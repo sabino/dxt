@@ -115,25 +115,29 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
     assert manifest["dxt_metadata"]["compatibility_target"] == "dbt-manifest-v12-slice"
     for unique_id, node in manifest["nodes"].items():
         assert unique_id == node["unique_id"]
-        assert node["resource_type"] == "model"
-        assert set(node) >= {
+        assert node["resource_type"] in {"model", "seed"}
+        common_keys = {
             "unique_id",
             "resource_type",
             "package_name",
             "name",
             "path",
             "original_file_path",
-            "patch_path",
-            "language",
-            "raw_code",
-            "description",
-            "columns",
             "config",
             "depends_on",
         }
+        assert set(node) >= common_keys
+        if node["resource_type"] == "model":
+            assert set(node) >= {
+                "patch_path",
+                "language",
+                "raw_code",
+                "description",
+                "columns",
+            }
+            if node["patch_path"] is not None:
+                assert not Path(node["patch_path"]).is_absolute()
         assert not Path(node["original_file_path"]).is_absolute()
-        if node["patch_path"] is not None:
-            assert not Path(node["patch_path"]).is_absolute()
         assert set(node["depends_on"]) == {"macros", "nodes"}
     for unique_id, source in manifest["sources"].items():
         assert unique_id == source["unique_id"]
@@ -268,6 +272,46 @@ def test_parse_source_dependency(tmp_path: Path):
     assert node["depends_on"]["nodes"] == ["source.source_ref.raw.customers"]
 
 
+def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
+    project = copy_fixture(tmp_path, "seed_ref")
+    command = [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"]
+    first = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    assert first.returncode == 0, first.stderr
+    manifest_path = project / "target-dxt" / "manifest.json"
+    first_manifest = manifest_path.read_text()
+    second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    assert second.returncode == 0, second.stderr
+    assert manifest_path.read_text() == first_manifest
+
+    manifest = json.loads(first_manifest)
+    assert_partial_manifest_schema(manifest)
+    assert sorted(manifest["nodes"]) == [
+        "model.seed_ref.stg_customers",
+        "seed.seed_ref.raw_customers",
+    ]
+    seed = manifest["nodes"]["seed.seed_ref.raw_customers"]
+    assert seed["resource_type"] == "seed"
+    assert seed["path"] == "raw_customers.csv"
+    assert seed["original_file_path"] == "seeds/raw_customers.csv"
+    assert seed["config"]["enabled"] is True
+    assert seed["config"]["materialized"] == "seed"
+    model = manifest["nodes"]["model.seed_ref.stg_customers"]
+    assert model["depends_on"]["nodes"] == ["seed.seed_ref.raw_customers"]
+    assert manifest["parent_map"]["model.seed_ref.stg_customers"] == ["seed.seed_ref.raw_customers"]
+    assert manifest["child_map"]["seed.seed_ref.raw_customers"] == ["model.seed_ref.stg_customers"]
+
+    ls_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "seed", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_result.returncode == 0, ls_result.stderr
+    assert json.loads(ls_result.stdout) == [
+        {"unique_id": "seed.seed_ref.raw_customers", "resource_type": "seed", "name": "raw_customers"}
+    ]
+
+
 def test_ls_text_json_and_tag_selection(tmp_path: Path):
     project = copy_fixture(tmp_path, "inline_config")
     text_result = subprocess.run(
@@ -304,13 +348,13 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
 def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     project = copy_fixture(tmp_path, "single_model")
     unsupported_type = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "seed"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "snapshot"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert unsupported_type.returncode == 2
-    assert "--resource-type supports only model or source" in unsupported_type.stderr
+    assert "--resource-type supports only model, seed, or source" in unsupported_type.stderr
 
     unsupported_selector = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "config.materialized:view"],
@@ -368,6 +412,18 @@ def test_duplicate_model_name_fails(tmp_path: Path):
     )
     assert result.returncode == 2
     assert "duplicate model name" in result.stderr
+
+
+def test_duplicate_seed_name_fails(tmp_path: Path):
+    project = copy_fixture(tmp_path, "duplicate_seed_name")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "duplicate seed name" in result.stderr
 
 
 def test_missing_project_file_fails(tmp_path: Path):

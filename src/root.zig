@@ -106,6 +106,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingProjectFile => stderr.writeAll("error: missing dbt_project.yml\n") catch {},
         error.InvalidProjectName => stderr.writeAll("error: dbt_project.yml must define a non-empty name\n") catch {},
         error.DuplicateModelName => stderr.writeAll("error: duplicate model name in supported M1 parser subset\n") catch {},
+        error.DuplicateSeedName => stderr.writeAll("error: duplicate seed name in supported M1 parser subset\n") catch {},
         error.UnsupportedDynamicRef => stderr.writeAll("error: unsupported dynamic ref; M1 parser only supports literal ref calls\n") catch {},
         error.UnsupportedDynamicSource => stderr.writeAll("error: unsupported dynamic source; M1 parser only supports literal source calls\n") catch {},
         error.UnsupportedYaml => stderr.writeAll("error: unsupported YAML shape in M1 parser subset\n") catch {},
@@ -114,7 +115,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnresolvedRef => stderr.writeAll("error: unresolved ref in supported M1 parser subset\n") catch {},
         error.UnresolvedSource => stderr.writeAll("error: unresolved source in supported M1 parser subset\n") catch {},
         error.InvalidOutput => stderr.writeAll("error: --output must be text or json\n") catch {},
-        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model or source in the M1 parser subset\n") catch {},
+        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, or source in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
         error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by the implemented M1 parser command\n") catch {},
         else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},
@@ -173,7 +174,7 @@ fn parseOptions(args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) 
                 try validateSelector(value);
                 options.exclude = value;
             } else if (equals(arg, "--resource-type")) {
-                if (!equals(value, "model") and !equals(value, "source")) return error.UnsupportedResourceType;
+                if (!equals(value, "model") and !equals(value, "seed") and !equals(value, "source")) return error.UnsupportedResourceType;
                 options.resource_type = value;
             } else if (equals(arg, "--output")) {
                 if (equals(value, "text")) {
