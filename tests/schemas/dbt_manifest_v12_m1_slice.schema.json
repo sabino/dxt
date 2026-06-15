@@ -121,20 +121,22 @@
     "model_config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "materialized", "tags"],
+      "required": ["enabled", "materialized", "tags", "docs"],
       "properties": {
         "enabled": {"type": "boolean"},
         "materialized": {"type": "string"},
-        "tags": {"$ref": "#/$defs/unique_id_array"}
+        "tags": {"$ref": "#/$defs/unique_id_array"},
+        "docs": {"$ref": "#/$defs/docs_config"}
       }
     },
     "seed_config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "materialized"],
+      "required": ["enabled", "materialized", "docs"],
       "properties": {
         "enabled": {"type": "boolean"},
-        "materialized": {"type": "string"}
+        "materialized": {"type": "string"},
+        "docs": {"$ref": "#/$defs/docs_config"}
       }
     },
     "test_config": {
@@ -153,7 +155,7 @@
         "meta": {"type": "object"}
       }
     },
-    "macro_docs": {
+    "docs_config": {
       "type": "object",
       "additionalProperties": false,
       "required": ["show", "node_color"],
@@ -256,6 +258,7 @@
         "raw_code",
         "description",
         "doc_blocks",
+        "docs",
         "columns",
         "config",
         "depends_on"
@@ -272,6 +275,7 @@
         "raw_code": {"type": "string"},
         "description": {"type": "string"},
         "doc_blocks": {"$ref": "#/$defs/unique_id_array"},
+        "docs": {"$ref": "#/$defs/docs_config"},
         "columns": {
           "type": "object",
           "additionalProperties": {"$ref": "#/$defs/column"}
@@ -290,6 +294,7 @@
         "name",
         "path",
         "original_file_path",
+        "docs",
         "config",
         "depends_on"
       ],
@@ -300,6 +305,7 @@
         "name": {"type": "string"},
         "path": {"type": "string"},
         "original_file_path": {"type": "string"},
+        "docs": {"$ref": "#/$defs/docs_config"},
         "config": {"$ref": "#/$defs/seed_config"},
         "depends_on": {"$ref": "#/$defs/depends_on"}
       }
@@ -393,7 +399,7 @@
         "depends_on": {"$ref": "#/$defs/macro_depends_on"},
         "description": {"type": "string"},
         "meta": {"type": "object"},
-        "docs": {"$ref": "#/$defs/macro_docs"},
+        "docs": {"$ref": "#/$defs/docs_config"},
         "arguments": {
           "type": "array",
           "items": {"$ref": "#/$defs/macro_argument"}

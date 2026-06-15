@@ -26,6 +26,7 @@ const ProjectConfig = struct {
     seed_paths: std.ArrayList([]const u8) = .empty,
     macro_paths: std.ArrayList([]const u8) = .empty,
     model_path_configs: std.ArrayList(ModelPathConfig) = .empty,
+    seed_docs: DocsConfig = .{},
     macro_paths_set: bool = false,
     target_path: []const u8 = "target",
 };
@@ -34,6 +35,13 @@ const ModelPathConfig = struct {
     path: []const u8,
     materialized: []const u8 = "",
     tags: std.ArrayList([]const u8) = .empty,
+    docs: DocsConfig = .{},
+};
+
+const DocsConfig = struct {
+    configured: bool = false,
+    show: bool = true,
+    node_color: ?[]const u8 = null,
 };
 
 const SourceDef = struct {
@@ -170,6 +178,7 @@ const Node = struct {
     inline_materialized: bool = false,
     inline_tags: bool = false,
     enabled: bool = true,
+    docs: DocsConfig = .{},
     tags: std.ArrayList([]const u8) = .empty,
     doc_blocks: std.ArrayList([]const u8) = .empty,
     tests: std.ArrayList(GenericTestDef) = .empty,
@@ -415,6 +424,7 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
             try parseSeed(runtime, seed_path, relative_path, config.name, &graph);
         }
     }
+    applyProjectSeedDocs(&graph, config.seed_docs);
 
     try rejectDuplicateMacroProperties(&graph);
     try applyMacroProperties(&graph);
@@ -573,6 +583,7 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
 
     if (config.name.len == 0) return error.InvalidProjectName;
     try parseProjectModelPathConfigs(runtime.allocator, text, config.name, &config.model_path_configs);
+    try parseProjectSeedDocs(runtime.allocator, text, &config.seed_docs);
     if (config.model_paths.items.len == 0) {
         try config.model_paths.append(runtime.allocator, "models");
     }
@@ -593,8 +604,11 @@ const PathStackEntry = struct {
 fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, project_name: []const u8, configs: *std.ArrayList(ModelPathConfig)) !void {
     var in_models = false;
     var in_project = false;
+    var in_docs = false;
     var models_indent: usize = 0;
     var project_indent: usize = 0;
+    var docs_indent: usize = 0;
+    var docs_path: []const u8 = "";
     var path_stack: std.ArrayList(PathStackEntry) = .empty;
     defer path_stack.deinit(allocator);
 
@@ -621,6 +635,17 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
         }
 
         const kv = splitKeyValue(trimmed) orelse continue;
+
+        if (in_docs) {
+            if (indent <= docs_indent) {
+                in_docs = false;
+            } else {
+                const path_config = try getOrCreateModelPathConfig(allocator, configs, docs_path);
+                try applyDocsConfigKeyValue(allocator, &path_config.docs, kv);
+                continue;
+            }
+        }
+
         if (!in_project) {
             if (indent > models_indent and std.mem.eql(u8, kv.key, project_name) and std.mem.trim(u8, kv.value, " \t").len == 0) {
                 in_project = true;
@@ -654,6 +679,12 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
                 path_config.tags.clearRetainingCapacity();
                 try parseInlineStringList(allocator, kv.value, &path_config.tags);
                 sortStrings(path_config.tags.items);
+            } else if (std.mem.eql(u8, kv.key, "+docs") and std.mem.trim(u8, kv.value, " \t").len == 0) {
+                const path_config = try getOrCreateModelPathConfig(allocator, configs, path);
+                path_config.docs.configured = true;
+                in_docs = true;
+                docs_indent = indent;
+                docs_path = path_config.path;
             }
             continue;
         }
@@ -661,6 +692,60 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
         if (std.mem.trim(u8, kv.value, " \t").len == 0) {
             try path_stack.append(allocator, .{ .indent = indent, .name = try dupTrimmedScalar(allocator, kv.key) });
         }
+    }
+}
+
+fn parseProjectSeedDocs(allocator: std.mem.Allocator, text: []const u8, docs: *DocsConfig) !void {
+    var in_seeds = false;
+    var in_docs = false;
+    var seeds_indent: usize = 0;
+    var docs_indent: usize = 0;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (std.mem.eql(u8, trimmed, "seeds:")) {
+            in_seeds = true;
+            in_docs = false;
+            seeds_indent = indent;
+            continue;
+        }
+        if (!in_seeds) continue;
+        if (indent <= seeds_indent and !std.mem.eql(u8, trimmed, "seeds:")) {
+            in_seeds = false;
+            in_docs = false;
+            continue;
+        }
+
+        const kv = splitKeyValue(trimmed) orelse continue;
+        if (in_docs) {
+            if (indent <= docs_indent) {
+                in_docs = false;
+            } else {
+                try applyDocsConfigKeyValue(allocator, docs, kv);
+                continue;
+            }
+        }
+
+        if (std.mem.eql(u8, kv.key, "+docs") and std.mem.trim(u8, kv.value, " \t").len == 0) {
+            docs.configured = true;
+            in_docs = true;
+            docs_indent = indent;
+        }
+    }
+}
+
+fn applyDocsConfigKeyValue(allocator: std.mem.Allocator, docs: *DocsConfig, kv: KeyValue) !void {
+    if (std.mem.eql(u8, kv.key, "node_color")) {
+        docs.configured = true;
+        docs.node_color = try dupTrimmedScalar(allocator, kv.value);
+    } else if (std.mem.eql(u8, kv.key, "show")) {
+        docs.configured = true;
+        docs.show = !std.mem.eql(u8, std.mem.trim(u8, kv.value, " \t\r"), "false");
     }
 }
 
@@ -1625,6 +1710,8 @@ fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig)
 
         var materialized_config: ?*const ModelPathConfig = null;
         var materialized_depth: usize = 0;
+        var docs_config: ?*const ModelPathConfig = null;
+        var docs_depth: usize = 0;
         for (configs) |*config| {
             if (!modelPathConfigMatches(config.path, node.path)) continue;
             const depth = modelPathConfigDepth(config.path);
@@ -1635,12 +1722,25 @@ fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig)
             for (config.tags.items) |tag| {
                 try appendUnique(graph.allocator, &node.tags, tag);
             }
+            if (config.docs.configured and (docs_config == null or depth >= docs_depth)) {
+                docs_config = config;
+                docs_depth = depth;
+            }
         }
 
         if (!node.inline_materialized) {
             if (materialized_config) |config| node.materialized = config.materialized;
         }
+        if (docs_config) |config| node.docs = config.docs;
         sortStrings(node.tags.items);
+    }
+}
+
+fn applyProjectSeedDocs(graph: *Graph, docs: DocsConfig) void {
+    if (!docs.configured) return;
+    for (graph.nodes.items) |*node| {
+        if (!std.mem.eql(u8, node.resource_type, "seed")) continue;
+        node.docs = docs;
     }
 }
 
@@ -2801,6 +2901,8 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
     try writeJsonString(writer, node.description);
     try writer.writeAll(",\"doc_blocks\":");
     try writeStringArray(writer, node.doc_blocks.items);
+    try writer.writeAll(",\"docs\":");
+    try writeDocsConfig(writer, node.docs);
     try writer.writeAll(",\"columns\":{");
     for (node.columns.items, 0..) |column, index| {
         if (index != 0) try writer.writeAll(",");
@@ -2819,6 +2921,8 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
     try writeJsonString(writer, node.materialized);
     try writer.writeAll(",\"tags\":");
     try writeStringArray(writer, node.tags.items);
+    try writer.writeAll(",\"docs\":");
+    try writeDocsConfig(writer, node.docs);
     try writer.writeAll("},\"depends_on\":{\"macros\":");
     try writeStringArray(writer, node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
@@ -2839,7 +2943,11 @@ fn writeSeedNode(writer: *Io.Writer, project_name: []const u8, node: Node) !void
     try writeJsonString(writer, normalizeForDisplay(node.original_file_path));
     try writer.writeAll(",\"config\":{\"enabled\":");
     try writer.writeAll(if (node.enabled) "true" else "false");
-    try writer.writeAll(",\"materialized\":\"seed\"},\"depends_on\":{\"macros\":[],\"nodes\":");
+    try writer.writeAll(",\"materialized\":\"seed\",\"docs\":");
+    try writeDocsConfig(writer, node.docs);
+    try writer.writeAll("},\"docs\":");
+    try writeDocsConfig(writer, node.docs);
+    try writer.writeAll(",\"depends_on\":{\"macros\":[],\"nodes\":");
     try writeStringArray(writer, node.depends_on.items);
     try writer.writeAll("}}");
 }
@@ -2940,6 +3048,14 @@ fn writeMetaObject(writer: *Io.Writer, entries: []const MetaEntry) !void {
         try writer.writeAll(":");
         try writeJsonScalar(writer, entry.value);
     }
+    try writer.writeAll("}");
+}
+
+fn writeDocsConfig(writer: *Io.Writer, docs: DocsConfig) !void {
+    try writer.writeAll("{\"show\":");
+    try writer.writeAll(if (docs.show) "true" else "false");
+    try writer.writeAll(",\"node_color\":");
+    try writeNullableString(writer, docs.node_color);
     try writer.writeAll("}");
 }
 
