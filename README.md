@@ -1,6 +1,6 @@
 # dxt
 
-`dxt` is the **Data Transformation eXecutor**: a dbt-project-compatible transformation engine written in Zig.
+`dxt` is **Data eXecution & Transformation**: a dbt-project-compatible transformation engine written in Zig.
 
 The first target is dbt Core compatibility for public projects such as Jaffle Shop. The long-term architecture also accounts for semantic resources, metrics, Fusion-style static analysis, and efficient cross-database execution.
 
