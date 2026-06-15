@@ -40,7 +40,7 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for parse\n");
             return .usage;
         };
-        project.parse(rt, options, stdout) catch |err| return commandError(err, stderr);
+        project.parse(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
     if (equals(command, "compile")) {
@@ -110,6 +110,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedDynamicSource => stderr.writeAll("error: unsupported dynamic source; M1 parser only supports literal source calls\n") catch {},
         error.UnsupportedYaml => stderr.writeAll("error: unsupported YAML shape in M1 parser subset\n") catch {},
         error.UnsupportedJinja => stderr.writeAll("error: unsupported or malformed Jinja in M1 parser subset\n") catch {},
+        error.DisabledRef => stderr.writeAll("error: ref targets a disabled model in the M1 parser subset\n") catch {},
         error.UnresolvedRef => stderr.writeAll("error: unresolved ref in supported M1 parser subset\n") catch {},
         error.UnresolvedSource => stderr.writeAll("error: unresolved source in supported M1 parser subset\n") catch {},
         error.InvalidOutput => stderr.writeAll("error: --output must be text or json\n") catch {},

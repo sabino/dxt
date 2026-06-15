@@ -7,3 +7,9 @@ sources:
         columns:
           - name: customer_id
       - name: orders
+
+models:
+  - name: stg_customers
+    description: Staged raw customers
+    config:
+      tags: ["staging"]

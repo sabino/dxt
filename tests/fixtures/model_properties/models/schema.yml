@@ -1,0 +1,18 @@
+version: 2
+
+models:
+  - name: customers
+    description: Customer dimension
+    config:
+      materialized: table
+      tags: ["nightly", "published"]
+    tests:
+      - unique
+    columns:
+      - name: customer_id
+        description: Stable customer identifier
+        tests:
+          - not_null
+          - unique
+      - name: customer_name
+        description: Display name

@@ -513,8 +513,8 @@ Exit criteria:
 ## Current Status
 
 - M0 is under PR review as the Zig `0.16.0` runtime scaffold.
-- M1 has started on a stacked branch with a native Zig artifact-first parser slice.
-- `dxt parse` now targets the supported Tier 0 subset: project name/model paths, SQL model discovery, literal `ref`, literal `source`, inline `config(materialized=..., tags=...)`, dependency maps, and deterministic partial `manifest.json`.
+- M1 has started on stacked branches with native Zig artifact-first parser slices.
+- `dxt parse` now targets the supported Tier 0 subset: project name/model paths, SQL model discovery, literal `ref`, literal `source`, inline `config(materialized=..., tags=...)`, narrow YAML model properties for scalar descriptions, simple columns, tags, materialization, disabled SQL models, dependency maps, and deterministic partial `manifest.json`. Generic tests are parsed for later graph work but are not yet emitted as dbt-shaped `test.*` nodes.
 - `dxt ls` now lists resources from the same parser graph with stable text/JSON output and basic name, tag, path, resource type, and exact exclude filters.
-- Synthetic fixtures cover one model, model refs, source refs, inline config/tag selection, duplicate model diagnostics, unsupported dynamic ref diagnostics, and unsupported macro-call diagnostics.
-- The next M1 slices should add published schema validation, YAML model properties, disabled resources, docs blocks, macros, stronger selector parity, and Jaffle Shop DuckDB parse exploration.
+- Synthetic fixtures cover one model, model refs, source refs, combined source/model YAML, inline config/tag selection, YAML model properties and columns, disabled models, disabled ref diagnostics, unmatched model-property warnings, duplicate model diagnostics, unsupported dynamic ref diagnostics, and unsupported macro-call diagnostics.
+- The next M1 slices should add published schema validation, docs blocks, macros, stronger selector parity, and Jaffle Shop DuckDB parse exploration.

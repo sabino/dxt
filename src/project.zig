@@ -43,14 +43,41 @@ const SourceDep = struct {
     table_name: []const u8,
 };
 
+const ColumnDef = struct {
+    name: []const u8,
+    description: []const u8 = "",
+    tests: std.ArrayList([]const u8) = .empty,
+};
+
+const ModelProperty = struct {
+    name: []const u8,
+    patch_path: []const u8,
+    description: []const u8 = "",
+    materialized: []const u8 = "",
+    tags: std.ArrayList([]const u8) = .empty,
+    tests: std.ArrayList([]const u8) = .empty,
+    columns: std.ArrayList(ColumnDef) = .empty,
+    enabled: ?bool = null,
+};
+
+const UnmatchedModelProperty = struct {
+    name: []const u8,
+    patch_path: []const u8,
+};
+
 const Node = struct {
     unique_id: []const u8,
     name: []const u8,
     path: []const u8,
     original_file_path: []const u8,
+    patch_path: ?[]const u8 = null,
     raw_code: []const u8,
+    description: []const u8 = "",
     materialized: []const u8 = "view",
+    enabled: bool = true,
     tags: std.ArrayList([]const u8) = .empty,
+    tests: std.ArrayList([]const u8) = .empty,
+    columns: std.ArrayList(ColumnDef) = .empty,
     refs: std.ArrayList(RefDep) = .empty,
     source_refs: std.ArrayList(SourceDep) = .empty,
     depends_on: std.ArrayList([]const u8) = .empty,
@@ -61,24 +88,51 @@ const Graph = struct {
     project_name: []const u8,
     nodes: std.ArrayList(Node) = .empty,
     sources: std.ArrayList(SourceDef) = .empty,
+    model_properties: std.ArrayList(ModelProperty) = .empty,
+    unmatched_model_properties: std.ArrayList(UnmatchedModelProperty) = .empty,
 
     fn deinit(self: *Graph) void {
         for (self.nodes.items) |*node| {
-            node.tags.deinit(self.allocator);
-            node.refs.deinit(self.allocator);
-            node.source_refs.deinit(self.allocator);
-            node.depends_on.deinit(self.allocator);
+            deinitNode(self.allocator, node);
+        }
+        for (self.model_properties.items) |*property| {
+            deinitModelProperty(self.allocator, property);
         }
         self.nodes.deinit(self.allocator);
         self.sources.deinit(self.allocator);
+        self.model_properties.deinit(self.allocator);
+        self.unmatched_model_properties.deinit(self.allocator);
     }
 };
 
-pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
+fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
+    node.tags.deinit(allocator);
+    node.tests.deinit(allocator);
+    for (node.columns.items) |*column| {
+        column.tests.deinit(allocator);
+    }
+    node.columns.deinit(allocator);
+    node.refs.deinit(allocator);
+    node.source_refs.deinit(allocator);
+    node.depends_on.deinit(allocator);
+}
+
+fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) void {
+    property.tags.deinit(allocator);
+    property.tests.deinit(allocator);
+    for (property.columns.items) |*column| {
+        column.tests.deinit(allocator);
+    }
+    property.columns.deinit(allocator);
+}
+
+pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try loadGraph(runtime, options.project_dir);
     defer graph.deinit();
 
     try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+    const active_models = countActiveNodes(&graph);
 
     const target_path = options.target_path orelse graphDefaultTarget(runtime, options.project_dir) catch "target";
     const target_dir = if (std.fs.path.isAbsolute(target_path))
@@ -90,7 +144,7 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
     const manifest = try renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest });
     try stdout.print("Parsed {d} model(s) and {d} source(s) into {s}\n", .{
-        graph.nodes.items.len,
+        active_models,
         graph.sources.items.len,
         normalizeForDisplay(manifest_path),
     });
@@ -139,13 +193,14 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
         sortStrings(yaml_files.items);
 
         for (yaml_files.items) |yaml_path| {
-            try parseSources(runtime, project_dir, yaml_path, config.name, &graph);
+            try parseYamlProperties(runtime, project_dir, yaml_path, config.name, &graph);
         }
         for (sql_files.items) |sql_path| {
             try parseModel(runtime, project_dir, model_path, sql_path, config.name, &graph);
         }
     }
 
+    try applyModelProperties(&graph);
     sortNodes(graph.nodes.items);
     sortSources(graph.sources.items);
     try rejectDuplicateModels(&graph);
@@ -230,10 +285,15 @@ fn discoverFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []con
     }
 }
 
-fn parseSources(runtime: Runtime, project_dir: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
 
+    try parseSourcesFromText(runtime.allocator, text, relative_path, package_name, graph);
+    try parseModelPropertiesFromText(runtime.allocator, text, relative_path, graph);
+}
+
+fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     var in_sources = false;
     var in_tables = false;
     var sources_indent: usize = 0;
@@ -269,7 +329,7 @@ fn parseSources(runtime: Runtime, project_dir: []const u8, relative_path: []cons
             continue;
         }
         if (std.mem.startsWith(u8, trimmed, "- name:")) {
-            const name = try dupTrimmedScalar(runtime.allocator, trimmed["- name:".len..]);
+            const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
             if (source_item_indent == null or indent == source_item_indent.?) {
                 source_item_indent = indent;
                 current_source = name;
@@ -278,13 +338,152 @@ fn parseSources(runtime: Runtime, project_dir: []const u8, relative_path: []cons
             } else if (in_tables and (table_item_indent == null or indent == table_item_indent.?)) {
                 table_item_indent = indent;
                 const source_name = current_source orelse return error.UnsupportedYaml;
-                const unique_id = try std.fmt.allocPrint(runtime.allocator, "source.{s}.{s}.{s}", .{ package_name, source_name, name });
-                try graph.sources.append(runtime.allocator, .{
+                const unique_id = try std.fmt.allocPrint(allocator, "source.{s}.{s}.{s}", .{ package_name, source_name, name });
+                try graph.sources.append(allocator, .{
                     .unique_id = unique_id,
                     .source_name = source_name,
                     .table_name = name,
                     .original_file_path = relative_path,
                 });
+            }
+        }
+    }
+}
+
+const TestTarget = enum {
+    none,
+    model,
+    column,
+};
+
+fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, graph: *Graph) !void {
+    var in_models = false;
+    var in_columns = false;
+    var in_config = false;
+    var test_target: TestTarget = .none;
+    var models_indent: usize = 0;
+    var model_item_indent: ?usize = null;
+    var column_item_indent: ?usize = null;
+    var config_indent: usize = 0;
+    var tests_indent: usize = 0;
+    var current_model: ?usize = null;
+    var current_column: ?usize = null;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (std.mem.eql(u8, trimmed, "models:")) {
+            in_models = true;
+            in_columns = false;
+            in_config = false;
+            test_target = .none;
+            models_indent = indent;
+            model_item_indent = null;
+            column_item_indent = null;
+            current_model = null;
+            current_column = null;
+            continue;
+        }
+        if (!in_models) continue;
+        if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:")) break;
+
+        if (test_target != .none and indent <= tests_indent and !std.mem.startsWith(u8, trimmed, "- ")) {
+            test_target = .none;
+        }
+        if (in_config and indent <= config_indent and !std.mem.eql(u8, trimmed, "config:")) {
+            in_config = false;
+        }
+        if (in_columns and current_model != null and indent <= (model_item_indent orelse 0) and !std.mem.startsWith(u8, trimmed, "- name:")) {
+            in_columns = false;
+            current_column = null;
+            column_item_indent = null;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "- ")) {
+            if (test_target != .none and indent > tests_indent) {
+                const test_name = try testNameFromYamlItem(allocator, trimmed[2..]);
+                if (test_target == .model) {
+                    const model_index = current_model orelse return error.UnsupportedYaml;
+                    try appendUnique(allocator, &graph.model_properties.items[model_index].tests, test_name);
+                } else {
+                    const model_index = current_model orelse return error.UnsupportedYaml;
+                    const column_index = current_column orelse return error.UnsupportedYaml;
+                    try appendUnique(allocator, &graph.model_properties.items[model_index].columns.items[column_index].tests, test_name);
+                }
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, trimmed, "- name:")) {
+                const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
+                if (in_columns and current_model != null and indent > (model_item_indent orelse 0)) {
+                    const model_index = current_model.?;
+                    try graph.model_properties.items[model_index].columns.append(allocator, .{ .name = name });
+                    current_column = graph.model_properties.items[model_index].columns.items.len - 1;
+                    column_item_indent = indent;
+                    test_target = .none;
+                    in_config = false;
+                } else {
+                    try graph.model_properties.append(allocator, .{ .name = name, .patch_path = relative_path });
+                    current_model = graph.model_properties.items.len - 1;
+                    current_column = null;
+                    model_item_indent = indent;
+                    column_item_indent = null;
+                    in_columns = false;
+                    in_config = false;
+                    test_target = .none;
+                }
+            }
+            continue;
+        }
+
+        const model_index = current_model orelse continue;
+        if (splitKeyValue(trimmed)) |kv| {
+            if (in_config and indent > config_indent) {
+                if (std.mem.eql(u8, kv.key, "enabled")) {
+                    graph.model_properties.items[model_index].enabled = try parseBool(kv.value);
+                } else if (std.mem.eql(u8, kv.key, "materialized")) {
+                    graph.model_properties.items[model_index].materialized = try dupTrimmedScalar(allocator, kv.value);
+                } else if (std.mem.eql(u8, kv.key, "tags")) {
+                    try parseInlineStringList(allocator, kv.value, &graph.model_properties.items[model_index].tags);
+                    sortStrings(graph.model_properties.items[model_index].tags.items);
+                }
+                continue;
+            }
+
+            if (std.mem.eql(u8, kv.key, "description")) {
+                if (in_columns and current_column != null and indent > (column_item_indent orelse 0)) {
+                    graph.model_properties.items[model_index].columns.items[current_column.?].description = try dupTrimmedScalar(allocator, kv.value);
+                } else {
+                    graph.model_properties.items[model_index].description = try dupTrimmedScalar(allocator, kv.value);
+                }
+            } else if (std.mem.eql(u8, kv.key, "tags")) {
+                try parseInlineStringList(allocator, kv.value, &graph.model_properties.items[model_index].tags);
+                sortStrings(graph.model_properties.items[model_index].tags.items);
+            } else if (std.mem.eql(u8, kv.key, "columns")) {
+                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                in_columns = true;
+                current_column = null;
+                column_item_indent = null;
+                test_target = .none;
+            } else if (std.mem.eql(u8, kv.key, "tests")) {
+                if (std.mem.trim(u8, kv.value, " \t").len != 0) {
+                    if (in_columns and current_column != null) {
+                        try parseInlineStringList(allocator, kv.value, &graph.model_properties.items[model_index].columns.items[current_column.?].tests);
+                    } else {
+                        try parseInlineStringList(allocator, kv.value, &graph.model_properties.items[model_index].tests);
+                    }
+                } else {
+                    test_target = if (in_columns and current_column != null) .column else .model;
+                    tests_indent = indent;
+                }
+            } else if (std.mem.eql(u8, kv.key, "config")) {
+                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                in_config = true;
+                config_indent = indent;
             }
         }
     }
@@ -305,13 +504,63 @@ fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8,
         .raw_code = sql,
     };
     errdefer {
-        node.tags.deinit(runtime.allocator);
-        node.refs.deinit(runtime.allocator);
-        node.source_refs.deinit(runtime.allocator);
-        node.depends_on.deinit(runtime.allocator);
+        deinitNode(runtime.allocator, &node);
     }
     try scanSql(runtime.allocator, sql, &node);
     try graph.nodes.append(runtime.allocator, node);
+}
+
+fn applyModelProperties(graph: *Graph) !void {
+    for (graph.model_properties.items) |property| {
+        const node_index = findNodeIndexByName(graph, property.name) orelse {
+            try graph.unmatched_model_properties.append(graph.allocator, .{ .name = property.name, .patch_path = property.patch_path });
+            continue;
+        };
+        var node = &graph.nodes.items[node_index];
+        node.patch_path = property.patch_path;
+        if (property.description.len != 0) node.description = property.description;
+        if (property.materialized.len != 0) node.materialized = property.materialized;
+        if (property.enabled) |enabled| node.enabled = enabled;
+        for (property.tags.items) |tag| {
+            try appendUnique(graph.allocator, &node.tags, tag);
+        }
+        sortStrings(node.tags.items);
+        for (property.tests.items) |test_name| {
+            try appendUnique(graph.allocator, &node.tests, test_name);
+        }
+        sortStrings(node.tests.items);
+        for (property.columns.items) |column| {
+            try appendColumnClone(graph.allocator, &node.columns, column);
+        }
+        sortColumns(node.columns.items);
+    }
+}
+
+fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
+    for (graph.unmatched_model_properties.items) |property| {
+        try stderr.print("warning: did not find matching node for model property `{s}` in {s}\n", .{ property.name, normalizeForDisplay(property.patch_path) });
+    }
+}
+
+fn appendColumnClone(allocator: std.mem.Allocator, columns: *std.ArrayList(ColumnDef), source: ColumnDef) !void {
+    for (columns.items) |*existing| {
+        if (std.mem.eql(u8, existing.name, source.name)) {
+            if (source.description.len != 0) existing.description = source.description;
+            for (source.tests.items) |test_name| {
+                try appendUnique(allocator, &existing.tests, test_name);
+            }
+            sortStrings(existing.tests.items);
+            return;
+        }
+    }
+
+    var column = ColumnDef{ .name = source.name, .description = source.description };
+    errdefer column.tests.deinit(allocator);
+    for (source.tests.items) |test_name| {
+        try appendUnique(allocator, &column.tests, test_name);
+    }
+    sortStrings(column.tests.items);
+    try columns.append(allocator, column);
 }
 
 fn rejectDuplicateModels(graph: *const Graph) !void {
@@ -328,9 +577,11 @@ fn rejectDuplicateModels(graph: *const Graph) !void {
 
 fn resolveDependencies(graph: *Graph) !void {
     for (graph.nodes.items) |*node| {
+        if (!node.enabled) continue;
         for (node.refs.items) |ref_dep| {
             const package = ref_dep.package orelse graph.project_name;
             const unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, ref_dep.name });
+            if (hasDisabledNode(graph, unique_id)) return error.DisabledRef;
             if (!hasNode(graph, unique_id)) return error.UnresolvedRef;
             try appendUnique(graph.allocator, &node.depends_on, unique_id);
         }
@@ -527,6 +778,7 @@ fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, options: O
     var selected: std.ArrayList(SelectedResource) = .empty;
     errdefer selected.deinit(allocator);
     for (graph.nodes.items) |node| {
+        if (!node.enabled) continue;
         if (matchesResourceType(options.resource_type, "model") and matchesSelector(graph, node, options.select) and (options.exclude == null or !matchesSelector(graph, node, options.exclude))) {
             try selected.append(allocator, .{ .unique_id = node.unique_id, .name = node.name, .resource_type = "model" });
         }
@@ -606,30 +858,16 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
 
     try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": null, \"dbt_version\": null, \"project_name\": ");
     try writeJsonString(writer, graph.project_name);
-    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"dxt_metadata\": {\"artifact_kind\": \"partial_manifest\", \"compatibility_target\": \"dbt-manifest-v12-slice\", \"supported_surface\": [\"model\", \"source\", \"literal_ref\", \"literal_source\", \"inline_config\"]},\n  \"nodes\": {");
-    for (graph.nodes.items, 0..) |node, index| {
-        if (index != 0) try writer.writeAll(",");
+    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"dxt_metadata\": {\"artifact_kind\": \"partial_manifest\", \"compatibility_target\": \"dbt-manifest-v12-slice\", \"supported_surface\": [\"model\", \"source\", \"literal_ref\", \"literal_source\", \"inline_config\", \"model_properties\", \"disabled_models\"]},\n  \"nodes\": {");
+    var node_index: usize = 0;
+    for (graph.nodes.items) |node| {
+        if (!node.enabled) continue;
+        if (node_index != 0) try writer.writeAll(",");
+        node_index += 1;
         try writer.writeAll("\n    ");
         try writeJsonString(writer, node.unique_id);
-        try writer.writeAll(": {\"unique_id\":");
-        try writeJsonString(writer, node.unique_id);
-        try writer.writeAll(",\"resource_type\":\"model\",\"package_name\":");
-        try writeJsonString(writer, graph.project_name);
-        try writer.writeAll(",\"name\":");
-        try writeJsonString(writer, node.name);
-        try writer.writeAll(",\"path\":");
-        try writeJsonString(writer, normalizeForDisplay(node.path));
-        try writer.writeAll(",\"original_file_path\":");
-        try writeJsonString(writer, normalizeForDisplay(node.original_file_path));
-        try writer.writeAll(",\"language\":\"sql\",\"raw_code\":");
-        try writeJsonString(writer, node.raw_code);
-        try writer.writeAll(",\"config\":{\"materialized\":");
-        try writeJsonString(writer, node.materialized);
-        try writer.writeAll(",\"tags\":");
-        try writeStringArray(writer, node.tags.items);
-        try writer.writeAll("},\"depends_on\":{\"macros\":[],\"nodes\":");
-        try writeStringArray(writer, node.depends_on.items);
-        try writer.writeAll("}}");
+        try writer.writeAll(": ");
+        try writeModelNode(allocator, writer, graph.project_name, node);
     }
     try writer.writeAll("\n  },\n  \"sources\": {");
     for (graph.sources.items, 0..) |source, index| {
@@ -648,9 +886,24 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writeJsonString(writer, normalizeForDisplay(source.original_file_path));
         try writer.writeAll("}");
     }
-    try writer.writeAll("\n  },\n  \"macros\": {},\n  \"docs\": {},\n  \"exposures\": {},\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"disabled\": {},\n  \"parent_map\": {");
-    for (graph.nodes.items, 0..) |node, index| {
-        if (index != 0) try writer.writeAll(",");
+    try writer.writeAll("\n  },\n  \"macros\": {},\n  \"docs\": {},\n  \"exposures\": {},\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"disabled\": {");
+    var disabled_index: usize = 0;
+    for (graph.nodes.items) |node| {
+        if (node.enabled) continue;
+        if (disabled_index != 0) try writer.writeAll(",");
+        disabled_index += 1;
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, node.unique_id);
+        try writer.writeAll(": [");
+        try writeModelNode(allocator, writer, graph.project_name, node);
+        try writer.writeAll("]");
+    }
+    try writer.writeAll("\n  },\n  \"parent_map\": {");
+    var parent_index: usize = 0;
+    for (graph.nodes.items) |node| {
+        if (!node.enabled) continue;
+        if (parent_index != 0) try writer.writeAll(",");
+        parent_index += 1;
         try writer.writeAll("\n    ");
         try writeJsonString(writer, node.unique_id);
         try writer.writeAll(": ");
@@ -665,6 +918,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
 fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
     var first = true;
     for (graph.nodes.items) |candidate| {
+        if (!candidate.enabled) continue;
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
     for (graph.sources.items) |candidate| {
@@ -680,6 +934,7 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
     try writer.writeAll(": [");
     var child_first = true;
     for (graph.nodes.items) |node| {
+        if (!node.enabled) continue;
         if (containsString(node.depends_on.items, unique_id)) {
             if (!child_first) try writer.writeAll(",");
             child_first = false;
@@ -687,6 +942,50 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
         }
     }
     try writer.writeAll("]");
+}
+
+fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, node: Node) !void {
+    try writer.writeAll("{\"unique_id\":");
+    try writeJsonString(writer, node.unique_id);
+    try writer.writeAll(",\"resource_type\":\"model\",\"package_name\":");
+    try writeJsonString(writer, project_name);
+    try writer.writeAll(",\"name\":");
+    try writeJsonString(writer, node.name);
+    try writer.writeAll(",\"path\":");
+    try writeJsonString(writer, normalizeForDisplay(node.path));
+    try writer.writeAll(",\"original_file_path\":");
+    try writeJsonString(writer, normalizeForDisplay(node.original_file_path));
+    try writer.writeAll(",\"patch_path\":");
+    if (node.patch_path) |patch_path| {
+        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ project_name, normalizeForDisplay(patch_path) });
+        defer allocator.free(dbt_patch_path);
+        try writeJsonString(writer, dbt_patch_path);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"language\":\"sql\",\"raw_code\":");
+    try writeJsonString(writer, node.raw_code);
+    try writer.writeAll(",\"description\":");
+    try writeJsonString(writer, node.description);
+    try writer.writeAll(",\"columns\":{");
+    for (node.columns.items, 0..) |column, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writeJsonString(writer, column.name);
+        try writer.writeAll(":{\"name\":");
+        try writeJsonString(writer, column.name);
+        try writer.writeAll(",\"description\":");
+        try writeJsonString(writer, column.description);
+        try writer.writeAll(",\"meta\":{},\"data_type\":null,\"quote\":null,\"tags\":[],\"config\":{}}");
+    }
+    try writer.writeAll("},\"config\":{\"enabled\":");
+    try writer.writeAll(if (node.enabled) "true" else "false");
+    try writer.writeAll(",\"materialized\":");
+    try writeJsonString(writer, node.materialized);
+    try writer.writeAll(",\"tags\":");
+    try writeStringArray(writer, node.tags.items);
+    try writer.writeAll("},\"depends_on\":{\"macros\":[],\"nodes\":");
+    try writeStringArray(writer, node.depends_on.items);
+    try writer.writeAll("}}");
 }
 
 fn writeStringArray(writer: *Io.Writer, values: []const []const u8) !void {
@@ -807,6 +1106,14 @@ fn sortSources(sources: []SourceDef) void {
     }.lessThan);
 }
 
+fn sortColumns(columns: []ColumnDef) void {
+    std.mem.sort(ColumnDef, columns, {}, struct {
+        fn lessThan(_: void, a: ColumnDef, b: ColumnDef) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+}
+
 fn skipWs(text: []const u8, start: usize) usize {
     var i = start;
     while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\r' or text[i] == '\n')) i += 1;
@@ -869,9 +1176,31 @@ fn findValueStart(text: []const u8, start: usize) ?usize {
 
 fn hasNode(graph: *const Graph, unique_id: []const u8) bool {
     for (graph.nodes.items) |node| {
-        if (std.mem.eql(u8, node.unique_id, unique_id)) return true;
+        if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return true;
     }
     return false;
+}
+
+fn hasDisabledNode(graph: *const Graph, unique_id: []const u8) bool {
+    for (graph.nodes.items) |node| {
+        if (!node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return true;
+    }
+    return false;
+}
+
+fn findNodeIndexByName(graph: *const Graph, name: []const u8) ?usize {
+    for (graph.nodes.items, 0..) |node, index| {
+        if (std.mem.eql(u8, node.name, name)) return index;
+    }
+    return null;
+}
+
+fn countActiveNodes(graph: *const Graph) usize {
+    var count: usize = 0;
+    for (graph.nodes.items) |node| {
+        if (node.enabled) count += 1;
+    }
+    return count;
 }
 
 fn hasSource(graph: *const Graph, unique_id: []const u8) bool {
@@ -879,6 +1208,20 @@ fn hasSource(graph: *const Graph, unique_id: []const u8) bool {
         if (std.mem.eql(u8, source.unique_id, unique_id)) return true;
     }
     return false;
+}
+
+fn parseBool(value: []const u8) !bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    if (std.ascii.eqlIgnoreCase(trimmed, "true")) return true;
+    if (std.ascii.eqlIgnoreCase(trimmed, "false")) return false;
+    return error.UnsupportedYaml;
+}
+
+fn testNameFromYamlItem(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    if (trimmed.len == 0) return error.UnsupportedYaml;
+    const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse trimmed.len;
+    return try dupTrimmedScalar(allocator, trimmed[0..colon]);
 }
 
 fn appendUnique(allocator: std.mem.Allocator, values: *std.ArrayList([]const u8), value: []const u8) !void {
