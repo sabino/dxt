@@ -385,6 +385,33 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         },
     ]
 
+    ls_resource_type_tests = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:test", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_resource_type_tests.returncode == 0, ls_resource_type_tests.stderr
+    assert json.loads(ls_resource_type_tests.stdout) == json.loads(ls_tests.stdout)
+
+    ls_generic_tests = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_generic_tests.returncode == 0, ls_generic_tests.stderr
+    assert json.loads(ls_generic_tests.stdout) == json.loads(ls_tests.stdout)
+
+    ls_singular_tests = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_singular_tests.returncode == 0, ls_singular_tests.stderr
+    assert ls_singular_tests.stdout == ""
+
 def test_parse_generic_test_arguments(tmp_path: Path):
     project = copy_fixture(tmp_path, "generic_test_arguments")
     result = subprocess.run(
@@ -971,6 +998,9 @@ def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
         return result.stdout.splitlines()
 
     assert ls_text("--select", "config.materialized:table") == ["model.inline_config.orders"]
+    assert ls_text("--select", "resource_type:model,config.materialized:table") == [
+        "model.inline_config.orders"
+    ]
     assert ls_text("--select", "config.materialized:view") == []
     assert ls_text("--select", "tag:nightly,config.materialized:table") == [
         "model.inline_config.orders"
@@ -988,6 +1018,37 @@ def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
     )
     assert default_result.returncode == 0, default_result.stderr
     assert default_result.stdout.splitlines() == ["model.single_model.customers"]
+
+
+def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
+    source_project = copy_fixture(tmp_path, "source_ref")
+    source_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "resource_type:source", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_result.returncode == 0, source_result.stderr
+    assert [item["unique_id"] for item in json.loads(source_result.stdout)] == [
+        "source.source_ref.raw.customers",
+        "source.source_ref.raw.orders",
+    ]
+
+    exposure_project = copy_fixture(tmp_path, "exposure_artifacts")
+    exposure_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "resource_type:exposure", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_result.returncode == 0, exposure_result.stderr
+    assert json.loads(exposure_result.stdout) == [
+        {
+            "unique_id": "exposure.exposure_artifacts.weekly_kpis",
+            "resource_type": "exposure",
+            "name": "weekly_kpis",
+        }
+    ]
 
 
 def test_ls_graph_plus_selectors(tmp_path: Path):
@@ -1050,6 +1111,8 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     for selector in [
         "state:modified",
         "config.schema:audit",
+        "resource_type:snapshot",
+        "test_type:unit",
         "tag:nightly,",
         "config.materialized:",
         "tag:nightly, config.materialized:view",
