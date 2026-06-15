@@ -1,0 +1,5 @@
+name: malformed_docs_block
+version: "1.0"
+profile: default
+model-paths: ["models"]
+target-path: target
