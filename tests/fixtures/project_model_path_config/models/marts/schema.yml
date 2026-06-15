@@ -1,0 +1,9 @@
+models:
+  - name: inline_orders
+    config:
+      materialized: view
+      tags: [yaml_inline]
+  - name: yaml_orders
+    config:
+      materialized: view
+      tags: [yaml]
