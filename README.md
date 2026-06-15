@@ -1,6 +1,6 @@
 # dxt
 
-`dxt` is **Data eXecution & Transformation**: a dbt-project-compatible transformation engine written in Zig.
+`dxt` is **Data Transformation eXecutor**: a dbt-project-compatible transformation engine written in Zig.
 
 The first target is dbt Core compatibility for public projects such as Jaffle Shop. The long-term architecture also accounts for semantic resources, metrics, Fusion-style static analysis, and efficient cross-database execution.
 
@@ -35,7 +35,7 @@ Implemented pre-alpha commands:
 ./zig-out/bin/dxt ls --project-dir tests/fixtures/model_ref --output json
 ```
 
-`parse` and `ls` currently support only the documented M1 parser subset: `dbt_project.yml` name/model paths/seed paths/macro paths/target path, SQL model discovery, CSV seed discovery, source discovery, exposure discovery, project macro discovery, docs block discovery, literal `ref` to models or seeds, literal `source`, literal `doc` in descriptions, basic inline `config`, narrow YAML model and macro properties, simple columns, tags, materialization and disabled SQL models, dbt-shaped generic test nodes for `unique`, `not_null`, `accepted_values`, and `relationships`, deterministic partial `manifest.json`, and basic name/tag/path/resource/config materialization selectors with comma intersections and graph expansion. `compile`, `build`, and `docs generate` remain planned placeholders.
+`parse` and `ls` currently support only the documented M1 parser subset: `dbt_project.yml` name/model paths/seed paths/macro paths/target path, SQL model discovery, CSV seed discovery, source discovery, exposure discovery, project macro discovery, installed package macro discovery from `dbt_packages`, docs block discovery, literal `ref` to models or seeds, literal `source`, literal `doc` in descriptions, package-qualified macro dependencies, basic inline `config`, narrow YAML model and project macro properties, simple columns, tags, materialization and disabled SQL models, dbt-shaped generic test nodes for `unique`, `not_null`, `accepted_values`, and `relationships`, deterministic partial `manifest.json`, and basic name/tag/path/resource/config materialization selectors with comma intersections and graph expansion. `compile`, `build`, and `docs generate` remain planned placeholders.
 
 ## Development
 

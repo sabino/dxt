@@ -1,0 +1,3 @@
+name: util_pkg
+version: "1.0"
+macro-paths: ["custom_macros"]

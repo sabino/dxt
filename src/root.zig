@@ -275,7 +275,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
     try writer.writeAll(
         \\Usage: dxt [--version] <command> [options]
         \\
-        \\Data eXecution & Transformation: a dbt-project-compatible transformation engine.
+        \\Data Transformation eXecutor: a dbt-project-compatible transformation engine.
         \\
         \\Commands:
         \\  version          Print the dxt version.

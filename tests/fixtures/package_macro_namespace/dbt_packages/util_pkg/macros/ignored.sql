@@ -1,0 +1,3 @@
+{% macro ignored() %}
+    ignored
+{% endmacro %}

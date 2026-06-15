@@ -22,5 +22,11 @@ zig-out/
 target/
 logs/
 dbt_packages/
+!tests/fixtures/package_macro_namespace/dbt_packages/
+!tests/fixtures/package_macro_namespace/dbt_packages/**
+!tests/fixtures/missing_package_macro/dbt_packages/
+!tests/fixtures/missing_package_macro/dbt_packages/**
+!tests/fixtures/missing_package_macro_in_macro/dbt_packages/
+!tests/fixtures/missing_package_macro_in_macro/dbt_packages/**
 
 .agent/runs/
