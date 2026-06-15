@@ -1,0 +1,7 @@
+version: 2
+
+models:
+  - name: disabled_customers
+    description: Disabled model should stay out of active graph
+    config:
+      enabled: false
