@@ -354,6 +354,88 @@ def test_parse_generic_test_arguments(tmp_path: Path):
     ]
 
 
+def test_parse_macro_artifacts_and_model_macro_dependency(tmp_path: Path):
+    project = copy_fixture(tmp_path, "macro_artifacts")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert sorted(manifest["nodes"]) == ["model.macro_artifacts.customers"]
+    macro_id = "macro.macro_artifacts.format_id"
+    dependent_macro_id = "macro.macro_artifacts.outer_id"
+    nested_macro_id = "macro.macro_artifacts.wrap_optional"
+    assert sorted(manifest["macros"]) == [macro_id, dependent_macro_id, nested_macro_id]
+    assert manifest["macros"][macro_id] == {
+        "unique_id": macro_id,
+        "resource_type": "macro",
+        "package_name": "macro_artifacts",
+        "name": "format_id",
+        "path": "macros/format_id.sql",
+        "original_file_path": "macros/format_id.sql",
+        "macro_sql": "{% macro format_id(column_name) %}\n    cast({{ column_name }} as varchar)\n{% endmacro %}",
+        "depends_on": {"macros": []},
+        "description": "",
+        "meta": {},
+        "docs": {"show": True, "node_color": None},
+        "patch_path": None,
+        "arguments": [],
+        "supported_languages": None,
+    }
+    assert manifest["macros"][dependent_macro_id]["depends_on"]["macros"] == [macro_id]
+    assert manifest["macros"][nested_macro_id]["macro_sql"] == (
+        "{% macro wrap_optional(column_name, enabled=true) %}\n"
+        "    {% if enabled %}\n"
+        "        coalesce({{ column_name }}, 'unknown')\n"
+        "    {% else %}\n"
+        "        {{ column_name }}\n"
+        "    {% endif %}\n"
+        "{% endmacro %}"
+    )
+    node = manifest["nodes"]["model.macro_artifacts.customers"]
+    assert node["depends_on"]["macros"] == [macro_id]
+    assert manifest["parent_map"]["model.macro_artifacts.customers"] == []
+    assert macro_id not in manifest["parent_map"]
+    assert macro_id not in manifest["child_map"]
+
+    ls_default = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_default.returncode == 0, ls_default.stderr
+    assert json.loads(ls_default.stdout) == [
+        {
+            "unique_id": "model.macro_artifacts.customers",
+            "resource_type": "model",
+            "name": "customers",
+        }
+    ]
+
+
+def test_macro_paths_replace_default_macro_directory(tmp_path: Path):
+    project = copy_fixture(tmp_path, "macro_paths_custom")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert sorted(manifest["macros"]) == ["macro.macro_paths_custom.kept_macro"]
+    macro = manifest["macros"]["macro.macro_paths_custom.kept_macro"]
+    assert macro["path"] == "custom_macros/kept.sql"
+    assert macro["original_file_path"] == "custom_macros/kept.sql"
+    assert "macro.macro_paths_custom.ignored_macro" not in manifest["macros"]
+
+
 def test_disabled_model_is_not_active_but_is_represented(tmp_path: Path):
     project = copy_fixture(tmp_path, "disabled_model")
     result = subprocess.run(

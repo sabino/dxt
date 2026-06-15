@@ -1,0 +1,6 @@
+name: macro_paths_custom
+version: "1.0"
+profile: default
+model-paths: ["models"]
+macro-paths: ["custom_macros"]
+target-path: target

@@ -24,6 +24,8 @@ const ProjectConfig = struct {
     name: []const u8,
     model_paths: std.ArrayList([]const u8) = .empty,
     seed_paths: std.ArrayList([]const u8) = .empty,
+    macro_paths: std.ArrayList([]const u8) = .empty,
+    macro_paths_set: bool = false,
     target_path: []const u8 = "target",
 };
 
@@ -66,6 +68,15 @@ const DocBlock = struct {
     block_contents: []const u8,
 };
 
+const MacroDef = struct {
+    unique_id: []const u8,
+    name: []const u8,
+    path: []const u8,
+    original_file_path: []const u8,
+    macro_sql: []const u8,
+    macro_depends_on: std.ArrayList([]const u8) = .empty,
+};
+
 const ModelProperty = struct {
     name: []const u8,
     patch_path: []const u8,
@@ -101,6 +112,7 @@ const Node = struct {
     refs: std.ArrayList(RefDep) = .empty,
     source_refs: std.ArrayList(SourceDep) = .empty,
     depends_on: std.ArrayList([]const u8) = .empty,
+    macro_depends_on: std.ArrayList([]const u8) = .empty,
 };
 
 const GenericTestNode = struct {
@@ -127,6 +139,7 @@ const Graph = struct {
     tests: std.ArrayList(GenericTestNode) = .empty,
     sources: std.ArrayList(SourceDef) = .empty,
     docs: std.ArrayList(DocBlock) = .empty,
+    macros: std.ArrayList(MacroDef) = .empty,
     model_properties: std.ArrayList(ModelProperty) = .empty,
     unmatched_model_properties: std.ArrayList(UnmatchedModelProperty) = .empty,
 
@@ -140,10 +153,14 @@ const Graph = struct {
         for (self.model_properties.items) |*property| {
             deinitModelProperty(self.allocator, property);
         }
+        for (self.macros.items) |*macro| {
+            deinitMacro(self.allocator, macro);
+        }
         self.nodes.deinit(self.allocator);
         self.tests.deinit(self.allocator);
         self.sources.deinit(self.allocator);
         self.docs.deinit(self.allocator);
+        self.macros.deinit(self.allocator);
         self.model_properties.deinit(self.allocator);
         self.unmatched_model_properties.deinit(self.allocator);
     }
@@ -161,12 +178,17 @@ fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     node.refs.deinit(allocator);
     node.source_refs.deinit(allocator);
     node.depends_on.deinit(allocator);
+    node.macro_depends_on.deinit(allocator);
 }
 
 fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
     test_node.accepted_values.deinit(allocator);
     test_node.depends_on.deinit(allocator);
     test_node.macro_depends_on.deinit(allocator);
+}
+
+fn deinitMacro(allocator: std.mem.Allocator, macro: *MacroDef) void {
+    macro.macro_depends_on.deinit(allocator);
 }
 
 fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) void {
@@ -232,6 +254,7 @@ fn graphDefaultTarget(runtime: Runtime, project_dir: []const u8) ![]const u8 {
     var config = try loadProjectConfig(runtime, project_dir);
     defer config.model_paths.deinit(runtime.allocator);
     defer config.seed_paths.deinit(runtime.allocator);
+    defer config.macro_paths.deinit(runtime.allocator);
     return config.target_path;
 }
 
@@ -239,9 +262,26 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     var config = try loadProjectConfig(runtime, project_dir);
     defer config.model_paths.deinit(runtime.allocator);
     defer config.seed_paths.deinit(runtime.allocator);
+    defer config.macro_paths.deinit(runtime.allocator);
 
     var graph = Graph{ .allocator = runtime.allocator, .project_name = config.name };
     errdefer graph.deinit();
+
+    for (config.macro_paths.items) |macro_path| {
+        var macro_files: std.ArrayList([]const u8) = .empty;
+        defer macro_files.deinit(runtime.allocator);
+
+        const root = try pathJoin(runtime.allocator, &.{ project_dir, macro_path });
+        discoverSqlFiles(runtime, root, macro_path, &macro_files) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        sortStrings(macro_files.items);
+
+        for (macro_files.items) |relative_path| {
+            try parseMacros(runtime, project_dir, relative_path, config.name, &graph);
+        }
+    }
 
     for (config.model_paths.items) |model_path| {
         var sql_files: std.ArrayList([]const u8) = .empty;
@@ -293,9 +333,12 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     sortTests(graph.tests.items);
     sortSources(graph.sources.items);
     sortDocs(graph.docs.items);
+    sortMacros(graph.macros.items);
     try rejectDuplicateModels(&graph);
     try rejectDuplicateSeeds(&graph);
     try rejectDuplicateDocs(&graph);
+    try rejectDuplicateMacros(&graph);
+    try resolveMacroDependencies(&graph);
     return graph;
 }
 
@@ -310,11 +353,13 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
     errdefer {
         config.model_paths.deinit(runtime.allocator);
         config.seed_paths.deinit(runtime.allocator);
+        config.macro_paths.deinit(runtime.allocator);
     }
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     var read_model_path_block = false;
     var read_seed_path_block = false;
+    var read_macro_path_block = false;
     while (lines.next()) |raw_line| {
         const line = stripYamlComment(raw_line);
         const trimmed = std.mem.trim(u8, line, " \t\r");
@@ -334,6 +379,13 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
             }
             read_seed_path_block = false;
         }
+        if (read_macro_path_block) {
+            if (std.mem.startsWith(u8, trimmed, "- ")) {
+                try config.macro_paths.append(runtime.allocator, try dupTrimmedScalar(runtime.allocator, trimmed[2..]));
+                continue;
+            }
+            read_macro_path_block = false;
+        }
 
         if (splitKeyValue(trimmed)) |kv| {
             if (std.mem.eql(u8, kv.key, "name")) {
@@ -352,6 +404,13 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
                 } else {
                     try parseInlineStringList(runtime.allocator, kv.value, &config.seed_paths);
                 }
+            } else if (std.mem.eql(u8, kv.key, "macro-paths")) {
+                config.macro_paths_set = true;
+                if (std.mem.trim(u8, kv.value, " \t").len == 0) {
+                    read_macro_path_block = true;
+                } else {
+                    try parseInlineStringList(runtime.allocator, kv.value, &config.macro_paths);
+                }
             }
         }
     }
@@ -362,6 +421,9 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
     }
     if (config.seed_paths.items.len == 0) {
         try config.seed_paths.append(runtime.allocator, "seeds");
+    }
+    if (!config.macro_paths_set) {
+        try config.macro_paths.append(runtime.allocator, "macros");
     }
     return config;
 }
@@ -421,6 +483,35 @@ fn discoverSeedFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: [
     }
 }
 
+fn discoverSqlFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8)) !void {
+    var dir = try std.Io.Dir.cwd().openDir(runtime.io, absolute_dir, .{ .iterate = true });
+    defer dir.close(runtime.io);
+
+    var iter = dir.iterate();
+    while (try iter.next(runtime.io)) |entry| {
+        if (entry.name.len == 0 or entry.name[0] == '.') continue;
+        if (std.mem.eql(u8, entry.name, "target") or
+            std.mem.eql(u8, entry.name, "dbt_packages") or
+            std.mem.eql(u8, entry.name, ".zig-cache") or
+            std.mem.eql(u8, entry.name, "zig-out"))
+        {
+            continue;
+        }
+
+        const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
+        const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
+        switch (entry.kind) {
+            .directory => try discoverSqlFiles(runtime, child_abs, child_rel, sql_files),
+            .file => {
+                if (std.mem.endsWith(u8, entry.name, ".sql")) {
+                    try sql_files.append(runtime.allocator, child_rel);
+                }
+            },
+            else => {},
+        }
+    }
+}
+
 fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
@@ -452,6 +543,60 @@ fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const
         });
         index = end_close + 2;
     }
+}
+
+fn parseMacros(runtime: Runtime, project_dir: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
+    const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
+        const close = std.mem.indexOfPos(u8, text, open + 2, "%}") orelse return error.MalformedMacroBlock;
+        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
+        if (!isMacroOpenTag(tag)) {
+            index = close + 2;
+            continue;
+        }
+        const name_start = skipWs(tag, "macro".len);
+        if (name_start >= tag.len or !isIdentStart(tag[name_start])) return error.MalformedMacroBlock;
+        var name_end = name_start + 1;
+        while (name_end < tag.len and isIdentChar(tag[name_end])) name_end += 1;
+        const macro_name = tag[name_start..name_end];
+        const call_pos = skipWs(tag, name_end);
+        if (call_pos >= tag.len or tag[call_pos] != '(') return error.MalformedMacroBlock;
+        _ = findMatchingParen(tag, call_pos) orelse return error.MalformedMacroBlock;
+
+        const end = try findEndMacroTag(text, close + 2);
+
+        const macro_sql = std.mem.trim(u8, text[open .. end.close + 2], " \t\r\n");
+        const unique_id = try std.fmt.allocPrint(runtime.allocator, "macro.{s}.{s}", .{ package_name, macro_name });
+        try graph.macros.append(runtime.allocator, .{
+            .unique_id = unique_id,
+            .name = try runtime.allocator.dupe(u8, macro_name),
+            .path = relative_path,
+            .original_file_path = relative_path,
+            .macro_sql = try runtime.allocator.dupe(u8, macro_sql),
+        });
+        index = end.close + 2;
+    }
+}
+
+const MacroEndTag = struct {
+    close: usize,
+};
+
+fn isMacroOpenTag(tag: []const u8) bool {
+    return std.mem.startsWith(u8, tag, "macro") and tag.len > "macro".len and std.ascii.isWhitespace(tag["macro".len]);
+}
+
+fn findEndMacroTag(text: []const u8, start: usize) !MacroEndTag {
+    var index = start;
+    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
+        const close = std.mem.indexOfPos(u8, text, open + 2, "%}") orelse return error.MalformedMacroBlock;
+        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
+        if (std.mem.eql(u8, tag, "endmacro")) return .{ .close = close };
+        index = close + 2;
+    }
+    return error.MalformedMacroBlock;
 }
 
 fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
@@ -749,7 +894,7 @@ fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8,
     errdefer {
         deinitNode(runtime.allocator, &node);
     }
-    try scanSql(runtime.allocator, sql, &node);
+    try scanSql(runtime.allocator, sql, &node, graph);
     try graph.nodes.append(runtime.allocator, node);
 }
 
@@ -940,6 +1085,25 @@ fn rejectDuplicateDocs(graph: *const Graph) !void {
     }
 }
 
+fn rejectDuplicateMacros(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.macros.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.macros.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.macros.items[i].unique_id, graph.macros.items[j].unique_id)) {
+                return error.DuplicateMacroName;
+            }
+        }
+    }
+}
+
+fn resolveMacroDependencies(graph: *Graph) !void {
+    for (graph.macros.items) |*macro| {
+        try scanMacroSqlForKnownMacroCalls(graph.allocator, macro.macro_sql, graph, macro.unique_id, &macro.macro_depends_on);
+        sortStrings(macro.macro_depends_on.items);
+    }
+}
+
 fn resolveDocDescription(graph: *Graph, description: []const u8, doc_blocks: *std.ArrayList([]const u8)) ![]const u8 {
     const trimmed = std.mem.trim(u8, description, " \t\r\n");
     if (std.mem.indexOf(u8, trimmed, "{{") == null) return description;
@@ -965,6 +1129,10 @@ fn resolveDocDescription(graph: *Graph, description: []const u8, doc_blocks: *st
 fn resolveDependencies(graph: *Graph) !void {
     for (graph.nodes.items) |*node| {
         if (!node.enabled) continue;
+        for (node.macro_depends_on.items) |macro_dep| {
+            if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
+        }
+        sortStrings(node.macro_depends_on.items);
         for (node.refs.items) |ref_dep| {
             const package = ref_dep.package orelse graph.project_name;
             const model_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, ref_dep.name });
@@ -986,7 +1154,7 @@ fn resolveDependencies(graph: *Graph) !void {
     }
 }
 
-fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node) !void {
+fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
     var index: usize = 0;
     while (index + 1 < sql.len) {
         if (sql[index] != '{') {
@@ -1005,7 +1173,7 @@ fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node) !void {
         else
             null;
         if (close) |end| {
-            try scanJinjaSpan(allocator, sql[index + 2 .. end], node);
+            try scanJinjaSpan(allocator, sql[index + 2 .. end], node, graph);
             index = end + 2;
             continue;
         }
@@ -1013,7 +1181,7 @@ fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node) !void {
     }
 }
 
-fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node) !void {
+fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, graph: ?*const Graph) !void {
     var i: usize = 0;
     while (i < span.len) {
         if (span[i] == '"' or span[i] == '\'') {
@@ -1052,7 +1220,70 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node) !v
         } else if (std.mem.eql(u8, ident, "config")) {
             try parseConfig(allocator, args, node);
         } else {
+            if (graph) |known_graph| {
+                if (findProjectMacroIdByName(known_graph, ident)) |macro_id| {
+                    try appendUnique(allocator, &node.macro_depends_on, macro_id);
+                    i = close + 1;
+                    continue;
+                }
+            }
             return error.UnsupportedJinja;
+        }
+        i = close + 1;
+    }
+}
+
+fn scanMacroSqlForKnownMacroCalls(allocator: std.mem.Allocator, sql: []const u8, graph: *const Graph, current_macro_id: []const u8, macro_depends_on: *std.ArrayList([]const u8)) !void {
+    var index: usize = 0;
+    while (index + 1 < sql.len) {
+        if (sql[index] != '{') {
+            index += 1;
+            continue;
+        }
+        if (sql[index + 1] == '#') {
+            const end = std.mem.indexOfPos(u8, sql, index + 2, "#}") orelse break;
+            index = end + 2;
+            continue;
+        }
+        const close = if (sql[index + 1] == '{')
+            std.mem.indexOfPos(u8, sql, index + 2, "}}")
+        else if (sql[index + 1] == '%')
+            std.mem.indexOfPos(u8, sql, index + 2, "%}")
+        else
+            null;
+        if (close) |end| {
+            try scanMacroSpanForKnownMacroCalls(allocator, sql[index + 2 .. end], graph, current_macro_id, macro_depends_on);
+            index = end + 2;
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u8, graph: *const Graph, current_macro_id: []const u8, macro_depends_on: *std.ArrayList([]const u8)) !void {
+    var i: usize = 0;
+    while (i < span.len) {
+        if (span[i] == '"' or span[i] == '\'') {
+            i = skipQuotedSpan(span, i) orelse break;
+            continue;
+        }
+        if (!isIdentStart(span[i])) {
+            i += 1;
+            continue;
+        }
+        const start = i;
+        i += 1;
+        while (i < span.len and isIdentChar(span[i])) i += 1;
+        const ident = span[start..i];
+        const call_pos = skipWs(span, i);
+        if (call_pos >= span.len or span[call_pos] != '(') continue;
+        const close = findMatchingParen(span, call_pos) orelse break;
+        if (findProjectMacroIdByName(graph, ident)) |macro_id| {
+            if (std.mem.eql(u8, macro_id, current_macro_id)) {
+                i = close + 1;
+                continue;
+            }
+            try appendUnique(allocator, macro_depends_on, macro_id);
         }
         i = close + 1;
     }
@@ -1267,7 +1498,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
 
     try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": null, \"dbt_version\": null, \"project_name\": ");
     try writeJsonString(writer, graph.project_name);
-    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"dxt_metadata\": {\"artifact_kind\": \"partial_manifest\", \"compatibility_target\": \"dbt-manifest-v12-slice\", \"supported_surface\": [\"model\", \"seed\", \"source\", \"docs\", \"literal_ref\", \"literal_source\", \"literal_doc\", \"inline_config\", \"model_properties\", \"disabled_models\"]},\n  \"nodes\": {");
+    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"dxt_metadata\": {\"artifact_kind\": \"partial_manifest\", \"compatibility_target\": \"dbt-manifest-v12-slice\", \"supported_surface\": [\"model\", \"seed\", \"source\", \"macro\", \"docs\", \"literal_ref\", \"literal_source\", \"literal_doc\", \"inline_config\", \"model_properties\", \"disabled_models\"]},\n  \"nodes\": {");
     var node_index: usize = 0;
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
@@ -1303,7 +1534,15 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writeJsonString(writer, normalizeForDisplay(source.original_file_path));
         try writer.writeAll("}");
     }
-    try writer.writeAll("\n  },\n  \"macros\": {},\n  \"docs\": {");
+    try writer.writeAll("\n  },\n  \"macros\": {");
+    for (graph.macros.items, 0..) |macro, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, macro.unique_id);
+        try writer.writeAll(": ");
+        try writeMacroNode(writer, graph.project_name, macro);
+    }
+    try writer.writeAll("\n  },\n  \"docs\": {");
     for (graph.docs.items, 0..) |doc, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("\n    ");
@@ -1406,6 +1645,24 @@ fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []c
     }
 }
 
+fn writeMacroNode(writer: *Io.Writer, project_name: []const u8, macro: MacroDef) !void {
+    try writer.writeAll("{\"unique_id\":");
+    try writeJsonString(writer, macro.unique_id);
+    try writer.writeAll(",\"resource_type\":\"macro\",\"package_name\":");
+    try writeJsonString(writer, project_name);
+    try writer.writeAll(",\"name\":");
+    try writeJsonString(writer, macro.name);
+    try writer.writeAll(",\"path\":");
+    try writeJsonString(writer, normalizeForDisplay(macro.path));
+    try writer.writeAll(",\"original_file_path\":");
+    try writeJsonString(writer, normalizeForDisplay(macro.original_file_path));
+    try writer.writeAll(",\"macro_sql\":");
+    try writeJsonString(writer, macro.macro_sql);
+    try writer.writeAll(",\"depends_on\":{\"macros\":");
+    try writeStringArray(writer, macro.macro_depends_on.items);
+    try writer.writeAll("},\"description\":\"\",\"meta\":{},\"docs\":{\"show\":true,\"node_color\":null},\"patch_path\":null,\"arguments\":[],\"supported_languages\":null}");
+}
+
 fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, node: Node) !void {
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, node.unique_id);
@@ -1449,7 +1706,9 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
     try writeJsonString(writer, node.materialized);
     try writer.writeAll(",\"tags\":");
     try writeStringArray(writer, node.tags.items);
-    try writer.writeAll("},\"depends_on\":{\"macros\":[],\"nodes\":");
+    try writer.writeAll("},\"depends_on\":{\"macros\":");
+    try writeStringArray(writer, node.macro_depends_on.items);
+    try writer.writeAll(",\"nodes\":");
     try writeStringArray(writer, node.depends_on.items);
     try writer.writeAll("}}");
 }
@@ -1883,6 +2142,14 @@ fn sortDocs(docs: []DocBlock) void {
     }.lessThan);
 }
 
+fn sortMacros(macros: []MacroDef) void {
+    std.mem.sort(MacroDef, macros, {}, struct {
+        fn lessThan(_: void, a: MacroDef, b: MacroDef) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
 fn sortColumns(columns: []ColumnDef) void {
     std.mem.sort(ColumnDef, columns, {}, struct {
         fn lessThan(_: void, a: ColumnDef, b: ColumnDef) bool {
@@ -2002,6 +2269,20 @@ fn hasSource(graph: *const Graph, unique_id: []const u8) bool {
     return false;
 }
 
+fn hasMacro(graph: *const Graph, unique_id: []const u8) bool {
+    for (graph.macros.items) |macro| {
+        if (std.mem.eql(u8, macro.unique_id, unique_id)) return true;
+    }
+    return false;
+}
+
+fn findProjectMacroIdByName(graph: *const Graph, name: []const u8) ?[]const u8 {
+    for (graph.macros.items) |macro| {
+        if (std.mem.eql(u8, macro.name, name)) return macro.unique_id;
+    }
+    return null;
+}
+
 fn parseBool(value: []const u8) !bool {
     const trimmed = std.mem.trim(u8, value, " \t\r");
     if (std.ascii.eqlIgnoreCase(trimmed, "true")) return true;
@@ -2073,6 +2354,7 @@ test "sql scanner extracts refs sources and config tags from jinja spans" {
         node.refs.deinit(allocator);
         node.source_refs.deinit(allocator);
         node.depends_on.deinit(allocator);
+        node.macro_depends_on.deinit(allocator);
     }
 
     try scanSql(allocator,
@@ -2081,7 +2363,7 @@ test "sql scanner extracts refs sources and config tags from jinja spans" {
         \\union all select * from {{ source('raw', "customers") }}
         \\select {{ "ref('not_a_dependency')" }} as literal_ref
         \\{# {{ ref("ignored") }} #}
-    , &node);
+    , &node, null);
 
     try std.testing.expectEqual(@as(usize, 1), node.refs.items.len);
     try std.testing.expectEqualStrings("stg_customers", node.refs.items[0].name);
