@@ -48,7 +48,14 @@ const ColumnDef = struct {
     name: []const u8,
     description: []const u8 = "",
     doc_blocks: std.ArrayList([]const u8) = .empty,
-    tests: std.ArrayList([]const u8) = .empty,
+    tests: std.ArrayList(GenericTestDef) = .empty,
+};
+
+const GenericTestDef = struct {
+    name: []const u8,
+    accepted_values: std.ArrayList([]const u8) = .empty,
+    relationship_to: []const u8 = "",
+    relationship_field: []const u8 = "",
 };
 
 const DocBlock = struct {
@@ -66,7 +73,7 @@ const ModelProperty = struct {
     materialized: []const u8 = "",
     tags: std.ArrayList([]const u8) = .empty,
     doc_blocks: std.ArrayList([]const u8) = .empty,
-    tests: std.ArrayList([]const u8) = .empty,
+    tests: std.ArrayList(GenericTestDef) = .empty,
     columns: std.ArrayList(ColumnDef) = .empty,
     enabled: ?bool = null,
 };
@@ -89,7 +96,7 @@ const Node = struct {
     enabled: bool = true,
     tags: std.ArrayList([]const u8) = .empty,
     doc_blocks: std.ArrayList([]const u8) = .empty,
-    tests: std.ArrayList([]const u8) = .empty,
+    tests: std.ArrayList(GenericTestDef) = .empty,
     columns: std.ArrayList(ColumnDef) = .empty,
     refs: std.ArrayList(RefDep) = .empty,
     source_refs: std.ArrayList(SourceDep) = .empty,
@@ -99,11 +106,15 @@ const Node = struct {
 const GenericTestNode = struct {
     unique_id: []const u8,
     name: []const u8,
+    alias: []const u8,
     path: []const u8,
     original_file_path: []const u8,
     raw_code: []const u8,
     test_name: []const u8,
     column_name: ?[]const u8 = null,
+    accepted_values: std.ArrayList([]const u8) = .empty,
+    relationship_to: []const u8 = "",
+    relationship_field: []const u8 = "",
     attached_node: []const u8,
     depends_on: std.ArrayList([]const u8) = .empty,
     macro_depends_on: std.ArrayList([]const u8) = .empty,
@@ -141,10 +152,10 @@ const Graph = struct {
 fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     node.tags.deinit(allocator);
     node.doc_blocks.deinit(allocator);
-    node.tests.deinit(allocator);
+    deinitGenericTestDefs(allocator, &node.tests);
     for (node.columns.items) |*column| {
         column.doc_blocks.deinit(allocator);
-        column.tests.deinit(allocator);
+        deinitGenericTestDefs(allocator, &column.tests);
     }
     node.columns.deinit(allocator);
     node.refs.deinit(allocator);
@@ -153,6 +164,7 @@ fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
 }
 
 fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
+    test_node.accepted_values.deinit(allocator);
     test_node.depends_on.deinit(allocator);
     test_node.macro_depends_on.deinit(allocator);
 }
@@ -160,12 +172,19 @@ fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNo
 fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) void {
     property.tags.deinit(allocator);
     property.doc_blocks.deinit(allocator);
-    property.tests.deinit(allocator);
+    deinitGenericTestDefs(allocator, &property.tests);
     for (property.columns.items) |*column| {
         column.doc_blocks.deinit(allocator);
-        column.tests.deinit(allocator);
+        deinitGenericTestDefs(allocator, &column.tests);
     }
     property.columns.deinit(allocator);
+}
+
+fn deinitGenericTestDefs(allocator: std.mem.Allocator, tests: *std.ArrayList(GenericTestDef)) void {
+    for (tests.items) |*test_def| {
+        test_def.accepted_values.deinit(allocator);
+    }
+    tests.deinit(allocator);
 }
 
 pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
@@ -511,13 +530,19 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
     var in_columns = false;
     var in_config = false;
     var test_target: TestTarget = .none;
+    var active_test_target: TestTarget = .none;
+    var active_values_target: TestTarget = .none;
     var models_indent: usize = 0;
     var model_item_indent: ?usize = null;
     var column_item_indent: ?usize = null;
     var config_indent: usize = 0;
     var tests_indent: usize = 0;
+    var active_test_indent: usize = 0;
+    var active_values_indent: usize = 0;
     var current_model: ?usize = null;
     var current_column: ?usize = null;
+    var active_test_index: ?usize = null;
+    var active_values_index: ?usize = null;
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
@@ -531,11 +556,15 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             in_columns = false;
             in_config = false;
             test_target = .none;
+            active_test_target = .none;
+            active_values_target = .none;
             models_indent = indent;
             model_item_indent = null;
             column_item_indent = null;
             current_model = null;
             current_column = null;
+            active_test_index = null;
+            active_values_index = null;
             continue;
         }
         if (!in_models) continue;
@@ -544,6 +573,14 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
         if (test_target != .none and indent <= tests_indent and !std.mem.startsWith(u8, trimmed, "- ")) {
             test_target = .none;
         }
+        if (active_test_index != null and indent <= active_test_indent) {
+            active_test_target = .none;
+            active_test_index = null;
+        }
+        if (active_values_index != null and indent <= active_values_indent) {
+            active_values_target = .none;
+            active_values_index = null;
+        }
         if (in_config and indent <= config_indent and !std.mem.eql(u8, trimmed, "config:")) {
             in_config = false;
         }
@@ -551,18 +588,33 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             in_columns = false;
             current_column = null;
             column_item_indent = null;
+            active_test_target = .none;
+            active_test_index = null;
+            active_values_target = .none;
+            active_values_index = null;
         }
 
         if (std.mem.startsWith(u8, trimmed, "- ")) {
+            if (active_values_index != null and indent > active_values_indent) {
+                const test_def = try currentGenericTestDef(graph, current_model orelse return error.UnsupportedYaml, current_column, active_values_target, active_values_index.?);
+                try test_def.accepted_values.append(allocator, try dupTrimmedScalar(allocator, trimmed[2..]));
+                continue;
+            }
             if (test_target != .none and indent > tests_indent) {
                 const test_name = try testNameFromYamlItem(allocator, trimmed[2..]);
                 if (test_target == .model) {
                     const model_index = current_model orelse return error.UnsupportedYaml;
-                    try appendUnique(allocator, &graph.model_properties.items[model_index].tests, test_name);
+                    active_test_index = try appendGenericTestDef(allocator, &graph.model_properties.items[model_index].tests, test_name);
                 } else {
                     const model_index = current_model orelse return error.UnsupportedYaml;
                     const column_index = current_column orelse return error.UnsupportedYaml;
-                    try appendUnique(allocator, &graph.model_properties.items[model_index].columns.items[column_index].tests, test_name);
+                    active_test_index = try appendGenericTestDef(allocator, &graph.model_properties.items[model_index].columns.items[column_index].tests, test_name);
+                }
+                active_test_target = test_target;
+                active_test_indent = indent;
+                if (std.mem.indexOfScalar(u8, std.mem.trim(u8, trimmed[2..], " \t\r"), ':') == null) {
+                    active_test_target = .none;
+                    active_test_index = null;
                 }
                 continue;
             }
@@ -575,6 +627,10 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                     current_column = graph.model_properties.items[model_index].columns.items.len - 1;
                     column_item_indent = indent;
                     test_target = .none;
+                    active_test_target = .none;
+                    active_test_index = null;
+                    active_values_target = .none;
+                    active_values_index = null;
                     in_config = false;
                 } else {
                     try graph.model_properties.append(allocator, .{ .name = name, .patch_path = relative_path });
@@ -585,6 +641,10 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                     in_columns = false;
                     in_config = false;
                     test_target = .none;
+                    active_test_target = .none;
+                    active_test_index = null;
+                    active_values_target = .none;
+                    active_values_index = null;
                 }
             }
             continue;
@@ -592,6 +652,31 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
 
         const model_index = current_model orelse continue;
         if (splitKeyValue(trimmed)) |kv| {
+            if (active_test_index != null and indent > active_test_indent) {
+                if (std.mem.eql(u8, kv.key, "arguments")) {
+                    if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                    continue;
+                }
+
+                const test_def = try currentGenericTestDef(graph, model_index, current_column, active_test_target, active_test_index.?);
+                if (std.mem.eql(u8, kv.key, "values")) {
+                    if (std.mem.trim(u8, kv.value, " \t").len == 0) {
+                        active_values_target = active_test_target;
+                        active_values_index = active_test_index;
+                        active_values_indent = indent;
+                    } else {
+                        try parseInlineStringList(allocator, kv.value, &test_def.accepted_values);
+                    }
+                    continue;
+                } else if (std.mem.eql(u8, kv.key, "to")) {
+                    test_def.relationship_to = try dupTrimmedScalar(allocator, kv.value);
+                    continue;
+                } else if (std.mem.eql(u8, kv.key, "field")) {
+                    test_def.relationship_field = try dupTrimmedScalar(allocator, kv.value);
+                    continue;
+                }
+            }
+
             if (in_config and indent > config_indent) {
                 if (std.mem.eql(u8, kv.key, "enabled")) {
                     graph.model_properties.items[model_index].enabled = try parseBool(kv.value);
@@ -619,16 +704,24 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                 current_column = null;
                 column_item_indent = null;
                 test_target = .none;
+                active_test_target = .none;
+                active_test_index = null;
+                active_values_target = .none;
+                active_values_index = null;
             } else if (std.mem.eql(u8, kv.key, "tests") or std.mem.eql(u8, kv.key, "data_tests")) {
                 if (std.mem.trim(u8, kv.value, " \t").len != 0) {
                     if (in_columns and current_column != null) {
-                        try parseInlineStringList(allocator, kv.value, &graph.model_properties.items[model_index].columns.items[current_column.?].tests);
+                        try parseInlineGenericTestList(allocator, kv.value, &graph.model_properties.items[model_index].columns.items[current_column.?].tests);
                     } else {
-                        try parseInlineStringList(allocator, kv.value, &graph.model_properties.items[model_index].tests);
+                        try parseInlineGenericTestList(allocator, kv.value, &graph.model_properties.items[model_index].tests);
                     }
                 } else {
                     test_target = if (in_columns and current_column != null) .column else .model;
                     tests_indent = indent;
+                    active_test_target = .none;
+                    active_test_index = null;
+                    active_values_target = .none;
+                    active_values_index = null;
                 }
             } else if (std.mem.eql(u8, kv.key, "config")) {
                 if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
@@ -695,10 +788,10 @@ fn applyModelProperties(graph: *Graph) !void {
             try appendUnique(graph.allocator, &node.tags, tag);
         }
         sortStrings(node.tags.items);
-        for (property.tests.items) |test_name| {
-            try appendUnique(graph.allocator, &node.tests, test_name);
+        for (property.tests.items) |test_def| {
+            try appendGenericTestDefClone(graph, &node.tests, test_def);
         }
-        sortStrings(node.tests.items);
+        sortGenericTestDefs(node.tests.items);
         for (property.columns.items) |column| {
             try appendColumnClone(graph, &node.columns, column);
         }
@@ -709,47 +802,69 @@ fn applyModelProperties(graph: *Graph) !void {
 fn materializeGenericTests(graph: *Graph) !void {
     for (graph.nodes.items) |*node| {
         if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
-        for (node.tests.items) |test_name| {
-            if (isSupportedGenericTest(test_name)) {
-                try appendGenericTestNode(graph, node, test_name, null);
+        for (node.tests.items) |test_def| {
+            if (isSupportedGenericTest(test_def)) {
+                try appendGenericTestNode(graph, node, test_def, null);
             }
         }
         for (node.columns.items) |column| {
-            for (column.tests.items) |test_name| {
-                if (isSupportedGenericTest(test_name)) {
-                    try appendGenericTestNode(graph, node, test_name, column.name);
+            for (column.tests.items) |test_def| {
+                if (isSupportedGenericTest(test_def)) {
+                    try appendGenericTestNode(graph, node, test_def, column.name);
                 }
             }
         }
     }
 }
 
-fn appendGenericTestNode(graph: *Graph, node: *const Node, test_name: []const u8, column_name: ?[]const u8) !void {
-    const name = try synthesizeGenericTestName(graph.allocator, test_name, node.name, column_name);
-    const unique_id = try genericTestUniqueId(graph.allocator, graph.project_name, name, test_name, node.name, column_name);
+fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTestDef, column_name: ?[]const u8) !void {
+    const names = try synthesizeGenericTestNames(graph.allocator, test_def, node.name, column_name);
+    const unique_id = try genericTestUniqueId(graph.allocator, graph.project_name, names.full, test_def, node.name, column_name);
     for (graph.tests.items) |existing| {
         if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
     }
 
+    const raw_code = if (std.mem.eql(u8, names.compiled, names.full))
+        try std.fmt.allocPrint(graph.allocator, "{{{{ test_{s}(**_dbt_generic_test_kwargs) }}}}", .{test_def.name})
+    else
+        try std.fmt.allocPrint(graph.allocator, "{{{{ test_{s}(**_dbt_generic_test_kwargs) }}}}{{{{ config(alias=\"{s}\") }}}}", .{ test_def.name, names.compiled });
     var test_node = GenericTestNode{
         .unique_id = unique_id,
-        .name = name,
-        .path = try std.fmt.allocPrint(graph.allocator, "{s}.sql", .{name}),
+        .name = names.full,
+        .alias = names.compiled,
+        .path = try std.fmt.allocPrint(graph.allocator, "{s}.sql", .{names.compiled}),
         .original_file_path = node.patch_path orelse node.original_file_path,
-        .raw_code = try std.fmt.allocPrint(graph.allocator, "{{{{ test_{s}(**_dbt_generic_test_kwargs) }}}}", .{test_name}),
-        .test_name = test_name,
+        .raw_code = raw_code,
+        .test_name = test_def.name,
         .column_name = column_name,
+        .relationship_to = test_def.relationship_to,
+        .relationship_field = test_def.relationship_field,
         .attached_node = node.unique_id,
     };
     errdefer deinitGenericTestNode(graph.allocator, &test_node);
 
+    for (test_def.accepted_values.items) |value| {
+        try test_node.accepted_values.append(graph.allocator, value);
+    }
+    if (std.mem.eql(u8, test_def.name, "relationships")) {
+        const target_name = try refTargetName(graph.allocator, test_def.relationship_to);
+        const target_unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ graph.project_name, target_name });
+        if (!hasNode(graph, target_unique_id)) return error.UnresolvedRef;
+        try test_node.depends_on.append(graph.allocator, target_unique_id);
+    }
     try test_node.depends_on.append(graph.allocator, node.unique_id);
-    try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_name}));
+    try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
+    if (!std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
+        try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
+    }
     try graph.tests.append(graph.allocator, test_node);
 }
 
-fn isSupportedGenericTest(test_name: []const u8) bool {
-    return std.mem.eql(u8, test_name, "not_null") or std.mem.eql(u8, test_name, "unique");
+fn isSupportedGenericTest(test_def: GenericTestDef) bool {
+    return std.mem.eql(u8, test_def.name, "not_null") or
+        std.mem.eql(u8, test_def.name, "unique") or
+        (std.mem.eql(u8, test_def.name, "accepted_values") and test_def.accepted_values.items.len != 0) or
+        (std.mem.eql(u8, test_def.name, "relationships") and test_def.relationship_to.len != 0 and test_def.relationship_field.len != 0);
 }
 
 fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
@@ -762,10 +877,10 @@ fn appendColumnClone(graph: *Graph, columns: *std.ArrayList(ColumnDef), source: 
     for (columns.items) |*existing| {
         if (std.mem.eql(u8, existing.name, source.name)) {
             if (source.description.len != 0) existing.description = try resolveDocDescription(graph, source.description, &existing.doc_blocks);
-            for (source.tests.items) |test_name| {
-                try appendUnique(graph.allocator, &existing.tests, test_name);
+            for (source.tests.items) |test_def| {
+                try appendGenericTestDefClone(graph, &existing.tests, test_def);
             }
-            sortStrings(existing.tests.items);
+            sortGenericTestDefs(existing.tests.items);
             return;
         }
     }
@@ -776,10 +891,10 @@ fn appendColumnClone(graph: *Graph, columns: *std.ArrayList(ColumnDef), source: 
         column.tests.deinit(graph.allocator);
     }
     if (source.description.len != 0) column.description = try resolveDocDescription(graph, source.description, &column.doc_blocks);
-    for (source.tests.items) |test_name| {
-        try appendUnique(graph.allocator, &column.tests, test_name);
+    for (source.tests.items) |test_def| {
+        try appendGenericTestDefClone(graph, &column.tests, test_def);
     }
-    sortStrings(column.tests.items);
+    sortGenericTestDefs(column.tests.items);
     try columns.append(graph.allocator, column);
 }
 
@@ -1364,6 +1479,8 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, projec
     try writeJsonString(writer, project_name);
     try writer.writeAll(",\"name\":");
     try writeJsonString(writer, test_node.name);
+    try writer.writeAll(",\"alias\":");
+    try writeJsonString(writer, test_node.alias);
     try writer.writeAll(",\"path\":");
     try writeJsonString(writer, normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -1388,6 +1505,18 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, projec
     if (test_node.column_name) |column_name| {
         try writer.writeAll(",\"column_name\":");
         try writeJsonString(writer, column_name);
+    }
+    if (test_node.accepted_values.items.len != 0) {
+        try writer.writeAll(",\"values\":");
+        try writeStringArray(writer, test_node.accepted_values.items);
+    }
+    if (test_node.relationship_to.len != 0) {
+        try writer.writeAll(",\"to\":");
+        try writeJsonString(writer, test_node.relationship_to);
+    }
+    if (test_node.relationship_field.len != 0) {
+        try writer.writeAll(",\"field\":");
+        try writeJsonString(writer, test_node.relationship_field);
     }
     try writer.writeAll("},\"namespace\":null},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
     try writeStringArray(writer, test_node.macro_depends_on.items);
@@ -1459,6 +1588,46 @@ fn parseInlineStringList(allocator: std.mem.Allocator, value: []const u8, out: *
     }
 }
 
+fn parseInlineGenericTestList(allocator: std.mem.Allocator, value: []const u8, out: *std.ArrayList(GenericTestDef)) !void {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') {
+        _ = try appendGenericTestDef(allocator, out, try dupTrimmedScalar(allocator, trimmed));
+        return;
+    }
+    var pieces = std.mem.splitScalar(u8, trimmed[1 .. trimmed.len - 1], ',');
+    while (pieces.next()) |piece| {
+        const item = std.mem.trim(u8, piece, " \t");
+        if (item.len != 0) _ = try appendGenericTestDef(allocator, out, try dupTrimmedScalar(allocator, item));
+    }
+}
+
+fn appendGenericTestDef(allocator: std.mem.Allocator, tests: *std.ArrayList(GenericTestDef), test_name: []const u8) !usize {
+    try tests.append(allocator, .{ .name = test_name });
+    return tests.items.len - 1;
+}
+
+fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTestDef), source: GenericTestDef) !void {
+    var cloned = GenericTestDef{
+        .name = source.name,
+        .relationship_to = source.relationship_to,
+        .relationship_field = source.relationship_field,
+    };
+    errdefer cloned.accepted_values.deinit(graph.allocator);
+    for (source.accepted_values.items) |value| {
+        try cloned.accepted_values.append(graph.allocator, value);
+    }
+    try tests.append(graph.allocator, cloned);
+}
+
+fn currentGenericTestDef(graph: *Graph, model_index: usize, current_column: ?usize, target: TestTarget, test_index: usize) !*GenericTestDef {
+    if (target == .model) return &graph.model_properties.items[model_index].tests.items[test_index];
+    if (target == .column) {
+        const column_index = current_column orelse return error.UnsupportedYaml;
+        return &graph.model_properties.items[model_index].columns.items[column_index].tests.items[test_index];
+    }
+    return error.UnsupportedYaml;
+}
+
 fn dupTrimmedScalar(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     const trimmed = std.mem.trim(u8, value, " \t\r");
     if (trimmed.len >= 2 and ((trimmed[0] == '"' and trimmed[trimmed.len - 1] == '"') or (trimmed[0] == '\'' and trimmed[trimmed.len - 1] == '\''))) {
@@ -1467,28 +1636,73 @@ fn dupTrimmedScalar(allocator: std.mem.Allocator, value: []const u8) ![]const u8
     return try allocator.dupe(u8, trimmed);
 }
 
-fn synthesizeGenericTestName(allocator: std.mem.Allocator, test_name: []const u8, model_name: []const u8, column_name: ?[]const u8) ![]const u8 {
-    if (column_name) |column| {
-        const clean_column = try cleanTestNamePart(allocator, column);
-        defer allocator.free(clean_column);
-        return try std.fmt.allocPrint(allocator, "{s}_{s}_{s}", .{ test_name, model_name, clean_column });
+const GenericTestNames = struct {
+    full: []const u8,
+    compiled: []const u8,
+};
+
+fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: GenericTestDef, model_name: []const u8, column_name: ?[]const u8) !GenericTestNames {
+    var clean_args: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (clean_args.items) |arg| allocator.free(arg);
+        clean_args.deinit(allocator);
     }
-    return try std.fmt.allocPrint(allocator, "{s}_{s}_", .{ test_name, model_name });
+
+    if (column_name) |column| try clean_args.append(allocator, try cleanTestNamePart(allocator, column));
+    if (std.mem.eql(u8, test_def.name, "relationships")) {
+        try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_field));
+        try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_to));
+    } else if (std.mem.eql(u8, test_def.name, "accepted_values")) {
+        for (test_def.accepted_values.items) |value| {
+            try clean_args.append(allocator, try cleanTestNamePart(allocator, value));
+        }
+    }
+
+    const test_identifier = try std.fmt.allocPrint(allocator, "{s}_{s}", .{ test_def.name, model_name });
+    const unique = try joinStrings(allocator, clean_args.items, "__");
+    defer allocator.free(unique);
+
+    const full = if (unique.len == 0)
+        try std.fmt.allocPrint(allocator, "{s}_", .{test_identifier})
+    else
+        try std.fmt.allocPrint(allocator, "{s}_{s}", .{ test_identifier, unique });
+    if (full.len < 64) return .{ .full = full, .compiled = full };
+
+    const label = genericTestHashFull(full);
+    const prefix_len = @min(test_identifier.len, 30);
+    const compiled = try std.fmt.allocPrint(allocator, "{s}_{s}", .{ test_identifier[0..prefix_len], label });
+    return .{ .full = full, .compiled = compiled };
 }
 
-fn genericTestUniqueId(allocator: std.mem.Allocator, package_name: []const u8, name: []const u8, test_name: []const u8, model_name: []const u8, column_name: ?[]const u8) ![]const u8 {
+fn genericTestUniqueId(allocator: std.mem.Allocator, package_name: []const u8, name: []const u8, test_def: GenericTestDef, model_name: []const u8, column_name: ?[]const u8) ![]const u8 {
     const model_kwarg = try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
     defer allocator.free(model_kwarg);
-    const metadata = if (column_name) |column|
-        try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\"}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, model_kwarg, test_name })
-    else
-        try std.fmt.allocPrint(allocator, "{{'kwargs': {{'model': \"{s}\"}}, 'name': '{s}', 'namespace': 'None'}}", .{ model_kwarg, test_name });
+    const metadata = try genericTestMetadataRepr(allocator, test_def, model_kwarg, column_name);
     defer allocator.free(metadata);
 
     const hash_input = try std.fmt.allocPrint(allocator, "{s}{s}", .{ name, metadata });
     defer allocator.free(hash_input);
     const suffix = genericTestHashSuffix(hash_input);
     return try std.fmt.allocPrint(allocator, "test.{s}.{s}.{s}", .{ package_name, name, suffix });
+}
+
+fn genericTestMetadataRepr(allocator: std.mem.Allocator, test_def: GenericTestDef, model_kwarg: []const u8, column_name: ?[]const u8) ![]const u8 {
+    if (std.mem.eql(u8, test_def.name, "accepted_values")) {
+        const values = try pythonReprStringList(allocator, test_def.accepted_values.items);
+        defer allocator.free(values);
+        if (column_name) |column| {
+            return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\", 'values': {s}}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, model_kwarg, values, test_def.name });
+        }
+    }
+    if (std.mem.eql(u8, test_def.name, "relationships")) {
+        if (column_name) |column| {
+            return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'field': '{s}', 'model': \"{s}\", 'to': \"{s}\"}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, test_def.relationship_field, model_kwarg, test_def.relationship_to, test_def.name });
+        }
+    }
+    if (column_name) |column| {
+        return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\"}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, model_kwarg, test_def.name });
+    }
+    return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'model': \"{s}\"}}, 'name': '{s}', 'namespace': 'None'}}", .{ model_kwarg, test_def.name });
 }
 
 fn genericTestHashSuffix(input: []const u8) [10]u8 {
@@ -1501,14 +1715,74 @@ fn genericTestHashSuffix(input: []const u8) [10]u8 {
     return suffix;
 }
 
+fn genericTestHashFull(input: []const u8) [32]u8 {
+    var digest: [16]u8 = undefined;
+    std.crypto.hash.Md5.hash(input, &digest, .{});
+    var hex: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    return hex;
+}
+
+fn pythonReprStringList(allocator: std.mem.Allocator, values: []const []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.append(allocator, '[');
+    for (values, 0..) |value, index| {
+        if (index != 0) try out.appendSlice(allocator, ", ");
+        const repr = try pythonReprString(allocator, value);
+        defer allocator.free(repr);
+        try out.appendSlice(allocator, repr);
+    }
+    try out.append(allocator, ']');
+    return try out.toOwnedSlice(allocator);
+}
+
+fn pythonReprString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    const has_single = std.mem.indexOfScalar(u8, value, '\'') != null;
+    const has_double = std.mem.indexOfScalar(u8, value, '"') != null;
+    const quote: u8 = if (has_single and !has_double) '"' else '\'';
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.append(allocator, quote);
+    for (value) |ch| {
+        switch (ch) {
+            '\\' => try out.appendSlice(allocator, "\\\\"),
+            '\n' => try out.appendSlice(allocator, "\\n"),
+            '\r' => try out.appendSlice(allocator, "\\r"),
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            else => {
+                if (ch == quote) try out.append(allocator, '\\');
+                try out.append(allocator, ch);
+            },
+        }
+    }
+    try out.append(allocator, quote);
+    return try out.toOwnedSlice(allocator);
+}
+
+fn joinStrings(allocator: std.mem.Allocator, values: []const []const u8, separator: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (values, 0..) |value, index| {
+        if (index != 0) try out.appendSlice(allocator, separator);
+        try out.appendSlice(allocator, value);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 fn cleanTestNamePart(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
+    var previous_was_replacement = false;
     for (value) |ch| {
         if (std.ascii.isAlphanumeric(ch) or ch == '_') {
             try out.append(allocator, ch);
+            previous_was_replacement = false;
         } else {
+            if (previous_was_replacement) continue;
             try out.append(allocator, '_');
+            previous_was_replacement = true;
         }
     }
     return try out.toOwnedSlice(allocator);
@@ -1519,6 +1793,19 @@ fn modelNameFromUniqueId(unique_id: []const u8) []const u8 {
         return unique_id[index + 1 ..];
     }
     return unique_id;
+}
+
+fn refTargetName(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    if (std.mem.startsWith(u8, trimmed, "ref(")) {
+        const open = std.mem.indexOfScalar(u8, trimmed, '(') orelse return error.UnsupportedRef;
+        const close = findMatchingParen(trimmed, open) orelse return error.UnsupportedRef;
+        const args = std.mem.trim(u8, trimmed[open + 1 .. close], " \t\r");
+        var pieces = std.mem.splitScalar(u8, args, ',');
+        const first = pieces.next() orelse return error.UnsupportedRef;
+        return try dupTrimmedScalar(allocator, first);
+    }
+    return try dupTrimmedScalar(allocator, trimmed);
 }
 
 fn modelNameFromPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
@@ -1552,6 +1839,14 @@ fn sortStrings(values: [][]const u8) void {
     std.mem.sort([]const u8, values, {}, struct {
         fn lessThan(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+}
+
+fn sortGenericTestDefs(tests: []GenericTestDef) void {
+    std.mem.sort(GenericTestDef, tests, {}, struct {
+        fn lessThan(_: void, a: GenericTestDef, b: GenericTestDef) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lessThan);
 }
