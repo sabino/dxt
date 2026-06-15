@@ -1,0 +1,7 @@
+version: 2
+
+macros:
+  - name: format_id
+    description: First patch.
+  - name: format_id
+    description: Second patch.
