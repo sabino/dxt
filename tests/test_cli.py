@@ -689,6 +689,42 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     assert excluded.stdout == ""
 
 
+def test_ls_graph_plus_selectors(tmp_path: Path):
+    project = copy_fixture(tmp_path, "selector_graph")
+
+    def ls_json(*args: str) -> list[str]:
+        result = subprocess.run(
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return [item["unique_id"] for item in json.loads(result.stdout)]
+
+    assert ls_json("--select", "customers") == ["model.selector_graph.customers"]
+    assert ls_json("--select", "+customers") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "customers+") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+    ]
+    assert ls_json("--select", "+customers+") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "+customers+", "--exclude", "customers+") == [
+        "model.selector_graph.stg_customers"
+    ]
+    assert ls_json("--select", "+customers+", "--exclude", "customers") == [
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+
+
 def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     project = copy_fixture(tmp_path, "single_model")
     unsupported_type = subprocess.run(
