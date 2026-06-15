@@ -1,0 +1,6 @@
+name: seed_ref
+version: "1.0"
+profile: default
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: target

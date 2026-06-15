@@ -23,6 +23,7 @@ pub const Output = enum {
 const ProjectConfig = struct {
     name: []const u8,
     model_paths: std.ArrayList([]const u8) = .empty,
+    seed_paths: std.ArrayList([]const u8) = .empty,
     target_path: []const u8 = "target",
 };
 
@@ -66,6 +67,7 @@ const UnmatchedModelProperty = struct {
 };
 
 const Node = struct {
+    resource_type: []const u8 = "model",
     unique_id: []const u8,
     name: []const u8,
     path: []const u8,
@@ -133,6 +135,7 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     try resolveDependencies(&graph);
     try writeWarnings(stderr, &graph);
     const active_models = countActiveNodes(&graph);
+    const active_seeds = countActiveSeeds(&graph);
 
     const target_path = options.target_path orelse graphDefaultTarget(runtime, options.project_dir) catch "target";
     const target_dir = if (std.fs.path.isAbsolute(target_path))
@@ -143,8 +146,9 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest = try renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest });
-    try stdout.print("Parsed {d} model(s) and {d} source(s) into {s}\n", .{
+    try stdout.print("Parsed {d} model(s), {d} seed(s), and {d} source(s) into {s}\n", .{
         active_models,
+        active_seeds,
         graph.sources.items.len,
         normalizeForDisplay(manifest_path),
     });
@@ -168,12 +172,14 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
 fn graphDefaultTarget(runtime: Runtime, project_dir: []const u8) ![]const u8 {
     var config = try loadProjectConfig(runtime, project_dir);
     defer config.model_paths.deinit(runtime.allocator);
+    defer config.seed_paths.deinit(runtime.allocator);
     return config.target_path;
 }
 
 fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     var config = try loadProjectConfig(runtime, project_dir);
     defer config.model_paths.deinit(runtime.allocator);
+    defer config.seed_paths.deinit(runtime.allocator);
 
     var graph = Graph{ .allocator = runtime.allocator, .project_name = config.name };
     errdefer graph.deinit();
@@ -200,10 +206,27 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
         }
     }
 
+    for (config.seed_paths.items) |seed_path| {
+        var seed_files: std.ArrayList([]const u8) = .empty;
+        defer seed_files.deinit(runtime.allocator);
+
+        const root = try pathJoin(runtime.allocator, &.{ project_dir, seed_path });
+        discoverSeedFiles(runtime, root, seed_path, &seed_files) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        sortStrings(seed_files.items);
+
+        for (seed_files.items) |relative_path| {
+            try parseSeed(runtime, seed_path, relative_path, config.name, &graph);
+        }
+    }
+
     try applyModelProperties(&graph);
     sortNodes(graph.nodes.items);
     sortSources(graph.sources.items);
     try rejectDuplicateModels(&graph);
+    try rejectDuplicateSeeds(&graph);
     return graph;
 }
 
@@ -215,10 +238,14 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
     };
 
     var config = ProjectConfig{ .name = "" };
-    errdefer config.model_paths.deinit(runtime.allocator);
+    errdefer {
+        config.model_paths.deinit(runtime.allocator);
+        config.seed_paths.deinit(runtime.allocator);
+    }
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     var read_model_path_block = false;
+    var read_seed_path_block = false;
     while (lines.next()) |raw_line| {
         const line = stripYamlComment(raw_line);
         const trimmed = std.mem.trim(u8, line, " \t\r");
@@ -230,6 +257,13 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
                 continue;
             }
             read_model_path_block = false;
+        }
+        if (read_seed_path_block) {
+            if (std.mem.startsWith(u8, trimmed, "- ")) {
+                try config.seed_paths.append(runtime.allocator, try dupTrimmedScalar(runtime.allocator, trimmed[2..]));
+                continue;
+            }
+            read_seed_path_block = false;
         }
 
         if (splitKeyValue(trimmed)) |kv| {
@@ -243,6 +277,12 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
                 } else {
                     try parseInlineStringList(runtime.allocator, kv.value, &config.model_paths);
                 }
+            } else if (std.mem.eql(u8, kv.key, "seed-paths")) {
+                if (std.mem.trim(u8, kv.value, " \t").len == 0) {
+                    read_seed_path_block = true;
+                } else {
+                    try parseInlineStringList(runtime.allocator, kv.value, &config.seed_paths);
+                }
             }
         }
     }
@@ -250,6 +290,9 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
     if (config.name.len == 0) return error.InvalidProjectName;
     if (config.model_paths.items.len == 0) {
         try config.model_paths.append(runtime.allocator, "models");
+    }
+    if (config.seed_paths.items.len == 0) {
+        try config.seed_paths.append(runtime.allocator, "seeds");
     }
     return config;
 }
@@ -278,6 +321,28 @@ fn discoverFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []con
                     try sql_files.append(runtime.allocator, child_rel);
                 } else if (std.mem.endsWith(u8, entry.name, ".yml") or std.mem.endsWith(u8, entry.name, ".yaml")) {
                     try yaml_files.append(runtime.allocator, child_rel);
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn discoverSeedFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, seed_files: *std.ArrayList([]const u8)) !void {
+    var dir = try std.Io.Dir.cwd().openDir(runtime.io, absolute_dir, .{ .iterate = true });
+    defer dir.close(runtime.io);
+
+    var iter = dir.iterate();
+    while (try iter.next(runtime.io)) |entry| {
+        if (entry.name.len == 0 or entry.name[0] == '.') continue;
+
+        const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
+        const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
+        switch (entry.kind) {
+            .directory => try discoverSeedFiles(runtime, child_abs, child_rel, seed_files),
+            .file => {
+                if (std.mem.endsWith(u8, entry.name, ".csv")) {
+                    try seed_files.append(runtime.allocator, child_rel);
                 }
             },
             else => {},
@@ -494,7 +559,7 @@ fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8,
     const sql = try std.Io.Dir.cwd().readFileAlloc(runtime.io, full_path, runtime.allocator, .limited(16 * 1024 * 1024));
     const model_name = try modelNameFromPath(runtime.allocator, relative_path);
     const unique_id = try std.fmt.allocPrint(runtime.allocator, "model.{s}.{s}", .{ package_name, model_name });
-    const model_path = relativeUnderModelPath(relative_path, model_root);
+    const model_path = relativeUnderResourcePath(relative_path, model_root);
 
     var node = Node{
         .unique_id = unique_id,
@@ -510,9 +575,29 @@ fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8,
     try graph.nodes.append(runtime.allocator, node);
 }
 
+fn parseSeed(runtime: Runtime, seed_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    const seed_name = try resourceNameFromPath(runtime.allocator, relative_path, ".csv");
+    const unique_id = try std.fmt.allocPrint(runtime.allocator, "seed.{s}.{s}", .{ package_name, seed_name });
+    const seed_path = relativeUnderResourcePath(relative_path, seed_root);
+
+    var node = Node{
+        .resource_type = "seed",
+        .unique_id = unique_id,
+        .name = seed_name,
+        .path = seed_path,
+        .original_file_path = relative_path,
+        .raw_code = "",
+        .materialized = "seed",
+    };
+    errdefer {
+        deinitNode(runtime.allocator, &node);
+    }
+    try graph.nodes.append(runtime.allocator, node);
+}
+
 fn applyModelProperties(graph: *Graph) !void {
     for (graph.model_properties.items) |property| {
-        const node_index = findNodeIndexByName(graph, property.name) orelse {
+        const node_index = findModelIndexByName(graph, property.name) orelse {
             try graph.unmatched_model_properties.append(graph.allocator, .{ .name = property.name, .patch_path = property.patch_path });
             continue;
         };
@@ -568,8 +653,26 @@ fn rejectDuplicateModels(graph: *const Graph) !void {
     while (i < graph.nodes.items.len) : (i += 1) {
         var j = i + 1;
         while (j < graph.nodes.items.len) : (j += 1) {
-            if (std.mem.eql(u8, graph.nodes.items[i].unique_id, graph.nodes.items[j].unique_id)) {
+            if (std.mem.eql(u8, graph.nodes.items[i].resource_type, "model") and
+                std.mem.eql(u8, graph.nodes.items[j].resource_type, "model") and
+                std.mem.eql(u8, graph.nodes.items[i].unique_id, graph.nodes.items[j].unique_id))
+            {
                 return error.DuplicateModelName;
+            }
+        }
+    }
+}
+
+fn rejectDuplicateSeeds(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.nodes.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.nodes.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.nodes.items[i].resource_type, "seed") and
+                std.mem.eql(u8, graph.nodes.items[j].resource_type, "seed") and
+                std.mem.eql(u8, graph.nodes.items[i].unique_id, graph.nodes.items[j].unique_id))
+            {
+                return error.DuplicateSeedName;
             }
         }
     }
@@ -580,10 +683,15 @@ fn resolveDependencies(graph: *Graph) !void {
         if (!node.enabled) continue;
         for (node.refs.items) |ref_dep| {
             const package = ref_dep.package orelse graph.project_name;
-            const unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, ref_dep.name });
-            if (hasDisabledNode(graph, unique_id)) return error.DisabledRef;
-            if (!hasNode(graph, unique_id)) return error.UnresolvedRef;
-            try appendUnique(graph.allocator, &node.depends_on, unique_id);
+            const model_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, ref_dep.name });
+            if (hasDisabledNode(graph, model_id)) return error.DisabledRef;
+            if (hasNode(graph, model_id)) {
+                try appendUnique(graph.allocator, &node.depends_on, model_id);
+                continue;
+            }
+            const seed_id = try std.fmt.allocPrint(graph.allocator, "seed.{s}.{s}", .{ package, ref_dep.name });
+            if (!hasNode(graph, seed_id)) return error.UnresolvedRef;
+            try appendUnique(graph.allocator, &node.depends_on, seed_id);
         }
         for (node.source_refs.items) |source_dep| {
             const unique_id = try std.fmt.allocPrint(graph.allocator, "source.{s}.{s}.{s}", .{ graph.project_name, source_dep.source_name, source_dep.table_name });
@@ -779,8 +887,8 @@ fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, options: O
     errdefer selected.deinit(allocator);
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
-        if (matchesResourceType(options.resource_type, "model") and matchesSelector(graph, node, options.select) and (options.exclude == null or !matchesSelector(graph, node, options.exclude))) {
-            try selected.append(allocator, .{ .unique_id = node.unique_id, .name = node.name, .resource_type = "model" });
+        if (matchesResourceType(options.resource_type, node.resource_type) and matchesSelector(graph, node, options.select) and (options.exclude == null or !matchesSelector(graph, node, options.exclude))) {
+            try selected.append(allocator, .{ .unique_id = node.unique_id, .name = node.name, .resource_type = node.resource_type });
         }
     }
     for (graph.sources.items) |source| {
@@ -858,7 +966,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
 
     try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": null, \"dbt_version\": null, \"project_name\": ");
     try writeJsonString(writer, graph.project_name);
-    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"dxt_metadata\": {\"artifact_kind\": \"partial_manifest\", \"compatibility_target\": \"dbt-manifest-v12-slice\", \"supported_surface\": [\"model\", \"source\", \"literal_ref\", \"literal_source\", \"inline_config\", \"model_properties\", \"disabled_models\"]},\n  \"nodes\": {");
+    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"dxt_metadata\": {\"artifact_kind\": \"partial_manifest\", \"compatibility_target\": \"dbt-manifest-v12-slice\", \"supported_surface\": [\"model\", \"seed\", \"source\", \"literal_ref\", \"literal_source\", \"inline_config\", \"model_properties\", \"disabled_models\"]},\n  \"nodes\": {");
     var node_index: usize = 0;
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
@@ -867,7 +975,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll("\n    ");
         try writeJsonString(writer, node.unique_id);
         try writer.writeAll(": ");
-        try writeModelNode(allocator, writer, graph.project_name, node);
+        try writeNode(allocator, writer, graph.project_name, node);
     }
     try writer.writeAll("\n  },\n  \"sources\": {");
     for (graph.sources.items, 0..) |source, index| {
@@ -895,7 +1003,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll("\n    ");
         try writeJsonString(writer, node.unique_id);
         try writer.writeAll(": [");
-        try writeModelNode(allocator, writer, graph.project_name, node);
+        try writeNode(allocator, writer, graph.project_name, node);
         try writer.writeAll("]");
     }
     try writer.writeAll("\n  },\n  \"parent_map\": {");
@@ -944,6 +1052,14 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
     try writer.writeAll("]");
 }
 
+fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, node: Node) !void {
+    if (std.mem.eql(u8, node.resource_type, "seed")) {
+        try writeSeedNode(writer, project_name, node);
+    } else {
+        try writeModelNode(allocator, writer, project_name, node);
+    }
+}
+
 fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, node: Node) !void {
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, node.unique_id);
@@ -984,6 +1100,24 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
     try writer.writeAll(",\"tags\":");
     try writeStringArray(writer, node.tags.items);
     try writer.writeAll("},\"depends_on\":{\"macros\":[],\"nodes\":");
+    try writeStringArray(writer, node.depends_on.items);
+    try writer.writeAll("}}");
+}
+
+fn writeSeedNode(writer: *Io.Writer, project_name: []const u8, node: Node) !void {
+    try writer.writeAll("{\"unique_id\":");
+    try writeJsonString(writer, node.unique_id);
+    try writer.writeAll(",\"resource_type\":\"seed\",\"package_name\":");
+    try writeJsonString(writer, project_name);
+    try writer.writeAll(",\"name\":");
+    try writeJsonString(writer, node.name);
+    try writer.writeAll(",\"path\":");
+    try writeJsonString(writer, normalizeForDisplay(node.path));
+    try writer.writeAll(",\"original_file_path\":");
+    try writeJsonString(writer, normalizeForDisplay(node.original_file_path));
+    try writer.writeAll(",\"config\":{\"enabled\":");
+    try writer.writeAll(if (node.enabled) "true" else "false");
+    try writer.writeAll(",\"materialized\":\"seed\"},\"depends_on\":{\"macros\":[],\"nodes\":");
     try writeStringArray(writer, node.depends_on.items);
     try writer.writeAll("}}");
 }
@@ -1060,16 +1194,20 @@ fn dupTrimmedScalar(allocator: std.mem.Allocator, value: []const u8) ![]const u8
 }
 
 fn modelNameFromPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    return resourceNameFromPath(allocator, path, ".sql");
+}
+
+fn resourceNameFromPath(allocator: std.mem.Allocator, path: []const u8, suffix: []const u8) ![]const u8 {
     const base = std.fs.path.basename(path);
-    if (std.mem.endsWith(u8, base, ".sql")) {
-        return try allocator.dupe(u8, base[0 .. base.len - ".sql".len]);
+    if (std.mem.endsWith(u8, base, suffix)) {
+        return try allocator.dupe(u8, base[0 .. base.len - suffix.len]);
     }
     return try allocator.dupe(u8, base);
 }
 
-fn relativeUnderModelPath(relative_path: []const u8, model_root: []const u8) []const u8 {
-    if (std.mem.startsWith(u8, relative_path, model_root) and relative_path.len > model_root.len and relative_path[model_root.len] == '/') {
-        return relative_path[model_root.len + 1 ..];
+fn relativeUnderResourcePath(relative_path: []const u8, resource_root: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, relative_path, resource_root) and relative_path.len > resource_root.len and relative_path[resource_root.len] == '/') {
+        return relative_path[resource_root.len + 1 ..];
     }
     return relative_path;
 }
@@ -1188,9 +1326,9 @@ fn hasDisabledNode(graph: *const Graph, unique_id: []const u8) bool {
     return false;
 }
 
-fn findNodeIndexByName(graph: *const Graph, name: []const u8) ?usize {
+fn findModelIndexByName(graph: *const Graph, name: []const u8) ?usize {
     for (graph.nodes.items, 0..) |node, index| {
-        if (std.mem.eql(u8, node.name, name)) return index;
+        if (std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, node.name, name)) return index;
     }
     return null;
 }
@@ -1198,7 +1336,15 @@ fn findNodeIndexByName(graph: *const Graph, name: []const u8) ?usize {
 fn countActiveNodes(graph: *const Graph) usize {
     var count: usize = 0;
     for (graph.nodes.items) |node| {
-        if (node.enabled) count += 1;
+        if (node.enabled and std.mem.eql(u8, node.resource_type, "model")) count += 1;
+    }
+    return count;
+}
+
+fn countActiveSeeds(graph: *const Graph) usize {
+    var count: usize = 0;
+    for (graph.nodes.items) |node| {
+        if (node.enabled and std.mem.eql(u8, node.resource_type, "seed")) count += 1;
     }
     return count;
 }
