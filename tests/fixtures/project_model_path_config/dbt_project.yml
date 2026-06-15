@@ -1,0 +1,14 @@
+name: project_model_path_config
+version: "1.0"
+profile: project_model_path_config
+model-paths: ["models"]
+target-path: target
+
+models:
+  project_model_path_config:
+    +materialized: table
+    +tags: [root]
+    staging:
+      +materialized: view
+    marts:
+      +tags: [published]

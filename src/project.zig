@@ -25,8 +25,15 @@ const ProjectConfig = struct {
     model_paths: std.ArrayList([]const u8) = .empty,
     seed_paths: std.ArrayList([]const u8) = .empty,
     macro_paths: std.ArrayList([]const u8) = .empty,
+    model_path_configs: std.ArrayList(ModelPathConfig) = .empty,
     macro_paths_set: bool = false,
     target_path: []const u8 = "target",
+};
+
+const ModelPathConfig = struct {
+    path: []const u8,
+    materialized: []const u8 = "",
+    tags: std.ArrayList([]const u8) = .empty,
 };
 
 const SourceDef = struct {
@@ -160,6 +167,8 @@ const Node = struct {
     raw_code: []const u8,
     description: []const u8 = "",
     materialized: []const u8 = "view",
+    inline_materialized: bool = false,
+    inline_tags: bool = false,
     enabled: bool = true,
     tags: std.ArrayList([]const u8) = .empty,
     doc_blocks: std.ArrayList([]const u8) = .empty,
@@ -255,6 +264,16 @@ fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNo
     test_node.macro_depends_on.deinit(allocator);
 }
 
+fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig) void {
+    for (config.model_path_configs.items) |*path_config| {
+        path_config.tags.deinit(allocator);
+    }
+    config.model_paths.deinit(allocator);
+    config.seed_paths.deinit(allocator);
+    config.macro_paths.deinit(allocator);
+    config.model_path_configs.deinit(allocator);
+}
+
 fn deinitExposureDef(allocator: std.mem.Allocator, exposure: *ExposureDef) void {
     exposure.tags.deinit(allocator);
     exposure.meta.deinit(allocator);
@@ -337,17 +356,13 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
 
 fn graphDefaultTarget(runtime: Runtime, project_dir: []const u8) ![]const u8 {
     var config = try loadProjectConfig(runtime, project_dir);
-    defer config.model_paths.deinit(runtime.allocator);
-    defer config.seed_paths.deinit(runtime.allocator);
-    defer config.macro_paths.deinit(runtime.allocator);
+    defer deinitProjectConfig(runtime.allocator, &config);
     return config.target_path;
 }
 
 fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     var config = try loadProjectConfig(runtime, project_dir);
-    defer config.model_paths.deinit(runtime.allocator);
-    defer config.seed_paths.deinit(runtime.allocator);
-    defer config.macro_paths.deinit(runtime.allocator);
+    defer deinitProjectConfig(runtime.allocator, &config);
 
     var graph = Graph{ .allocator = runtime.allocator, .project_name = config.name };
     errdefer graph.deinit();
@@ -382,6 +397,8 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
             try parseModel(runtime, project_dir, model_path, sql_path, config.name, &graph);
         }
     }
+
+    try applyProjectModelPathConfigs(&graph, config.model_path_configs.items);
 
     for (config.seed_paths.items) |seed_path| {
         var seed_files: std.ArrayList([]const u8) = .empty;
@@ -477,9 +494,7 @@ fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, graph: 
             error.MissingProjectFile => continue,
             else => return err,
         };
-        defer package_config.model_paths.deinit(runtime.allocator);
-        defer package_config.seed_paths.deinit(runtime.allocator);
-        defer package_config.macro_paths.deinit(runtime.allocator);
+        defer deinitProjectConfig(runtime.allocator, &package_config);
 
         try loadProjectMacros(runtime, package_dir, package_config.name, package_config.macro_paths.items, false, graph);
     }
@@ -494,9 +509,7 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
 
     var config = ProjectConfig{ .name = "" };
     errdefer {
-        config.model_paths.deinit(runtime.allocator);
-        config.seed_paths.deinit(runtime.allocator);
-        config.macro_paths.deinit(runtime.allocator);
+        deinitProjectConfig(runtime.allocator, &config);
     }
 
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -559,6 +572,7 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
     }
 
     if (config.name.len == 0) return error.InvalidProjectName;
+    try parseProjectModelPathConfigs(runtime.allocator, text, config.name, &config.model_path_configs);
     if (config.model_paths.items.len == 0) {
         try config.model_paths.append(runtime.allocator, "models");
     }
@@ -569,6 +583,113 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
         try config.macro_paths.append(runtime.allocator, "macros");
     }
     return config;
+}
+
+const PathStackEntry = struct {
+    indent: usize,
+    name: []const u8,
+};
+
+fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, project_name: []const u8, configs: *std.ArrayList(ModelPathConfig)) !void {
+    var in_models = false;
+    var in_project = false;
+    var models_indent: usize = 0;
+    var project_indent: usize = 0;
+    var path_stack: std.ArrayList(PathStackEntry) = .empty;
+    defer path_stack.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (std.mem.eql(u8, trimmed, "models:")) {
+            in_models = true;
+            in_project = false;
+            models_indent = indent;
+            path_stack.clearRetainingCapacity();
+            continue;
+        }
+        if (!in_models) continue;
+        if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:")) {
+            in_models = false;
+            in_project = false;
+            path_stack.clearRetainingCapacity();
+            continue;
+        }
+
+        const kv = splitKeyValue(trimmed) orelse continue;
+        if (!in_project) {
+            if (indent > models_indent and std.mem.eql(u8, kv.key, project_name) and std.mem.trim(u8, kv.value, " \t").len == 0) {
+                in_project = true;
+                project_indent = indent;
+                path_stack.clearRetainingCapacity();
+            }
+            continue;
+        }
+
+        if (indent <= project_indent) {
+            in_project = false;
+            path_stack.clearRetainingCapacity();
+            if (indent > models_indent and std.mem.eql(u8, kv.key, project_name) and std.mem.trim(u8, kv.value, " \t").len == 0) {
+                in_project = true;
+                project_indent = indent;
+            }
+            continue;
+        }
+
+        while (path_stack.items.len != 0 and indent <= path_stack.items[path_stack.items.len - 1].indent) {
+            _ = path_stack.pop();
+        }
+
+        if (std.mem.startsWith(u8, kv.key, "+")) {
+            const path = try joinPathStack(allocator, path_stack.items);
+            if (std.mem.eql(u8, kv.key, "+materialized")) {
+                const path_config = try getOrCreateModelPathConfig(allocator, configs, path);
+                path_config.materialized = try dupTrimmedScalar(allocator, kv.value);
+            } else if (std.mem.eql(u8, kv.key, "+tags")) {
+                const path_config = try getOrCreateModelPathConfig(allocator, configs, path);
+                path_config.tags.clearRetainingCapacity();
+                try parseInlineStringList(allocator, kv.value, &path_config.tags);
+                sortStrings(path_config.tags.items);
+            }
+            continue;
+        }
+
+        if (std.mem.trim(u8, kv.value, " \t").len == 0) {
+            try path_stack.append(allocator, .{ .indent = indent, .name = try dupTrimmedScalar(allocator, kv.key) });
+        }
+    }
+}
+
+fn joinPathStack(allocator: std.mem.Allocator, stack: []const PathStackEntry) ![]const u8 {
+    if (stack.len == 0) return "";
+    var total: usize = 0;
+    for (stack) |entry| {
+        total += entry.name.len;
+    }
+    total += stack.len - 1;
+    var out = try allocator.alloc(u8, total);
+    var index: usize = 0;
+    for (stack, 0..) |entry, entry_index| {
+        if (entry_index != 0) {
+            out[index] = '/';
+            index += 1;
+        }
+        @memcpy(out[index .. index + entry.name.len], entry.name);
+        index += entry.name.len;
+    }
+    return out;
+}
+
+fn getOrCreateModelPathConfig(allocator: std.mem.Allocator, configs: *std.ArrayList(ModelPathConfig), path: []const u8) !*ModelPathConfig {
+    for (configs.items) |*config| {
+        if (std.mem.eql(u8, config.path, path)) return config;
+    }
+    try configs.append(allocator, .{ .path = path });
+    return &configs.items[configs.items.len - 1];
 }
 
 fn discoverFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8), md_files: *std.ArrayList([]const u8)) !void {
@@ -1481,7 +1602,7 @@ fn applyModelProperties(graph: *Graph) !void {
         var node = &graph.nodes.items[node_index];
         node.patch_path = property.patch_path;
         if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.description, &node.doc_blocks);
-        if (property.materialized.len != 0) node.materialized = property.materialized;
+        if (property.materialized.len != 0 and !node.inline_materialized) node.materialized = property.materialized;
         if (property.enabled) |enabled| node.enabled = enabled;
         for (property.tags.items) |tag| {
             try appendUnique(graph.allocator, &node.tags, tag);
@@ -1496,6 +1617,48 @@ fn applyModelProperties(graph: *Graph) !void {
         }
         sortColumns(node.columns.items);
     }
+}
+
+fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig) !void {
+    for (graph.nodes.items) |*node| {
+        if (!std.mem.eql(u8, node.resource_type, "model")) continue;
+
+        var materialized_config: ?*const ModelPathConfig = null;
+        var materialized_depth: usize = 0;
+        for (configs) |*config| {
+            if (!modelPathConfigMatches(config.path, node.path)) continue;
+            const depth = modelPathConfigDepth(config.path);
+            if (config.materialized.len != 0 and (materialized_config == null or depth >= materialized_depth)) {
+                materialized_config = config;
+                materialized_depth = depth;
+            }
+            for (config.tags.items) |tag| {
+                try appendUnique(graph.allocator, &node.tags, tag);
+            }
+        }
+
+        if (!node.inline_materialized) {
+            if (materialized_config) |config| node.materialized = config.materialized;
+        }
+        sortStrings(node.tags.items);
+    }
+}
+
+fn modelPathConfigMatches(config_path: []const u8, model_path: []const u8) bool {
+    if (config_path.len == 0) return true;
+    if (!std.mem.startsWith(u8, model_path, config_path)) return false;
+    if (model_path.len == config_path.len) return true;
+    if (model_path[config_path.len] == '/') return true;
+    return std.mem.eql(u8, model_path[config_path.len..], ".sql");
+}
+
+fn modelPathConfigDepth(config_path: []const u8) usize {
+    if (config_path.len == 0) return 0;
+    var depth: usize = 1;
+    for (config_path) |ch| {
+        if (ch == '/') depth += 1;
+    }
+    return depth;
 }
 
 fn materializeGenericTests(graph: *Graph) !void {
@@ -1968,11 +2131,13 @@ fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !voi
             if (args[value_pos] != '"' and args[value_pos] != '\'') return error.UnsupportedJinja;
             const parsed = try parseQuoted(allocator, args, value_pos);
             node.materialized = parsed.value;
+            node.inline_materialized = true;
         }
     }
     if (findKeyword(args, "tags")) |pos| {
         if (findValueStart(args, pos + "tags".len)) |value_pos| {
             try parseTagList(allocator, args[value_pos..], &node.tags);
+            node.inline_tags = true;
             sortStrings(node.tags.items);
         }
     }

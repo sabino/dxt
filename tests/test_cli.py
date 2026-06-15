@@ -1020,6 +1020,66 @@ def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
     assert default_result.stdout.splitlines() == ["model.single_model.customers"]
 
 
+def test_project_model_path_configs_apply_below_inline_and_yaml_configs(tmp_path: Path):
+    project = copy_fixture(tmp_path, "project_model_path_config")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest_path = project / "target-dxt" / "manifest.json"
+    assert_manifest_schema_slice(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    nodes = manifest["nodes"]
+    assert nodes["model.project_model_path_config.customers"]["config"]["materialized"] == "table"
+    assert nodes["model.project_model_path_config.stg_customers"]["config"]["materialized"] == "view"
+    assert nodes["model.project_model_path_config.orders"]["config"]["materialized"] == "table"
+    assert nodes["model.project_model_path_config.orders"]["config"]["tags"] == ["published", "root"]
+    assert nodes["model.project_model_path_config.inline_orders"]["config"]["materialized"] == "incremental"
+    assert nodes["model.project_model_path_config.inline_orders"]["config"]["tags"] == [
+        "inline",
+        "published",
+        "root",
+        "yaml_inline",
+    ]
+    assert nodes["model.project_model_path_config.yaml_orders"]["config"]["materialized"] == "view"
+    assert nodes["model.project_model_path_config.yaml_orders"]["config"]["tags"] == [
+        "published",
+        "root",
+        "yaml",
+    ]
+
+    def ls_text(*args: str) -> list[str]:
+        ls_result = subprocess.run(
+            [DXT, "ls", "--project-dir", str(project), *args],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert ls_result.returncode == 0, ls_result.stderr
+        return ls_result.stdout.splitlines()
+
+    assert ls_text("--select", "config.materialized:table") == [
+        "model.project_model_path_config.customers",
+        "model.project_model_path_config.orders",
+    ]
+    assert ls_text("--select", "tag:published") == [
+        "model.project_model_path_config.inline_orders",
+        "model.project_model_path_config.orders",
+        "model.project_model_path_config.yaml_orders",
+    ]
+    assert ls_text("--select", "tag:root") == [
+        "model.project_model_path_config.customers",
+        "model.project_model_path_config.inline_orders",
+        "model.project_model_path_config.orders",
+        "model.project_model_path_config.stg_customers",
+        "model.project_model_path_config.yaml_orders",
+    ]
+
+
 def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     source_project = copy_fixture(tmp_path, "source_ref")
     source_result = subprocess.run(
