@@ -1,0 +1,485 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.getdbt.com/dbt/manifest/v12.json#dxt-m1-slice",
+  "title": "dxt M1 dbt Manifest v12 compatibility slice",
+  "$comment": "Pinned local compatibility slice for dbt Manifest v12. Source reference: https://schemas.getdbt.com/dbt/manifest/v12.json, checked 2026-06-15. This intentionally validates only the artifact surface emitted by the M1 parser and must grow before dxt claims full v12 artifact validation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "metadata",
+    "nodes",
+    "sources",
+    "macros",
+    "docs",
+    "exposures",
+    "metrics",
+    "groups",
+    "selectors",
+    "group_map",
+    "saved_queries",
+    "semantic_models",
+    "unit_tests",
+    "disabled",
+    "parent_map",
+    "child_map"
+  ],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_name"],
+      "properties": {
+        "dbt_schema_version": {"type": "string"},
+        "dbt_version": {"type": "string"},
+        "generated_at": {"type": "string"},
+        "invocation_id": {"type": ["string", "null"]},
+        "invocation_started_at": {"type": ["string", "null"]},
+        "env": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "project_name": {"type": ["string", "null"]},
+        "project_id": {"type": ["string", "null"]},
+        "user_id": {"type": ["string", "null"]},
+        "send_anonymous_usage_stats": {"type": ["boolean", "null"]},
+        "adapter_type": {"type": ["string", "null"]},
+        "quoting": {"type": ["object", "null"]}
+      }
+    },
+    "nodes": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/node"}
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/source"}
+    },
+    "macros": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/macro"}
+    },
+    "docs": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/doc"}
+    },
+    "exposures": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/exposure"}
+    },
+    "metrics": {"type": "object", "additionalProperties": false},
+    "groups": {"type": "object", "additionalProperties": false},
+    "selectors": {"type": "object", "additionalProperties": false},
+    "group_map": {"type": "object", "additionalProperties": false},
+    "saved_queries": {"type": "object", "additionalProperties": false},
+    "semantic_models": {"type": "object", "additionalProperties": false},
+    "unit_tests": {"type": "object", "additionalProperties": false},
+    "disabled": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {"$ref": "#/$defs/node"}
+      }
+    },
+    "parent_map": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/unique_id_array"}
+    },
+    "child_map": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/unique_id_array"}
+    }
+  },
+  "$defs": {
+    "unique_id_array": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "depends_on": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["macros", "nodes"],
+      "properties": {
+        "macros": {"$ref": "#/$defs/unique_id_array"},
+        "nodes": {"$ref": "#/$defs/unique_id_array"}
+      }
+    },
+    "column": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "meta", "data_type", "quote", "tags", "config", "doc_blocks"],
+      "properties": {
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "meta": {"type": "object"},
+        "data_type": {"type": ["string", "null"]},
+        "quote": {"type": ["boolean", "null"]},
+        "tags": {"$ref": "#/$defs/unique_id_array"},
+        "config": {"type": "object"},
+        "doc_blocks": {"$ref": "#/$defs/unique_id_array"}
+      }
+    },
+    "model_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "materialized", "tags"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "materialized": {"type": "string"},
+        "tags": {"$ref": "#/$defs/unique_id_array"}
+      }
+    },
+    "seed_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "materialized"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "materialized": {"type": "string"}
+      }
+    },
+    "test_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "materialized", "severity", "fail_calc", "warn_if", "error_if", "schema", "tags", "meta"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "materialized": {"type": "string"},
+        "severity": {"type": "string"},
+        "fail_calc": {"type": "string"},
+        "warn_if": {"type": "string"},
+        "error_if": {"type": "string"},
+        "schema": {"type": "string"},
+        "tags": {"$ref": "#/$defs/unique_id_array"},
+        "meta": {"type": "object"}
+      }
+    },
+    "macro_docs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["show", "node_color"],
+      "properties": {
+        "show": {"type": "boolean"},
+        "node_color": {"type": ["string", "null"]}
+      }
+    },
+    "macro_argument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "description"],
+      "properties": {
+        "name": {"type": "string"},
+        "type": {"type": ["string", "null"]},
+        "description": {"type": "string"}
+      }
+    },
+    "test_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kwargs", "namespace"],
+      "properties": {
+        "name": {"type": "string"},
+        "kwargs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["model"],
+          "properties": {
+            "model": {"type": "string"},
+            "column_name": {"type": "string"},
+            "values": {"$ref": "#/$defs/unique_id_array"},
+            "to": {"type": "string"},
+            "field": {"type": "string"}
+          }
+        },
+        "namespace": {"type": ["string", "null"]}
+      }
+    },
+    "ref_dep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "package", "version"],
+      "properties": {
+        "name": {"type": "string"},
+        "package": {"type": ["string", "null"]},
+        "version": {"type": ["string", "null"]}
+      }
+    },
+    "source_dep": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["email", "name"],
+      "properties": {
+        "email": {"type": ["string", "null"]},
+        "name": {"type": ["string", "null"]}
+      }
+    },
+    "exposure_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "tags", "meta"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "tags": {"$ref": "#/$defs/unique_id_array"},
+        "meta": {"type": "object"}
+      }
+    },
+    "macro_depends_on": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["macros"],
+      "properties": {
+        "macros": {"$ref": "#/$defs/unique_id_array"}
+      }
+    },
+    "node": {
+      "oneOf": [
+        {"$ref": "#/$defs/model_node"},
+        {"$ref": "#/$defs/seed_node"},
+        {"$ref": "#/$defs/test_node"}
+      ]
+    },
+    "model_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_id",
+        "resource_type",
+        "package_name",
+        "name",
+        "path",
+        "original_file_path",
+        "patch_path",
+        "language",
+        "raw_code",
+        "description",
+        "doc_blocks",
+        "columns",
+        "config",
+        "depends_on"
+      ],
+      "properties": {
+        "unique_id": {"type": "string"},
+        "resource_type": {"const": "model"},
+        "package_name": {"type": "string"},
+        "name": {"type": "string"},
+        "path": {"type": "string"},
+        "original_file_path": {"type": "string"},
+        "patch_path": {"type": ["string", "null"]},
+        "language": {"type": "string"},
+        "raw_code": {"type": "string"},
+        "description": {"type": "string"},
+        "doc_blocks": {"$ref": "#/$defs/unique_id_array"},
+        "columns": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/column"}
+        },
+        "config": {"$ref": "#/$defs/model_config"},
+        "depends_on": {"$ref": "#/$defs/depends_on"}
+      }
+    },
+    "seed_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_id",
+        "resource_type",
+        "package_name",
+        "name",
+        "path",
+        "original_file_path",
+        "config",
+        "depends_on"
+      ],
+      "properties": {
+        "unique_id": {"type": "string"},
+        "resource_type": {"const": "seed"},
+        "package_name": {"type": "string"},
+        "name": {"type": "string"},
+        "path": {"type": "string"},
+        "original_file_path": {"type": "string"},
+        "config": {"$ref": "#/$defs/seed_config"},
+        "depends_on": {"$ref": "#/$defs/depends_on"}
+      }
+    },
+    "test_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_id",
+        "resource_type",
+        "package_name",
+        "name",
+        "alias",
+        "path",
+        "original_file_path",
+        "patch_path",
+        "language",
+        "raw_code",
+        "attached_node",
+        "column_name",
+        "test_metadata",
+        "config",
+        "depends_on"
+      ],
+      "properties": {
+        "unique_id": {"type": "string"},
+        "resource_type": {"const": "test"},
+        "package_name": {"type": "string"},
+        "name": {"type": "string"},
+        "alias": {"type": "string"},
+        "path": {"type": "string"},
+        "original_file_path": {"type": "string"},
+        "patch_path": {"type": ["string", "null"]},
+        "language": {"type": "string"},
+        "raw_code": {"type": "string"},
+        "attached_node": {"type": "string"},
+        "column_name": {"type": ["string", "null"]},
+        "test_metadata": {"$ref": "#/$defs/test_metadata"},
+        "config": {"$ref": "#/$defs/test_config"},
+        "depends_on": {"$ref": "#/$defs/depends_on"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_id",
+        "resource_type",
+        "package_name",
+        "source_name",
+        "name",
+        "original_file_path"
+      ],
+      "properties": {
+        "unique_id": {"type": "string"},
+        "resource_type": {"const": "source"},
+        "package_name": {"type": "string"},
+        "source_name": {"type": "string"},
+        "name": {"type": "string"},
+        "original_file_path": {"type": "string"}
+      }
+    },
+    "macro": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_id",
+        "resource_type",
+        "package_name",
+        "name",
+        "path",
+        "original_file_path",
+        "macro_sql",
+        "depends_on",
+        "description",
+        "meta",
+        "docs",
+        "patch_path",
+        "arguments",
+        "supported_languages"
+      ],
+      "properties": {
+        "unique_id": {"type": "string"},
+        "resource_type": {"const": "macro"},
+        "package_name": {"type": "string"},
+        "name": {"type": "string"},
+        "path": {"type": "string"},
+        "original_file_path": {"type": "string"},
+        "macro_sql": {"type": "string"},
+        "patch_path": {"type": ["string", "null"]},
+        "depends_on": {"$ref": "#/$defs/macro_depends_on"},
+        "description": {"type": "string"},
+        "meta": {"type": "object"},
+        "docs": {"$ref": "#/$defs/macro_docs"},
+        "arguments": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/macro_argument"}
+        },
+        "supported_languages": {"type": ["array", "null"]}
+      }
+    },
+    "doc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_id",
+        "resource_type",
+        "package_name",
+        "name",
+        "path",
+        "original_file_path",
+        "block_contents"
+      ],
+      "properties": {
+        "unique_id": {"type": "string"},
+        "resource_type": {"const": "doc"},
+        "package_name": {"type": "string"},
+        "name": {"type": "string"},
+        "path": {"type": "string"},
+        "original_file_path": {"type": "string"},
+        "block_contents": {"type": "string"}
+      }
+    },
+    "exposure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_id",
+        "resource_type",
+        "package_name",
+        "name",
+        "type",
+        "path",
+        "original_file_path",
+        "fqn",
+        "label",
+        "maturity",
+        "url",
+        "description",
+        "refs",
+        "sources",
+        "metrics",
+        "owner",
+        "tags",
+        "meta",
+        "config",
+        "unrendered_config",
+        "created_at",
+        "depends_on"
+      ],
+      "properties": {
+        "unique_id": {"type": "string"},
+        "resource_type": {"const": "exposure"},
+        "package_name": {"type": "string"},
+        "name": {"type": "string"},
+        "type": {"type": "string"},
+        "path": {"type": "string"},
+        "original_file_path": {"type": "string"},
+        "fqn": {"$ref": "#/$defs/unique_id_array"},
+        "label": {"type": ["string", "null"]},
+        "maturity": {"type": ["string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "description": {"type": "string"},
+        "depends_on": {"$ref": "#/$defs/depends_on"},
+        "refs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/ref_dep"}
+        },
+        "sources": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/source_dep"}
+        },
+        "metrics": {"$ref": "#/$defs/unique_id_array"},
+        "owner": {"$ref": "#/$defs/owner"},
+        "tags": {"$ref": "#/$defs/unique_id_array"},
+        "meta": {"type": "object"},
+        "config": {"$ref": "#/$defs/exposure_config"},
+        "unrendered_config": {"type": "object"},
+        "created_at": {"type": "number"}
+      }
+    }
+  }
+}
