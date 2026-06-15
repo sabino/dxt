@@ -1,10 +1,10 @@
 # dxt
 
-`dxt` is the **Data Transformation eXecutor**: a planned dbt-project-compatible transformation engine written in Zig.
+`dxt` is the **Data Transformation eXecutor**: a dbt-project-compatible transformation engine written in Zig.
 
 The first target is dbt Core compatibility for public projects such as Jaffle Shop. The long-term architecture also accounts for semantic resources, metrics, Fusion-style static analysis, and efficient cross-database execution.
 
-This repository is at the planning and scaffolding stage. See [PLAN.md](PLAN.md) for the active execution plan.
+This repository is pre-alpha. It currently has a native Zig parser slice for a small dbt project subset, with broader dbt Core compatibility tracked in [PLAN.md](PLAN.md).
 
 ## Principles
 
@@ -17,7 +17,7 @@ This repository is at the planning and scaffolding stage. See [PLAN.md](PLAN.md)
 
 ## Current CLI
 
-The current Zig CLI is a placeholder so future work has a stable command surface:
+Build and smoke-test the native CLI:
 
 ```sh
 zig build
@@ -27,7 +27,15 @@ zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/dxt version
 ```
 
-Planned commands include `parse`, `ls`, `compile`, `build`, and `docs generate`.
+Implemented pre-alpha commands:
+
+```sh
+./zig-out/bin/dxt parse --project-dir tests/fixtures/model_ref --target-path target-dxt
+./zig-out/bin/dxt ls --project-dir tests/fixtures/model_ref
+./zig-out/bin/dxt ls --project-dir tests/fixtures/model_ref --output json
+```
+
+`parse` and `ls` currently support only the documented M1 parser subset: `dbt_project.yml` name/model paths/target path, SQL model discovery, literal `ref`, literal `source`, basic inline `config`, deterministic partial `manifest.json`, and simple name/tag/path/resource filters. `compile`, `build`, and `docs generate` remain planned placeholders.
 
 ## Development
 

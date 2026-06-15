@@ -17,6 +17,18 @@ def main() -> int:
     for path in src_python:
         findings.append(f"{path.relative_to(ROOT)} exists under product source")
 
+    forbidden_runtime_tokens = {
+        "std.process.Child": "product runtime must not shell out for parser behavior",
+        "ChildProcess": "product runtime must not shell out for parser behavior",
+        '"python"': "product runtime must not invoke Python",
+        '"python3"': "product runtime must not invoke Python",
+    }
+    for path in sorted((ROOT / "src").rglob("*.zig")):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for token, reason in forbidden_runtime_tokens.items():
+            if token in text:
+                findings.append(f"{path.relative_to(ROOT)} contains {token}; {reason}")
+
     python_product_dirs = [ROOT / "src" / "dxt"]
     for path in python_product_dirs:
         if path.exists():
