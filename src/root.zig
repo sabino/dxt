@@ -230,15 +230,32 @@ fn validateSelectorMethod(part: []const u8) !void {
         "path:",
         "source:",
         "exposure:",
+        "resource_type:",
+        "test_type:",
         "config.materialized:",
     };
     inline for (prefixes) |prefix| {
         if (std.mem.startsWith(u8, part, prefix)) {
             if (part.len == prefix.len) return error.UnsupportedSelector;
+            const value = part[prefix.len..];
+            if (std.mem.eql(u8, prefix, "resource_type:") and !isSupportedResourceType(value)) return error.UnsupportedSelector;
+            if (std.mem.eql(u8, prefix, "test_type:") and !isSupportedTestType(value)) return error.UnsupportedSelector;
             return;
         }
     }
     return error.UnsupportedSelector;
+}
+
+fn isSupportedResourceType(value: []const u8) bool {
+    return equals(value, "model") or
+        equals(value, "seed") or
+        equals(value, "source") or
+        equals(value, "exposure") or
+        equals(value, "test");
+}
+
+fn isSupportedTestType(value: []const u8) bool {
+    return equals(value, "generic") or equals(value, "singular");
 }
 
 fn requiresValue(arg: []const u8, mode: OptionMode) bool {

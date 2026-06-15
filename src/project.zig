@@ -2113,6 +2113,13 @@ fn matchesNodeSelectorExpression(graph: *const Graph, node: *const Node, value: 
 
 fn matchesNodeSelectorTerm(node: *const Node, value: []const u8) bool {
     if (std.mem.eql(u8, value, node.name) or std.mem.eql(u8, value, node.unique_id)) return true;
+    if (std.mem.startsWith(u8, value, "resource_type:")) {
+        const resource_type = value["resource_type:".len..];
+        return std.mem.eql(u8, resource_type, node.resource_type);
+    }
+    if (std.mem.startsWith(u8, value, "test_type:")) {
+        return false;
+    }
     if (std.mem.startsWith(u8, value, "tag:")) {
         const tag = value["tag:".len..];
         for (node.tags.items) |node_tag| {
@@ -2153,6 +2160,14 @@ fn matchesTestSelectorExpression(graph: *const Graph, test_node: *const GenericT
 
 fn matchesTestSelectorTerm(test_node: *const GenericTestNode, value: []const u8) bool {
     if (std.mem.eql(u8, value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id)) return true;
+    if (std.mem.startsWith(u8, value, "resource_type:")) {
+        const resource_type = value["resource_type:".len..];
+        return std.mem.eql(u8, resource_type, "test");
+    }
+    if (std.mem.startsWith(u8, value, "test_type:")) {
+        const test_type = value["test_type:".len..];
+        return std.mem.eql(u8, test_type, "generic");
+    }
     if (std.mem.startsWith(u8, value, "path:")) {
         const path = value["path:".len..];
         return std.mem.indexOf(u8, test_node.original_file_path, path) != null;
@@ -2180,6 +2195,13 @@ fn matchesSourceSelectorExpression(graph: *const Graph, source: *const SourceDef
 
 fn matchesSourceSelectorTerm(source: *const SourceDef, value: []const u8) bool {
     if (std.mem.eql(u8, value, source.unique_id) or std.mem.eql(u8, value, source.table_name)) return true;
+    if (std.mem.startsWith(u8, value, "resource_type:")) {
+        const resource_type = value["resource_type:".len..];
+        return std.mem.eql(u8, resource_type, "source");
+    }
+    if (std.mem.startsWith(u8, value, "test_type:")) {
+        return false;
+    }
     if (std.mem.startsWith(u8, value, "source:")) {
         const source_value = value["source:".len..];
         if (std.mem.eql(u8, source_value, source.source_name) or std.mem.eql(u8, source_value, source.unique_id)) return true;
@@ -2210,6 +2232,13 @@ fn matchesExposureSelectorExpression(graph: *const Graph, exposure: *const Expos
 
 fn matchesExposureSelectorTerm(exposure: *const ExposureDef, value: []const u8) bool {
     if (std.mem.eql(u8, value, exposure.name) or std.mem.eql(u8, value, exposure.unique_id)) return true;
+    if (std.mem.startsWith(u8, value, "resource_type:")) {
+        const resource_type = value["resource_type:".len..];
+        return std.mem.eql(u8, resource_type, "exposure");
+    }
+    if (std.mem.startsWith(u8, value, "test_type:")) {
+        return false;
+    }
     if (std.mem.startsWith(u8, value, "exposure:")) {
         const exposure_value = value["exposure:".len..];
         return std.mem.eql(u8, exposure_value, exposure.name) or std.mem.eql(u8, exposure_value, exposure.unique_id);
