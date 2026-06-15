@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {
     ".git",
     ".pytest_cache",
+    ".zig-cache",
     "__pycache__",
     ".agent/runs",
     ".venv",
@@ -17,6 +18,7 @@ SKIP_DIRS = {
     "target",
     "logs",
     "dbt_packages",
+    "zig-out",
 }
 TEXT_SUFFIXES = {
     ".cfg",
@@ -30,6 +32,8 @@ TEXT_SUFFIXES = {
     ".sql",
     ".toml",
     ".txt",
+    ".zig",
+    ".zon",
     ".yml",
     ".yaml",
 }
@@ -39,7 +43,7 @@ PATTERNS = {
     "local home path": re.compile("/home/" + "sabino"),
     "local media path": re.compile("/media/" + "sabino"),
     "local mount name": re.compile("SABINO" + "_EXT4"),
-    "github token": re.compile(r"(?:gh[oprstu]_|github_pat_)" + r"[A-Za-z0-9_]+"),
+    "github token": re.compile(r"(?:gh[oprstu]_|github" + r"_pat_)" + r"[A-Za-z0-9_]+"),
     "openai token": re.compile(r"sk-(?:proj-)?" + r"[A-Za-z0-9_-]{20,}"),
     "aws access key": re.compile("AKIA" + r"[0-9A-Z]{16}"),
     "private key": re.compile("BEGIN " + r"(RSA|OPENSSH|EC|PRIVATE) KEY"),

@@ -1,0 +1,16 @@
+.{
+    .name = .dxt,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x11fc3590db5d95, // Changing this has security and trust implications.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        ".zigversion",
+        "src",
+        "README.md",
+        "PLAN.md",
+        "AGENTS.md",
+        "SECURITY.md",
+    },
+}

@@ -2,6 +2,8 @@
 
 This repository is building `dxt`, the Data Transformation eXecutor: a dbt-project-compatible transformation engine with an artifact-first compatibility strategy and later cross-database execution.
 
+Hard requirement: the `dxt` product runtime is Zig. Python may remain only for developer scripts, tests, fixture tooling, compatibility harnesses, and safety scans. Do not implement product CLI, parser, compiler, artifact writer, planner, adapter, or runtime behavior in Python.
+
 ## Planning Contract
 
 - Treat `PLAN.md` as the active ExecPlan for multi-hour work.
@@ -14,6 +16,7 @@ This repository is building `dxt`, the Data Transformation eXecutor: a dbt-proje
 ## Engineering Rules
 
 - Preserve dbt compatibility as an observed contract: compare against dbt Core outputs and published artifact schemas.
+- Keep user-facing product behavior in Zig and validate it through the native binary.
 - Keep implementation slices small and reviewable.
 - Prefer deterministic fixtures and local adapters before live warehouses.
 - Do not add broad dependencies or generated artifacts without a validation reason.

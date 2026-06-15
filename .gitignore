@@ -16,6 +16,8 @@ htmlcov/
 venv/
 dist/
 build/
+zig-out/
+.zig-cache/
 
 target/
 logs/
