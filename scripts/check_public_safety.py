@@ -20,10 +20,14 @@ SKIP_DIRS = {
 }
 TEXT_SUFFIXES = {
     ".cfg",
+    ".csv",
     ".ini",
+    ".jinja",
+    ".jinja2",
     ".json",
     ".md",
     ".py",
+    ".sql",
     ".toml",
     ".txt",
     ".yml",
@@ -35,8 +39,8 @@ PATTERNS = {
     "local home path": re.compile("/home/" + "sabino"),
     "local media path": re.compile("/media/" + "sabino"),
     "local mount name": re.compile("SABINO" + "_EXT4"),
-    "github token": re.compile("gho_" + r"[A-Za-z0-9_]+"),
-    "openai token": re.compile("sk-" + r"[A-Za-z0-9]{20,}"),
+    "github token": re.compile(r"(?:gh[oprstu]_|github_pat_)" + r"[A-Za-z0-9_]+"),
+    "openai token": re.compile(r"sk-(?:proj-)?" + r"[A-Za-z0-9_-]{20,}"),
     "aws access key": re.compile("AKIA" + r"[0-9A-Z]{16}"),
     "private key": re.compile("BEGIN " + r"(RSA|OPENSSH|EC|PRIVATE) KEY"),
 }
@@ -53,7 +57,7 @@ def should_skip(path: Path) -> bool:
 
 
 def is_text_candidate(path: Path) -> bool:
-    if path.name in {"AGENTS.md", "PLAN.md", "README.md", "SECURITY.md"}:
+    if path.name in {"AGENTS.md", "PLAN.md", "README.md", "SECURITY.md", ".env.example"}:
         return True
     return path.suffix in TEXT_SUFFIXES
 
