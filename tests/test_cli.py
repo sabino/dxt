@@ -115,7 +115,7 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
     assert manifest["dxt_metadata"]["compatibility_target"] == "dbt-manifest-v12-slice"
     for unique_id, node in manifest["nodes"].items():
         assert unique_id == node["unique_id"]
-        assert node["resource_type"] in {"model", "seed"}
+        assert node["resource_type"] in {"model", "seed", "test"}
         common_keys = {
             "unique_id",
             "resource_type",
@@ -171,6 +171,12 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert manifest_path.read_text() == first_manifest
 
     manifest = json.loads(first_manifest)
+    expected_tests = [
+        "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
+        "test.model_properties.unique_customers_.ccc5343706",
+        "test.model_properties.unique_customers_customer_id.c5af1ff4b1",
+    ]
+    assert sorted(manifest["nodes"]) == ["model.model_properties.customers", *expected_tests]
     node = manifest["nodes"]["model.model_properties.customers"]
     assert node["description"] == "Customer dimension"
     assert node["patch_path"] == "model_properties://models/schema.yml"
@@ -183,6 +189,46 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert "tests" not in node["columns"]["customer_id"]
     assert node["columns"]["customer_name"]["description"] == "Display name"
 
+    model_test = manifest["nodes"]["test.model_properties.unique_customers_.ccc5343706"]
+    assert model_test["resource_type"] == "test"
+    assert model_test["name"] == "unique_customers_"
+    assert model_test["path"] == "unique_customers_.sql"
+    assert model_test["original_file_path"] == "models/schema.yml"
+    assert model_test["raw_code"] == "{{ test_unique(**_dbt_generic_test_kwargs) }}"
+    assert model_test["attached_node"] == "model.model_properties.customers"
+    assert model_test["column_name"] is None
+    assert model_test["depends_on"]["macros"] == ["macro.dbt.test_unique"]
+    assert model_test["depends_on"]["nodes"] == ["model.model_properties.customers"]
+    assert model_test["test_metadata"] == {
+        "name": "unique",
+        "kwargs": {"model": "{{ get_where_subquery(ref('customers')) }}"},
+        "namespace": None,
+    }
+    assert model_test["config"]["materialized"] == "test"
+    assert model_test["config"]["schema"] == "dbt_test__audit"
+
+    column_test = manifest["nodes"]["test.model_properties.not_null_customers_customer_id.5c9bf9911d"]
+    assert column_test["resource_type"] == "test"
+    assert column_test["name"] == "not_null_customers_customer_id"
+    assert column_test["path"] == "not_null_customers_customer_id.sql"
+    assert column_test["original_file_path"] == "models/schema.yml"
+    assert column_test["raw_code"] == "{{ test_not_null(**_dbt_generic_test_kwargs) }}"
+    assert column_test["attached_node"] == "model.model_properties.customers"
+    assert column_test["column_name"] == "customer_id"
+    assert column_test["depends_on"]["macros"] == ["macro.dbt.test_not_null"]
+    assert column_test["depends_on"]["nodes"] == ["model.model_properties.customers"]
+    assert column_test["test_metadata"] == {
+        "name": "not_null",
+        "kwargs": {
+            "model": "{{ get_where_subquery(ref('customers')) }}",
+            "column_name": "customer_id",
+        },
+        "namespace": None,
+    }
+    assert manifest["parent_map"][column_test["unique_id"]] == ["model.model_properties.customers"]
+    assert manifest["child_map"]["model.model_properties.customers"] == expected_tests
+    assert manifest["child_map"][column_test["unique_id"]] == []
+
     ls_result = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "tag:published"],
         cwd=ROOT,
@@ -191,6 +237,32 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     )
     assert ls_result.returncode == 0, ls_result.stderr
     assert ls_result.stdout.splitlines() == ["model.model_properties.customers"]
+
+    ls_tests = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_tests.returncode == 0, ls_tests.stderr
+    assert json.loads(ls_tests.stdout) == [
+        {
+            "unique_id": "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
+            "resource_type": "test",
+            "name": "not_null_customers_customer_id",
+        },
+        {
+            "unique_id": "test.model_properties.unique_customers_.ccc5343706",
+            "resource_type": "test",
+            "name": "unique_customers_",
+        },
+        {
+            "unique_id": "test.model_properties.unique_customers_customer_id.c5af1ff4b1",
+            "resource_type": "test",
+            "name": "unique_customers_customer_id",
+        },
+    ]
+
 
 
 def test_disabled_model_is_not_active_but_is_represented(tmp_path: Path):
@@ -408,7 +480,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         capture_output=True,
     )
     assert unsupported_type.returncode == 2
-    assert "--resource-type supports only model, seed, or source" in unsupported_type.stderr
+    assert "--resource-type supports only model, seed, source, or test" in unsupported_type.stderr
 
     unsupported_selector = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "config.materialized:view"],

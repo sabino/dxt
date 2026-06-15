@@ -96,10 +96,24 @@ const Node = struct {
     depends_on: std.ArrayList([]const u8) = .empty,
 };
 
+const GenericTestNode = struct {
+    unique_id: []const u8,
+    name: []const u8,
+    path: []const u8,
+    original_file_path: []const u8,
+    raw_code: []const u8,
+    test_name: []const u8,
+    column_name: ?[]const u8 = null,
+    attached_node: []const u8,
+    depends_on: std.ArrayList([]const u8) = .empty,
+    macro_depends_on: std.ArrayList([]const u8) = .empty,
+};
+
 const Graph = struct {
     allocator: std.mem.Allocator,
     project_name: []const u8,
     nodes: std.ArrayList(Node) = .empty,
+    tests: std.ArrayList(GenericTestNode) = .empty,
     sources: std.ArrayList(SourceDef) = .empty,
     docs: std.ArrayList(DocBlock) = .empty,
     model_properties: std.ArrayList(ModelProperty) = .empty,
@@ -109,10 +123,14 @@ const Graph = struct {
         for (self.nodes.items) |*node| {
             deinitNode(self.allocator, node);
         }
+        for (self.tests.items) |*test_node| {
+            deinitGenericTestNode(self.allocator, test_node);
+        }
         for (self.model_properties.items) |*property| {
             deinitModelProperty(self.allocator, property);
         }
         self.nodes.deinit(self.allocator);
+        self.tests.deinit(self.allocator);
         self.sources.deinit(self.allocator);
         self.docs.deinit(self.allocator);
         self.model_properties.deinit(self.allocator);
@@ -132,6 +150,11 @@ fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     node.refs.deinit(allocator);
     node.source_refs.deinit(allocator);
     node.depends_on.deinit(allocator);
+}
+
+fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
+    test_node.depends_on.deinit(allocator);
+    test_node.macro_depends_on.deinit(allocator);
 }
 
 fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) void {
@@ -246,7 +269,9 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     }
 
     try applyModelProperties(&graph);
+    try materializeGenericTests(&graph);
     sortNodes(graph.nodes.items);
+    sortTests(graph.tests.items);
     sortSources(graph.sources.items);
     sortDocs(graph.docs.items);
     try rejectDuplicateModels(&graph);
@@ -594,7 +619,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                 current_column = null;
                 column_item_indent = null;
                 test_target = .none;
-            } else if (std.mem.eql(u8, kv.key, "tests")) {
+            } else if (std.mem.eql(u8, kv.key, "tests") or std.mem.eql(u8, kv.key, "data_tests")) {
                 if (std.mem.trim(u8, kv.value, " \t").len != 0) {
                     if (in_columns and current_column != null) {
                         try parseInlineStringList(allocator, kv.value, &graph.model_properties.items[model_index].columns.items[current_column.?].tests);
@@ -679,6 +704,52 @@ fn applyModelProperties(graph: *Graph) !void {
         }
         sortColumns(node.columns.items);
     }
+}
+
+fn materializeGenericTests(graph: *Graph) !void {
+    for (graph.nodes.items) |*node| {
+        if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
+        for (node.tests.items) |test_name| {
+            if (isSupportedGenericTest(test_name)) {
+                try appendGenericTestNode(graph, node, test_name, null);
+            }
+        }
+        for (node.columns.items) |column| {
+            for (column.tests.items) |test_name| {
+                if (isSupportedGenericTest(test_name)) {
+                    try appendGenericTestNode(graph, node, test_name, column.name);
+                }
+            }
+        }
+    }
+}
+
+fn appendGenericTestNode(graph: *Graph, node: *const Node, test_name: []const u8, column_name: ?[]const u8) !void {
+    const name = try synthesizeGenericTestName(graph.allocator, test_name, node.name, column_name);
+    const unique_id = try genericTestUniqueId(graph.allocator, graph.project_name, name, test_name, node.name, column_name);
+    for (graph.tests.items) |existing| {
+        if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
+    }
+
+    var test_node = GenericTestNode{
+        .unique_id = unique_id,
+        .name = name,
+        .path = try std.fmt.allocPrint(graph.allocator, "{s}.sql", .{name}),
+        .original_file_path = node.patch_path orelse node.original_file_path,
+        .raw_code = try std.fmt.allocPrint(graph.allocator, "{{{{ test_{s}(**_dbt_generic_test_kwargs) }}}}", .{test_name}),
+        .test_name = test_name,
+        .column_name = column_name,
+        .attached_node = node.unique_id,
+    };
+    errdefer deinitGenericTestNode(graph.allocator, &test_node);
+
+    try test_node.depends_on.append(graph.allocator, node.unique_id);
+    try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_name}));
+    try graph.tests.append(graph.allocator, test_node);
+}
+
+fn isSupportedGenericTest(test_name: []const u8) bool {
+    return std.mem.eql(u8, test_name, "not_null") or std.mem.eql(u8, test_name, "unique");
 }
 
 fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
@@ -989,6 +1060,11 @@ fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, options: O
             try selected.append(allocator, .{ .unique_id = node.unique_id, .name = node.name, .resource_type = node.resource_type });
         }
     }
+    for (graph.tests.items) |test_node| {
+        if (matchesResourceType(options.resource_type, "test") and matchesTestSelector(test_node, options.select) and (options.exclude == null or !matchesTestSelector(test_node, options.exclude))) {
+            try selected.append(allocator, .{ .unique_id = test_node.unique_id, .name = test_node.name, .resource_type = "test" });
+        }
+    }
     for (graph.sources.items) |source| {
         if (matchesResourceType(options.resource_type, "source") and matchesSourceSelector(source, options.select) and (options.exclude == null or !matchesSourceSelector(source, options.exclude))) {
             try selected.append(allocator, .{ .unique_id = source.unique_id, .name = source.table_name, .resource_type = "source" });
@@ -1027,6 +1103,18 @@ fn matchesSelector(graph: *const Graph, node: Node, selector: ?[]const u8) bool 
         return false;
     }
     _ = graph;
+    return false;
+}
+
+fn matchesTestSelector(test_node: GenericTestNode, selector: ?[]const u8) bool {
+    const raw = selector orelse return true;
+    const value = trimPlus(raw);
+    if (value.len == 0) return true;
+    if (std.mem.eql(u8, value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id)) return true;
+    if (std.mem.startsWith(u8, value, "path:")) {
+        const path = value["path:".len..];
+        return std.mem.indexOf(u8, test_node.original_file_path, path) != null;
+    }
     return false;
 }
 
@@ -1074,6 +1162,14 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writeJsonString(writer, node.unique_id);
         try writer.writeAll(": ");
         try writeNode(allocator, writer, graph.project_name, node);
+    }
+    for (graph.tests.items) |test_node| {
+        if (node_index != 0) try writer.writeAll(",");
+        node_index += 1;
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, test_node.unique_id);
+        try writer.writeAll(": ");
+        try writeGenericTestNode(allocator, writer, graph.project_name, test_node);
     }
     try writer.writeAll("\n  },\n  \"sources\": {");
     for (graph.sources.items, 0..) |source, index| {
@@ -1134,6 +1230,14 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll(": ");
         try writeStringArray(writer, node.depends_on.items);
     }
+    for (graph.tests.items) |test_node| {
+        if (parent_index != 0) try writer.writeAll(",");
+        parent_index += 1;
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, test_node.unique_id);
+        try writer.writeAll(": ");
+        try writeStringArray(writer, test_node.depends_on.items);
+    }
     try writer.writeAll("\n  },\n  \"child_map\": {");
     try writeChildMap(writer, graph);
     try writer.writeAll("\n  }\n}\n");
@@ -1144,6 +1248,9 @@ fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
     var first = true;
     for (graph.nodes.items) |candidate| {
         if (!candidate.enabled) continue;
+        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+    }
+    for (graph.tests.items) |candidate| {
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
     for (graph.sources.items) |candidate| {
@@ -1164,6 +1271,13 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
             if (!child_first) try writer.writeAll(",");
             child_first = false;
             try writeJsonString(writer, node.unique_id);
+        }
+    }
+    for (graph.tests.items) |test_node| {
+        if (containsString(test_node.depends_on.items, unique_id)) {
+            if (!child_first) try writer.writeAll(",");
+            child_first = false;
+            try writeJsonString(writer, test_node.unique_id);
         }
     }
     try writer.writeAll("]");
@@ -1243,6 +1357,45 @@ fn writeSeedNode(writer: *Io.Writer, project_name: []const u8, node: Node) !void
     try writer.writeAll("}}");
 }
 
+fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, test_node: GenericTestNode) !void {
+    try writer.writeAll("{\"unique_id\":");
+    try writeJsonString(writer, test_node.unique_id);
+    try writer.writeAll(",\"resource_type\":\"test\",\"package_name\":");
+    try writeJsonString(writer, project_name);
+    try writer.writeAll(",\"name\":");
+    try writeJsonString(writer, test_node.name);
+    try writer.writeAll(",\"path\":");
+    try writeJsonString(writer, normalizeForDisplay(test_node.path));
+    try writer.writeAll(",\"original_file_path\":");
+    try writeJsonString(writer, normalizeForDisplay(test_node.original_file_path));
+    try writer.writeAll(",\"patch_path\":null,\"language\":\"sql\",\"raw_code\":");
+    try writeJsonString(writer, test_node.raw_code);
+    try writer.writeAll(",\"attached_node\":");
+    try writeJsonString(writer, test_node.attached_node);
+    try writer.writeAll(",\"column_name\":");
+    if (test_node.column_name) |column_name| {
+        try writeJsonString(writer, column_name);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"test_metadata\":{\"name\":");
+    try writeJsonString(writer, test_node.test_name);
+    try writer.writeAll(",\"kwargs\":{\"model\":");
+    const model_name = modelNameFromUniqueId(test_node.attached_node);
+    const model_kwarg = try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
+    defer allocator.free(model_kwarg);
+    try writeJsonString(writer, model_kwarg);
+    if (test_node.column_name) |column_name| {
+        try writer.writeAll(",\"column_name\":");
+        try writeJsonString(writer, column_name);
+    }
+    try writer.writeAll("},\"namespace\":null},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
+    try writeStringArray(writer, test_node.macro_depends_on.items);
+    try writer.writeAll(",\"nodes\":");
+    try writeStringArray(writer, test_node.depends_on.items);
+    try writer.writeAll("}}");
+}
+
 fn writeStringArray(writer: *Io.Writer, values: []const []const u8) !void {
     try writer.writeAll("[");
     for (values, 0..) |value, index| {
@@ -1314,6 +1467,60 @@ fn dupTrimmedScalar(allocator: std.mem.Allocator, value: []const u8) ![]const u8
     return try allocator.dupe(u8, trimmed);
 }
 
+fn synthesizeGenericTestName(allocator: std.mem.Allocator, test_name: []const u8, model_name: []const u8, column_name: ?[]const u8) ![]const u8 {
+    if (column_name) |column| {
+        const clean_column = try cleanTestNamePart(allocator, column);
+        defer allocator.free(clean_column);
+        return try std.fmt.allocPrint(allocator, "{s}_{s}_{s}", .{ test_name, model_name, clean_column });
+    }
+    return try std.fmt.allocPrint(allocator, "{s}_{s}_", .{ test_name, model_name });
+}
+
+fn genericTestUniqueId(allocator: std.mem.Allocator, package_name: []const u8, name: []const u8, test_name: []const u8, model_name: []const u8, column_name: ?[]const u8) ![]const u8 {
+    const model_kwarg = try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
+    defer allocator.free(model_kwarg);
+    const metadata = if (column_name) |column|
+        try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\"}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, model_kwarg, test_name })
+    else
+        try std.fmt.allocPrint(allocator, "{{'kwargs': {{'model': \"{s}\"}}, 'name': '{s}', 'namespace': 'None'}}", .{ model_kwarg, test_name });
+    defer allocator.free(metadata);
+
+    const hash_input = try std.fmt.allocPrint(allocator, "{s}{s}", .{ name, metadata });
+    defer allocator.free(hash_input);
+    const suffix = genericTestHashSuffix(hash_input);
+    return try std.fmt.allocPrint(allocator, "test.{s}.{s}.{s}", .{ package_name, name, suffix });
+}
+
+fn genericTestHashSuffix(input: []const u8) [10]u8 {
+    var digest: [16]u8 = undefined;
+    std.crypto.hash.Md5.hash(input, &digest, .{});
+    var hex: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    var suffix: [10]u8 = undefined;
+    @memcpy(&suffix, hex[22..32]);
+    return suffix;
+}
+
+fn cleanTestNamePart(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (value) |ch| {
+        if (std.ascii.isAlphanumeric(ch) or ch == '_') {
+            try out.append(allocator, ch);
+        } else {
+            try out.append(allocator, '_');
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn modelNameFromUniqueId(unique_id: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, unique_id, '.')) |index| {
+        return unique_id[index + 1 ..];
+    }
+    return unique_id;
+}
+
 fn modelNameFromPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return resourceNameFromPath(allocator, path, ".sql");
 }
@@ -1352,6 +1559,14 @@ fn sortStrings(values: [][]const u8) void {
 fn sortNodes(nodes: []Node) void {
     std.mem.sort(Node, nodes, {}, struct {
         fn lessThan(_: void, a: Node, b: Node) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
+fn sortTests(tests: []GenericTestNode) void {
+    std.mem.sort(GenericTestNode, tests, {}, struct {
+        fn lessThan(_: void, a: GenericTestNode, b: GenericTestNode) bool {
             return std.mem.lessThan(u8, a.unique_id, b.unique_id);
         }
     }.lessThan);
