@@ -501,4 +501,5 @@ Exit criteria:
 - M0 is in progress.
 - Independent planning notes have been created under `.agent/research/`.
 - A separate `codex exec` strategy critique has been stored under `.agent/runs/`, which is ignored by Git.
+- CI and public-safety scanning are being added before further implementation work.
 - Next implementation slice after M0 is a minimal `dxt parse` project loader for Tier 0 fixtures.
