@@ -436,6 +436,46 @@ def test_macro_paths_replace_default_macro_directory(tmp_path: Path):
     assert "macro.macro_paths_custom.ignored_macro" not in manifest["macros"]
 
 
+def test_parse_macro_property_yaml(tmp_path: Path):
+    project = copy_fixture(tmp_path, "macro_properties")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    macro = manifest["macros"]["macro.macro_properties.format_id"]
+    assert macro["description"] == "Format an identifier expression."
+    assert macro["patch_path"] == "macro_properties://macros/schema.yml"
+    assert macro["arguments"] == [
+        {
+            "name": "column_name",
+            "type": "string",
+            "description": "Column expression to cast.",
+        },
+        {
+            "name": "optional_suffix",
+            "type": None,
+            "description": "Optional suffix value.",
+        },
+    ]
+
+
+def test_duplicate_macro_property_fails_loudly(tmp_path: Path):
+    project = copy_fixture(tmp_path, "duplicate_macro_property")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "duplicate macro property patch" in result.stderr
+
+
 def test_disabled_model_is_not_active_but_is_represented(tmp_path: Path):
     project = copy_fixture(tmp_path, "disabled_model")
     result = subprocess.run(

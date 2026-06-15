@@ -74,7 +74,16 @@ const MacroDef = struct {
     path: []const u8,
     original_file_path: []const u8,
     macro_sql: []const u8,
+    patch_path: ?[]const u8 = null,
+    description: []const u8 = "",
+    arguments: std.ArrayList(MacroArgument) = .empty,
     macro_depends_on: std.ArrayList([]const u8) = .empty,
+};
+
+const MacroArgument = struct {
+    name: []const u8,
+    type: []const u8 = "",
+    description: []const u8 = "",
 };
 
 const ModelProperty = struct {
@@ -90,6 +99,18 @@ const ModelProperty = struct {
 };
 
 const UnmatchedModelProperty = struct {
+    name: []const u8,
+    patch_path: []const u8,
+};
+
+const MacroProperty = struct {
+    name: []const u8,
+    patch_path: []const u8,
+    description: []const u8 = "",
+    arguments: std.ArrayList(MacroArgument) = .empty,
+};
+
+const UnmatchedMacroProperty = struct {
     name: []const u8,
     patch_path: []const u8,
 };
@@ -141,7 +162,9 @@ const Graph = struct {
     docs: std.ArrayList(DocBlock) = .empty,
     macros: std.ArrayList(MacroDef) = .empty,
     model_properties: std.ArrayList(ModelProperty) = .empty,
+    macro_properties: std.ArrayList(MacroProperty) = .empty,
     unmatched_model_properties: std.ArrayList(UnmatchedModelProperty) = .empty,
+    unmatched_macro_properties: std.ArrayList(UnmatchedMacroProperty) = .empty,
 
     fn deinit(self: *Graph) void {
         for (self.nodes.items) |*node| {
@@ -153,6 +176,9 @@ const Graph = struct {
         for (self.model_properties.items) |*property| {
             deinitModelProperty(self.allocator, property);
         }
+        for (self.macro_properties.items) |*property| {
+            deinitMacroProperty(self.allocator, property);
+        }
         for (self.macros.items) |*macro| {
             deinitMacro(self.allocator, macro);
         }
@@ -162,7 +188,9 @@ const Graph = struct {
         self.docs.deinit(self.allocator);
         self.macros.deinit(self.allocator);
         self.model_properties.deinit(self.allocator);
+        self.macro_properties.deinit(self.allocator);
         self.unmatched_model_properties.deinit(self.allocator);
+        self.unmatched_macro_properties.deinit(self.allocator);
     }
 };
 
@@ -188,6 +216,7 @@ fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNo
 }
 
 fn deinitMacro(allocator: std.mem.Allocator, macro: *MacroDef) void {
+    macro.arguments.deinit(allocator);
     macro.macro_depends_on.deinit(allocator);
 }
 
@@ -200,6 +229,10 @@ fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) v
         deinitGenericTestDefs(allocator, &column.tests);
     }
     property.columns.deinit(allocator);
+}
+
+fn deinitMacroProperty(allocator: std.mem.Allocator, property: *MacroProperty) void {
+    property.arguments.deinit(allocator);
 }
 
 fn deinitGenericTestDefs(allocator: std.mem.Allocator, tests: *std.ArrayList(GenericTestDef)) void {
@@ -270,14 +303,20 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     for (config.macro_paths.items) |macro_path| {
         var macro_files: std.ArrayList([]const u8) = .empty;
         defer macro_files.deinit(runtime.allocator);
+        var macro_yaml_files: std.ArrayList([]const u8) = .empty;
+        defer macro_yaml_files.deinit(runtime.allocator);
 
         const root = try pathJoin(runtime.allocator, &.{ project_dir, macro_path });
-        discoverSqlFiles(runtime, root, macro_path, &macro_files) catch |err| switch (err) {
+        discoverMacroFiles(runtime, root, macro_path, &macro_files, &macro_yaml_files) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
         sortStrings(macro_files.items);
+        sortStrings(macro_yaml_files.items);
 
+        for (macro_yaml_files.items) |yaml_path| {
+            try parseYamlProperties(runtime, project_dir, yaml_path, config.name, &graph);
+        }
         for (macro_files.items) |relative_path| {
             try parseMacros(runtime, project_dir, relative_path, config.name, &graph);
         }
@@ -327,6 +366,8 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
         }
     }
 
+    try rejectDuplicateMacroProperties(&graph);
+    try applyMacroProperties(&graph);
     try applyModelProperties(&graph);
     try materializeGenericTests(&graph);
     sortNodes(graph.nodes.items);
@@ -512,6 +553,37 @@ fn discoverSqlFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []
     }
 }
 
+fn discoverMacroFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8)) !void {
+    var dir = try std.Io.Dir.cwd().openDir(runtime.io, absolute_dir, .{ .iterate = true });
+    defer dir.close(runtime.io);
+
+    var iter = dir.iterate();
+    while (try iter.next(runtime.io)) |entry| {
+        if (entry.name.len == 0 or entry.name[0] == '.') continue;
+        if (std.mem.eql(u8, entry.name, "target") or
+            std.mem.eql(u8, entry.name, "dbt_packages") or
+            std.mem.eql(u8, entry.name, ".zig-cache") or
+            std.mem.eql(u8, entry.name, "zig-out"))
+        {
+            continue;
+        }
+
+        const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
+        const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
+        switch (entry.kind) {
+            .directory => try discoverMacroFiles(runtime, child_abs, child_rel, sql_files, yaml_files),
+            .file => {
+                if (std.mem.endsWith(u8, entry.name, ".sql")) {
+                    try sql_files.append(runtime.allocator, child_rel);
+                } else if (std.mem.endsWith(u8, entry.name, ".yml") or std.mem.endsWith(u8, entry.name, ".yaml")) {
+                    try yaml_files.append(runtime.allocator, child_rel);
+                }
+            },
+            else => {},
+        }
+    }
+}
+
 fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
@@ -605,6 +677,7 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, relative_path:
 
     try parseSourcesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseModelPropertiesFromText(runtime.allocator, text, relative_path, graph);
+    try parseMacroPropertiesFromText(runtime.allocator, text, relative_path, graph);
 }
 
 fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
@@ -877,6 +950,87 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
     }
 }
 
+fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, graph: *Graph) !void {
+    var in_macros = false;
+    var in_arguments = false;
+    var macros_indent: usize = 0;
+    var macro_item_indent: ?usize = null;
+    var arguments_indent: usize = 0;
+    var argument_item_indent: ?usize = null;
+    var current_macro: ?usize = null;
+    var current_argument: ?usize = null;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (std.mem.eql(u8, trimmed, "macros:")) {
+            in_macros = true;
+            in_arguments = false;
+            macros_indent = indent;
+            macro_item_indent = null;
+            argument_item_indent = null;
+            current_macro = null;
+            current_argument = null;
+            continue;
+        }
+        if (!in_macros) continue;
+        if (indent <= macros_indent and !std.mem.eql(u8, trimmed, "macros:")) break;
+
+        if (in_arguments and indent <= arguments_indent and !std.mem.eql(u8, trimmed, "arguments:")) {
+            in_arguments = false;
+            argument_item_indent = null;
+            current_argument = null;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "- name:")) {
+            const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
+            if (in_arguments and current_macro != null and indent > (macro_item_indent orelse 0)) {
+                const macro_index = current_macro.?;
+                try graph.macro_properties.items[macro_index].arguments.append(allocator, .{ .name = name });
+                current_argument = graph.macro_properties.items[macro_index].arguments.items.len - 1;
+                argument_item_indent = indent;
+            } else {
+                try graph.macro_properties.append(allocator, .{ .name = name, .patch_path = relative_path });
+                current_macro = graph.macro_properties.items.len - 1;
+                macro_item_indent = indent;
+                in_arguments = false;
+                argument_item_indent = null;
+                current_argument = null;
+            }
+            continue;
+        }
+
+        const macro_index = current_macro orelse continue;
+        if (splitKeyValue(trimmed)) |kv| {
+            if (in_arguments and current_argument != null and indent > (argument_item_indent orelse 0)) {
+                var argument = &graph.macro_properties.items[macro_index].arguments.items[current_argument.?];
+                if (std.mem.eql(u8, kv.key, "type")) {
+                    argument.type = try dupTrimmedScalar(allocator, kv.value);
+                } else if (std.mem.eql(u8, kv.key, "description")) {
+                    argument.description = try dupTrimmedScalar(allocator, kv.value);
+                } else {
+                    return error.UnsupportedYaml;
+                }
+                continue;
+            }
+
+            if (std.mem.eql(u8, kv.key, "description")) {
+                graph.macro_properties.items[macro_index].description = try dupTrimmedScalar(allocator, kv.value);
+            } else if (std.mem.eql(u8, kv.key, "arguments")) {
+                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                in_arguments = true;
+                arguments_indent = indent;
+                argument_item_indent = null;
+                current_argument = null;
+            }
+        }
+    }
+}
+
 fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const full_path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const sql = try std.Io.Dir.cwd().readFileAlloc(runtime.io, full_path, runtime.allocator, .limited(16 * 1024 * 1024));
@@ -916,6 +1070,21 @@ fn parseSeed(runtime: Runtime, seed_root: []const u8, relative_path: []const u8,
         deinitNode(runtime.allocator, &node);
     }
     try graph.nodes.append(runtime.allocator, node);
+}
+
+fn applyMacroProperties(graph: *Graph) !void {
+    for (graph.macro_properties.items) |property| {
+        const macro_index = findMacroIndexByName(graph, property.name) orelse {
+            try graph.unmatched_macro_properties.append(graph.allocator, .{ .name = property.name, .patch_path = property.patch_path });
+            continue;
+        };
+        var macro = &graph.macros.items[macro_index];
+        macro.patch_path = property.patch_path;
+        if (property.description.len != 0) macro.description = property.description;
+        for (property.arguments.items) |argument| {
+            try appendMacroArgumentClone(graph, &macro.arguments, argument);
+        }
+    }
 }
 
 fn applyModelProperties(graph: *Graph) !void {
@@ -1016,6 +1185,9 @@ fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
     for (graph.unmatched_model_properties.items) |property| {
         try stderr.print("warning: did not find matching node for model property `{s}` in {s}\n", .{ property.name, normalizeForDisplay(property.patch_path) });
     }
+    for (graph.unmatched_macro_properties.items) |property| {
+        try stderr.print("warning: did not find matching macro for macro property `{s}` in {s}\n", .{ property.name, normalizeForDisplay(property.patch_path) });
+    }
 }
 
 fn appendColumnClone(graph: *Graph, columns: *std.ArrayList(ColumnDef), source: ColumnDef) !void {
@@ -1080,6 +1252,18 @@ fn rejectDuplicateDocs(graph: *const Graph) !void {
         while (j < graph.docs.items.len) : (j += 1) {
             if (std.mem.eql(u8, graph.docs.items[i].unique_id, graph.docs.items[j].unique_id)) {
                 return error.DuplicateDocName;
+            }
+        }
+    }
+}
+
+fn rejectDuplicateMacroProperties(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.macro_properties.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.macro_properties.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.macro_properties.items[i].name, graph.macro_properties.items[j].name)) {
+                return error.DuplicateMacroProperty;
             }
         }
     }
@@ -1540,7 +1724,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll("\n    ");
         try writeJsonString(writer, macro.unique_id);
         try writer.writeAll(": ");
-        try writeMacroNode(writer, graph.project_name, macro);
+        try writeMacroNode(allocator, writer, graph.project_name, macro);
     }
     try writer.writeAll("\n  },\n  \"docs\": {");
     for (graph.docs.items, 0..) |doc, index| {
@@ -1645,7 +1829,7 @@ fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []c
     }
 }
 
-fn writeMacroNode(writer: *Io.Writer, project_name: []const u8, macro: MacroDef) !void {
+fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, macro: MacroDef) !void {
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, macro.unique_id);
     try writer.writeAll(",\"resource_type\":\"macro\",\"package_name\":");
@@ -1660,7 +1844,19 @@ fn writeMacroNode(writer: *Io.Writer, project_name: []const u8, macro: MacroDef)
     try writeJsonString(writer, macro.macro_sql);
     try writer.writeAll(",\"depends_on\":{\"macros\":");
     try writeStringArray(writer, macro.macro_depends_on.items);
-    try writer.writeAll("},\"description\":\"\",\"meta\":{},\"docs\":{\"show\":true,\"node_color\":null},\"patch_path\":null,\"arguments\":[],\"supported_languages\":null}");
+    try writer.writeAll("},\"description\":");
+    try writeJsonString(writer, macro.description);
+    try writer.writeAll(",\"meta\":{},\"docs\":{\"show\":true,\"node_color\":null},\"patch_path\":");
+    if (macro.patch_path) |patch_path| {
+        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ project_name, normalizeForDisplay(patch_path) });
+        defer allocator.free(dbt_patch_path);
+        try writeJsonString(writer, dbt_patch_path);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"arguments\":");
+    try writeMacroArguments(writer, macro.arguments.items);
+    try writer.writeAll(",\"supported_languages\":null}");
 }
 
 fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, node: Node) !void {
@@ -1793,6 +1989,25 @@ fn writeStringArray(writer: *Io.Writer, values: []const []const u8) !void {
     try writer.writeAll("]");
 }
 
+fn writeMacroArguments(writer: *Io.Writer, arguments: []const MacroArgument) !void {
+    try writer.writeAll("[");
+    for (arguments, 0..) |argument, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("{\"name\":");
+        try writeJsonString(writer, argument.name);
+        try writer.writeAll(",\"type\":");
+        if (argument.type.len == 0) {
+            try writer.writeAll("null");
+        } else {
+            try writeJsonString(writer, argument.type);
+        }
+        try writer.writeAll(",\"description\":");
+        try writeJsonString(writer, argument.description);
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("]");
+}
+
 fn writeJsonString(writer: *Io.Writer, value: []const u8) !void {
     try std.json.Stringify.value(value, .{}, writer);
 }
@@ -1876,6 +2091,17 @@ fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTestDef
         try cloned.accepted_values.append(graph.allocator, value);
     }
     try tests.append(graph.allocator, cloned);
+}
+
+fn appendMacroArgumentClone(graph: *Graph, arguments: *std.ArrayList(MacroArgument), source: MacroArgument) !void {
+    for (arguments.items) |*existing| {
+        if (std.mem.eql(u8, existing.name, source.name)) {
+            if (source.type.len != 0) existing.type = source.type;
+            if (source.description.len != 0) existing.description = source.description;
+            return;
+        }
+    }
+    try arguments.append(graph.allocator, source);
 }
 
 fn currentGenericTestDef(graph: *Graph, model_index: usize, current_column: ?usize, target: TestTarget, test_index: usize) !*GenericTestDef {
@@ -2279,6 +2505,13 @@ fn hasMacro(graph: *const Graph, unique_id: []const u8) bool {
 fn findProjectMacroIdByName(graph: *const Graph, name: []const u8) ?[]const u8 {
     for (graph.macros.items) |macro| {
         if (std.mem.eql(u8, macro.name, name)) return macro.unique_id;
+    }
+    return null;
+}
+
+fn findMacroIndexByName(graph: *const Graph, name: []const u8) ?usize {
+    for (graph.macros.items, 0..) |macro, index| {
+        if (std.mem.eql(u8, macro.name, name)) return index;
     }
     return null;
 }
