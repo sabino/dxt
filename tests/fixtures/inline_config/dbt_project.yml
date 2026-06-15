@@ -1,0 +1,5 @@
+name: inline_config
+version: "1.0"
+profile: default
+model-paths: ["models"]
+target-path: target

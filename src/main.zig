@@ -15,7 +15,10 @@ pub fn main(init: std.process.Init) !void {
     var stderr_file_writer: Io.File.Writer = .init(.stderr(), init.io, &stderr_buffer);
     const stderr = &stderr_file_writer.interface;
 
-    const code = try dxt.run(args, stdout, stderr);
+    const code = try dxt.run(args, stdout, stderr, .{
+        .allocator = arena,
+        .io = init.io,
+    });
     try stdout.flush();
     try stderr.flush();
     std.process.exit(@intFromEnum(code));

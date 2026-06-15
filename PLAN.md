@@ -512,8 +512,9 @@ Exit criteria:
 
 ## Current Status
 
-- M0 is in progress.
-- Independent planning notes have been created under `.agent/research/`.
-- A separate `codex exec` strategy critique has been stored under `.agent/runs/`, which is ignored by Git.
-- The active migration slice replaces the Python product scaffold with a Zig `0.16.0` runtime scaffold.
-- Next implementation slice after the Zig scaffold lands is a minimal `dxt parse` project loader for Tier 0 fixtures.
+- M0 is under PR review as the Zig `0.16.0` runtime scaffold.
+- M1 has started on a stacked branch with a native Zig artifact-first parser slice.
+- `dxt parse` now targets the supported Tier 0 subset: project name/model paths, SQL model discovery, literal `ref`, literal `source`, inline `config(materialized=..., tags=...)`, dependency maps, and deterministic partial `manifest.json`.
+- `dxt ls` now lists resources from the same parser graph with stable text/JSON output and basic name, tag, path, resource type, and exact exclude filters.
+- Synthetic fixtures cover one model, model refs, source refs, inline config/tag selection, duplicate model diagnostics, unsupported dynamic ref diagnostics, and unsupported macro-call diagnostics.
+- The next M1 slices should add published schema validation, YAML model properties, disabled resources, docs blocks, macros, stronger selector parity, and Jaffle Shop DuckDB parse exploration.
