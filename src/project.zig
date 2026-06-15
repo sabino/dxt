@@ -1581,6 +1581,12 @@ const SelectedResource = struct {
     resource_type: []const u8,
 };
 
+const SelectorSpec = struct {
+    value: []const u8,
+    include_parents: bool,
+    include_children: bool,
+};
+
 fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, options: Options) ![]SelectedResource {
     var selected: std.ArrayList(SelectedResource) = .empty;
     errdefer selected.deinit(allocator);
@@ -1591,12 +1597,12 @@ fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, options: O
         }
     }
     for (graph.tests.items) |test_node| {
-        if (matchesResourceType(options.resource_type, "test") and matchesTestSelector(test_node, options.select) and (options.exclude == null or !matchesTestSelector(test_node, options.exclude))) {
+        if (matchesResourceType(options.resource_type, "test") and matchesTestSelector(graph, test_node, options.select) and (options.exclude == null or !matchesTestSelector(graph, test_node, options.exclude))) {
             try selected.append(allocator, .{ .unique_id = test_node.unique_id, .name = test_node.name, .resource_type = "test" });
         }
     }
     for (graph.sources.items) |source| {
-        if (matchesResourceType(options.resource_type, "source") and matchesSourceSelector(source, options.select) and (options.exclude == null or !matchesSourceSelector(source, options.exclude))) {
+        if (matchesResourceType(options.resource_type, "source") and matchesSourceSelector(graph, source, options.select) and (options.exclude == null or !matchesSourceSelector(graph, source, options.exclude))) {
             try selected.append(allocator, .{ .unique_id = source.unique_id, .name = source.table_name, .resource_type = "source" });
         }
     }
@@ -1614,9 +1620,13 @@ fn matchesResourceType(requested: ?[]const u8, actual: []const u8) bool {
 }
 
 fn matchesSelector(graph: *const Graph, node: Node, selector: ?[]const u8) bool {
-    const raw = selector orelse return true;
-    const value = trimPlus(raw);
-    if (value.len == 0) return true;
+    const spec = parseSelectorSpec(selector) orelse return true;
+    if (spec.value.len == 0) return true;
+    if (matchesNodeSelectorDirect(node, spec.value)) return true;
+    return matchesGraphExpansion(graph, node.unique_id, spec);
+}
+
+fn matchesNodeSelectorDirect(node: Node, value: []const u8) bool {
     if (std.mem.eql(u8, value, node.name) or std.mem.eql(u8, value, node.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "tag:")) {
         const tag = value["tag:".len..];
@@ -1629,17 +1639,19 @@ fn matchesSelector(graph: *const Graph, node: Node, selector: ?[]const u8) bool 
         return std.mem.indexOf(u8, node.original_file_path, path) != null;
     }
     if (std.mem.startsWith(u8, value, "source:")) {
-        _ = graph;
         return false;
     }
-    _ = graph;
     return false;
 }
 
-fn matchesTestSelector(test_node: GenericTestNode, selector: ?[]const u8) bool {
-    const raw = selector orelse return true;
-    const value = trimPlus(raw);
-    if (value.len == 0) return true;
+fn matchesTestSelector(graph: *const Graph, test_node: GenericTestNode, selector: ?[]const u8) bool {
+    const spec = parseSelectorSpec(selector) orelse return true;
+    if (spec.value.len == 0) return true;
+    if (matchesTestSelectorDirect(test_node, spec.value)) return true;
+    return matchesGraphExpansion(graph, test_node.unique_id, spec);
+}
+
+fn matchesTestSelectorDirect(test_node: GenericTestNode, value: []const u8) bool {
     if (std.mem.eql(u8, value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "path:")) {
         const path = value["path:".len..];
@@ -1648,14 +1660,72 @@ fn matchesTestSelector(test_node: GenericTestNode, selector: ?[]const u8) bool {
     return false;
 }
 
-fn matchesSourceSelector(source: SourceDef, selector: ?[]const u8) bool {
-    const raw = selector orelse return true;
-    const value = trimPlus(raw);
-    if (value.len == 0) return true;
+fn matchesSourceSelector(graph: *const Graph, source: SourceDef, selector: ?[]const u8) bool {
+    const spec = parseSelectorSpec(selector) orelse return true;
+    if (spec.value.len == 0) return true;
+    if (matchesSourceSelectorDirect(source, spec.value)) return true;
+    return matchesGraphExpansion(graph, source.unique_id, spec);
+}
+
+fn matchesSourceSelectorDirect(source: SourceDef, value: []const u8) bool {
     if (std.mem.eql(u8, value, source.unique_id) or std.mem.eql(u8, value, source.table_name)) return true;
     if (std.mem.startsWith(u8, value, "source:")) {
         const source_value = value["source:".len..];
         return std.mem.eql(u8, source_value, source.source_name) or std.mem.eql(u8, source_value, source.unique_id);
+    }
+    return false;
+}
+
+fn parseSelectorSpec(selector: ?[]const u8) ?SelectorSpec {
+    const raw = selector orelse return null;
+    return .{
+        .value = trimPlus(raw),
+        .include_parents = std.mem.startsWith(u8, raw, "+"),
+        .include_children = std.mem.endsWith(u8, raw, "+"),
+    };
+}
+
+fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, spec: SelectorSpec) bool {
+    if (!spec.include_parents and !spec.include_children) return false;
+    for (graph.nodes.items) |target| {
+        if (!target.enabled or !matchesNodeSelectorDirect(target, spec.value)) continue;
+        if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
+        if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
+    }
+    for (graph.tests.items) |target| {
+        if (!matchesTestSelectorDirect(target, spec.value)) continue;
+        if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
+        if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
+    }
+    for (graph.sources.items) |target| {
+        if (!matchesSourceSelectorDirect(target, spec.value)) continue;
+        if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
+    }
+    return false;
+}
+
+fn resourceDependsOn(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8) bool {
+    return resourceDependsOnWithin(graph, resource_unique_id, dependency_unique_id, graph.nodes.items.len + graph.tests.items.len + graph.sources.items.len + 1);
+}
+
+fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8, remaining_depth: usize) bool {
+    if (std.mem.eql(u8, resource_unique_id, dependency_unique_id)) return true;
+    if (remaining_depth == 0) return false;
+    for (graph.nodes.items) |node| {
+        if (!node.enabled or !std.mem.eql(u8, node.unique_id, resource_unique_id)) continue;
+        return dependencyListContainsTransitive(graph, node.depends_on.items, dependency_unique_id, remaining_depth - 1);
+    }
+    for (graph.tests.items) |test_node| {
+        if (!std.mem.eql(u8, test_node.unique_id, resource_unique_id)) continue;
+        return dependencyListContainsTransitive(graph, test_node.depends_on.items, dependency_unique_id, remaining_depth - 1);
+    }
+    return false;
+}
+
+fn dependencyListContainsTransitive(graph: *const Graph, dependencies: []const []const u8, dependency_unique_id: []const u8, remaining_depth: usize) bool {
+    for (dependencies) |direct| {
+        if (std.mem.eql(u8, direct, dependency_unique_id)) return true;
+        if (resourceDependsOnWithin(graph, direct, dependency_unique_id, remaining_depth)) return true;
     }
     return false;
 }
