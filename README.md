@@ -35,7 +35,7 @@ Implemented pre-alpha commands:
 ./zig-out/bin/dxt ls --project-dir tests/fixtures/model_ref --output json
 ```
 
-`parse` and `ls` currently support only the documented M1 parser subset: `dbt_project.yml` name/model paths/seed paths/target path, SQL model discovery, CSV seed discovery, literal `ref` to models or seeds, literal `source`, basic inline `config`, narrow YAML model properties for scalar descriptions, simple columns, tags, materialization and disabled SQL models, deterministic partial `manifest.json`, and simple name/tag/path/resource filters. dbt-shaped generic test nodes, `compile`, `build`, and `docs generate` remain planned placeholders.
+`parse` and `ls` currently support only the documented M1 parser subset: `dbt_project.yml` name/model paths/seed paths/target path, SQL model discovery, CSV seed discovery, docs block discovery, literal `ref` to models or seeds, literal `source`, literal `doc` in descriptions, basic inline `config`, narrow YAML model properties for scalar descriptions, simple columns, tags, materialization and disabled SQL models, deterministic partial `manifest.json`, and simple name/tag/path/resource filters. dbt-shaped generic test nodes, `compile`, `build`, and `docs generate` remain planned placeholders.
 
 ## Development
 

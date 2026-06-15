@@ -133,6 +133,7 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
                 "language",
                 "raw_code",
                 "description",
+                "doc_blocks",
                 "columns",
             }
             if node["patch_path"] is not None:
@@ -143,6 +144,19 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
         assert unique_id == source["unique_id"]
         assert source["resource_type"] == "source"
         assert not Path(source["original_file_path"]).is_absolute()
+    for unique_id, doc in manifest["docs"].items():
+        assert unique_id == doc["unique_id"]
+        assert doc["resource_type"] == "doc"
+        assert set(doc) == {
+            "unique_id",
+            "resource_type",
+            "package_name",
+            "name",
+            "path",
+            "original_file_path",
+            "block_contents",
+        }
+        assert not Path(doc["original_file_path"]).is_absolute()
 
 
 def test_parse_model_properties_and_columns(tmp_path: Path):
@@ -312,6 +326,46 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     ]
 
 
+def test_parse_docs_blocks_and_literal_doc_descriptions(tmp_path: Path):
+    project = copy_fixture(tmp_path, "docs_blocks")
+    command = [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"]
+    first = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    assert first.returncode == 0, first.stderr
+    manifest_path = project / "target-dxt" / "manifest.json"
+    first_manifest = manifest_path.read_text()
+    second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    assert second.returncode == 0, second.stderr
+    assert manifest_path.read_text() == first_manifest
+
+    manifest = json.loads(first_manifest)
+    assert_partial_manifest_schema(manifest)
+    assert sorted(manifest["docs"]) == [
+        "doc.docs_blocks.customer_id",
+        "doc.docs_blocks.customer_model",
+    ]
+    model_doc = manifest["docs"]["doc.docs_blocks.customer_model"]
+    assert model_doc == {
+        "unique_id": "doc.docs_blocks.customer_model",
+        "resource_type": "doc",
+        "package_name": "docs_blocks",
+        "name": "customer_model",
+        "path": "docs.md",
+        "original_file_path": "models/docs.md",
+        "block_contents": "Customer model docs.",
+    }
+    column_doc = manifest["docs"]["doc.docs_blocks.customer_id"]
+    assert column_doc["block_contents"] == "Customer id docs."
+
+    node = manifest["nodes"]["model.docs_blocks.customers"]
+    assert node["description"] == "Customer model docs."
+    assert node["doc_blocks"] == ["doc.docs_blocks.customer_model"]
+    assert node["columns"]["customer_id"]["description"] == "Customer id docs."
+    assert node["columns"]["customer_id"]["doc_blocks"] == ["doc.docs_blocks.customer_id"]
+    assert all(not key.startswith("doc.") for key in manifest["parent_map"])
+    assert all(not key.startswith("doc.") for key in manifest["child_map"])
+    assert str(project) not in first_manifest
+
+
 def test_ls_text_json_and_tag_selection(tmp_path: Path):
     project = copy_fixture(tmp_path, "inline_config")
     text_result = subprocess.run(
@@ -376,6 +430,54 @@ def test_dynamic_ref_fails_loudly(tmp_path: Path):
     )
     assert result.returncode == 2
     assert "unsupported dynamic ref" in result.stderr
+
+
+def test_dynamic_doc_fails_loudly(tmp_path: Path):
+    project = copy_fixture(tmp_path, "unsupported_dynamic_doc")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "unsupported dynamic doc" in result.stderr
+
+
+def test_missing_doc_reference_fails_loudly(tmp_path: Path):
+    project = copy_fixture(tmp_path, "missing_doc_ref")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "unresolved doc reference" in result.stderr
+
+
+def test_duplicate_doc_name_fails_loudly(tmp_path: Path):
+    project = copy_fixture(tmp_path, "duplicate_doc_name")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "duplicate docs block name" in result.stderr
+
+
+def test_malformed_docs_block_fails_loudly(tmp_path: Path):
+    project = copy_fixture(tmp_path, "malformed_docs_block")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "malformed docs block" in result.stderr
 
 
 def test_unsupported_macro_call_fails_loudly(tmp_path: Path):

@@ -47,7 +47,16 @@ const SourceDep = struct {
 const ColumnDef = struct {
     name: []const u8,
     description: []const u8 = "",
+    doc_blocks: std.ArrayList([]const u8) = .empty,
     tests: std.ArrayList([]const u8) = .empty,
+};
+
+const DocBlock = struct {
+    unique_id: []const u8,
+    name: []const u8,
+    path: []const u8,
+    original_file_path: []const u8,
+    block_contents: []const u8,
 };
 
 const ModelProperty = struct {
@@ -56,6 +65,7 @@ const ModelProperty = struct {
     description: []const u8 = "",
     materialized: []const u8 = "",
     tags: std.ArrayList([]const u8) = .empty,
+    doc_blocks: std.ArrayList([]const u8) = .empty,
     tests: std.ArrayList([]const u8) = .empty,
     columns: std.ArrayList(ColumnDef) = .empty,
     enabled: ?bool = null,
@@ -78,6 +88,7 @@ const Node = struct {
     materialized: []const u8 = "view",
     enabled: bool = true,
     tags: std.ArrayList([]const u8) = .empty,
+    doc_blocks: std.ArrayList([]const u8) = .empty,
     tests: std.ArrayList([]const u8) = .empty,
     columns: std.ArrayList(ColumnDef) = .empty,
     refs: std.ArrayList(RefDep) = .empty,
@@ -90,6 +101,7 @@ const Graph = struct {
     project_name: []const u8,
     nodes: std.ArrayList(Node) = .empty,
     sources: std.ArrayList(SourceDef) = .empty,
+    docs: std.ArrayList(DocBlock) = .empty,
     model_properties: std.ArrayList(ModelProperty) = .empty,
     unmatched_model_properties: std.ArrayList(UnmatchedModelProperty) = .empty,
 
@@ -102,6 +114,7 @@ const Graph = struct {
         }
         self.nodes.deinit(self.allocator);
         self.sources.deinit(self.allocator);
+        self.docs.deinit(self.allocator);
         self.model_properties.deinit(self.allocator);
         self.unmatched_model_properties.deinit(self.allocator);
     }
@@ -109,8 +122,10 @@ const Graph = struct {
 
 fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     node.tags.deinit(allocator);
+    node.doc_blocks.deinit(allocator);
     node.tests.deinit(allocator);
     for (node.columns.items) |*column| {
+        column.doc_blocks.deinit(allocator);
         column.tests.deinit(allocator);
     }
     node.columns.deinit(allocator);
@@ -121,8 +136,10 @@ fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
 
 fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) void {
     property.tags.deinit(allocator);
+    property.doc_blocks.deinit(allocator);
     property.tests.deinit(allocator);
     for (property.columns.items) |*column| {
+        column.doc_blocks.deinit(allocator);
         column.tests.deinit(allocator);
     }
     property.columns.deinit(allocator);
@@ -189,15 +206,21 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
         defer sql_files.deinit(runtime.allocator);
         var yaml_files: std.ArrayList([]const u8) = .empty;
         defer yaml_files.deinit(runtime.allocator);
+        var md_files: std.ArrayList([]const u8) = .empty;
+        defer md_files.deinit(runtime.allocator);
 
         const root = try pathJoin(runtime.allocator, &.{ project_dir, model_path });
-        discoverFiles(runtime, root, model_path, &sql_files, &yaml_files) catch |err| switch (err) {
+        discoverFiles(runtime, root, model_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
         sortStrings(sql_files.items);
         sortStrings(yaml_files.items);
+        sortStrings(md_files.items);
 
+        for (md_files.items) |md_path| {
+            try parseDocBlocks(runtime, project_dir, model_path, md_path, config.name, &graph);
+        }
         for (yaml_files.items) |yaml_path| {
             try parseYamlProperties(runtime, project_dir, yaml_path, config.name, &graph);
         }
@@ -225,8 +248,10 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     try applyModelProperties(&graph);
     sortNodes(graph.nodes.items);
     sortSources(graph.sources.items);
+    sortDocs(graph.docs.items);
     try rejectDuplicateModels(&graph);
     try rejectDuplicateSeeds(&graph);
+    try rejectDuplicateDocs(&graph);
     return graph;
 }
 
@@ -297,7 +322,7 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
     return config;
 }
 
-fn discoverFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8)) !void {
+fn discoverFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8), md_files: *std.ArrayList([]const u8)) !void {
     var dir = try std.Io.Dir.cwd().openDir(runtime.io, absolute_dir, .{ .iterate = true });
     defer dir.close(runtime.io);
 
@@ -315,12 +340,14 @@ fn discoverFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []con
         const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
         const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
         switch (entry.kind) {
-            .directory => try discoverFiles(runtime, child_abs, child_rel, sql_files, yaml_files),
+            .directory => try discoverFiles(runtime, child_abs, child_rel, sql_files, yaml_files, md_files),
             .file => {
                 if (std.mem.endsWith(u8, entry.name, ".sql")) {
                     try sql_files.append(runtime.allocator, child_rel);
                 } else if (std.mem.endsWith(u8, entry.name, ".yml") or std.mem.endsWith(u8, entry.name, ".yaml")) {
                     try yaml_files.append(runtime.allocator, child_rel);
+                } else if (std.mem.endsWith(u8, entry.name, ".md")) {
+                    try md_files.append(runtime.allocator, child_rel);
                 }
             },
             else => {},
@@ -347,6 +374,39 @@ fn discoverSeedFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: [
             },
             else => {},
         }
+    }
+}
+
+fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
+    const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
+        const close = std.mem.indexOfPos(u8, text, open + 2, "%}") orelse return error.MalformedDocsBlock;
+        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
+        if (!std.mem.startsWith(u8, tag, "docs")) {
+            index = close + 2;
+            continue;
+        }
+        if (tag.len <= "docs".len or !std.ascii.isWhitespace(tag["docs".len])) return error.MalformedDocsBlock;
+        const raw_name = std.mem.trim(u8, tag["docs".len..], " \t\r\n");
+        if (raw_name.len == 0 or std.mem.indexOfAny(u8, raw_name, " \t\r\n(){}") != null) return error.MalformedDocsBlock;
+
+        const end_open = std.mem.indexOfPos(u8, text, close + 2, "{%") orelse return error.MalformedDocsBlock;
+        const end_close = std.mem.indexOfPos(u8, text, end_open + 2, "%}") orelse return error.MalformedDocsBlock;
+        const end_tag = std.mem.trim(u8, text[end_open + 2 .. end_close], " \t\r\n-");
+        if (!std.mem.eql(u8, end_tag, "enddocs")) return error.MalformedDocsBlock;
+
+        const block_contents = std.mem.trim(u8, text[close + 2 .. end_open], " \t\r\n");
+        const unique_id = try std.fmt.allocPrint(runtime.allocator, "doc.{s}.{s}", .{ package_name, raw_name });
+        try graph.docs.append(runtime.allocator, .{
+            .unique_id = unique_id,
+            .name = try runtime.allocator.dupe(u8, raw_name),
+            .path = relativeUnderResourcePath(relative_path, model_root),
+            .original_file_path = relative_path,
+            .block_contents = try runtime.allocator.dupe(u8, block_contents),
+        });
+        index = end_close + 2;
     }
 }
 
@@ -603,7 +663,7 @@ fn applyModelProperties(graph: *Graph) !void {
         };
         var node = &graph.nodes.items[node_index];
         node.patch_path = property.patch_path;
-        if (property.description.len != 0) node.description = property.description;
+        if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.description, &node.doc_blocks);
         if (property.materialized.len != 0) node.materialized = property.materialized;
         if (property.enabled) |enabled| node.enabled = enabled;
         for (property.tags.items) |tag| {
@@ -615,7 +675,7 @@ fn applyModelProperties(graph: *Graph) !void {
         }
         sortStrings(node.tests.items);
         for (property.columns.items) |column| {
-            try appendColumnClone(graph.allocator, &node.columns, column);
+            try appendColumnClone(graph, &node.columns, column);
         }
         sortColumns(node.columns.items);
     }
@@ -627,25 +687,29 @@ fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
     }
 }
 
-fn appendColumnClone(allocator: std.mem.Allocator, columns: *std.ArrayList(ColumnDef), source: ColumnDef) !void {
+fn appendColumnClone(graph: *Graph, columns: *std.ArrayList(ColumnDef), source: ColumnDef) !void {
     for (columns.items) |*existing| {
         if (std.mem.eql(u8, existing.name, source.name)) {
-            if (source.description.len != 0) existing.description = source.description;
+            if (source.description.len != 0) existing.description = try resolveDocDescription(graph, source.description, &existing.doc_blocks);
             for (source.tests.items) |test_name| {
-                try appendUnique(allocator, &existing.tests, test_name);
+                try appendUnique(graph.allocator, &existing.tests, test_name);
             }
             sortStrings(existing.tests.items);
             return;
         }
     }
 
-    var column = ColumnDef{ .name = source.name, .description = source.description };
-    errdefer column.tests.deinit(allocator);
+    var column = ColumnDef{ .name = source.name };
+    errdefer {
+        column.doc_blocks.deinit(graph.allocator);
+        column.tests.deinit(graph.allocator);
+    }
+    if (source.description.len != 0) column.description = try resolveDocDescription(graph, source.description, &column.doc_blocks);
     for (source.tests.items) |test_name| {
-        try appendUnique(allocator, &column.tests, test_name);
+        try appendUnique(graph.allocator, &column.tests, test_name);
     }
     sortStrings(column.tests.items);
-    try columns.append(allocator, column);
+    try columns.append(graph.allocator, column);
 }
 
 fn rejectDuplicateModels(graph: *const Graph) !void {
@@ -676,6 +740,40 @@ fn rejectDuplicateSeeds(graph: *const Graph) !void {
             }
         }
     }
+}
+
+fn rejectDuplicateDocs(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.docs.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.docs.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.docs.items[i].unique_id, graph.docs.items[j].unique_id)) {
+                return error.DuplicateDocName;
+            }
+        }
+    }
+}
+
+fn resolveDocDescription(graph: *Graph, description: []const u8, doc_blocks: *std.ArrayList([]const u8)) ![]const u8 {
+    const trimmed = std.mem.trim(u8, description, " \t\r\n");
+    if (std.mem.indexOf(u8, trimmed, "{{") == null) return description;
+    if (!std.mem.startsWith(u8, trimmed, "{{") or !std.mem.endsWith(u8, trimmed, "}}")) return error.UnsupportedDynamicDoc;
+
+    const span = std.mem.trim(u8, trimmed[2 .. trimmed.len - 2], " \t\r\n-");
+    if (!std.mem.startsWith(u8, span, "doc")) return error.UnsupportedDynamicDoc;
+    const call_pos = skipWs(span, "doc".len);
+    if (call_pos >= span.len or span[call_pos] != '(') return error.UnsupportedDynamicDoc;
+    const close = findMatchingParen(span, call_pos) orelse return error.UnsupportedDynamicDoc;
+    if (std.mem.trim(u8, span[close + 1 ..], " \t\r\n").len != 0) return error.UnsupportedDynamicDoc;
+    var strings = try parseLiteralArgs(graph.allocator, span[call_pos + 1 .. close], error.UnsupportedDynamicDoc);
+    defer strings.deinit(graph.allocator);
+    if (strings.items.len != 1) return error.UnsupportedDynamicDoc;
+
+    const unique_id = try std.fmt.allocPrint(graph.allocator, "doc.{s}.{s}", .{ graph.project_name, strings.items[0] });
+    const doc = findDoc(graph, unique_id) orelse return error.UnresolvedDoc;
+    try appendUnique(graph.allocator, doc_blocks, doc.unique_id);
+    sortStrings(doc_blocks.items);
+    return doc.block_contents;
 }
 
 fn resolveDependencies(graph: *Graph) !void {
@@ -966,7 +1064,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
 
     try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": null, \"dbt_version\": null, \"project_name\": ");
     try writeJsonString(writer, graph.project_name);
-    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"dxt_metadata\": {\"artifact_kind\": \"partial_manifest\", \"compatibility_target\": \"dbt-manifest-v12-slice\", \"supported_surface\": [\"model\", \"seed\", \"source\", \"literal_ref\", \"literal_source\", \"inline_config\", \"model_properties\", \"disabled_models\"]},\n  \"nodes\": {");
+    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"dxt_metadata\": {\"artifact_kind\": \"partial_manifest\", \"compatibility_target\": \"dbt-manifest-v12-slice\", \"supported_surface\": [\"model\", \"seed\", \"source\", \"docs\", \"literal_ref\", \"literal_source\", \"literal_doc\", \"inline_config\", \"model_properties\", \"disabled_models\"]},\n  \"nodes\": {");
     var node_index: usize = 0;
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
@@ -994,7 +1092,26 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writeJsonString(writer, normalizeForDisplay(source.original_file_path));
         try writer.writeAll("}");
     }
-    try writer.writeAll("\n  },\n  \"macros\": {},\n  \"docs\": {},\n  \"exposures\": {},\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"disabled\": {");
+    try writer.writeAll("\n  },\n  \"macros\": {},\n  \"docs\": {");
+    for (graph.docs.items, 0..) |doc, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, doc.unique_id);
+        try writer.writeAll(": {\"unique_id\":");
+        try writeJsonString(writer, doc.unique_id);
+        try writer.writeAll(",\"resource_type\":\"doc\",\"package_name\":");
+        try writeJsonString(writer, graph.project_name);
+        try writer.writeAll(",\"name\":");
+        try writeJsonString(writer, doc.name);
+        try writer.writeAll(",\"path\":");
+        try writeJsonString(writer, normalizeForDisplay(doc.path));
+        try writer.writeAll(",\"original_file_path\":");
+        try writeJsonString(writer, normalizeForDisplay(doc.original_file_path));
+        try writer.writeAll(",\"block_contents\":");
+        try writeJsonString(writer, doc.block_contents);
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("\n  },\n  \"exposures\": {},\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"disabled\": {");
     var disabled_index: usize = 0;
     for (graph.nodes.items) |node| {
         if (node.enabled) continue;
@@ -1083,6 +1200,8 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
     try writeJsonString(writer, node.raw_code);
     try writer.writeAll(",\"description\":");
     try writeJsonString(writer, node.description);
+    try writer.writeAll(",\"doc_blocks\":");
+    try writeStringArray(writer, node.doc_blocks.items);
     try writer.writeAll(",\"columns\":{");
     for (node.columns.items, 0..) |column, index| {
         if (index != 0) try writer.writeAll(",");
@@ -1091,7 +1210,9 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
         try writeJsonString(writer, column.name);
         try writer.writeAll(",\"description\":");
         try writeJsonString(writer, column.description);
-        try writer.writeAll(",\"meta\":{},\"data_type\":null,\"quote\":null,\"tags\":[],\"config\":{}}");
+        try writer.writeAll(",\"meta\":{},\"data_type\":null,\"quote\":null,\"tags\":[],\"config\":{},\"doc_blocks\":");
+        try writeStringArray(writer, column.doc_blocks.items);
+        try writer.writeAll("}");
     }
     try writer.writeAll("},\"config\":{\"enabled\":");
     try writer.writeAll(if (node.enabled) "true" else "false");
@@ -1244,6 +1365,14 @@ fn sortSources(sources: []SourceDef) void {
     }.lessThan);
 }
 
+fn sortDocs(docs: []DocBlock) void {
+    std.mem.sort(DocBlock, docs, {}, struct {
+        fn lessThan(_: void, a: DocBlock, b: DocBlock) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
 fn sortColumns(columns: []ColumnDef) void {
     std.mem.sort(ColumnDef, columns, {}, struct {
         fn lessThan(_: void, a: ColumnDef, b: ColumnDef) bool {
@@ -1324,6 +1453,13 @@ fn hasDisabledNode(graph: *const Graph, unique_id: []const u8) bool {
         if (!node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return true;
     }
     return false;
+}
+
+fn findDoc(graph: *const Graph, unique_id: []const u8) ?DocBlock {
+    for (graph.docs.items) |doc| {
+        if (std.mem.eql(u8, doc.unique_id, unique_id)) return doc;
+    }
+    return null;
 }
 
 fn findModelIndexByName(graph: *const Graph, name: []const u8) ?usize {
