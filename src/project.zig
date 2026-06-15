@@ -36,6 +36,40 @@ const SourceDef = struct {
     original_file_path: []const u8,
 };
 
+const ExposureDef = struct {
+    unique_id: []const u8,
+    name: []const u8,
+    exposure_type: []const u8 = "",
+    enabled: bool = true,
+    maturity: ?[]const u8 = null,
+    url: ?[]const u8 = null,
+    description: []const u8 = "",
+    owner_name: []const u8 = "",
+    owner_email: ?[]const u8 = null,
+    path: []const u8,
+    original_file_path: []const u8,
+    tags: std.ArrayList([]const u8) = .empty,
+    meta: std.ArrayList(MetaEntry) = .empty,
+    refs: std.ArrayList(RefDep) = .empty,
+    source_refs: std.ArrayList(SourceDep) = .empty,
+    depends_on: std.ArrayList([]const u8) = .empty,
+};
+
+const MetaEntry = struct {
+    key: []const u8,
+    value: JsonScalar,
+};
+
+const JsonScalar = struct {
+    text: []const u8,
+    kind: enum {
+        string,
+        number,
+        bool,
+        null,
+    } = .string,
+};
+
 const RefDep = struct {
     package: ?[]const u8,
     name: []const u8,
@@ -159,6 +193,7 @@ const Graph = struct {
     nodes: std.ArrayList(Node) = .empty,
     tests: std.ArrayList(GenericTestNode) = .empty,
     sources: std.ArrayList(SourceDef) = .empty,
+    exposures: std.ArrayList(ExposureDef) = .empty,
     docs: std.ArrayList(DocBlock) = .empty,
     macros: std.ArrayList(MacroDef) = .empty,
     model_properties: std.ArrayList(ModelProperty) = .empty,
@@ -173,6 +208,9 @@ const Graph = struct {
         for (self.tests.items) |*test_node| {
             deinitGenericTestNode(self.allocator, test_node);
         }
+        for (self.exposures.items) |*exposure| {
+            deinitExposureDef(self.allocator, exposure);
+        }
         for (self.model_properties.items) |*property| {
             deinitModelProperty(self.allocator, property);
         }
@@ -185,6 +223,7 @@ const Graph = struct {
         self.nodes.deinit(self.allocator);
         self.tests.deinit(self.allocator);
         self.sources.deinit(self.allocator);
+        self.exposures.deinit(self.allocator);
         self.docs.deinit(self.allocator);
         self.macros.deinit(self.allocator);
         self.model_properties.deinit(self.allocator);
@@ -213,6 +252,14 @@ fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNo
     test_node.accepted_values.deinit(allocator);
     test_node.depends_on.deinit(allocator);
     test_node.macro_depends_on.deinit(allocator);
+}
+
+fn deinitExposureDef(allocator: std.mem.Allocator, exposure: *ExposureDef) void {
+    exposure.tags.deinit(allocator);
+    exposure.meta.deinit(allocator);
+    exposure.refs.deinit(allocator);
+    exposure.source_refs.deinit(allocator);
+    exposure.depends_on.deinit(allocator);
 }
 
 fn deinitMacro(allocator: std.mem.Allocator, macro: *MacroDef) void {
@@ -260,10 +307,11 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest = try renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest });
-    try stdout.print("Parsed {d} model(s), {d} seed(s), and {d} source(s) into {s}\n", .{
+    try stdout.print("Parsed {d} model(s), {d} seed(s), {d} source(s), and {d} exposure(s) into {s}\n", .{
         active_models,
         active_seeds,
         graph.sources.items.len,
+        countActiveExposures(&graph),
         normalizeForDisplay(manifest_path),
     });
 }
@@ -273,7 +321,10 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
     defer graph.deinit();
 
     try resolveDependencies(&graph);
-    const selected = try selectResources(runtime.allocator, &graph, options);
+    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
+    const resource_type = if (options.resource_type) |value| try runtime.allocator.dupe(u8, value) else null;
+    const selected = try selectResources(runtime.allocator, &graph, resource_type, select, exclude);
     if (options.output == .json) {
         try writeSelectedJson(stdout, selected);
     } else {
@@ -315,7 +366,7 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
         sortStrings(macro_yaml_files.items);
 
         for (macro_yaml_files.items) |yaml_path| {
-            try parseYamlProperties(runtime, project_dir, yaml_path, config.name, &graph);
+            try parseYamlProperties(runtime, project_dir, macro_path, yaml_path, config.name, &graph);
         }
         for (macro_files.items) |relative_path| {
             try parseMacros(runtime, project_dir, relative_path, config.name, &graph);
@@ -343,7 +394,7 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
             try parseDocBlocks(runtime, project_dir, model_path, md_path, config.name, &graph);
         }
         for (yaml_files.items) |yaml_path| {
-            try parseYamlProperties(runtime, project_dir, yaml_path, config.name, &graph);
+            try parseYamlProperties(runtime, project_dir, model_path, yaml_path, config.name, &graph);
         }
         for (sql_files.items) |sql_path| {
             try parseModel(runtime, project_dir, model_path, sql_path, config.name, &graph);
@@ -373,11 +424,13 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     sortNodes(graph.nodes.items);
     sortTests(graph.tests.items);
     sortSources(graph.sources.items);
+    sortExposures(graph.exposures.items);
     sortDocs(graph.docs.items);
     sortMacros(graph.macros.items);
     try rejectDuplicateModels(&graph);
     try rejectDuplicateSeeds(&graph);
     try rejectDuplicateDocs(&graph);
+    try rejectDuplicateExposures(&graph);
     try rejectDuplicateMacros(&graph);
     try resolveMacroDependencies(&graph);
     return graph;
@@ -470,11 +523,12 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
 }
 
 fn discoverFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8), md_files: *std.ArrayList([]const u8)) !void {
-    var dir = try std.Io.Dir.cwd().openDir(runtime.io, absolute_dir, .{ .iterate = true });
-    defer dir.close(runtime.io);
+    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
+    defer closeLinuxFd(fd);
 
-    var iter = dir.iterate();
-    while (try iter.next(runtime.io)) |entry| {
+    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
+    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
+    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
         if (entry.name.len == 0 or entry.name[0] == '.') continue;
         if (std.mem.eql(u8, entry.name, "target") or
             std.mem.eql(u8, entry.name, "dbt_packages") or
@@ -486,9 +540,13 @@ fn discoverFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []con
 
         const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
         const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
+        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
+            try discoverFiles(runtime, child_abs, child_rel, sql_files, yaml_files, md_files);
+            continue;
+        }
         switch (entry.kind) {
             .directory => try discoverFiles(runtime, child_abs, child_rel, sql_files, yaml_files, md_files),
-            .file => {
+            .file, .unknown => {
                 if (std.mem.endsWith(u8, entry.name, ".sql")) {
                     try sql_files.append(runtime.allocator, child_rel);
                 } else if (std.mem.endsWith(u8, entry.name, ".yml") or std.mem.endsWith(u8, entry.name, ".yaml")) {
@@ -503,18 +561,23 @@ fn discoverFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []con
 }
 
 fn discoverSeedFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, seed_files: *std.ArrayList([]const u8)) !void {
-    var dir = try std.Io.Dir.cwd().openDir(runtime.io, absolute_dir, .{ .iterate = true });
-    defer dir.close(runtime.io);
+    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
+    defer closeLinuxFd(fd);
 
-    var iter = dir.iterate();
-    while (try iter.next(runtime.io)) |entry| {
+    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
+    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
+    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
         if (entry.name.len == 0 or entry.name[0] == '.') continue;
 
         const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
         const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
+        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
+            try discoverSeedFiles(runtime, child_abs, child_rel, seed_files);
+            continue;
+        }
         switch (entry.kind) {
             .directory => try discoverSeedFiles(runtime, child_abs, child_rel, seed_files),
-            .file => {
+            .file, .unknown => {
                 if (std.mem.endsWith(u8, entry.name, ".csv")) {
                     try seed_files.append(runtime.allocator, child_rel);
                 }
@@ -525,11 +588,12 @@ fn discoverSeedFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: [
 }
 
 fn discoverSqlFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8)) !void {
-    var dir = try std.Io.Dir.cwd().openDir(runtime.io, absolute_dir, .{ .iterate = true });
-    defer dir.close(runtime.io);
+    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
+    defer closeLinuxFd(fd);
 
-    var iter = dir.iterate();
-    while (try iter.next(runtime.io)) |entry| {
+    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
+    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
+    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
         if (entry.name.len == 0 or entry.name[0] == '.') continue;
         if (std.mem.eql(u8, entry.name, "target") or
             std.mem.eql(u8, entry.name, "dbt_packages") or
@@ -541,9 +605,13 @@ fn discoverSqlFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []
 
         const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
         const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
+        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
+            try discoverSqlFiles(runtime, child_abs, child_rel, sql_files);
+            continue;
+        }
         switch (entry.kind) {
             .directory => try discoverSqlFiles(runtime, child_abs, child_rel, sql_files),
-            .file => {
+            .file, .unknown => {
                 if (std.mem.endsWith(u8, entry.name, ".sql")) {
                     try sql_files.append(runtime.allocator, child_rel);
                 }
@@ -554,11 +622,12 @@ fn discoverSqlFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []
 }
 
 fn discoverMacroFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8)) !void {
-    var dir = try std.Io.Dir.cwd().openDir(runtime.io, absolute_dir, .{ .iterate = true });
-    defer dir.close(runtime.io);
+    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
+    defer closeLinuxFd(fd);
 
-    var iter = dir.iterate();
-    while (try iter.next(runtime.io)) |entry| {
+    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
+    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
+    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
         if (entry.name.len == 0 or entry.name[0] == '.') continue;
         if (std.mem.eql(u8, entry.name, "target") or
             std.mem.eql(u8, entry.name, "dbt_packages") or
@@ -570,9 +639,13 @@ fn discoverMacroFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: 
 
         const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
         const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
+        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
+            try discoverMacroFiles(runtime, child_abs, child_rel, sql_files, yaml_files);
+            continue;
+        }
         switch (entry.kind) {
             .directory => try discoverMacroFiles(runtime, child_abs, child_rel, sql_files, yaml_files),
-            .file => {
+            .file, .unknown => {
                 if (std.mem.endsWith(u8, entry.name, ".sql")) {
                     try sql_files.append(runtime.allocator, child_rel);
                 } else if (std.mem.endsWith(u8, entry.name, ".yml") or std.mem.endsWith(u8, entry.name, ".yaml")) {
@@ -581,6 +654,83 @@ fn discoverMacroFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: 
             },
             else => {},
         }
+    }
+}
+
+const LinuxDirEntry = struct {
+    name: [:0]const u8,
+    kind: std.Io.File.Kind,
+};
+
+const LinuxDirReadState = struct {
+    fd: std.os.linux.fd_t,
+    buffer: []u8,
+    index: usize = 0,
+    end: usize = 0,
+};
+
+// Keep discovery synchronous and deterministic on mounts that report DT_UNKNOWN
+// or behave poorly with the experimental std.Io directory iterator.
+fn openLinuxDirectory(allocator: std.mem.Allocator, path: []const u8) !std.os.linux.fd_t {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const rc = std.os.linux.openat(std.os.linux.AT.FDCWD, path_z.ptr, .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .NOENT => error.FileNotFound,
+        .NOTDIR => error.NotDir,
+        .ACCES => error.AccessDenied,
+        else => error.Unexpected,
+    };
+}
+
+fn closeLinuxFd(fd: std.os.linux.fd_t) void {
+    _ = std.os.linux.close(fd);
+}
+
+fn linuxPathIsDirectory(allocator: std.mem.Allocator, path: []const u8) !bool {
+    const fd = openLinuxDirectory(allocator, path) catch |err| switch (err) {
+        error.NotDir => return false,
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    closeLinuxFd(fd);
+    return true;
+}
+
+fn nextLinuxDirectoryEntry(state: *LinuxDirReadState) !?LinuxDirEntry {
+    while (true) {
+        if (state.index >= state.end) {
+            const rc = std.os.linux.getdents64(state.fd, state.buffer.ptr, state.buffer.len);
+            switch (std.os.linux.errno(rc)) {
+                .SUCCESS => {},
+                .INTR => continue,
+                else => return error.Unexpected,
+            }
+            if (rc == 0) return null;
+            state.index = 0;
+            state.end = rc;
+        }
+
+        const linux_entry: *align(1) std.os.linux.dirent64 = @ptrCast(&state.buffer[state.index]);
+        state.index += linux_entry.reclen;
+
+        const name_ptr: [*]u8 = &linux_entry.name;
+        const padded_name = name_ptr[0 .. linux_entry.reclen - @offsetOf(std.os.linux.dirent64, "name")];
+        const name_len = std.mem.findScalar(u8, padded_name, 0).?;
+        const name = name_ptr[0..name_len :0];
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+
+        return .{
+            .name = name,
+            .kind = switch (linux_entry.type) {
+                std.os.linux.DT.DIR => .directory,
+                std.os.linux.DT.REG => .file,
+                std.os.linux.DT.LNK => .sym_link,
+                else => .unknown,
+            },
+        };
     }
 }
 
@@ -671,11 +821,12 @@ fn findEndMacroTag(text: []const u8, start: usize) !MacroEndTag {
     return error.MalformedMacroBlock;
 }
 
-fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
 
     try parseSourcesFromText(runtime.allocator, text, relative_path, package_name, graph);
+    try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseModelPropertiesFromText(runtime.allocator, text, relative_path, graph);
     try parseMacroPropertiesFromText(runtime.allocator, text, relative_path, graph);
 }
@@ -735,6 +886,190 @@ fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, relative
             }
         }
     }
+}
+
+fn parseExposuresFromText(allocator: std.mem.Allocator, text: []const u8, resource_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    var in_exposures = false;
+    var in_depends_on = false;
+    var in_owner = false;
+    var in_config = false;
+    var in_meta = false;
+    var exposures_indent: usize = 0;
+    var exposure_item_indent: ?usize = null;
+    var depends_on_indent: usize = 0;
+    var owner_indent: usize = 0;
+    var config_indent: usize = 0;
+    var meta_indent: usize = 0;
+    var current_exposure: ?usize = null;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (std.mem.eql(u8, trimmed, "exposures:")) {
+            in_exposures = true;
+            in_depends_on = false;
+            in_owner = false;
+            in_config = false;
+            in_meta = false;
+            exposures_indent = indent;
+            exposure_item_indent = null;
+            current_exposure = null;
+            continue;
+        }
+        if (!in_exposures) continue;
+        if (indent <= exposures_indent and !std.mem.eql(u8, trimmed, "exposures:")) {
+            in_exposures = false;
+            in_depends_on = false;
+            in_owner = false;
+            in_config = false;
+            in_meta = false;
+            current_exposure = null;
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "- name:")) {
+            if (exposure_item_indent == null or indent == exposure_item_indent.?) {
+                exposure_item_indent = indent;
+                in_depends_on = false;
+                in_owner = false;
+                in_config = false;
+                in_meta = false;
+                const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
+                const unique_id = try std.fmt.allocPrint(allocator, "exposure.{s}.{s}", .{ package_name, name });
+                try graph.exposures.append(allocator, .{
+                    .unique_id = unique_id,
+                    .name = name,
+                    .path = relativeUnderResourcePath(relative_path, resource_root),
+                    .original_file_path = relative_path,
+                });
+                current_exposure = graph.exposures.items.len - 1;
+                continue;
+            }
+        }
+
+        const exposure_index = current_exposure orelse continue;
+        if (exposure_item_indent) |item_indent| {
+            if (indent <= item_indent and !std.mem.startsWith(u8, trimmed, "- name:")) {
+                in_depends_on = false;
+                in_owner = false;
+                in_config = false;
+                in_meta = false;
+            }
+        }
+
+        if (std.mem.eql(u8, trimmed, "depends_on:")) {
+            in_depends_on = true;
+            in_owner = false;
+            in_config = false;
+            in_meta = false;
+            depends_on_indent = indent;
+            continue;
+        }
+        if (std.mem.eql(u8, trimmed, "owner:")) {
+            in_owner = true;
+            in_depends_on = false;
+            in_config = false;
+            in_meta = false;
+            owner_indent = indent;
+            continue;
+        }
+        if (std.mem.eql(u8, trimmed, "config:")) {
+            in_config = true;
+            in_depends_on = false;
+            in_owner = false;
+            in_meta = false;
+            config_indent = indent;
+            continue;
+        }
+        if (std.mem.eql(u8, trimmed, "meta:")) {
+            in_meta = true;
+            in_depends_on = false;
+            in_owner = false;
+            meta_indent = indent;
+            continue;
+        }
+        if (in_depends_on and indent <= depends_on_indent) in_depends_on = false;
+        if (in_owner and indent <= owner_indent) in_owner = false;
+        if (in_config and indent <= config_indent) in_config = false;
+        if (in_meta and indent <= meta_indent) in_meta = false;
+
+        if (in_depends_on and std.mem.startsWith(u8, trimmed, "- ")) {
+            try parseExposureDependency(allocator, trimmed[2..], &graph.exposures.items[exposure_index]);
+            continue;
+        }
+
+        if (splitKeyValue(trimmed)) |kv| {
+            const value = try dupTrimmedScalar(allocator, kv.value);
+            if (in_meta) {
+                try appendMetaEntry(allocator, &graph.exposures.items[exposure_index].meta, kv.key, try parseJsonScalar(allocator, kv.value));
+                continue;
+            }
+            if (in_owner) {
+                if (std.mem.eql(u8, kv.key, "name")) {
+                    graph.exposures.items[exposure_index].owner_name = value;
+                } else if (std.mem.eql(u8, kv.key, "email")) {
+                    graph.exposures.items[exposure_index].owner_email = value;
+                }
+                continue;
+            }
+            if (in_config) {
+                if (std.mem.eql(u8, kv.key, "enabled")) {
+                    graph.exposures.items[exposure_index].enabled = try parseBool(kv.value);
+                } else if (std.mem.eql(u8, kv.key, "tags")) {
+                    try parseInlineStringList(allocator, kv.value, &graph.exposures.items[exposure_index].tags);
+                    sortStrings(graph.exposures.items[exposure_index].tags.items);
+                } else if (std.mem.eql(u8, kv.key, "meta") and std.mem.trim(u8, kv.value, " \t").len == 0) {
+                    in_meta = true;
+                    meta_indent = indent;
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, kv.key, "type")) {
+                graph.exposures.items[exposure_index].exposure_type = value;
+            } else if (std.mem.eql(u8, kv.key, "maturity")) {
+                graph.exposures.items[exposure_index].maturity = value;
+            } else if (std.mem.eql(u8, kv.key, "url")) {
+                graph.exposures.items[exposure_index].url = value;
+            } else if (std.mem.eql(u8, kv.key, "description")) {
+                graph.exposures.items[exposure_index].description = value;
+            } else if (std.mem.eql(u8, kv.key, "tags")) {
+                try parseInlineStringList(allocator, kv.value, &graph.exposures.items[exposure_index].tags);
+                sortStrings(graph.exposures.items[exposure_index].tags.items);
+            }
+        }
+    }
+}
+
+fn parseExposureDependency(allocator: std.mem.Allocator, raw_value: []const u8, exposure: *ExposureDef) !void {
+    const value = std.mem.trim(u8, raw_value, " \t\r");
+    if (std.mem.startsWith(u8, value, "ref(")) {
+        const args_start = std.mem.indexOfScalar(u8, value, '(') orelse return error.UnsupportedDynamicRef;
+        const args_end = findMatchingParen(value, args_start) orelse return error.UnsupportedDynamicRef;
+        var strings = try parseLiteralArgs(allocator, value[args_start + 1 .. args_end], error.UnsupportedDynamicRef);
+        defer strings.deinit(allocator);
+        if (strings.items.len == 1) {
+            try exposure.refs.append(allocator, .{ .package = null, .name = strings.items[0] });
+        } else if (strings.items.len == 2) {
+            try exposure.refs.append(allocator, .{ .package = strings.items[0], .name = strings.items[1] });
+        } else {
+            return error.UnsupportedDynamicRef;
+        }
+        return;
+    }
+    if (std.mem.startsWith(u8, value, "source(")) {
+        const args_start = std.mem.indexOfScalar(u8, value, '(') orelse return error.UnsupportedDynamicSource;
+        const args_end = findMatchingParen(value, args_start) orelse return error.UnsupportedDynamicSource;
+        var strings = try parseLiteralArgs(allocator, value[args_start + 1 .. args_end], error.UnsupportedDynamicSource);
+        defer strings.deinit(allocator);
+        if (strings.items.len != 2) return error.UnsupportedDynamicSource;
+        try exposure.source_refs.append(allocator, .{ .source_name = strings.items[0], .table_name = strings.items[1] });
+        return;
+    }
+    return error.UnsupportedYaml;
 }
 
 const TestTarget = enum {
@@ -1257,6 +1592,18 @@ fn rejectDuplicateDocs(graph: *const Graph) !void {
     }
 }
 
+fn rejectDuplicateExposures(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.exposures.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.exposures.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.exposures.items[i].unique_id, graph.exposures.items[j].unique_id)) {
+                return error.DuplicateExposureName;
+            }
+        }
+    }
+}
+
 fn rejectDuplicateMacroProperties(graph: *const Graph) !void {
     var i: usize = 0;
     while (i < graph.macro_properties.items.len) : (i += 1) {
@@ -1335,6 +1682,27 @@ fn resolveDependencies(graph: *Graph) !void {
             try appendUnique(graph.allocator, &node.depends_on, unique_id);
         }
         sortStrings(node.depends_on.items);
+    }
+    for (graph.exposures.items) |*exposure| {
+        if (!exposure.enabled) continue;
+        for (exposure.refs.items) |ref_dep| {
+            const package = ref_dep.package orelse graph.project_name;
+            const model_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, ref_dep.name });
+            if (hasDisabledNode(graph, model_id)) return error.DisabledRef;
+            if (hasNode(graph, model_id)) {
+                try appendUnique(graph.allocator, &exposure.depends_on, model_id);
+                continue;
+            }
+            const seed_id = try std.fmt.allocPrint(graph.allocator, "seed.{s}.{s}", .{ package, ref_dep.name });
+            if (!hasNode(graph, seed_id)) return error.UnresolvedRef;
+            try appendUnique(graph.allocator, &exposure.depends_on, seed_id);
+        }
+        for (exposure.source_refs.items) |source_dep| {
+            const unique_id = try std.fmt.allocPrint(graph.allocator, "source.{s}.{s}.{s}", .{ graph.project_name, source_dep.source_name, source_dep.table_name });
+            if (!hasSource(graph, unique_id)) return error.UnresolvedSource;
+            try appendUnique(graph.allocator, &exposure.depends_on, unique_id);
+        }
+        sortStrings(exposure.depends_on.items);
     }
 }
 
@@ -1582,28 +1950,37 @@ const SelectedResource = struct {
 };
 
 const SelectorSpec = struct {
-    value: []const u8,
-    include_parents: bool,
-    include_children: bool,
+    active: bool = false,
+    value: []const u8 = "",
+    include_parents: bool = false,
+    include_children: bool = false,
 };
 
-fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, options: Options) ![]SelectedResource {
+fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8) ![]SelectedResource {
+    const select_spec = parseSelectorSpec(select);
+    const exclude_spec = parseSelectorSpec(exclude);
     var selected: std.ArrayList(SelectedResource) = .empty;
     errdefer selected.deinit(allocator);
-    for (graph.nodes.items) |node| {
+    for (graph.nodes.items) |*node| {
         if (!node.enabled) continue;
-        if (matchesResourceType(options.resource_type, node.resource_type) and matchesSelector(graph, node, options.select) and (options.exclude == null or !matchesSelector(graph, node, options.exclude))) {
+        if (matchesResourceType(resource_type, node.resource_type) and matchesSelector(graph, node, select_spec) and (!exclude_spec.active or !matchesSelector(graph, node, exclude_spec))) {
             try selected.append(allocator, .{ .unique_id = node.unique_id, .name = node.name, .resource_type = node.resource_type });
         }
     }
-    for (graph.tests.items) |test_node| {
-        if (matchesResourceType(options.resource_type, "test") and matchesTestSelector(graph, test_node, options.select) and (options.exclude == null or !matchesTestSelector(graph, test_node, options.exclude))) {
+    for (graph.tests.items) |*test_node| {
+        if (matchesResourceType(resource_type, "test") and matchesTestSelector(graph, test_node, select_spec) and (!exclude_spec.active or !matchesTestSelector(graph, test_node, exclude_spec))) {
             try selected.append(allocator, .{ .unique_id = test_node.unique_id, .name = test_node.name, .resource_type = "test" });
         }
     }
-    for (graph.sources.items) |source| {
-        if (matchesResourceType(options.resource_type, "source") and matchesSourceSelector(graph, source, options.select) and (options.exclude == null or !matchesSourceSelector(graph, source, options.exclude))) {
+    for (graph.sources.items) |*source| {
+        if (matchesResourceType(resource_type, "source") and matchesSourceSelector(graph, source, select_spec) and (!exclude_spec.active or !matchesSourceSelector(graph, source, exclude_spec))) {
             try selected.append(allocator, .{ .unique_id = source.unique_id, .name = source.table_name, .resource_type = "source" });
+        }
+    }
+    for (graph.exposures.items) |*exposure| {
+        if (!exposure.enabled) continue;
+        if (matchesResourceType(resource_type, "exposure") and matchesExposureSelector(graph, exposure, select_spec) and (!exclude_spec.active or !matchesExposureSelector(graph, exposure, exclude_spec))) {
+            try selected.append(allocator, .{ .unique_id = exposure.unique_id, .name = exposure.name, .resource_type = "exposure" });
         }
     }
     std.mem.sort(SelectedResource, selected.items, {}, struct {
@@ -1619,14 +1996,14 @@ fn matchesResourceType(requested: ?[]const u8, actual: []const u8) bool {
     return true;
 }
 
-fn matchesSelector(graph: *const Graph, node: Node, selector: ?[]const u8) bool {
-    const spec = parseSelectorSpec(selector) orelse return true;
+fn matchesSelector(graph: *const Graph, node: *const Node, spec: SelectorSpec) bool {
+    if (!spec.active) return true;
     if (spec.value.len == 0) return true;
     if (matchesNodeSelectorDirect(node, spec.value)) return true;
     return matchesGraphExpansion(graph, node.unique_id, spec);
 }
 
-fn matchesNodeSelectorDirect(node: Node, value: []const u8) bool {
+fn matchesNodeSelectorDirect(node: *const Node, value: []const u8) bool {
     if (std.mem.eql(u8, value, node.name) or std.mem.eql(u8, value, node.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "tag:")) {
         const tag = value["tag:".len..];
@@ -1644,14 +2021,14 @@ fn matchesNodeSelectorDirect(node: Node, value: []const u8) bool {
     return false;
 }
 
-fn matchesTestSelector(graph: *const Graph, test_node: GenericTestNode, selector: ?[]const u8) bool {
-    const spec = parseSelectorSpec(selector) orelse return true;
+fn matchesTestSelector(graph: *const Graph, test_node: *const GenericTestNode, spec: SelectorSpec) bool {
+    if (!spec.active) return true;
     if (spec.value.len == 0) return true;
     if (matchesTestSelectorDirect(test_node, spec.value)) return true;
     return matchesGraphExpansion(graph, test_node.unique_id, spec);
 }
 
-fn matchesTestSelectorDirect(test_node: GenericTestNode, value: []const u8) bool {
+fn matchesTestSelectorDirect(test_node: *const GenericTestNode, value: []const u8) bool {
     if (std.mem.eql(u8, value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "path:")) {
         const path = value["path:".len..];
@@ -1660,25 +2037,56 @@ fn matchesTestSelectorDirect(test_node: GenericTestNode, value: []const u8) bool
     return false;
 }
 
-fn matchesSourceSelector(graph: *const Graph, source: SourceDef, selector: ?[]const u8) bool {
-    const spec = parseSelectorSpec(selector) orelse return true;
+fn matchesSourceSelector(graph: *const Graph, source: *const SourceDef, spec: SelectorSpec) bool {
+    if (!spec.active) return true;
     if (spec.value.len == 0) return true;
     if (matchesSourceSelectorDirect(source, spec.value)) return true;
     return matchesGraphExpansion(graph, source.unique_id, spec);
 }
 
-fn matchesSourceSelectorDirect(source: SourceDef, value: []const u8) bool {
+fn matchesSourceSelectorDirect(source: *const SourceDef, value: []const u8) bool {
     if (std.mem.eql(u8, value, source.unique_id) or std.mem.eql(u8, value, source.table_name)) return true;
     if (std.mem.startsWith(u8, value, "source:")) {
         const source_value = value["source:".len..];
-        return std.mem.eql(u8, source_value, source.source_name) or std.mem.eql(u8, source_value, source.unique_id);
+        if (std.mem.eql(u8, source_value, source.source_name) or std.mem.eql(u8, source_value, source.unique_id)) return true;
+        if (std.mem.indexOfScalar(u8, source_value, '.')) |dot| {
+            return std.mem.eql(u8, source_value[0..dot], source.source_name) and std.mem.eql(u8, source_value[dot + 1 ..], source.table_name);
+        }
     }
     return false;
 }
 
-fn parseSelectorSpec(selector: ?[]const u8) ?SelectorSpec {
-    const raw = selector orelse return null;
+fn matchesExposureSelector(graph: *const Graph, exposure: *const ExposureDef, spec: SelectorSpec) bool {
+    if (!spec.active) return true;
+    if (spec.value.len == 0) return true;
+    const direct = matchesExposureSelectorDirect(exposure, spec.value);
+    if (direct) return true;
+    return matchesGraphExpansion(graph, exposure.unique_id, spec);
+}
+
+fn matchesExposureSelectorDirect(exposure: *const ExposureDef, value: []const u8) bool {
+    if (std.mem.eql(u8, value, exposure.name) or std.mem.eql(u8, value, exposure.unique_id)) return true;
+    if (std.mem.startsWith(u8, value, "exposure:")) {
+        const exposure_value = value["exposure:".len..];
+        return std.mem.eql(u8, exposure_value, exposure.name) or std.mem.eql(u8, exposure_value, exposure.unique_id);
+    }
+    if (std.mem.startsWith(u8, value, "tag:")) {
+        const tag = value["tag:".len..];
+        for (exposure.tags.items) |exposure_tag| {
+            if (std.mem.eql(u8, tag, exposure_tag)) return true;
+        }
+    }
+    if (std.mem.startsWith(u8, value, "path:")) {
+        const path = value["path:".len..];
+        return std.mem.indexOf(u8, exposure.original_file_path, path) != null;
+    }
+    return false;
+}
+
+fn parseSelectorSpec(selector: ?[]const u8) SelectorSpec {
+    const raw = selector orelse return .{};
     return .{
+        .active = true,
         .value = trimPlus(raw),
         .include_parents = std.mem.startsWith(u8, raw, "+"),
         .include_children = std.mem.endsWith(u8, raw, "+"),
@@ -1687,25 +2095,31 @@ fn parseSelectorSpec(selector: ?[]const u8) ?SelectorSpec {
 
 fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, spec: SelectorSpec) bool {
     if (!spec.include_parents and !spec.include_children) return false;
-    for (graph.nodes.items) |target| {
+    for (graph.nodes.items) |*target| {
         if (!target.enabled or !matchesNodeSelectorDirect(target, spec.value)) continue;
         if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }
-    for (graph.tests.items) |target| {
+    for (graph.tests.items) |*target| {
         if (!matchesTestSelectorDirect(target, spec.value)) continue;
         if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }
-    for (graph.sources.items) |target| {
+    for (graph.sources.items) |*target| {
         if (!matchesSourceSelectorDirect(target, spec.value)) continue;
+        if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
+    }
+    for (graph.exposures.items) |*target| {
+        if (!target.enabled) continue;
+        if (!matchesExposureSelectorDirect(target, spec.value)) continue;
+        if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }
     return false;
 }
 
 fn resourceDependsOn(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8) bool {
-    return resourceDependsOnWithin(graph, resource_unique_id, dependency_unique_id, graph.nodes.items.len + graph.tests.items.len + graph.sources.items.len + 1);
+    return resourceDependsOnWithin(graph, resource_unique_id, dependency_unique_id, graph.nodes.items.len + graph.tests.items.len + graph.sources.items.len + graph.exposures.items.len + 1);
 }
 
 fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8, remaining_depth: usize) bool {
@@ -1718,6 +2132,11 @@ fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, 
     for (graph.tests.items) |test_node| {
         if (!std.mem.eql(u8, test_node.unique_id, resource_unique_id)) continue;
         return dependencyListContainsTransitive(graph, test_node.depends_on.items, dependency_unique_id, remaining_depth - 1);
+    }
+    for (graph.exposures.items) |exposure| {
+        if (!exposure.enabled) continue;
+        if (!std.mem.eql(u8, exposure.unique_id, resource_unique_id)) continue;
+        return dependencyListContainsTransitive(graph, exposure.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
     return false;
 }
@@ -1752,7 +2171,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
 
     try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": null, \"dbt_version\": null, \"project_name\": ");
     try writeJsonString(writer, graph.project_name);
-    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"dxt_metadata\": {\"artifact_kind\": \"partial_manifest\", \"compatibility_target\": \"dbt-manifest-v12-slice\", \"supported_surface\": [\"model\", \"seed\", \"source\", \"macro\", \"docs\", \"literal_ref\", \"literal_source\", \"literal_doc\", \"inline_config\", \"model_properties\", \"disabled_models\"]},\n  \"nodes\": {");
+    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"nodes\": {");
     var node_index: usize = 0;
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
@@ -1815,7 +2234,18 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writeJsonString(writer, doc.block_contents);
         try writer.writeAll("}");
     }
-    try writer.writeAll("\n  },\n  \"exposures\": {},\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"disabled\": {");
+    try writer.writeAll("\n  },\n  \"exposures\": {");
+    var exposure_index: usize = 0;
+    for (graph.exposures.items) |exposure| {
+        if (!exposure.enabled) continue;
+        if (exposure_index != 0) try writer.writeAll(",");
+        exposure_index += 1;
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, exposure.unique_id);
+        try writer.writeAll(": ");
+        try writeExposureNode(writer, graph.project_name, exposure);
+    }
+    try writer.writeAll("\n  },\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"disabled\": {");
     var disabled_index: usize = 0;
     for (graph.nodes.items) |node| {
         if (node.enabled) continue;
@@ -1846,6 +2276,15 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll(": ");
         try writeStringArray(writer, test_node.depends_on.items);
     }
+    for (graph.exposures.items) |exposure| {
+        if (!exposure.enabled) continue;
+        if (parent_index != 0) try writer.writeAll(",");
+        parent_index += 1;
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, exposure.unique_id);
+        try writer.writeAll(": ");
+        try writeStringArray(writer, exposure.depends_on.items);
+    }
     try writer.writeAll("\n  },\n  \"child_map\": {");
     try writeChildMap(writer, graph);
     try writer.writeAll("\n  }\n}\n");
@@ -1862,6 +2301,10 @@ fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
     for (graph.sources.items) |candidate| {
+        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+    }
+    for (graph.exposures.items) |candidate| {
+        if (!candidate.enabled) continue;
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
 }
@@ -1886,6 +2329,14 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
             if (!child_first) try writer.writeAll(",");
             child_first = false;
             try writeJsonString(writer, test_node.unique_id);
+        }
+    }
+    for (graph.exposures.items) |exposure| {
+        if (!exposure.enabled) continue;
+        if (containsString(exposure.depends_on.items, unique_id)) {
+            if (!child_first) try writer.writeAll(",");
+            child_first = false;
+            try writeJsonString(writer, exposure.unique_id);
         }
     }
     try writer.writeAll("]");
@@ -1927,6 +2378,56 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
     try writer.writeAll(",\"arguments\":");
     try writeMacroArguments(writer, macro.arguments.items);
     try writer.writeAll(",\"supported_languages\":null}");
+}
+
+fn writeExposureNode(writer: *Io.Writer, project_name: []const u8, exposure: ExposureDef) !void {
+    try writer.writeAll("{\"unique_id\":");
+    try writeJsonString(writer, exposure.unique_id);
+    try writer.writeAll(",\"resource_type\":\"exposure\",\"package_name\":");
+    try writeJsonString(writer, project_name);
+    try writer.writeAll(",\"name\":");
+    try writeJsonString(writer, exposure.name);
+    try writer.writeAll(",\"path\":");
+    try writeJsonString(writer, normalizeForDisplay(exposure.path));
+    try writer.writeAll(",\"original_file_path\":");
+    try writeJsonString(writer, normalizeForDisplay(exposure.original_file_path));
+    try writer.writeAll(",\"fqn\":[");
+    try writeJsonString(writer, project_name);
+    try writer.writeAll(",");
+    try writeJsonString(writer, exposure.name);
+    try writer.writeAll("],\"label\":null,\"type\":");
+    try writeJsonString(writer, exposure.exposure_type);
+    try writer.writeAll(",\"maturity\":");
+    try writeNullableString(writer, exposure.maturity);
+    try writer.writeAll(",\"url\":");
+    try writeNullableString(writer, exposure.url);
+    try writer.writeAll(",\"description\":");
+    try writeJsonString(writer, exposure.description);
+    try writer.writeAll(",\"depends_on\":{\"macros\":[],\"nodes\":");
+    try writeExposureDependsOnNodes(writer, exposure.depends_on.items);
+    try writer.writeAll("},\"refs\":");
+    try writeRefDeps(writer, exposure.refs.items);
+    try writer.writeAll(",\"sources\":");
+    try writeSourceDeps(writer, exposure.source_refs.items);
+    try writer.writeAll(",\"metrics\":[],\"owner\":{\"email\":");
+    try writeNullableString(writer, exposure.owner_email);
+    try writer.writeAll(",\"name\":");
+    if (exposure.owner_name.len == 0) {
+        try writer.writeAll("null");
+    } else {
+        try writeJsonString(writer, exposure.owner_name);
+    }
+    try writer.writeAll("},\"tags\":");
+    try writeStringArray(writer, exposure.tags.items);
+    try writer.writeAll(",\"meta\":");
+    try writeMetaObject(writer, exposure.meta.items);
+    try writer.writeAll(",\"config\":{\"enabled\":");
+    try writer.writeAll(if (exposure.enabled) "true" else "false");
+    try writer.writeAll(",\"tags\":");
+    try writeStringArray(writer, exposure.tags.items);
+    try writer.writeAll(",\"meta\":");
+    try writeMetaObject(writer, exposure.meta.items);
+    try writer.writeAll("},\"unrendered_config\":{},\"created_at\":0.0}");
 }
 
 fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, node: Node) !void {
@@ -2059,6 +2560,76 @@ fn writeStringArray(writer: *Io.Writer, values: []const []const u8) !void {
     try writer.writeAll("]");
 }
 
+fn writeExposureDependsOnNodes(writer: *Io.Writer, values: []const []const u8) !void {
+    try writer.writeAll("[");
+    var first = true;
+    for (values) |value| {
+        if (!std.mem.startsWith(u8, value, "source.")) continue;
+        if (!first) try writer.writeAll(",");
+        first = false;
+        try writeJsonString(writer, value);
+    }
+    for (values) |value| {
+        if (std.mem.startsWith(u8, value, "source.")) continue;
+        if (!first) try writer.writeAll(",");
+        first = false;
+        try writeJsonString(writer, value);
+    }
+    try writer.writeAll("]");
+}
+
+fn writeNullableString(writer: *Io.Writer, value: ?[]const u8) !void {
+    if (value) |text| {
+        try writeJsonString(writer, text);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeMetaObject(writer: *Io.Writer, entries: []const MetaEntry) !void {
+    try writer.writeAll("{");
+    for (entries, 0..) |entry, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writeJsonString(writer, entry.key);
+        try writer.writeAll(":");
+        try writeJsonScalar(writer, entry.value);
+    }
+    try writer.writeAll("}");
+}
+
+fn writeJsonScalar(writer: *Io.Writer, value: JsonScalar) !void {
+    switch (value.kind) {
+        .string => try writeJsonString(writer, value.text),
+        .number, .bool, .null => try writer.writeAll(value.text),
+    }
+}
+
+fn writeRefDeps(writer: *Io.Writer, refs: []const RefDep) !void {
+    try writer.writeAll("[");
+    for (refs, 0..) |ref_dep, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("{\"name\":");
+        try writeJsonString(writer, ref_dep.name);
+        try writer.writeAll(",\"package\":");
+        try writeNullableString(writer, ref_dep.package);
+        try writer.writeAll(",\"version\":null}");
+    }
+    try writer.writeAll("]");
+}
+
+fn writeSourceDeps(writer: *Io.Writer, sources: []const SourceDep) !void {
+    try writer.writeAll("[");
+    for (sources, 0..) |source_dep, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("[");
+        try writeJsonString(writer, source_dep.source_name);
+        try writer.writeAll(",");
+        try writeJsonString(writer, source_dep.table_name);
+        try writer.writeAll("]");
+    }
+    try writer.writeAll("]");
+}
+
 fn writeMacroArguments(writer: *Io.Writer, arguments: []const MacroArgument) !void {
     try writer.writeAll("[");
     for (arguments, 0..) |argument, index| {
@@ -2172,6 +2743,26 @@ fn appendMacroArgumentClone(graph: *Graph, arguments: *std.ArrayList(MacroArgume
         }
     }
     try arguments.append(graph.allocator, source);
+}
+
+fn appendMetaEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(MetaEntry), key: []const u8, value: JsonScalar) !void {
+    for (entries.items) |*existing| {
+        if (std.mem.eql(u8, existing.key, key)) {
+            existing.value = value;
+            return;
+        }
+    }
+    try entries.append(allocator, .{ .key = try allocator.dupe(u8, key), .value = value });
+    sortMetaEntries(entries.items);
+}
+
+fn parseJsonScalar(allocator: std.mem.Allocator, value: []const u8) !JsonScalar {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    const unquoted = try dupTrimmedScalar(allocator, trimmed);
+    if (std.mem.eql(u8, trimmed, "true") or std.mem.eql(u8, trimmed, "false")) return .{ .text = unquoted, .kind = .bool };
+    if (std.mem.eql(u8, trimmed, "null")) return .{ .text = unquoted, .kind = .null };
+    if (isJsonNumber(trimmed)) return .{ .text = unquoted, .kind = .number };
+    return .{ .text = unquoted, .kind = .string };
 }
 
 fn currentGenericTestDef(graph: *Graph, model_index: usize, current_column: ?usize, target: TestTarget, test_index: usize) !*GenericTestDef {
@@ -2430,6 +3021,22 @@ fn sortSources(sources: []SourceDef) void {
     }.lessThan);
 }
 
+fn sortExposures(exposures: []ExposureDef) void {
+    std.mem.sort(ExposureDef, exposures, {}, struct {
+        fn lessThan(_: void, a: ExposureDef, b: ExposureDef) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
+fn sortMetaEntries(entries: []MetaEntry) void {
+    std.mem.sort(MetaEntry, entries, {}, struct {
+        fn lessThan(_: void, a: MetaEntry, b: MetaEntry) bool {
+            return std.mem.lessThan(u8, a.key, b.key);
+        }
+    }.lessThan);
+}
+
 fn sortDocs(docs: []DocBlock) void {
     std.mem.sort(DocBlock, docs, {}, struct {
         fn lessThan(_: void, a: DocBlock, b: DocBlock) bool {
@@ -2558,6 +3165,14 @@ fn countActiveSeeds(graph: *const Graph) usize {
     return count;
 }
 
+fn countActiveExposures(graph: *const Graph) usize {
+    var count: usize = 0;
+    for (graph.exposures.items) |exposure| {
+        if (exposure.enabled) count += 1;
+    }
+    return count;
+}
+
 fn hasSource(graph: *const Graph, unique_id: []const u8) bool {
     for (graph.sources.items) |source| {
         if (std.mem.eql(u8, source.unique_id, unique_id)) return true;
@@ -2591,6 +3206,50 @@ fn parseBool(value: []const u8) !bool {
     if (std.ascii.eqlIgnoreCase(trimmed, "true")) return true;
     if (std.ascii.eqlIgnoreCase(trimmed, "false")) return false;
     return error.UnsupportedYaml;
+}
+
+fn isJsonNumber(value: []const u8) bool {
+    if (value.len == 0) return false;
+    var i: usize = 0;
+    if (value[i] == '-') {
+        i += 1;
+        if (i == value.len) return false;
+    }
+    if (value[i] == '0') {
+        i += 1;
+        if (i < value.len and std.ascii.isDigit(value[i])) return false;
+    } else if (value[i] >= '1' and value[i] <= '9') {
+        i += 1;
+        while (i < value.len and std.ascii.isDigit(value[i])) : (i += 1) {}
+    } else {
+        return false;
+    }
+    if (i < value.len and value[i] == '.') {
+        i += 1;
+        var frac_digits: usize = 0;
+        while (i < value.len and std.ascii.isDigit(value[i])) : (i += 1) {
+            frac_digits += 1;
+        }
+        if (frac_digits == 0) return false;
+    }
+    if (i < value.len and (value[i] == 'e' or value[i] == 'E')) {
+        i += 1;
+        if (i < value.len and (value[i] == '+' or value[i] == '-')) i += 1;
+        var exp_digits: usize = 0;
+        while (i < value.len and std.ascii.isDigit(value[i])) : (i += 1) {
+            exp_digits += 1;
+        }
+        if (exp_digits == 0) return false;
+    }
+    return i == value.len;
+}
+
+test "json number parser rejects invalid leading zero forms" {
+    try std.testing.expect(isJsonNumber("0"));
+    try std.testing.expect(isJsonNumber("-12.5e+3"));
+    try std.testing.expect(!isJsonNumber("007"));
+    try std.testing.expect(!isJsonNumber("-01"));
+    try std.testing.expect(!isJsonNumber("1."));
 }
 
 fn testNameFromYamlItem(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
