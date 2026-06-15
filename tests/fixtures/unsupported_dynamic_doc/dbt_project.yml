@@ -1,0 +1,5 @@
+name: unsupported_dynamic_doc
+version: "1.0"
+profile: default
+model-paths: ["models"]
+target-path: target

@@ -4,14 +4,23 @@
 
 `dxt` means **Data Transformation eXecutor**.
 
-The product goal is a dbt-project-compatible transformation engine. The first promise is compatibility with dbt Core project semantics and artifacts, not a private or unofficial dbt fork. Fusion-era capabilities, semantic resources, metrics, static analysis, and cross-database planning shape the architecture, but dbt Core compatibility is the required base.
+The product goal is a dbt-project-compatible transformation engine written in Zig. The first promise is compatibility with dbt Core project semantics and artifacts, not a private or unofficial dbt fork. Fusion-era capabilities, semantic resources, metrics, static analysis, and cross-database planning shape the architecture, but dbt Core compatibility is the required base.
 
 Public wording must avoid implying dbt Labs affiliation.
+
+## Hard Runtime Requirement
+
+`dxt` must be implemented as a native Zig product runtime. The pinned initial toolchain is Zig `0.16.0`.
+
+Python may remain only for developer-side scripts, tests, fixture generation, dbt Core oracle harnesses, artifact comparison, schema validation helpers, and public-safety scans. Python must not implement the product CLI, parser, compiler, artifact writer, runner, planner, adapter layer, or user-facing runtime behavior.
+
+Every user-facing command must run through the Zig binary. CI and PR review must reject new Python product-runtime code.
 
 ## Objective
 
 Build `dxt` into a practical dbt alternative that can eventually run real public dbt projects, starting with Jaffle Shop variants. It must:
 
+- Build and ship as a fast native Zig binary.
 - Parse dbt projects and reproduce graph semantics.
 - Compile common dbt SQL/Jinja behavior.
 - Execute models, seeds, tests, snapshots, and docs workflows for supported adapters.
@@ -148,6 +157,8 @@ Core components:
 8. **Runner:** schedules DAG tasks, materializations, tests, docs generation, and artifact writes.
 9. **State Store:** records runs, task state, watermarks, catalog snapshots, stage artifacts, and lineage.
 10. **Cross-Database Planner:** chooses pushdown, staging, embedded execution, destination-hosted joins, and policy outcomes.
+
+All core components above are Zig product-runtime components.
 
 ## Cross-Database Execution
 
@@ -303,13 +314,16 @@ Public fixtures:
 Deliverables:
 
 - Public-safe README, plan, agent rules, security policy, and ignore rules.
-- Minimal package skeleton and CLI entrypoint.
+- Minimal Zig package skeleton and native CLI entrypoint.
 - Minimal tests and local verification command.
 - Initial commit and remote setup.
 
 Exit criteria:
 
-- `pytest` passes.
+- `zig build` passes.
+- `zig build test` passes.
+- Native CLI smoke tests pass.
+- Developer-side `pytest` passes while Python utility tests remain.
 - No committed local paths or secrets.
 - `PLAN.md` exists and is current.
 
@@ -498,8 +512,9 @@ Exit criteria:
 
 ## Current Status
 
-- M0 is in progress.
-- Independent planning notes have been created under `.agent/research/`.
-- A separate `codex exec` strategy critique has been stored under `.agent/runs/`, which is ignored by Git.
-- CI and public-safety scanning are being added before further implementation work.
-- Next implementation slice after M0 is a minimal `dxt parse` project loader for Tier 0 fixtures.
+- M0 is under PR review as the Zig `0.16.0` runtime scaffold.
+- M1 has started on stacked branches with native Zig artifact-first parser slices.
+- `dxt parse` now targets the supported Tier 0 subset: project name/model paths/seed paths, SQL model discovery, CSV seed discovery, docs block discovery, literal `ref` to models or seeds, literal `source`, literal `doc` in descriptions, inline `config(materialized=..., tags=...)`, narrow YAML model properties for scalar descriptions, simple columns, tags, materialization, disabled SQL models, dbt-shaped `unique`, `not_null`, `accepted_values`, and `relationships` generic test nodes, dependency maps, and deterministic partial `manifest.json`. YAML generic test arguments are currently supported for scalar values plus inline and block lists required by public Jaffle Shop DuckDB-style tests.
+- `dxt ls` now lists resources from the same parser graph with stable text/JSON output and basic name, tag, path, resource type, and exact exclude filters.
+- Synthetic fixtures cover one model, model refs, seed refs, source refs, combined source/model YAML, inline config/tag selection, YAML model properties and columns, emitted `unique`, `not_null`, `accepted_values`, and `relationships` generic test nodes, docs blocks with literal `doc` descriptions, disabled models, disabled ref diagnostics, unmatched model-property warnings, duplicate model and docs diagnostics, unsupported dynamic ref/doc diagnostics, missing doc diagnostics, malformed docs block diagnostics, and unsupported macro-call diagnostics.
+- The current M1 manual gate parses the public Jaffle Shop DuckDB project into a partial manifest with SQL models, CSV seeds, docs blocks, and supported generic test nodes, including the Jaffle `accepted_values` and `relationships` tests. The next M1 slices should add published schema validation, macros, stronger selector parity, and deeper Jaffle artifact parity.

@@ -1,0 +1,3 @@
+name: generic_test_arguments
+version: 1.0
+model-paths: ["models"]

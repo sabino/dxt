@@ -1,0 +1,5 @@
+version: 2
+
+models:
+  - name: missing_model
+    description: This should warn without stopping parse
