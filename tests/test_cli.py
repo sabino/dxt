@@ -50,6 +50,13 @@ def test_version_command():
     assert result.stderr == ""
 
 
+def test_root_help_uses_canonical_name():
+    result = subprocess.run([DXT, "--help"], cwd=ROOT, check=True, text=True, capture_output=True)
+    assert "Data eXecution & Transformation" in result.stdout
+    assert "Data Transformation eXecutor" not in result.stdout
+    assert result.stderr == ""
+
+
 def copy_fixture(tmp_path: Path, name: str) -> Path:
     source = ROOT / "tests" / "fixtures" / name
     dest = tmp_path / name

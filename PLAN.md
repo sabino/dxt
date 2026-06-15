@@ -2,7 +2,7 @@
 
 ## Name And Product Contract
 
-`dxt` means **Data Transformation eXecutor**.
+`dxt` means **Data eXecution & Transformation**.
 
 The product goal is a dbt-project-compatible transformation engine written in Zig. The first promise is compatibility with dbt Core project semantics and artifacts, not a private or unofficial dbt fork. Fusion-era capabilities, semantic resources, metrics, static analysis, and cross-database planning shape the architecture, but dbt Core compatibility is the required base.
 
