@@ -2321,9 +2321,9 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
     errdefer out.deinit();
     const writer = &out.writer;
 
-    try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": null, \"dbt_version\": null, \"project_name\": ");
+    try writer.writeAll("{\n  \"metadata\": {\"project_name\": ");
     try writeJsonString(writer, graph.project_name);
-    try writer.writeAll(", \"generated_by\": \"dxt\"},\n  \"nodes\": {");
+    try writer.writeAll("},\n  \"nodes\": {");
     var node_index: usize = 0;
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
@@ -2397,7 +2397,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll(": ");
         try writeExposureNode(writer, graph.project_name, exposure);
     }
-    try writer.writeAll("\n  },\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"disabled\": {");
+    try writer.writeAll("\n  },\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"group_map\": {},\n  \"saved_queries\": {},\n  \"semantic_models\": {},\n  \"unit_tests\": {},\n  \"disabled\": {");
     var disabled_index: usize = 0;
     for (graph.nodes.items) |node| {
         if (node.enabled) continue;

@@ -47,6 +47,7 @@ zig build test
 pytest -q
 python scripts/check_public_safety.py
 python scripts/check_runtime_boundary.py
+python scripts/validate_manifest_schema.py target/manifest.json
 ```
 
 The product runtime requires Zig `0.16.0`. Python remains in this repository only for developer-side validation utilities, not for the `dxt` product runtime.

@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import json
 import shutil
+import importlib.util
+import copy
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DXT = ROOT / "zig-out" / "bin" / "dxt"
+SCHEMA_VALIDATOR_PATH = ROOT / "scripts" / "validate_manifest_schema.py"
+SCHEMA_SPEC = importlib.util.spec_from_file_location("validate_manifest_schema", SCHEMA_VALIDATOR_PATH)
+assert SCHEMA_SPEC is not None
+assert SCHEMA_SPEC.loader is not None
+schema_validator = importlib.util.module_from_spec(SCHEMA_SPEC)
+SCHEMA_SPEC.loader.exec_module(schema_validator)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -90,6 +98,7 @@ def test_parse_writes_minimal_manifest(tmp_path: Path):
     manifest_path = target / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
     assert sorted(manifest["nodes"]) == ["model.single_model.customers"]
     node = manifest["nodes"]["model.single_model.customers"]
     assert node["name"] == "customers"
@@ -111,13 +120,21 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
         "metrics",
         "groups",
         "selectors",
+        "group_map",
+        "saved_queries",
+        "semantic_models",
+        "unit_tests",
         "disabled",
         "parent_map",
         "child_map",
     }
     assert "dxt_metadata" not in manifest
-    assert manifest["metadata"]["dbt_schema_version"] is None
-    assert manifest["metadata"]["generated_by"] == "dxt"
+    assert isinstance(manifest["metadata"].get("project_name"), str)
+    assert "generated_by" not in manifest["metadata"]
+    assert manifest["group_map"] == {}
+    assert manifest["saved_queries"] == {}
+    assert manifest["semantic_models"] == {}
+    assert manifest["unit_tests"] == {}
     for unique_id, node in manifest["nodes"].items():
         assert unique_id == node["unique_id"]
         assert node["resource_type"] in {"model", "seed", "test"}
@@ -182,6 +199,87 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
         assert not Path(doc["original_file_path"]).is_absolute()
 
 
+def assert_manifest_schema_slice(manifest_path: Path) -> None:
+    manifest = json.loads(manifest_path.read_text())
+    schema = schema_validator.load_json(schema_validator.DEFAULT_SCHEMA)
+    errors = schema_validator.validate_manifest(manifest, schema)
+    assert errors == []
+
+
+def test_manifest_schema_validator_rejects_missing_required_key(tmp_path: Path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"metadata": {}}), encoding="utf-8")
+
+    result = subprocess.run(
+        ["python", "scripts/validate_manifest_schema.py", str(manifest_path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "missing required property 'nodes'" in result.stderr
+
+
+def test_manifest_schema_validator_rejects_unexpected_resource_field(tmp_path: Path):
+    project = copy_fixture(tmp_path, "single_model")
+    target = tmp_path / "manifest-target"
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    invalid = copy.deepcopy(manifest)
+    invalid["nodes"]["model.single_model.customers"]["dxt_private_field"] = True
+
+    schema = schema_validator.load_json(schema_validator.DEFAULT_SCHEMA)
+    errors = schema_validator.validate_manifest(invalid, schema)
+    assert any("unexpected property 'dxt_private_field'" in error for error in errors)
+
+
+def test_manifest_schema_validator_rejects_missing_model_field(tmp_path: Path):
+    project = copy_fixture(tmp_path, "single_model")
+    target = tmp_path / "manifest-target"
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    invalid = copy.deepcopy(manifest)
+    del invalid["nodes"]["model.single_model.customers"]["raw_code"]
+
+    schema = schema_validator.load_json(schema_validator.DEFAULT_SCHEMA)
+    errors = schema_validator.validate_manifest(invalid, schema)
+    assert any("missing required property 'raw_code'" in error for error in errors)
+
+
+def test_manifest_schema_validator_rejects_missing_generic_test_field(tmp_path: Path):
+    project = copy_fixture(tmp_path, "model_properties")
+    target = tmp_path / "manifest-target"
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    invalid = copy.deepcopy(manifest)
+    del invalid["nodes"]["test.model_properties.unique_customers_.ccc5343706"]["test_metadata"]
+
+    schema = schema_validator.load_json(schema_validator.DEFAULT_SCHEMA)
+    errors = schema_validator.validate_manifest(invalid, schema)
+    assert any("missing required property 'test_metadata'" in error for error in errors)
+
+
 def test_parse_model_properties_and_columns(tmp_path: Path):
     project = copy_fixture(tmp_path, "model_properties")
     command = [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"]
@@ -194,6 +292,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert manifest_path.read_text() == first_manifest
 
     manifest = json.loads(first_manifest)
+    assert_manifest_schema_slice(manifest_path)
     expected_tests = [
         "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
         "test.model_properties.unique_customers_.ccc5343706",
@@ -297,6 +396,7 @@ def test_parse_generic_test_arguments(tmp_path: Path):
     assert result.returncode == 0, result.stderr
 
     manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert_manifest_schema_slice(project / "target-dxt" / "manifest.json")
     accepted_id = "test.generic_test_arguments.accepted_values_orders_status__placed__shipped__completed__return_pending__returned.be6b5b5ec3"
     accepted_block_id = "test.generic_test_arguments.accepted_values_orders_status_block__placed__shipped.62277f9bb9"
     relationships_id = "test.generic_test_arguments.relationships_orders_customer_id__customer_id__ref_customers_.c6ec7f58f2"
@@ -388,6 +488,7 @@ def test_parse_macro_artifacts_and_model_macro_dependency(tmp_path: Path):
     assert result.returncode == 0, result.stderr
 
     manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert_manifest_schema_slice(project / "target-dxt" / "manifest.json")
     assert sorted(manifest["nodes"]) == ["model.macro_artifacts.customers"]
     macro_id = "macro.macro_artifacts.format_id"
     dependent_macro_id = "macro.macro_artifacts.outer_id"
@@ -453,6 +554,7 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
 
     manifest_path = project / "target-dxt" / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
+    assert_manifest_schema_slice(manifest_path)
     root_macro_id = "macro.package_macro_namespace.format_id"
     root_external_macro_id = "macro.package_macro_namespace.wrap_external_id"
     package_macro_id = "macro.util_pkg.format_id"
@@ -645,6 +747,7 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
 
     manifest = json.loads(first_manifest)
     assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
     assert sorted(manifest["nodes"]) == [
         "model.seed_ref.stg_customers",
         "seed.seed_ref.raw_customers",
@@ -685,6 +788,7 @@ def test_parse_docs_blocks_and_literal_doc_descriptions(tmp_path: Path):
 
     manifest = json.loads(first_manifest)
     assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
     assert sorted(manifest["docs"]) == [
         "doc.docs_blocks.customer_id",
         "doc.docs_blocks.customer_model",
@@ -723,6 +827,7 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     assert result.returncode == 0, result.stderr
 
     manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert_manifest_schema_slice(project / "target-dxt" / "manifest.json")
     exposure_id = "exposure.exposure_artifacts.weekly_kpis"
     disabled_exposure_id = "exposure.exposure_artifacts.hidden_dashboard"
     model_id = "model.exposure_artifacts.orders"
