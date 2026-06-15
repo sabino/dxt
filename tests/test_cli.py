@@ -52,8 +52,8 @@ def test_version_command():
 
 def test_root_help_uses_canonical_name():
     result = subprocess.run([DXT, "--help"], cwd=ROOT, check=True, text=True, capture_output=True)
-    assert "Data eXecution & Transformation" in result.stdout
-    assert "Data Transformation eXecutor" not in result.stdout
+    assert "Data Transformation eXecutor" in result.stdout
+    assert "Data eXecution & Transformation" not in result.stdout
     assert result.stderr == ""
 
 
@@ -439,6 +439,46 @@ def test_parse_macro_artifacts_and_model_macro_dependency(tmp_path: Path):
             "name": "customers",
         }
     ]
+
+
+def test_parse_package_macro_namespaces(tmp_path: Path):
+    project = copy_fixture(tmp_path, "package_macro_namespace")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest_path = project / "target-dxt" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    root_macro_id = "macro.package_macro_namespace.format_id"
+    root_external_macro_id = "macro.package_macro_namespace.wrap_external_id"
+    package_macro_id = "macro.util_pkg.format_id"
+    package_outer_macro_id = "macro.util_pkg.outer_id"
+    assert sorted(manifest["macros"]) == [
+        root_macro_id,
+        root_external_macro_id,
+        package_macro_id,
+        package_outer_macro_id,
+    ]
+    assert manifest["macros"][package_macro_id]["package_name"] == "util_pkg"
+    assert manifest["macros"][package_macro_id]["path"] == "custom_macros/format_id.sql"
+    assert manifest["macros"][package_macro_id]["original_file_path"] == "custom_macros/format_id.sql"
+    assert "dbt_packages" not in manifest["macros"][package_macro_id]["path"]
+    assert "macro.util_pkg.ignored" not in manifest["macros"]
+    assert manifest["nodes"]["model.package_macro_namespace.customers"]["depends_on"]["macros"] == [
+        package_macro_id
+    ]
+    assert manifest["nodes"]["model.package_macro_namespace.local_customers"]["depends_on"]["macros"] == [
+        root_macro_id
+    ]
+    assert manifest["macros"][root_external_macro_id]["depends_on"]["macros"] == [package_macro_id]
+    assert manifest["macros"][package_outer_macro_id]["depends_on"]["macros"] == [package_macro_id]
+    assert package_macro_id not in manifest["parent_map"]
+    assert package_outer_macro_id not in manifest["child_map"]
+    assert str(project) not in manifest_path.read_text()
 
 
 def test_macro_paths_replace_default_macro_directory(tmp_path: Path):
@@ -992,6 +1032,30 @@ def test_unsupported_macro_call_fails_loudly(tmp_path: Path):
     )
     assert result.returncode == 2
     assert "unsupported or malformed Jinja" in result.stderr
+
+
+def test_missing_package_macro_fails_loudly(tmp_path: Path):
+    project = copy_fixture(tmp_path, "missing_package_macro")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "unresolved macro reference" in result.stderr
+
+
+def test_missing_package_macro_in_macro_body_fails_loudly(tmp_path: Path):
+    project = copy_fixture(tmp_path, "missing_package_macro_in_macro")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "unresolved macro reference" in result.stderr
 
 
 def test_implemented_parse_rejects_ignored_dbt_flags(tmp_path: Path):

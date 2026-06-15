@@ -1,6 +1,6 @@
 # Agent Instructions
 
-This repository is building `dxt`, Data eXecution & Transformation: a dbt-project-compatible transformation engine with an artifact-first compatibility strategy and later cross-database execution.
+This repository is building `dxt`, Data Transformation eXecutor: a dbt-project-compatible transformation engine with an artifact-first compatibility strategy and later cross-database execution.
 
 Hard requirement: the `dxt` product runtime is Zig. Python may remain only for developer scripts, tests, fixture tooling, compatibility harnesses, and safety scans. Do not implement product CLI, parser, compiler, artifact writer, planner, adapter, or runtime behavior in Python.
 

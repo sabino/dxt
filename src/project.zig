@@ -104,6 +104,7 @@ const DocBlock = struct {
 
 const MacroDef = struct {
     unique_id: []const u8,
+    package_name: []const u8,
     name: []const u8,
     path: []const u8,
     original_file_path: []const u8,
@@ -351,27 +352,8 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     var graph = Graph{ .allocator = runtime.allocator, .project_name = config.name };
     errdefer graph.deinit();
 
-    for (config.macro_paths.items) |macro_path| {
-        var macro_files: std.ArrayList([]const u8) = .empty;
-        defer macro_files.deinit(runtime.allocator);
-        var macro_yaml_files: std.ArrayList([]const u8) = .empty;
-        defer macro_yaml_files.deinit(runtime.allocator);
-
-        const root = try pathJoin(runtime.allocator, &.{ project_dir, macro_path });
-        discoverMacroFiles(runtime, root, macro_path, &macro_files, &macro_yaml_files) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => return err,
-        };
-        sortStrings(macro_files.items);
-        sortStrings(macro_yaml_files.items);
-
-        for (macro_yaml_files.items) |yaml_path| {
-            try parseYamlProperties(runtime, project_dir, macro_path, yaml_path, config.name, &graph);
-        }
-        for (macro_files.items) |relative_path| {
-            try parseMacros(runtime, project_dir, relative_path, config.name, &graph);
-        }
-    }
+    try loadProjectMacros(runtime, project_dir, config.name, config.macro_paths.items, true, &graph);
+    try loadInstalledPackageMacros(runtime, project_dir, &graph);
 
     for (config.model_paths.items) |model_path| {
         var sql_files: std.ArrayList([]const u8) = .empty;
@@ -434,6 +416,73 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     try rejectDuplicateMacros(&graph);
     try resolveMacroDependencies(&graph);
     return graph;
+}
+
+fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []const u8, macro_paths: []const []const u8, parse_properties: bool, graph: *Graph) !void {
+    for (macro_paths) |macro_path| {
+        var macro_files: std.ArrayList([]const u8) = .empty;
+        defer macro_files.deinit(runtime.allocator);
+        var macro_yaml_files: std.ArrayList([]const u8) = .empty;
+        defer macro_yaml_files.deinit(runtime.allocator);
+
+        const root = try pathJoin(runtime.allocator, &.{ project_dir, macro_path });
+        discoverMacroFiles(runtime, root, macro_path, &macro_files, &macro_yaml_files) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        sortStrings(macro_files.items);
+        sortStrings(macro_yaml_files.items);
+
+        if (parse_properties) {
+            for (macro_yaml_files.items) |yaml_path| {
+                try parseYamlProperties(runtime, project_dir, macro_path, yaml_path, package_name, graph);
+            }
+        }
+        for (macro_files.items) |relative_path| {
+            try parseMacros(runtime, project_dir, relative_path, package_name, graph);
+        }
+    }
+}
+
+fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, graph: *Graph) !void {
+    const packages_dir = try pathJoin(runtime.allocator, &.{ project_dir, "dbt_packages" });
+    const fd = openLinuxDirectory(runtime.allocator, packages_dir) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer closeLinuxFd(fd);
+
+    var package_dirs: std.ArrayList([]const u8) = .empty;
+    defer package_dirs.deinit(runtime.allocator);
+
+    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
+    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
+    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
+        if (entry.name.len == 0 or entry.name[0] == '.') continue;
+        const child_abs = try pathJoin(runtime.allocator, &.{ packages_dir, entry.name });
+        const is_dir = if (entry.kind == .directory)
+            true
+        else if (entry.kind == .unknown)
+            try linuxPathIsDirectory(runtime.allocator, child_abs)
+        else
+            false;
+        if (is_dir) {
+            try package_dirs.append(runtime.allocator, child_abs);
+        }
+    }
+    sortStrings(package_dirs.items);
+
+    for (package_dirs.items) |package_dir| {
+        var package_config = loadProjectConfig(runtime, package_dir) catch |err| switch (err) {
+            error.MissingProjectFile => continue,
+            else => return err,
+        };
+        defer package_config.model_paths.deinit(runtime.allocator);
+        defer package_config.seed_paths.deinit(runtime.allocator);
+        defer package_config.macro_paths.deinit(runtime.allocator);
+
+        try loadProjectMacros(runtime, package_dir, package_config.name, package_config.macro_paths.items, false, graph);
+    }
 }
 
 fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
@@ -793,6 +842,7 @@ fn parseMacros(runtime: Runtime, project_dir: []const u8, relative_path: []const
         const unique_id = try std.fmt.allocPrint(runtime.allocator, "macro.{s}.{s}", .{ package_name, macro_name });
         try graph.macros.append(runtime.allocator, .{
             .unique_id = unique_id,
+            .package_name = package_name,
             .name = try runtime.allocator.dupe(u8, macro_name),
             .path = relative_path,
             .original_file_path = relative_path,
@@ -1409,7 +1459,7 @@ fn parseSeed(runtime: Runtime, seed_root: []const u8, relative_path: []const u8,
 
 fn applyMacroProperties(graph: *Graph) !void {
     for (graph.macro_properties.items) |property| {
-        const macro_index = findMacroIndexByName(graph, property.name) orelse {
+        const macro_index = findProjectMacroIndexByName(graph, property.name) orelse {
             try graph.unmatched_macro_properties.append(graph.allocator, .{ .name = property.name, .patch_path = property.patch_path });
             continue;
         };
@@ -1733,6 +1783,41 @@ fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*
     }
 }
 
+const JinjaCall = struct {
+    package_name: ?[]const u8,
+    name: []const u8,
+    open: usize,
+    close: usize,
+};
+
+fn readJinjaCall(span: []const u8, first_ident: []const u8, first_ident_end: usize) !?JinjaCall {
+    if (first_ident_end < span.len and span[first_ident_end] == '.') {
+        const name_start = first_ident_end + 1;
+        if (name_start >= span.len or !isIdentStart(span[name_start])) return error.UnsupportedJinja;
+        var name_end = name_start + 1;
+        while (name_end < span.len and isIdentChar(span[name_end])) name_end += 1;
+        const call_pos = skipWs(span, name_end);
+        if (call_pos >= span.len or span[call_pos] != '(') return null;
+        const close = findMatchingParen(span, call_pos) orelse return error.UnsupportedJinja;
+        return .{
+            .package_name = first_ident,
+            .name = span[name_start..name_end],
+            .open = call_pos,
+            .close = close,
+        };
+    }
+
+    const call_pos = skipWs(span, first_ident_end);
+    if (call_pos >= span.len or span[call_pos] != '(') return null;
+    const close = findMatchingParen(span, call_pos) orelse return error.UnsupportedJinja;
+    return .{
+        .package_name = null,
+        .name = first_ident,
+        .open = call_pos,
+        .close = close,
+    };
+}
+
 fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, graph: ?*const Graph) !void {
     var i: usize = 0;
     while (i < span.len) {
@@ -1748,12 +1833,20 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
         i += 1;
         while (i < span.len and isIdentChar(span[i])) i += 1;
         const ident = span[start..i];
-        const call_pos = skipWs(span, i);
-        if (call_pos >= span.len or span[call_pos] != '(') continue;
-        const close = findMatchingParen(span, call_pos) orelse return error.UnsupportedJinja;
-        const args = span[call_pos + 1 .. close];
+        const call = (try readJinjaCall(span, ident, i)) orelse continue;
+        const args = span[call.open + 1 .. call.close];
 
-        if (std.mem.eql(u8, ident, "ref")) {
+        if (call.package_name) |package_name| {
+            if (graph) |known_graph| {
+                if (findMacroIdByPackageAndName(known_graph, package_name, call.name)) |macro_id| {
+                    try appendUnique(allocator, &node.macro_depends_on, macro_id);
+                    i = call.close + 1;
+                    continue;
+                }
+                if (hasMacroPackage(known_graph, package_name)) return error.UnresolvedMacro;
+            }
+            return error.UnsupportedJinja;
+        } else if (std.mem.eql(u8, call.name, "ref")) {
             var strings = try parseLiteralArgs(allocator, args, error.UnsupportedDynamicRef);
             defer strings.deinit(allocator);
             if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedDynamicRef;
@@ -1761,7 +1854,7 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
                 .package = if (strings.items.len == 2) strings.items[0] else null,
                 .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
             });
-        } else if (std.mem.eql(u8, ident, "source")) {
+        } else if (std.mem.eql(u8, call.name, "source")) {
             var strings = try parseLiteralArgs(allocator, args, error.UnsupportedDynamicSource);
             defer strings.deinit(allocator);
             if (strings.items.len != 2) return error.UnsupportedDynamicSource;
@@ -1769,19 +1862,19 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
                 .source_name = strings.items[0],
                 .table_name = strings.items[1],
             });
-        } else if (std.mem.eql(u8, ident, "config")) {
+        } else if (std.mem.eql(u8, call.name, "config")) {
             try parseConfig(allocator, args, node);
         } else {
             if (graph) |known_graph| {
-                if (findProjectMacroIdByName(known_graph, ident)) |macro_id| {
+                if (findProjectMacroIdByName(known_graph, call.name)) |macro_id| {
                     try appendUnique(allocator, &node.macro_depends_on, macro_id);
-                    i = close + 1;
+                    i = call.close + 1;
                     continue;
                 }
             }
             return error.UnsupportedJinja;
         }
-        i = close + 1;
+        i = call.close + 1;
     }
 }
 
@@ -1814,6 +1907,7 @@ fn scanMacroSqlForKnownMacroCalls(allocator: std.mem.Allocator, sql: []const u8,
 
 fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u8, graph: *const Graph, current_macro_id: []const u8, macro_depends_on: *std.ArrayList([]const u8)) !void {
     var i: usize = 0;
+    const current_package = packageNameFromMacroUniqueId(current_macro_id) orelse graph.project_name;
     while (i < span.len) {
         if (span[i] == '"' or span[i] == '\'') {
             i = skipQuotedSpan(span, i) orelse break;
@@ -1827,17 +1921,20 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
         i += 1;
         while (i < span.len and isIdentChar(span[i])) i += 1;
         const ident = span[start..i];
-        const call_pos = skipWs(span, i);
-        if (call_pos >= span.len or span[call_pos] != '(') continue;
-        const close = findMatchingParen(span, call_pos) orelse break;
-        if (findProjectMacroIdByName(graph, ident)) |macro_id| {
-            if (std.mem.eql(u8, macro_id, current_macro_id)) {
-                i = close + 1;
+        const call = (readJinjaCall(span, ident, i) catch break) orelse continue;
+        const macro_id = if (call.package_name) |package_name| blk: {
+            const resolved = findMacroIdByPackageAndName(graph, package_name, call.name);
+            if (resolved == null and hasMacroPackage(graph, package_name)) return error.UnresolvedMacro;
+            break :blk resolved;
+        } else findMacroIdByPackageAndName(graph, current_package, call.name);
+        if (macro_id) |resolved_macro_id| {
+            if (std.mem.eql(u8, resolved_macro_id, current_macro_id)) {
+                i = call.close + 1;
                 continue;
             }
-            try appendUnique(allocator, macro_depends_on, macro_id);
+            try appendUnique(allocator, macro_depends_on, resolved_macro_id);
         }
-        i = close + 1;
+        i = call.close + 1;
     }
 }
 
@@ -2268,7 +2365,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll("\n    ");
         try writeJsonString(writer, macro.unique_id);
         try writer.writeAll(": ");
-        try writeMacroNode(allocator, writer, graph.project_name, macro);
+        try writeMacroNode(allocator, writer, macro);
     }
     try writer.writeAll("\n  },\n  \"docs\": {");
     for (graph.docs.items, 0..) |doc, index| {
@@ -2405,11 +2502,11 @@ fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []c
     }
 }
 
-fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, macro: MacroDef) !void {
+fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: MacroDef) !void {
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, macro.unique_id);
     try writer.writeAll(",\"resource_type\":\"macro\",\"package_name\":");
-    try writeJsonString(writer, project_name);
+    try writeJsonString(writer, macro.package_name);
     try writer.writeAll(",\"name\":");
     try writeJsonString(writer, macro.name);
     try writer.writeAll(",\"path\":");
@@ -2424,7 +2521,7 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
     try writeJsonString(writer, macro.description);
     try writer.writeAll(",\"meta\":{},\"docs\":{\"show\":true,\"node_color\":null},\"patch_path\":");
     if (macro.patch_path) |patch_path| {
-        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ project_name, normalizeForDisplay(patch_path) });
+        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ macro.package_name, normalizeForDisplay(patch_path) });
         defer allocator.free(dbt_patch_path);
         try writeJsonString(writer, dbt_patch_path);
     } else {
@@ -3242,16 +3339,34 @@ fn hasMacro(graph: *const Graph, unique_id: []const u8) bool {
     return false;
 }
 
-fn findProjectMacroIdByName(graph: *const Graph, name: []const u8) ?[]const u8 {
+fn hasMacroPackage(graph: *const Graph, package_name: []const u8) bool {
     for (graph.macros.items) |macro| {
-        if (std.mem.eql(u8, macro.name, name)) return macro.unique_id;
+        if (std.mem.eql(u8, macro.package_name, package_name)) return true;
+    }
+    return false;
+}
+
+fn findMacroIdByPackageAndName(graph: *const Graph, package_name: []const u8, name: []const u8) ?[]const u8 {
+    for (graph.macros.items) |macro| {
+        if (std.mem.eql(u8, macro.package_name, package_name) and std.mem.eql(u8, macro.name, name)) return macro.unique_id;
     }
     return null;
 }
 
-fn findMacroIndexByName(graph: *const Graph, name: []const u8) ?usize {
+fn findProjectMacroIdByName(graph: *const Graph, name: []const u8) ?[]const u8 {
+    return findMacroIdByPackageAndName(graph, graph.project_name, name);
+}
+
+fn packageNameFromMacroUniqueId(unique_id: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, unique_id, "macro.")) return null;
+    const package_start = "macro.".len;
+    const package_end = std.mem.indexOfPos(u8, unique_id, package_start, ".") orelse return null;
+    return unique_id[package_start..package_end];
+}
+
+fn findProjectMacroIndexByName(graph: *const Graph, name: []const u8) ?usize {
     for (graph.macros.items, 0..) |macro, index| {
-        if (std.mem.eql(u8, macro.name, name)) return index;
+        if (std.mem.eql(u8, macro.package_name, graph.project_name) and std.mem.eql(u8, macro.name, name)) return index;
     }
     return null;
 }
