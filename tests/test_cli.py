@@ -105,6 +105,8 @@ def test_parse_writes_minimal_manifest(tmp_path: Path):
     assert node["path"] == "customers.sql"
     assert node["original_file_path"] == "models/customers.sql"
     assert 'quoted "value" with backslash \\ marker' in node["raw_code"]
+    assert node["docs"] == {"show": True, "node_color": None}
+    assert node["config"]["docs"] == {"show": True, "node_color": None}
     assert manifest["parent_map"]["model.single_model.customers"] == []
     assert str(project) not in manifest_path.read_text()
 
@@ -1051,6 +1053,30 @@ def test_project_model_path_configs_apply_below_inline_and_yaml_configs(tmp_path
         "root",
         "yaml",
     ]
+    assert nodes["model.project_model_path_config.customers"]["docs"] == {
+        "show": True,
+        "node_color": "gold",
+    }
+    assert nodes["model.project_model_path_config.customers"]["config"]["docs"] == {
+        "show": True,
+        "node_color": "gold",
+    }
+    assert nodes["model.project_model_path_config.stg_customers"]["docs"] == {
+        "show": True,
+        "node_color": "silver",
+    }
+    assert nodes["model.project_model_path_config.orders"]["docs"] == {
+        "show": True,
+        "node_color": "gold",
+    }
+    assert nodes["seed.project_model_path_config.raw_customers"]["docs"] == {
+        "show": True,
+        "node_color": "#cd7f32",
+    }
+    assert nodes["seed.project_model_path_config.raw_customers"]["config"]["docs"] == {
+        "show": True,
+        "node_color": "#cd7f32",
+    }
 
     def ls_text(*args: str) -> list[str]:
         ls_result = subprocess.run(

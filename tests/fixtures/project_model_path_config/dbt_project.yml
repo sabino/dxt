@@ -2,13 +2,22 @@ name: project_model_path_config
 version: "1.0"
 profile: project_model_path_config
 model-paths: ["models"]
+seed-paths: ["seeds"]
 target-path: target
+
+seeds:
+  +docs:
+    node_color: '#cd7f32'
 
 models:
   project_model_path_config:
     +materialized: table
     +tags: [root]
+    +docs:
+      node_color: gold
     staging:
       +materialized: view
+      +docs:
+        node_color: silver
     marts:
       +tags: [published]
