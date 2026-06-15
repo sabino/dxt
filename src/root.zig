@@ -207,16 +207,38 @@ fn parseOptions(args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) 
 }
 
 fn validateSelector(value: []const u8) !void {
-    const trimmed = std.mem.trim(u8, value, "+");
-    if (std.mem.indexOfScalar(u8, trimmed, ':')) |_| {
-        if (!(std.mem.startsWith(u8, trimmed, "tag:") or
-            std.mem.startsWith(u8, trimmed, "path:") or
-            std.mem.startsWith(u8, trimmed, "source:") or
-            std.mem.startsWith(u8, trimmed, "exposure:")))
-        {
-            return error.UnsupportedSelector;
+    if (value.len == 0) return error.UnsupportedSelector;
+    var terms = std.mem.splitScalar(u8, value, ',');
+    while (terms.next()) |raw_term| {
+        if (raw_term.len == 0) return error.UnsupportedSelector;
+        const leading_plus = raw_term[0] == '+';
+        const trailing_plus = raw_term[raw_term.len - 1] == '+';
+        const start: usize = if (leading_plus) 1 else 0;
+        const end: usize = if (trailing_plus) raw_term.len - 1 else raw_term.len;
+        if (start >= end) return error.UnsupportedSelector;
+        const part = raw_term[start..end];
+        if (part.len == 0) return error.UnsupportedSelector;
+        if (std.mem.indexOfAny(u8, part, " \t\r")) |_| return error.UnsupportedSelector;
+        if (std.mem.indexOfScalar(u8, part, '+')) |_| return error.UnsupportedSelector;
+        if (std.mem.indexOfScalar(u8, part, ':')) |_| try validateSelectorMethod(part);
+    }
+}
+
+fn validateSelectorMethod(part: []const u8) !void {
+    const prefixes = [_][]const u8{
+        "tag:",
+        "path:",
+        "source:",
+        "exposure:",
+        "config.materialized:",
+    };
+    inline for (prefixes) |prefix| {
+        if (std.mem.startsWith(u8, part, prefix)) {
+            if (part.len == prefix.len) return error.UnsupportedSelector;
+            return;
         }
     }
+    return error.UnsupportedSelector;
 }
 
 fn requiresValue(arg: []const u8, mode: OptionMode) bool {

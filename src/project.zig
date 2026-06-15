@@ -1999,11 +1999,22 @@ fn matchesResourceType(requested: ?[]const u8, actual: []const u8) bool {
 fn matchesSelector(graph: *const Graph, node: *const Node, spec: SelectorSpec) bool {
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
-    if (matchesNodeSelectorDirect(node, spec.value)) return true;
-    return matchesGraphExpansion(graph, node.unique_id, spec);
+    return matchesNodeSelectorExpression(graph, node, spec.value);
 }
 
-fn matchesNodeSelectorDirect(node: *const Node, value: []const u8) bool {
+fn matchesNodeSelectorExpression(graph: *const Graph, node: *const Node, value: []const u8) bool {
+    var raw_terms = std.mem.splitScalar(u8, value, ',');
+    var matched_any = false;
+    while (raw_terms.next()) |raw_term| {
+        const term = parseSelectorTerm(raw_term);
+        if (term.value.len == 0) return false;
+        if (!matchesNodeSelectorTerm(node, term.value) and !matchesGraphExpansion(graph, node.unique_id, term)) return false;
+        matched_any = true;
+    }
+    return matched_any;
+}
+
+fn matchesNodeSelectorTerm(node: *const Node, value: []const u8) bool {
     if (std.mem.eql(u8, value, node.name) or std.mem.eql(u8, value, node.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "tag:")) {
         const tag = value["tag:".len..];
@@ -2018,17 +2029,32 @@ fn matchesNodeSelectorDirect(node: *const Node, value: []const u8) bool {
     if (std.mem.startsWith(u8, value, "source:")) {
         return false;
     }
+    if (std.mem.startsWith(u8, value, "config.materialized:")) {
+        const materialized = value["config.materialized:".len..];
+        return std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, materialized, node.materialized);
+    }
     return false;
 }
 
 fn matchesTestSelector(graph: *const Graph, test_node: *const GenericTestNode, spec: SelectorSpec) bool {
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
-    if (matchesTestSelectorDirect(test_node, spec.value)) return true;
-    return matchesGraphExpansion(graph, test_node.unique_id, spec);
+    return matchesTestSelectorExpression(graph, test_node, spec.value);
 }
 
-fn matchesTestSelectorDirect(test_node: *const GenericTestNode, value: []const u8) bool {
+fn matchesTestSelectorExpression(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8) bool {
+    var raw_terms = std.mem.splitScalar(u8, value, ',');
+    var matched_any = false;
+    while (raw_terms.next()) |raw_term| {
+        const term = parseSelectorTerm(raw_term);
+        if (term.value.len == 0) return false;
+        if (!matchesTestSelectorTerm(test_node, term.value) and !matchesGraphExpansion(graph, test_node.unique_id, term)) return false;
+        matched_any = true;
+    }
+    return matched_any;
+}
+
+fn matchesTestSelectorTerm(test_node: *const GenericTestNode, value: []const u8) bool {
     if (std.mem.eql(u8, value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "path:")) {
         const path = value["path:".len..];
@@ -2040,11 +2066,22 @@ fn matchesTestSelectorDirect(test_node: *const GenericTestNode, value: []const u
 fn matchesSourceSelector(graph: *const Graph, source: *const SourceDef, spec: SelectorSpec) bool {
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
-    if (matchesSourceSelectorDirect(source, spec.value)) return true;
-    return matchesGraphExpansion(graph, source.unique_id, spec);
+    return matchesSourceSelectorExpression(graph, source, spec.value);
 }
 
-fn matchesSourceSelectorDirect(source: *const SourceDef, value: []const u8) bool {
+fn matchesSourceSelectorExpression(graph: *const Graph, source: *const SourceDef, value: []const u8) bool {
+    var raw_terms = std.mem.splitScalar(u8, value, ',');
+    var matched_any = false;
+    while (raw_terms.next()) |raw_term| {
+        const term = parseSelectorTerm(raw_term);
+        if (term.value.len == 0) return false;
+        if (!matchesSourceSelectorTerm(source, term.value) and !matchesGraphExpansion(graph, source.unique_id, term)) return false;
+        matched_any = true;
+    }
+    return matched_any;
+}
+
+fn matchesSourceSelectorTerm(source: *const SourceDef, value: []const u8) bool {
     if (std.mem.eql(u8, value, source.unique_id) or std.mem.eql(u8, value, source.table_name)) return true;
     if (std.mem.startsWith(u8, value, "source:")) {
         const source_value = value["source:".len..];
@@ -2059,12 +2096,22 @@ fn matchesSourceSelectorDirect(source: *const SourceDef, value: []const u8) bool
 fn matchesExposureSelector(graph: *const Graph, exposure: *const ExposureDef, spec: SelectorSpec) bool {
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
-    const direct = matchesExposureSelectorDirect(exposure, spec.value);
-    if (direct) return true;
-    return matchesGraphExpansion(graph, exposure.unique_id, spec);
+    return matchesExposureSelectorExpression(graph, exposure, spec.value);
 }
 
-fn matchesExposureSelectorDirect(exposure: *const ExposureDef, value: []const u8) bool {
+fn matchesExposureSelectorExpression(graph: *const Graph, exposure: *const ExposureDef, value: []const u8) bool {
+    var raw_terms = std.mem.splitScalar(u8, value, ',');
+    var matched_any = false;
+    while (raw_terms.next()) |raw_term| {
+        const term = parseSelectorTerm(raw_term);
+        if (term.value.len == 0) return false;
+        if (!matchesExposureSelectorTerm(exposure, term.value) and !matchesGraphExpansion(graph, exposure.unique_id, term)) return false;
+        matched_any = true;
+    }
+    return matched_any;
+}
+
+fn matchesExposureSelectorTerm(exposure: *const ExposureDef, value: []const u8) bool {
     if (std.mem.eql(u8, value, exposure.name) or std.mem.eql(u8, value, exposure.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "exposure:")) {
         const exposure_value = value["exposure:".len..];
@@ -2087,31 +2134,39 @@ fn parseSelectorSpec(selector: ?[]const u8) SelectorSpec {
     const raw = selector orelse return .{};
     return .{
         .active = true,
-        .value = trimPlus(raw),
-        .include_parents = std.mem.startsWith(u8, raw, "+"),
-        .include_children = std.mem.endsWith(u8, raw, "+"),
+        .value = raw,
+    };
+}
+
+fn parseSelectorTerm(raw: []const u8) SelectorSpec {
+    const trimmed = std.mem.trim(u8, raw, " \t\r");
+    return .{
+        .active = true,
+        .value = trimPlus(trimmed),
+        .include_parents = std.mem.startsWith(u8, trimmed, "+"),
+        .include_children = std.mem.endsWith(u8, trimmed, "+"),
     };
 }
 
 fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, spec: SelectorSpec) bool {
     if (!spec.include_parents and !spec.include_children) return false;
     for (graph.nodes.items) |*target| {
-        if (!target.enabled or !matchesNodeSelectorDirect(target, spec.value)) continue;
+        if (!target.enabled or !matchesNodeSelectorTerm(target, spec.value)) continue;
         if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }
     for (graph.tests.items) |*target| {
-        if (!matchesTestSelectorDirect(target, spec.value)) continue;
+        if (!matchesTestSelectorTerm(target, spec.value)) continue;
         if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }
     for (graph.sources.items) |*target| {
-        if (!matchesSourceSelectorDirect(target, spec.value)) continue;
+        if (!matchesSourceSelectorTerm(target, spec.value)) continue;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }
     for (graph.exposures.items) |*target| {
         if (!target.enabled) continue;
-        if (!matchesExposureSelectorDirect(target, spec.value)) continue;
+        if (!matchesExposureSelectorTerm(target, spec.value)) continue;
         if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }

@@ -812,6 +812,39 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     assert excluded.stdout == ""
 
 
+def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
+    project = copy_fixture(tmp_path, "inline_config")
+
+    def ls_text(*args: str) -> list[str]:
+        result = subprocess.run(
+            [DXT, "ls", "--project-dir", str(project), *args],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.splitlines()
+
+    assert ls_text("--select", "config.materialized:table") == ["model.inline_config.orders"]
+    assert ls_text("--select", "config.materialized:view") == []
+    assert ls_text("--select", "tag:nightly,config.materialized:table") == [
+        "model.inline_config.orders"
+    ]
+    assert ls_text("--select", "tag:nightly,config.materialized:view") == []
+    assert ls_text("--select", "orders,config.materialized:table") == ["model.inline_config.orders"]
+    assert ls_text("--select", "tag:nightly", "--exclude", "orders,config.materialized:table") == []
+
+    default_project = copy_fixture(tmp_path, "single_model")
+    default_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(default_project), "--select", "config.materialized:view"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert default_result.returncode == 0, default_result.stderr
+    assert default_result.stdout.splitlines() == ["model.single_model.customers"]
+
+
 def test_ls_graph_plus_selectors(tmp_path: Path):
     project = copy_fixture(tmp_path, "selector_graph")
 
@@ -846,6 +879,16 @@ def test_ls_graph_plus_selectors(tmp_path: Path):
         "model.selector_graph.orders",
         "model.selector_graph.stg_customers",
     ]
+    assert ls_json("--select", "customers+,config.materialized:view") == [
+        "model.selector_graph.customers"
+    ]
+    assert ls_json("--select", "customers+,config.materialized:table") == [
+        "model.selector_graph.orders"
+    ]
+    assert ls_json("--select", "+orders,config.materialized:view") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.stg_customers",
+    ]
 
 
 def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
@@ -859,14 +902,24 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     assert unsupported_type.returncode == 2
     assert "--resource-type supports only model, seed, source, exposure, or test" in unsupported_type.stderr
 
-    unsupported_selector = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "config.materialized:view"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
-    assert unsupported_selector.returncode == 2
-    assert "selector syntax is not supported" in unsupported_selector.stderr
+    for selector in [
+        "state:modified",
+        "config.schema:audit",
+        "tag:nightly,",
+        "config.materialized:",
+        "tag:nightly, config.materialized:view",
+        "++customers",
+        "customers++",
+        "++customers++",
+    ]:
+        unsupported_selector = subprocess.run(
+            [DXT, "ls", "--project-dir", str(project), "--select", selector],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert unsupported_selector.returncode == 2
+        assert "selector syntax is not supported" in unsupported_selector.stderr
 
 
 def test_dynamic_ref_fails_loudly(tmp_path: Path):
