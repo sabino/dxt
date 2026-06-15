@@ -263,6 +263,95 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         },
     ]
 
+def test_parse_generic_test_arguments(tmp_path: Path):
+    project = copy_fixture(tmp_path, "generic_test_arguments")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    accepted_id = "test.generic_test_arguments.accepted_values_orders_status__placed__shipped__completed__return_pending__returned.be6b5b5ec3"
+    accepted_block_id = "test.generic_test_arguments.accepted_values_orders_status_block__placed__shipped.62277f9bb9"
+    relationships_id = "test.generic_test_arguments.relationships_orders_customer_id__customer_id__ref_customers_.c6ec7f58f2"
+    unique_id = "test.generic_test_arguments.unique_customers_customer_id.c5af1ff4b1"
+    assert sorted(manifest["nodes"]) == [
+        "model.generic_test_arguments.customers",
+        "model.generic_test_arguments.orders",
+        accepted_id,
+        accepted_block_id,
+        relationships_id,
+        unique_id,
+    ]
+
+    accepted = manifest["nodes"][accepted_id]
+    assert accepted["name"] == "accepted_values_orders_status__placed__shipped__completed__return_pending__returned"
+    assert accepted["alias"] == "accepted_values_orders_1ce6ab157c285f7cd2ac656013faf758"
+    assert accepted["path"] == "accepted_values_orders_1ce6ab157c285f7cd2ac656013faf758.sql"
+    assert accepted["raw_code"] == '{{ test_accepted_values(**_dbt_generic_test_kwargs) }}{{ config(alias="accepted_values_orders_1ce6ab157c285f7cd2ac656013faf758") }}'
+    assert accepted["column_name"] == "status"
+    assert accepted["depends_on"]["macros"] == [
+        "macro.dbt.test_accepted_values",
+        "macro.dbt.get_where_subquery",
+    ]
+    assert accepted["depends_on"]["nodes"] == ["model.generic_test_arguments.orders"]
+    assert accepted["test_metadata"] == {
+        "name": "accepted_values",
+        "kwargs": {
+            "model": "{{ get_where_subquery(ref('orders')) }}",
+            "column_name": "status",
+            "values": ["placed", "shipped", "completed", "return_pending", "returned"],
+        },
+        "namespace": None,
+    }
+
+    accepted_block = manifest["nodes"][accepted_block_id]
+    assert accepted_block["name"] == "accepted_values_orders_status_block__placed__shipped"
+    assert accepted_block["alias"] == "accepted_values_orders_status_block__placed__shipped"
+    assert accepted_block["path"] == "accepted_values_orders_status_block__placed__shipped.sql"
+    assert accepted_block["column_name"] == "status_block"
+    assert accepted_block["test_metadata"]["kwargs"]["values"] == ["placed", "shipped"]
+
+    relationships = manifest["nodes"][relationships_id]
+    assert relationships["name"] == "relationships_orders_customer_id__customer_id__ref_customers_"
+    assert relationships["alias"] == "relationships_orders_customer_id__customer_id__ref_customers_"
+    assert relationships["path"] == "relationships_orders_customer_id__customer_id__ref_customers_.sql"
+    assert relationships["raw_code"] == "{{ test_relationships(**_dbt_generic_test_kwargs) }}"
+    assert relationships["column_name"] == "customer_id"
+    assert relationships["depends_on"]["macros"] == [
+        "macro.dbt.test_relationships",
+        "macro.dbt.get_where_subquery",
+    ]
+    assert relationships["depends_on"]["nodes"] == [
+        "model.generic_test_arguments.customers",
+        "model.generic_test_arguments.orders",
+    ]
+    assert relationships["test_metadata"] == {
+        "name": "relationships",
+        "kwargs": {
+            "model": "{{ get_where_subquery(ref('orders')) }}",
+            "column_name": "customer_id",
+            "to": "ref('customers')",
+            "field": "customer_id",
+        },
+        "namespace": None,
+    }
+    assert manifest["parent_map"][relationships_id] == [
+        "model.generic_test_arguments.customers",
+        "model.generic_test_arguments.orders",
+    ]
+    assert manifest["child_map"]["model.generic_test_arguments.customers"] == [
+        relationships_id,
+        unique_id,
+    ]
+    assert manifest["child_map"]["model.generic_test_arguments.orders"] == [
+        accepted_id,
+        accepted_block_id,
+        relationships_id,
+    ]
 
 
 def test_disabled_model_is_not_active_but_is_represented(tmp_path: Path):

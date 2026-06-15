@@ -1,0 +1,28 @@
+version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests:
+          - unique
+
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('customers')
+                field: customer_id
+      - name: status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['placed', 'shipped', 'completed', 'return_pending', 'returned']
+      - name: status_block
+        tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - placed
+                  - shipped
