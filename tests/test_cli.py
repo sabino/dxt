@@ -103,7 +103,6 @@ def test_parse_writes_minimal_manifest(tmp_path: Path):
 def assert_partial_manifest_schema(manifest: dict) -> None:
     assert set(manifest) >= {
         "metadata",
-        "dxt_metadata",
         "nodes",
         "sources",
         "macros",
@@ -116,10 +115,9 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
         "parent_map",
         "child_map",
     }
+    assert "dxt_metadata" not in manifest
     assert manifest["metadata"]["dbt_schema_version"] is None
     assert manifest["metadata"]["generated_by"] == "dxt"
-    assert manifest["dxt_metadata"]["artifact_kind"] == "partial_manifest"
-    assert manifest["dxt_metadata"]["compatibility_target"] == "dbt-manifest-v12-slice"
     for unique_id, node in manifest["nodes"].items():
         assert unique_id == node["unique_id"]
         assert node["resource_type"] in {"model", "seed", "test"}
@@ -151,6 +149,24 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
         assert unique_id == source["unique_id"]
         assert source["resource_type"] == "source"
         assert not Path(source["original_file_path"]).is_absolute()
+    for unique_id, exposure in manifest["exposures"].items():
+        assert unique_id == exposure["unique_id"]
+        assert exposure["resource_type"] == "exposure"
+        assert set(exposure) >= {
+            "unique_id",
+            "resource_type",
+            "package_name",
+            "name",
+            "type",
+            "owner",
+            "depends_on",
+            "refs",
+            "sources",
+            "path",
+            "original_file_path",
+        }
+        assert set(exposure["depends_on"]) == {"macros", "nodes"}
+        assert not Path(exposure["original_file_path"]).is_absolute()
     for unique_id, doc in manifest["docs"].items():
         assert unique_id == doc["unique_id"]
         assert doc["resource_type"] == "doc"
@@ -656,6 +672,113 @@ def test_parse_docs_blocks_and_literal_doc_descriptions(tmp_path: Path):
     assert str(project) not in first_manifest
 
 
+def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
+    project = copy_fixture(tmp_path, "exposure_artifacts")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    exposure_id = "exposure.exposure_artifacts.weekly_kpis"
+    disabled_exposure_id = "exposure.exposure_artifacts.hidden_dashboard"
+    model_id = "model.exposure_artifacts.orders"
+    source_id = "source.exposure_artifacts.raw.customers"
+    assert sorted(manifest["exposures"]) == [exposure_id]
+    assert disabled_exposure_id not in manifest["parent_map"]
+    assert disabled_exposure_id not in manifest["child_map"]
+    exposure = manifest["exposures"][exposure_id]
+    assert exposure["unique_id"] == exposure_id
+    assert exposure["resource_type"] == "exposure"
+    assert exposure["package_name"] == "exposure_artifacts"
+    assert exposure["name"] == "weekly_kpis"
+    assert exposure["path"] == "schema.yml"
+    assert exposure["original_file_path"] == "models/schema.yml"
+    assert exposure["fqn"] == ["exposure_artifacts", "weekly_kpis"]
+    assert exposure["type"] == "dashboard"
+    assert exposure["maturity"] == "high"
+    assert exposure["url"] == "https://example.com/weekly"
+    assert exposure["description"] == "Weekly KPI dashboard."
+    assert exposure["depends_on"] == {"macros": [], "nodes": [source_id, model_id]}
+    assert exposure["refs"] == [{"name": "orders", "package": None, "version": None}]
+    assert exposure["sources"] == [["raw", "customers"]]
+    assert exposure["owner"] == {
+        "email": "analytics@example.com",
+        "name": "Analytics Team",
+    }
+    assert exposure["tags"] == ["bi"]
+    assert exposure["meta"] == {"audited": True, "priority": 7}
+    assert exposure["config"] == {
+        "enabled": True,
+        "tags": ["bi"],
+        "meta": {"audited": True, "priority": 7},
+    }
+    assert isinstance(exposure["created_at"], float)
+    assert manifest["parent_map"][exposure_id] == [model_id, source_id]
+    assert manifest["child_map"][model_id] == [exposure_id]
+    assert manifest["child_map"][source_id] == [exposure_id]
+    assert manifest["child_map"][exposure_id] == []
+    assert str(project) not in (project / "target-dxt" / "manifest.json").read_text()
+
+    ls_default = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_default.returncode == 0, ls_default.stderr
+    assert ls_default.stdout.splitlines() == [
+        exposure_id,
+        model_id,
+        source_id,
+    ]
+
+    ls_exposure = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "exposure", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_exposure.returncode == 0, ls_exposure.stderr
+    assert json.loads(ls_exposure.stdout) == [
+        {"unique_id": exposure_id, "resource_type": "exposure", "name": "weekly_kpis"}
+    ]
+
+    ls_parents = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "+weekly_kpis"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_parents.returncode == 0, ls_parents.stderr
+    assert ls_parents.stdout.splitlines() == [
+        exposure_id,
+        model_id,
+        source_id,
+    ]
+
+    ls_children = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "orders+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_children.returncode == 0, ls_children.stderr
+    assert ls_children.stdout.splitlines() == [exposure_id, model_id]
+
+    ls_tag = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:bi"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_tag.returncode == 0, ls_tag.stderr
+    assert ls_tag.stdout.splitlines() == [exposure_id]
+
+
 def test_ls_text_json_and_tag_selection(tmp_path: Path):
     project = copy_fixture(tmp_path, "inline_config")
     text_result = subprocess.run(
@@ -734,7 +857,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         capture_output=True,
     )
     assert unsupported_type.returncode == 2
-    assert "--resource-type supports only model, seed, source, or test" in unsupported_type.stderr
+    assert "--resource-type supports only model, seed, source, exposure, or test" in unsupported_type.stderr
 
     unsupported_selector = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "config.materialized:view"],

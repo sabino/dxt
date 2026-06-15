@@ -108,6 +108,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.DuplicateModelName => stderr.writeAll("error: duplicate model name in supported M1 parser subset\n") catch {},
         error.DuplicateSeedName => stderr.writeAll("error: duplicate seed name in supported M1 parser subset\n") catch {},
         error.DuplicateDocName => stderr.writeAll("error: duplicate docs block name in supported M1 parser subset\n") catch {},
+        error.DuplicateExposureName => stderr.writeAll("error: duplicate exposure name in supported M1 parser subset\n") catch {},
         error.DuplicateMacroName => stderr.writeAll("error: duplicate macro name in supported M1 parser subset\n") catch {},
         error.DuplicateMacroProperty => stderr.writeAll("error: duplicate macro property patch in supported M1 parser subset\n") catch {},
         error.UnsupportedDynamicRef => stderr.writeAll("error: unsupported dynamic ref; M1 parser only supports literal ref calls\n") catch {},
@@ -123,7 +124,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnresolvedDoc => stderr.writeAll("error: unresolved doc reference in supported M1 parser subset\n") catch {},
         error.UnresolvedMacro => stderr.writeAll("error: unresolved macro reference in supported M1 parser subset\n") catch {},
         error.InvalidOutput => stderr.writeAll("error: --output must be text or json\n") catch {},
-        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, or test in the M1 parser subset\n") catch {},
+        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, or test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
         error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by the implemented M1 parser command\n") catch {},
         else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},
@@ -182,7 +183,7 @@ fn parseOptions(args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) 
                 try validateSelector(value);
                 options.exclude = value;
             } else if (equals(arg, "--resource-type")) {
-                if (!equals(value, "model") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "test")) return error.UnsupportedResourceType;
+                if (!equals(value, "model") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "exposure") and !equals(value, "test")) return error.UnsupportedResourceType;
                 options.resource_type = value;
             } else if (equals(arg, "--output")) {
                 if (equals(value, "text")) {
@@ -210,7 +211,8 @@ fn validateSelector(value: []const u8) !void {
     if (std.mem.indexOfScalar(u8, trimmed, ':')) |_| {
         if (!(std.mem.startsWith(u8, trimmed, "tag:") or
             std.mem.startsWith(u8, trimmed, "path:") or
-            std.mem.startsWith(u8, trimmed, "source:")))
+            std.mem.startsWith(u8, trimmed, "source:") or
+            std.mem.startsWith(u8, trimmed, "exposure:")))
         {
             return error.UnsupportedSelector;
         }

@@ -1,0 +1,33 @@
+version: 2
+
+sources:
+  - name: raw
+    tables:
+      - name: customers
+
+exposures:
+  - name: weekly_kpis
+    type: dashboard
+    maturity: high
+    url: https://example.com/weekly
+    description: Weekly KPI dashboard.
+    tags: [bi]
+    config:
+      meta:
+        priority: 7
+        audited: true
+    depends_on:
+      - ref('orders')
+      - source('raw', 'customers')
+    owner:
+      name: Analytics Team
+      email: analytics@example.com
+
+  - name: hidden_dashboard
+    type: dashboard
+    config:
+      enabled: false
+    depends_on:
+      - ref('orders')
+    owner:
+      name: Analytics Team
