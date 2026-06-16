@@ -251,6 +251,43 @@ Normalize:
 - Absolute paths where dbt emits them.
 - Adapter response fields known to differ.
 
+## Source-Grounded Compatibility Method
+
+dbt execution remains the artifact and behavior oracle, but future compatibility
+slices must also name the upstream source files that define the behavior being
+implemented. The public source map lives in
+`.agent/research/dbt-upstream-reference-map.md`.
+
+Every compatibility slice must record:
+
+- dbt Core v1 source references and, when relevant, dbt Core v2 / Fusion source
+  references.
+- The owning dxt Zig module or planned module.
+- The dbt artifact maps and pinned schemas affected.
+- Native Zig tests for parser, selector, graph, manifest, Jinja, or adapter core
+  logic.
+- Python/dbt oracle tests for CLI, filesystem fixtures, artifact parity, schema
+  validation, and public-safety boundaries.
+- Stop conditions that keep mechanical extractions separate from behavior
+  changes and prevent Python from crossing into product runtime behavior.
+
+The next source-grounded M1/M2 slices are:
+
+1. Extract loader orchestration into `src/project/loader.zig`, using v1
+   `ManifestLoader.load` and v2 loader/resolver order as the reference map.
+2. Move source and exposure YAML parser ownership out of `src/project.zig`,
+   using v1 `SourceParser`, `ExposureParser`, and source processing functions
+   plus v2 source/exposure resolver phases.
+3. Move macro block and macro patch ownership toward parser/resolve modules,
+   using v1 `MacroParser`, `MacroPatchParser`, and `MacroNamespaceBuilder` plus
+   v2 macro resolution and dependency listener behavior.
+4. Start the M2 parse-time Jinja context boundary with explicit `execute=false`
+   semantics, using v1 providers and v2 renderer/dbt namespace interception as
+   references.
+5. Grow artifact schema coverage only alongside emitted fields, using v1 JSON
+   schemas and v2 manifest builder behavior while keeping dxt-specific metadata
+   out of dbt schemas.
+
 ## Fixture Ladder
 
 Tier 0 synthetic fixtures:
@@ -576,3 +613,5 @@ Exit criteria:
 - Synthetic fixtures cover one model, model refs, seed refs, source refs, exposure refs to models and sources, combined source/model YAML, inline config/tag selection, config materialization selection, comma-intersection selection, YAML model properties and columns, emitted `unique`, `not_null`, `accepted_values`, and `relationships` generic test nodes, project macro artifacts and macro properties, configured `macro-paths` replacing the default macro directory, installed package macros with package-qualified calls and package-local macro calls, installed package models, seeds, sources, docs, exposures, package YAML model properties, root package config overrides, and package-qualified/package-local refs/sources, macro calls recorded in model and macro `depends_on.macros`, docs blocks with literal `doc` descriptions, disabled models, disabled ref diagnostics, unmatched model-property warnings, duplicate model and docs diagnostics, unsupported dynamic ref/doc diagnostics, missing doc diagnostics, malformed docs block diagnostics, unresolved package macro diagnostics, and unsupported unknown macro-call diagnostics.
 - The current M1 manual gate parses the public Jaffle Shop DuckDB project into a partial manifest with SQL models, CSV seeds, docs blocks, project macros, project `+docs.node_color` config, model/test `refs` and `sources` artifact fields, supported generic test nodes including the Jaffle `accepted_values` and `relationships` tests, and selector behavior for `dxt ls` covering whitespace unions, comma intersections, graph expansion, exact package selectors, dbt-style selector wildcards, multi-argv selector lists, and repeated `--select`/`--exclude` flags. Remaining M1 work includes package-provided generic tests/macros beyond the current narrow macro call surface and deeper Jaffle artifact parity.
 - Selector wildcard behavior is currently pinned to observed dbt Core 1.10 behavior. dbt Fusion preview currently differs for resource-type-prefixed wildcard selectors such as `model.<package>.*` and filename-suffix path selectors such as `path:*orders.sql`; a future Fusion-compatibility slice must decide whether to support a selector dialect switch or a compatible superset.
+- Compatibility planning now uses a source-grounded reference map under `.agent/research/dbt-upstream-reference-map.md`; future feature slices should name upstream dbt v1/v2 source references, dxt Zig owners, affected artifact fields, validation gates, and stop conditions before implementation.
+- Before starting M2 product implementation, close or explicitly re-scope the remaining M1/M1A gates: a reproducible committed Jaffle Shop DuckDB parse gate, a dbt-vs-dxt oracle harness for the M1 fixture ladder, and the behavior-preserving `src/project/loader.zig` extraction that keeps `src/project.zig` as a thinner facade.
