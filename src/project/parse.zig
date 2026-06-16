@@ -450,10 +450,14 @@ fn macroDefFromParts(allocator: std.mem.Allocator, package_name: []const u8, mac
 pub fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     var in_macros = false;
     var in_arguments = false;
+    var in_docs = false;
+    var in_meta = false;
     var macros_indent: usize = 0;
     var macro_item_indent: ?usize = null;
     var arguments_indent: usize = 0;
     var argument_item_indent: ?usize = null;
+    var docs_indent: usize = 0;
+    var meta_indent: usize = 0;
     var current_macro: ?usize = null;
     var current_argument: ?usize = null;
 
@@ -467,6 +471,8 @@ pub fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const 
         if (std.mem.eql(u8, trimmed, "macros:")) {
             in_macros = true;
             in_arguments = false;
+            in_docs = false;
+            in_meta = false;
             macros_indent = indent;
             macro_item_indent = null;
             argument_item_indent = null;
@@ -482,6 +488,8 @@ pub fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const 
             argument_item_indent = null;
             current_argument = null;
         }
+        if (in_docs and indent <= docs_indent) in_docs = false;
+        if (in_meta and indent <= meta_indent) in_meta = false;
 
         if (std.mem.startsWith(u8, trimmed, "- name:")) {
             const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
@@ -495,6 +503,8 @@ pub fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const 
                 current_macro = graph.macro_properties.items.len - 1;
                 macro_item_indent = indent;
                 in_arguments = false;
+                in_docs = false;
+                in_meta = false;
                 argument_item_indent = null;
                 current_argument = null;
             }
@@ -502,6 +512,17 @@ pub fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const 
         }
 
         const macro_index = current_macro orelse continue;
+        if (in_docs and indent > docs_indent) {
+            const kv = splitKeyValue(trimmed) orelse return error.UnsupportedYaml;
+            try applyMacroDocsConfigKeyValue(allocator, &graph.macro_properties.items[macro_index].docs, kv);
+            continue;
+        }
+        if (in_meta and indent > meta_indent) {
+            const kv = splitKeyValue(trimmed) orelse return error.UnsupportedYaml;
+            if (std.mem.trim(u8, kv.value, " \t").len == 0) return error.UnsupportedYaml;
+            try appendMetaEntry(allocator, &graph.macro_properties.items[macro_index].meta, kv.key, try parseJsonScalar(allocator, kv.value));
+            continue;
+        }
         if (splitKeyValue(trimmed)) |kv| {
             if (in_arguments and current_argument != null and indent > (argument_item_indent orelse 0)) {
                 var argument = &graph.macro_properties.items[macro_index].arguments.items[current_argument.?];
@@ -520,12 +541,45 @@ pub fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const 
             } else if (std.mem.eql(u8, kv.key, "arguments")) {
                 if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
                 in_arguments = true;
+                in_docs = false;
+                in_meta = false;
                 arguments_indent = indent;
                 argument_item_indent = null;
                 current_argument = null;
+            } else if (std.mem.eql(u8, kv.key, "docs")) {
+                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                in_arguments = false;
+                in_docs = true;
+                in_meta = false;
+                docs_indent = indent;
+                graph.macro_properties.items[macro_index].docs.configured = true;
+            } else if (std.mem.eql(u8, kv.key, "meta")) {
+                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                in_arguments = false;
+                in_docs = false;
+                in_meta = true;
+                meta_indent = indent;
             }
         }
     }
+}
+
+fn applyMacroDocsConfigKeyValue(allocator: std.mem.Allocator, docs: *types.DocsConfig, kv: util.KeyValue) !void {
+    if (std.mem.eql(u8, kv.key, "show")) {
+        docs.configured = true;
+        docs.show = try parseBool(kv.value);
+    } else if (std.mem.eql(u8, kv.key, "node_color")) {
+        docs.configured = true;
+        docs.node_color = try parseDocsNodeColor(allocator, kv.value);
+    } else {
+        return error.UnsupportedYaml;
+    }
+}
+
+fn parseDocsNodeColor(allocator: std.mem.Allocator, value: []const u8) !?[]const u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    if (std.mem.eql(u8, trimmed, "null") or std.mem.eql(u8, trimmed, "~")) return null;
+    return try dupTrimmedScalar(allocator, value);
 }
 
 pub fn applyMacroProperties(graph: *Graph) !void {
@@ -537,6 +591,10 @@ pub fn applyMacroProperties(graph: *Graph) !void {
         var macro = &graph.macros.items[macro_index];
         macro.patch_path = property.patch_path;
         if (property.description.len != 0) macro.description = property.description;
+        if (property.docs.configured) macro.docs = property.docs;
+        for (property.meta.items) |entry| {
+            try appendMetaEntry(graph.allocator, &macro.meta, entry.key, entry.value);
+        }
         for (property.arguments.items) |argument| {
             try appendMacroArgumentClone(graph, &macro.arguments, argument);
         }
@@ -1389,12 +1447,22 @@ test "parseMacroPropertiesFromText records descriptions and arguments" {
         \\macros:
         \\  - name: format_id
         \\    description: Format an identifier expression.
+        \\    docs:
+        \\      show: false
+        \\      node_color: "#336699"
+        \\    meta:
+        \\      owner: analytics
+        \\      audited: true
+        \\      priority: 2
         \\    arguments:
         \\      - name: column_name
         \\        type: string
         \\        description: Identifier expression.
         \\      - name: quote
         \\        type: bool
+        \\  - name: reset_color
+        \\    docs:
+        \\      node_color: null
         \\
         \\models:
         \\  - name: ignored
@@ -1402,17 +1470,56 @@ test "parseMacroPropertiesFromText records descriptions and arguments" {
 
     try parseMacroPropertiesFromText(allocator, yaml, "macros/schema.yml", "demo", &graph);
 
-    try std.testing.expectEqual(@as(usize, 1), graph.macro_properties.items.len);
+    try std.testing.expectEqual(@as(usize, 2), graph.macro_properties.items.len);
     try std.testing.expectEqualStrings("demo", graph.macro_properties.items[0].package_name);
     try std.testing.expectEqualStrings("format_id", graph.macro_properties.items[0].name);
     try std.testing.expectEqualStrings("macros/schema.yml", graph.macro_properties.items[0].patch_path);
     try std.testing.expectEqualStrings("Format an identifier expression.", graph.macro_properties.items[0].description);
+    try std.testing.expect(graph.macro_properties.items[0].docs.configured);
+    try std.testing.expect(!graph.macro_properties.items[0].docs.show);
+    try std.testing.expectEqualStrings("#336699", graph.macro_properties.items[0].docs.node_color.?);
+    try std.testing.expectEqual(@as(usize, 3), graph.macro_properties.items[0].meta.items.len);
+    try std.testing.expectEqualStrings("audited", graph.macro_properties.items[0].meta.items[0].key);
+    try std.testing.expectEqualStrings("true", graph.macro_properties.items[0].meta.items[0].value.text);
+    try std.testing.expectEqual(.bool, graph.macro_properties.items[0].meta.items[0].value.kind);
+    try std.testing.expectEqualStrings("owner", graph.macro_properties.items[0].meta.items[1].key);
+    try std.testing.expectEqualStrings("analytics", graph.macro_properties.items[0].meta.items[1].value.text);
+    try std.testing.expectEqual(.string, graph.macro_properties.items[0].meta.items[1].value.kind);
+    try std.testing.expectEqualStrings("priority", graph.macro_properties.items[0].meta.items[2].key);
+    try std.testing.expectEqualStrings("2", graph.macro_properties.items[0].meta.items[2].value.text);
+    try std.testing.expectEqual(.number, graph.macro_properties.items[0].meta.items[2].value.kind);
     try std.testing.expectEqual(@as(usize, 2), graph.macro_properties.items[0].arguments.items.len);
     try std.testing.expectEqualStrings("column_name", graph.macro_properties.items[0].arguments.items[0].name);
     try std.testing.expectEqualStrings("string", graph.macro_properties.items[0].arguments.items[0].type);
     try std.testing.expectEqualStrings("Identifier expression.", graph.macro_properties.items[0].arguments.items[0].description);
     try std.testing.expectEqualStrings("quote", graph.macro_properties.items[0].arguments.items[1].name);
     try std.testing.expectEqualStrings("bool", graph.macro_properties.items[0].arguments.items[1].type);
+    try std.testing.expectEqualStrings("reset_color", graph.macro_properties.items[1].name);
+    try std.testing.expect(graph.macro_properties.items[1].docs.configured);
+    try std.testing.expect(graph.macro_properties.items[1].docs.node_color == null);
+}
+
+test "parseMacroPropertiesFromText rejects nested macro meta" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\macros:
+        \\  - name: format_id
+        \\    meta:
+        \\      owner:
+        \\        team: analytics
+    ;
+
+    try std.testing.expectError(
+        error.UnsupportedYaml,
+        parseMacroPropertiesFromText(allocator, yaml, "macros/schema.yml", "demo", &graph),
+    );
 }
 
 test "applyMacroProperties applies descriptions patch paths and merges arguments" {
@@ -1443,6 +1550,11 @@ test "applyMacroProperties applies descriptions patch paths and merges arguments
         .patch_path = "macros/schema.yml",
         .description = "Formats an identifier.",
     });
+    graph.macro_properties.items[0].docs.configured = true;
+    graph.macro_properties.items[0].docs.show = false;
+    graph.macro_properties.items[0].docs.node_color = "#336699";
+    try appendMetaEntry(allocator, &graph.macro_properties.items[0].meta, "owner", .{ .text = "analytics", .kind = .string });
+    try appendMetaEntry(allocator, &graph.macro_properties.items[0].meta, "priority", .{ .text = "2", .kind = .number });
     try graph.macro_properties.items[0].arguments.append(allocator, .{
         .name = "column_name",
         .type = "",
@@ -1458,6 +1570,14 @@ test "applyMacroProperties applies descriptions patch paths and merges arguments
 
     try std.testing.expectEqualStrings("macros/schema.yml", graph.macros.items[0].patch_path.?);
     try std.testing.expectEqualStrings("Formats an identifier.", graph.macros.items[0].description);
+    try std.testing.expect(graph.macros.items[0].docs.configured);
+    try std.testing.expect(!graph.macros.items[0].docs.show);
+    try std.testing.expectEqualStrings("#336699", graph.macros.items[0].docs.node_color.?);
+    try std.testing.expectEqual(@as(usize, 2), graph.macros.items[0].meta.items.len);
+    try std.testing.expectEqualStrings("owner", graph.macros.items[0].meta.items[0].key);
+    try std.testing.expectEqualStrings("analytics", graph.macros.items[0].meta.items[0].value.text);
+    try std.testing.expectEqualStrings("priority", graph.macros.items[0].meta.items[1].key);
+    try std.testing.expectEqualStrings("2", graph.macros.items[0].meta.items[1].value.text);
     try std.testing.expectEqual(@as(usize, 2), graph.macros.items[0].arguments.items.len);
     try std.testing.expectEqualStrings("column_name", graph.macros.items[0].arguments.items[0].name);
     try std.testing.expectEqualStrings("string", graph.macros.items[0].arguments.items[0].type);

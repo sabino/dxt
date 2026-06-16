@@ -3,6 +3,13 @@ version: 2
 macros:
   - name: format_id
     description: Format an identifier expression.
+    docs:
+      show: false
+      node_color: "#336699"
+    meta:
+      owner: analytics
+      audited: true
+      priority: 2
     arguments:
       - name: column_name
         type: string

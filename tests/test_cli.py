@@ -1247,8 +1247,15 @@ def test_parse_macro_property_yaml(tmp_path: Path):
     assert result.returncode == 0, result.stderr
 
     manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert_manifest_schema_slice(project / "target-dxt" / "manifest.json")
     macro = manifest["macros"]["macro.macro_properties.format_id"]
     assert macro["description"] == "Format an identifier expression."
+    assert macro["docs"] == {"show": False, "node_color": "#336699"}
+    assert macro["meta"] == {
+        "audited": True,
+        "owner": "analytics",
+        "priority": 2,
+    }
     assert macro["patch_path"] == "macro_properties://macros/schema.yml"
     assert macro["arguments"] == [
         {
