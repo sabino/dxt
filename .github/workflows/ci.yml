@@ -51,7 +51,9 @@ jobs:
         run: git show --check --format=short --no-renames HEAD
 
       - name: Check Zig formatting
-        run: zig fmt --check build.zig build.zig.zon src/main.zig src/project.zig src/root.zig
+        run: |
+          zig fmt --check build.zig build.zig.zon
+          find src -name '*.zig' -print0 | sort -z | xargs -0 zig fmt --check
 
       - name: Run public-safety scan
         run: python scripts/check_public_safety.py
