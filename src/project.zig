@@ -31,6 +31,13 @@ const Graph = types.Graph;
 const deinitProjectConfig = types.deinitProjectConfig;
 const deinitNode = types.deinitNode;
 const deinitGenericTestNode = types.deinitGenericTestNode;
+const KeyValue = util.KeyValue;
+const stripYamlComment = util.stripYamlComment;
+const leadingSpaces = util.leadingSpaces;
+const splitKeyValue = util.splitKeyValue;
+const parseInlineStringList = util.parseInlineStringList;
+const dupTrimmedScalar = util.dupTrimmedScalar;
+const sortStrings = util.sortStrings;
 
 pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try loadGraph(runtime, options.project_dir);
@@ -2146,56 +2153,6 @@ fn skipQuotedSpan(text: []const u8, start: usize) ?usize {
     return null;
 }
 
-fn stripYamlComment(line: []const u8) []const u8 {
-    var quote: ?u8 = null;
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        const ch = line[i];
-        if (quote) |q| {
-            if (ch == q) quote = null;
-            continue;
-        }
-        if (ch == '"' or ch == '\'') {
-            quote = ch;
-            continue;
-        }
-        if (ch == '#') return line[0..i];
-    }
-    return line;
-}
-
-fn leadingSpaces(line: []const u8) usize {
-    var count: usize = 0;
-    while (count < line.len and line[count] == ' ') count += 1;
-    return count;
-}
-
-const KeyValue = struct {
-    key: []const u8,
-    value: []const u8,
-};
-
-fn splitKeyValue(line: []const u8) ?KeyValue {
-    const colon = std.mem.indexOfScalar(u8, line, ':') orelse return null;
-    return .{
-        .key = std.mem.trim(u8, line[0..colon], " \t"),
-        .value = std.mem.trim(u8, line[colon + 1 ..], " \t"),
-    };
-}
-
-fn parseInlineStringList(allocator: std.mem.Allocator, value: []const u8, out: *std.ArrayList([]const u8)) !void {
-    const trimmed = std.mem.trim(u8, value, " \t");
-    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') {
-        try out.append(allocator, try dupTrimmedScalar(allocator, trimmed));
-        return;
-    }
-    var pieces = std.mem.splitScalar(u8, trimmed[1 .. trimmed.len - 1], ',');
-    while (pieces.next()) |piece| {
-        const item = std.mem.trim(u8, piece, " \t");
-        if (item.len != 0) try out.append(allocator, try dupTrimmedScalar(allocator, item));
-    }
-}
-
 fn parseInlineGenericTestList(allocator: std.mem.Allocator, value: []const u8, out: *std.ArrayList(GenericTestDef)) !void {
     const trimmed = std.mem.trim(u8, value, " \t");
     if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') {
@@ -2265,14 +2222,6 @@ fn currentGenericTestDef(graph: *Graph, model_index: usize, current_column: ?usi
         return &graph.model_properties.items[model_index].columns.items[column_index].tests.items[test_index];
     }
     return error.UnsupportedYaml;
-}
-
-fn dupTrimmedScalar(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
-    const trimmed = std.mem.trim(u8, value, " \t\r");
-    if (trimmed.len >= 2 and ((trimmed[0] == '"' and trimmed[trimmed.len - 1] == '"') or (trimmed[0] == '\'' and trimmed[trimmed.len - 1] == '\''))) {
-        return try allocator.dupe(u8, trimmed[1 .. trimmed.len - 1]);
-    }
-    return try allocator.dupe(u8, trimmed);
 }
 
 const GenericTestNames = struct {
@@ -2465,14 +2414,6 @@ fn relativeUnderResourcePath(relative_path: []const u8, resource_root: []const u
 
 fn pathJoin(allocator: std.mem.Allocator, parts: []const []const u8) ![]const u8 {
     return try std.fs.path.join(allocator, parts);
-}
-
-fn sortStrings(values: [][]const u8) void {
-    std.mem.sort([]const u8, values, {}, struct {
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lessThan);
 }
 
 fn sortGenericTestDefs(tests: []GenericTestDef) void {
