@@ -64,9 +64,14 @@ Every compatibility slice should record:
   traversal, target-path lookup, project/package resource traversal,
   macro/property application sequencing, duplicate checks, and graph sorting.
 - `src/project.zig` is now the public parse/list facade plus remaining resource
-  parser callbacks. It still owns docs block parsing, macro block parsing, YAML
-  model/macro property parsing, model/seed parsing, generic-test
-  materialization, warnings, and remaining resolver orchestration.
+  parser callbacks. It still owns docs block parsing, YAML model property
+  parsing, model/seed parsing, generic-test materialization, warnings, and
+  remaining resolver orchestration.
+- `src/project/parse.zig` owns current top-level `{% macro %}` block parsing,
+  macro property YAML parsing, macro-property application, and native parser
+  tests for that preserved surface. dbt-compatible macro block variants
+  (`materialization`, `test`, `data_test`), macro argument extraction, patch
+  validation, and namespace precedence remain behavior slices.
 - Existing extracted modules are `types`, `util`, `config`, `fs`, `jinja`,
   `loader`, `resolve`, `parse`, `selector`, and `manifest`.
 - The test base includes native Zig tests for module-level helpers and pytest
@@ -84,7 +89,7 @@ Every compatibility slice should record:
 
 ## Next Source-Grounded Slices
 
-### 1. M1 Macro Block and Macro Patch Ownership
+### 1. M1 Macro Block and Macro Patch Parity
 
 - Upstream references: v1 `core/dbt/parser/macros.py::MacroParser`,
   `parse_unparsed_macros`, `parse_macro`, `_extract_args`,
@@ -97,11 +102,12 @@ Every compatibility slice should record:
   `apply_macro_patches`,
   `crates/dbt-jinja-utils/src/listener.rs::MacroDependencyListener`,
   and macro namespace registries in the Jinja environment builder.
-- dxt files: move macro block parsing and macro property parsing ownership out
-  of `src/project.zig` into `src/project/parse.zig` or a future
-  `src/project/macro.zig`; keep lexical scanning helpers in
+- dxt files: current top-level macro block parsing and macro property YAML
+  ownership lives in `src/project/parse.zig`; keep lexical scanning helpers in
   `src/project/jinja.zig` and lookup/namespace behavior in
-  `src/project/resolve.zig`.
+  `src/project/resolve.zig`. Introduce a future `src/project/macro.zig` only if
+  macro execution, namespace, and dispatch logic would otherwise make
+  `parse.zig` too broad.
 - Tests: native tests for top-level `{% macro %}` extraction with nested
   non-top-level blocks ignored, `{% materialization %}`, `{% test %}`, and
   `{% data_test %}` artifact extraction, package-qualified macro IDs, duplicate
