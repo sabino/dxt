@@ -32,6 +32,7 @@ const ProjectConfig = struct {
 };
 
 const ModelPathConfig = struct {
+    package_name: []const u8,
     path: []const u8,
     materialized: []const u8 = "",
     tags: std.ArrayList([]const u8) = .empty,
@@ -45,6 +46,7 @@ const DocsConfig = struct {
 };
 
 const SourceDef = struct {
+    package_name: []const u8,
     unique_id: []const u8,
     source_name: []const u8,
     table_name: []const u8,
@@ -52,6 +54,7 @@ const SourceDef = struct {
 };
 
 const ExposureDef = struct {
+    package_name: []const u8,
     unique_id: []const u8,
     name: []const u8,
     exposure_type: []const u8 = "",
@@ -110,6 +113,7 @@ const GenericTestDef = struct {
 };
 
 const DocBlock = struct {
+    package_name: []const u8,
     unique_id: []const u8,
     name: []const u8,
     path: []const u8,
@@ -137,6 +141,7 @@ const MacroArgument = struct {
 };
 
 const ModelProperty = struct {
+    package_name: []const u8,
     name: []const u8,
     patch_path: []const u8,
     description: []const u8 = "",
@@ -154,6 +159,7 @@ const UnmatchedModelProperty = struct {
 };
 
 const MacroProperty = struct {
+    package_name: []const u8,
     name: []const u8,
     patch_path: []const u8,
     description: []const u8 = "",
@@ -167,6 +173,7 @@ const UnmatchedMacroProperty = struct {
 
 const Node = struct {
     resource_type: []const u8 = "model",
+    package_name: []const u8,
     unique_id: []const u8,
     name: []const u8,
     path: []const u8,
@@ -190,6 +197,7 @@ const Node = struct {
 };
 
 const GenericTestNode = struct {
+    package_name: []const u8,
     unique_id: []const u8,
     name: []const u8,
     alias: []const u8,
@@ -382,6 +390,7 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
 
     try loadProjectMacros(runtime, project_dir, config.name, config.macro_paths.items, true, &graph);
     try loadInstalledPackageMacros(runtime, project_dir, &graph);
+    try loadInstalledPackageResources(runtime, project_dir, &graph);
 
     for (config.model_paths.items) |model_path| {
         var sql_files: std.ArrayList([]const u8) = .empty;
@@ -411,7 +420,7 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
         }
     }
 
-    try applyProjectModelPathConfigs(&graph, config.model_path_configs.items);
+    try applyProjectModelPathConfigs(&graph, config.model_path_configs.items, true, null);
 
     for (config.seed_paths.items) |seed_path| {
         var seed_files: std.ArrayList([]const u8) = .empty;
@@ -428,11 +437,11 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
             try parseSeed(runtime, seed_path, relative_path, config.name, &graph);
         }
     }
-    applyProjectSeedDocs(&graph, config.seed_docs);
+    applyProjectSeedDocs(&graph, config.name, config.seed_docs);
 
     try rejectDuplicateMacroProperties(&graph);
     try applyMacroProperties(&graph);
-    try applyModelProperties(&graph);
+    try applyModelProperties(&graph, config.name);
     try materializeGenericTests(&graph);
     sortNodes(graph.nodes.items);
     sortTests(graph.tests.items);
@@ -510,7 +519,92 @@ fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, graph: 
         };
         defer deinitProjectConfig(runtime.allocator, &package_config);
 
-        try loadProjectMacros(runtime, package_dir, package_config.name, package_config.macro_paths.items, false, graph);
+        try loadProjectMacros(runtime, package_dir, package_config.name, package_config.macro_paths.items, true, graph);
+    }
+}
+
+fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, graph: *Graph) !void {
+    const packages_dir = try pathJoin(runtime.allocator, &.{ project_dir, "dbt_packages" });
+    const fd = openLinuxDirectory(runtime.allocator, packages_dir) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer closeLinuxFd(fd);
+
+    var package_dirs: std.ArrayList([]const u8) = .empty;
+    defer package_dirs.deinit(runtime.allocator);
+
+    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
+    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
+    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
+        if (entry.name.len == 0 or entry.name[0] == '.') continue;
+        const child_abs = try pathJoin(runtime.allocator, &.{ packages_dir, entry.name });
+        const is_dir = if (entry.kind == .directory)
+            true
+        else if (entry.kind == .unknown)
+            try linuxPathIsDirectory(runtime.allocator, child_abs)
+        else
+            false;
+        if (is_dir) {
+            try package_dirs.append(runtime.allocator, child_abs);
+        }
+    }
+    sortStrings(package_dirs.items);
+
+    for (package_dirs.items) |package_dir| {
+        var package_config = loadProjectConfig(runtime, package_dir) catch |err| switch (err) {
+            error.MissingProjectFile => continue,
+            else => return err,
+        };
+        defer deinitProjectConfig(runtime.allocator, &package_config);
+
+        for (package_config.model_paths.items) |model_path| {
+            var sql_files: std.ArrayList([]const u8) = .empty;
+            defer sql_files.deinit(runtime.allocator);
+            var yaml_files: std.ArrayList([]const u8) = .empty;
+            defer yaml_files.deinit(runtime.allocator);
+            var md_files: std.ArrayList([]const u8) = .empty;
+            defer md_files.deinit(runtime.allocator);
+
+            const root = try pathJoin(runtime.allocator, &.{ package_dir, model_path });
+            discoverFiles(runtime, root, model_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            sortStrings(sql_files.items);
+            sortStrings(yaml_files.items);
+            sortStrings(md_files.items);
+
+            for (md_files.items) |md_path| {
+                try parseDocBlocks(runtime, package_dir, model_path, md_path, package_config.name, graph);
+            }
+            for (yaml_files.items) |yaml_path| {
+                try parseYamlProperties(runtime, package_dir, model_path, yaml_path, package_config.name, graph);
+            }
+
+            for (sql_files.items) |sql_path| {
+                try parseModel(runtime, package_dir, model_path, sql_path, package_config.name, graph);
+            }
+        }
+
+        for (package_config.seed_paths.items) |seed_path| {
+            var seed_files: std.ArrayList([]const u8) = .empty;
+            defer seed_files.deinit(runtime.allocator);
+
+            const root = try pathJoin(runtime.allocator, &.{ package_dir, seed_path });
+            discoverSeedFiles(runtime, root, seed_path, &seed_files) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            sortStrings(seed_files.items);
+
+            for (seed_files.items) |relative_path| {
+                try parseSeed(runtime, seed_path, relative_path, package_config.name, graph);
+            }
+        }
+        try applyProjectModelPathConfigs(graph, package_config.model_path_configs.items, false, package_config.name);
+        try applyModelProperties(graph, package_config.name);
+        applyProjectSeedDocs(graph, package_config.name, package_config.seed_docs);
     }
 }
 
@@ -586,7 +680,7 @@ fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
     }
 
     if (config.name.len == 0) return error.InvalidProjectName;
-    try parseProjectModelPathConfigs(runtime.allocator, text, config.name, &config.model_path_configs);
+    try parseProjectModelPathConfigs(runtime.allocator, text, &config.model_path_configs);
     try parseProjectSeedDocs(runtime.allocator, text, &config.seed_docs);
     if (config.model_paths.items.len == 0) {
         try config.model_paths.append(runtime.allocator, "models");
@@ -605,13 +699,14 @@ const PathStackEntry = struct {
     name: []const u8,
 };
 
-fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, project_name: []const u8, configs: *std.ArrayList(ModelPathConfig)) !void {
+fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, configs: *std.ArrayList(ModelPathConfig)) !void {
     var in_models = false;
-    var in_project = false;
+    var in_package = false;
     var in_docs = false;
     var models_indent: usize = 0;
-    var project_indent: usize = 0;
+    var package_indent: usize = 0;
     var docs_indent: usize = 0;
+    var package_name: []const u8 = "";
     var docs_path: []const u8 = "";
     var path_stack: std.ArrayList(PathStackEntry) = .empty;
     defer path_stack.deinit(allocator);
@@ -625,15 +720,17 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
 
         if (std.mem.eql(u8, trimmed, "models:")) {
             in_models = true;
-            in_project = false;
+            in_package = false;
             models_indent = indent;
+            package_name = "";
             path_stack.clearRetainingCapacity();
             continue;
         }
         if (!in_models) continue;
         if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:")) {
             in_models = false;
-            in_project = false;
+            in_package = false;
+            package_name = "";
             path_stack.clearRetainingCapacity();
             continue;
         }
@@ -644,27 +741,30 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
             if (indent <= docs_indent) {
                 in_docs = false;
             } else {
-                const path_config = try getOrCreateModelPathConfig(allocator, configs, docs_path);
+                const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, docs_path);
                 try applyDocsConfigKeyValue(allocator, &path_config.docs, kv);
                 continue;
             }
         }
 
-        if (!in_project) {
-            if (indent > models_indent and std.mem.eql(u8, kv.key, project_name) and std.mem.trim(u8, kv.value, " \t").len == 0) {
-                in_project = true;
-                project_indent = indent;
+        if (!in_package) {
+            if (indent > models_indent and !std.mem.startsWith(u8, kv.key, "+") and std.mem.trim(u8, kv.value, " \t").len == 0) {
+                in_package = true;
+                package_indent = indent;
+                package_name = try dupTrimmedScalar(allocator, kv.key);
                 path_stack.clearRetainingCapacity();
             }
             continue;
         }
 
-        if (indent <= project_indent) {
-            in_project = false;
+        if (indent <= package_indent) {
+            in_package = false;
+            package_name = "";
             path_stack.clearRetainingCapacity();
-            if (indent > models_indent and std.mem.eql(u8, kv.key, project_name) and std.mem.trim(u8, kv.value, " \t").len == 0) {
-                in_project = true;
-                project_indent = indent;
+            if (indent > models_indent and !std.mem.startsWith(u8, kv.key, "+") and std.mem.trim(u8, kv.value, " \t").len == 0) {
+                in_package = true;
+                package_indent = indent;
+                package_name = try dupTrimmedScalar(allocator, kv.key);
             }
             continue;
         }
@@ -676,15 +776,15 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
         if (std.mem.startsWith(u8, kv.key, "+")) {
             const path = try joinPathStack(allocator, path_stack.items);
             if (std.mem.eql(u8, kv.key, "+materialized")) {
-                const path_config = try getOrCreateModelPathConfig(allocator, configs, path);
+                const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
                 path_config.materialized = try dupTrimmedScalar(allocator, kv.value);
             } else if (std.mem.eql(u8, kv.key, "+tags")) {
-                const path_config = try getOrCreateModelPathConfig(allocator, configs, path);
+                const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
                 path_config.tags.clearRetainingCapacity();
                 try parseInlineStringList(allocator, kv.value, &path_config.tags);
                 sortStrings(path_config.tags.items);
             } else if (std.mem.eql(u8, kv.key, "+docs") and std.mem.trim(u8, kv.value, " \t").len == 0) {
-                const path_config = try getOrCreateModelPathConfig(allocator, configs, path);
+                const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
                 path_config.docs.configured = true;
                 in_docs = true;
                 docs_indent = indent;
@@ -773,11 +873,11 @@ fn joinPathStack(allocator: std.mem.Allocator, stack: []const PathStackEntry) ![
     return out;
 }
 
-fn getOrCreateModelPathConfig(allocator: std.mem.Allocator, configs: *std.ArrayList(ModelPathConfig), path: []const u8) !*ModelPathConfig {
+fn getOrCreateModelPathConfig(allocator: std.mem.Allocator, configs: *std.ArrayList(ModelPathConfig), package_name: []const u8, path: []const u8) !*ModelPathConfig {
     for (configs.items) |*config| {
-        if (std.mem.eql(u8, config.path, path)) return config;
+        if (std.mem.eql(u8, config.package_name, package_name) and std.mem.eql(u8, config.path, path)) return config;
     }
-    try configs.append(allocator, .{ .path = path });
+    try configs.append(allocator, .{ .package_name = package_name, .path = path });
     return &configs.items[configs.items.len - 1];
 }
 
@@ -1016,6 +1116,7 @@ fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const
         const block_contents = std.mem.trim(u8, text[close + 2 .. end_open], " \t\r\n");
         const unique_id = try std.fmt.allocPrint(runtime.allocator, "doc.{s}.{s}", .{ package_name, raw_name });
         try graph.docs.append(runtime.allocator, .{
+            .package_name = package_name,
             .unique_id = unique_id,
             .name = try runtime.allocator.dupe(u8, raw_name),
             .path = relativeUnderResourcePath(relative_path, model_root),
@@ -1087,8 +1188,8 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
 
     try parseSourcesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
-    try parseModelPropertiesFromText(runtime.allocator, text, relative_path, graph);
-    try parseMacroPropertiesFromText(runtime.allocator, text, relative_path, graph);
+    try parseModelPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
+    try parseMacroPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
 }
 
 fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
@@ -1138,6 +1239,7 @@ fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, relative
                 const source_name = current_source orelse return error.UnsupportedYaml;
                 const unique_id = try std.fmt.allocPrint(allocator, "source.{s}.{s}.{s}", .{ package_name, source_name, name });
                 try graph.sources.append(allocator, .{
+                    .package_name = package_name,
                     .unique_id = unique_id,
                     .source_name = source_name,
                     .table_name = name,
@@ -1201,6 +1303,7 @@ fn parseExposuresFromText(allocator: std.mem.Allocator, text: []const u8, resour
                 const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
                 const unique_id = try std.fmt.allocPrint(allocator, "exposure.{s}.{s}", .{ package_name, name });
                 try graph.exposures.append(allocator, .{
+                    .package_name = package_name,
                     .unique_id = unique_id,
                     .name = name,
                     .path = relativeUnderResourcePath(relative_path, resource_root),
@@ -1338,7 +1441,7 @@ const TestTarget = enum {
     column,
 };
 
-fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, graph: *Graph) !void {
+fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     var in_models = false;
     var in_columns = false;
     var in_config = false;
@@ -1446,7 +1549,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                     active_values_index = null;
                     in_config = false;
                 } else {
-                    try graph.model_properties.append(allocator, .{ .name = name, .patch_path = relative_path });
+                    try graph.model_properties.append(allocator, .{ .package_name = package_name, .name = name, .patch_path = relative_path });
                     current_model = graph.model_properties.items.len - 1;
                     current_column = null;
                     model_item_indent = indent;
@@ -1545,7 +1648,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
     }
 }
 
-fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, graph: *Graph) !void {
+fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     var in_macros = false;
     var in_arguments = false;
     var macros_indent: usize = 0;
@@ -1589,7 +1692,7 @@ fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                 current_argument = graph.macro_properties.items[macro_index].arguments.items.len - 1;
                 argument_item_indent = indent;
             } else {
-                try graph.macro_properties.append(allocator, .{ .name = name, .patch_path = relative_path });
+                try graph.macro_properties.append(allocator, .{ .package_name = package_name, .name = name, .patch_path = relative_path });
                 current_macro = graph.macro_properties.items.len - 1;
                 macro_item_indent = indent;
                 in_arguments = false;
@@ -1634,6 +1737,7 @@ fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8,
     const model_path = relativeUnderResourcePath(relative_path, model_root);
 
     var node = Node{
+        .package_name = package_name,
         .unique_id = unique_id,
         .name = model_name,
         .path = model_path,
@@ -1654,6 +1758,7 @@ fn parseSeed(runtime: Runtime, seed_root: []const u8, relative_path: []const u8,
 
     var node = Node{
         .resource_type = "seed",
+        .package_name = package_name,
         .unique_id = unique_id,
         .name = seed_name,
         .path = seed_path,
@@ -1669,7 +1774,7 @@ fn parseSeed(runtime: Runtime, seed_root: []const u8, relative_path: []const u8,
 
 fn applyMacroProperties(graph: *Graph) !void {
     for (graph.macro_properties.items) |property| {
-        const macro_index = findProjectMacroIndexByName(graph, property.name) orelse {
+        const macro_index = findMacroIndexByPackageAndName(graph, property.package_name, property.name) orelse {
             try graph.unmatched_macro_properties.append(graph.allocator, .{ .name = property.name, .patch_path = property.patch_path });
             continue;
         };
@@ -1682,15 +1787,16 @@ fn applyMacroProperties(graph: *Graph) !void {
     }
 }
 
-fn applyModelProperties(graph: *Graph) !void {
+fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
     for (graph.model_properties.items) |property| {
-        const node_index = findModelIndexByName(graph, property.name) orelse {
+        if (!std.mem.eql(u8, property.package_name, package_name)) continue;
+        const node_index = findModelIndexByName(graph, property.package_name, property.name) orelse {
             try graph.unmatched_model_properties.append(graph.allocator, .{ .name = property.name, .patch_path = property.patch_path });
             continue;
         };
         var node = &graph.nodes.items[node_index];
         node.patch_path = property.patch_path;
-        if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.description, &node.doc_blocks);
+        if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.package_name, property.description, &node.doc_blocks);
         if (property.materialized.len != 0 and !node.inline_materialized) node.materialized = property.materialized;
         if (property.enabled) |enabled| node.enabled = enabled;
         for (property.tags.items) |tag| {
@@ -1702,13 +1808,13 @@ fn applyModelProperties(graph: *Graph) !void {
         }
         sortGenericTestDefs(node.tests.items);
         for (property.columns.items) |column| {
-            try appendColumnClone(graph, &node.columns, column);
+            try appendColumnClone(graph, property.package_name, &node.columns, column);
         }
         sortColumns(node.columns.items);
     }
 }
 
-fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig) !void {
+fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig, override_dependency_inline: bool, restrict_package_name: ?[]const u8) !void {
     for (graph.nodes.items) |*node| {
         if (!std.mem.eql(u8, node.resource_type, "model")) continue;
 
@@ -1717,6 +1823,10 @@ fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig)
         var docs_config: ?*const ModelPathConfig = null;
         var docs_depth: usize = 0;
         for (configs) |*config| {
+            if (restrict_package_name) |package_name| {
+                if (!std.mem.eql(u8, config.package_name, package_name)) continue;
+            }
+            if (!std.mem.eql(u8, node.package_name, config.package_name)) continue;
             if (!modelPathConfigMatches(config.path, node.path)) continue;
             const depth = modelPathConfigDepth(config.path);
             if (config.materialized.len != 0 and (materialized_config == null or depth >= materialized_depth)) {
@@ -1732,7 +1842,8 @@ fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig)
             }
         }
 
-        if (!node.inline_materialized) {
+        const can_override_materialized = !node.inline_materialized or (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name));
+        if (can_override_materialized) {
             if (materialized_config) |config| node.materialized = config.materialized;
         }
         if (docs_config) |config| node.docs = config.docs;
@@ -1740,9 +1851,10 @@ fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig)
     }
 }
 
-fn applyProjectSeedDocs(graph: *Graph, docs: DocsConfig) void {
+fn applyProjectSeedDocs(graph: *Graph, package_name: []const u8, docs: DocsConfig) void {
     if (!docs.configured) return;
     for (graph.nodes.items) |*node| {
+        if (!std.mem.eql(u8, node.package_name, package_name)) continue;
         if (!std.mem.eql(u8, node.resource_type, "seed")) continue;
         node.docs = docs;
     }
@@ -1785,7 +1897,7 @@ fn materializeGenericTests(graph: *Graph) !void {
 
 fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTestDef, column_name: ?[]const u8) !void {
     const names = try synthesizeGenericTestNames(graph.allocator, test_def, node.name, column_name);
-    const unique_id = try genericTestUniqueId(graph.allocator, graph.project_name, names.full, test_def, node.name, column_name);
+    const unique_id = try genericTestUniqueId(graph.allocator, node.package_name, names.full, test_def, node.name, column_name);
     for (graph.tests.items) |existing| {
         if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
     }
@@ -1795,6 +1907,7 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
     else
         try std.fmt.allocPrint(graph.allocator, "{{{{ test_{s}(**_dbt_generic_test_kwargs) }}}}{{{{ config(alias=\"{s}\") }}}}", .{ test_def.name, names.compiled });
     var test_node = GenericTestNode{
+        .package_name = node.package_name,
         .unique_id = unique_id,
         .name = names.full,
         .alias = names.compiled,
@@ -1815,9 +1928,7 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
     if (std.mem.eql(u8, test_def.name, "relationships")) {
         const target_ref = try refDepFromValue(graph.allocator, test_def.relationship_to);
         try test_node.refs.append(graph.allocator, target_ref);
-        const target_package = target_ref.package orelse graph.project_name;
-        const target_unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ target_package, target_ref.name });
-        if (!hasNode(graph, target_unique_id)) return error.UnresolvedRef;
+        const target_unique_id = try resolveRefDependency(graph, node.package_name, target_ref);
         try test_node.depends_on.append(graph.allocator, target_unique_id);
     }
     try test_node.refs.append(graph.allocator, .{ .package = null, .name = node.name });
@@ -1845,10 +1956,10 @@ fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
     }
 }
 
-fn appendColumnClone(graph: *Graph, columns: *std.ArrayList(ColumnDef), source: ColumnDef) !void {
+fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.ArrayList(ColumnDef), source: ColumnDef) !void {
     for (columns.items) |*existing| {
         if (std.mem.eql(u8, existing.name, source.name)) {
-            if (source.description.len != 0) existing.description = try resolveDocDescription(graph, source.description, &existing.doc_blocks);
+            if (source.description.len != 0) existing.description = try resolveDocDescription(graph, package_name, source.description, &existing.doc_blocks);
             for (source.tests.items) |test_def| {
                 try appendGenericTestDefClone(graph, &existing.tests, test_def);
             }
@@ -1862,7 +1973,7 @@ fn appendColumnClone(graph: *Graph, columns: *std.ArrayList(ColumnDef), source: 
         column.doc_blocks.deinit(graph.allocator);
         column.tests.deinit(graph.allocator);
     }
-    if (source.description.len != 0) column.description = try resolveDocDescription(graph, source.description, &column.doc_blocks);
+    if (source.description.len != 0) column.description = try resolveDocDescription(graph, package_name, source.description, &column.doc_blocks);
     for (source.tests.items) |test_def| {
         try appendGenericTestDefClone(graph, &column.tests, test_def);
     }
@@ -1929,7 +2040,9 @@ fn rejectDuplicateMacroProperties(graph: *const Graph) !void {
     while (i < graph.macro_properties.items.len) : (i += 1) {
         var j = i + 1;
         while (j < graph.macro_properties.items.len) : (j += 1) {
-            if (std.mem.eql(u8, graph.macro_properties.items[i].name, graph.macro_properties.items[j].name)) {
+            if (std.mem.eql(u8, graph.macro_properties.items[i].package_name, graph.macro_properties.items[j].package_name) and
+                std.mem.eql(u8, graph.macro_properties.items[i].name, graph.macro_properties.items[j].name))
+            {
                 return error.DuplicateMacroProperty;
             }
         }
@@ -1955,7 +2068,7 @@ fn resolveMacroDependencies(graph: *Graph) !void {
     }
 }
 
-fn resolveDocDescription(graph: *Graph, description: []const u8, doc_blocks: *std.ArrayList([]const u8)) ![]const u8 {
+fn resolveDocDescription(graph: *Graph, package_name: []const u8, description: []const u8, doc_blocks: *std.ArrayList([]const u8)) ![]const u8 {
     const trimmed = std.mem.trim(u8, description, " \t\r\n");
     if (std.mem.indexOf(u8, trimmed, "{{") == null) return description;
     if (!std.mem.startsWith(u8, trimmed, "{{") or !std.mem.endsWith(u8, trimmed, "}}")) return error.UnsupportedDynamicDoc;
@@ -1970,7 +2083,7 @@ fn resolveDocDescription(graph: *Graph, description: []const u8, doc_blocks: *st
     defer strings.deinit(graph.allocator);
     if (strings.items.len != 1) return error.UnsupportedDynamicDoc;
 
-    const unique_id = try std.fmt.allocPrint(graph.allocator, "doc.{s}.{s}", .{ graph.project_name, strings.items[0] });
+    const unique_id = try std.fmt.allocPrint(graph.allocator, "doc.{s}.{s}", .{ package_name, strings.items[0] });
     const doc = findDoc(graph, unique_id) orelse return error.UnresolvedDoc;
     try appendUnique(graph.allocator, doc_blocks, doc.unique_id);
     sortStrings(doc_blocks.items);
@@ -1985,45 +2098,64 @@ fn resolveDependencies(graph: *Graph) !void {
         }
         sortStrings(node.macro_depends_on.items);
         for (node.refs.items) |ref_dep| {
-            const package = ref_dep.package orelse graph.project_name;
-            const model_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, ref_dep.name });
-            if (hasDisabledNode(graph, model_id)) return error.DisabledRef;
-            if (hasNode(graph, model_id)) {
-                try appendUnique(graph.allocator, &node.depends_on, model_id);
-                continue;
-            }
-            const seed_id = try std.fmt.allocPrint(graph.allocator, "seed.{s}.{s}", .{ package, ref_dep.name });
-            if (!hasNode(graph, seed_id)) return error.UnresolvedRef;
-            try appendUnique(graph.allocator, &node.depends_on, seed_id);
+            try appendUnique(graph.allocator, &node.depends_on, try resolveRefDependency(graph, node.package_name, ref_dep));
         }
         for (node.source_refs.items) |source_dep| {
-            const unique_id = try std.fmt.allocPrint(graph.allocator, "source.{s}.{s}.{s}", .{ graph.project_name, source_dep.source_name, source_dep.table_name });
-            if (!hasSource(graph, unique_id)) return error.UnresolvedSource;
-            try appendUnique(graph.allocator, &node.depends_on, unique_id);
+            try appendUnique(graph.allocator, &node.depends_on, try resolveSourceDependency(graph, node.package_name, source_dep));
         }
         sortStrings(node.depends_on.items);
     }
     for (graph.exposures.items) |*exposure| {
         if (!exposure.enabled) continue;
         for (exposure.refs.items) |ref_dep| {
-            const package = ref_dep.package orelse graph.project_name;
-            const model_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, ref_dep.name });
-            if (hasDisabledNode(graph, model_id)) return error.DisabledRef;
-            if (hasNode(graph, model_id)) {
-                try appendUnique(graph.allocator, &exposure.depends_on, model_id);
-                continue;
-            }
-            const seed_id = try std.fmt.allocPrint(graph.allocator, "seed.{s}.{s}", .{ package, ref_dep.name });
-            if (!hasNode(graph, seed_id)) return error.UnresolvedRef;
-            try appendUnique(graph.allocator, &exposure.depends_on, seed_id);
+            try appendUnique(graph.allocator, &exposure.depends_on, try resolveRefDependency(graph, exposure.package_name, ref_dep));
         }
         for (exposure.source_refs.items) |source_dep| {
-            const unique_id = try std.fmt.allocPrint(graph.allocator, "source.{s}.{s}.{s}", .{ graph.project_name, source_dep.source_name, source_dep.table_name });
-            if (!hasSource(graph, unique_id)) return error.UnresolvedSource;
-            try appendUnique(graph.allocator, &exposure.depends_on, unique_id);
+            try appendUnique(graph.allocator, &exposure.depends_on, try resolveSourceDependency(graph, exposure.package_name, source_dep));
         }
         sortStrings(exposure.depends_on.items);
     }
+}
+
+fn resolveRefDependency(graph: *const Graph, current_package: []const u8, ref_dep: RefDep) ![]const u8 {
+    const package = ref_dep.package orelse current_package;
+    if (try resolveRefInPackage(graph, package, ref_dep.name)) |unique_id| return unique_id;
+    if (ref_dep.package != null) return error.UnresolvedRef;
+
+    var found: ?[]const u8 = null;
+    for (graph.nodes.items) |node| {
+        if (!std.mem.eql(u8, node.name, ref_dep.name)) continue;
+        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed")) continue;
+        if (!node.enabled) continue;
+        if (found != null) return error.UnresolvedRef;
+        found = node.unique_id;
+    }
+    return found orelse error.UnresolvedRef;
+}
+
+fn resolveRefInPackage(graph: *const Graph, package: []const u8, name: []const u8) !?[]const u8 {
+    const model_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, name });
+    if (hasDisabledNode(graph, model_id)) return error.DisabledRef;
+    if (hasNode(graph, model_id)) return model_id;
+
+    const seed_id = try std.fmt.allocPrint(graph.allocator, "seed.{s}.{s}", .{ package, name });
+    if (hasDisabledNode(graph, seed_id)) return error.DisabledRef;
+    if (hasNode(graph, seed_id)) return seed_id;
+    return null;
+}
+
+fn resolveSourceDependency(graph: *const Graph, current_package: []const u8, source_dep: SourceDep) ![]const u8 {
+    const unique_id = try std.fmt.allocPrint(graph.allocator, "source.{s}.{s}.{s}", .{ current_package, source_dep.source_name, source_dep.table_name });
+    if (hasSource(graph, unique_id)) return unique_id;
+
+    var found: ?[]const u8 = null;
+    for (graph.sources.items) |source| {
+        if (!std.mem.eql(u8, source.source_name, source_dep.source_name)) continue;
+        if (!std.mem.eql(u8, source.table_name, source_dep.table_name)) continue;
+        if (found != null) return error.UnresolvedSource;
+        found = source.unique_id;
+    }
+    return found orelse error.UnresolvedSource;
 }
 
 fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
@@ -2136,7 +2268,7 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
             try parseConfig(allocator, args, node);
         } else {
             if (graph) |known_graph| {
-                if (findProjectMacroIdByName(known_graph, call.name)) |macro_id| {
+                if (findMacroIdForUnqualifiedCall(known_graph, node.package_name, call.name)) |macro_id| {
                     try appendUnique(allocator, &node.macro_depends_on, macro_id);
                     i = call.close + 1;
                     continue;
@@ -2196,7 +2328,7 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
             const resolved = findMacroIdByPackageAndName(graph, package_name, call.name);
             if (resolved == null and hasMacroPackage(graph, package_name)) return error.UnresolvedMacro;
             break :blk resolved;
-        } else findMacroIdByPackageAndName(graph, current_package, call.name);
+        } else findMacroIdForUnqualifiedCall(graph, current_package, call.name);
         if (macro_id) |resolved_macro_id| {
             if (std.mem.eql(u8, resolved_macro_id, current_macro_id)) {
                 i = call.close + 1;
@@ -2385,13 +2517,13 @@ fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
         if (term.value.len == 0) return false;
-        if (!matchesNodeSelectorTerm(node, term.value) and !matchesGraphExpansion(graph, node.unique_id, term)) return false;
+        if (!matchesNodeSelectorTerm(graph, node, term.value) and !matchesGraphExpansion(graph, node.unique_id, term)) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesNodeSelectorTerm(node: *const Node, value: []const u8) bool {
+fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []const u8) bool {
     if (std.mem.eql(u8, value, node.name) or std.mem.eql(u8, value, node.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
@@ -2401,7 +2533,7 @@ fn matchesNodeSelectorTerm(node: *const Node, value: []const u8) bool {
         return false;
     }
     if (std.mem.startsWith(u8, value, "package:")) {
-        return matchesUniqueIdPackage(node.unique_id, value["package:".len..]);
+        return matchesUniqueIdPackage(graph, node.unique_id, value["package:".len..]);
     }
     if (std.mem.startsWith(u8, value, "tag:")) {
         const tag = value["tag:".len..];
@@ -2443,13 +2575,13 @@ fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const Generi
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
         if (term.value.len == 0) return false;
-        if (!matchesTestSelectorTerm(test_node, term.value) and !matchesGraphExpansion(graph, test_node.unique_id, term)) return false;
+        if (!matchesTestSelectorTerm(graph, test_node, term.value) and !matchesGraphExpansion(graph, test_node.unique_id, term)) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesTestSelectorTerm(test_node: *const GenericTestNode, value: []const u8) bool {
+fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8) bool {
     if (std.mem.eql(u8, value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
@@ -2460,7 +2592,7 @@ fn matchesTestSelectorTerm(test_node: *const GenericTestNode, value: []const u8)
         return std.mem.eql(u8, test_type, "generic");
     }
     if (std.mem.startsWith(u8, value, "package:")) {
-        return matchesUniqueIdPackage(test_node.unique_id, value["package:".len..]);
+        return matchesUniqueIdPackage(graph, test_node.unique_id, value["package:".len..]);
     }
     if (std.mem.startsWith(u8, value, "path:")) {
         const path = value["path:".len..];
@@ -2489,13 +2621,13 @@ fn matchesSourceSelectorIntersection(graph: *const Graph, source: *const SourceD
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
         if (term.value.len == 0) return false;
-        if (!matchesSourceSelectorTerm(source, term.value) and !matchesGraphExpansion(graph, source.unique_id, term)) return false;
+        if (!matchesSourceSelectorTerm(graph, source, term.value) and !matchesGraphExpansion(graph, source.unique_id, term)) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesSourceSelectorTerm(source: *const SourceDef, value: []const u8) bool {
+fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, value: []const u8) bool {
     if (std.mem.eql(u8, value, source.unique_id) or std.mem.eql(u8, value, source.table_name)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
@@ -2505,7 +2637,7 @@ fn matchesSourceSelectorTerm(source: *const SourceDef, value: []const u8) bool {
         return false;
     }
     if (std.mem.startsWith(u8, value, "package:")) {
-        return matchesUniqueIdPackage(source.unique_id, value["package:".len..]);
+        return matchesUniqueIdPackage(graph, source.unique_id, value["package:".len..]);
     }
     if (std.mem.startsWith(u8, value, "source:")) {
         const source_value = value["source:".len..];
@@ -2537,13 +2669,13 @@ fn matchesExposureSelectorIntersection(graph: *const Graph, exposure: *const Exp
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
         if (term.value.len == 0) return false;
-        if (!matchesExposureSelectorTerm(exposure, term.value) and !matchesGraphExpansion(graph, exposure.unique_id, term)) return false;
+        if (!matchesExposureSelectorTerm(graph, exposure, term.value) and !matchesGraphExpansion(graph, exposure.unique_id, term)) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesExposureSelectorTerm(exposure: *const ExposureDef, value: []const u8) bool {
+fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef, value: []const u8) bool {
     if (std.mem.eql(u8, value, exposure.name) or std.mem.eql(u8, value, exposure.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
@@ -2553,7 +2685,7 @@ fn matchesExposureSelectorTerm(exposure: *const ExposureDef, value: []const u8) 
         return false;
     }
     if (std.mem.startsWith(u8, value, "package:")) {
-        return matchesUniqueIdPackage(exposure.unique_id, value["package:".len..]);
+        return matchesUniqueIdPackage(graph, exposure.unique_id, value["package:".len..]);
     }
     if (std.mem.startsWith(u8, value, "exposure:")) {
         const exposure_value = value["exposure:".len..];
@@ -2572,11 +2704,12 @@ fn matchesExposureSelectorTerm(exposure: *const ExposureDef, value: []const u8) 
     return false;
 }
 
-fn matchesUniqueIdPackage(unique_id: []const u8, package_name: []const u8) bool {
+fn matchesUniqueIdPackage(graph: *const Graph, unique_id: []const u8, package_name: []const u8) bool {
+    const expected_package = if (std.mem.eql(u8, package_name, "this")) graph.project_name else package_name;
     const prefix_end = std.mem.indexOfScalar(u8, unique_id, '.') orelse return false;
     const package_start = prefix_end + 1;
     const package_end = std.mem.indexOfPos(u8, unique_id, package_start, ".") orelse return false;
-    return std.mem.eql(u8, package_name, unique_id[package_start..package_end]);
+    return std.mem.eql(u8, expected_package, unique_id[package_start..package_end]);
 }
 
 fn parseSelectorSpec(selector: ?[]const u8) SelectorSpec {
@@ -2600,22 +2733,22 @@ fn parseSelectorTerm(raw: []const u8) SelectorSpec {
 fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, spec: SelectorSpec) bool {
     if (!spec.include_parents and !spec.include_children) return false;
     for (graph.nodes.items) |*target| {
-        if (!target.enabled or !matchesNodeSelectorTerm(target, spec.value)) continue;
+        if (!target.enabled or !matchesNodeSelectorTerm(graph, target, spec.value)) continue;
         if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }
     for (graph.tests.items) |*target| {
-        if (!matchesTestSelectorTerm(target, spec.value)) continue;
+        if (!matchesTestSelectorTerm(graph, target, spec.value)) continue;
         if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }
     for (graph.sources.items) |*target| {
-        if (!matchesSourceSelectorTerm(target, spec.value)) continue;
+        if (!matchesSourceSelectorTerm(graph, target, spec.value)) continue;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }
     for (graph.exposures.items) |*target| {
         if (!target.enabled) continue;
-        if (!matchesExposureSelectorTerm(target, spec.value)) continue;
+        if (!matchesExposureSelectorTerm(graph, target, spec.value)) continue;
         if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
     }
@@ -2684,7 +2817,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll("\n    ");
         try writeJsonString(writer, node.unique_id);
         try writer.writeAll(": ");
-        try writeNode(allocator, writer, graph.project_name, node);
+        try writeNode(allocator, writer, node);
     }
     for (graph.tests.items) |test_node| {
         if (node_index != 0) try writer.writeAll(",");
@@ -2692,7 +2825,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll("\n    ");
         try writeJsonString(writer, test_node.unique_id);
         try writer.writeAll(": ");
-        try writeGenericTestNode(allocator, writer, graph.project_name, test_node);
+        try writeGenericTestNode(allocator, writer, test_node);
     }
     try writer.writeAll("\n  },\n  \"sources\": {");
     for (graph.sources.items, 0..) |source, index| {
@@ -2702,7 +2835,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll(": {\"unique_id\":");
         try writeJsonString(writer, source.unique_id);
         try writer.writeAll(",\"resource_type\":\"source\",\"package_name\":");
-        try writeJsonString(writer, graph.project_name);
+        try writeJsonString(writer, source.package_name);
         try writer.writeAll(",\"source_name\":");
         try writeJsonString(writer, source.source_name);
         try writer.writeAll(",\"name\":");
@@ -2727,7 +2860,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll(": {\"unique_id\":");
         try writeJsonString(writer, doc.unique_id);
         try writer.writeAll(",\"resource_type\":\"doc\",\"package_name\":");
-        try writeJsonString(writer, graph.project_name);
+        try writeJsonString(writer, doc.package_name);
         try writer.writeAll(",\"name\":");
         try writeJsonString(writer, doc.name);
         try writer.writeAll(",\"path\":");
@@ -2747,7 +2880,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll("\n    ");
         try writeJsonString(writer, exposure.unique_id);
         try writer.writeAll(": ");
-        try writeExposureNode(writer, graph.project_name, exposure);
+        try writeExposureNode(writer, exposure);
     }
     try writer.writeAll("\n  },\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"group_map\": {},\n  \"saved_queries\": {},\n  \"semantic_models\": {},\n  \"unit_tests\": {},\n  \"disabled\": {");
     var disabled_index: usize = 0;
@@ -2758,7 +2891,7 @@ fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8
         try writer.writeAll("\n    ");
         try writeJsonString(writer, node.unique_id);
         try writer.writeAll(": [");
-        try writeNode(allocator, writer, graph.project_name, node);
+        try writeNode(allocator, writer, node);
         try writer.writeAll("]");
     }
     try writer.writeAll("\n  },\n  \"parent_map\": {");
@@ -2846,11 +2979,11 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
     try writer.writeAll("]");
 }
 
-fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, node: Node) !void {
+fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
     if (std.mem.eql(u8, node.resource_type, "seed")) {
-        try writeSeedNode(writer, project_name, node);
+        try writeSeedNode(writer, node);
     } else {
-        try writeModelNode(allocator, writer, project_name, node);
+        try writeModelNode(allocator, writer, node);
     }
 }
 
@@ -2884,11 +3017,11 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
     try writer.writeAll(",\"supported_languages\":null}");
 }
 
-fn writeExposureNode(writer: *Io.Writer, project_name: []const u8, exposure: ExposureDef) !void {
+fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, exposure.unique_id);
     try writer.writeAll(",\"resource_type\":\"exposure\",\"package_name\":");
-    try writeJsonString(writer, project_name);
+    try writeJsonString(writer, exposure.package_name);
     try writer.writeAll(",\"name\":");
     try writeJsonString(writer, exposure.name);
     try writer.writeAll(",\"path\":");
@@ -2896,7 +3029,7 @@ fn writeExposureNode(writer: *Io.Writer, project_name: []const u8, exposure: Exp
     try writer.writeAll(",\"original_file_path\":");
     try writeJsonString(writer, normalizeForDisplay(exposure.original_file_path));
     try writer.writeAll(",\"fqn\":[");
-    try writeJsonString(writer, project_name);
+    try writeJsonString(writer, exposure.package_name);
     try writer.writeAll(",");
     try writeJsonString(writer, exposure.name);
     try writer.writeAll("],\"label\":null,\"type\":");
@@ -2934,11 +3067,11 @@ fn writeExposureNode(writer: *Io.Writer, project_name: []const u8, exposure: Exp
     try writer.writeAll("},\"unrendered_config\":{},\"created_at\":0.0}");
 }
 
-fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, node: Node) !void {
+fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, node.unique_id);
     try writer.writeAll(",\"resource_type\":\"model\",\"package_name\":");
-    try writeJsonString(writer, project_name);
+    try writeJsonString(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try writeJsonString(writer, node.name);
     try writer.writeAll(",\"path\":");
@@ -2947,7 +3080,7 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
     try writeJsonString(writer, normalizeForDisplay(node.original_file_path));
     try writer.writeAll(",\"patch_path\":");
     if (node.patch_path) |patch_path| {
-        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ project_name, normalizeForDisplay(patch_path) });
+        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ node.package_name, normalizeForDisplay(patch_path) });
         defer allocator.free(dbt_patch_path);
         try writeJsonString(writer, dbt_patch_path);
     } else {
@@ -2992,11 +3125,11 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
     try writer.writeAll("}");
 }
 
-fn writeSeedNode(writer: *Io.Writer, project_name: []const u8, node: Node) !void {
+fn writeSeedNode(writer: *Io.Writer, node: Node) !void {
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, node.unique_id);
     try writer.writeAll(",\"resource_type\":\"seed\",\"package_name\":");
-    try writeJsonString(writer, project_name);
+    try writeJsonString(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try writeJsonString(writer, node.name);
     try writer.writeAll(",\"path\":");
@@ -3014,11 +3147,11 @@ fn writeSeedNode(writer: *Io.Writer, project_name: []const u8, node: Node) !void
     try writer.writeAll("}}");
 }
 
-fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name: []const u8, test_node: GenericTestNode) !void {
+fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_node: GenericTestNode) !void {
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, test_node.unique_id);
     try writer.writeAll(",\"resource_type\":\"test\",\"package_name\":");
-    try writeJsonString(writer, project_name);
+    try writeJsonString(writer, test_node.package_name);
     try writer.writeAll(",\"name\":");
     try writeJsonString(writer, test_node.name);
     try writer.writeAll(",\"alias\":");
@@ -3674,9 +3807,9 @@ fn findDoc(graph: *const Graph, unique_id: []const u8) ?DocBlock {
     return null;
 }
 
-fn findModelIndexByName(graph: *const Graph, name: []const u8) ?usize {
+fn findModelIndexByName(graph: *const Graph, package_name: []const u8, name: []const u8) ?usize {
     for (graph.nodes.items, 0..) |node, index| {
-        if (std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, node.name, name)) return index;
+        if (std.mem.eql(u8, node.package_name, package_name) and std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, node.name, name)) return index;
     }
     return null;
 }
@@ -3733,6 +3866,14 @@ fn findMacroIdByPackageAndName(graph: *const Graph, package_name: []const u8, na
     return null;
 }
 
+fn findMacroIdForUnqualifiedCall(graph: *const Graph, package_name: []const u8, name: []const u8) ?[]const u8 {
+    if (findMacroIdByPackageAndName(graph, package_name, name)) |macro_id| return macro_id;
+    if (!std.mem.eql(u8, package_name, graph.project_name)) {
+        return findProjectMacroIdByName(graph, name);
+    }
+    return null;
+}
+
 fn findProjectMacroIdByName(graph: *const Graph, name: []const u8) ?[]const u8 {
     return findMacroIdByPackageAndName(graph, graph.project_name, name);
 }
@@ -3745,8 +3886,12 @@ fn packageNameFromMacroUniqueId(unique_id: []const u8) ?[]const u8 {
 }
 
 fn findProjectMacroIndexByName(graph: *const Graph, name: []const u8) ?usize {
+    return findMacroIndexByPackageAndName(graph, graph.project_name, name);
+}
+
+fn findMacroIndexByPackageAndName(graph: *const Graph, package_name: []const u8, name: []const u8) ?usize {
     for (graph.macros.items, 0..) |macro, index| {
-        if (std.mem.eql(u8, macro.package_name, graph.project_name) and std.mem.eql(u8, macro.name, name)) return index;
+        if (std.mem.eql(u8, macro.package_name, package_name) and std.mem.eql(u8, macro.name, name)) return index;
     }
     return null;
 }
@@ -3855,6 +4000,7 @@ test "sql scanner extracts refs sources and config tags from jinja spans" {
     const allocator = arena.allocator();
 
     var node = Node{
+        .package_name = "demo",
         .unique_id = "model.demo.customers",
         .name = "customers",
         .path = "customers.sql",

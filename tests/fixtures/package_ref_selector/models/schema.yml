@@ -1,0 +1,7 @@
+version: 2
+
+models:
+  - name: pkg_customers
+    description: Root model with the same name as a package model.
+    config:
+      materialized: table

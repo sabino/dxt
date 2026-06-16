@@ -1,0 +1,23 @@
+version: 2
+
+sources:
+  - name: raw
+    tables:
+      - name: pkg_customers
+
+models:
+  - name: pkg_customers
+    description: "{{ doc('pkg_customers_doc') }}"
+    config:
+      materialized: table
+    columns:
+      - name: customer_id
+        description: Package customer identifier.
+
+exposures:
+  - name: package_dashboard
+    type: dashboard
+    depends_on:
+      - ref('pkg_customers')
+    owner:
+      name: Data Team

@@ -1,0 +1,11 @@
+name: package_ref_selector
+version: "1.0"
+profile: default
+model-paths: ["models"]
+target-path: target
+models:
+  package_ref_selector:
+    +schema: root_schema
+  util_pkg:
+    +schema: package_schema
+    +materialized: incremental
