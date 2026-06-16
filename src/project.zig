@@ -55,6 +55,7 @@ const parseQuoted = project_jinja.parseQuoted;
 const readJinjaCall = project_jinja.readJinjaCall;
 const skipQuotedSpan = project_jinja.skipQuotedSpan;
 const skipWs = project_jinja.skipWs;
+const appendUnique = util.appendUnique;
 const countActiveExposures = project_resolve.countActiveExposures;
 const countActiveNodes = project_resolve.countActiveNodes;
 const countActiveSeeds = project_resolve.countActiveSeeds;
@@ -63,10 +64,9 @@ const findMacroIdByPackageAndName = project_resolve.findMacroIdByPackageAndName;
 const findMacroIdForUnqualifiedCall = project_resolve.findMacroIdForUnqualifiedCall;
 const findMacroIndexByPackageAndName = project_resolve.findMacroIndexByPackageAndName;
 const findModelIndexByName = project_resolve.findModelIndexByName;
-const hasMacro = project_resolve.hasMacro;
 const hasMacroPackage = project_resolve.hasMacroPackage;
+const resolveDependencies = project_resolve.resolveDependencies;
 const resolveRefDependency = project_resolve.resolveRefDependency;
-const resolveSourceDependency = project_resolve.resolveSourceDependency;
 
 pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try loadGraph(runtime, options.project_dir);
@@ -1309,33 +1309,6 @@ fn resolveDocDescription(graph: *Graph, package_name: []const u8, description: [
     return doc.block_contents;
 }
 
-fn resolveDependencies(graph: *Graph) !void {
-    for (graph.nodes.items) |*node| {
-        if (!node.enabled) continue;
-        for (node.macro_depends_on.items) |macro_dep| {
-            if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
-        }
-        sortStrings(node.macro_depends_on.items);
-        for (node.refs.items) |ref_dep| {
-            try appendUnique(graph.allocator, &node.depends_on, try resolveRefDependency(graph, node.package_name, ref_dep));
-        }
-        for (node.source_refs.items) |source_dep| {
-            try appendUnique(graph.allocator, &node.depends_on, try resolveSourceDependency(graph, node.package_name, source_dep));
-        }
-        sortStrings(node.depends_on.items);
-    }
-    for (graph.exposures.items) |*exposure| {
-        if (!exposure.enabled) continue;
-        for (exposure.refs.items) |ref_dep| {
-            try appendUnique(graph.allocator, &exposure.depends_on, try resolveRefDependency(graph, exposure.package_name, ref_dep));
-        }
-        for (exposure.source_refs.items) |source_dep| {
-            try appendUnique(graph.allocator, &exposure.depends_on, try resolveSourceDependency(graph, exposure.package_name, source_dep));
-        }
-        sortStrings(exposure.depends_on.items);
-    }
-}
-
 fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
     var index: usize = 0;
     while (index + 1 < sql.len) {
@@ -1923,12 +1896,6 @@ fn testNameFromYamlItem(allocator: std.mem.Allocator, value: []const u8) ![]cons
     if (trimmed.len == 0) return error.UnsupportedYaml;
     const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse trimmed.len;
     return try dupTrimmedScalar(allocator, trimmed[0..colon]);
-}
-
-fn appendUnique(allocator: std.mem.Allocator, values: *std.ArrayList([]const u8), value: []const u8) !void {
-    if (!util.containsString(values.items, value)) {
-        try values.append(allocator, value);
-    }
 }
 
 test "sql scanner extracts refs sources and config tags from jinja spans" {

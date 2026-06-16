@@ -19,6 +19,12 @@ pub fn sortStrings(values: [][]const u8) void {
     }.lessThan);
 }
 
+pub fn appendUnique(allocator: std.mem.Allocator, values: *std.ArrayList([]const u8), value: []const u8) !void {
+    if (!containsString(values.items, value)) {
+        try values.append(allocator, value);
+    }
+}
+
 pub fn stripYamlComment(line: []const u8) []const u8 {
     var quote: ?u8 = null;
     var i: usize = 0;
@@ -93,6 +99,19 @@ test "sortStrings orders byte strings lexicographically" {
     try std.testing.expectEqualStrings("customers", values[0]);
     try std.testing.expectEqualStrings("orders", values[1]);
     try std.testing.expectEqualStrings("stg_customers", values[2]);
+}
+
+test "appendUnique preserves first occurrence order" {
+    var values: std.ArrayList([]const u8) = .empty;
+    defer values.deinit(std.testing.allocator);
+
+    try appendUnique(std.testing.allocator, &values, "model.demo.customers");
+    try appendUnique(std.testing.allocator, &values, "model.demo.orders");
+    try appendUnique(std.testing.allocator, &values, "model.demo.customers");
+
+    try std.testing.expectEqual(@as(usize, 2), values.items.len);
+    try std.testing.expectEqualStrings("model.demo.customers", values.items[0]);
+    try std.testing.expectEqualStrings("model.demo.orders", values.items[1]);
 }
 
 test "stripYamlComment ignores hashes inside quotes" {
