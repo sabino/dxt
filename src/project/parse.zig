@@ -1,11 +1,15 @@
 const std = @import("std");
+const jinja = @import("jinja.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 
 const JsonScalar = types.JsonScalar;
 const GenericTestDef = types.GenericTestDef;
 const Graph = types.Graph;
+const RefDep = types.RefDep;
 const dupTrimmedScalar = util.dupTrimmedScalar;
+const findMatchingParen = jinja.findMatchingParen;
+const parseLiteralArgs = jinja.parseLiteralArgs;
 
 pub fn parseBool(value: []const u8) !bool {
     const trimmed = std.mem.trim(u8, value, " \t\r");
@@ -95,6 +99,23 @@ pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTes
         try cloned.accepted_values.append(graph.allocator, value);
     }
     try tests.append(graph.allocator, cloned);
+}
+
+pub fn refDepFromValue(allocator: std.mem.Allocator, value: []const u8) !RefDep {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    if (std.mem.startsWith(u8, trimmed, "ref(")) {
+        const open = std.mem.indexOfScalar(u8, trimmed, '(') orelse return error.UnsupportedRef;
+        const close = findMatchingParen(trimmed, open) orelse return error.UnsupportedRef;
+        const args = std.mem.trim(u8, trimmed[open + 1 .. close], " \t\r");
+        var strings = try parseLiteralArgs(allocator, args, error.UnsupportedRef);
+        defer strings.deinit(allocator);
+        if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedRef;
+        return .{
+            .package = if (strings.items.len == 2) strings.items[0] else null,
+            .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
+        };
+    }
+    return .{ .package = null, .name = try dupTrimmedScalar(allocator, trimmed) };
 }
 
 pub const GenericTestNames = struct {
@@ -345,6 +366,34 @@ test "appendGenericTestDefClone copies nested accepted values list" {
     try std.testing.expectEqual(@as(usize, 2), clones.items[0].accepted_values.items.len);
     try std.testing.expectEqualStrings("placed", clones.items[0].accepted_values.items[0]);
     try std.testing.expectEqualStrings("returned", clones.items[0].accepted_values.items[1]);
+}
+
+test "refDepFromValue parses relationship target refs and raw model names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const raw = try refDepFromValue(allocator, " customers ");
+    try std.testing.expect(raw.package == null);
+    try std.testing.expectEqualStrings("customers", raw.name);
+
+    const local_ref = try refDepFromValue(allocator, "ref('orders')");
+    try std.testing.expect(local_ref.package == null);
+    try std.testing.expectEqualStrings("orders", local_ref.name);
+
+    const package_ref = try refDepFromValue(allocator, " ref(\"pkg\", 'orders') ");
+    try std.testing.expectEqualStrings("pkg", package_ref.package.?);
+    try std.testing.expectEqualStrings("orders", package_ref.name);
+}
+
+test "refDepFromValue rejects unsupported dynamic or malformed refs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(error.UnsupportedRef, refDepFromValue(allocator, "ref(var('model'))"));
+    try std.testing.expectError(error.UnsupportedRef, refDepFromValue(allocator, "ref('pkg', 'orders', 'extra')"));
+    try std.testing.expectError(error.UnsupportedRef, refDepFromValue(allocator, "ref('orders'"));
 }
 
 test "synthesizeGenericTestNames preserves short generic test identities" {

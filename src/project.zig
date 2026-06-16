@@ -18,7 +18,6 @@ const SourceDef = types.SourceDef;
 const ExposureDef = types.ExposureDef;
 const MetaEntry = types.MetaEntry;
 const JsonScalar = types.JsonScalar;
-const RefDep = types.RefDep;
 const SourceDep = types.SourceDep;
 const ColumnDef = types.ColumnDef;
 const GenericTestDef = types.GenericTestDef;
@@ -56,6 +55,7 @@ const parseBool = project_parse.parseBool;
 const genericTestUniqueId = project_parse.genericTestUniqueId;
 const parseInlineGenericTestList = project_parse.parseInlineGenericTestList;
 const parseJsonScalar = project_parse.parseJsonScalar;
+const refDepFromValue = project_parse.refDepFromValue;
 const synthesizeGenericTestNames = project_parse.synthesizeGenericTestNames;
 const testNameFromYamlItem = project_parse.testNameFromYamlItem;
 const findKeyword = project_jinja.findKeyword;
@@ -1400,23 +1400,6 @@ fn currentGenericTestDef(graph: *Graph, model_index: usize, current_column: ?usi
         return &graph.model_properties.items[model_index].columns.items[column_index].tests.items[test_index];
     }
     return error.UnsupportedYaml;
-}
-
-fn refDepFromValue(allocator: std.mem.Allocator, value: []const u8) !RefDep {
-    const trimmed = std.mem.trim(u8, value, " \t\r");
-    if (std.mem.startsWith(u8, trimmed, "ref(")) {
-        const open = std.mem.indexOfScalar(u8, trimmed, '(') orelse return error.UnsupportedRef;
-        const close = findMatchingParen(trimmed, open) orelse return error.UnsupportedRef;
-        const args = std.mem.trim(u8, trimmed[open + 1 .. close], " \t\r");
-        var strings = try parseLiteralArgs(allocator, args, error.UnsupportedRef);
-        defer strings.deinit(allocator);
-        if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedRef;
-        return .{
-            .package = if (strings.items.len == 2) strings.items[0] else null,
-            .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
-        };
-    }
-    return .{ .package = null, .name = try dupTrimmedScalar(allocator, trimmed) };
 }
 
 fn sortGenericTestDefs(tests: []GenericTestDef) void {
