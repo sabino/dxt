@@ -208,7 +208,18 @@ fn parseOptions(args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) 
 
 fn validateSelector(value: []const u8) !void {
     if (value.len == 0) return error.UnsupportedSelector;
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    var matched_any = false;
+    while (expressions.next()) |expression| {
+        try validateSelectorExpression(expression);
+        matched_any = true;
+    }
+    if (!matched_any) return error.UnsupportedSelector;
+}
+
+fn validateSelectorExpression(value: []const u8) !void {
     var terms = std.mem.splitScalar(u8, value, ',');
+    var matched_any = false;
     while (terms.next()) |raw_term| {
         if (raw_term.len == 0) return error.UnsupportedSelector;
         const leading_plus = raw_term[0] == '+';
@@ -221,7 +232,9 @@ fn validateSelector(value: []const u8) !void {
         if (std.mem.indexOfAny(u8, part, " \t\r")) |_| return error.UnsupportedSelector;
         if (std.mem.indexOfScalar(u8, part, '+')) |_| return error.UnsupportedSelector;
         if (std.mem.indexOfScalar(u8, part, ':')) |_| try validateSelectorMethod(part);
+        matched_any = true;
     }
+    if (!matched_any) return error.UnsupportedSelector;
 }
 
 fn validateSelectorMethod(part: []const u8) !void {
@@ -292,7 +305,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
     try writer.writeAll(
         \\Usage: dxt [--version] <command> [options]
         \\
-        \\Data Transformation eXecutor: a dbt-project-compatible transformation engine.
+        \\Data eXecution & Transformation: a dbt-project-compatible transformation engine.
         \\
         \\Commands:
         \\  version          Print the dxt version.

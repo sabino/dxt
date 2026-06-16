@@ -60,8 +60,8 @@ def test_version_command():
 
 def test_root_help_uses_canonical_name():
     result = subprocess.run([DXT, "--help"], cwd=ROOT, check=True, text=True, capture_output=True)
-    assert "Data Transformation eXecutor" in result.stdout
-    assert "Data eXecution & Transformation" not in result.stdout
+    assert "Data eXecution & Transformation" in result.stdout
+    assert "Data Transformation eXecutor" not in result.stdout
     assert result.stderr == ""
 
 
@@ -408,6 +408,20 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     )
     assert ls_generic_tests.returncode == 0, ls_generic_tests.stderr
     assert json.loads(ls_generic_tests.stdout) == json.loads(ls_tests.stdout)
+
+    ls_model_and_tests = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "customers test_type:generic", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_model_and_tests.returncode == 0, ls_model_and_tests.stderr
+    assert [item["unique_id"] for item in json.loads(ls_model_and_tests.stdout)] == [
+        "model.model_properties.customers",
+        "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
+        "test.model_properties.unique_customers_.ccc5343706",
+        "test.model_properties.unique_customers_customer_id.c5af1ff4b1",
+    ]
 
     ls_singular_tests = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular"],
@@ -1136,6 +1150,17 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
+    source_union = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw.customers source:raw.orders", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_union.returncode == 0, source_union.stderr
+    assert [item["unique_id"] for item in json.loads(source_union.stdout)] == [
+        "source.source_ref.raw.customers",
+        "source.source_ref.raw.orders",
+    ]
 
     exposure_project = copy_fixture(tmp_path, "exposure_artifacts")
     exposure_result = subprocess.run(
@@ -1151,6 +1176,17 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
             "resource_type": "exposure",
             "name": "weekly_kpis",
         }
+    ]
+    exposure_union = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "orders weekly_kpis", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_union.returncode == 0, exposure_union.stderr
+    assert [item["unique_id"] for item in json.loads(exposure_union.stdout)] == [
+        "exposure.exposure_artifacts.weekly_kpis",
+        "model.exposure_artifacts.orders",
     ]
 
 
@@ -1197,6 +1233,27 @@ def test_ls_graph_plus_selectors(tmp_path: Path):
     assert ls_json("--select", "+orders,config.materialized:view") == [
         "model.selector_graph.customers",
         "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "customers orders") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+    ]
+    assert ls_json("--select", "  customers   orders  ") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+    ]
+    assert ls_json("--select", "+customers orders") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "customers+,config.materialized:table +orders,config.materialized:view") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "+customers+", "--exclude", "orders stg_customers") == [
+        "model.selector_graph.customers"
     ]
 
 
