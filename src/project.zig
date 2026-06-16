@@ -40,6 +40,10 @@ const discoverChildDirectories = project_fs.discoverChildDirectories;
 const discoverProjectFiles = project_fs.discoverProjectFiles;
 const discoverSeedFiles = project_fs.discoverSeedFiles;
 const discoverMacroFiles = project_fs.discoverMacroFiles;
+const modelNameFromPath = project_fs.modelNameFromPath;
+const pathJoin = project_fs.pathJoin;
+const relativeUnderResourcePath = project_fs.relativeUnderResourcePath;
+const resourceNameFromPath = project_fs.resourceNameFromPath;
 const stripYamlComment = util.stripYamlComment;
 const leadingSpaces = util.leadingSpaces;
 const splitKeyValue = util.splitKeyValue;
@@ -1479,29 +1483,6 @@ fn refDepFromValue(allocator: std.mem.Allocator, value: []const u8) !RefDep {
         };
     }
     return .{ .package = null, .name = try dupTrimmedScalar(allocator, trimmed) };
-}
-
-fn modelNameFromPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    return resourceNameFromPath(allocator, path, ".sql");
-}
-
-fn resourceNameFromPath(allocator: std.mem.Allocator, path: []const u8, suffix: []const u8) ![]const u8 {
-    const base = std.fs.path.basename(path);
-    if (std.mem.endsWith(u8, base, suffix)) {
-        return try allocator.dupe(u8, base[0 .. base.len - suffix.len]);
-    }
-    return try allocator.dupe(u8, base);
-}
-
-fn relativeUnderResourcePath(relative_path: []const u8, resource_root: []const u8) []const u8 {
-    if (std.mem.startsWith(u8, relative_path, resource_root) and relative_path.len > resource_root.len and relative_path[resource_root.len] == '/') {
-        return relative_path[resource_root.len + 1 ..];
-    }
-    return relative_path;
-}
-
-fn pathJoin(allocator: std.mem.Allocator, parts: []const []const u8) ![]const u8 {
-    return try std.fs.path.join(allocator, parts);
 }
 
 fn sortGenericTestDefs(tests: []GenericTestDef) void {
