@@ -20,6 +20,7 @@ Hard requirement: the `dxt` product runtime is Zig. Python may remain only for d
 - `src/project.zig` is a public/orchestration facade in transition, not the permanent home for all product logic. New shared data model, selector, parser, graph, manifest, loader, and utility code should move toward focused `src/project/*.zig` modules.
 - Keep behavior-preserving moves separate from feature behavior changes. Mechanical extraction commits should avoid selector/parser/runtime semantic changes beyond import visibility needed for the move.
 - Keep implementation slices small and reviewable.
+- During implementation, prefer local tests and focused self-checks over repeated agent reviews after each small edit. Run a second-agent/Codex review once at the coherent PR boundary, unless a specific blocker needs earlier independent analysis.
 - Prefer deterministic fixtures and local adapters before live warehouses.
 - Do not add broad dependencies or generated artifacts without a validation reason.
 - Run the fastest relevant verification before finishing a change.
@@ -39,5 +40,5 @@ Hard requirement: the `dxt` product runtime is Zig. Python may remain only for d
 
 - `main` should stay green.
 - Use feature branches and PRs for publication once the GitHub repository exists.
-- Require tests and a second-agent or human review before merge.
+- Require tests and one second-agent or human review at the PR boundary before merge, unless the active workflow explicitly allows self-merge after green checks.
 - Do not publish artifacts containing local paths, secrets, caches, logs, or private environment details.

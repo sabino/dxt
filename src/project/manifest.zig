@@ -360,6 +360,15 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) 
     try writeRefDeps(writer, node.refs.items);
     try writer.writeAll(",\"sources\":");
     try writeSourceDeps(writer, node.source_refs.items);
+    if (node.compiled) {
+        try writer.writeAll(",\"compiled\":true,\"compiled_code\":");
+        try writeJsonString(writer, node.compiled_code orelse "");
+        try writer.writeAll(",\"compiled_path\":");
+        try writeJsonString(writer, util.normalizeForDisplay(node.compiled_path orelse ""));
+        try writer.writeAll(",\"relation_name\":");
+        try writeJsonString(writer, node.relation_name orelse "");
+        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":false");
+    }
     try writer.writeAll("}");
 }
 
