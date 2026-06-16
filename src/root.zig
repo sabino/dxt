@@ -31,7 +31,6 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
     }
 
     if (equals(command, "parse")) {
-        const options = parseOptions(args[2..], stderr, .common_and_select) catch |err| return commandError(err, stderr);
         if (hasHelp(args[2..])) {
             try printCommandHelp(command, stdout, .project_selection);
             return .ok;
@@ -40,6 +39,7 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for parse\n");
             return .usage;
         };
+        const options = parseOptions(rt.allocator, args[2..], stderr, .common_and_select) catch |err| return commandError(err, stderr);
         project.parse(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
@@ -47,7 +47,6 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
         return planned(command, args[2..], stdout, stderr, .common_and_select, .project_selection);
     }
     if (equals(command, "ls")) {
-        const options = parseOptions(args[2..], stderr, .list) catch |err| return commandError(err, stderr);
         if (hasHelp(args[2..])) {
             try printCommandHelp(command, stdout, .list);
             return .ok;
@@ -56,6 +55,7 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for ls\n");
             return .usage;
         };
+        const options = parseOptions(rt.allocator, args[2..], stderr, .list) catch |err| return commandError(err, stderr);
         project.list(rt, options, stdout) catch |err| return commandError(err, stderr);
         return .ok;
     }
@@ -94,7 +94,8 @@ fn planned(command: []const u8, args: []const []const u8, stdout: *Io.Writer, st
         try printCommandHelp(command, stdout, help_mode);
         return .ok;
     }
-    if (!try validateOptions(args, stderr, option_mode)) {
+    const valid = validateOptions(args, stderr, option_mode) catch |err| return commandError(err, stderr);
+    if (!valid) {
         return .usage;
     }
     try stdout.print("`dxt {s}` is planned but not implemented yet. See PLAN.md.\n", .{command});
@@ -141,30 +142,69 @@ fn hasHelp(args: []const []const u8) bool {
 
 fn validateOptions(args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) !bool {
     var i: usize = 0;
-    while (i < args.len) : (i += 1) {
+    while (i < args.len) {
         const arg = args[i];
         if (equals(arg, "-h") or equals(arg, "--help")) return true;
+        if (isSelectorOption(arg, mode)) {
+            i += 1;
+            var consumed = false;
+            while (i < args.len and !isOptionLike(args[i])) : (i += 1) {
+                try validateSelector(args[i]);
+                consumed = true;
+            }
+            if (!consumed) {
+                try stderr.print("error: option `{s}` requires a value\n", .{arg});
+                return false;
+            }
+            continue;
+        }
         if (requiresValue(arg, mode)) {
             if (i + 1 >= args.len) {
                 try stderr.print("error: option `{s}` requires a value\n", .{arg});
                 return false;
             }
+            i += 2;
+            continue;
+        }
+        if (isFlag(arg, mode)) {
             i += 1;
             continue;
         }
-        if (isFlag(arg, mode)) continue;
         try stderr.print("error: unsupported option `{s}`\n", .{arg});
         return false;
     }
     return true;
 }
 
-fn parseOptions(args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) !project.Options {
+fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) !project.Options {
     var options = project.Options{};
+    var select_values: std.ArrayList([]const u8) = .empty;
+    defer select_values.deinit(allocator);
+    var exclude_values: std.ArrayList([]const u8) = .empty;
+    defer exclude_values.deinit(allocator);
+
     var i: usize = 0;
-    while (i < args.len) : (i += 1) {
+    while (i < args.len) {
         const arg = args[i];
         if (equals(arg, "-h") or equals(arg, "--help")) return options;
+        if (isSelectorOption(arg, mode)) {
+            i += 1;
+            var consumed = false;
+            while (i < args.len and !isOptionLike(args[i])) : (i += 1) {
+                try validateSelector(args[i]);
+                if (equals(arg, "--select")) {
+                    try select_values.append(allocator, args[i]);
+                } else {
+                    try exclude_values.append(allocator, args[i]);
+                }
+                consumed = true;
+            }
+            if (!consumed) {
+                try stderr.print("error: option `{s}` requires a value\n", .{arg});
+                return error.InvalidOption;
+            }
+            continue;
+        }
         if (requiresValue(arg, mode)) {
             if (i + 1 >= args.len) {
                 try stderr.print("error: option `{s}` requires a value\n", .{arg});
@@ -176,12 +216,6 @@ fn parseOptions(args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) 
             } else if (equals(arg, "--target-path")) {
                 if (mode == .list) return error.UnsupportedCommandOption;
                 options.target_path = value;
-            } else if (equals(arg, "--select")) {
-                try validateSelector(value);
-                options.select = value;
-            } else if (equals(arg, "--exclude")) {
-                try validateSelector(value);
-                options.exclude = value;
             } else if (equals(arg, "--resource-type")) {
                 if (!equals(value, "model") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "exposure") and !equals(value, "test")) return error.UnsupportedResourceType;
                 options.resource_type = value;
@@ -196,14 +230,23 @@ fn parseOptions(args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) 
             } else {
                 return error.UnsupportedCommandOption;
             }
+            i += 2;
+            continue;
+        }
+        if (isFlag(arg, mode)) {
             i += 1;
             continue;
         }
-        if (isFlag(arg, mode)) continue;
         try stderr.print("error: unsupported option `{s}`\n", .{arg});
         return error.InvalidOption;
     }
+    if (select_values.items.len != 0) options.select = try joinSelectorValues(allocator, select_values.items);
+    if (exclude_values.items.len != 0) options.exclude = try joinSelectorValues(allocator, exclude_values.items);
     return options;
+}
+
+fn joinSelectorValues(allocator: std.mem.Allocator, values: []const []const u8) ![]const u8 {
+    return try std.mem.join(allocator, " ", values);
 }
 
 fn validateSelector(value: []const u8) !void {
@@ -297,6 +340,14 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
     return false;
 }
 
+fn isSelectorOption(arg: []const u8, mode: OptionMode) bool {
+    return mode != .common_only and (equals(arg, "--select") or equals(arg, "--exclude"));
+}
+
+fn isOptionLike(arg: []const u8) bool {
+    return std.mem.startsWith(u8, arg, "-");
+}
+
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
     return mode == .build and equals(arg, "--full-refresh");
 }
@@ -334,8 +385,8 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
             );
         }
         try writer.writeAll(
-            \\  --select <selector>
-            \\  --exclude <selector>
+            \\  --select <selector> [selector ...]
+            \\  --exclude <selector> [selector ...]
             \\
         );
         if (equals(command, "ls")) {
@@ -362,8 +413,8 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
     switch (mode) {
         .project_selection, .list, .build => {
             try writer.writeAll(
-                \\  --select <selector>
-                \\  --exclude <selector>
+                \\  --select <selector> [selector ...]
+                \\  --exclude <selector> [selector ...]
                 \\
             );
         },
@@ -414,6 +465,42 @@ test "planned command accepts dbt-like flags" {
     try std.testing.expectEqual(ExitCode.usage, code);
     try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "planned but not implemented") != null);
     try std.testing.expectEqualStrings("", stderr.written());
+}
+
+test "planned command accepts selector argv lists" {
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const code = try run(&.{ "dxt", "compile", "--project-dir", "fixture", "--select", "customers", "tag:nightly", "--exclude", "orders" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expectEqual(ExitCode.usage, code);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "planned but not implemented") != null);
+    try std.testing.expectEqualStrings("", stderr.written());
+}
+
+test "planned build accepts selector lists and build flags" {
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const code = try run(&.{ "dxt", "build", "--select", "customers", "orders", "--exclude", "stg_customers", "--threads", "4", "--full-refresh" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expectEqual(ExitCode.usage, code);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "planned but not implemented") != null);
+    try std.testing.expectEqualStrings("", stderr.written());
+}
+
+test "planned command rejects missing selector value" {
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const code = try run(&.{ "dxt", "compile", "--select", "--project-dir", "fixture" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expectEqual(ExitCode.usage, code);
+    try std.testing.expectEqualStrings("", stdout.written());
+    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "option `--select` requires a value") != null);
 }
 
 test "subcommand help exits successfully" {

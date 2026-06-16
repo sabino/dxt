@@ -1017,6 +1017,35 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     assert excluded.stdout == ""
 
 
+def test_ls_multi_argv_and_repeated_selector_flags(tmp_path: Path):
+    project = copy_fixture(tmp_path, "selector_graph")
+
+    def ls_json(*args: str) -> list[str]:
+        result = subprocess.run(
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return [item["unique_id"] for item in json.loads(result.stdout)]
+
+    expected_pair = [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+    ]
+    assert ls_json("--select", "customers orders") == expected_pair
+    assert ls_json("--select", "customers", "orders") == expected_pair
+    assert ls_json("--select", "customers", "--select", "orders") == expected_pair
+    assert ls_json("--select", "customers", "orders", "--resource-type", "model") == expected_pair
+    assert ls_json("--select", "+customers+", "--exclude", "orders", "stg_customers") == [
+        "model.selector_graph.customers"
+    ]
+    assert ls_json("--select", "+customers+", "--exclude", "orders", "--exclude", "stg_customers") == [
+        "model.selector_graph.customers"
+    ]
+
+
 def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
     project = copy_fixture(tmp_path, "inline_config")
 
@@ -1288,6 +1317,49 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         )
         assert unsupported_selector.returncode == 2
         assert "selector syntax is not supported" in unsupported_selector.stderr
+
+    missing_selector = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert missing_selector.returncode == 2
+    assert "option `--select` requires a value" in missing_selector.stderr
+
+    unsupported_in_list = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "customers", "state:modified"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert unsupported_in_list.returncode == 2
+    assert "selector syntax is not supported" in unsupported_in_list.stderr
+
+
+def test_parse_accepts_selector_argv_lists_without_filtering_manifest(tmp_path: Path):
+    project = copy_fixture(tmp_path, "single_model")
+    result = subprocess.run(
+        [
+            DXT,
+            "parse",
+            "--project-dir",
+            str(project),
+            "--select",
+            "customers",
+            "tag:nightly",
+            "--exclude",
+            "tag:skip",
+            "--target-path",
+            "target-dxt",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert list(manifest["nodes"]) == ["model.single_model.customers"]
 
 
 def test_dynamic_ref_fails_loudly(tmp_path: Path):
