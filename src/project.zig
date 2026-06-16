@@ -46,8 +46,11 @@ const splitKeyValue = util.splitKeyValue;
 const parseInlineStringList = util.parseInlineStringList;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 const sortStrings = util.sortStrings;
+const appendGenericTestDef = project_parse.appendGenericTestDef;
+const appendGenericTestDefClone = project_parse.appendGenericTestDefClone;
 const parseBool = project_parse.parseBool;
 const genericTestUniqueId = project_parse.genericTestUniqueId;
+const parseInlineGenericTestList = project_parse.parseInlineGenericTestList;
 const parseJsonScalar = project_parse.parseJsonScalar;
 const synthesizeGenericTestNames = project_parse.synthesizeGenericTestNames;
 const testNameFromYamlItem = project_parse.testNameFromYamlItem;
@@ -1502,37 +1505,6 @@ fn parseTagList(allocator: std.mem.Allocator, text: []const u8, tags: *std.Array
         try appendUnique(allocator, tags, parsed.value);
         i = parsed.next;
     }
-}
-
-fn parseInlineGenericTestList(allocator: std.mem.Allocator, value: []const u8, out: *std.ArrayList(GenericTestDef)) !void {
-    const trimmed = std.mem.trim(u8, value, " \t");
-    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') {
-        _ = try appendGenericTestDef(allocator, out, try dupTrimmedScalar(allocator, trimmed));
-        return;
-    }
-    var pieces = std.mem.splitScalar(u8, trimmed[1 .. trimmed.len - 1], ',');
-    while (pieces.next()) |piece| {
-        const item = std.mem.trim(u8, piece, " \t");
-        if (item.len != 0) _ = try appendGenericTestDef(allocator, out, try dupTrimmedScalar(allocator, item));
-    }
-}
-
-fn appendGenericTestDef(allocator: std.mem.Allocator, tests: *std.ArrayList(GenericTestDef), test_name: []const u8) !usize {
-    try tests.append(allocator, .{ .name = test_name });
-    return tests.items.len - 1;
-}
-
-fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTestDef), source: GenericTestDef) !void {
-    var cloned = GenericTestDef{
-        .name = source.name,
-        .relationship_to = source.relationship_to,
-        .relationship_field = source.relationship_field,
-    };
-    errdefer cloned.accepted_values.deinit(graph.allocator);
-    for (source.accepted_values.items) |value| {
-        try cloned.accepted_values.append(graph.allocator, value);
-    }
-    try tests.append(graph.allocator, cloned);
 }
 
 fn appendMacroArgumentClone(graph: *Graph, arguments: *std.ArrayList(MacroArgument), source: MacroArgument) !void {

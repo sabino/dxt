@@ -4,6 +4,7 @@ const util = @import("util.zig");
 
 const JsonScalar = types.JsonScalar;
 const GenericTestDef = types.GenericTestDef;
+const Graph = types.Graph;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 
 pub fn parseBool(value: []const u8) !bool {
@@ -63,6 +64,37 @@ pub fn testNameFromYamlItem(allocator: std.mem.Allocator, value: []const u8) ![]
     if (trimmed.len == 0) return error.UnsupportedYaml;
     const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse trimmed.len;
     return try dupTrimmedScalar(allocator, trimmed[0..colon]);
+}
+
+pub fn parseInlineGenericTestList(allocator: std.mem.Allocator, value: []const u8, out: *std.ArrayList(GenericTestDef)) !void {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') {
+        _ = try appendGenericTestDef(allocator, out, try dupTrimmedScalar(allocator, trimmed));
+        return;
+    }
+    var pieces = std.mem.splitScalar(u8, trimmed[1 .. trimmed.len - 1], ',');
+    while (pieces.next()) |piece| {
+        const item = std.mem.trim(u8, piece, " \t");
+        if (item.len != 0) _ = try appendGenericTestDef(allocator, out, try dupTrimmedScalar(allocator, item));
+    }
+}
+
+pub fn appendGenericTestDef(allocator: std.mem.Allocator, tests: *std.ArrayList(GenericTestDef), test_name: []const u8) !usize {
+    try tests.append(allocator, .{ .name = test_name });
+    return tests.items.len - 1;
+}
+
+pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTestDef), source: GenericTestDef) !void {
+    var cloned = GenericTestDef{
+        .name = source.name,
+        .relationship_to = source.relationship_to,
+        .relationship_field = source.relationship_field,
+    };
+    errdefer cloned.accepted_values.deinit(graph.allocator);
+    for (source.accepted_values.items) |value| {
+        try cloned.accepted_values.append(graph.allocator, value);
+    }
+    try tests.append(graph.allocator, cloned);
 }
 
 pub const GenericTestNames = struct {
@@ -262,6 +294,57 @@ test "testNameFromYamlItem reads scalar and mapping test names" {
     try std.testing.expectEqualStrings("relationships", try testNameFromYamlItem(allocator, "relationships:"));
     try std.testing.expectEqualStrings("accepted_values", try testNameFromYamlItem(allocator, "\"accepted_values\": {values: [a, b]}"));
     try std.testing.expectError(error.UnsupportedYaml, testNameFromYamlItem(allocator, "   "));
+}
+
+test "parseInlineGenericTestList reads scalar and inline generic tests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tests: std.ArrayList(GenericTestDef) = .empty;
+    defer tests.deinit(allocator);
+    try parseInlineGenericTestList(allocator, "[unique, \"not_null\", ]", &tests);
+    try std.testing.expectEqual(@as(usize, 2), tests.items.len);
+    try std.testing.expectEqualStrings("unique", tests.items[0].name);
+    try std.testing.expectEqualStrings("not_null", tests.items[1].name);
+
+    var scalar: std.ArrayList(GenericTestDef) = .empty;
+    defer scalar.deinit(allocator);
+    try parseInlineGenericTestList(allocator, "'accepted_values'", &scalar);
+    try std.testing.expectEqual(@as(usize, 1), scalar.items.len);
+    try std.testing.expectEqualStrings("accepted_values", scalar.items[0].name);
+}
+
+test "appendGenericTestDefClone copies nested accepted values list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var source_values: std.ArrayList([]const u8) = .empty;
+    defer source_values.deinit(allocator);
+    try source_values.append(allocator, "placed");
+    try source_values.append(allocator, "returned");
+
+    const source = GenericTestDef{
+        .name = "accepted_values",
+        .accepted_values = source_values,
+        .relationship_to = "ref('customers')",
+        .relationship_field = "id",
+    };
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    var clones: std.ArrayList(GenericTestDef) = .empty;
+    defer clones.deinit(allocator);
+
+    try appendGenericTestDefClone(&graph, &clones, source);
+    try source_values.append(allocator, "cancelled");
+
+    try std.testing.expectEqual(@as(usize, 1), clones.items.len);
+    try std.testing.expectEqualStrings("accepted_values", clones.items[0].name);
+    try std.testing.expectEqualStrings("ref('customers')", clones.items[0].relationship_to);
+    try std.testing.expectEqualStrings("id", clones.items[0].relationship_field);
+    try std.testing.expectEqual(@as(usize, 2), clones.items[0].accepted_values.items.len);
+    try std.testing.expectEqualStrings("placed", clones.items[0].accepted_values.items[0]);
+    try std.testing.expectEqualStrings("returned", clones.items[0].accepted_values.items[1]);
 }
 
 test "synthesizeGenericTestNames preserves short generic test identities" {
