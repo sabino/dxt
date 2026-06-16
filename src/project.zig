@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const project_config = @import("project/config.zig");
+const project_fs = @import("project/fs.zig");
 const manifest = @import("project/manifest.zig");
 const selector = @import("project/selector.zig");
 const types = @import("project/types.zig");
@@ -32,6 +33,10 @@ const deinitProjectConfig = types.deinitProjectConfig;
 const deinitNode = types.deinitNode;
 const deinitGenericTestNode = types.deinitGenericTestNode;
 const loadProjectConfig = project_config.loadProjectConfig;
+const discoverChildDirectories = project_fs.discoverChildDirectories;
+const discoverProjectFiles = project_fs.discoverProjectFiles;
+const discoverSeedFiles = project_fs.discoverSeedFiles;
+const discoverMacroFiles = project_fs.discoverMacroFiles;
 const stripYamlComment = util.stripYamlComment;
 const leadingSpaces = util.leadingSpaces;
 const splitKeyValue = util.splitKeyValue;
@@ -110,7 +115,7 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
         defer md_files.deinit(runtime.allocator);
 
         const root = try pathJoin(runtime.allocator, &.{ project_dir, model_path });
-        discoverFiles(runtime, root, model_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
+        discoverProjectFiles(runtime, root, model_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
@@ -195,30 +200,13 @@ fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []
 
 fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, graph: *Graph) !void {
     const packages_dir = try pathJoin(runtime.allocator, &.{ project_dir, "dbt_packages" });
-    const fd = openLinuxDirectory(runtime.allocator, packages_dir) catch |err| switch (err) {
-        error.FileNotFound => return,
-        else => return err,
-    };
-    defer closeLinuxFd(fd);
-
     var package_dirs: std.ArrayList([]const u8) = .empty;
     defer package_dirs.deinit(runtime.allocator);
 
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
-        if (entry.name.len == 0 or entry.name[0] == '.') continue;
-        const child_abs = try pathJoin(runtime.allocator, &.{ packages_dir, entry.name });
-        const is_dir = if (entry.kind == .directory)
-            true
-        else if (entry.kind == .unknown)
-            try linuxPathIsDirectory(runtime.allocator, child_abs)
-        else
-            false;
-        if (is_dir) {
-            try package_dirs.append(runtime.allocator, child_abs);
-        }
-    }
+    discoverChildDirectories(runtime, packages_dir, &package_dirs) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
     sortStrings(package_dirs.items);
 
     for (package_dirs.items) |package_dir| {
@@ -234,30 +222,13 @@ fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, graph: 
 
 fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, graph: *Graph) !void {
     const packages_dir = try pathJoin(runtime.allocator, &.{ project_dir, "dbt_packages" });
-    const fd = openLinuxDirectory(runtime.allocator, packages_dir) catch |err| switch (err) {
-        error.FileNotFound => return,
-        else => return err,
-    };
-    defer closeLinuxFd(fd);
-
     var package_dirs: std.ArrayList([]const u8) = .empty;
     defer package_dirs.deinit(runtime.allocator);
 
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
-        if (entry.name.len == 0 or entry.name[0] == '.') continue;
-        const child_abs = try pathJoin(runtime.allocator, &.{ packages_dir, entry.name });
-        const is_dir = if (entry.kind == .directory)
-            true
-        else if (entry.kind == .unknown)
-            try linuxPathIsDirectory(runtime.allocator, child_abs)
-        else
-            false;
-        if (is_dir) {
-            try package_dirs.append(runtime.allocator, child_abs);
-        }
-    }
+    discoverChildDirectories(runtime, packages_dir, &package_dirs) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
     sortStrings(package_dirs.items);
 
     for (package_dirs.items) |package_dir| {
@@ -276,7 +247,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, grap
             defer md_files.deinit(runtime.allocator);
 
             const root = try pathJoin(runtime.allocator, &.{ package_dir, model_path });
-            discoverFiles(runtime, root, model_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
+            discoverProjectFiles(runtime, root, model_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => return err,
             };
@@ -314,218 +285,6 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, grap
         try applyProjectModelPathConfigs(graph, package_config.model_path_configs.items, false, package_config.name);
         try applyModelProperties(graph, package_config.name);
         applyProjectSeedDocs(graph, package_config.name, package_config.seed_docs);
-    }
-}
-
-fn discoverFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8), md_files: *std.ArrayList([]const u8)) !void {
-    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
-    defer closeLinuxFd(fd);
-
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
-        if (entry.name.len == 0 or entry.name[0] == '.') continue;
-        if (std.mem.eql(u8, entry.name, "target") or
-            std.mem.eql(u8, entry.name, "dbt_packages") or
-            std.mem.eql(u8, entry.name, ".zig-cache") or
-            std.mem.eql(u8, entry.name, "zig-out"))
-        {
-            continue;
-        }
-
-        const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
-        const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
-        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
-            try discoverFiles(runtime, child_abs, child_rel, sql_files, yaml_files, md_files);
-            continue;
-        }
-        switch (entry.kind) {
-            .directory => try discoverFiles(runtime, child_abs, child_rel, sql_files, yaml_files, md_files),
-            .file, .unknown => {
-                if (std.mem.endsWith(u8, entry.name, ".sql")) {
-                    try sql_files.append(runtime.allocator, child_rel);
-                } else if (std.mem.endsWith(u8, entry.name, ".yml") or std.mem.endsWith(u8, entry.name, ".yaml")) {
-                    try yaml_files.append(runtime.allocator, child_rel);
-                } else if (std.mem.endsWith(u8, entry.name, ".md")) {
-                    try md_files.append(runtime.allocator, child_rel);
-                }
-            },
-            else => {},
-        }
-    }
-}
-
-fn discoverSeedFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, seed_files: *std.ArrayList([]const u8)) !void {
-    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
-    defer closeLinuxFd(fd);
-
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
-        if (entry.name.len == 0 or entry.name[0] == '.') continue;
-
-        const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
-        const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
-        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
-            try discoverSeedFiles(runtime, child_abs, child_rel, seed_files);
-            continue;
-        }
-        switch (entry.kind) {
-            .directory => try discoverSeedFiles(runtime, child_abs, child_rel, seed_files),
-            .file, .unknown => {
-                if (std.mem.endsWith(u8, entry.name, ".csv")) {
-                    try seed_files.append(runtime.allocator, child_rel);
-                }
-            },
-            else => {},
-        }
-    }
-}
-
-fn discoverSqlFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8)) !void {
-    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
-    defer closeLinuxFd(fd);
-
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
-        if (entry.name.len == 0 or entry.name[0] == '.') continue;
-        if (std.mem.eql(u8, entry.name, "target") or
-            std.mem.eql(u8, entry.name, "dbt_packages") or
-            std.mem.eql(u8, entry.name, ".zig-cache") or
-            std.mem.eql(u8, entry.name, "zig-out"))
-        {
-            continue;
-        }
-
-        const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
-        const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
-        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
-            try discoverSqlFiles(runtime, child_abs, child_rel, sql_files);
-            continue;
-        }
-        switch (entry.kind) {
-            .directory => try discoverSqlFiles(runtime, child_abs, child_rel, sql_files),
-            .file, .unknown => {
-                if (std.mem.endsWith(u8, entry.name, ".sql")) {
-                    try sql_files.append(runtime.allocator, child_rel);
-                }
-            },
-            else => {},
-        }
-    }
-}
-
-fn discoverMacroFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8)) !void {
-    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
-    defer closeLinuxFd(fd);
-
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
-        if (entry.name.len == 0 or entry.name[0] == '.') continue;
-        if (std.mem.eql(u8, entry.name, "target") or
-            std.mem.eql(u8, entry.name, "dbt_packages") or
-            std.mem.eql(u8, entry.name, ".zig-cache") or
-            std.mem.eql(u8, entry.name, "zig-out"))
-        {
-            continue;
-        }
-
-        const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
-        const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
-        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
-            try discoverMacroFiles(runtime, child_abs, child_rel, sql_files, yaml_files);
-            continue;
-        }
-        switch (entry.kind) {
-            .directory => try discoverMacroFiles(runtime, child_abs, child_rel, sql_files, yaml_files),
-            .file, .unknown => {
-                if (std.mem.endsWith(u8, entry.name, ".sql")) {
-                    try sql_files.append(runtime.allocator, child_rel);
-                } else if (std.mem.endsWith(u8, entry.name, ".yml") or std.mem.endsWith(u8, entry.name, ".yaml")) {
-                    try yaml_files.append(runtime.allocator, child_rel);
-                }
-            },
-            else => {},
-        }
-    }
-}
-
-const LinuxDirEntry = struct {
-    name: [:0]const u8,
-    kind: std.Io.File.Kind,
-};
-
-const LinuxDirReadState = struct {
-    fd: std.os.linux.fd_t,
-    buffer: []u8,
-    index: usize = 0,
-    end: usize = 0,
-};
-
-// Keep discovery synchronous and deterministic on mounts that report DT_UNKNOWN
-// or behave poorly with the experimental std.Io directory iterator.
-fn openLinuxDirectory(allocator: std.mem.Allocator, path: []const u8) !std.os.linux.fd_t {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    const rc = std.os.linux.openat(std.os.linux.AT.FDCWD, path_z.ptr, .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
-    return switch (std.os.linux.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        .NOENT => error.FileNotFound,
-        .NOTDIR => error.NotDir,
-        .ACCES => error.AccessDenied,
-        else => error.Unexpected,
-    };
-}
-
-fn closeLinuxFd(fd: std.os.linux.fd_t) void {
-    _ = std.os.linux.close(fd);
-}
-
-fn linuxPathIsDirectory(allocator: std.mem.Allocator, path: []const u8) !bool {
-    const fd = openLinuxDirectory(allocator, path) catch |err| switch (err) {
-        error.NotDir => return false,
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    closeLinuxFd(fd);
-    return true;
-}
-
-fn nextLinuxDirectoryEntry(state: *LinuxDirReadState) !?LinuxDirEntry {
-    while (true) {
-        if (state.index >= state.end) {
-            const rc = std.os.linux.getdents64(state.fd, state.buffer.ptr, state.buffer.len);
-            switch (std.os.linux.errno(rc)) {
-                .SUCCESS => {},
-                .INTR => continue,
-                else => return error.Unexpected,
-            }
-            if (rc == 0) return null;
-            state.index = 0;
-            state.end = rc;
-        }
-
-        const linux_entry: *align(1) std.os.linux.dirent64 = @ptrCast(&state.buffer[state.index]);
-        state.index += linux_entry.reclen;
-
-        const name_ptr: [*]u8 = &linux_entry.name;
-        const padded_name = name_ptr[0 .. linux_entry.reclen - @offsetOf(std.os.linux.dirent64, "name")];
-        const name_len = std.mem.findScalar(u8, padded_name, 0).?;
-        const name = name_ptr[0..name_len :0];
-        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-
-        return .{
-            .name = name,
-            .kind = switch (linux_entry.type) {
-                std.os.linux.DT.DIR => .directory,
-                std.os.linux.DT.REG => .file,
-                std.os.linux.DT.LNK => .sym_link,
-                else => .unknown,
-            },
-        };
     }
 }
 
