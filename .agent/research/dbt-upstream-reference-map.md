@@ -40,13 +40,13 @@ Every compatibility slice should record:
 
 | Compatibility area | Upstream v1 references | Upstream v2 / Fusion references | dxt owner |
 | --- | --- | --- | --- |
-| Project load and parse order | `core/dbt/parser/manifest.py::ManifestLoader.load`, `parse_project`, `load_and_parse_macros`, `load_macros`, `process_sources`, `process_refs`, `process_docs`, `process_metrics`, `process_unit_tests`, `cleanup_disabled`, `_backfill_direct_parents`, `write_manifest` | `crates/dbt-loader/src/loader.rs::load`, `load_inner`, `load_dbtignore`, `collect_paths`, `merge_vars`; `crates/dbt-parser/src/resolver.rs::resolve`, `resolve_inner`, `resolve_package_waves` | Current `src/project.zig`; future `src/project/loader.zig` orchestration with resource-specific work delegated to `config`, `fs`, `parse`, `jinja`, and `resolve` |
+| Project load and parse order | `core/dbt/parser/manifest.py::ManifestLoader.load`, `parse_project`, `load_and_parse_macros`, `load_macros`, `process_sources`, `process_refs`, `process_docs`, `process_metrics`, `process_unit_tests`, `cleanup_disabled`, `_backfill_direct_parents`, `write_manifest` | `crates/dbt-loader/src/loader.rs::load`, `load_inner`, `load_dbtignore`, `collect_paths`, `merge_vars`; `crates/dbt-parser/src/resolver.rs::resolve`, `resolve_package_waves`, `resolve_dependencies` | `src/project/loader.zig` owns graph loading order, package traversal, target path lookup, duplicate-check sequencing, and graph sorting; `src/project.zig` still supplies parser callbacks until resource parsers move down |
 | Parse-time node creation and config | `core/dbt/parser/base.py::ConfiguredParser`, `_create_parsetime_node`, `render_with_context`, `update_parsed_node_config`, `update_parsed_node_relation_names`, `render_update`, `add_result_node`, `parse_node` | `crates/dbt-parser/src/renderer.rs::render_sql_file_inner`, config resolver calls, disabled root-overlay handling, final status/config resolution | `src/project/config.zig`, `src/project/jinja.zig`, future `src/project/parse.zig` resource parsers and `src/project/compiler.zig` |
 | Macro parsing | `core/dbt/parser/macros.py::MacroParser`, `parse_macro`, `parse_unparsed_macros`, block types `macro`, `materialization`, `test`, `data_test` | `crates/dbt-parser/src/resolver.rs` macro resolution; `crates/dbt-parser/src/renderer.rs` macro dependency listener | Current macro scanning in `src/project.zig` plus `src/project/jinja.zig`; future `src/project/parse.zig` macro parser and `src/project/resolve.zig` namespace resolver |
 | Macro namespace and dispatch | `core/dbt/context/macros.py::MacroNamespace`, `_search_order`, `MacroNamespaceBuilder.add_macro`, `add_macros`, `build_namespace` | `crates/dbt-parser/src/resolver.rs` macro unit construction and package runtime config; adapter dispatch references in adapter/Jinja crates | `src/project/resolve.zig` for lookup semantics; future `src/project/jinja.zig` or `src/project/macro.zig` for executable namespace and dispatch |
-| YAML properties and resource patches | `core/dbt/parser/schemas.py::SchemaParser`, `SourceParser`, `PatchParser`, `ModelPatchParser`, `MacroPatchParser`; `core/dbt/parser/schema_yaml_readers.py::ExposureParser`, `MetricParser`, `SemanticModelParser`, `SavedQueryParser` | `crates/dbt-parser/src/resolver.rs::resolve_inner` resource order: sources, seeds, snapshots, groups, models, analyses, functions, exposures, semantic models, metrics, saved queries, data tests, unit tests | Current `src/project.zig` YAML routines and `src/project/parse.zig` helpers; future `src/project/parse.zig` plus narrower modules if needed |
+| YAML properties and resource patches | `core/dbt/parser/schemas.py::SchemaParser`, `SourceParser`, `PatchParser`, `ModelPatchParser`, `MacroPatchParser`; `core/dbt/parser/schema_yaml_readers.py::ExposureParser`, `MetricParser`, `SemanticModelParser`, `SavedQueryParser` | `crates/dbt-parser/src/resolver.rs::resolve_package_waves` resource order: sources, seeds, snapshots, groups, models, analyses, functions, exposures, semantic models, metrics, saved queries, data tests, unit tests | Current `src/project.zig` YAML routines and `src/project/parse.zig` helpers; future `src/project/parse.zig` plus narrower modules if needed |
 | Exposure, source, ref, metric dependency resolution | `core/dbt/parser/manifest.py::_process_refs`, `_process_sources_for_node`, `_process_sources_for_exposure`, `_process_metrics_for_node` | `crates/dbt-jinja-utils/src/node_resolver.rs::resolve_dependencies`; `crates/dbt-parser/src/resolver.rs` access validation, relation uniqueness, primary-key inference | `src/project/resolve.zig`; current higher-level orchestration still in `src/project.zig` |
-| Parse vs runtime Jinja context | `core/dbt/context/providers.py::ParseProvider`, `RuntimeProvider`, `ProviderContext.ref`, `source`, `execute`, `var`, `graph`, `env_var`, `selected_resources`, `generate_parser_model_context`, `generate_runtime_model_context`, `generate_parse_exposure`, `generate_parse_semantic_models` | `crates/dbt-parser/src/renderer.rs` execute=false render, static source recovery behind false branches, hook dependency rendering; `crates/dbt-parser/src/dbt_namespace.rs` parse-mode interception of `get_relation` and `get_columns_in_relation` | Current lexical `src/project/jinja.zig`; future parse context and compile/runtime context modules before M2 |
+| Parse vs runtime Jinja context | `core/dbt/context/providers.py::ParseProvider`, `RuntimeProvider`, `ProviderContext.ref`, `source`, `execute`, `var`, `graph`, `env_var`, `selected_resources`, `generate_parser_model_context`, `generate_runtime_model_context`, `generate_parse_exposure`, `generate_parse_semantic_models` | `crates/dbt-parser/src/renderer.rs::render_sql_file_inner`, `augment_sql_resources_with_static_sources`; `crates/dbt-parser/src/dbt_namespace.rs::DbtNamespace` parse-mode interception of `get_relation` and `get_columns_in_relation` | Current lexical `src/project/jinja.zig`; future parse context and compile/runtime context modules before M2 |
 | Manifest data model and maps | `core/dbt/contracts/graph/manifest.py::Manifest` maps for nodes, sources, macros, docs, exposures, metrics, groups, selectors, files, disabled, semantic_models, unit_tests, saved_queries, fixtures; `build_flat_graph`, `build_parent_and_child_maps`, lookup rebuilders, resource adders | `crates/dbt-schemas/src/schemas/manifest/manifest.rs::build_manifest`, `build_disabled_map`, `build_parent_and_child_maps`, path normalization, `nodes_from_dbt_manifest` | `src/project/types.zig`, `src/project/manifest.zig`, `src/project/resolve.zig` |
 | Selector grammar and methods | `core/dbt/graph/selector_spec.py`, `selector.py`, `selector_methods.py`, `cli.py`, `graph.py`, `queue.py`; methods include FQN, tag, group, access, source, exposure, metric, semantic_model, saved_query, unit_test, path, file, package, config, resource_type, test_name, test_type, state, result, source_status, version, selector | `crates/dbt-parser/src/resolver.rs` selector YAML loading; command flags in `crates/dbt-clap-core/src/commands.rs` | `src/project/selector.zig` and CLI validation in `src/root.zig`; future state/result/source-status work in `src/project/state.zig` |
 | Artifact schemas | `schemas/dbt/manifest/v12.json`, `schemas/dbt/run-results/v6.json`, `schemas/dbt/sources/v3.json`, `schemas/dbt/catalog/v1.json` | v2 still emits JSON for compatibility and adds Parquet artifacts per README; manifest builder in `crates/dbt-schemas/src/schemas/manifest/manifest.rs` | `src/project/manifest.zig`, future run/catalog/source writers and schema validators under tests/scripts |
@@ -60,20 +60,23 @@ Every compatibility slice should record:
 - Product runtime is Zig and remains so.
 - Current implemented command surface is `parse`, `ls`, `version`, and help;
   `compile`, `build`, and `docs generate` are placeholders.
-- `src/project.zig` is still the facade plus remaining loader/resource parser
-  orchestration. It owns high-level graph loading, installed-package resource
-  loading, docs block parsing, macro block parsing, YAML source/exposure/model
-  property parsing, model/seed parsing, generic-test materialization, warnings,
-  and remaining resolver orchestration.
+- `src/project/loader.zig` now owns graph loading order, installed-package
+  traversal, target-path lookup, project/package resource traversal,
+  macro/property application sequencing, duplicate checks, and graph sorting.
+- `src/project.zig` is now the public parse/list facade plus remaining resource
+  parser callbacks. It still owns docs block parsing, macro block parsing, YAML
+  source/exposure/model property parsing, model/seed parsing, generic-test
+  materialization, warnings, and remaining resolver orchestration.
 - Existing extracted modules are `types`, `util`, `config`, `fs`, `jinja`,
-  `resolve`, `parse`, `selector`, and `manifest`.
+  `loader`, `resolve`, `parse`, `selector`, and `manifest`.
 - The test base includes native Zig tests for module-level helpers and pytest
   integration tests for CLI/artifact fixtures plus a pinned local Manifest v12
   schema slice.
-- M1 should not be treated as closed until the project has a reproducible
-  public Jaffle Shop DuckDB parse gate, a dbt-vs-dxt oracle harness for the M1
-  fixture ladder, and documented schema-slice expansion rules for fields beyond
-  the current emitted manifest surface.
+- M1 now has a reproducible public Jaffle Shop DuckDB parse gate and a dbt-vs-dxt
+  oracle harness for the M1 fixture ladder. M1 should still not be treated as
+  closed until the known installed-package exposure ref gap is either fixed or
+  explicitly re-scoped, and schema-slice expansion rules are applied to each new
+  emitted artifact field.
 - M2 implementation should wait until M1/M1A gates above are either complete or
   explicitly re-scoped. A source-grounded M2 preplan can proceed first because
   it will clarify parse-time Jinja, macro namespace, adapter dispatch, and
@@ -81,74 +84,171 @@ Every compatibility slice should record:
 
 ## Next Five Source-Grounded Slices
 
-### 1. M1A Loader Facade Extraction
+### 1. M1 Source and Exposure YAML Parser Ownership
 
-- Upstream references: v1 `ManifestLoader.load`; v2 `dbt-loader/src/loader.rs`,
-  `dbt-parser/src/resolver.rs::resolve`.
-- dxt files: create `src/project/loader.zig`; shrink `src/project.zig` to call
-  loader and manifest/selector facades.
-- Tests: native Zig smoke test for loader orchestration over an in-memory or
-  temp fixture if practical; keep pytest fixture coverage unchanged.
-- Artifact validation: existing Manifest v12 slice for all parse fixtures.
-- Stop conditions: stop if extraction changes resource counts, selector output,
-  manifest ordering, or diagnostics.
-
-### 2. M1 Source and Exposure YAML Parser Ownership
-
-- Upstream references: v1 `SourceParser`, `ExposureParser`,
-  `_process_sources_for_exposure`; v2 `resolve_sources`, `resolve_exposures`.
+- Upstream references: v1 `core/dbt/parser/schemas.py::SchemaParser.parse_file`,
+  `SourceParser.parse`, `SourceParser.add_source_definitions`,
+  `core/dbt/parser/sources.py::SourcePatcher.construct_sources`,
+  `patch_source`, `parse_source`,
+  `core/dbt/parser/schema_yaml_readers.py::ExposureParser.parse_exposure`,
+  `core/dbt/context/providers.py::generate_parse_exposure`,
+  `core/dbt/parser/manifest.py::_process_sources_for_exposure`; v2
+  `crates/dbt-parser/src/resolver.rs::resolve_package_waves`,
+  `crates/dbt-parser/src/resolve/resolve_sources.rs::resolve_sources`,
+  `build_source_unrendered_config`,
+  `crates/dbt-parser/src/resolve/resolve_exposures.rs::resolve_exposures`,
+  and `resolve_yaml_depends_on`.
 - dxt files: move source/exposure YAML parsing from `src/project.zig` into
   `src/project/parse.zig` or a follow-up `src/project/schema.zig`.
-- Tests: native tests for source tables, exposure owners, maturity, URL,
-  `ref`, `source`, and unsupported dependency forms; pytest for fixture
-  manifests and `ls source:` / `ls exposure:` behavior.
+- Tests: native tests for source sections with multiple tables, package source
+  table IDs, exposure owner/type/maturity/URL/tags/meta/config.enabled, and
+  deterministic exposure dependency ordering for `source()` and `ref()`;
+  pytest/dbt oracle coverage for unique IDs, `refs`, `sources`,
+  `depends_on.nodes`, parent/child maps, disabled exposure filtering, and
+  `ls source:` / `ls exposure:` behavior.
 - Artifact validation: Manifest v12 source/exposure entries, parent/child maps,
-  and `depends_on.nodes`.
+  `disabled`, and `depends_on.nodes`. Defer richer `SourceDefinition` fields to
+  the artifact schema expansion slice.
 - Stop conditions: do not add semantic metrics or new selector behavior in this
-  extraction.
+  extraction; stop if resource counts, unique IDs, dependency maps, warning
+  behavior, or package-local exposure resolution change outside the explicit
+  fixture.
 
-### 3. M1 Macro Block and Macro Patch Parity
+### 2. M1 Macro Block and Macro Patch Ownership
 
-- Upstream references: v1 `MacroParser`, `MacroPatchParser`,
-  `MacroNamespaceBuilder`; v2 resolver macro phases and renderer macro
-  dependency listener.
+- Upstream references: v1 `core/dbt/parser/macros.py::MacroParser`,
+  `parse_unparsed_macros`, `parse_macro`, `_extract_args`,
+  `core/dbt/parser/schemas.py::MacroPatchParser.parse_patch`,
+  `_check_patch_arguments`, `is_valid_type`,
+  `core/dbt/context/macros.py::MacroNamespaceBuilder`,
+  `core/dbt/contracts/graph/manifest.py::MacroMethods`; v2
+  `crates/dbt-parser/src/resolve/resolve_macros.rs::resolve_macros`,
+  `resolve_docs_macros`, `process_docs_macro_file`, `is_valid_macro_arg_type`,
+  `apply_macro_patches`,
+  `crates/dbt-jinja-utils/src/listener.rs::MacroDependencyListener`,
+  and macro namespace registries in the Jinja environment builder.
 - dxt files: move macro block parsing and macro property parsing ownership out
-  of `src/project.zig`; extend `src/project/jinja.zig` only for lexical helpers.
-- Tests: native tests for macro/materialization/test/data_test block extraction,
-  package-qualified macro IDs, argument patch merge, and namespace precedence.
+  of `src/project.zig` into `src/project/parse.zig` or a future
+  `src/project/macro.zig`; keep lexical scanning helpers in
+  `src/project/jinja.zig` and lookup/namespace behavior in
+  `src/project/resolve.zig`.
+- Tests: native tests for top-level `{% macro %}` extraction with nested
+  non-top-level blocks ignored, `{% materialization %}`, `{% test %}`, and
+  `{% data_test %}` artifact extraction, package-qualified macro IDs, duplicate
+  macro patch rejection, argument patch merge, invalid argument type diagnostics,
+  patch `description`/`docs`/`meta`, and namespace precedence.
 - Python/dbt oracle: compare macro manifest entries and model macro dependencies
-  on synthetic package fixtures.
+  on synthetic package fixtures, including package macro namespace fixtures.
 - Artifact validation: Manifest v12 `macros` map and `depends_on.macros`.
 - Stop conditions: do not implement macro execution or adapter dispatch in the
-  same slice.
+  same slice; do not implement materialization runtime behavior here.
 
-### 4. M2 Parse-Time Jinja Context Boundary
+### 3. M2 Parse-Time Jinja Context Boundary
 
-- Upstream references: v1 `ParseProvider`, `RuntimeProvider`, provider methods
-  for `ref`, `source`, `config`, `var`, `env_var`, `execute`, `this`, `graph`,
-  `selected_resources`; v2 `renderer.rs` execute=false rendering,
-  `dbt_namespace.rs` adapter introspection capture.
-- dxt files: future parse-context module plus `src/project/jinja.zig` scanner
-  integration and eventual compiler module.
-- Tests: native tests for `execute`-guarded calls, unsupported `run_query` at
-  parse time, var/env defaults, and hook dependency capture; pytest/dbt oracle
-  for compiled SQL and manifest dependency parity.
+- Upstream references: v1 `core/dbt/context/README.md`,
+  `core/dbt/context/configured.py::SchemaYamlContext`,
+  `generate_schema_yml_context`, `core/dbt/context/providers.py::ParseProvider`,
+  `RuntimeProvider`, `ParseConfigObject`, `ParseRefResolver`,
+  `ParseSourceResolver`, `ProviderContext.ref`, `source`, `ctx_config`,
+  `execute`, `generate_parser_model_context`, `generate_parse_exposure`,
+  `generate_parse_semantic_models`; v2
+  `crates/dbt-parser/src/renderer.rs::render_sql_file_inner`,
+  `render_unresolved_sql_files`, `augment_sql_resources_with_static_sources`,
+  `SqlFileRenderResult`, `RenderCtx`,
+  `crates/dbt-jinja-utils/src/phases/parse/init.rs::initialize_parse_jinja_environment`,
+  `crates/dbt-jinja-utils/src/phases/parse/resolve_model_context.rs`,
+  `crates/dbt-jinja-utils/src/phases/parse/sql_resource.rs::SqlResource`, and
+  `crates/dbt-parser/src/dbt_namespace.rs::DbtNamespace`.
+- dxt files: add a narrow `src/project/context.zig` or
+  `src/project/jinja_context.zig` for parse-time context data/callbacks; keep
+  scanner-level helpers in `src/project/jinja.zig`; have
+  `src/project/resolve.zig` consume collected `Ref`, `Source`, `StaticSource`,
+  `ConfigCall`, and macro dependency records; reserve compiled SQL behavior for
+  a later `src/project/compiler.zig`.
+- Tests: native tests that `execute` is false at parse time,
+  `config(materialized=..., tags=...)` records config and returns empty text,
+  literal `ref`/`source` record dependencies and deterministic placeholder
+  relation text, dynamic `ref(var(...))` remains unsupported, static
+  `source()` discovery from false branches does not become a normal runtime
+  dependency edge, `var`/`env_var` defaults are captured, and parse adapter
+  `get_relation`/`get_columns_in_relation` calls are recorded as metadata rather
+  than executed. Add pytest/dbt oracle fixtures for parse-time `execute`,
+  `run_query`, refs/sources inside macros, and manifest dependency parity.
 - Artifact validation: manifest `refs`, `sources`, `depends_on`, `config`, and
-  later compiled SQL outputs.
+  macro dependencies only. No compiled fields yet.
 - Stop conditions: do not start warehouse execution or DuckDB adapter behavior
-  until parse/compile context behavior has deterministic fixtures.
+  until parse/compile context behavior has deterministic fixtures; do not add
+  general-purpose Jinja interpretation if deterministic parse extraction is
+  enough; do not serialize static source metadata as normal dbt dependency
+  fields.
 
-### 5. M1/M2 Artifact Schema Expansion
+### 4. M1/M2 Artifact Schema Expansion
 
-- Upstream references: v1 `Manifest` maps and artifact schemas
-  `manifest/v12.json`, `run-results/v6.json`, `sources/v3.json`,
-  `catalog/v1.json`; v2 `build_manifest` and JSON compatibility notes.
-- dxt files: `src/project/manifest.zig`, future run-results/source/catalog
-  writer modules.
-- Tests: native deterministic JSON escaping/ordering tests plus pytest schema
-  validation against pinned schema slices that grow only when dxt emits the
-  corresponding fields.
-- Python/dbt oracle: normalize invocation IDs, timestamps, elapsed time,
-  adapter responses, and absolute paths before comparison.
-- Stop conditions: never invent dbt field names; keep dxt-only metadata in a
-  namespaced artifact outside dbt schemas.
+- Upstream references: v1
+  `core/dbt/artifacts/schemas/manifest/v12/manifest.py::WritableManifest`,
+  `ManifestMetadata`, `core/dbt/artifacts/resources/base.py::BaseResource`,
+  `GraphResource`, `Docs`, `FileHash`,
+  `core/dbt/artifacts/resources/v1/components.py::ParsedResource`,
+  `CompiledResource`, `DependsOn`, `MacroDependsOn`, plus v1 resource classes
+  for model, source definition, exposure, macro, and seed; v2
+  `crates/dbt-schemas/src/schemas/manifest/manifest.rs::build_manifest`,
+  `build_disabled_map`, `build_parent_and_child_maps`, `build_group_map`,
+  `path_config_for_package`, path normalization helpers, and
+  `crates/dbt-schemas/src/schemas/manifest/v12.rs::DbtManifestV12`.
+- dxt files: grow `src/project/types.zig` and `src/project/manifest.zig` in
+  small field clusters; add a later `src/project/artifacts.zig` only when
+  run-results, sources, or catalog writers exist; keep path normalization
+  centralized.
+- Tests: native deterministic JSON writer tests for metadata, checksum, docs
+  config, source config, source columns, macro config, stable null/default
+  emission, parent/child map leaf entries, sorted and deduped dependencies,
+  disabled map serialization, patch path normalization, and package path
+  normalization. Add pytest/dbt field comparison with nondeterministic
+  timestamp/invocation/path normalization.
+- Artifact validation: grow the pinned Manifest v12 schema slice only for fields
+  actually emitted. Practical next clusters are metadata
+  `dbt_schema_version`/`dbt_version`/`generated_at`/`adapter_type`/`quoting`,
+  model/seed relation fields, source descriptive/config fields, and macro
+  `config`/`created_at`.
+- Stop conditions: one schema cluster per slice; never invent dbt field names;
+  keep dxt-only metadata in a namespaced artifact outside dbt schemas; do not
+  vendor a full generated schema unless it is used by validation.
+
+### 5. M2 First Compile Boundary And Adapter Relation Identity
+
+- Upstream references: v1 `core/dbt/task/compile.py::CompileRunner.compile`,
+  `CompileRunner.execute`, `CompileTask`,
+  `core/dbt/compilation.py::Compiler._create_node_context`, `_compile_code`,
+  `_recursively_prepend_ctes`, `_write_node`, `compile_node`,
+  `inject_ctes_into_sql`, `core/dbt/task/run.py::ModelRunner._get_materialization_macro`,
+  `_execute_model`, `_materialization_relations`,
+  `_validate_materialization_relations_dict`, `execute`; v2
+  `crates/dbt-adapter-core/src/lib.rs::AdapterType`, `quote_char`,
+  static-analysis and microbatch capability helpers,
+  `crates/dbt-adapter-sql/src/ident.rs`, `statements.rs`, `types/mod.rs`, and
+  metadata/index direction from `crates/dbt-index-core` and
+  `crates/dbt-metadata-parquet`.
+- dxt files: introduce `src/project/compiler.zig` for render-only compile
+  output and `src/project/adapter.zig`, `src/project/sql.zig`, or
+  `src/project/relation.zig` for adapter kind, quoting, identifier formatting,
+  relation identity, target profile values, and SQL statement classification.
+  Reserve `src/project/runner.zig`, live connections, and metadata/index
+  writers for later.
+- Tests: native tests for compiling simple refs/sources into deterministic
+  relation strings, compiled target-path layout, adapter aliases such as
+  `postgres`/`postgresql`, quote chars, must-quote identifiers, max identifier
+  length, relation naming from database/schema/alias, capability matrices, and
+  rejecting missing materialization macros at the boundary without executing
+  anything.
+- Python/dbt oracle: compare `dbt compile` vs `dxt compile` for `single_model`,
+  `model_ref`, `source_ref`, and inline config fixtures, normalizing
+  `compiled_code`, `compiled_path`, `relation_name`, and selected manifest
+  compiled fields without opening a warehouse connection.
+- Artifact validation: add compile-only manifest fields only when emitted:
+  `compiled_code`, `compiled`, `compiled_path`, `extra_ctes_injected`,
+  `extra_ctes`, and `relation_name`. Do not emit successful `run_results.json`
+  until a materialization actually executes.
+- Stop conditions: no table/view creation, DuckDB adapter execution,
+  materialization macro execution, adapter cache mutation, transactions,
+  cross-database movement, Parquet dependency, or Python product behavior in
+  this slice.

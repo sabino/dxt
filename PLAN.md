@@ -285,6 +285,9 @@ The next source-grounded M1/M2 slices after the loader extraction are:
 4. Grow artifact schema coverage only alongside emitted fields, using v1 JSON
    schemas and v2 manifest builder behavior while keeping dxt-specific metadata
    out of dbt schemas.
+5. Seed the first compile boundary and adapter relation identity without live
+   execution, using v1 compile runner/compiler behavior plus v2 adapter
+   core/SQL identity references.
 
 ## Fixture Ladder
 
