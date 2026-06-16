@@ -59,8 +59,11 @@ Use the test layers deliberately:
 - `pytest -q` runs black-box integration and compatibility checks against the compiled Zig binary. It exists because dbt compatibility is fixture-heavy: tests copy synthetic dbt projects, invoke `dxt`, compare artifacts, validate schema slices, and can use dbt Core oracle behavior. Pytest should not implement product runtime behavior.
 - `python scripts/check_runtime_boundary.py` verifies Python has not crossed into product runtime responsibilities.
 - `python scripts/check_public_safety.py` scans for committed local paths, secrets, caches, logs, and private artifacts.
+- `python scripts/check_jaffle_shop_duckdb_parse.py` clones a pinned public Jaffle Shop DuckDB ref into a temporary directory, runs the Zig `dxt` binary, validates the current M1 manifest schema slice, and checks the supported Jaffle resource/selector shape. Use `--project-dir path/to/jaffle_shop_duckdb` to run against an existing local checkout without cloning.
 
 When a feature touches both core logic and user-visible CLI/artifact behavior, prefer both a Zig test for the core rule and a pytest integration/dbt-compatibility test for the end-to-end contract. Mechanical module extractions should pass `zig build test` after each step; run `pytest -q tests/test_cli.py` when CLI output, artifacts, fixtures, selectors, or manifest behavior are touched.
+
+The Jaffle Shop DuckDB gate is a public-fixture compatibility check, not part of the offline local test baseline. Its default mode uses the network to fetch the pinned public ref; use `python scripts/check_jaffle_shop_duckdb_parse.py --project-dir path/to/jaffle_shop_duckdb` when working offline from an existing checkout.
 
 ## Status
 
