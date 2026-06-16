@@ -708,6 +708,233 @@ def test_macro_paths_replace_default_macro_directory(tmp_path: Path):
     assert "macro.macro_paths_custom.ignored_macro" not in manifest["macros"]
 
 
+def test_parse_installed_package_refs_and_resources(tmp_path: Path):
+    project = copy_fixture(tmp_path, "package_ref_selector")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest_path = project / "target-dxt" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_manifest_schema_slice(manifest_path)
+    root_same_name = "model.package_ref_selector.pkg_customers"
+    root_customers = "model.package_ref_selector.root_customers"
+    root_orders = "model.package_ref_selector.root_orders"
+    root_pkg_source = "model.package_ref_selector.root_pkg_source"
+    root_unqualified_package_only = "model.package_ref_selector.root_unqualified_package_only"
+    package_from_source = "model.util_pkg.from_source"
+    package_customers = "model.util_pkg.pkg_customers"
+    package_only_customers = "model.util_pkg.pkg_only_customers"
+    package_root_macro_customers = "model.util_pkg.root_macro_customers"
+    package_seeded_customers = "model.util_pkg.pkg_seeded_customers"
+    package_seed = "seed.util_pkg.raw_pkg_customers"
+    root_macro = "macro.package_ref_selector.root_format_id"
+    package_source = "source.util_pkg.raw.pkg_customers"
+    package_macro = "macro.util_pkg.format_id"
+    package_doc = "doc.util_pkg.pkg_customers_doc"
+    package_exposure = "exposure.util_pkg.package_dashboard"
+    assert sorted(manifest["nodes"]) == [
+        root_same_name,
+        root_customers,
+        root_orders,
+        root_pkg_source,
+        root_unqualified_package_only,
+        package_from_source,
+        package_customers,
+        package_only_customers,
+        package_seeded_customers,
+        package_root_macro_customers,
+        package_seed,
+    ]
+    assert sorted(manifest["sources"]) == [package_source]
+    assert sorted(manifest["docs"]) == [package_doc]
+    assert sorted(manifest["exposures"]) == [package_exposure]
+    assert manifest["sources"][package_source]["package_name"] == "util_pkg"
+    assert manifest["docs"][package_doc]["package_name"] == "util_pkg"
+    assert manifest["docs"][package_doc]["block_contents"] == "Package customers from the installed utility package."
+    assert manifest["exposures"][package_exposure]["package_name"] == "util_pkg"
+    assert manifest["exposures"][package_exposure]["fqn"] == ["util_pkg", "package_dashboard"]
+    assert manifest["exposures"][package_exposure]["depends_on"]["nodes"] == [package_customers]
+    assert manifest["nodes"][root_same_name]["package_name"] == "package_ref_selector"
+    assert manifest["nodes"][root_same_name]["description"] == "Root model with the same name as a package model."
+    assert manifest["nodes"][root_same_name]["config"]["materialized"] == "table"
+    assert manifest["nodes"][root_customers]["package_name"] == "package_ref_selector"
+    assert manifest["nodes"][root_customers]["refs"] == [
+        {"name": "pkg_customers", "package": "util_pkg", "version": None}
+    ]
+    assert manifest["nodes"][root_customers]["depends_on"]["nodes"] == [package_customers]
+    assert manifest["nodes"][root_orders]["depends_on"]["nodes"] == [root_customers]
+    assert manifest["nodes"][root_pkg_source]["depends_on"]["nodes"] == [package_source]
+    assert manifest["nodes"][root_pkg_source]["sources"] == [["raw", "pkg_customers"]]
+    assert manifest["nodes"][root_unqualified_package_only]["refs"] == [
+        {"name": "pkg_only_customers", "package": None, "version": None}
+    ]
+    assert manifest["nodes"][root_unqualified_package_only]["depends_on"]["nodes"] == [package_only_customers]
+    assert manifest["nodes"][package_customers]["package_name"] == "util_pkg"
+    assert manifest["nodes"][package_customers]["path"] == "pkg_customers.sql"
+    assert manifest["nodes"][package_customers]["patch_path"] == "util_pkg://models/sources.yml"
+    assert manifest["nodes"][package_customers]["description"] == "Package customers from the installed utility package."
+    assert manifest["nodes"][package_customers]["doc_blocks"] == [package_doc]
+    assert manifest["nodes"][package_customers]["columns"]["customer_id"]["description"] == "Package customer identifier."
+    assert manifest["nodes"][package_customers]["config"]["materialized"] == "incremental"
+    assert manifest["nodes"][package_only_customers]["package_name"] == "util_pkg"
+    assert manifest["nodes"][package_only_customers]["config"]["materialized"] == "incremental"
+    assert manifest["nodes"][package_root_macro_customers]["package_name"] == "util_pkg"
+    assert manifest["nodes"][package_root_macro_customers]["depends_on"]["macros"] == [root_macro]
+    assert manifest["macros"][root_macro]["description"] == ""
+    assert manifest["macros"][package_macro]["description"] == "Format an identifier in the utility package."
+    assert manifest["macros"][package_macro]["patch_path"] == "util_pkg://macros/schema.yml"
+    assert manifest["macros"][package_macro]["arguments"] == [
+        {
+            "name": "column_name",
+            "type": "string",
+            "description": "Identifier expression to cast.",
+        }
+    ]
+    assert manifest["nodes"][package_from_source]["package_name"] == "util_pkg"
+    assert manifest["nodes"][package_from_source]["depends_on"]["nodes"] == [package_source]
+    assert manifest["nodes"][package_from_source]["sources"] == [["raw", "pkg_customers"]]
+    assert manifest["nodes"][package_seeded_customers]["package_name"] == "util_pkg"
+    assert manifest["nodes"][package_seeded_customers]["refs"] == [
+        {"name": "raw_pkg_customers", "package": None, "version": None}
+    ]
+    assert manifest["nodes"][package_seeded_customers]["depends_on"] == {
+        "macros": [package_macro],
+        "nodes": [package_seed],
+    }
+    assert manifest["nodes"][package_seed]["package_name"] == "util_pkg"
+    assert manifest["nodes"][package_seed]["path"] == "raw_pkg_customers.csv"
+    assert manifest["nodes"][package_seed]["docs"]["node_color"] == "green"
+    assert manifest["parent_map"][root_customers] == [package_customers]
+    assert manifest["parent_map"][root_pkg_source] == [package_source]
+    assert manifest["parent_map"][root_unqualified_package_only] == [package_only_customers]
+    assert manifest["parent_map"][package_from_source] == [package_source]
+    assert manifest["parent_map"][package_exposure] == [package_customers]
+    assert manifest["child_map"][package_source] == [root_pkg_source, package_from_source]
+    assert manifest["child_map"][package_customers] == [root_customers, package_exposure]
+    assert manifest["child_map"][package_only_customers] == [root_unqualified_package_only]
+    assert manifest["parent_map"][package_seeded_customers] == [package_seed]
+    assert manifest["child_map"][package_seed] == [package_seeded_customers]
+    assert str(project) not in manifest_path.read_text()
+
+    ls_package = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_package.returncode == 0, ls_package.stderr
+    assert [item["unique_id"] for item in json.loads(ls_package.stdout)] == [
+        package_exposure,
+        package_from_source,
+        package_customers,
+        package_only_customers,
+        package_seeded_customers,
+        package_root_macro_customers,
+        package_seed,
+        package_source,
+    ]
+
+    ls_package_models = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg,resource_type:model", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_package_models.returncode == 0, ls_package_models.stderr
+    assert [item["unique_id"] for item in json.loads(ls_package_models.stdout)] == [
+        package_from_source,
+        package_customers,
+        package_only_customers,
+        package_seeded_customers,
+        package_root_macro_customers,
+    ]
+
+    ls_root = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:this", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_root.returncode == 0, ls_root.stderr
+    assert [item["unique_id"] for item in json.loads(ls_root.stdout)] == [
+        root_same_name,
+        root_customers,
+        root_orders,
+        root_pkg_source,
+        root_unqualified_package_only,
+    ]
+
+    ls_package_exclude = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--exclude", "pkg_seeded_customers", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_package_exclude.returncode == 0, ls_package_exclude.stderr
+    assert [item["unique_id"] for item in json.loads(ls_package_exclude.stdout)] == [
+        package_exposure,
+        package_from_source,
+        package_customers,
+        package_only_customers,
+        package_root_macro_customers,
+        package_seed,
+        package_source,
+    ]
+
+
+def test_installed_package_configs_do_not_reconfigure_siblings(tmp_path: Path):
+    project = tmp_path / "root"
+    package_a = project / "dbt_packages" / "pkg_a"
+    package_b = project / "dbt_packages" / "pkg_b"
+    (project / "models").mkdir(parents=True)
+    (package_a / "models").mkdir(parents=True)
+    (package_b / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: root_proj
+version: "1.0"
+profile: default
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (package_a / "dbt_project.yml").write_text(
+        """name: pkg_a
+version: "1.0"
+profile: default
+model-paths: ["models"]
+models:
+  pkg_b:
+    +materialized: incremental
+"""
+    )
+    (package_b / "dbt_project.yml").write_text(
+        """name: pkg_b
+version: "1.0"
+profile: default
+model-paths: ["models"]
+models:
+  pkg_b:
+    +materialized: table
+"""
+    )
+    (package_b / "models" / "b.sql").write_text("select 1 as id\n")
+
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert manifest["nodes"]["model.pkg_b.b"]["config"]["materialized"] == "table"
+
+
 def test_parse_macro_property_yaml(tmp_path: Path):
     project = copy_fixture(tmp_path, "macro_properties")
     result = subprocess.run(

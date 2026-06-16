@@ -1,0 +1,11 @@
+default:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: localhost
+      user: dxt
+      password: dxt
+      port: 5432
+      dbname: dxt
+      schema: public
