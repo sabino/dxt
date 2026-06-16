@@ -3,6 +3,7 @@ const Io = std.Io;
 const manifest = @import("project/manifest.zig");
 const selector = @import("project/selector.zig");
 const types = @import("project/types.zig");
+const util = @import("project/util.zig");
 
 pub const Runtime = types.Runtime;
 pub const Options = types.Options;
@@ -54,7 +55,7 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
         active_seeds,
         graph.sources.items.len,
         countActiveExposures(&graph),
-        normalizeForDisplay(manifest_path),
+        util.normalizeForDisplay(manifest_path),
     });
 }
 
@@ -1650,10 +1651,10 @@ fn isSupportedGenericTest(test_def: GenericTestDef) bool {
 
 fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
     for (graph.unmatched_model_properties.items) |property| {
-        try stderr.print("warning: did not find matching node for model property `{s}` in {s}\n", .{ property.name, normalizeForDisplay(property.patch_path) });
+        try stderr.print("warning: did not find matching node for model property `{s}` in {s}\n", .{ property.name, util.normalizeForDisplay(property.patch_path) });
     }
     for (graph.unmatched_macro_properties.items) |property| {
-        try stderr.print("warning: did not find matching macro for macro property `{s}` in {s}\n", .{ property.name, normalizeForDisplay(property.patch_path) });
+        try stderr.print("warning: did not find matching macro for macro property `{s}` in {s}\n", .{ property.name, util.normalizeForDisplay(property.patch_path) });
     }
 }
 
@@ -2466,10 +2467,6 @@ fn pathJoin(allocator: std.mem.Allocator, parts: []const []const u8) ![]const u8
     return try std.fs.path.join(allocator, parts);
 }
 
-fn normalizeForDisplay(path: []const u8) []const u8 {
-    return path;
-}
-
 fn sortStrings(values: [][]const u8) void {
     std.mem.sort([]const u8, values, {}, struct {
         fn lessThan(_: void, a: []const u8, b: []const u8) bool {
@@ -2779,16 +2776,9 @@ fn testNameFromYamlItem(allocator: std.mem.Allocator, value: []const u8) ![]cons
 }
 
 fn appendUnique(allocator: std.mem.Allocator, values: *std.ArrayList([]const u8), value: []const u8) !void {
-    if (!containsString(values.items, value)) {
+    if (!util.containsString(values.items, value)) {
         try values.append(allocator, value);
     }
-}
-
-fn containsString(values: []const []const u8, value: []const u8) bool {
-    for (values) |candidate| {
-        if (std.mem.eql(u8, candidate, value)) return true;
-    }
-    return false;
 }
 
 test "project yaml parser reads dbt name and inline model paths" {
