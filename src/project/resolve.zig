@@ -3,9 +3,14 @@ const types = @import("types.zig");
 const util = @import("util.zig");
 
 const DocBlock = types.DocBlock;
+const ExposureDef = types.ExposureDef;
+const GenericTestNode = types.GenericTestNode;
 const Graph = types.Graph;
+const MacroDef = types.MacroDef;
+const Node = types.Node;
 const RefDep = types.RefDep;
 const SourceDep = types.SourceDep;
+const SourceDef = types.SourceDef;
 
 const appendUnique = util.appendUnique;
 const sortStrings = util.sortStrings;
@@ -141,6 +146,15 @@ pub fn resolveDependencies(graph: *Graph) !void {
     }
 }
 
+pub fn sortGraphResources(graph: *Graph) void {
+    sortNodes(graph.nodes.items);
+    sortTests(graph.tests.items);
+    sortSources(graph.sources.items);
+    sortExposures(graph.exposures.items);
+    sortDocs(graph.docs.items);
+    sortMacros(graph.macros.items);
+}
+
 pub fn rejectDuplicateModels(graph: *const Graph) !void {
     var i: usize = 0;
     while (i < graph.nodes.items.len) : (i += 1) {
@@ -251,6 +265,54 @@ fn resolveRefInPackage(graph: *const Graph, package: []const u8, name: []const u
     if (hasDisabledNode(graph, seed_id)) return error.DisabledRef;
     if (hasNode(graph, seed_id)) return seed_id;
     return null;
+}
+
+fn sortNodes(nodes: []Node) void {
+    std.mem.sort(Node, nodes, {}, struct {
+        fn lessThan(_: void, a: Node, b: Node) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
+fn sortTests(tests: []GenericTestNode) void {
+    std.mem.sort(GenericTestNode, tests, {}, struct {
+        fn lessThan(_: void, a: GenericTestNode, b: GenericTestNode) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
+fn sortSources(sources: []SourceDef) void {
+    std.mem.sort(SourceDef, sources, {}, struct {
+        fn lessThan(_: void, a: SourceDef, b: SourceDef) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
+fn sortExposures(exposures: []ExposureDef) void {
+    std.mem.sort(ExposureDef, exposures, {}, struct {
+        fn lessThan(_: void, a: ExposureDef, b: ExposureDef) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
+fn sortDocs(docs: []DocBlock) void {
+    std.mem.sort(DocBlock, docs, {}, struct {
+        fn lessThan(_: void, a: DocBlock, b: DocBlock) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
+fn sortMacros(macros: []MacroDef) void {
+    std.mem.sort(MacroDef, macros, {}, struct {
+        fn lessThan(_: void, a: MacroDef, b: MacroDef) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
 }
 
 fn findProjectMacroIdByName(graph: *const Graph, name: []const u8) ?[]const u8 {
@@ -466,4 +528,59 @@ test "dependency resolution rejects unresolved macro dependencies" {
     try graph.nodes.items[0].macro_depends_on.append(graph.allocator, "macro.demo.missing");
 
     try std.testing.expectError(error.UnresolvedMacro, resolveDependencies(&graph));
+}
+
+test "graph resource sorting preserves deterministic unique id order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
+    defer graph.deinit();
+
+    try appendNode(&graph, "model", "demo", "model.demo.z_orders", "z_orders", true);
+    try appendNode(&graph, "model", "demo", "model.demo.a_customers", "a_customers", true);
+    try graph.tests.append(graph.allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.z_test.2222222222",
+        .name = "z_test",
+        .alias = "z_test",
+        .path = "",
+        .original_file_path = "",
+        .raw_code = "",
+        .test_name = "unique",
+        .attached_node = "model.demo.z_orders",
+    });
+    try graph.tests.append(graph.allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.a_test.1111111111",
+        .name = "a_test",
+        .alias = "a_test",
+        .path = "",
+        .original_file_path = "",
+        .raw_code = "",
+        .test_name = "not_null",
+        .attached_node = "model.demo.a_customers",
+    });
+    try appendSource(&graph, "demo", "raw", "z_orders");
+    try appendSource(&graph, "demo", "raw", "a_customers");
+    try graph.exposures.append(graph.allocator, .{ .package_name = "demo", .unique_id = "exposure.demo.z_dashboard", .name = "z_dashboard", .path = "", .original_file_path = "" });
+    try graph.exposures.append(graph.allocator, .{ .package_name = "demo", .unique_id = "exposure.demo.a_dashboard", .name = "a_dashboard", .path = "", .original_file_path = "" });
+    try graph.docs.append(graph.allocator, .{ .package_name = "demo", .unique_id = "doc.demo.z_doc", .name = "z_doc", .path = "", .original_file_path = "", .block_contents = "" });
+    try graph.docs.append(graph.allocator, .{ .package_name = "demo", .unique_id = "doc.demo.a_doc", .name = "a_doc", .path = "", .original_file_path = "", .block_contents = "" });
+    try appendMacro(&graph, "demo", "z_macro");
+    try appendMacro(&graph, "demo", "a_macro");
+
+    sortGraphResources(&graph);
+
+    try std.testing.expectEqualStrings("model.demo.a_customers", graph.nodes.items[0].unique_id);
+    try std.testing.expectEqualStrings("model.demo.z_orders", graph.nodes.items[1].unique_id);
+    try std.testing.expectEqualStrings("test.demo.a_test.1111111111", graph.tests.items[0].unique_id);
+    try std.testing.expectEqualStrings("test.demo.z_test.2222222222", graph.tests.items[1].unique_id);
+    try std.testing.expectEqualStrings("source.demo.raw.a_customers", graph.sources.items[0].unique_id);
+    try std.testing.expectEqualStrings("source.demo.raw.z_orders", graph.sources.items[1].unique_id);
+    try std.testing.expectEqualStrings("exposure.demo.a_dashboard", graph.exposures.items[0].unique_id);
+    try std.testing.expectEqualStrings("exposure.demo.z_dashboard", graph.exposures.items[1].unique_id);
+    try std.testing.expectEqualStrings("doc.demo.a_doc", graph.docs.items[0].unique_id);
+    try std.testing.expectEqualStrings("doc.demo.z_doc", graph.docs.items[1].unique_id);
+    try std.testing.expectEqualStrings("macro.demo.a_macro", graph.macros.items[0].unique_id);
+    try std.testing.expectEqualStrings("macro.demo.z_macro", graph.macros.items[1].unique_id);
 }

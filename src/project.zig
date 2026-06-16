@@ -86,6 +86,7 @@ const rejectDuplicateModels = project_resolve.rejectDuplicateModels;
 const rejectDuplicateSeeds = project_resolve.rejectDuplicateSeeds;
 const resolveDependencies = project_resolve.resolveDependencies;
 const resolveRefDependency = project_resolve.resolveRefDependency;
+const sortGraphResources = project_resolve.sortGraphResources;
 
 pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try loadGraph(runtime, options.project_dir);
@@ -200,12 +201,7 @@ fn loadGraph(runtime: Runtime, project_dir: []const u8) !Graph {
     try applyMacroProperties(&graph);
     try applyModelProperties(&graph, config.name);
     try materializeGenericTests(&graph);
-    sortNodes(graph.nodes.items);
-    sortTests(graph.tests.items);
-    sortSources(graph.sources.items);
-    sortExposures(graph.exposures.items);
-    sortDocs(graph.docs.items);
-    sortMacros(graph.macros.items);
+    sortGraphResources(&graph);
     try rejectDuplicateModels(&graph);
     try rejectDuplicateSeeds(&graph);
     try rejectDuplicateDocs(&graph);
@@ -1430,58 +1426,10 @@ fn sortGenericTestDefs(tests: []GenericTestDef) void {
     }.lessThan);
 }
 
-fn sortNodes(nodes: []Node) void {
-    std.mem.sort(Node, nodes, {}, struct {
-        fn lessThan(_: void, a: Node, b: Node) bool {
-            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
-        }
-    }.lessThan);
-}
-
-fn sortTests(tests: []GenericTestNode) void {
-    std.mem.sort(GenericTestNode, tests, {}, struct {
-        fn lessThan(_: void, a: GenericTestNode, b: GenericTestNode) bool {
-            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
-        }
-    }.lessThan);
-}
-
-fn sortSources(sources: []SourceDef) void {
-    std.mem.sort(SourceDef, sources, {}, struct {
-        fn lessThan(_: void, a: SourceDef, b: SourceDef) bool {
-            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
-        }
-    }.lessThan);
-}
-
-fn sortExposures(exposures: []ExposureDef) void {
-    std.mem.sort(ExposureDef, exposures, {}, struct {
-        fn lessThan(_: void, a: ExposureDef, b: ExposureDef) bool {
-            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
-        }
-    }.lessThan);
-}
-
 fn sortMetaEntries(entries: []MetaEntry) void {
     std.mem.sort(MetaEntry, entries, {}, struct {
         fn lessThan(_: void, a: MetaEntry, b: MetaEntry) bool {
             return std.mem.lessThan(u8, a.key, b.key);
-        }
-    }.lessThan);
-}
-
-fn sortDocs(docs: []DocBlock) void {
-    std.mem.sort(DocBlock, docs, {}, struct {
-        fn lessThan(_: void, a: DocBlock, b: DocBlock) bool {
-            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
-        }
-    }.lessThan);
-}
-
-fn sortMacros(macros: []MacroDef) void {
-    std.mem.sort(MacroDef, macros, {}, struct {
-        fn lessThan(_: void, a: MacroDef, b: MacroDef) bool {
-            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
         }
     }.lessThan);
 }
