@@ -168,6 +168,100 @@ def test_compile_uses_selected_node_package_for_compiled_path(tmp_path: Path):
     assert "compiled" not in manifest["nodes"]["model.package_ref_selector.pkg_customers"]
 
 
+def test_run_prepare_compiles_selected_model_but_does_not_execute(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "orders", "--threads", "4"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "Prepared 1 model(s) for execution" in result.stdout
+    assert "model execution requires a DuckDB adapter and materialization runner" in result.stderr
+    assert not (target / "run_results.json").exists()
+
+    compiled_root = target / "compiled" / "compile_basic" / "models"
+    assert not (compiled_root / "customers.sql").exists()
+    assert (compiled_root / "orders.sql").exists()
+    assert not (compiled_root / "from_source.sql").exists()
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["nodes"]["model.compile_basic.orders"]["compiled"] is True
+    assert "compiled" not in manifest["nodes"]["model.compile_basic.customers"]
+
+
+def test_run_prepare_rejects_non_model_selection(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "source:raw.payments"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "run currently supports only selected SQL model resources before execution" in result.stderr
+    assert not (target / "run_results.json").exists()
+
+
+def test_build_prepare_compiles_model_then_stops_before_execution(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "Prepared 1 selected resource(s), including 1 compiled model(s)" in result.stdout
+    assert "model execution requires a DuckDB adapter and materialization runner" in result.stderr
+    assert not (target / "run_results.json").exists()
+    assert (target / "compiled" / "compile_basic" / "models" / "orders.sql").exists()
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["nodes"]["model.compile_basic.orders"]["compiled"] is True
+
+
+def test_build_prepare_reports_seed_execution_boundary(tmp_path: Path):
+    project = copy_fixture(tmp_path, "seed_ref")
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "Prepared 1 selected resource(s), including 0 compiled model(s)" in result.stdout
+    assert "seed execution requires a DuckDB adapter and seed runner" in result.stderr
+    assert not (target / "run_results.json").exists()
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert sorted(manifest["nodes"]) == [
+        "model.seed_ref.stg_customers",
+        "seed.seed_ref.raw_customers",
+    ]
+
+
+def test_build_prepare_reports_test_execution_boundary(tmp_path: Path):
+    project = copy_fixture(tmp_path, "generic_test_arguments")
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "Prepared " in result.stdout
+    assert "including 0 compiled model(s)" in result.stdout
+    assert "test execution requires a DuckDB adapter and test runner" in result.stderr
+    assert not (target / "run_results.json").exists()
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert "compiled" not in manifest["nodes"]["model.generic_test_arguments.customers"]
+    assert sorted(manifest["child_map"]["model.generic_test_arguments.customers"])
+
+
 def test_parse_writes_minimal_manifest(tmp_path: Path):
     project = copy_fixture(tmp_path, "single_model")
     target = tmp_path / "manifest-target"
