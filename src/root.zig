@@ -69,8 +69,31 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
         project.list(rt, options, stdout) catch |err| return commandError(err, stderr);
         return .ok;
     }
+    if (equals(command, "run")) {
+        if (hasHelp(args[2..])) {
+            try printCommandHelp(command, stdout, .build);
+            return .ok;
+        }
+        const rt = runtime orelse {
+            try stderr.writeAll("error: runtime I/O is required for run\n");
+            return .usage;
+        };
+        const options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
+        project.runPreflight(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        return .ok;
+    }
     if (equals(command, "build")) {
-        return planned(command, args[2..], stdout, stderr, .build, .build);
+        if (hasHelp(args[2..])) {
+            try printCommandHelp(command, stdout, .build);
+            return .ok;
+        }
+        const rt = runtime orelse {
+            try stderr.writeAll("error: runtime I/O is required for build\n");
+            return .usage;
+        };
+        const options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
+        project.buildPreflight(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        return .ok;
     }
     if (equals(command, "docs")) {
         if (args.len >= 3 and equals(args[2], "generate")) {
@@ -111,19 +134,6 @@ const HelpMode = enum {
     docs_generate,
 };
 
-fn planned(command: []const u8, args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, option_mode: OptionMode, help_mode: HelpMode) !ExitCode {
-    if (hasHelp(args)) {
-        try printCommandHelp(command, stdout, help_mode);
-        return .ok;
-    }
-    const valid = validateOptions(args, stderr, option_mode) catch |err| return commandError(err, stderr);
-    if (!valid) {
-        return .usage;
-    }
-    try stdout.print("`dxt {s}` is planned but not implemented yet. See PLAN.md.\n", .{command});
-    return .usage;
-}
-
 fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
     switch (err) {
         error.MissingProjectFile => stderr.writeAll("error: missing dbt_project.yml\n") catch {},
@@ -150,6 +160,11 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, or test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
         error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model resources\n") catch {},
+        error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources before execution\n") catch {},
+        error.UnsupportedBuildSelection => stderr.writeAll("error: build currently supports only selected model, seed, and test resources before execution\n") catch {},
+        error.UnsupportedModelExecution => stderr.writeAll("error: model execution requires a DuckDB adapter and materialization runner; not implemented yet\n") catch {},
+        error.UnsupportedSeedExecution => stderr.writeAll("error: seed execution requires a DuckDB adapter and seed runner; not implemented yet\n") catch {},
+        error.UnsupportedTestExecution => stderr.writeAll("error: test execution requires a DuckDB adapter and test runner; not implemented yet\n") catch {},
         error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by the implemented M1 parser command\n") catch {},
         else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},
     }
@@ -161,42 +176,6 @@ fn hasHelp(args: []const []const u8) bool {
         if (equals(arg, "-h") or equals(arg, "--help")) return true;
     }
     return false;
-}
-
-fn validateOptions(args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) !bool {
-    var i: usize = 0;
-    while (i < args.len) {
-        const arg = args[i];
-        if (equals(arg, "-h") or equals(arg, "--help")) return true;
-        if (isSelectorOption(arg, mode)) {
-            i += 1;
-            var consumed = false;
-            while (i < args.len and !isOptionLike(args[i])) : (i += 1) {
-                try validateSelector(args[i]);
-                consumed = true;
-            }
-            if (!consumed) {
-                try stderr.print("error: option `{s}` requires a value\n", .{arg});
-                return false;
-            }
-            continue;
-        }
-        if (requiresValue(arg, mode)) {
-            if (i + 1 >= args.len) {
-                try stderr.print("error: option `{s}` requires a value\n", .{arg});
-                return false;
-            }
-            i += 2;
-            continue;
-        }
-        if (isFlag(arg, mode)) {
-            i += 1;
-            continue;
-        }
-        try stderr.print("error: unsupported option `{s}`\n", .{arg});
-        return false;
-    }
-    return true;
 }
 
 fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) !project.Options {
@@ -237,16 +216,16 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             if (equals(arg, "--project-dir")) {
                 options.project_dir = value;
             } else if (equals(arg, "--profiles-dir")) {
-                if (mode != .compile and mode != .docs_generate) return error.UnsupportedCommandOption;
+                if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
                 options.profiles_dir = value;
             } else if (equals(arg, "--profile")) {
-                if (mode != .compile and mode != .docs_generate) return error.UnsupportedCommandOption;
+                if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
                 options.profile = value;
             } else if (equals(arg, "--target")) {
-                if (mode != .compile and mode != .docs_generate) return error.UnsupportedCommandOption;
+                if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
                 options.target = value;
             } else if (equals(arg, "--vars")) {
-                if (mode != .compile and mode != .docs_generate) return error.UnsupportedCommandOption;
+                if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
                 options.vars = value;
             } else if (equals(arg, "--threads")) {
                 if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
@@ -402,7 +381,8 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  parse            Parse a supported dbt project subset and emit manifest artifacts.
         \\  ls               List resources from the supported parser graph.
         \\  compile          Compile supported dbt SQL/Jinja without executing.
-        \\  build            Planned: run seeds, models, and tests.
+        \\  run              Preflight selected model execution without running SQL.
+        \\  build            Preflight selected seeds, models, and tests without running SQL.
         \\  docs generate    Generate supported docs artifacts.
         \\
     );
@@ -410,20 +390,20 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
 
 fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !void {
     try writer.print("Usage: dxt {s} [options]\n\n", .{command});
-    if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile") or equals(command, "docs generate")) {
+    if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate")) {
         try writer.print("`dxt {s}` supports the M1 parser subset documented in PLAN.md.\n\n", .{command});
         try writer.writeAll("Options:\n");
         try writer.writeAll(
             \\  --project-dir <path>
             \\
         );
-        if (equals(command, "parse") or equals(command, "compile") or equals(command, "docs generate")) {
+        if (equals(command, "parse") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate")) {
             try writer.writeAll(
                 \\  --target-path <path>
                 \\
             );
         }
-        if (equals(command, "compile") or equals(command, "docs generate")) {
+        if (equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate")) {
             try writer.writeAll(
                 \\  --profiles-dir <path>
                 \\  --profile <name>
@@ -442,6 +422,12 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
             try writer.writeAll(
                 \\  --resource-type <type>
                 \\  --output <text|json>
+                \\
+            );
+        }
+        if (equals(command, "build")) {
+            try writer.writeAll(
+                \\  --full-refresh
                 \\
             );
         }
@@ -521,19 +507,19 @@ test "compile command requires runtime I/O" {
     try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for compile") != null);
 }
 
-test "planned command accepts selector argv lists" {
+test "run command requires runtime I/O and accepts selector lists" {
     var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stdout.deinit();
     var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stderr.deinit();
 
-    const code = try run(&.{ "dxt", "build", "--project-dir", "fixture", "--select", "customers", "tag:nightly", "--exclude", "orders" }, &stdout.writer, &stderr.writer, null);
+    const code = try run(&.{ "dxt", "run", "--project-dir", "fixture", "--select", "customers", "tag:nightly", "--exclude", "orders" }, &stdout.writer, &stderr.writer, null);
     try std.testing.expectEqual(ExitCode.usage, code);
-    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "planned but not implemented") != null);
-    try std.testing.expectEqualStrings("", stderr.written());
+    try std.testing.expectEqualStrings("", stdout.written());
+    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for run") != null);
 }
 
-test "planned build accepts selector lists and build flags" {
+test "build command requires runtime I/O and accepts selector lists" {
     var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stdout.deinit();
     var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
@@ -541,20 +527,22 @@ test "planned build accepts selector lists and build flags" {
 
     const code = try run(&.{ "dxt", "build", "--select", "customers", "orders", "--exclude", "stg_customers", "--threads", "4", "--full-refresh" }, &stdout.writer, &stderr.writer, null);
     try std.testing.expectEqual(ExitCode.usage, code);
-    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "planned but not implemented") != null);
-    try std.testing.expectEqualStrings("", stderr.written());
+    try std.testing.expectEqualStrings("", stdout.written());
+    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for build") != null);
 }
 
-test "planned command rejects missing selector value" {
+test "build command help describes preflight options" {
     var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stdout.deinit();
     var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stderr.deinit();
 
-    const code = try run(&.{ "dxt", "build", "--select", "--project-dir", "fixture" }, &stdout.writer, &stderr.writer, null);
-    try std.testing.expectEqual(ExitCode.usage, code);
-    try std.testing.expectEqualStrings("", stdout.written());
-    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "option `--select` requires a value") != null);
+    const code = try run(&.{ "dxt", "build", "--help" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expectEqual(ExitCode.ok, code);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "Usage: dxt build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "--full-refresh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "planned but not implemented") == null);
+    try std.testing.expectEqualStrings("", stderr.written());
 }
 
 test "subcommand help exits successfully" {

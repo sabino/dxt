@@ -169,11 +169,83 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     });
 }
 
+pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options.project_dir, loader_callbacks);
+    defer graph.deinit();
+
+    try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+
+    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
+    const selected_models = try selector.selectResources(runtime.allocator, &graph, "model", select, exclude);
+    if (selected_models.len == 0 and options.select != null) {
+        const selected_any = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
+        if (selected_any.len != 0) return error.UnsupportedRunSelection;
+    }
+
+    const target_dir = try targetDir(runtime, options);
+    const compile_result = try compileSelectedModels(runtime, &graph, selected_models, target_dir);
+    const manifest_path = try writeManifest(runtime, &graph, target_dir);
+    try stdout.print("Prepared {d} model(s) for execution into {s}\n", .{
+        compile_result.count,
+        util.normalizeForDisplay(manifest_path),
+    });
+    if (compile_result.count == 0) return error.UnsupportedRunSelection;
+    return error.UnsupportedModelExecution;
+}
+
+pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options.project_dir, loader_callbacks);
+    defer graph.deinit();
+
+    try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+
+    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
+    const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
+
+    const target_dir = try targetDir(runtime, options);
+    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir);
+    const manifest_path = try writeManifest(runtime, &graph, target_dir);
+    const execution_kind = firstExecutionKind(selected) orelse return error.UnsupportedBuildSelection;
+    try stdout.print("Prepared {d} selected resource(s), including {d} compiled model(s), into {s}\n", .{
+        selected.len,
+        compile_result.count,
+        util.normalizeForDisplay(manifest_path),
+    });
+    return switch (execution_kind) {
+        .seed => error.UnsupportedSeedExecution,
+        .model => error.UnsupportedModelExecution,
+        .test_resource => error.UnsupportedTestExecution,
+    };
+}
+
 const CompileResult = struct {
     count: usize,
     saw_model: bool,
     compiled_base: []const u8,
 };
+
+const ExecutionKind = enum {
+    seed,
+    model,
+    test_resource,
+};
+
+fn firstExecutionKind(selected: []const selector.SelectedResource) ?ExecutionKind {
+    for (selected) |item| {
+        if (std.mem.eql(u8, item.resource_type, "seed")) return .seed;
+    }
+    for (selected) |item| {
+        if (std.mem.eql(u8, item.resource_type, "model")) return .model;
+    }
+    for (selected) |item| {
+        if (std.mem.eql(u8, item.resource_type, "test")) return .test_resource;
+    }
+    return null;
+}
 
 fn targetDir(runtime: Runtime, options: Options) ![]const u8 {
     const target_path = options.target_path orelse project_loader.graphDefaultTarget(runtime, options.project_dir) catch "target";
@@ -206,6 +278,14 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
     }
 
     return .{ .count = compiled_count, .saw_model = saw_selected_model, .compiled_base = compiled_base };
+}
+
+fn writeManifest(runtime: Runtime, graph: *const Graph, target_dir: []const u8) ![]const u8 {
+    const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
+    const manifest_json = try manifest.renderManifest(runtime.allocator, graph);
+    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
+    return manifest_path;
 }
 
 fn selectionContains(selected: []const selector.SelectedResource, unique_id: []const u8) bool {
