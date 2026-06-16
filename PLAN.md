@@ -345,6 +345,61 @@ Exit criteria:
 - Jaffle Shop DuckDB parses.
 - Manifest validates against pinned schema slices.
 
+### M1A: Architecture And Test Structure Hardening
+
+Purpose:
+
+- Shrink `src/project.zig` from a mega-file into a thin public/orchestration facade while preserving dbt Core behavior.
+- Keep runtime behavior Zig-first and keep Python as integration, compatibility, schema, fixture, and safety tooling only.
+- Build a clearer testing pyramid so core parser/selector/graph/manifest logic has fast native Zig coverage and fixture-heavy/dbt-oracle behavior stays in pytest.
+
+Target module layout:
+
+```text
+src/
+  main.zig
+  root.zig
+  project.zig
+  project/
+    types.zig
+    util.zig
+    config.zig
+    fs.zig
+    loader.zig
+    parse.zig
+    jinja.zig
+    resolve.zig
+    selector.zig
+    manifest.zig
+```
+
+Staged extraction order:
+
+1. Extract `src/project/types.zig` for `Runtime`, `Options`, graph/resource/config structs, and data-model deinit helpers.
+2. Extract selector parsing, wildcard matching, resource matching, and graph expansion into `src/project/selector.zig`, carrying selector Zig tests with the module.
+3. Extract selected-resource JSON and `manifest.json` writers into `src/project/manifest.zig`, carrying JSON escaping and deterministic ordering tests with the module.
+4. Extract shared path/string/YAML scalar/sort/hash helpers into `src/project/util.zig` only when at least two modules need them.
+5. Extract config, filesystem discovery, loader orchestration, resource parsing, Jinja scanning, and dependency resolution in that order, keeping imports acyclic: `types`/`util` first, then `jinja`/`parse`/`selector`/`manifest`, then `loader` and the `project.zig` facade.
+
+Validation gates:
+
+- After each mechanical extraction: `zig fmt --check` on touched Zig files and `zig build test`.
+- When CLI, artifact shape, fixtures, selectors, or manifests are touched: `pytest -q tests/test_cli.py`.
+- Before merging an architecture slice: `zig build`, `zig build test`, `pytest -q`, `python scripts/check_runtime_boundary.py`, `python scripts/check_public_safety.py`, and `git diff --check`.
+
+Risk and rollback notes:
+
+- Zig file-level privacy can force temporary `pub` exposure across internal modules. Prefer internal module imports over re-exporting from `root.zig`; only public API should be exposed by `root.zig`.
+- Keep extraction commits behavior-preserving. If a move requires semantic changes, stop and split the behavior change into a separate feature slice with dbt oracle evidence.
+- Avoid import cycles by moving shared helpers downward into `types` or `util`, never upward into `loader` or `project.zig`.
+- Roll back a failed extraction by reverting the extraction commit rather than editing unrelated parser or selector behavior.
+
+Stop conditions:
+
+- Stop after any extraction if `zig build test` fails for a reason that is not a direct import/privacy fix.
+- Stop before further extraction if the diff mixes mechanical moves with behavior changes that need dbt Core oracle review.
+- Stop before pushing if the worktree contains generated targets, logs, caches, local paths, secrets, or unrelated changes.
+
 ### M2: Compiler And Macro Core
 
 Deliverables:
@@ -514,6 +569,7 @@ Exit criteria:
 
 - M0 is complete as the Zig `0.16.0` runtime scaffold.
 - M1 has started on stacked branches with native Zig artifact-first parser slices.
+- M1A has started with a behavior-preserving `src/project/types.zig` extraction. `src/project.zig` remains the public parser/list facade and still owns most loader, parser, selector, resolver, and manifest code until follow-up extractions move those pieces behind focused internal modules.
 - `dxt parse` now targets the supported Tier 0 subset: project name/model paths/seed paths/macro paths, project and package model path configs for literal `+materialized`, `+tags`, and model/seed `+docs.node_color`, root-project model config overrides for installed packages, SQL model discovery, CSV seed discovery, installed package SQL model and CSV seed discovery from `dbt_packages`, source discovery, installed package source discovery, exposure discovery, installed package exposure discovery, project macro discovery, installed package macro discovery from `dbt_packages`, macro property YAML for project macro descriptions and arguments, project and package docs block discovery, literal `ref` to models or seeds, two-argument package refs, package-local refs in installed package models and exposures, unique installed-package fallback for unqualified refs, literal `source`, package-local sources in installed package models, unique installed-package fallback for unqualified sources, literal `doc` in project and package descriptions, inline `config(materialized=..., tags=...)`, known project/package-qualified/package-local macro call dependencies, narrow project and package YAML model properties for scalar descriptions, simple columns, tags, materialization, disabled SQL models, dbt-shaped `unique`, `not_null`, `accepted_values`, and `relationships` generic test nodes, model/test `refs` and `sources` artifact fields, dependency maps, and deterministic partial `manifest.json`. The manifest includes the v12 top-level maps needed by the M1 artifact shape and is covered by a pinned local dbt Manifest v12 schema slice. YAML generic test arguments are currently supported for scalar values plus inline and block lists required by public Jaffle Shop DuckDB-style tests.
 - `dxt ls` now lists dbt-selectable resources from the same parser graph with stable text/JSON output and basic name/FQN wildcards, tag wildcards, slash-aware `path:` wildcards, exact `package:`/`package:this`, `source:` wildcards including package-qualified source selectors, `exposure:` wildcards, `resource_type:`, `test_type:generic`, config materialization, comma intersection, whitespace union, multi-argument selector lists, repeated selector flags, leading/trailing `+` graph expansion, and exact exclude filters; macros are emitted in artifacts but not exposed as `ls` resources.
 - Synthetic fixtures cover one model, model refs, seed refs, source refs, exposure refs to models and sources, combined source/model YAML, inline config/tag selection, config materialization selection, comma-intersection selection, YAML model properties and columns, emitted `unique`, `not_null`, `accepted_values`, and `relationships` generic test nodes, project macro artifacts and macro properties, configured `macro-paths` replacing the default macro directory, installed package macros with package-qualified calls and package-local macro calls, installed package models, seeds, sources, docs, exposures, package YAML model properties, root package config overrides, and package-qualified/package-local refs/sources, macro calls recorded in model and macro `depends_on.macros`, docs blocks with literal `doc` descriptions, disabled models, disabled ref diagnostics, unmatched model-property warnings, duplicate model and docs diagnostics, unsupported dynamic ref/doc diagnostics, missing doc diagnostics, malformed docs block diagnostics, unresolved package macro diagnostics, and unsupported unknown macro-call diagnostics.

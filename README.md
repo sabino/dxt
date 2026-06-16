@@ -52,6 +52,16 @@ python scripts/validate_manifest_schema.py target/manifest.json
 
 The product runtime requires Zig `0.16.0`. Python remains in this repository only for developer-side validation utilities, not for the `dxt` product runtime.
 
+Use the test layers deliberately:
+
+- `zig build` compiles the native CLI and should run after edits that affect product code or imports.
+- `zig build test` runs fast native unit/regression tests for core Zig logic. Add these for parser helpers, selector matching and graph expansion, Jinja scanning, dependency resolution, manifest writer helpers, deterministic ordering, JSON escaping, and internal CLI option logic.
+- `pytest -q` runs black-box integration and compatibility checks against the compiled Zig binary. It exists because dbt compatibility is fixture-heavy: tests copy synthetic dbt projects, invoke `dxt`, compare artifacts, validate schema slices, and can use dbt Core oracle behavior. Pytest should not implement product runtime behavior.
+- `python scripts/check_runtime_boundary.py` verifies Python has not crossed into product runtime responsibilities.
+- `python scripts/check_public_safety.py` scans for committed local paths, secrets, caches, logs, and private artifacts.
+
+When a feature touches both core logic and user-visible CLI/artifact behavior, prefer both a Zig test for the core rule and a pytest integration/dbt-compatibility test for the end-to-end contract. Mechanical module extractions should pass `zig build test` after each step; run `pytest -q tests/test_cli.py` when CLI output, artifacts, fixtures, selectors, or manifest behavior are touched.
+
 ## Status
 
 Pre-alpha. Do not use for production data transformations yet.
