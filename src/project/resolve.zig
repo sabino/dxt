@@ -89,6 +89,13 @@ pub fn findMacroIndexByPackageAndName(graph: *const Graph, package_name: []const
     return null;
 }
 
+pub fn packageNameFromMacroUniqueId(unique_id: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, unique_id, "macro.")) return null;
+    const package_start = "macro.".len;
+    const package_end = std.mem.indexOfPos(u8, unique_id, package_start, ".") orelse return null;
+    return unique_id[package_start..package_end];
+}
+
 pub fn resolveRefDependency(graph: *const Graph, current_package: []const u8, ref_dep: RefDep) ![]const u8 {
     const package = ref_dep.package orelse current_package;
     if (try resolveRefInPackage(graph, package, ref_dep.name)) |unique_id| return unique_id;
@@ -406,6 +413,13 @@ test "unqualified macro lookup prefers current package then project package" {
     try std.testing.expect(findMacroIdForUnqualifiedCall(&graph, "demo", "missing") == null);
     try std.testing.expect(hasMacroPackage(&graph, "pkg"));
     try std.testing.expect(!hasMacroPackage(&graph, "other"));
+}
+
+test "macro unique id package extraction accepts only macro ids" {
+    try std.testing.expectEqualStrings("pkg", packageNameFromMacroUniqueId("macro.pkg.some_macro").?);
+    try std.testing.expect(packageNameFromMacroUniqueId("model.pkg.some_macro") == null);
+    try std.testing.expect(packageNameFromMacroUniqueId("macro.") == null);
+    try std.testing.expect(packageNameFromMacroUniqueId("macro.pkg") == null);
 }
 
 test "ref resolution handles package refs seed refs disabled refs fallback and ambiguity" {
