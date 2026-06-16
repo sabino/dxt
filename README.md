@@ -60,10 +60,13 @@ Use the test layers deliberately:
 - `python scripts/check_runtime_boundary.py` verifies Python has not crossed into product runtime responsibilities.
 - `python scripts/check_public_safety.py` scans for committed local paths, secrets, caches, logs, and private artifacts.
 - `python scripts/check_jaffle_shop_duckdb_parse.py` clones a pinned public Jaffle Shop DuckDB ref into a temporary directory, runs the Zig `dxt` binary, validates the current M1 manifest schema slice, and checks the supported Jaffle resource/selector shape. Use `--project-dir path/to/jaffle_shop_duckdb` to run against an existing local checkout without cloning.
+- `python scripts/check_dbt_core_m1_oracle.py` is an optional dbt Core oracle harness for supported synthetic M1 fixtures. It requires developer-installed `dbt-core` and `dbt-duckdb`, invokes dbt Core through Python against temporary fixture copies, runs `dxt parse` through the Zig binary, and compares stable manifest slices. Use `--allow-dbt-artifact-on-error` only for known local dbt failures that happen after `manifest.json` is written.
 
 When a feature touches both core logic and user-visible CLI/artifact behavior, prefer both a Zig test for the core rule and a pytest integration/dbt-compatibility test for the end-to-end contract. Mechanical module extractions should pass `zig build test` after each step; run `pytest -q tests/test_cli.py` when CLI output, artifacts, fixtures, selectors, or manifest behavior are touched.
 
 The Jaffle Shop DuckDB gate is a public-fixture compatibility check, not part of the offline local test baseline. Its default mode uses the network to fetch the pinned public ref; use `python scripts/check_jaffle_shop_duckdb_parse.py --project-dir path/to/jaffle_shop_duckdb` when working offline from an existing checkout.
+
+The dbt Core oracle harness is also outside the default CI baseline because this repository does not vendor dbt Core. It is intended for local compatibility evidence before parser/artifact changes are merged.
 
 ## Status
 
