@@ -78,6 +78,7 @@ const findMacroIdForUnqualifiedCall = project_resolve.findMacroIdForUnqualifiedC
 const findMacroIndexByPackageAndName = project_resolve.findMacroIndexByPackageAndName;
 const findModelIndexByName = project_resolve.findModelIndexByName;
 const hasMacroPackage = project_resolve.hasMacroPackage;
+const packageNameFromMacroUniqueId = project_resolve.packageNameFromMacroUniqueId;
 const rejectDuplicateDocs = project_resolve.rejectDuplicateDocs;
 const rejectDuplicateExposures = project_resolve.rejectDuplicateExposures;
 const rejectDuplicateMacroProperties = project_resolve.rejectDuplicateMacroProperties;
@@ -1440,13 +1441,6 @@ fn sortColumns(columns: []ColumnDef) void {
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lessThan);
-}
-
-fn packageNameFromMacroUniqueId(unique_id: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, unique_id, "macro.")) return null;
-    const package_start = "macro.".len;
-    const package_end = std.mem.indexOfPos(u8, unique_id, package_start, ".") orelse return null;
-    return unique_id[package_start..package_end];
 }
 
 test "sql scanner extracts refs sources and config tags from jinja spans" {
