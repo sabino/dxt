@@ -65,7 +65,7 @@ Every compatibility slice should record:
   macro/property application sequencing, duplicate checks, and graph sorting.
 - `src/project.zig` is now the public parse/list facade plus remaining resource
   parser callbacks. It still owns docs block parsing, macro block parsing, YAML
-  source/exposure/model property parsing, model/seed parsing, generic-test
+  model/macro property parsing, model/seed parsing, generic-test
   materialization, warnings, and remaining resolver orchestration.
 - Existing extracted modules are `types`, `util`, `config`, `fs`, `jinja`,
   `loader`, `resolve`, `parse`, `selector`, and `manifest`.
@@ -82,39 +82,9 @@ Every compatibility slice should record:
   it will clarify parse-time Jinja, macro namespace, adapter dispatch, and
   compiled artifact boundaries without changing product behavior.
 
-## Next Five Source-Grounded Slices
+## Next Source-Grounded Slices
 
-### 1. M1 Source and Exposure YAML Parser Ownership
-
-- Upstream references: v1 `core/dbt/parser/schemas.py::SchemaParser.parse_file`,
-  `SourceParser.parse`, `SourceParser.add_source_definitions`,
-  `core/dbt/parser/sources.py::SourcePatcher.construct_sources`,
-  `patch_source`, `parse_source`,
-  `core/dbt/parser/schema_yaml_readers.py::ExposureParser.parse_exposure`,
-  `core/dbt/context/providers.py::generate_parse_exposure`,
-  `core/dbt/parser/manifest.py::_process_sources_for_exposure`; v2
-  `crates/dbt-parser/src/resolver.rs::resolve_package_waves`,
-  `crates/dbt-parser/src/resolve/resolve_sources.rs::resolve_sources`,
-  `build_source_unrendered_config`,
-  `crates/dbt-parser/src/resolve/resolve_exposures.rs::resolve_exposures`,
-  and `resolve_yaml_depends_on`.
-- dxt files: move source/exposure YAML parsing from `src/project.zig` into
-  `src/project/parse.zig` or a follow-up `src/project/schema.zig`.
-- Tests: native tests for source sections with multiple tables, package source
-  table IDs, exposure owner/type/maturity/URL/tags/meta/config.enabled, and
-  deterministic exposure dependency ordering for `source()` and `ref()`;
-  pytest/dbt oracle coverage for unique IDs, `refs`, `sources`,
-  `depends_on.nodes`, parent/child maps, disabled exposure filtering, and
-  `ls source:` / `ls exposure:` behavior.
-- Artifact validation: Manifest v12 source/exposure entries, parent/child maps,
-  `disabled`, and `depends_on.nodes`. Defer richer `SourceDefinition` fields to
-  the artifact schema expansion slice.
-- Stop conditions: do not add semantic metrics or new selector behavior in this
-  extraction; stop if resource counts, unique IDs, dependency maps, warning
-  behavior, or package-local exposure resolution change outside the explicit
-  fixture.
-
-### 2. M1 Macro Block and Macro Patch Ownership
+### 1. M1 Macro Block and Macro Patch Ownership
 
 - Upstream references: v1 `core/dbt/parser/macros.py::MacroParser`,
   `parse_unparsed_macros`, `parse_macro`, `_extract_args`,
@@ -143,7 +113,7 @@ Every compatibility slice should record:
 - Stop conditions: do not implement macro execution or adapter dispatch in the
   same slice; do not implement materialization runtime behavior here.
 
-### 3. M2 Parse-Time Jinja Context Boundary
+### 2. M2 Parse-Time Jinja Context Boundary
 
 - Upstream references: v1 `core/dbt/context/README.md`,
   `core/dbt/context/configured.py::SchemaYamlContext`,
@@ -182,7 +152,7 @@ Every compatibility slice should record:
   enough; do not serialize static source metadata as normal dbt dependency
   fields.
 
-### 4. M1/M2 Artifact Schema Expansion
+### 3. M1/M2 Artifact Schema Expansion
 
 - Upstream references: v1
   `core/dbt/artifacts/schemas/manifest/v12/manifest.py::WritableManifest`,
@@ -214,7 +184,7 @@ Every compatibility slice should record:
   keep dxt-only metadata in a namespaced artifact outside dbt schemas; do not
   vendor a full generated schema unless it is used by validation.
 
-### 5. M2 First Compile Boundary And Adapter Relation Identity
+### 4. M2 First Compile Boundary And Adapter Relation Identity
 
 - Upstream references: v1 `core/dbt/task/compile.py::CompileRunner.compile`,
   `CompileRunner.execute`, `CompileTask`,

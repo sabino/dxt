@@ -1,4 +1,5 @@
 const std = @import("std");
+const fs = @import("fs.zig");
 const jinja = @import("jinja.zig");
 const resolve = @import("resolve.zig");
 const types = @import("types.zig");
@@ -9,8 +10,15 @@ const ExposureDef = types.ExposureDef;
 const GenericTestDef = types.GenericTestDef;
 const Graph = types.Graph;
 const MacroArgument = types.MacroArgument;
+const MetaEntry = types.MetaEntry;
 const RefDep = types.RefDep;
 const dupTrimmedScalar = util.dupTrimmedScalar;
+const leadingSpaces = util.leadingSpaces;
+const parseInlineStringList = util.parseInlineStringList;
+const relativeUnderResourcePath = fs.relativeUnderResourcePath;
+const sortStrings = util.sortStrings;
+const splitKeyValue = util.splitKeyValue;
+const stripYamlComment = util.stripYamlComment;
 const findMatchingParen = jinja.findMatchingParen;
 const parseLiteralArgs = jinja.parseLiteralArgs;
 const findMacroIndexByPackageAndName = resolve.findMacroIndexByPackageAndName;
@@ -174,6 +182,240 @@ pub fn parseExposureDependency(allocator: std.mem.Allocator, raw_value: []const 
         return;
     }
     return error.UnsupportedYaml;
+}
+
+pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    var in_sources = false;
+    var in_tables = false;
+    var sources_indent: usize = 0;
+    var source_item_indent: ?usize = null;
+    var table_item_indent: ?usize = null;
+    var current_source: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (std.mem.eql(u8, trimmed, "sources:")) {
+            in_sources = true;
+            in_tables = false;
+            sources_indent = indent;
+            source_item_indent = null;
+            table_item_indent = null;
+            continue;
+        }
+        if (!in_sources) continue;
+        if (indent <= sources_indent and !std.mem.eql(u8, trimmed, "sources:")) {
+            in_sources = false;
+            in_tables = false;
+            current_source = null;
+            continue;
+        }
+
+        if (std.mem.eql(u8, trimmed, "tables:")) {
+            in_tables = true;
+            table_item_indent = null;
+            continue;
+        }
+        if (std.mem.startsWith(u8, trimmed, "- name:")) {
+            const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
+            if (source_item_indent == null or indent == source_item_indent.?) {
+                source_item_indent = indent;
+                current_source = name;
+                in_tables = false;
+                table_item_indent = null;
+            } else if (in_tables and (table_item_indent == null or indent == table_item_indent.?)) {
+                table_item_indent = indent;
+                const source_name = current_source orelse return error.UnsupportedYaml;
+                const unique_id = try std.fmt.allocPrint(allocator, "source.{s}.{s}.{s}", .{ package_name, source_name, name });
+                try graph.sources.append(allocator, .{
+                    .package_name = package_name,
+                    .unique_id = unique_id,
+                    .source_name = source_name,
+                    .table_name = name,
+                    .original_file_path = relative_path,
+                });
+            }
+        }
+    }
+}
+
+pub fn parseExposuresFromText(allocator: std.mem.Allocator, text: []const u8, resource_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    var in_exposures = false;
+    var in_depends_on = false;
+    var in_owner = false;
+    var in_config = false;
+    var in_meta = false;
+    var exposures_indent: usize = 0;
+    var exposure_item_indent: ?usize = null;
+    var depends_on_indent: usize = 0;
+    var owner_indent: usize = 0;
+    var config_indent: usize = 0;
+    var meta_indent: usize = 0;
+    var current_exposure: ?usize = null;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (std.mem.eql(u8, trimmed, "exposures:")) {
+            in_exposures = true;
+            in_depends_on = false;
+            in_owner = false;
+            in_config = false;
+            in_meta = false;
+            exposures_indent = indent;
+            exposure_item_indent = null;
+            current_exposure = null;
+            continue;
+        }
+        if (!in_exposures) continue;
+        if (indent <= exposures_indent and !std.mem.eql(u8, trimmed, "exposures:")) {
+            in_exposures = false;
+            in_depends_on = false;
+            in_owner = false;
+            in_config = false;
+            in_meta = false;
+            current_exposure = null;
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "- name:")) {
+            if (exposure_item_indent == null or indent == exposure_item_indent.?) {
+                exposure_item_indent = indent;
+                in_depends_on = false;
+                in_owner = false;
+                in_config = false;
+                in_meta = false;
+                const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
+                const unique_id = try std.fmt.allocPrint(allocator, "exposure.{s}.{s}", .{ package_name, name });
+                try graph.exposures.append(allocator, .{
+                    .package_name = package_name,
+                    .unique_id = unique_id,
+                    .name = name,
+                    .path = relativeUnderResourcePath(relative_path, resource_root),
+                    .original_file_path = relative_path,
+                });
+                current_exposure = graph.exposures.items.len - 1;
+                continue;
+            }
+        }
+
+        const exposure_index = current_exposure orelse continue;
+        if (exposure_item_indent) |item_indent| {
+            if (indent <= item_indent and !std.mem.startsWith(u8, trimmed, "- name:")) {
+                in_depends_on = false;
+                in_owner = false;
+                in_config = false;
+                in_meta = false;
+            }
+        }
+
+        if (std.mem.eql(u8, trimmed, "depends_on:")) {
+            in_depends_on = true;
+            in_owner = false;
+            in_config = false;
+            in_meta = false;
+            depends_on_indent = indent;
+            continue;
+        }
+        if (std.mem.eql(u8, trimmed, "owner:")) {
+            in_owner = true;
+            in_depends_on = false;
+            in_config = false;
+            in_meta = false;
+            owner_indent = indent;
+            continue;
+        }
+        if (std.mem.eql(u8, trimmed, "config:")) {
+            in_config = true;
+            in_depends_on = false;
+            in_owner = false;
+            in_meta = false;
+            config_indent = indent;
+            continue;
+        }
+        if (std.mem.eql(u8, trimmed, "meta:")) {
+            in_meta = true;
+            in_depends_on = false;
+            in_owner = false;
+            meta_indent = indent;
+            continue;
+        }
+        if (in_depends_on and indent <= depends_on_indent) in_depends_on = false;
+        if (in_owner and indent <= owner_indent) in_owner = false;
+        if (in_config and indent <= config_indent) in_config = false;
+        if (in_meta and indent <= meta_indent) in_meta = false;
+
+        if (in_depends_on and std.mem.startsWith(u8, trimmed, "- ")) {
+            try parseExposureDependency(allocator, trimmed[2..], &graph.exposures.items[exposure_index]);
+            continue;
+        }
+
+        if (splitKeyValue(trimmed)) |kv| {
+            const value = try dupTrimmedScalar(allocator, kv.value);
+            if (in_meta) {
+                try appendMetaEntry(allocator, &graph.exposures.items[exposure_index].meta, kv.key, try parseJsonScalar(allocator, kv.value));
+                continue;
+            }
+            if (in_owner) {
+                if (std.mem.eql(u8, kv.key, "name")) {
+                    graph.exposures.items[exposure_index].owner_name = value;
+                } else if (std.mem.eql(u8, kv.key, "email")) {
+                    graph.exposures.items[exposure_index].owner_email = value;
+                }
+                continue;
+            }
+            if (in_config) {
+                if (std.mem.eql(u8, kv.key, "enabled")) {
+                    graph.exposures.items[exposure_index].enabled = try parseBool(kv.value);
+                } else if (std.mem.eql(u8, kv.key, "tags")) {
+                    try parseInlineStringList(allocator, kv.value, &graph.exposures.items[exposure_index].tags);
+                    sortStrings(graph.exposures.items[exposure_index].tags.items);
+                } else if (std.mem.eql(u8, kv.key, "meta") and std.mem.trim(u8, kv.value, " \t").len == 0) {
+                    in_meta = true;
+                    meta_indent = indent;
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, kv.key, "type")) {
+                graph.exposures.items[exposure_index].exposure_type = value;
+            } else if (std.mem.eql(u8, kv.key, "maturity")) {
+                graph.exposures.items[exposure_index].maturity = value;
+            } else if (std.mem.eql(u8, kv.key, "url")) {
+                graph.exposures.items[exposure_index].url = value;
+            } else if (std.mem.eql(u8, kv.key, "description")) {
+                graph.exposures.items[exposure_index].description = value;
+            } else if (std.mem.eql(u8, kv.key, "tags")) {
+                try parseInlineStringList(allocator, kv.value, &graph.exposures.items[exposure_index].tags);
+                sortStrings(graph.exposures.items[exposure_index].tags.items);
+            }
+        }
+    }
+}
+
+fn appendMetaEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(MetaEntry), key: []const u8, value: JsonScalar) !void {
+    for (entries.items) |*existing| {
+        if (std.mem.eql(u8, existing.key, key)) {
+            existing.value = value;
+            return;
+        }
+    }
+    try entries.append(allocator, .{ .key = try allocator.dupe(u8, key), .value = value });
+    sortMetaEntries(entries.items);
+}
+
+fn sortMetaEntries(entries: []MetaEntry) void {
+    std.mem.sort(MetaEntry, entries, {}, struct {
+        fn lessThan(_: void, a: MetaEntry, b: MetaEntry) bool {
+            return std.mem.lessThan(u8, a.key, b.key);
+        }
+    }.lessThan);
 }
 
 pub const GenericTestNames = struct {
@@ -578,6 +820,101 @@ test "parseExposureDependency rejects unsupported dependency forms" {
     try std.testing.expectError(error.UnsupportedDynamicRef, parseExposureDependency(allocator, "ref('pkg', 'orders', 'extra')", &exposure));
     try std.testing.expectError(error.UnsupportedDynamicSource, parseExposureDependency(allocator, "source('raw')", &exposure));
     try std.testing.expectError(error.UnsupportedYaml, parseExposureDependency(allocator, "metric('orders')", &exposure));
+}
+
+test "parseSourcesFromText records source tables with package IDs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    tables:
+        \\      - name: orders
+        \\      - name: payments
+        \\  - name: app
+        \\    tables:
+        \\      - name: users
+    ;
+
+    try parseSourcesFromText(allocator, yaml, "models/schema.yml", "pkg", &graph);
+
+    try std.testing.expectEqual(@as(usize, 3), graph.sources.items.len);
+    try std.testing.expectEqualStrings("source.pkg.raw.orders", graph.sources.items[0].unique_id);
+    try std.testing.expectEqualStrings("raw", graph.sources.items[0].source_name);
+    try std.testing.expectEqualStrings("orders", graph.sources.items[0].table_name);
+    try std.testing.expectEqualStrings("source.pkg.raw.payments", graph.sources.items[1].unique_id);
+    try std.testing.expectEqualStrings("source.pkg.app.users", graph.sources.items[2].unique_id);
+    try std.testing.expectEqualStrings("models/schema.yml", graph.sources.items[2].original_file_path);
+}
+
+test "parseExposuresFromText records exposure metadata and dependencies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\exposures:
+        \\  - name: weekly_kpis
+        \\    type: dashboard
+        \\    maturity: high
+        \\    url: https://example.invalid/dashboard
+        \\    description: Weekly KPI dashboard
+        \\    tags: [finance, weekly]
+        \\    depends_on:
+        \\      - ref('orders')
+        \\      - source('raw', 'payments')
+        \\    owner:
+        \\      name: Analytics
+        \\      email: analytics@example.invalid
+        \\    config:
+        \\      enabled: false
+        \\      tags: [disabled, finance]
+        \\      meta:
+        \\        priority: 2
+        \\        pii: false
+    ;
+
+    try parseExposuresFromText(allocator, yaml, "models", "models/exposures.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.exposures.items.len);
+    const exposure = graph.exposures.items[0];
+    try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", exposure.unique_id);
+    try std.testing.expectEqualStrings("weekly_kpis", exposure.name);
+    try std.testing.expectEqualStrings("dashboard", exposure.exposure_type);
+    try std.testing.expect(!exposure.enabled);
+    try std.testing.expectEqualStrings("high", exposure.maturity.?);
+    try std.testing.expectEqualStrings("https://example.invalid/dashboard", exposure.url.?);
+    try std.testing.expectEqualStrings("Weekly KPI dashboard", exposure.description);
+    try std.testing.expectEqualStrings("Analytics", exposure.owner_name);
+    try std.testing.expectEqualStrings("analytics@example.invalid", exposure.owner_email.?);
+    try std.testing.expectEqualStrings("exposures.yml", exposure.path);
+    try std.testing.expectEqual(@as(usize, 4), exposure.tags.items.len);
+    try std.testing.expectEqualStrings("disabled", exposure.tags.items[0]);
+    try std.testing.expectEqualStrings("finance", exposure.tags.items[1]);
+    try std.testing.expectEqualStrings("finance", exposure.tags.items[2]);
+    try std.testing.expectEqualStrings("weekly", exposure.tags.items[3]);
+    try std.testing.expectEqual(@as(usize, 1), exposure.refs.items.len);
+    try std.testing.expectEqualStrings("orders", exposure.refs.items[0].name);
+    try std.testing.expectEqual(@as(usize, 1), exposure.source_refs.items.len);
+    try std.testing.expectEqualStrings("raw", exposure.source_refs.items[0].source_name);
+    try std.testing.expectEqualStrings("payments", exposure.source_refs.items[0].table_name);
+    try std.testing.expectEqual(@as(usize, 2), exposure.meta.items.len);
+    try std.testing.expectEqualStrings("pii", exposure.meta.items[0].key);
+    try std.testing.expectEqualStrings("false", exposure.meta.items[0].value.text);
+    try std.testing.expectEqual(.bool, exposure.meta.items[0].value.kind);
+    try std.testing.expectEqualStrings("priority", exposure.meta.items[1].key);
+    try std.testing.expectEqualStrings("2", exposure.meta.items[1].value.text);
+    try std.testing.expectEqual(.number, exposure.meta.items[1].value.kind);
 }
 
 test "synthesizeGenericTestNames preserves short generic test identities" {
