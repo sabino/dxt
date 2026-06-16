@@ -291,7 +291,16 @@
         "sources": {
           "type": "array",
           "items": {"$ref": "#/$defs/source_dep"}
-        }
+        },
+        "compiled": {"type": "boolean"},
+        "compiled_code": {"type": "string"},
+        "compiled_path": {"type": "string"},
+        "relation_name": {"type": "string"},
+        "extra_ctes": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "extra_ctes_injected": {"type": "boolean"}
       }
     },
     "seed_node": {

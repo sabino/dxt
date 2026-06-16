@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const compiler = @import("project/compiler.zig");
 const project_fs = @import("project/fs.zig");
 const project_jinja = @import("project/jinja.zig");
 const project_loader = @import("project/loader.zig");
@@ -111,6 +112,64 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
             try stdout.print("{s}\n", .{item.unique_id});
         }
     }
+}
+
+pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options.project_dir, loader_callbacks);
+    defer graph.deinit();
+
+    try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+
+    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
+    const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
+
+    const target_path = options.target_path orelse project_loader.graphDefaultTarget(runtime, options.project_dir) catch "target";
+    const target_dir = if (std.fs.path.isAbsolute(target_path))
+        target_path
+    else
+        try pathJoin(runtime.allocator, &.{ options.project_dir, target_path });
+    const compiled_base = try pathJoin(runtime.allocator, &.{ target_dir, "compiled" });
+    try std.Io.Dir.cwd().createDirPath(runtime.io, compiled_base);
+
+    var compiled_count: usize = 0;
+    var saw_selected_resource = false;
+    for (graph.nodes.items) |*node| {
+        if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
+        if (!selectionContains(selected, node.unique_id)) continue;
+        saw_selected_resource = true;
+
+        const compiled_code = try compiler.compileModel(runtime.allocator, &graph, node);
+        const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, node.package_name, node.original_file_path });
+        if (std.fs.path.dirname(compiled_path)) |parent| {
+            try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
+        }
+        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = compiled_code });
+        node.compiled = true;
+        node.compiled_code = compiled_code;
+        node.compiled_path = util.normalizeForDisplay(compiled_path);
+        node.relation_name = try compiler.relationNameForNode(runtime.allocator, node);
+        compiled_count += 1;
+    }
+
+    if (selected.len != 0 and !saw_selected_resource) return error.UnsupportedCompileSelection;
+
+    const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
+    const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
+    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
+    try stdout.print("Compiled {d} model(s) into {s}\n", .{
+        compiled_count,
+        util.normalizeForDisplay(compiled_base),
+    });
+}
+
+fn selectionContains(selected: []selector.SelectedResource, unique_id: []const u8) bool {
+    for (selected) |item| {
+        if (std.mem.eql(u8, item.unique_id, unique_id)) return true;
+    }
+    return false;
 }
 
 fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {

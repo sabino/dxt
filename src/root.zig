@@ -44,7 +44,17 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
         return .ok;
     }
     if (equals(command, "compile")) {
-        return planned(command, args[2..], stdout, stderr, .common_and_select, .project_selection);
+        if (hasHelp(args[2..])) {
+            try printCommandHelp(command, stdout, .project_selection);
+            return .ok;
+        }
+        const rt = runtime orelse {
+            try stderr.writeAll("error: runtime I/O is required for compile\n");
+            return .usage;
+        };
+        const options = parseOptions(rt.allocator, args[2..], stderr, .compile) catch |err| return commandError(err, stderr);
+        project.compile(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        return .ok;
     }
     if (equals(command, "ls")) {
         if (hasHelp(args[2..])) {
@@ -78,6 +88,7 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
 const OptionMode = enum {
     common_only,
     common_and_select,
+    compile,
     list,
     build,
 };
@@ -127,6 +138,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.InvalidOutput => stderr.writeAll("error: --output must be text or json\n") catch {},
         error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, or test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
+        error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model resources\n") catch {},
         error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by the implemented M1 parser command\n") catch {},
         else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},
     }
@@ -213,6 +225,21 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             const value = args[i + 1];
             if (equals(arg, "--project-dir")) {
                 options.project_dir = value;
+            } else if (equals(arg, "--profiles-dir")) {
+                if (mode != .compile) return error.UnsupportedCommandOption;
+                options.profiles_dir = value;
+            } else if (equals(arg, "--profile")) {
+                if (mode != .compile) return error.UnsupportedCommandOption;
+                options.profile = value;
+            } else if (equals(arg, "--target")) {
+                if (mode != .compile) return error.UnsupportedCommandOption;
+                options.target = value;
+            } else if (equals(arg, "--vars")) {
+                if (mode != .compile) return error.UnsupportedCommandOption;
+                options.vars = value;
+            } else if (equals(arg, "--threads")) {
+                if (mode != .compile) return error.UnsupportedCommandOption;
+                options.threads = value;
             } else if (equals(arg, "--target-path")) {
                 if (mode == .list) return error.UnsupportedCommandOption;
                 options.target_path = value;
@@ -328,7 +355,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
     }
 
     switch (mode) {
-        .common_and_select, .list, .build => {
+        .common_and_select, .compile, .list, .build => {
             if (equals(arg, "--select") or equals(arg, "--exclude")) return true;
         },
         .common_only => {},
@@ -363,7 +390,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  version          Print the dxt version.
         \\  parse            Parse a supported dbt project subset and emit manifest artifacts.
         \\  ls               List resources from the supported parser graph.
-        \\  compile          Planned: compile dbt SQL/Jinja without executing.
+        \\  compile          Compile supported dbt SQL/Jinja without executing.
         \\  build            Planned: run seeds, models, and tests.
         \\  docs generate    Planned: generate docs artifacts.
         \\
@@ -372,16 +399,25 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
 
 fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !void {
     try writer.print("Usage: dxt {s} [options]\n\n", .{command});
-    if (equals(command, "parse") or equals(command, "ls")) {
+    if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile")) {
         try writer.print("`dxt {s}` supports the M1 parser subset documented in PLAN.md.\n\n", .{command});
         try writer.writeAll("Options:\n");
         try writer.writeAll(
             \\  --project-dir <path>
             \\
         );
-        if (equals(command, "parse")) {
+        if (equals(command, "parse") or equals(command, "compile")) {
             try writer.writeAll(
                 \\  --target-path <path>
+                \\
+            );
+        }
+        if (equals(command, "compile")) {
+            try writer.writeAll(
+                \\  --profiles-dir <path>
+                \\  --profile <name>
+                \\  --target <name>
+                \\  --vars <yaml>
                 \\
             );
         }
@@ -456,7 +492,7 @@ test "version command prints raw version" {
     try std.testing.expectEqualStrings("", stderr.written());
 }
 
-test "planned command accepts dbt-like flags" {
+test "compile command requires runtime I/O" {
     var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stdout.deinit();
     var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
@@ -464,8 +500,8 @@ test "planned command accepts dbt-like flags" {
 
     const code = try run(&.{ "dxt", "compile", "--project-dir", "fixture", "--select", "tag:nightly" }, &stdout.writer, &stderr.writer, null);
     try std.testing.expectEqual(ExitCode.usage, code);
-    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "planned but not implemented") != null);
-    try std.testing.expectEqualStrings("", stderr.written());
+    try std.testing.expectEqualStrings("", stdout.written());
+    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for compile") != null);
 }
 
 test "planned command accepts selector argv lists" {
@@ -474,7 +510,7 @@ test "planned command accepts selector argv lists" {
     var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stderr.deinit();
 
-    const code = try run(&.{ "dxt", "compile", "--project-dir", "fixture", "--select", "customers", "tag:nightly", "--exclude", "orders" }, &stdout.writer, &stderr.writer, null);
+    const code = try run(&.{ "dxt", "build", "--project-dir", "fixture", "--select", "customers", "tag:nightly", "--exclude", "orders" }, &stdout.writer, &stderr.writer, null);
     try std.testing.expectEqual(ExitCode.usage, code);
     try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "planned but not implemented") != null);
     try std.testing.expectEqualStrings("", stderr.written());
@@ -498,7 +534,7 @@ test "planned command rejects missing selector value" {
     var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stderr.deinit();
 
-    const code = try run(&.{ "dxt", "compile", "--select", "--project-dir", "fixture" }, &stdout.writer, &stderr.writer, null);
+    const code = try run(&.{ "dxt", "build", "--select", "--project-dir", "fixture" }, &stdout.writer, &stderr.writer, null);
     try std.testing.expectEqual(ExitCode.usage, code);
     try std.testing.expectEqualStrings("", stdout.written());
     try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "option `--select` requires a value") != null);

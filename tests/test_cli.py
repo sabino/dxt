@@ -72,17 +72,99 @@ def copy_fixture(tmp_path: Path, name: str) -> Path:
     return dest
 
 
-def test_compile_placeholder_still_returns_nonzero():
+def test_compile_writes_compiled_sql_and_manifest_fields(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    target = tmp_path / "compile-target"
     result = subprocess.run(
-        [DXT, "compile", "--project-dir", "fixture", "--select", "tag:nightly"],
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--threads", "4"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert "Compiled 3 model(s)" in result.stdout
+
+    compiled_root = target / "compiled" / "compile_basic" / "models"
+    assert (compiled_root / "customers.sql").read_text().strip() == "select 1 as customer_id"
+    orders_sql = (compiled_root / "orders.sql").read_text()
+    assert "config(" not in orders_sql
+    assert 'from "main"."customers"' in orders_sql
+    assert (compiled_root / "from_source.sql").read_text().strip() == 'select *\nfrom "raw"."payments"'
+
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
+    orders = manifest["nodes"]["model.compile_basic.orders"]
+    assert orders["compiled"] is True
+    assert orders["compiled_code"] == orders_sql
+    assert orders["compiled_path"].endswith("/compiled/compile_basic/models/orders.sql")
+    assert orders["relation_name"] == '"main"."orders"'
+    assert orders["extra_ctes"] == []
+    assert orders["extra_ctes_injected"] is False
+
+
+def test_compile_select_limits_compiled_models_but_keeps_graph_context(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Compiled 1 model(s)" in result.stdout
+
+    compiled_root = target / "compiled" / "compile_basic" / "models"
+    assert not (compiled_root / "customers.sql").exists()
+    assert not (compiled_root / "from_source.sql").exists()
+    assert 'from "main"."customers"' in (compiled_root / "orders.sql").read_text()
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["nodes"]["model.compile_basic.orders"]["compiled"] is True
+    assert "compiled" not in manifest["nodes"]["model.compile_basic.customers"]
+    assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
+
+
+def test_compile_rejects_selection_without_models(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--select", "source:raw.payments"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "planned but not implemented" in result.stdout
-    assert "PLAN.md" in result.stdout
-    assert result.stderr == ""
+    assert "compile currently supports only selected SQL model resources" in result.stderr
+
+
+def test_compile_uses_selected_node_package_for_compiled_path(tmp_path: Path):
+    project = copy_fixture(tmp_path, "package_ref_selector")
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [
+            DXT,
+            "compile",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "package:util_pkg,pkg_customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (target / "compiled" / "util_pkg" / "models" / "pkg_customers.sql").exists()
+    assert not (target / "compiled" / "package_ref_selector" / "models" / "pkg_customers.sql").exists()
+    manifest = json.loads((target / "manifest.json").read_text())
+    package_node = manifest["nodes"]["model.util_pkg.pkg_customers"]
+    assert package_node["compiled_path"].endswith("/compiled/util_pkg/models/pkg_customers.sql")
+    assert "compiled" not in manifest["nodes"]["model.package_ref_selector.pkg_customers"]
 
 
 def test_parse_writes_minimal_manifest(tmp_path: Path):

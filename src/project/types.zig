@@ -8,7 +8,12 @@ pub const Runtime = struct {
 
 pub const Options = struct {
     project_dir: []const u8 = ".",
+    profiles_dir: ?[]const u8 = null,
+    profile: ?[]const u8 = null,
+    target: ?[]const u8 = null,
     target_path: ?[]const u8 = null,
+    vars: ?[]const u8 = null,
+    threads: ?[]const u8 = null,
     select: ?[]const u8 = null,
     exclude: ?[]const u8 = null,
     resource_type: ?[]const u8 = null,
@@ -196,6 +201,10 @@ pub const Node = struct {
     source_refs: std.ArrayList(SourceDep) = .empty,
     depends_on: std.ArrayList([]const u8) = .empty,
     macro_depends_on: std.ArrayList([]const u8) = .empty,
+    compiled: bool = false,
+    compiled_code: ?[]const u8 = null,
+    compiled_path: ?[]const u8 = null,
+    relation_name: ?[]const u8 = null,
 };
 
 pub const GenericTestNode = struct {
