@@ -1,10 +1,14 @@
 const std = @import("std");
 const types = @import("types.zig");
+const util = @import("util.zig");
 
 const DocBlock = types.DocBlock;
 const Graph = types.Graph;
 const RefDep = types.RefDep;
 const SourceDep = types.SourceDep;
+
+const appendUnique = util.appendUnique;
+const sortStrings = util.sortStrings;
 
 pub fn findDoc(graph: *const Graph, unique_id: []const u8) ?DocBlock {
     for (graph.docs.items) |doc| {
@@ -44,7 +48,7 @@ pub fn countActiveExposures(graph: *const Graph) usize {
     return count;
 }
 
-pub fn hasMacro(graph: *const Graph, unique_id: []const u8) bool {
+fn hasMacro(graph: *const Graph, unique_id: []const u8) bool {
     for (graph.macros.items) |macro| {
         if (std.mem.eql(u8, macro.unique_id, unique_id)) return true;
     }
@@ -108,6 +112,33 @@ pub fn resolveSourceDependency(graph: *const Graph, current_package: []const u8,
         found = source.unique_id;
     }
     return found orelse error.UnresolvedSource;
+}
+
+pub fn resolveDependencies(graph: *Graph) !void {
+    for (graph.nodes.items) |*node| {
+        if (!node.enabled) continue;
+        for (node.macro_depends_on.items) |macro_dep| {
+            if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
+        }
+        sortStrings(node.macro_depends_on.items);
+        for (node.refs.items) |ref_dep| {
+            try appendUnique(graph.allocator, &node.depends_on, try resolveRefDependency(graph, node.package_name, ref_dep));
+        }
+        for (node.source_refs.items) |source_dep| {
+            try appendUnique(graph.allocator, &node.depends_on, try resolveSourceDependency(graph, node.package_name, source_dep));
+        }
+        sortStrings(node.depends_on.items);
+    }
+    for (graph.exposures.items) |*exposure| {
+        if (!exposure.enabled) continue;
+        for (exposure.refs.items) |ref_dep| {
+            try appendUnique(graph.allocator, &exposure.depends_on, try resolveRefDependency(graph, exposure.package_name, ref_dep));
+        }
+        for (exposure.source_refs.items) |source_dep| {
+            try appendUnique(graph.allocator, &exposure.depends_on, try resolveSourceDependency(graph, exposure.package_name, source_dep));
+        }
+        sortStrings(exposure.depends_on.items);
+    }
 }
 
 fn hasNode(graph: *const Graph, unique_id: []const u8) bool {
@@ -268,4 +299,55 @@ test "source resolution prefers current package and errors on ambiguous fallback
     try std.testing.expectEqualStrings("source.pkg.raw.orders", try resolveSourceDependency(&graph, "pkg", .{ .source_name = "raw", .table_name = "orders" }));
     try std.testing.expectError(error.UnresolvedSource, resolveSourceDependency(&graph, "demo", .{ .source_name = "raw", .table_name = "orders" }));
     try std.testing.expectError(error.UnresolvedSource, resolveSourceDependency(&graph, "demo", .{ .source_name = "raw", .table_name = "missing" }));
+}
+
+test "dependency resolution populates sorted unique node and exposure dependencies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
+    defer graph.deinit();
+
+    try appendNode(&graph, "model", "demo", "model.demo.customers", "customers", true);
+    try appendNode(&graph, "model", "demo", "model.demo.orders", "orders", true);
+    try appendSource(&graph, "demo", "raw", "customers");
+    try appendMacro(&graph, "demo", "format_id");
+
+    try graph.nodes.items[1].refs.append(graph.allocator, .{ .package = null, .name = "customers" });
+    try graph.nodes.items[1].refs.append(graph.allocator, .{ .package = null, .name = "customers" });
+    try graph.nodes.items[1].source_refs.append(graph.allocator, .{ .source_name = "raw", .table_name = "customers" });
+    try graph.nodes.items[1].macro_depends_on.append(graph.allocator, "macro.demo.format_id");
+
+    try graph.exposures.append(graph.allocator, .{
+        .package_name = "demo",
+        .unique_id = "exposure.demo.weekly_kpis",
+        .name = "weekly_kpis",
+        .path = "",
+        .original_file_path = "",
+        .enabled = true,
+    });
+    try graph.exposures.items[0].refs.append(graph.allocator, .{ .package = null, .name = "orders" });
+    try graph.exposures.items[0].source_refs.append(graph.allocator, .{ .source_name = "raw", .table_name = "customers" });
+
+    try resolveDependencies(&graph);
+
+    try std.testing.expectEqual(@as(usize, 2), graph.nodes.items[1].depends_on.items.len);
+    try std.testing.expectEqualStrings("model.demo.customers", graph.nodes.items[1].depends_on.items[0]);
+    try std.testing.expectEqualStrings("source.demo.raw.customers", graph.nodes.items[1].depends_on.items[1]);
+    try std.testing.expectEqual(@as(usize, 1), graph.nodes.items[1].macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.demo.format_id", graph.nodes.items[1].macro_depends_on.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), graph.exposures.items[0].depends_on.items.len);
+    try std.testing.expectEqualStrings("model.demo.orders", graph.exposures.items[0].depends_on.items[0]);
+    try std.testing.expectEqualStrings("source.demo.raw.customers", graph.exposures.items[0].depends_on.items[1]);
+}
+
+test "dependency resolution rejects unresolved macro dependencies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
+    defer graph.deinit();
+
+    try appendNode(&graph, "model", "demo", "model.demo.customers", "customers", true);
+    try graph.nodes.items[0].macro_depends_on.append(graph.allocator, "macro.demo.missing");
+
+    try std.testing.expectError(error.UnresolvedMacro, resolveDependencies(&graph));
 }
