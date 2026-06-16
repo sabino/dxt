@@ -17,11 +17,15 @@ Hard requirement: the `dxt` product runtime is Zig. Python may remain only for d
 
 - Preserve dbt compatibility as an observed contract: compare against dbt Core outputs and published artifact schemas.
 - Keep user-facing product behavior in Zig and validate it through the native binary.
+- `src/project.zig` is a public/orchestration facade in transition, not the permanent home for all product logic. New shared data model, selector, parser, graph, manifest, loader, and utility code should move toward focused `src/project/*.zig` modules.
+- Keep behavior-preserving moves separate from feature behavior changes. Mechanical extraction commits should avoid selector/parser/runtime semantic changes beyond import visibility needed for the move.
 - Keep implementation slices small and reviewable.
 - Prefer deterministic fixtures and local adapters before live warehouses.
 - Do not add broad dependencies or generated artifacts without a validation reason.
 - Run the fastest relevant verification before finishing a change.
 - Review `git status --short` and the diff before committing.
+- Python tests are allowed for black-box CLI integration, dbt compatibility oracles, fixture-heavy artifact checks, schema validation, public-safety scans, and runtime-boundary checks only. Product CLI, parser, compiler, selector, graph, manifest, adapter, and runner behavior must remain Zig.
+- Core parser, selector, graph, manifest, and Jinja/helper behavior should have fast native Zig tests close to the implementation. Add Python coverage as integration or dbt-parity evidence when behavior crosses the CLI, filesystem, artifacts, or dbt fixtures.
 
 ## Compatibility Priorities
 
