@@ -42,7 +42,7 @@ Every compatibility slice should record:
 | --- | --- | --- | --- |
 | Project load and parse order | `core/dbt/parser/manifest.py::ManifestLoader.load`, `parse_project`, `load_and_parse_macros`, `load_macros`, `process_sources`, `process_refs`, `process_docs`, `process_metrics`, `process_unit_tests`, `cleanup_disabled`, `_backfill_direct_parents`, `write_manifest` | `crates/dbt-loader/src/loader.rs::load`, `load_inner`, `load_dbtignore`, `collect_paths`, `merge_vars`; `crates/dbt-parser/src/resolver.rs::resolve`, `resolve_package_waves`, `resolve_dependencies` | `src/project/loader.zig` owns graph loading order, package traversal, target path lookup, duplicate-check sequencing, and graph sorting; `src/project.zig` still supplies parser callbacks until resource parsers move down |
 | Parse-time node creation and config | `core/dbt/parser/base.py::ConfiguredParser`, `_create_parsetime_node`, `render_with_context`, `update_parsed_node_config`, `update_parsed_node_relation_names`, `render_update`, `add_result_node`, `parse_node` | `crates/dbt-parser/src/renderer.rs::render_sql_file_inner`, config resolver calls, disabled root-overlay handling, final status/config resolution | `src/project/config.zig`, `src/project/jinja.zig`, future `src/project/parse.zig` resource parsers and `src/project/compiler.zig` |
-| Macro parsing | `core/dbt/parser/macros.py::MacroParser`, `parse_macro`, `parse_unparsed_macros`, block types `macro`, `materialization`, `test`, `data_test` | `crates/dbt-parser/src/resolver.rs` macro resolution; `crates/dbt-parser/src/renderer.rs` macro dependency listener | Current macro scanning in `src/project.zig` plus `src/project/jinja.zig`; future `src/project/parse.zig` macro parser and `src/project/resolve.zig` namespace resolver |
+| Macro parsing | `core/dbt/parser/macros.py::MacroParser`, `parse_macro`, `parse_unparsed_macros`, block types `macro`, `materialization`, `test`, `data_test`; `core/dbt/clients/jinja.py::get_supported_languages` | `crates/dbt-parser/src/utils.rs::parse_macro_statements`; `crates/dbt-parser/src/sql_file_info.rs::SqlFileInfo`; `crates/dbt-jinja/minijinja/src/compiler/parser.rs` materialization parsing | `src/project/parse.zig` owns current macro/test/data_test/materialization block scanning and materialization supported-language parsing; `src/project/jinja.zig` owns lexical macro-call scanning; future `src/project/resolve.zig` or `src/project/macro.zig` owns namespace/dispatch semantics |
 | Macro namespace and dispatch | `core/dbt/context/macros.py::MacroNamespace`, `_search_order`, `MacroNamespaceBuilder.add_macro`, `add_macros`, `build_namespace` | `crates/dbt-parser/src/resolver.rs` macro unit construction and package runtime config; adapter dispatch references in adapter/Jinja crates | `src/project/resolve.zig` for lookup semantics; future `src/project/jinja.zig` or `src/project/macro.zig` for executable namespace and dispatch |
 | YAML properties and resource patches | `core/dbt/parser/schemas.py::SchemaParser`, `SourceParser`, `PatchParser`, `ModelPatchParser`, `MacroPatchParser`; `core/dbt/parser/schema_yaml_readers.py::ExposureParser`, `MetricParser`, `SemanticModelParser`, `SavedQueryParser` | `crates/dbt-parser/src/resolver.rs::resolve_package_waves` resource order: sources, seeds, snapshots, groups, models, analyses, functions, exposures, semantic models, metrics, saved queries, data tests, unit tests | Current `src/project.zig` YAML routines and `src/project/parse.zig` helpers; future `src/project/parse.zig` plus narrower modules if needed |
 | Exposure, source, ref, metric dependency resolution | `core/dbt/parser/manifest.py::_process_refs`, `_process_sources_for_node`, `_process_sources_for_exposure`, `_process_metrics_for_node` | `crates/dbt-jinja-utils/src/node_resolver.rs::resolve_dependencies`; `crates/dbt-parser/src/resolver.rs` access validation, relation uniqueness, primary-key inference | `src/project/resolve.zig`; current higher-level orchestration still in `src/project.zig` |
@@ -67,11 +67,13 @@ Every compatibility slice should record:
   parser callbacks. It still owns docs block parsing, YAML model property
   parsing, model/seed parsing, generic-test materialization, warnings, and
   remaining resolver orchestration.
-- `src/project/parse.zig` owns current top-level `{% macro %}` block parsing,
-  macro property YAML parsing, macro-property application, and native parser
-  tests for that preserved surface. dbt-compatible macro block variants
-  (`materialization`, `test`, `data_test`), macro argument extraction, patch
-  validation, and namespace precedence remain behavior slices.
+- `src/project/parse.zig` owns current top-level `{% macro %}`, `{% test %}`,
+  `{% data_test %}`, and `{% materialization %}` block parsing, materialization
+  `supported_languages` parsing, macro property YAML parsing,
+  macro-property application, and native parser tests for that surface. Macro
+  argument extraction under dbt's `validate_macro_args` behavior, patch
+  validation, macro `docs`/`meta` fields, and namespace precedence remain
+  behavior slices.
 - Existing extracted modules are `types`, `util`, `config`, `fs`, `jinja`,
   `loader`, `resolve`, `parse`, `selector`, and `manifest`.
 - The test base includes native Zig tests for module-level helpers and pytest
@@ -89,7 +91,7 @@ Every compatibility slice should record:
 
 ## Next Source-Grounded Slices
 
-### 1. M1 Macro Block and Macro Patch Parity
+### 1. M1 Macro Patch and Namespace Parity
 
 - Upstream references: v1 `core/dbt/parser/macros.py::MacroParser`,
   `parse_unparsed_macros`, `parse_macro`, `_extract_args`,
@@ -108,11 +110,14 @@ Every compatibility slice should record:
   `src/project/resolve.zig`. Introduce a future `src/project/macro.zig` only if
   macro execution, namespace, and dispatch logic would otherwise make
   `parse.zig` too broad.
-- Tests: native tests for top-level `{% macro %}` extraction with nested
-  non-top-level blocks ignored, `{% materialization %}`, `{% test %}`, and
-  `{% data_test %}` artifact extraction, package-qualified macro IDs, duplicate
-  macro patch rejection, argument patch merge, invalid argument type diagnostics,
-  patch `description`/`docs`/`meta`, and namespace precedence.
+- Tests: native tests for parser-controlled macro argument extraction when a
+  dbt-compatible flag or mode is added, duplicate macro patch rejection,
+  argument patch merge, invalid argument type diagnostics, patch
+  `description`/`docs`/`meta`, and namespace precedence. Existing native and
+  Python tests now cover top-level `{% macro %}`, `{% materialization %}`, and
+  `{% test %}` artifact extraction plus materialization supported languages;
+  `{% data_test %}` has native source-grounded coverage because local dbt Core
+  1.10 rejects the tag before writing oracle artifacts.
 - Python/dbt oracle: compare macro manifest entries and model macro dependencies
   on synthetic package fixtures, including package macro namespace fixtures.
 - Artifact validation: Manifest v12 `macros` map and `depends_on.macros`.

@@ -25,6 +25,7 @@ const splitKeyValue = util.splitKeyValue;
 const stripYamlComment = util.stripYamlComment;
 const findMatchingParen = jinja.findMatchingParen;
 const parseLiteralArgs = jinja.parseLiteralArgs;
+const skipQuotedSpan = jinja.skipQuotedSpan;
 const skipWs = jinja.skipWs;
 const findMacroIndexByPackageAndName = resolve.findMacroIndexByPackageAndName;
 
@@ -126,28 +127,313 @@ pub fn parseMacros(runtime: types.Runtime, project_dir: []const u8, relative_pat
 
 pub fn parseMacrosFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     var index: usize = 0;
-    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
-        const close = std.mem.indexOfPos(u8, text, open + 2, "%}") orelse return error.MalformedMacroBlock;
+    var control_depth: usize = 0;
+    while (try nextJinjaBlockOutsideIgnoredSpans(text, &index)) |open| {
+        const close = findJinjaBlockClose(text, open) orelse return error.MalformedMacroBlock;
         const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
-        if (!isMacroOpenTag(tag)) {
+        if (std.mem.eql(u8, tag, "raw")) {
+            const end = try findRawEndTag(text, close + 2);
+            index = end.close + 2;
+            continue;
+        }
+        if (isControlFlowStartTag(tag)) {
+            control_depth += 1;
             index = close + 2;
             continue;
         }
-        const name_start = skipWs(tag, "macro".len);
-        if (name_start >= tag.len or !isIdentStart(tag[name_start])) return error.MalformedMacroBlock;
-        var name_end = name_start + 1;
-        while (name_end < tag.len and isIdentChar(tag[name_end])) name_end += 1;
-        const macro_name = tag[name_start..name_end];
-        const call_pos = skipWs(tag, name_end);
-        if (call_pos >= tag.len or tag[call_pos] != '(') return error.MalformedMacroBlock;
-        _ = findMatchingParen(tag, call_pos) orelse return error.MalformedMacroBlock;
+        if (isControlFlowEndTag(tag)) {
+            if (control_depth == 0) return error.MalformedMacroBlock;
+            control_depth -= 1;
+            index = close + 2;
+            continue;
+        }
+        var macro_tag = parseMacroOpenTag(allocator, tag) catch |err| switch (err) {
+            error.NotMacroBlock => {
+                index = close + 2;
+                continue;
+            },
+            else => return err,
+        };
+        if (control_depth != 0) return error.MalformedMacroBlock;
 
-        const end = try findEndMacroTag(text, close + 2);
+        const end = try findEndMacroTag(text, close + 2, macro_tag.end_tag);
 
         const macro_sql = std.mem.trim(u8, text[open .. end.close + 2], " \t\r\n");
-        try graph.macros.append(allocator, try macroDefFromParts(allocator, package_name, macro_name, relative_path, macro_sql));
+        var macro = try macroDefFromParts(allocator, package_name, macro_tag.name, relative_path, macro_sql);
+        macro.supported_languages = macro_tag.supported_languages;
+        macro_tag.supported_languages = .empty;
+        macro.has_supported_languages = macro_tag.has_supported_languages;
+        try graph.macros.append(allocator, macro);
         index = end.close + 2;
     }
+    if (control_depth != 0) return error.MalformedMacroBlock;
+}
+
+fn nextJinjaBlockOutsideIgnoredSpans(text: []const u8, index: *usize) !?usize {
+    while (true) {
+        const block_open = std.mem.indexOfPos(u8, text, index.*, "{%");
+        const comment_open = std.mem.indexOfPos(u8, text, index.*, "{#");
+        const expr_open = std.mem.indexOfPos(u8, text, index.*, "{{");
+        if (comment_open) |comment| {
+            if (isBeforeOptional(comment, block_open) and isBeforeOptional(comment, expr_open)) {
+                const comment_close = std.mem.indexOfPos(u8, text, comment + 2, "#}") orelse return error.MalformedMacroBlock;
+                index.* = comment_close + 2;
+                continue;
+            }
+        }
+        if (expr_open) |expr| {
+            if (isBeforeOptional(expr, block_open)) {
+                const expr_close = findJinjaExprClose(text, expr) orelse return error.MalformedMacroBlock;
+                index.* = expr_close + 2;
+                continue;
+            }
+        }
+        return block_open;
+    }
+}
+
+fn isBeforeOptional(value: usize, maybe_other: ?usize) bool {
+    return maybe_other == null or value < maybe_other.?;
+}
+
+fn findJinjaBlockClose(text: []const u8, open: usize) ?usize {
+    var index = open + 2;
+    while (index + 1 < text.len) : (index += 1) {
+        if (text[index] == '"' or text[index] == '\'') {
+            index = (skipQuotedSpan(text, index) orelse return null) - 1;
+            continue;
+        }
+        if (text[index] == '%' and text[index + 1] == '}') return index;
+    }
+    return null;
+}
+
+fn findJinjaExprClose(text: []const u8, open: usize) ?usize {
+    var index = open + 2;
+    while (index + 1 < text.len) : (index += 1) {
+        if (text[index] == '"' or text[index] == '\'') {
+            index = (skipQuotedSpan(text, index) orelse return null) - 1;
+            continue;
+        }
+        if (text[index] == '}' and text[index + 1] == '}') return index;
+    }
+    return null;
+}
+
+const MacroOpenTag = struct {
+    name: []const u8,
+    end_tag: []const u8,
+    supported_languages: std.ArrayList([]const u8) = .empty,
+    has_supported_languages: bool = false,
+};
+
+fn parseMacroOpenTag(allocator: std.mem.Allocator, tag: []const u8) !MacroOpenTag {
+    if (std.mem.startsWith(u8, tag, "macro") and tag.len > "macro".len and std.ascii.isWhitespace(tag["macro".len])) {
+        const name = try parseCallableBlockName(tag, "macro");
+        return .{ .name = name, .end_tag = "endmacro" };
+    }
+    if (std.mem.startsWith(u8, tag, "test") and tag.len > "test".len and std.ascii.isWhitespace(tag["test".len])) {
+        const name = try parseCallableBlockName(tag, "test");
+        return .{ .name = try std.fmt.allocPrint(allocator, "test_{s}", .{name}), .end_tag = "endtest" };
+    }
+    if (std.mem.startsWith(u8, tag, "data_test") and tag.len > "data_test".len and std.ascii.isWhitespace(tag["data_test".len])) {
+        const name = try parseCallableBlockName(tag, "data_test");
+        return .{ .name = try std.fmt.allocPrint(allocator, "test_{s}", .{name}), .end_tag = "enddata_test" };
+    }
+    if (std.mem.startsWith(u8, tag, "materialization") and tag.len > "materialization".len and std.ascii.isWhitespace(tag["materialization".len])) {
+        return try parseMaterializationOpenTag(allocator, tag);
+    }
+    return error.NotMacroBlock;
+}
+
+fn parseCallableBlockName(tag: []const u8, keyword: []const u8) ![]const u8 {
+    const name_start = skipWs(tag, keyword.len);
+    if (name_start >= tag.len or !isIdentStart(tag[name_start])) return error.MalformedMacroBlock;
+    var name_end = name_start + 1;
+    while (name_end < tag.len and isIdentChar(tag[name_end])) name_end += 1;
+    const call_pos = skipWs(tag, name_end);
+    if (call_pos >= tag.len or tag[call_pos] != '(') return error.MalformedMacroBlock;
+    _ = findMatchingParen(tag, call_pos) orelse return error.MalformedMacroBlock;
+    return tag[name_start..name_end];
+}
+
+fn parseMaterializationOpenTag(allocator: std.mem.Allocator, tag: []const u8) !MacroOpenTag {
+    const name_start = skipWs(tag, "materialization".len);
+    if (name_start >= tag.len or !isIdentStart(tag[name_start])) return error.MalformedMacroBlock;
+    var name_end = name_start + 1;
+    while (name_end < tag.len and isIdentChar(tag[name_end])) name_end += 1;
+
+    var rest_start = skipWs(tag, name_end);
+    var adapter_part: []const u8 = "default";
+    var languages: std.ArrayList([]const u8) = .empty;
+    errdefer languages.deinit(allocator);
+    var has_languages = false;
+
+    while (rest_start < tag.len) {
+        if (tag[rest_start] != ',') return error.MalformedMacroBlock;
+        rest_start += 1;
+        rest_start = skipWs(tag, rest_start);
+
+        const option = try parseIdentifier(tag, &rest_start);
+        if (std.mem.eql(u8, option, "default")) {
+            rest_start = skipWs(tag, rest_start);
+            continue;
+        }
+        if (std.mem.eql(u8, option, "adapter")) {
+            rest_start = skipWs(tag, rest_start);
+            if (rest_start >= tag.len or tag[rest_start] != '=') return error.MalformedMacroBlock;
+            rest_start = skipWs(tag, rest_start + 1);
+            adapter_part = try parseQuotedString(tag, &rest_start);
+            rest_start = skipWs(tag, rest_start);
+            continue;
+        }
+        if (std.mem.eql(u8, option, "supported_languages")) {
+            try parseSupportedLanguagesValue(allocator, tag, &rest_start, &languages);
+            has_languages = true;
+            rest_start = skipWs(tag, rest_start);
+            continue;
+        }
+        return error.MalformedMacroBlock;
+    }
+
+    if (!has_languages) {
+        try languages.append(allocator, "sql");
+    }
+
+    return .{
+        .name = try std.fmt.allocPrint(allocator, "materialization_{s}_{s}", .{ tag[name_start..name_end], adapter_part }),
+        .end_tag = "endmaterialization",
+        .supported_languages = languages,
+        .has_supported_languages = true,
+    };
+}
+
+fn parseSupportedLanguagesValue(allocator: std.mem.Allocator, tag: []const u8, index: *usize, out: *std.ArrayList([]const u8)) !void {
+    var pos = index.*;
+    pos = skipWs(tag, pos);
+    if (pos >= tag.len or tag[pos] != '=') return error.MalformedMacroBlock;
+    pos = skipWs(tag, pos + 1);
+    if (pos >= tag.len or (tag[pos] != '[' and tag[pos] != '(')) return error.MalformedMacroBlock;
+    const open = tag[pos];
+    const close: u8 = if (open == '[') ']' else ')';
+    pos += 1;
+    var item_count: usize = 0;
+    var trailing_comma = false;
+    while (true) {
+        pos = skipWs(tag, pos);
+        if (pos >= tag.len) return error.MalformedMacroBlock;
+        if (tag[pos] == close) {
+            if (open == '(' and item_count == 1 and !trailing_comma) return error.MalformedMacroBlock;
+            pos += 1;
+            break;
+        }
+        const language = try parseQuotedString(tag, &pos);
+        if (!isSupportedMaterializationLanguage(language)) return error.MalformedMacroBlock;
+        try out.append(allocator, language);
+        item_count += 1;
+        trailing_comma = false;
+        pos = skipWs(tag, pos);
+        if (pos >= tag.len) return error.MalformedMacroBlock;
+        if (tag[pos] == ',') {
+            pos += 1;
+            trailing_comma = true;
+            continue;
+        }
+        if (tag[pos] == close) {
+            if (open == '(' and item_count == 1) return error.MalformedMacroBlock;
+            pos += 1;
+            break;
+        }
+        return error.MalformedMacroBlock;
+    }
+    index.* = pos;
+}
+
+fn isSupportedMaterializationLanguage(language: []const u8) bool {
+    if (std.mem.eql(u8, language, "sql")) return true;
+    return language.len == 6 and
+        language[0] == 'p' and
+        language[1] == 'y' and
+        language[2] == 't' and
+        language[3] == 'h' and
+        language[4] == 'o' and
+        language[5] == 'n';
+}
+
+fn parseIdentifier(tag: []const u8, index: *usize) ![]const u8 {
+    if (index.* >= tag.len or !isIdentStart(tag[index.*])) return error.MalformedMacroBlock;
+    const start = index.*;
+    index.* += 1;
+    while (index.* < tag.len and isIdentChar(tag[index.*])) index.* += 1;
+    return tag[start..index.*];
+}
+
+fn isControlFlowStartTag(tag: []const u8) bool {
+    return startsWithKeyword(tag, "if") or startsWithKeyword(tag, "for");
+}
+
+fn isControlFlowEndTag(tag: []const u8) bool {
+    return std.mem.eql(u8, tag, "endif") or std.mem.eql(u8, tag, "endfor");
+}
+
+fn startsWithKeyword(tag: []const u8, keyword: []const u8) bool {
+    return std.mem.startsWith(u8, tag, keyword) and
+        (tag.len == keyword.len or std.ascii.isWhitespace(tag[keyword.len]));
+}
+
+fn parseQuotedString(tag: []const u8, index: *usize) ![]const u8 {
+    if (index.* >= tag.len or (tag[index.*] != '\'' and tag[index.*] != '"')) return error.MalformedMacroBlock;
+    const quote = tag[index.*];
+    const start = index.* + 1;
+    var pos = start;
+    while (pos < tag.len) : (pos += 1) {
+        if (tag[pos] == '\\') {
+            pos += 1;
+            continue;
+        }
+        if (tag[pos] == quote) {
+            index.* = pos + 1;
+            return tag[start..pos];
+        }
+    }
+    return error.MalformedMacroBlock;
+}
+
+const MacroEndTag = struct {
+    close: usize,
+};
+
+fn findEndMacroTag(text: []const u8, start: usize, expected_tag: []const u8) !MacroEndTag {
+    var index = start;
+    while (try nextJinjaBlockOutsideIgnoredSpans(text, &index)) |open| {
+        const close = findJinjaBlockClose(text, open) orelse return error.MalformedMacroBlock;
+        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
+        if (std.mem.eql(u8, tag, expected_tag)) return .{ .close = close };
+        if (std.mem.eql(u8, tag, "raw")) {
+            const end = try findRawEndTag(text, close + 2);
+            index = end.close + 2;
+            continue;
+        }
+        index = close + 2;
+    }
+    return error.MalformedMacroBlock;
+}
+
+fn findRawEndTag(text: []const u8, start: usize) !MacroEndTag {
+    var index = start;
+    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
+        var tag_start = skipWs(text, open + 2);
+        if (tag_start < text.len and text[tag_start] == '-') tag_start = skipWs(text, tag_start + 1);
+        if (!std.mem.startsWith(u8, text[tag_start..], "endraw")) {
+            index = open + 2;
+            continue;
+        }
+        const close = findJinjaBlockClose(text, open) orelse return error.MalformedMacroBlock;
+        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
+        if (std.mem.eql(u8, tag, "endraw")) return .{ .close = close };
+        index = close + 2;
+    }
+    return error.MalformedMacroBlock;
 }
 
 fn macroDefFromParts(allocator: std.mem.Allocator, package_name: []const u8, macro_name: []const u8, relative_path: []const u8, macro_sql: []const u8) !MacroDef {
@@ -159,25 +445,6 @@ fn macroDefFromParts(allocator: std.mem.Allocator, package_name: []const u8, mac
         .original_file_path = relative_path,
         .macro_sql = try allocator.dupe(u8, macro_sql),
     };
-}
-
-const MacroEndTag = struct {
-    close: usize,
-};
-
-fn isMacroOpenTag(tag: []const u8) bool {
-    return std.mem.startsWith(u8, tag, "macro") and tag.len > "macro".len and std.ascii.isWhitespace(tag["macro".len]);
-}
-
-fn findEndMacroTag(text: []const u8, start: usize) !MacroEndTag {
-    var index = start;
-    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
-        const close = std.mem.indexOfPos(u8, text, open + 2, "%}") orelse return error.MalformedMacroBlock;
-        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
-        if (std.mem.eql(u8, tag, "endmacro")) return .{ .close = close };
-        index = close + 2;
-    }
-    return error.MalformedMacroBlock;
 }
 
 pub fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
@@ -843,6 +1110,246 @@ test "parseMacrosFromText extracts top-level macro blocks" {
     try std.testing.expectEqualStrings(
         "{% macro format_id(column_name) %}\n    cast({{ column_name }} as varchar)\n{% endmacro %}",
         graph.macros.items[0].macro_sql,
+    );
+}
+
+test "parseMacrosFromText extracts dbt macro block variants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const sql =
+        \\{% test positive_value(model, column_name) %}
+        \\    select * from {{ model }} where {{ column_name }} <= 0
+        \\{% endtest %}
+        \\
+        \\{% data_test nonzero(model, column_name) %}
+        \\    select * from {{ model }} where {{ column_name }} = 0
+        \\{% enddata_test %}
+        \\
+        \\{% materialization table %}
+        \\    {{ return({'relations': []}) }}
+        \\{% endmaterialization %}
+        \\
+        \\{% materialization incremental, supported_languages=['sql'], adapter='duckdb' %}
+        \\    {{ return({'relations': []}) }}
+        \\{% endmaterialization %}
+        \\
+        \\{% materialization empty_langs, default, supported_languages=[] %}
+        \\    {{ return({'relations': []}) }}
+        \\{% endmaterialization %}
+        \\
+        \\{% materialization tuple_langs, supported_languages=('sql',), default %}
+        \\    {{ return({'relations': []}) }}
+        \\{% endmaterialization %}
+    ;
+
+    try parseMacrosFromText(allocator, sql, "macros/blocks.sql", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 6), graph.macros.items.len);
+    try std.testing.expectEqualStrings("macro.demo.test_positive_value", graph.macros.items[0].unique_id);
+    try std.testing.expectEqualStrings("test_positive_value", graph.macros.items[0].name);
+    try std.testing.expectEqualStrings("macro.demo.test_nonzero", graph.macros.items[1].unique_id);
+    try std.testing.expectEqualStrings("test_nonzero", graph.macros.items[1].name);
+    try std.testing.expectEqualStrings("macro.demo.materialization_table_default", graph.macros.items[2].unique_id);
+    try std.testing.expectEqualStrings("materialization_table_default", graph.macros.items[2].name);
+    try std.testing.expectEqual(@as(usize, 1), graph.macros.items[2].supported_languages.items.len);
+    try std.testing.expectEqualStrings("sql", graph.macros.items[2].supported_languages.items[0]);
+    try std.testing.expect(graph.macros.items[2].has_supported_languages);
+    try std.testing.expectEqualStrings("macro.demo.materialization_incremental_duckdb", graph.macros.items[3].unique_id);
+    try std.testing.expectEqualStrings("materialization_incremental_duckdb", graph.macros.items[3].name);
+    try std.testing.expectEqual(@as(usize, 1), graph.macros.items[3].supported_languages.items.len);
+    try std.testing.expectEqualStrings("sql", graph.macros.items[3].supported_languages.items[0]);
+    try std.testing.expect(graph.macros.items[3].has_supported_languages);
+    try std.testing.expectEqualStrings("macro.demo.materialization_empty_langs_default", graph.macros.items[4].unique_id);
+    try std.testing.expectEqualStrings("materialization_empty_langs_default", graph.macros.items[4].name);
+    try std.testing.expectEqual(@as(usize, 0), graph.macros.items[4].supported_languages.items.len);
+    try std.testing.expect(graph.macros.items[4].has_supported_languages);
+    try std.testing.expectEqualStrings("macro.demo.materialization_tuple_langs_default", graph.macros.items[5].unique_id);
+    try std.testing.expectEqualStrings("materialization_tuple_langs_default", graph.macros.items[5].name);
+    try std.testing.expectEqual(@as(usize, 1), graph.macros.items[5].supported_languages.items.len);
+    try std.testing.expectEqualStrings("sql", graph.macros.items[5].supported_languages.items[0]);
+    try std.testing.expect(graph.macros.items[5].has_supported_languages);
+}
+
+test "parseMacrosFromText rejects mismatched macro block end tags" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try std.testing.expectError(
+        error.MalformedMacroBlock,
+        parseMacrosFromText(
+            allocator,
+            "{% materialization table, default %}select 1{% endmacro %}",
+            "macros/broken.sql",
+            "demo",
+            &graph,
+        ),
+    );
+    try std.testing.expectError(
+        error.MalformedMacroBlock,
+        parseMacrosFromText(
+            allocator,
+            "{% test positive_value(model, column_name) %}select 1{% endmacro %}",
+            "macros/broken.sql",
+            "demo",
+            &graph,
+        ),
+    );
+}
+
+test "parseMacrosFromText rejects unsupported materialization languages" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try std.testing.expectError(
+        error.MalformedMacroBlock,
+        parseMacrosFromText(
+            allocator,
+            "{% materialization table, supported_languages=['r'] %}select 1{% endmaterialization %}",
+            "macros/broken.sql",
+            "demo",
+            &graph,
+        ),
+    );
+    try std.testing.expectError(
+        error.MalformedMacroBlock,
+        parseMacrosFromText(
+            allocator,
+            "{% materialization table, supported_languages=['SQL'] %}select 1{% endmaterialization %}",
+            "macros/broken.sql",
+            "demo",
+            &graph,
+        ),
+    );
+    try std.testing.expectError(
+        error.MalformedMacroBlock,
+        parseMacrosFromText(
+            allocator,
+            "{% materialization table, supported_languages=('sql') %}select 1{% endmaterialization %}",
+            "macros/broken.sql",
+            "demo",
+            &graph,
+        ),
+    );
+    try std.testing.expectError(
+        error.MalformedMacroBlock,
+        parseMacrosFromText(
+            allocator,
+            "{% materialization table, adapter=duckdb %}select 1{% endmaterialization %}",
+            "macros/broken.sql",
+            "demo",
+            &graph,
+        ),
+    );
+}
+
+test "parseMacrosFromText ignores Jinja comments and raw blocks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const sql =
+        \\{# {% materialization ignored, default %}
+        \\    select 1
+        \\{% endmaterialization %} #}
+        \\{% raw %}
+        \\{% test also_ignored(model) %}
+        \\    select 1
+        \\{% endtest %}
+        \\{% endraw %}
+        \\{% raw %}
+        \\{% macro broken(
+        \\{% endraw %}
+        \\{{ "{% macro also_ignored() %}{% endmacro %}" }}
+        \\{% macro actual() %}
+        \\    select 1
+        \\{% endmacro %}
+    ;
+
+    try parseMacrosFromText(allocator, sql, "macros/comments.sql", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.macros.items.len);
+    try std.testing.expectEqualStrings("macro.demo.actual", graph.macros.items[0].unique_id);
+    try std.testing.expectEqualStrings("actual", graph.macros.items[0].name);
+}
+
+test "parseMacrosFromText ignores end tags inside comments raw blocks and expressions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const sql =
+        \\{% materialization table, default %}
+        \\    {# {% endmaterialization %} #}
+        \\    {% raw %}{% endmaterialization %}{% endraw %}
+        \\    {{ "{% endmaterialization %}" }}
+        \\    select 1
+        \\{% endmaterialization %}
+        \\{% macro after() %}select 2{% endmacro %}
+    ;
+
+    try parseMacrosFromText(allocator, sql, "macros/end_tags.sql", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 2), graph.macros.items.len);
+    try std.testing.expectEqualStrings("macro.demo.materialization_table_default", graph.macros.items[0].unique_id);
+    try std.testing.expectEqualStrings(
+        \\{% materialization table, default %}
+        \\    {# {% endmaterialization %} #}
+        \\    {% raw %}{% endmaterialization %}{% endraw %}
+        \\    {{ "{% endmaterialization %}" }}
+        \\    select 1
+        \\{% endmaterialization %}
+    ,
+        graph.macros.items[0].macro_sql,
+    );
+    try std.testing.expectEqualStrings("macro.demo.after", graph.macros.items[1].unique_id);
+}
+
+test "parseMacrosFromText rejects blocks nested under top-level control flow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try std.testing.expectError(
+        error.MalformedMacroBlock,
+        parseMacrosFromText(
+            allocator,
+            "{% if execute %}{% test positive_value(model) %}select 1{% endtest %}{% endif %}",
+            "macros/nested.sql",
+            "demo",
+            &graph,
+        ),
+    );
+    try std.testing.expectError(
+        error.MalformedMacroBlock,
+        parseMacrosFromText(
+            allocator,
+            "{% for item in items %}{% macro nested() %}select 1{% endmacro %}{% endfor %}",
+            "macros/nested.sql",
+            "demo",
+            &graph,
+        ),
     );
 }
 

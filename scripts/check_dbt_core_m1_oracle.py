@@ -24,6 +24,7 @@ DEFAULT_FIXTURES = [
     "generic_test_arguments",
     "exposure_artifacts",
     "macro_artifacts",
+    "macro_block_variants",
     "macro_properties",
     "macro_paths_custom",
     "package_macro_namespace",
@@ -397,7 +398,7 @@ def compare_macro(
     packages: set[str],
 ) -> None:
     label = f"{fixture} {unique_id}"
-    for key in ["resource_type", "package_name", "name"]:
+    for key in ["resource_type", "package_name", "name", "supported_languages"]:
         assert_equal(f"{label} {key}", dxt_macro.get(key), dbt_macro.get(key))
     assert_equal(
         f"{label} depends_on.macros",
