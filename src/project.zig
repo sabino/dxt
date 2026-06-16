@@ -202,6 +202,8 @@ const GenericTestNode = struct {
     relationship_to: []const u8 = "",
     relationship_field: []const u8 = "",
     attached_node: []const u8,
+    refs: std.ArrayList(RefDep) = .empty,
+    source_refs: std.ArrayList(SourceDep) = .empty,
     depends_on: std.ArrayList([]const u8) = .empty,
     macro_depends_on: std.ArrayList([]const u8) = .empty,
 };
@@ -269,6 +271,8 @@ fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
 
 fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
     test_node.accepted_values.deinit(allocator);
+    test_node.refs.deinit(allocator);
+    test_node.source_refs.deinit(allocator);
     test_node.depends_on.deinit(allocator);
     test_node.macro_depends_on.deinit(allocator);
 }
@@ -1809,11 +1813,14 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
         try test_node.accepted_values.append(graph.allocator, value);
     }
     if (std.mem.eql(u8, test_def.name, "relationships")) {
-        const target_name = try refTargetName(graph.allocator, test_def.relationship_to);
-        const target_unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ graph.project_name, target_name });
+        const target_ref = try refDepFromValue(graph.allocator, test_def.relationship_to);
+        try test_node.refs.append(graph.allocator, target_ref);
+        const target_package = target_ref.package orelse graph.project_name;
+        const target_unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ target_package, target_ref.name });
         if (!hasNode(graph, target_unique_id)) return error.UnresolvedRef;
         try test_node.depends_on.append(graph.allocator, target_unique_id);
     }
+    try test_node.refs.append(graph.allocator, .{ .package = null, .name = node.name });
     try test_node.depends_on.append(graph.allocator, node.unique_id);
     try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
     if (!std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
@@ -2927,7 +2934,11 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, project_name
     try writeStringArray(writer, node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try writeStringArray(writer, node.depends_on.items);
-    try writer.writeAll("}}");
+    try writer.writeAll("},\"refs\":");
+    try writeRefDeps(writer, node.refs.items);
+    try writer.writeAll(",\"sources\":");
+    try writeSourceDeps(writer, node.source_refs.items);
+    try writer.writeAll("}");
 }
 
 fn writeSeedNode(writer: *Io.Writer, project_name: []const u8, node: Node) !void {
@@ -3002,7 +3013,11 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, projec
     try writeStringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try writeStringArray(writer, test_node.depends_on.items);
-    try writer.writeAll("}}");
+    try writer.writeAll("},\"refs\":");
+    try writeRefDeps(writer, test_node.refs.items);
+    try writer.writeAll(",\"sources\":");
+    try writeSourceDeps(writer, test_node.source_refs.items);
+    try writer.writeAll("}");
 }
 
 fn writeStringArray(writer: *Io.Writer, values: []const []const u8) !void {
@@ -3403,17 +3418,21 @@ fn modelNameFromUniqueId(unique_id: []const u8) []const u8 {
     return unique_id;
 }
 
-fn refTargetName(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+fn refDepFromValue(allocator: std.mem.Allocator, value: []const u8) !RefDep {
     const trimmed = std.mem.trim(u8, value, " \t\r");
     if (std.mem.startsWith(u8, trimmed, "ref(")) {
         const open = std.mem.indexOfScalar(u8, trimmed, '(') orelse return error.UnsupportedRef;
         const close = findMatchingParen(trimmed, open) orelse return error.UnsupportedRef;
         const args = std.mem.trim(u8, trimmed[open + 1 .. close], " \t\r");
-        var pieces = std.mem.splitScalar(u8, args, ',');
-        const first = pieces.next() orelse return error.UnsupportedRef;
-        return try dupTrimmedScalar(allocator, first);
+        var strings = try parseLiteralArgs(allocator, args, error.UnsupportedRef);
+        defer strings.deinit(allocator);
+        if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedRef;
+        return .{
+            .package = if (strings.items.len == 2) strings.items[0] else null,
+            .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
+        };
     }
-    return try dupTrimmedScalar(allocator, trimmed);
+    return .{ .package = null, .name = try dupTrimmedScalar(allocator, trimmed) };
 }
 
 fn modelNameFromPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {

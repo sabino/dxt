@@ -323,6 +323,8 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert model_test["column_name"] is None
     assert model_test["depends_on"]["macros"] == ["macro.dbt.test_unique"]
     assert model_test["depends_on"]["nodes"] == ["model.model_properties.customers"]
+    assert model_test["refs"] == [{"name": "customers", "package": None, "version": None}]
+    assert model_test["sources"] == []
     assert model_test["test_metadata"] == {
         "name": "unique",
         "kwargs": {"model": "{{ get_where_subquery(ref('customers')) }}"},
@@ -341,6 +343,8 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert column_test["column_name"] == "customer_id"
     assert column_test["depends_on"]["macros"] == ["macro.dbt.test_not_null"]
     assert column_test["depends_on"]["nodes"] == ["model.model_properties.customers"]
+    assert column_test["refs"] == [{"name": "customers", "package": None, "version": None}]
+    assert column_test["sources"] == []
     assert column_test["test_metadata"] == {
         "name": "not_null",
         "kwargs": {
@@ -450,6 +454,8 @@ def test_parse_generic_test_arguments(tmp_path: Path):
         "macro.dbt.get_where_subquery",
     ]
     assert accepted["depends_on"]["nodes"] == ["model.generic_test_arguments.orders"]
+    assert accepted["refs"] == [{"name": "orders", "package": None, "version": None}]
+    assert accepted["sources"] == []
     assert accepted["test_metadata"] == {
         "name": "accepted_values",
         "kwargs": {
@@ -465,6 +471,8 @@ def test_parse_generic_test_arguments(tmp_path: Path):
     assert accepted_block["alias"] == "accepted_values_orders_status_block__placed__shipped"
     assert accepted_block["path"] == "accepted_values_orders_status_block__placed__shipped.sql"
     assert accepted_block["column_name"] == "status_block"
+    assert accepted_block["refs"] == [{"name": "orders", "package": None, "version": None}]
+    assert accepted_block["sources"] == []
     assert accepted_block["test_metadata"]["kwargs"]["values"] == ["placed", "shipped"]
 
     relationships = manifest["nodes"][relationships_id]
@@ -481,6 +489,11 @@ def test_parse_generic_test_arguments(tmp_path: Path):
         "model.generic_test_arguments.customers",
         "model.generic_test_arguments.orders",
     ]
+    assert relationships["refs"] == [
+        {"name": "customers", "package": None, "version": None},
+        {"name": "orders", "package": None, "version": None},
+    ]
+    assert relationships["sources"] == []
     assert relationships["test_metadata"] == {
         "name": "relationships",
         "kwargs": {
@@ -740,6 +753,8 @@ def test_parse_ref_dependency_maps_are_deterministic(tmp_path: Path):
     manifest = json.loads(first_manifest)
     customer = manifest["nodes"]["model.model_ref.customers"]
     assert customer["depends_on"]["nodes"] == ["model.model_ref.stg_customers"]
+    assert customer["refs"] == [{"name": "stg_customers", "package": None, "version": None}]
+    assert customer["sources"] == []
     assert manifest["parent_map"]["model.model_ref.customers"] == ["model.model_ref.stg_customers"]
     assert manifest["child_map"]["model.model_ref.stg_customers"] == ["model.model_ref.customers"]
 
@@ -761,6 +776,8 @@ def test_parse_source_dependency(tmp_path: Path):
     assert node["patch_path"] == "source_ref://models/schema.yml"
     assert node["config"]["tags"] == ["staging"]
     assert node["depends_on"]["nodes"] == ["source.source_ref.raw.customers"]
+    assert node["refs"] == []
+    assert node["sources"] == [["raw", "customers"]]
 
 
 def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
