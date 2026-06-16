@@ -141,6 +141,86 @@ pub fn resolveDependencies(graph: *Graph) !void {
     }
 }
 
+pub fn rejectDuplicateModels(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.nodes.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.nodes.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.nodes.items[i].resource_type, "model") and
+                std.mem.eql(u8, graph.nodes.items[j].resource_type, "model") and
+                std.mem.eql(u8, graph.nodes.items[i].unique_id, graph.nodes.items[j].unique_id))
+            {
+                return error.DuplicateModelName;
+            }
+        }
+    }
+}
+
+pub fn rejectDuplicateSeeds(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.nodes.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.nodes.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.nodes.items[i].resource_type, "seed") and
+                std.mem.eql(u8, graph.nodes.items[j].resource_type, "seed") and
+                std.mem.eql(u8, graph.nodes.items[i].unique_id, graph.nodes.items[j].unique_id))
+            {
+                return error.DuplicateSeedName;
+            }
+        }
+    }
+}
+
+pub fn rejectDuplicateDocs(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.docs.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.docs.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.docs.items[i].unique_id, graph.docs.items[j].unique_id)) {
+                return error.DuplicateDocName;
+            }
+        }
+    }
+}
+
+pub fn rejectDuplicateExposures(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.exposures.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.exposures.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.exposures.items[i].unique_id, graph.exposures.items[j].unique_id)) {
+                return error.DuplicateExposureName;
+            }
+        }
+    }
+}
+
+pub fn rejectDuplicateMacroProperties(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.macro_properties.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.macro_properties.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.macro_properties.items[i].package_name, graph.macro_properties.items[j].package_name) and
+                std.mem.eql(u8, graph.macro_properties.items[i].name, graph.macro_properties.items[j].name))
+            {
+                return error.DuplicateMacroProperty;
+            }
+        }
+    }
+}
+
+pub fn rejectDuplicateMacros(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.macros.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.macros.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.macros.items[i].unique_id, graph.macros.items[j].unique_id)) {
+                return error.DuplicateMacroName;
+            }
+        }
+    }
+}
+
 fn hasNode(graph: *const Graph, unique_id: []const u8) bool {
     for (graph.nodes.items) |node| {
         if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return true;
@@ -299,6 +379,42 @@ test "source resolution prefers current package and errors on ambiguous fallback
     try std.testing.expectEqualStrings("source.pkg.raw.orders", try resolveSourceDependency(&graph, "pkg", .{ .source_name = "raw", .table_name = "orders" }));
     try std.testing.expectError(error.UnresolvedSource, resolveSourceDependency(&graph, "demo", .{ .source_name = "raw", .table_name = "orders" }));
     try std.testing.expectError(error.UnresolvedSource, resolveSourceDependency(&graph, "demo", .{ .source_name = "raw", .table_name = "missing" }));
+}
+
+test "duplicate validation rejects duplicate model and seed unique ids" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
+    defer graph.deinit();
+
+    try appendNode(&graph, "model", "demo", "model.demo.customers", "customers", true);
+    try appendNode(&graph, "model", "demo", "model.demo.customers", "customers", true);
+    try appendNode(&graph, "seed", "demo", "seed.demo.raw_customers", "raw_customers", true);
+    try appendNode(&graph, "seed", "demo", "seed.demo.raw_customers", "raw_customers", true);
+
+    try std.testing.expectError(error.DuplicateModelName, rejectDuplicateModels(&graph));
+    try std.testing.expectError(error.DuplicateSeedName, rejectDuplicateSeeds(&graph));
+}
+
+test "duplicate validation rejects docs exposures macros and macro properties" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.docs.append(graph.allocator, .{ .package_name = "demo", .unique_id = "doc.demo.orders", .name = "orders", .path = "", .original_file_path = "", .block_contents = "" });
+    try graph.docs.append(graph.allocator, .{ .package_name = "demo", .unique_id = "doc.demo.orders", .name = "orders", .path = "", .original_file_path = "", .block_contents = "" });
+    try graph.exposures.append(graph.allocator, .{ .package_name = "demo", .unique_id = "exposure.demo.weekly_kpis", .name = "weekly_kpis", .path = "", .original_file_path = "" });
+    try graph.exposures.append(graph.allocator, .{ .package_name = "demo", .unique_id = "exposure.demo.weekly_kpis", .name = "weekly_kpis", .path = "", .original_file_path = "" });
+    try appendMacro(&graph, "demo", "format_id");
+    try appendMacro(&graph, "demo", "format_id");
+    try graph.macro_properties.append(graph.allocator, .{ .package_name = "demo", .name = "format_id", .patch_path = "macros/schema.yml" });
+    try graph.macro_properties.append(graph.allocator, .{ .package_name = "demo", .name = "format_id", .patch_path = "macros/schema.yml" });
+
+    try std.testing.expectError(error.DuplicateDocName, rejectDuplicateDocs(&graph));
+    try std.testing.expectError(error.DuplicateExposureName, rejectDuplicateExposures(&graph));
+    try std.testing.expectError(error.DuplicateMacroName, rejectDuplicateMacros(&graph));
+    try std.testing.expectError(error.DuplicateMacroProperty, rejectDuplicateMacroProperties(&graph));
 }
 
 test "dependency resolution populates sorted unique node and exposure dependencies" {
