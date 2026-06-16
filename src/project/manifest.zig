@@ -236,7 +236,11 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
     try writeStringArray(writer, macro.macro_depends_on.items);
     try writer.writeAll("},\"description\":");
     try writeJsonString(writer, macro.description);
-    try writer.writeAll(",\"meta\":{},\"docs\":{\"show\":true,\"node_color\":null},\"patch_path\":");
+    try writer.writeAll(",\"meta\":");
+    try writeMetaObject(writer, macro.meta.items);
+    try writer.writeAll(",\"docs\":");
+    try writeDocsConfig(writer, macro.docs);
+    try writer.writeAll(",\"patch_path\":");
     if (macro.patch_path) |patch_path| {
         const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ macro.package_name, util.normalizeForDisplay(patch_path) });
         defer allocator.free(dbt_patch_path);

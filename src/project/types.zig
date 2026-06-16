@@ -135,6 +135,8 @@ pub const MacroDef = struct {
     macro_sql: []const u8,
     patch_path: ?[]const u8 = null,
     description: []const u8 = "",
+    meta: std.ArrayList(MetaEntry) = .empty,
+    docs: DocsConfig = .{},
     arguments: std.ArrayList(MacroArgument) = .empty,
     macro_depends_on: std.ArrayList([]const u8) = .empty,
     supported_languages: std.ArrayList([]const u8) = .empty,
@@ -170,6 +172,8 @@ pub const MacroProperty = struct {
     name: []const u8,
     patch_path: []const u8,
     description: []const u8 = "",
+    meta: std.ArrayList(MetaEntry) = .empty,
+    docs: DocsConfig = .{},
     arguments: std.ArrayList(MacroArgument) = .empty,
 };
 
@@ -315,6 +319,7 @@ fn deinitExposureDef(allocator: std.mem.Allocator, exposure: *ExposureDef) void 
 }
 
 fn deinitMacro(allocator: std.mem.Allocator, macro: *MacroDef) void {
+    macro.meta.deinit(allocator);
     macro.arguments.deinit(allocator);
     macro.macro_depends_on.deinit(allocator);
     macro.supported_languages.deinit(allocator);
@@ -332,6 +337,7 @@ fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) v
 }
 
 fn deinitMacroProperty(allocator: std.mem.Allocator, property: *MacroProperty) void {
+    property.meta.deinit(allocator);
     property.arguments.deinit(allocator);
 }
 
