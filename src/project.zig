@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const project_config = @import("project/config.zig");
 const project_fs = @import("project/fs.zig");
+const project_jinja = @import("project/jinja.zig");
 const manifest = @import("project/manifest.zig");
 const selector = @import("project/selector.zig");
 const types = @import("project/types.zig");
@@ -43,6 +44,16 @@ const splitKeyValue = util.splitKeyValue;
 const parseInlineStringList = util.parseInlineStringList;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 const sortStrings = util.sortStrings;
+const findKeyword = project_jinja.findKeyword;
+const findMatchingParen = project_jinja.findMatchingParen;
+const findValueStart = project_jinja.findValueStart;
+const isIdentChar = project_jinja.isIdentChar;
+const isIdentStart = project_jinja.isIdentStart;
+const parseLiteralArgs = project_jinja.parseLiteralArgs;
+const parseQuoted = project_jinja.parseQuoted;
+const readJinjaCall = project_jinja.readJinjaCall;
+const skipQuotedSpan = project_jinja.skipQuotedSpan;
+const skipWs = project_jinja.skipWs;
 
 pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try loadGraph(runtime, options.project_dir);
@@ -1380,41 +1391,6 @@ fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*
     }
 }
 
-const JinjaCall = struct {
-    package_name: ?[]const u8,
-    name: []const u8,
-    open: usize,
-    close: usize,
-};
-
-fn readJinjaCall(span: []const u8, first_ident: []const u8, first_ident_end: usize) !?JinjaCall {
-    if (first_ident_end < span.len and span[first_ident_end] == '.') {
-        const name_start = first_ident_end + 1;
-        if (name_start >= span.len or !isIdentStart(span[name_start])) return error.UnsupportedJinja;
-        var name_end = name_start + 1;
-        while (name_end < span.len and isIdentChar(span[name_end])) name_end += 1;
-        const call_pos = skipWs(span, name_end);
-        if (call_pos >= span.len or span[call_pos] != '(') return null;
-        const close = findMatchingParen(span, call_pos) orelse return error.UnsupportedJinja;
-        return .{
-            .package_name = first_ident,
-            .name = span[name_start..name_end],
-            .open = call_pos,
-            .close = close,
-        };
-    }
-
-    const call_pos = skipWs(span, first_ident_end);
-    if (call_pos >= span.len or span[call_pos] != '(') return null;
-    const close = findMatchingParen(span, call_pos) orelse return error.UnsupportedJinja;
-    return .{
-        .package_name = null,
-        .name = first_ident,
-        .open = call_pos,
-        .close = close,
-    };
-}
-
 fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, graph: ?*const Graph) !void {
     var i: usize = 0;
     while (i < span.len) {
@@ -1535,30 +1511,6 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
     }
 }
 
-fn parseLiteralArgs(allocator: std.mem.Allocator, args: []const u8, unsupported_error: anyerror) !std.ArrayList([]const u8) {
-    var strings: std.ArrayList([]const u8) = .empty;
-    errdefer strings.deinit(allocator);
-
-    var i: usize = 0;
-    var saw_literal = false;
-    while (i < args.len) {
-        i = skipWs(args, i);
-        if (i >= args.len) break;
-        if (args[i] == ',') {
-            i += 1;
-            continue;
-        }
-        if (args[i] != '"' and args[i] != '\'') return unsupported_error;
-        const parsed = try parseQuoted(allocator, args, i);
-        try strings.append(allocator, parsed.value);
-        saw_literal = true;
-        i = skipWs(args, parsed.next);
-        if (i < args.len and args[i] != ',') return unsupported_error;
-    }
-    if (!saw_literal) return unsupported_error;
-    return strings;
-}
-
 fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !void {
     if (findKeyword(args, "materialized")) |pos| {
         if (findValueStart(args, pos + "materialized".len)) |value_pos| {
@@ -1599,44 +1551,6 @@ fn parseTagList(allocator: std.mem.Allocator, text: []const u8, tags: *std.Array
         try appendUnique(allocator, tags, parsed.value);
         i = parsed.next;
     }
-}
-
-const ParsedString = struct {
-    value: []const u8,
-    next: usize,
-};
-
-fn parseQuoted(allocator: std.mem.Allocator, text: []const u8, start: usize) !ParsedString {
-    const quote = text[start];
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var i = start + 1;
-    while (i < text.len) : (i += 1) {
-        const ch = text[i];
-        if (ch == quote) {
-            return .{ .value = try out.toOwnedSlice(allocator), .next = i + 1 };
-        }
-        if (ch == '\\' and i + 1 < text.len) {
-            i += 1;
-            try out.append(allocator, text[i]);
-        } else {
-            try out.append(allocator, ch);
-        }
-    }
-    return error.UnsupportedJinja;
-}
-
-fn skipQuotedSpan(text: []const u8, start: usize) ?usize {
-    const quote = text[start];
-    var i = start + 1;
-    while (i < text.len) : (i += 1) {
-        if (text[i] == '\\' and i + 1 < text.len) {
-            i += 1;
-            continue;
-        }
-        if (text[i] == quote) return i + 1;
-    }
-    return null;
 }
 
 fn parseInlineGenericTestList(allocator: std.mem.Allocator, value: []const u8, out: *std.ArrayList(GenericTestDef)) !void {
@@ -1972,66 +1886,6 @@ fn sortColumns(columns: []ColumnDef) void {
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lessThan);
-}
-
-fn skipWs(text: []const u8, start: usize) usize {
-    var i = start;
-    while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\r' or text[i] == '\n')) i += 1;
-    return i;
-}
-
-fn findMatchingParen(text: []const u8, open: usize) ?usize {
-    var depth: usize = 0;
-    var quote: ?u8 = null;
-    var i = open;
-    while (i < text.len) : (i += 1) {
-        const ch = text[i];
-        if (quote) |q| {
-            if (ch == '\\' and i + 1 < text.len) {
-                i += 1;
-                continue;
-            }
-            if (ch == q) quote = null;
-            continue;
-        }
-        if (ch == '"' or ch == '\'') {
-            quote = ch;
-        } else if (ch == '(') {
-            depth += 1;
-        } else if (ch == ')') {
-            depth -= 1;
-            if (depth == 0) return i;
-        }
-    }
-    return null;
-}
-
-fn isIdentStart(ch: u8) bool {
-    return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or ch == '_';
-}
-
-fn isIdentChar(ch: u8) bool {
-    return isIdentStart(ch) or (ch >= '0' and ch <= '9');
-}
-
-fn findKeyword(text: []const u8, keyword: []const u8) ?usize {
-    var i: usize = 0;
-    while (std.mem.indexOfPos(u8, text, i, keyword)) |pos| {
-        const before_ok = pos == 0 or !isIdentChar(text[pos - 1]);
-        const after = pos + keyword.len;
-        const after_ok = after >= text.len or !isIdentChar(text[after]);
-        if (before_ok and after_ok) return pos;
-        i = after;
-    }
-    return null;
-}
-
-fn findValueStart(text: []const u8, start: usize) ?usize {
-    var i = skipWs(text, start);
-    if (i >= text.len or text[i] != '=') return null;
-    i = skipWs(text, i + 1);
-    if (i >= text.len) return null;
-    return i;
 }
 
 fn hasNode(graph: *const Graph, unique_id: []const u8) bool {
