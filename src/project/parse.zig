@@ -1,15 +1,18 @@
 const std = @import("std");
 const jinja = @import("jinja.zig");
+const resolve = @import("resolve.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 
 const JsonScalar = types.JsonScalar;
 const GenericTestDef = types.GenericTestDef;
 const Graph = types.Graph;
+const MacroArgument = types.MacroArgument;
 const RefDep = types.RefDep;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 const findMatchingParen = jinja.findMatchingParen;
 const parseLiteralArgs = jinja.parseLiteralArgs;
+const findMacroIndexByPackageAndName = resolve.findMacroIndexByPackageAndName;
 
 pub fn parseBool(value: []const u8) !bool {
     const trimmed = std.mem.trim(u8, value, " \t\r");
@@ -99,6 +102,32 @@ pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTes
         try cloned.accepted_values.append(graph.allocator, value);
     }
     try tests.append(graph.allocator, cloned);
+}
+
+pub fn applyMacroProperties(graph: *Graph) !void {
+    for (graph.macro_properties.items) |property| {
+        const macro_index = findMacroIndexByPackageAndName(graph, property.package_name, property.name) orelse {
+            try graph.unmatched_macro_properties.append(graph.allocator, .{ .name = property.name, .patch_path = property.patch_path });
+            continue;
+        };
+        var macro = &graph.macros.items[macro_index];
+        macro.patch_path = property.patch_path;
+        if (property.description.len != 0) macro.description = property.description;
+        for (property.arguments.items) |argument| {
+            try appendMacroArgumentClone(graph, &macro.arguments, argument);
+        }
+    }
+}
+
+fn appendMacroArgumentClone(graph: *Graph, arguments: *std.ArrayList(MacroArgument), source: MacroArgument) !void {
+    for (arguments.items) |*existing| {
+        if (std.mem.eql(u8, existing.name, source.name)) {
+            if (source.type.len != 0) existing.type = source.type;
+            if (source.description.len != 0) existing.description = source.description;
+            return;
+        }
+    }
+    try arguments.append(graph.allocator, source);
 }
 
 pub fn refDepFromValue(allocator: std.mem.Allocator, value: []const u8) !RefDep {
@@ -366,6 +395,78 @@ test "appendGenericTestDefClone copies nested accepted values list" {
     try std.testing.expectEqual(@as(usize, 2), clones.items[0].accepted_values.items.len);
     try std.testing.expectEqualStrings("placed", clones.items[0].accepted_values.items[0]);
     try std.testing.expectEqualStrings("returned", clones.items[0].accepted_values.items[1]);
+}
+
+test "applyMacroProperties applies descriptions patch paths and merges arguments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.macros.append(allocator, .{
+        .unique_id = "macro.demo.format_id",
+        .package_name = "demo",
+        .name = "format_id",
+        .path = "macros/format_id.sql",
+        .original_file_path = "macros/format_id.sql",
+        .macro_sql = "",
+    });
+    try graph.macros.items[0].arguments.append(allocator, .{
+        .name = "column_name",
+        .type = "string",
+        .description = "",
+    });
+
+    try graph.macro_properties.append(allocator, .{
+        .package_name = "demo",
+        .name = "format_id",
+        .patch_path = "macros/schema.yml",
+        .description = "Formats an identifier.",
+    });
+    try graph.macro_properties.items[0].arguments.append(allocator, .{
+        .name = "column_name",
+        .type = "",
+        .description = "Identifier expression.",
+    });
+    try graph.macro_properties.items[0].arguments.append(allocator, .{
+        .name = "quote",
+        .type = "bool",
+        .description = "Whether to quote.",
+    });
+
+    try applyMacroProperties(&graph);
+
+    try std.testing.expectEqualStrings("macros/schema.yml", graph.macros.items[0].patch_path.?);
+    try std.testing.expectEqualStrings("Formats an identifier.", graph.macros.items[0].description);
+    try std.testing.expectEqual(@as(usize, 2), graph.macros.items[0].arguments.items.len);
+    try std.testing.expectEqualStrings("column_name", graph.macros.items[0].arguments.items[0].name);
+    try std.testing.expectEqualStrings("string", graph.macros.items[0].arguments.items[0].type);
+    try std.testing.expectEqualStrings("Identifier expression.", graph.macros.items[0].arguments.items[0].description);
+    try std.testing.expectEqualStrings("quote", graph.macros.items[0].arguments.items[1].name);
+    try std.testing.expectEqualStrings("bool", graph.macros.items[0].arguments.items[1].type);
+}
+
+test "applyMacroProperties records unmatched macro properties" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.macro_properties.append(allocator, .{
+        .package_name = "demo",
+        .name = "missing_macro",
+        .patch_path = "macros/schema.yml",
+    });
+
+    try applyMacroProperties(&graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.unmatched_macro_properties.items.len);
+    try std.testing.expectEqualStrings("missing_macro", graph.unmatched_macro_properties.items[0].name);
+    try std.testing.expectEqualStrings("macros/schema.yml", graph.unmatched_macro_properties.items[0].patch_path);
 }
 
 test "refDepFromValue parses relationship target refs and raw model names" {

@@ -23,9 +23,7 @@ const ColumnDef = types.ColumnDef;
 const GenericTestDef = types.GenericTestDef;
 const DocBlock = types.DocBlock;
 const MacroDef = types.MacroDef;
-const MacroArgument = types.MacroArgument;
 const ModelProperty = types.ModelProperty;
-const MacroProperty = types.MacroProperty;
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
 const Graph = types.Graph;
@@ -49,6 +47,7 @@ const splitKeyValue = util.splitKeyValue;
 const parseInlineStringList = util.parseInlineStringList;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 const sortStrings = util.sortStrings;
+const applyMacroProperties = project_parse.applyMacroProperties;
 const appendGenericTestDef = project_parse.appendGenericTestDef;
 const appendGenericTestDefClone = project_parse.appendGenericTestDefClone;
 const parseBool = project_parse.parseBool;
@@ -68,7 +67,6 @@ const countActiveExposures = project_resolve.countActiveExposures;
 const countActiveNodes = project_resolve.countActiveNodes;
 const countActiveSeeds = project_resolve.countActiveSeeds;
 const findDoc = project_resolve.findDoc;
-const findMacroIndexByPackageAndName = project_resolve.findMacroIndexByPackageAndName;
 const findModelIndexByName = project_resolve.findModelIndexByName;
 const rejectDuplicateDocs = project_resolve.rejectDuplicateDocs;
 const rejectDuplicateExposures = project_resolve.rejectDuplicateExposures;
@@ -998,21 +996,6 @@ fn parseSeed(runtime: Runtime, seed_root: []const u8, relative_path: []const u8,
     try graph.nodes.append(runtime.allocator, node);
 }
 
-fn applyMacroProperties(graph: *Graph) !void {
-    for (graph.macro_properties.items) |property| {
-        const macro_index = findMacroIndexByPackageAndName(graph, property.package_name, property.name) orelse {
-            try graph.unmatched_macro_properties.append(graph.allocator, .{ .name = property.name, .patch_path = property.patch_path });
-            continue;
-        };
-        var macro = &graph.macros.items[macro_index];
-        macro.patch_path = property.patch_path;
-        if (property.description.len != 0) macro.description = property.description;
-        for (property.arguments.items) |argument| {
-            try appendMacroArgumentClone(graph, &macro.arguments, argument);
-        }
-    }
-}
-
 fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
     for (graph.model_properties.items) |property| {
         if (!std.mem.eql(u8, property.package_name, package_name)) continue;
@@ -1171,17 +1154,6 @@ fn resolveDocDescription(graph: *Graph, package_name: []const u8, description: [
     try appendUnique(graph.allocator, doc_blocks, doc.unique_id);
     sortStrings(doc_blocks.items);
     return doc.block_contents;
-}
-
-fn appendMacroArgumentClone(graph: *Graph, arguments: *std.ArrayList(MacroArgument), source: MacroArgument) !void {
-    for (arguments.items) |*existing| {
-        if (std.mem.eql(u8, existing.name, source.name)) {
-            if (source.type.len != 0) existing.type = source.type;
-            if (source.description.len != 0) existing.description = source.description;
-            return;
-        }
-    }
-    try arguments.append(graph.allocator, source);
 }
 
 fn appendMetaEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(MetaEntry), key: []const u8, value: JsonScalar) !void {
