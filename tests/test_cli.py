@@ -664,6 +664,78 @@ def test_parse_macro_artifacts_and_model_macro_dependency(tmp_path: Path):
     ]
 
 
+def test_parse_macro_block_variants(tmp_path: Path):
+    project = copy_fixture(tmp_path, "macro_block_variants")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert_manifest_schema_slice(project / "target-dxt" / "manifest.json")
+    assert sorted(manifest["macros"]) == [
+        "macro.macro_block_variants.format_id",
+        "macro.macro_block_variants.materialization_empty_langs_default",
+        "macro.macro_block_variants.materialization_incremental_default",
+        "macro.macro_block_variants.materialization_snapshot_duckdb",
+        "macro.macro_block_variants.materialization_table_default",
+        "macro.macro_block_variants.materialization_tuple_langs_default",
+        "macro.macro_block_variants.materialization_view_duckdb",
+        "macro.macro_block_variants.test_positive_value",
+    ]
+
+    test_macro = manifest["macros"]["macro.macro_block_variants.test_positive_value"]
+    assert test_macro["name"] == "test_positive_value"
+    assert test_macro["macro_sql"] == (
+        "{% test positive_value(model, column_name) %}\n"
+        "    select * from {{ model }} where {{ column_name }} <= 0\n"
+        "{% endtest %}"
+    )
+    assert test_macro["supported_languages"] is None
+
+    default_materialization = manifest["macros"]["macro.macro_block_variants.materialization_table_default"]
+    assert default_materialization["name"] == "materialization_table_default"
+    assert default_materialization["supported_languages"] == ["sql"]
+
+    no_option_materialization = manifest["macros"]["macro.macro_block_variants.materialization_incremental_default"]
+    assert no_option_materialization["name"] == "materialization_incremental_default"
+    assert no_option_materialization["supported_languages"] == ["sql"]
+
+    reordered_materialization = manifest["macros"]["macro.macro_block_variants.materialization_snapshot_duckdb"]
+    assert reordered_materialization["name"] == "materialization_snapshot_duckdb"
+    assert reordered_materialization["supported_languages"] == ["sql"]
+    assert reordered_materialization["macro_sql"] == (
+        "{% materialization snapshot, supported_languages=['sql'], adapter='duckdb' %}\n"
+        "    {{ return({'relations': []}) }}\n"
+        "{% endmaterialization %}"
+    )
+
+    empty_langs_materialization = manifest["macros"]["macro.macro_block_variants.materialization_empty_langs_default"]
+    assert empty_langs_materialization["name"] == "materialization_empty_langs_default"
+    assert empty_langs_materialization["supported_languages"] == []
+
+    tuple_langs_materialization = manifest["macros"]["macro.macro_block_variants.materialization_tuple_langs_default"]
+    assert tuple_langs_materialization["name"] == "materialization_tuple_langs_default"
+    assert tuple_langs_materialization["supported_languages"] == ["sql"]
+    assert tuple_langs_materialization["macro_sql"] == (
+        "{% materialization tuple_langs, supported_languages=('sql',), default %}\n"
+        "    {{ return({'relations': []}) }}\n"
+        "{% endmaterialization %}"
+    )
+
+    duckdb_materialization = manifest["macros"]["macro.macro_block_variants.materialization_view_duckdb"]
+    assert duckdb_materialization["name"] == "materialization_view_duckdb"
+    assert duckdb_materialization["supported_languages"] == ["sql", "python"]
+    assert duckdb_materialization["macro_sql"] == (
+        "{% materialization view, adapter='duckdb', supported_languages=['sql', 'python'] %}\n"
+        "    {{ return({'relations': []}) }}\n"
+        "{% endmaterialization %}"
+    )
+
+
 def test_parse_package_macro_namespaces(tmp_path: Path):
     project = copy_fixture(tmp_path, "package_macro_namespace")
     result = subprocess.run(

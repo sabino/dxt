@@ -246,7 +246,13 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
     }
     try writer.writeAll(",\"arguments\":");
     try writeMacroArguments(writer, macro.arguments.items);
-    try writer.writeAll(",\"supported_languages\":null}");
+    try writer.writeAll(",\"supported_languages\":");
+    if (macro.has_supported_languages) {
+        try writeStringArray(writer, macro.supported_languages.items);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("}");
 }
 
 fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {

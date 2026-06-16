@@ -132,6 +132,8 @@ pub const MacroDef = struct {
     description: []const u8 = "",
     arguments: std.ArrayList(MacroArgument) = .empty,
     macro_depends_on: std.ArrayList([]const u8) = .empty,
+    supported_languages: std.ArrayList([]const u8) = .empty,
+    has_supported_languages: bool = false,
 };
 
 pub const MacroArgument = struct {
@@ -306,6 +308,7 @@ fn deinitExposureDef(allocator: std.mem.Allocator, exposure: *ExposureDef) void 
 fn deinitMacro(allocator: std.mem.Allocator, macro: *MacroDef) void {
     macro.arguments.deinit(allocator);
     macro.macro_depends_on.deinit(allocator);
+    macro.supported_languages.deinit(allocator);
 }
 
 fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) void {
