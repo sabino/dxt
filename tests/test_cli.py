@@ -313,6 +313,18 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert "tests" not in node["columns"]["customer_id"]
     assert node["columns"]["customer_name"]["description"] == "Display name"
 
+    ls_schema_path = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "path:models/*.yml", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_schema_path.returncode == 0, ls_schema_path.stderr
+    assert [item["unique_id"] for item in json.loads(ls_schema_path.stdout)] == [
+        "model.model_properties.customers",
+        *expected_tests,
+    ]
+
     model_test = manifest["nodes"]["test.model_properties.unique_customers_.ccc5343706"]
     assert model_test["resource_type"] == "test"
     assert model_test["name"] == "unique_customers_"
@@ -364,7 +376,18 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert ls_result.returncode == 0, ls_result.stderr
-    assert ls_result.stdout.splitlines() == ["model.model_properties.customers"]
+    assert ls_result.stdout.splitlines() == ["model.model_properties.customers", *expected_tests]
+    tag_wildcard = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:pub*", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert tag_wildcard.returncode == 0, tag_wildcard.stderr
+    assert [item["unique_id"] for item in json.loads(tag_wildcard.stdout)] == [
+        "model.model_properties.customers",
+        *expected_tests,
+    ]
 
     ls_tests = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json"],
@@ -443,6 +466,28 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         "test.model_properties.unique_customers_.ccc5343706",
         "test.model_properties.unique_customers_customer_id.c5af1ff4b1",
     ]
+    for model_selector in ("customers", "customers*", "model_properties.customers", "model_properties.customers*"):
+        ls_indirect_tests = subprocess.run(
+            [DXT, "ls", "--project-dir", str(project), "--select", model_selector, "--output", "json"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert ls_indirect_tests.returncode == 0, ls_indirect_tests.stderr
+        assert [item["unique_id"] for item in json.loads(ls_indirect_tests.stdout)] == [
+            "model.model_properties.customers",
+            "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
+            "test.model_properties.unique_customers_.ccc5343706",
+            "test.model_properties.unique_customers_customer_id.c5af1ff4b1",
+        ]
+    ls_nested_model_selector = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "model_properties.customers.*", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_nested_model_selector.returncode == 0, ls_nested_model_selector.stderr
+    assert json.loads(ls_nested_model_selector.stdout) == []
 
     ls_singular_tests = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular"],
@@ -1274,6 +1319,15 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     assert ls_tag.returncode == 0, ls_tag.stderr
     assert ls_tag.stdout.splitlines() == [exposure_id]
 
+    ls_tag_wildcard = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:b*"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_tag_wildcard.returncode == 0, ls_tag_wildcard.stderr
+    assert ls_tag_wildcard.stdout.splitlines() == [exposure_id]
+
 
 def test_ls_text_json_and_tag_selection(tmp_path: Path):
     project = copy_fixture(tmp_path, "inline_config")
@@ -1334,6 +1388,27 @@ def test_ls_multi_argv_and_repeated_selector_flags(tmp_path: Path):
     ]
     assert ls_json("--select", "+customers+", "--exclude", "orders", "--exclude", "stg_customers") == [
         "model.selector_graph.customers"
+    ]
+    assert ls_json("--select", "stg_*") == ["model.selector_graph.stg_customers"]
+    assert ls_json("--select", "*customers") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "selector_graph.*customers") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "model.selector_graph.*customers") == []
+    assert ls_json("--select", "path:models/stg_*") == ["model.selector_graph.stg_customers"]
+    assert ls_json("--select", "path:*orders.sql") == []
+    assert ls_json("--select", "path:models?orders.sql") == []
+    assert ls_json("--select", "path:models/stg?customers.sql") == ["model.selector_graph.stg_customers"]
+    assert ls_json("--select", "path:models/*orders.sql") == ["model.selector_graph.orders"]
+    assert ls_json("--select", "+stg_*") == ["model.selector_graph.stg_customers"]
+    assert ls_json("--select", "stg_*+") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
     ]
 
 
@@ -1455,6 +1530,23 @@ def test_project_model_path_configs_apply_below_inline_and_yaml_configs(tmp_path
         "model.project_model_path_config.stg_customers",
         "model.project_model_path_config.yaml_orders",
     ]
+    assert ls_text("--select", "project_model_path_config.marts.*orders") == [
+        "model.project_model_path_config.inline_orders",
+        "model.project_model_path_config.orders",
+        "model.project_model_path_config.yaml_orders",
+    ]
+    assert ls_text("--select", "marts.*orders") == [
+        "model.project_model_path_config.inline_orders",
+        "model.project_model_path_config.orders",
+        "model.project_model_path_config.yaml_orders",
+    ]
+    assert ls_text("--select", "path:models/*") == [
+        "model.project_model_path_config.customers",
+        "model.project_model_path_config.inline_orders",
+        "model.project_model_path_config.orders",
+        "model.project_model_path_config.stg_customers",
+        "model.project_model_path_config.yaml_orders",
+    ]
 
 
 def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
@@ -1478,6 +1570,68 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     )
     assert source_union.returncode == 0, source_union.stderr
     assert [item["unique_id"] for item in json.loads(source_union.stdout)] == [
+        "source.source_ref.raw.customers",
+        "source.source_ref.raw.orders",
+    ]
+    source_wildcard = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw.*", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_wildcard.returncode == 0, source_wildcard.stderr
+    assert [item["unique_id"] for item in json.loads(source_wildcard.stdout)] == [
+        "source.source_ref.raw.customers",
+        "source.source_ref.raw.orders",
+    ]
+    source_package_wildcard = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:source_ref.raw.*", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_package_wildcard.returncode == 0, source_package_wildcard.stderr
+    assert [item["unique_id"] for item in json.loads(source_package_wildcard.stdout)] == [
+        "source.source_ref.raw.customers",
+        "source.source_ref.raw.orders",
+    ]
+    source_name_wildcard = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw*", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_name_wildcard.returncode == 0, source_name_wildcard.stderr
+    assert [item["unique_id"] for item in json.loads(source_name_wildcard.stdout)] == [
+        "source.source_ref.raw.customers",
+        "source.source_ref.raw.orders",
+    ]
+    source_table_without_source = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:*orders", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_table_without_source.returncode == 0, source_table_without_source.stderr
+    assert json.loads(source_table_without_source.stdout) == []
+    for bare_source_selector in ("orders", "*orders", "source_ref.raw.*", "source.source_ref.raw.orders"):
+        bare_source = subprocess.run(
+            [DXT, "ls", "--project-dir", str(source_project), "--select", bare_source_selector, "--output", "json"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert bare_source.returncode == 0, bare_source.stderr
+        assert json.loads(bare_source.stdout) == []
+    source_path = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "path:models/*.yml", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_path.returncode == 0, source_path.stderr
+    assert [item["unique_id"] for item in json.loads(source_path.stdout)] == [
+        "model.source_ref.stg_customers",
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
@@ -1527,6 +1681,53 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     assert [item["unique_id"] for item in json.loads(exposure_union.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis",
         "model.exposure_artifacts.orders",
+    ]
+    exposure_wildcard = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:weekly_*", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_wildcard.returncode == 0, exposure_wildcard.stderr
+    assert [item["unique_id"] for item in json.loads(exposure_wildcard.stdout)] == [
+        "exposure.exposure_artifacts.weekly_kpis"
+    ]
+    exposure_package_wildcard = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:exposure_artifacts.weekly_*", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_package_wildcard.returncode == 0, exposure_package_wildcard.stderr
+    assert [item["unique_id"] for item in json.loads(exposure_package_wildcard.stdout)] == [
+        "exposure.exposure_artifacts.weekly_kpis"
+    ]
+    exposure_prefixed_unique_id = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:exposure.exposure_artifacts.weekly_kpis", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_prefixed_unique_id.returncode == 0, exposure_prefixed_unique_id.stderr
+    assert json.loads(exposure_prefixed_unique_id.stdout) == []
+    bare_exposure_unique_id = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure.exposure_artifacts.weekly_kpis", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert bare_exposure_unique_id.returncode == 0, bare_exposure_unique_id.stderr
+    assert json.loads(bare_exposure_unique_id.stdout) == []
+    exposure_path = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "path:models/*.yml", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_path.returncode == 0, exposure_path.stderr
+    assert [item["unique_id"] for item in json.loads(exposure_path.stdout)] == [
+        "exposure.exposure_artifacts.weekly_kpis",
+        "source.exposure_artifacts.raw.customers",
     ]
     exposure_package = subprocess.run(
         [

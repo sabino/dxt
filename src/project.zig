@@ -2524,7 +2524,7 @@ fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value
 }
 
 fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []const u8) bool {
-    if (std.mem.eql(u8, value, node.name) or std.mem.eql(u8, value, node.unique_id)) return true;
+    if (matchesSelectorPattern(value, node.name) or std.mem.eql(u8, value, node.unique_id) or matchesNodeFqnPattern(value, node)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
         return std.mem.eql(u8, resource_type, node.resource_type);
@@ -2538,12 +2538,12 @@ fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []cons
     if (std.mem.startsWith(u8, value, "tag:")) {
         const tag = value["tag:".len..];
         for (node.tags.items) |node_tag| {
-            if (std.mem.eql(u8, tag, node_tag)) return true;
+            if (matchesSelectorPattern(tag, node_tag)) return true;
         }
     }
     if (std.mem.startsWith(u8, value, "path:")) {
         const path = value["path:".len..];
-        return std.mem.indexOf(u8, node.original_file_path, path) != null;
+        return matchesNodePathSelector(path, node);
     }
     if (std.mem.startsWith(u8, value, "source:")) {
         return false;
@@ -2582,7 +2582,8 @@ fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const Generi
 }
 
 fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8) bool {
-    if (std.mem.eql(u8, value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id)) return true;
+    if (matchesSelectorPattern(value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id) or matchesGenericTestFqnPattern(value, test_node)) return true;
+    if (matchesAttachedNodeNameOrFqnSelector(graph, test_node, value)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
         return std.mem.eql(u8, resource_type, "test");
@@ -2596,7 +2597,22 @@ fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNod
     }
     if (std.mem.startsWith(u8, value, "path:")) {
         const path = value["path:".len..];
-        return std.mem.indexOf(u8, test_node.original_file_path, path) != null;
+        return matchesPathSelector(path, test_node.original_file_path);
+    }
+    return false;
+}
+
+fn matchesAttachedNodeNameOrFqnSelector(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8) bool {
+    for (graph.nodes.items) |*node| {
+        if (!node.enabled or !std.mem.eql(u8, node.unique_id, test_node.attached_node)) continue;
+        if (std.mem.startsWith(u8, value, "tag:")) {
+            const tag = value["tag:".len..];
+            for (node.tags.items) |node_tag| {
+                if (matchesSelectorPattern(tag, node_tag)) return true;
+            }
+            return false;
+        }
+        return matchesSelectorPattern(value, node.name) or matchesNodeFqnPattern(value, node);
     }
     return false;
 }
@@ -2628,7 +2644,6 @@ fn matchesSourceSelectorIntersection(graph: *const Graph, source: *const SourceD
 }
 
 fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, value: []const u8) bool {
-    if (std.mem.eql(u8, value, source.unique_id) or std.mem.eql(u8, value, source.table_name)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
         return std.mem.eql(u8, resource_type, "source");
@@ -2641,10 +2656,20 @@ fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, valu
     }
     if (std.mem.startsWith(u8, value, "source:")) {
         const source_value = value["source:".len..];
-        if (std.mem.eql(u8, source_value, source.source_name) or std.mem.eql(u8, source_value, source.unique_id)) return true;
+        if (matchesSelectorPattern(source_value, source.source_name)) return true;
         if (std.mem.indexOfScalar(u8, source_value, '.')) |dot| {
-            return std.mem.eql(u8, source_value[0..dot], source.source_name) and std.mem.eql(u8, source_value[dot + 1 ..], source.table_name);
+            if (std.mem.indexOfScalar(u8, source_value[dot + 1 ..], '.')) |relative_second_dot| {
+                const second_dot = dot + 1 + relative_second_dot;
+                return matchesSelectorPattern(source_value[0..dot], source.package_name) and
+                    matchesSelectorPattern(source_value[dot + 1 .. second_dot], source.source_name) and
+                    matchesSelectorPattern(source_value[second_dot + 1 ..], source.table_name);
+            }
+            return matchesSelectorPattern(source_value[0..dot], source.source_name) and matchesSelectorPattern(source_value[dot + 1 ..], source.table_name);
         }
+    }
+    if (std.mem.startsWith(u8, value, "path:")) {
+        const path = value["path:".len..];
+        return matchesPathSelector(path, source.original_file_path);
     }
     return false;
 }
@@ -2676,7 +2701,7 @@ fn matchesExposureSelectorIntersection(graph: *const Graph, exposure: *const Exp
 }
 
 fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef, value: []const u8) bool {
-    if (std.mem.eql(u8, value, exposure.name) or std.mem.eql(u8, value, exposure.unique_id)) return true;
+    if (matchesSelectorPattern(value, exposure.name) or matchesUniqueIdFqnPattern(value, exposure.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
         return std.mem.eql(u8, resource_type, "exposure");
@@ -2689,19 +2714,149 @@ fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef
     }
     if (std.mem.startsWith(u8, value, "exposure:")) {
         const exposure_value = value["exposure:".len..];
-        return std.mem.eql(u8, exposure_value, exposure.name) or std.mem.eql(u8, exposure_value, exposure.unique_id);
+        return matchesSelectorPattern(exposure_value, exposure.name) or matchesUniqueIdFqnPattern(exposure_value, exposure.unique_id);
     }
     if (std.mem.startsWith(u8, value, "tag:")) {
         const tag = value["tag:".len..];
         for (exposure.tags.items) |exposure_tag| {
-            if (std.mem.eql(u8, tag, exposure_tag)) return true;
+            if (matchesSelectorPattern(tag, exposure_tag)) return true;
         }
     }
     if (std.mem.startsWith(u8, value, "path:")) {
         const path = value["path:".len..];
-        return std.mem.indexOf(u8, exposure.original_file_path, path) != null;
+        return matchesPathSelector(path, exposure.original_file_path);
     }
     return false;
+}
+
+fn matchesPathSelector(pattern: []const u8, path: []const u8) bool {
+    if (selectorPatternHasWildcard(pattern)) {
+        if (wildcardMatchesPath(pattern, path)) return true;
+        return wildcardMatchesPathParent(pattern, path);
+    }
+    return std.mem.indexOf(u8, path, pattern) != null;
+}
+
+fn matchesNodePathSelector(pattern: []const u8, node: *const Node) bool {
+    if (matchesPathSelector(pattern, node.original_file_path)) return true;
+    if (node.patch_path) |patch_path| return matchesPathSelector(pattern, patch_path);
+    return false;
+}
+
+fn wildcardMatchesPathParent(pattern: []const u8, path: []const u8) bool {
+    var index: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, path, index, '/')) |slash| {
+        if (wildcardMatchesPath(pattern, path[0..slash])) return true;
+        index = slash + 1;
+    }
+    return false;
+}
+
+fn matchesSelectorPattern(pattern: []const u8, value: []const u8) bool {
+    if (selectorPatternHasWildcard(pattern)) return wildcardMatches(pattern, value);
+    return std.mem.eql(u8, pattern, value);
+}
+
+fn matchesUniqueIdFqnPattern(pattern: []const u8, unique_id: []const u8) bool {
+    const prefix_end = std.mem.indexOfScalar(u8, unique_id, '.') orelse return false;
+    return matchesSelectorPattern(pattern, unique_id[prefix_end + 1 ..]);
+}
+
+fn matchesNodeFqnPattern(pattern: []const u8, node: *const Node) bool {
+    return matchesPathBackedFqnPattern(pattern, node.package_name, node.path);
+}
+
+fn matchesGenericTestFqnPattern(pattern: []const u8, test_node: *const GenericTestNode) bool {
+    return matchesPathBackedFqnPattern(pattern, test_node.package_name, test_node.path);
+}
+
+fn matchesPathBackedFqnPattern(pattern: []const u8, package_name: []const u8, path: []const u8) bool {
+    var buffer: [4096]u8 = undefined;
+    var len: usize = 0;
+    if (!appendFqnSlice(&buffer, &len, package_name)) return false;
+    if (!appendFqnByte(&buffer, &len, '.')) return false;
+    const unscoped_start = len;
+    if (!appendFqnPath(&buffer, &len, path)) return false;
+    const scoped = buffer[0..len];
+    const unscoped = buffer[unscoped_start..len];
+    return matchesFqnCandidate(pattern, scoped) or matchesFqnCandidate(pattern, unscoped);
+}
+
+fn matchesFqnCandidate(pattern: []const u8, candidate: []const u8) bool {
+    if (selectorPatternHasWildcard(pattern)) return wildcardMatches(pattern, candidate);
+    if (std.mem.eql(u8, pattern, candidate)) return true;
+    return candidate.len > pattern.len and std.mem.startsWith(u8, candidate, pattern) and candidate[pattern.len] == '.';
+}
+
+fn appendFqnPath(buffer: []u8, len: *usize, path: []const u8) bool {
+    const end = if (std.mem.endsWith(u8, path, ".sql") or std.mem.endsWith(u8, path, ".csv"))
+        path.len - 4
+    else
+        path.len;
+    for (path[0..end]) |byte| {
+        if (!appendFqnByte(buffer, len, if (byte == '/' or byte == '\\') '.' else byte)) return false;
+    }
+    return true;
+}
+
+fn appendFqnSlice(buffer: []u8, len: *usize, value: []const u8) bool {
+    for (value) |byte| {
+        if (!appendFqnByte(buffer, len, byte)) return false;
+    }
+    return true;
+}
+
+fn appendFqnByte(buffer: []u8, len: *usize, byte: u8) bool {
+    if (len.* >= buffer.len) return false;
+    buffer[len.*] = byte;
+    len.* += 1;
+    return true;
+}
+
+fn selectorPatternHasWildcard(pattern: []const u8) bool {
+    return std.mem.indexOfAny(u8, pattern, "*?") != null;
+}
+
+fn wildcardMatches(pattern: []const u8, value: []const u8) bool {
+    return wildcardMatchesWithSlashMode(pattern, value, true);
+}
+
+fn wildcardMatchesPath(pattern: []const u8, value: []const u8) bool {
+    return wildcardMatchesWithSlashMode(pattern, value, false);
+}
+
+fn wildcardMatchesWithSlashMode(pattern: []const u8, value: []const u8, star_matches_slash: bool) bool {
+    var pattern_index: usize = 0;
+    var value_index: usize = 0;
+    var star_index: ?usize = null;
+    var star_value_index: usize = 0;
+
+    while (value_index < value.len) {
+        if (pattern_index < pattern.len and pattern[pattern_index] == '?') {
+            if (!star_matches_slash and value[value_index] == '/') return false;
+            pattern_index += 1;
+            value_index += 1;
+        } else if (pattern_index < pattern.len and pattern[pattern_index] == value[value_index]) {
+            pattern_index += 1;
+            value_index += 1;
+        } else if (pattern_index < pattern.len and pattern[pattern_index] == '*') {
+            star_index = pattern_index;
+            pattern_index += 1;
+            star_value_index = value_index;
+        } else if (star_index) |index| {
+            if (!star_matches_slash and value[star_value_index] == '/') return false;
+            pattern_index = index + 1;
+            star_value_index += 1;
+            value_index = star_value_index;
+        } else {
+            return false;
+        }
+    }
+
+    while (pattern_index < pattern.len and pattern[pattern_index] == '*') {
+        pattern_index += 1;
+    }
+    return pattern_index == pattern.len;
 }
 
 fn matchesUniqueIdPackage(graph: *const Graph, unique_id: []const u8, package_name: []const u8) bool {
@@ -3969,6 +4124,36 @@ fn containsString(values: []const []const u8, value: []const u8) bool {
 
 fn trimPlus(value: []const u8) []const u8 {
     return std.mem.trim(u8, value, "+");
+}
+
+test "selector wildcard patterns match full resource values" {
+    const node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "marts/orders.sql",
+        .original_file_path = "models/marts/orders.sql",
+        .raw_code = "",
+    };
+    try std.testing.expect(matchesSelectorPattern("stg_*", "stg_customers"));
+    try std.testing.expect(matchesSelectorPattern("*customers", "stg_customers"));
+    try std.testing.expect(matchesNodeFqnPattern("demo.marts.*", &node));
+    try std.testing.expect(matchesNodeFqnPattern("marts.*", &node));
+    try std.testing.expect(matchesNodeFqnPattern("demo.marts", &node));
+    try std.testing.expect(!matchesNodeFqnPattern("model.demo.marts.*", &node));
+    try std.testing.expect(!matchesSelectorPattern("stg_*", "customers"));
+    try std.testing.expect(!matchesSelectorPattern("customers", "stg_customers"));
+}
+
+test "path selectors keep substring behavior unless wildcarded" {
+    try std.testing.expect(matchesPathSelector("models", "models/stg_customers.sql"));
+    try std.testing.expect(matchesPathSelector("models/*", "models/marts/orders.sql"));
+    try std.testing.expect(matchesPathSelector("models/stg_*", "models/stg_customers.sql"));
+    try std.testing.expect(matchesPathSelector("models/marts/*orders.sql", "models/marts/orders.sql"));
+    try std.testing.expect(matchesPathSelector("models/stg?customers.sql", "models/stg_customers.sql"));
+    try std.testing.expect(!matchesPathSelector("*orders.sql", "models/orders.sql"));
+    try std.testing.expect(!matchesPathSelector("models/stg_*", "models/marts/stg_customers.sql"));
+    try std.testing.expect(!matchesPathSelector("models?stg_customers.sql", "models/stg_customers.sql"));
 }
 
 test "project yaml parser reads dbt name and inline model paths" {
