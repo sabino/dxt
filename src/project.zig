@@ -51,6 +51,7 @@ const applyMacroProperties = project_parse.applyMacroProperties;
 const appendGenericTestDef = project_parse.appendGenericTestDef;
 const appendGenericTestDefClone = project_parse.appendGenericTestDefClone;
 const parseBool = project_parse.parseBool;
+const parseExposureDependency = project_parse.parseExposureDependency;
 const genericTestUniqueId = project_parse.genericTestUniqueId;
 const parseInlineGenericTestList = project_parse.parseInlineGenericTestList;
 const parseJsonScalar = project_parse.parseJsonScalar;
@@ -629,34 +630,6 @@ fn parseExposuresFromText(allocator: std.mem.Allocator, text: []const u8, resour
             }
         }
     }
-}
-
-fn parseExposureDependency(allocator: std.mem.Allocator, raw_value: []const u8, exposure: *ExposureDef) !void {
-    const value = std.mem.trim(u8, raw_value, " \t\r");
-    if (std.mem.startsWith(u8, value, "ref(")) {
-        const args_start = std.mem.indexOfScalar(u8, value, '(') orelse return error.UnsupportedDynamicRef;
-        const args_end = findMatchingParen(value, args_start) orelse return error.UnsupportedDynamicRef;
-        var strings = try parseLiteralArgs(allocator, value[args_start + 1 .. args_end], error.UnsupportedDynamicRef);
-        defer strings.deinit(allocator);
-        if (strings.items.len == 1) {
-            try exposure.refs.append(allocator, .{ .package = null, .name = strings.items[0] });
-        } else if (strings.items.len == 2) {
-            try exposure.refs.append(allocator, .{ .package = strings.items[0], .name = strings.items[1] });
-        } else {
-            return error.UnsupportedDynamicRef;
-        }
-        return;
-    }
-    if (std.mem.startsWith(u8, value, "source(")) {
-        const args_start = std.mem.indexOfScalar(u8, value, '(') orelse return error.UnsupportedDynamicSource;
-        const args_end = findMatchingParen(value, args_start) orelse return error.UnsupportedDynamicSource;
-        var strings = try parseLiteralArgs(allocator, value[args_start + 1 .. args_end], error.UnsupportedDynamicSource);
-        defer strings.deinit(allocator);
-        if (strings.items.len != 2) return error.UnsupportedDynamicSource;
-        try exposure.source_refs.append(allocator, .{ .source_name = strings.items[0], .table_name = strings.items[1] });
-        return;
-    }
-    return error.UnsupportedYaml;
 }
 
 const TestTarget = enum {
