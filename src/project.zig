@@ -17,7 +17,6 @@ pub const Output = types.Output;
 const ColumnDef = types.ColumnDef;
 const GenericTestDef = types.GenericTestDef;
 const DocBlock = types.DocBlock;
-const MacroDef = types.MacroDef;
 const ModelProperty = types.ModelProperty;
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
@@ -39,13 +38,13 @@ const parseBool = project_parse.parseBool;
 const parseExposuresFromText = project_parse.parseExposuresFromText;
 const genericTestUniqueId = project_parse.genericTestUniqueId;
 const parseInlineGenericTestList = project_parse.parseInlineGenericTestList;
+const parseMacroPropertiesFromText = project_parse.parseMacroPropertiesFromText;
+const parseMacros = project_parse.parseMacros;
 const parseSourcesFromText = project_parse.parseSourcesFromText;
 const refDepFromValue = project_parse.refDepFromValue;
 const synthesizeGenericTestNames = project_parse.synthesizeGenericTestNames;
 const testNameFromYamlItem = project_parse.testNameFromYamlItem;
 const findMatchingParen = project_jinja.findMatchingParen;
-const isIdentChar = project_jinja.isIdentChar;
-const isIdentStart = project_jinja.isIdentStart;
 const parseLiteralArgs = project_jinja.parseLiteralArgs;
 const skipWs = project_jinja.skipWs;
 const appendUnique = util.appendUnique;
@@ -146,61 +145,6 @@ fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const
         });
         index = end_close + 2;
     }
-}
-
-fn parseMacros(runtime: Runtime, project_dir: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
-    const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
-    const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
-    var index: usize = 0;
-    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
-        const close = std.mem.indexOfPos(u8, text, open + 2, "%}") orelse return error.MalformedMacroBlock;
-        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
-        if (!isMacroOpenTag(tag)) {
-            index = close + 2;
-            continue;
-        }
-        const name_start = skipWs(tag, "macro".len);
-        if (name_start >= tag.len or !isIdentStart(tag[name_start])) return error.MalformedMacroBlock;
-        var name_end = name_start + 1;
-        while (name_end < tag.len and isIdentChar(tag[name_end])) name_end += 1;
-        const macro_name = tag[name_start..name_end];
-        const call_pos = skipWs(tag, name_end);
-        if (call_pos >= tag.len or tag[call_pos] != '(') return error.MalformedMacroBlock;
-        _ = findMatchingParen(tag, call_pos) orelse return error.MalformedMacroBlock;
-
-        const end = try findEndMacroTag(text, close + 2);
-
-        const macro_sql = std.mem.trim(u8, text[open .. end.close + 2], " \t\r\n");
-        const unique_id = try std.fmt.allocPrint(runtime.allocator, "macro.{s}.{s}", .{ package_name, macro_name });
-        try graph.macros.append(runtime.allocator, .{
-            .unique_id = unique_id,
-            .package_name = package_name,
-            .name = try runtime.allocator.dupe(u8, macro_name),
-            .path = relative_path,
-            .original_file_path = relative_path,
-            .macro_sql = try runtime.allocator.dupe(u8, macro_sql),
-        });
-        index = end.close + 2;
-    }
-}
-
-const MacroEndTag = struct {
-    close: usize,
-};
-
-fn isMacroOpenTag(tag: []const u8) bool {
-    return std.mem.startsWith(u8, tag, "macro") and tag.len > "macro".len and std.ascii.isWhitespace(tag["macro".len]);
-}
-
-fn findEndMacroTag(text: []const u8, start: usize) !MacroEndTag {
-    var index = start;
-    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
-        const close = std.mem.indexOfPos(u8, text, open + 2, "%}") orelse return error.MalformedMacroBlock;
-        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
-        if (std.mem.eql(u8, tag, "endmacro")) return .{ .close = close };
-        index = close + 2;
-    }
-    return error.MalformedMacroBlock;
 }
 
 fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
@@ -421,87 +365,6 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                 if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
                 in_config = true;
                 config_indent = indent;
-            }
-        }
-    }
-}
-
-fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
-    var in_macros = false;
-    var in_arguments = false;
-    var macros_indent: usize = 0;
-    var macro_item_indent: ?usize = null;
-    var arguments_indent: usize = 0;
-    var argument_item_indent: ?usize = null;
-    var current_macro: ?usize = null;
-    var current_argument: ?usize = null;
-
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw_line| {
-        const line = stripYamlComment(raw_line);
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0) continue;
-        const indent = leadingSpaces(line);
-
-        if (std.mem.eql(u8, trimmed, "macros:")) {
-            in_macros = true;
-            in_arguments = false;
-            macros_indent = indent;
-            macro_item_indent = null;
-            argument_item_indent = null;
-            current_macro = null;
-            current_argument = null;
-            continue;
-        }
-        if (!in_macros) continue;
-        if (indent <= macros_indent and !std.mem.eql(u8, trimmed, "macros:")) break;
-
-        if (in_arguments and indent <= arguments_indent and !std.mem.eql(u8, trimmed, "arguments:")) {
-            in_arguments = false;
-            argument_item_indent = null;
-            current_argument = null;
-        }
-
-        if (std.mem.startsWith(u8, trimmed, "- name:")) {
-            const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
-            if (in_arguments and current_macro != null and indent > (macro_item_indent orelse 0)) {
-                const macro_index = current_macro.?;
-                try graph.macro_properties.items[macro_index].arguments.append(allocator, .{ .name = name });
-                current_argument = graph.macro_properties.items[macro_index].arguments.items.len - 1;
-                argument_item_indent = indent;
-            } else {
-                try graph.macro_properties.append(allocator, .{ .package_name = package_name, .name = name, .patch_path = relative_path });
-                current_macro = graph.macro_properties.items.len - 1;
-                macro_item_indent = indent;
-                in_arguments = false;
-                argument_item_indent = null;
-                current_argument = null;
-            }
-            continue;
-        }
-
-        const macro_index = current_macro orelse continue;
-        if (splitKeyValue(trimmed)) |kv| {
-            if (in_arguments and current_argument != null and indent > (argument_item_indent orelse 0)) {
-                var argument = &graph.macro_properties.items[macro_index].arguments.items[current_argument.?];
-                if (std.mem.eql(u8, kv.key, "type")) {
-                    argument.type = try dupTrimmedScalar(allocator, kv.value);
-                } else if (std.mem.eql(u8, kv.key, "description")) {
-                    argument.description = try dupTrimmedScalar(allocator, kv.value);
-                } else {
-                    return error.UnsupportedYaml;
-                }
-                continue;
-            }
-
-            if (std.mem.eql(u8, kv.key, "description")) {
-                graph.macro_properties.items[macro_index].description = try dupTrimmedScalar(allocator, kv.value);
-            } else if (std.mem.eql(u8, kv.key, "arguments")) {
-                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
-                in_arguments = true;
-                arguments_indent = indent;
-                argument_item_indent = null;
-                current_argument = null;
             }
         }
     }

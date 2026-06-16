@@ -9,18 +9,23 @@ const JsonScalar = types.JsonScalar;
 const ExposureDef = types.ExposureDef;
 const GenericTestDef = types.GenericTestDef;
 const Graph = types.Graph;
+const MacroDef = types.MacroDef;
 const MacroArgument = types.MacroArgument;
 const MetaEntry = types.MetaEntry;
 const RefDep = types.RefDep;
 const dupTrimmedScalar = util.dupTrimmedScalar;
+const isIdentChar = jinja.isIdentChar;
+const isIdentStart = jinja.isIdentStart;
 const leadingSpaces = util.leadingSpaces;
 const parseInlineStringList = util.parseInlineStringList;
+const pathJoin = fs.pathJoin;
 const relativeUnderResourcePath = fs.relativeUnderResourcePath;
 const sortStrings = util.sortStrings;
 const splitKeyValue = util.splitKeyValue;
 const stripYamlComment = util.stripYamlComment;
 const findMatchingParen = jinja.findMatchingParen;
 const parseLiteralArgs = jinja.parseLiteralArgs;
+const skipWs = jinja.skipWs;
 const findMacroIndexByPackageAndName = resolve.findMacroIndexByPackageAndName;
 
 pub fn parseBool(value: []const u8) !bool {
@@ -111,6 +116,149 @@ pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTes
         try cloned.accepted_values.append(graph.allocator, value);
     }
     try tests.append(graph.allocator, cloned);
+}
+
+pub fn parseMacros(runtime: types.Runtime, project_dir: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
+    const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
+    try parseMacrosFromText(runtime.allocator, text, relative_path, package_name, graph);
+}
+
+pub fn parseMacrosFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
+        const close = std.mem.indexOfPos(u8, text, open + 2, "%}") orelse return error.MalformedMacroBlock;
+        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
+        if (!isMacroOpenTag(tag)) {
+            index = close + 2;
+            continue;
+        }
+        const name_start = skipWs(tag, "macro".len);
+        if (name_start >= tag.len or !isIdentStart(tag[name_start])) return error.MalformedMacroBlock;
+        var name_end = name_start + 1;
+        while (name_end < tag.len and isIdentChar(tag[name_end])) name_end += 1;
+        const macro_name = tag[name_start..name_end];
+        const call_pos = skipWs(tag, name_end);
+        if (call_pos >= tag.len or tag[call_pos] != '(') return error.MalformedMacroBlock;
+        _ = findMatchingParen(tag, call_pos) orelse return error.MalformedMacroBlock;
+
+        const end = try findEndMacroTag(text, close + 2);
+
+        const macro_sql = std.mem.trim(u8, text[open .. end.close + 2], " \t\r\n");
+        try graph.macros.append(allocator, try macroDefFromParts(allocator, package_name, macro_name, relative_path, macro_sql));
+        index = end.close + 2;
+    }
+}
+
+fn macroDefFromParts(allocator: std.mem.Allocator, package_name: []const u8, macro_name: []const u8, relative_path: []const u8, macro_sql: []const u8) !MacroDef {
+    return .{
+        .unique_id = try std.fmt.allocPrint(allocator, "macro.{s}.{s}", .{ package_name, macro_name }),
+        .package_name = package_name,
+        .name = try allocator.dupe(u8, macro_name),
+        .path = relative_path,
+        .original_file_path = relative_path,
+        .macro_sql = try allocator.dupe(u8, macro_sql),
+    };
+}
+
+const MacroEndTag = struct {
+    close: usize,
+};
+
+fn isMacroOpenTag(tag: []const u8) bool {
+    return std.mem.startsWith(u8, tag, "macro") and tag.len > "macro".len and std.ascii.isWhitespace(tag["macro".len]);
+}
+
+fn findEndMacroTag(text: []const u8, start: usize) !MacroEndTag {
+    var index = start;
+    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
+        const close = std.mem.indexOfPos(u8, text, open + 2, "%}") orelse return error.MalformedMacroBlock;
+        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
+        if (std.mem.eql(u8, tag, "endmacro")) return .{ .close = close };
+        index = close + 2;
+    }
+    return error.MalformedMacroBlock;
+}
+
+pub fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    var in_macros = false;
+    var in_arguments = false;
+    var macros_indent: usize = 0;
+    var macro_item_indent: ?usize = null;
+    var arguments_indent: usize = 0;
+    var argument_item_indent: ?usize = null;
+    var current_macro: ?usize = null;
+    var current_argument: ?usize = null;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (std.mem.eql(u8, trimmed, "macros:")) {
+            in_macros = true;
+            in_arguments = false;
+            macros_indent = indent;
+            macro_item_indent = null;
+            argument_item_indent = null;
+            current_macro = null;
+            current_argument = null;
+            continue;
+        }
+        if (!in_macros) continue;
+        if (indent <= macros_indent and !std.mem.eql(u8, trimmed, "macros:")) break;
+
+        if (in_arguments and indent <= arguments_indent and !std.mem.eql(u8, trimmed, "arguments:")) {
+            in_arguments = false;
+            argument_item_indent = null;
+            current_argument = null;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "- name:")) {
+            const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
+            if (in_arguments and current_macro != null and indent > (macro_item_indent orelse 0)) {
+                const macro_index = current_macro.?;
+                try graph.macro_properties.items[macro_index].arguments.append(allocator, .{ .name = name });
+                current_argument = graph.macro_properties.items[macro_index].arguments.items.len - 1;
+                argument_item_indent = indent;
+            } else {
+                try graph.macro_properties.append(allocator, .{ .package_name = package_name, .name = name, .patch_path = relative_path });
+                current_macro = graph.macro_properties.items.len - 1;
+                macro_item_indent = indent;
+                in_arguments = false;
+                argument_item_indent = null;
+                current_argument = null;
+            }
+            continue;
+        }
+
+        const macro_index = current_macro orelse continue;
+        if (splitKeyValue(trimmed)) |kv| {
+            if (in_arguments and current_argument != null and indent > (argument_item_indent orelse 0)) {
+                var argument = &graph.macro_properties.items[macro_index].arguments.items[current_argument.?];
+                if (std.mem.eql(u8, kv.key, "type")) {
+                    argument.type = try dupTrimmedScalar(allocator, kv.value);
+                } else if (std.mem.eql(u8, kv.key, "description")) {
+                    argument.description = try dupTrimmedScalar(allocator, kv.value);
+                } else {
+                    return error.UnsupportedYaml;
+                }
+                continue;
+            }
+
+            if (std.mem.eql(u8, kv.key, "description")) {
+                graph.macro_properties.items[macro_index].description = try dupTrimmedScalar(allocator, kv.value);
+            } else if (std.mem.eql(u8, kv.key, "arguments")) {
+                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                in_arguments = true;
+                arguments_indent = indent;
+                argument_item_indent = null;
+                current_argument = null;
+            }
+        }
+    }
 }
 
 pub fn applyMacroProperties(graph: *Graph) !void {
@@ -666,6 +814,98 @@ test "appendGenericTestDefClone copies nested accepted values list" {
     try std.testing.expectEqual(@as(usize, 2), clones.items[0].accepted_values.items.len);
     try std.testing.expectEqualStrings("placed", clones.items[0].accepted_values.items[0]);
     try std.testing.expectEqualStrings("returned", clones.items[0].accepted_values.items[1]);
+}
+
+test "parseMacrosFromText extracts top-level macro blocks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const sql =
+        \\{% macro format_id(column_name) %}
+        \\    cast({{ column_name }} as varchar)
+        \\{% endmacro %}
+        \\
+        \\select 1
+    ;
+
+    try parseMacrosFromText(allocator, sql, "macros/format_id.sql", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.macros.items.len);
+    try std.testing.expectEqualStrings("macro.demo.format_id", graph.macros.items[0].unique_id);
+    try std.testing.expectEqualStrings("demo", graph.macros.items[0].package_name);
+    try std.testing.expectEqualStrings("format_id", graph.macros.items[0].name);
+    try std.testing.expectEqualStrings("macros/format_id.sql", graph.macros.items[0].path);
+    try std.testing.expectEqualStrings("macros/format_id.sql", graph.macros.items[0].original_file_path);
+    try std.testing.expectEqualStrings(
+        "{% macro format_id(column_name) %}\n    cast({{ column_name }} as varchar)\n{% endmacro %}",
+        graph.macros.items[0].macro_sql,
+    );
+}
+
+test "parseMacrosFromText ignores non-macro blocks and rejects malformed macros" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try parseMacrosFromText(
+        allocator,
+        "{% if execute %}{{ log('skip') }}{% endif %}\n{% set value = 1 %}",
+        "macros/no_macros.sql",
+        "demo",
+        &graph,
+    );
+    try std.testing.expectEqual(@as(usize, 0), graph.macros.items.len);
+
+    try std.testing.expectError(
+        error.MalformedMacroBlock,
+        parseMacrosFromText(allocator, "{% macro broken(column_name) %}", "macros/broken.sql", "demo", &graph),
+    );
+}
+
+test "parseMacroPropertiesFromText records descriptions and arguments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\macros:
+        \\  - name: format_id
+        \\    description: Format an identifier expression.
+        \\    arguments:
+        \\      - name: column_name
+        \\        type: string
+        \\        description: Identifier expression.
+        \\      - name: quote
+        \\        type: bool
+        \\
+        \\models:
+        \\  - name: ignored
+    ;
+
+    try parseMacroPropertiesFromText(allocator, yaml, "macros/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.macro_properties.items.len);
+    try std.testing.expectEqualStrings("demo", graph.macro_properties.items[0].package_name);
+    try std.testing.expectEqualStrings("format_id", graph.macro_properties.items[0].name);
+    try std.testing.expectEqualStrings("macros/schema.yml", graph.macro_properties.items[0].patch_path);
+    try std.testing.expectEqualStrings("Format an identifier expression.", graph.macro_properties.items[0].description);
+    try std.testing.expectEqual(@as(usize, 2), graph.macro_properties.items[0].arguments.items.len);
+    try std.testing.expectEqualStrings("column_name", graph.macro_properties.items[0].arguments.items[0].name);
+    try std.testing.expectEqualStrings("string", graph.macro_properties.items[0].arguments.items[0].type);
+    try std.testing.expectEqualStrings("Identifier expression.", graph.macro_properties.items[0].arguments.items[0].description);
+    try std.testing.expectEqualStrings("quote", graph.macro_properties.items[0].arguments.items[1].name);
+    try std.testing.expectEqualStrings("bool", graph.macro_properties.items[0].arguments.items[1].type);
 }
 
 test "applyMacroProperties applies descriptions patch paths and merges arguments" {
