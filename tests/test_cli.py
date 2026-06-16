@@ -400,6 +400,27 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert ls_resource_type_tests.returncode == 0, ls_resource_type_tests.stderr
     assert json.loads(ls_resource_type_tests.stdout) == json.loads(ls_tests.stdout)
 
+    ls_package_tests = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties,resource_type:test", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_package_tests.returncode == 0, ls_package_tests.stderr
+    assert json.loads(ls_package_tests.stdout) == json.loads(ls_tests.stdout)
+
+    ls_package_all = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_package_all.returncode == 0, ls_package_all.stderr
+    assert [item["unique_id"] for item in json.loads(ls_package_all.stdout)] == [
+        "model.model_properties.customers",
+        *expected_tests,
+    ]
+
     ls_generic_tests = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json"],
         cwd=ROOT,
@@ -637,6 +658,36 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
     assert package_macro_id not in manifest["parent_map"]
     assert package_outer_macro_id not in manifest["child_map"]
     assert str(project) not in manifest_path.read_text()
+
+    ls_root_package = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:package_macro_namespace", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_root_package.returncode == 0, ls_root_package.stderr
+    assert [item["unique_id"] for item in json.loads(ls_root_package.stdout)] == [
+        "model.package_macro_namespace.customers",
+        "model.package_macro_namespace.local_customers",
+    ]
+
+    ls_macro_package = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_macro_package.returncode == 0, ls_macro_package.stderr
+    assert json.loads(ls_macro_package.stdout) == []
+
+    ls_unknown_package = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:not_a_package", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_unknown_package.returncode == 0, ls_unknown_package.stderr
+    assert json.loads(ls_unknown_package.stdout) == []
 
 
 def test_macro_paths_replace_default_macro_directory(tmp_path: Path):
@@ -928,6 +979,19 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     assert manifest["child_map"][exposure_id] == []
     assert str(project) not in (project / "target-dxt" / "manifest.json").read_text()
 
+    ls_package_all = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:exposure_artifacts", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_package_all.returncode == 0, ls_package_all.stderr
+    assert [item["unique_id"] for item in json.loads(ls_package_all.stdout)] == [
+        exposure_id,
+        model_id,
+        source_id,
+    ]
+
     ls_default = subprocess.run(
         [DXT, "ls", "--project-dir", str(project)],
         cwd=ROOT,
@@ -1190,6 +1254,26 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
+    source_package = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(source_project),
+            "--select",
+            "package:source_ref,resource_type:source",
+            "--output",
+            "json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_package.returncode == 0, source_package.stderr
+    assert [item["unique_id"] for item in json.loads(source_package.stdout)] == [
+        "source.source_ref.raw.customers",
+        "source.source_ref.raw.orders",
+    ]
 
     exposure_project = copy_fixture(tmp_path, "exposure_artifacts")
     exposure_result = subprocess.run(
@@ -1216,6 +1300,29 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     assert [item["unique_id"] for item in json.loads(exposure_union.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis",
         "model.exposure_artifacts.orders",
+    ]
+    exposure_package = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(exposure_project),
+            "--select",
+            "package:exposure_artifacts,resource_type:exposure",
+            "--output",
+            "json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_package.returncode == 0, exposure_package.stderr
+    assert json.loads(exposure_package.stdout) == [
+        {
+            "unique_id": "exposure.exposure_artifacts.weekly_kpis",
+            "resource_type": "exposure",
+            "name": "weekly_kpis",
+        }
     ]
 
 
@@ -1304,6 +1411,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         "test_type:unit",
         "tag:nightly,",
         "config.materialized:",
+        "package:",
         "tag:nightly, config.materialized:view",
         "++customers",
         "customers++",
