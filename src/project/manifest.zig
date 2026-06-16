@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const selector = @import("selector.zig");
 const types = @import("types.zig");
+const util = @import("util.zig");
 
 const Graph = types.Graph;
 const Node = types.Node;
@@ -72,7 +73,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll(",\"name\":");
         try writeJsonString(writer, source.table_name);
         try writer.writeAll(",\"original_file_path\":");
-        try writeJsonString(writer, normalizeForDisplay(source.original_file_path));
+        try writeJsonString(writer, util.normalizeForDisplay(source.original_file_path));
         try writer.writeAll("}");
     }
     try writer.writeAll("\n  },\n  \"macros\": {");
@@ -95,9 +96,9 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll(",\"name\":");
         try writeJsonString(writer, doc.name);
         try writer.writeAll(",\"path\":");
-        try writeJsonString(writer, normalizeForDisplay(doc.path));
+        try writeJsonString(writer, util.normalizeForDisplay(doc.path));
         try writer.writeAll(",\"original_file_path\":");
-        try writeJsonString(writer, normalizeForDisplay(doc.original_file_path));
+        try writeJsonString(writer, util.normalizeForDisplay(doc.original_file_path));
         try writer.writeAll(",\"block_contents\":");
         try writeJsonString(writer, doc.block_contents);
         try writer.writeAll("}");
@@ -186,14 +187,14 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
     var child_first = true;
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
-        if (containsString(node.depends_on.items, unique_id)) {
+        if (util.containsString(node.depends_on.items, unique_id)) {
             if (!child_first) try writer.writeAll(",");
             child_first = false;
             try writeJsonString(writer, node.unique_id);
         }
     }
     for (graph.tests.items) |test_node| {
-        if (containsString(test_node.depends_on.items, unique_id)) {
+        if (util.containsString(test_node.depends_on.items, unique_id)) {
             if (!child_first) try writer.writeAll(",");
             child_first = false;
             try writeJsonString(writer, test_node.unique_id);
@@ -201,7 +202,7 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
     }
     for (graph.exposures.items) |exposure| {
         if (!exposure.enabled) continue;
-        if (containsString(exposure.depends_on.items, unique_id)) {
+        if (util.containsString(exposure.depends_on.items, unique_id)) {
             if (!child_first) try writer.writeAll(",");
             child_first = false;
             try writeJsonString(writer, exposure.unique_id);
@@ -226,9 +227,9 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
     try writer.writeAll(",\"name\":");
     try writeJsonString(writer, macro.name);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, normalizeForDisplay(macro.path));
+    try writeJsonString(writer, util.normalizeForDisplay(macro.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, normalizeForDisplay(macro.original_file_path));
+    try writeJsonString(writer, util.normalizeForDisplay(macro.original_file_path));
     try writer.writeAll(",\"macro_sql\":");
     try writeJsonString(writer, macro.macro_sql);
     try writer.writeAll(",\"depends_on\":{\"macros\":");
@@ -237,7 +238,7 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
     try writeJsonString(writer, macro.description);
     try writer.writeAll(",\"meta\":{},\"docs\":{\"show\":true,\"node_color\":null},\"patch_path\":");
     if (macro.patch_path) |patch_path| {
-        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ macro.package_name, normalizeForDisplay(patch_path) });
+        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ macro.package_name, util.normalizeForDisplay(patch_path) });
         defer allocator.free(dbt_patch_path);
         try writeJsonString(writer, dbt_patch_path);
     } else {
@@ -256,9 +257,9 @@ fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {
     try writer.writeAll(",\"name\":");
     try writeJsonString(writer, exposure.name);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, normalizeForDisplay(exposure.path));
+    try writeJsonString(writer, util.normalizeForDisplay(exposure.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, normalizeForDisplay(exposure.original_file_path));
+    try writeJsonString(writer, util.normalizeForDisplay(exposure.original_file_path));
     try writer.writeAll(",\"fqn\":[");
     try writeJsonString(writer, exposure.package_name);
     try writer.writeAll(",");
@@ -306,12 +307,12 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) 
     try writer.writeAll(",\"name\":");
     try writeJsonString(writer, node.name);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, normalizeForDisplay(node.path));
+    try writeJsonString(writer, util.normalizeForDisplay(node.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, normalizeForDisplay(node.original_file_path));
+    try writeJsonString(writer, util.normalizeForDisplay(node.original_file_path));
     try writer.writeAll(",\"patch_path\":");
     if (node.patch_path) |patch_path| {
-        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ node.package_name, normalizeForDisplay(patch_path) });
+        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ node.package_name, util.normalizeForDisplay(patch_path) });
         defer allocator.free(dbt_patch_path);
         try writeJsonString(writer, dbt_patch_path);
     } else {
@@ -364,9 +365,9 @@ fn writeSeedNode(writer: *Io.Writer, node: Node) !void {
     try writer.writeAll(",\"name\":");
     try writeJsonString(writer, node.name);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, normalizeForDisplay(node.path));
+    try writeJsonString(writer, util.normalizeForDisplay(node.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, normalizeForDisplay(node.original_file_path));
+    try writeJsonString(writer, util.normalizeForDisplay(node.original_file_path));
     try writer.writeAll(",\"config\":{\"enabled\":");
     try writer.writeAll(if (node.enabled) "true" else "false");
     try writer.writeAll(",\"materialized\":\"seed\",\"docs\":");
@@ -388,9 +389,9 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     try writer.writeAll(",\"alias\":");
     try writeJsonString(writer, test_node.alias);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, normalizeForDisplay(test_node.path));
+    try writeJsonString(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, normalizeForDisplay(test_node.original_file_path));
+    try writeJsonString(writer, util.normalizeForDisplay(test_node.original_file_path));
     try writer.writeAll(",\"patch_path\":null,\"language\":\"sql\",\"raw_code\":");
     try writeJsonString(writer, test_node.raw_code);
     try writer.writeAll(",\"attached_node\":");
@@ -550,15 +551,4 @@ fn modelNameFromUniqueId(unique_id: []const u8) []const u8 {
         return unique_id[index + 1 ..];
     }
     return unique_id;
-}
-
-fn normalizeForDisplay(path: []const u8) []const u8 {
-    return path;
-}
-
-fn containsString(values: []const []const u8, value: []const u8) bool {
-    for (values) |candidate| {
-        if (std.mem.eql(u8, candidate, value)) return true;
-    }
-    return false;
 }
