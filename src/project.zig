@@ -2400,6 +2400,9 @@ fn matchesNodeSelectorTerm(node: *const Node, value: []const u8) bool {
     if (std.mem.startsWith(u8, value, "test_type:")) {
         return false;
     }
+    if (std.mem.startsWith(u8, value, "package:")) {
+        return matchesUniqueIdPackage(node.unique_id, value["package:".len..]);
+    }
     if (std.mem.startsWith(u8, value, "tag:")) {
         const tag = value["tag:".len..];
         for (node.tags.items) |node_tag| {
@@ -2456,6 +2459,9 @@ fn matchesTestSelectorTerm(test_node: *const GenericTestNode, value: []const u8)
         const test_type = value["test_type:".len..];
         return std.mem.eql(u8, test_type, "generic");
     }
+    if (std.mem.startsWith(u8, value, "package:")) {
+        return matchesUniqueIdPackage(test_node.unique_id, value["package:".len..]);
+    }
     if (std.mem.startsWith(u8, value, "path:")) {
         const path = value["path:".len..];
         return std.mem.indexOf(u8, test_node.original_file_path, path) != null;
@@ -2497,6 +2503,9 @@ fn matchesSourceSelectorTerm(source: *const SourceDef, value: []const u8) bool {
     }
     if (std.mem.startsWith(u8, value, "test_type:")) {
         return false;
+    }
+    if (std.mem.startsWith(u8, value, "package:")) {
+        return matchesUniqueIdPackage(source.unique_id, value["package:".len..]);
     }
     if (std.mem.startsWith(u8, value, "source:")) {
         const source_value = value["source:".len..];
@@ -2543,6 +2552,9 @@ fn matchesExposureSelectorTerm(exposure: *const ExposureDef, value: []const u8) 
     if (std.mem.startsWith(u8, value, "test_type:")) {
         return false;
     }
+    if (std.mem.startsWith(u8, value, "package:")) {
+        return matchesUniqueIdPackage(exposure.unique_id, value["package:".len..]);
+    }
     if (std.mem.startsWith(u8, value, "exposure:")) {
         const exposure_value = value["exposure:".len..];
         return std.mem.eql(u8, exposure_value, exposure.name) or std.mem.eql(u8, exposure_value, exposure.unique_id);
@@ -2558,6 +2570,13 @@ fn matchesExposureSelectorTerm(exposure: *const ExposureDef, value: []const u8) 
         return std.mem.indexOf(u8, exposure.original_file_path, path) != null;
     }
     return false;
+}
+
+fn matchesUniqueIdPackage(unique_id: []const u8, package_name: []const u8) bool {
+    const prefix_end = std.mem.indexOfScalar(u8, unique_id, '.') orelse return false;
+    const package_start = prefix_end + 1;
+    const package_end = std.mem.indexOfPos(u8, unique_id, package_start, ".") orelse return false;
+    return std.mem.eql(u8, package_name, unique_id[package_start..package_end]);
 }
 
 fn parseSelectorSpec(selector: ?[]const u8) SelectorSpec {

@@ -286,6 +286,7 @@ fn validateSelectorMethod(part: []const u8) !void {
         "path:",
         "source:",
         "exposure:",
+        "package:",
         "resource_type:",
         "test_type:",
         "config.materialized:",
