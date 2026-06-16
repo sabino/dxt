@@ -6,8 +6,10 @@ const Runtime = types.Runtime;
 const ProjectConfig = types.ProjectConfig;
 const ModelPathConfig = types.ModelPathConfig;
 const DocsConfig = types.DocsConfig;
+const Graph = types.Graph;
 const deinitProjectConfig = types.deinitProjectConfig;
 const KeyValue = util.KeyValue;
+const appendUnique = util.appendUnique;
 const stripYamlComment = util.stripYamlComment;
 const leadingSpaces = util.leadingSpaces;
 const splitKeyValue = util.splitKeyValue;
@@ -22,6 +24,52 @@ pub fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConf
         else => return err,
     };
     return try parseProjectConfigText(runtime.allocator, text);
+}
+
+pub fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig, override_dependency_inline: bool, restrict_package_name: ?[]const u8) !void {
+    for (graph.nodes.items) |*node| {
+        if (!std.mem.eql(u8, node.resource_type, "model")) continue;
+
+        var materialized_config: ?*const ModelPathConfig = null;
+        var materialized_depth: usize = 0;
+        var docs_config: ?*const ModelPathConfig = null;
+        var docs_depth: usize = 0;
+        for (configs) |*config| {
+            if (restrict_package_name) |package_name| {
+                if (!std.mem.eql(u8, config.package_name, package_name)) continue;
+            }
+            if (!std.mem.eql(u8, node.package_name, config.package_name)) continue;
+            if (!modelPathConfigMatches(config.path, node.path)) continue;
+            const depth = modelPathConfigDepth(config.path);
+            if (config.materialized.len != 0 and (materialized_config == null or depth >= materialized_depth)) {
+                materialized_config = config;
+                materialized_depth = depth;
+            }
+            for (config.tags.items) |tag| {
+                try appendUnique(graph.allocator, &node.tags, tag);
+            }
+            if (config.docs.configured and (docs_config == null or depth >= docs_depth)) {
+                docs_config = config;
+                docs_depth = depth;
+            }
+        }
+
+        const can_override_materialized = !node.inline_materialized or (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name));
+        if (can_override_materialized) {
+            if (materialized_config) |config| node.materialized = config.materialized;
+        }
+        if (docs_config) |config| node.docs = config.docs;
+        sortStrings(node.tags.items);
+    }
+}
+
+pub fn applyProjectSeedDocs(graph: *Graph, package_name: []const u8, docs: DocsConfig) void {
+    if (!docs.configured) return;
+    for (graph.nodes.items) |*node| {
+        if (!std.mem.eql(u8, node.package_name, package_name)) continue;
+        if (!std.mem.eql(u8, node.resource_type, "seed")) continue;
+        node.docs = docs;
+    }
 }
 
 fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !ProjectConfig {
@@ -291,6 +339,23 @@ fn getOrCreateModelPathConfig(allocator: std.mem.Allocator, configs: *std.ArrayL
     return &configs.items[configs.items.len - 1];
 }
 
+fn modelPathConfigMatches(config_path: []const u8, model_path: []const u8) bool {
+    if (config_path.len == 0) return true;
+    if (!std.mem.startsWith(u8, model_path, config_path)) return false;
+    if (model_path.len == config_path.len) return true;
+    if (model_path[config_path.len] == '/') return true;
+    return std.mem.eql(u8, model_path[config_path.len..], ".sql");
+}
+
+fn modelPathConfigDepth(config_path: []const u8) usize {
+    if (config_path.len == 0) return 0;
+    var depth: usize = 1;
+    for (config_path) |ch| {
+        if (ch == '/') depth += 1;
+    }
+    return depth;
+}
+
 test "project config parser applies defaults for omitted paths" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -368,4 +433,124 @@ test "project config parser reads paths and nested docs configs" {
     try std.testing.expectEqualStrings("#336699", model_config.docs.node_color.?);
     try std.testing.expect(config.seed_docs.configured);
     try std.testing.expect(!config.seed_docs.show);
+}
+
+test "model path config matching preserves dbt path prefix semantics" {
+    try std.testing.expect(modelPathConfigMatches("", "marts/orders.sql"));
+    try std.testing.expect(modelPathConfigMatches("marts", "marts/orders.sql"));
+    try std.testing.expect(modelPathConfigMatches("marts/orders", "marts/orders.sql"));
+    try std.testing.expect(!modelPathConfigMatches("mart", "marts/orders.sql"));
+
+    try std.testing.expectEqual(@as(usize, 0), modelPathConfigDepth(""));
+    try std.testing.expectEqual(@as(usize, 1), modelPathConfigDepth("marts"));
+    try std.testing.expectEqual(@as(usize, 2), modelPathConfigDepth("marts/core"));
+}
+
+test "project model path config application preserves depth package and inline precedence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "marts/orders.sql",
+        .original_file_path = "models/marts/orders.sql",
+        .raw_code = "",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.inline_orders",
+        .name = "inline_orders",
+        .path = "marts/inline_orders.sql",
+        .original_file_path = "models/marts/inline_orders.sql",
+        .raw_code = "",
+        .materialized = "incremental",
+        .inline_materialized = true,
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "pkg",
+        .unique_id = "model.pkg.orders",
+        .name = "orders",
+        .path = "marts/orders.sql",
+        .original_file_path = "dbt_packages/pkg/models/marts/orders.sql",
+        .raw_code = "",
+    });
+
+    var configs: std.ArrayList(ModelPathConfig) = .empty;
+    defer {
+        for (configs.items) |*config| {
+            config.tags.deinit(allocator);
+        }
+        configs.deinit(allocator);
+    }
+    try configs.append(allocator, .{ .package_name = "demo", .path = "", .materialized = "view" });
+    try configs.append(allocator, .{ .package_name = "demo", .path = "marts", .materialized = "table", .docs = .{ .configured = true, .node_color = "#112233" } });
+    try configs.items[1].tags.append(allocator, "nightly");
+    try configs.items[1].tags.append(allocator, "core");
+    try configs.append(allocator, .{ .package_name = "pkg", .path = "marts", .materialized = "table" });
+
+    try applyProjectModelPathConfigs(&graph, configs.items, false, "demo");
+
+    try std.testing.expectEqualStrings("table", graph.nodes.items[0].materialized);
+    try std.testing.expect(graph.nodes.items[0].docs.configured);
+    try std.testing.expectEqualStrings("#112233", graph.nodes.items[0].docs.node_color.?);
+    try std.testing.expectEqual(@as(usize, 2), graph.nodes.items[0].tags.items.len);
+    try std.testing.expectEqualStrings("core", graph.nodes.items[0].tags.items[0]);
+    try std.testing.expectEqualStrings("nightly", graph.nodes.items[0].tags.items[1]);
+    try std.testing.expectEqualStrings("incremental", graph.nodes.items[1].materialized);
+    try std.testing.expectEqualStrings("view", graph.nodes.items[2].materialized);
+
+    try applyProjectModelPathConfigs(&graph, configs.items, true, null);
+    try std.testing.expectEqualStrings("table", graph.nodes.items[2].materialized);
+}
+
+test "project seed docs application targets package seeds only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.raw_orders",
+        .name = "raw_orders",
+        .path = "raw_orders.csv",
+        .original_file_path = "seeds/raw_orders.csv",
+        .raw_code = "",
+        .materialized = "seed",
+    });
+    try graph.nodes.append(allocator, .{
+        .resource_type = "seed",
+        .package_name = "pkg",
+        .unique_id = "seed.pkg.raw_orders",
+        .name = "raw_orders",
+        .path = "raw_orders.csv",
+        .original_file_path = "dbt_packages/pkg/seeds/raw_orders.csv",
+        .raw_code = "",
+        .materialized = "seed",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "",
+    });
+
+    applyProjectSeedDocs(&graph, "demo", .{ .configured = true, .show = false, .node_color = "#445566" });
+
+    try std.testing.expect(graph.nodes.items[0].docs.configured);
+    try std.testing.expect(!graph.nodes.items[0].docs.show);
+    try std.testing.expectEqualStrings("#445566", graph.nodes.items[0].docs.node_color.?);
+    try std.testing.expect(!graph.nodes.items[1].docs.configured);
+    try std.testing.expect(!graph.nodes.items[2].docs.configured);
 }

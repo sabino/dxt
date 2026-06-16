@@ -14,8 +14,6 @@ pub const Runtime = types.Runtime;
 pub const Options = types.Options;
 pub const Output = types.Output;
 
-const ModelPathConfig = types.ModelPathConfig;
-const DocsConfig = types.DocsConfig;
 const SourceDef = types.SourceDef;
 const ExposureDef = types.ExposureDef;
 const MetaEntry = types.MetaEntry;
@@ -35,6 +33,8 @@ const Graph = types.Graph;
 const deinitProjectConfig = types.deinitProjectConfig;
 const deinitNode = types.deinitNode;
 const deinitGenericTestNode = types.deinitGenericTestNode;
+const applyProjectModelPathConfigs = project_config.applyProjectModelPathConfigs;
+const applyProjectSeedDocs = project_config.applyProjectSeedDocs;
 const loadProjectConfig = project_config.loadProjectConfig;
 const discoverChildDirectories = project_fs.discoverChildDirectories;
 const discoverProjectFiles = project_fs.discoverProjectFiles;
@@ -1050,69 +1050,6 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
         }
         sortColumns(node.columns.items);
     }
-}
-
-fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig, override_dependency_inline: bool, restrict_package_name: ?[]const u8) !void {
-    for (graph.nodes.items) |*node| {
-        if (!std.mem.eql(u8, node.resource_type, "model")) continue;
-
-        var materialized_config: ?*const ModelPathConfig = null;
-        var materialized_depth: usize = 0;
-        var docs_config: ?*const ModelPathConfig = null;
-        var docs_depth: usize = 0;
-        for (configs) |*config| {
-            if (restrict_package_name) |package_name| {
-                if (!std.mem.eql(u8, config.package_name, package_name)) continue;
-            }
-            if (!std.mem.eql(u8, node.package_name, config.package_name)) continue;
-            if (!modelPathConfigMatches(config.path, node.path)) continue;
-            const depth = modelPathConfigDepth(config.path);
-            if (config.materialized.len != 0 and (materialized_config == null or depth >= materialized_depth)) {
-                materialized_config = config;
-                materialized_depth = depth;
-            }
-            for (config.tags.items) |tag| {
-                try appendUnique(graph.allocator, &node.tags, tag);
-            }
-            if (config.docs.configured and (docs_config == null or depth >= docs_depth)) {
-                docs_config = config;
-                docs_depth = depth;
-            }
-        }
-
-        const can_override_materialized = !node.inline_materialized or (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name));
-        if (can_override_materialized) {
-            if (materialized_config) |config| node.materialized = config.materialized;
-        }
-        if (docs_config) |config| node.docs = config.docs;
-        sortStrings(node.tags.items);
-    }
-}
-
-fn applyProjectSeedDocs(graph: *Graph, package_name: []const u8, docs: DocsConfig) void {
-    if (!docs.configured) return;
-    for (graph.nodes.items) |*node| {
-        if (!std.mem.eql(u8, node.package_name, package_name)) continue;
-        if (!std.mem.eql(u8, node.resource_type, "seed")) continue;
-        node.docs = docs;
-    }
-}
-
-fn modelPathConfigMatches(config_path: []const u8, model_path: []const u8) bool {
-    if (config_path.len == 0) return true;
-    if (!std.mem.startsWith(u8, model_path, config_path)) return false;
-    if (model_path.len == config_path.len) return true;
-    if (model_path[config_path.len] == '/') return true;
-    return std.mem.eql(u8, model_path[config_path.len..], ".sql");
-}
-
-fn modelPathConfigDepth(config_path: []const u8) usize {
-    if (config_path.len == 0) return 0;
-    var depth: usize = 1;
-    for (config_path) |ch| {
-        if (ch == '/') depth += 1;
-    }
-    return depth;
 }
 
 fn materializeGenericTests(graph: *Graph) !void {
