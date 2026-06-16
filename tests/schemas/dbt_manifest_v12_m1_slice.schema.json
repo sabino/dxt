@@ -261,7 +261,9 @@
         "docs",
         "columns",
         "config",
-        "depends_on"
+        "depends_on",
+        "refs",
+        "sources"
       ],
       "properties": {
         "unique_id": {"type": "string"},
@@ -281,7 +283,15 @@
           "additionalProperties": {"$ref": "#/$defs/column"}
         },
         "config": {"$ref": "#/$defs/model_config"},
-        "depends_on": {"$ref": "#/$defs/depends_on"}
+        "depends_on": {"$ref": "#/$defs/depends_on"},
+        "refs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/ref_dep"}
+        },
+        "sources": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/source_dep"}
+        }
       }
     },
     "seed_node": {
@@ -328,7 +338,9 @@
         "column_name",
         "test_metadata",
         "config",
-        "depends_on"
+        "depends_on",
+        "refs",
+        "sources"
       ],
       "properties": {
         "unique_id": {"type": "string"},
@@ -345,7 +357,15 @@
         "column_name": {"type": ["string", "null"]},
         "test_metadata": {"$ref": "#/$defs/test_metadata"},
         "config": {"$ref": "#/$defs/test_config"},
-        "depends_on": {"$ref": "#/$defs/depends_on"}
+        "depends_on": {"$ref": "#/$defs/depends_on"},
+        "refs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/ref_dep"}
+        },
+        "sources": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/source_dep"}
+        }
       }
     },
     "source": {
