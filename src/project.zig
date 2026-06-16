@@ -58,27 +58,18 @@ const parseJsonScalar = project_parse.parseJsonScalar;
 const refDepFromValue = project_parse.refDepFromValue;
 const synthesizeGenericTestNames = project_parse.synthesizeGenericTestNames;
 const testNameFromYamlItem = project_parse.testNameFromYamlItem;
-const findKeyword = project_jinja.findKeyword;
 const findMatchingParen = project_jinja.findMatchingParen;
-const findValueStart = project_jinja.findValueStart;
 const isIdentChar = project_jinja.isIdentChar;
 const isIdentStart = project_jinja.isIdentStart;
 const parseLiteralArgs = project_jinja.parseLiteralArgs;
-const parseQuoted = project_jinja.parseQuoted;
-const readJinjaCall = project_jinja.readJinjaCall;
-const skipQuotedSpan = project_jinja.skipQuotedSpan;
 const skipWs = project_jinja.skipWs;
 const appendUnique = util.appendUnique;
 const countActiveExposures = project_resolve.countActiveExposures;
 const countActiveNodes = project_resolve.countActiveNodes;
 const countActiveSeeds = project_resolve.countActiveSeeds;
 const findDoc = project_resolve.findDoc;
-const findMacroIdByPackageAndName = project_resolve.findMacroIdByPackageAndName;
-const findMacroIdForUnqualifiedCall = project_resolve.findMacroIdForUnqualifiedCall;
 const findMacroIndexByPackageAndName = project_resolve.findMacroIndexByPackageAndName;
 const findModelIndexByName = project_resolve.findModelIndexByName;
-const hasMacroPackage = project_resolve.hasMacroPackage;
-const packageNameFromMacroUniqueId = project_resolve.packageNameFromMacroUniqueId;
 const rejectDuplicateDocs = project_resolve.rejectDuplicateDocs;
 const rejectDuplicateExposures = project_resolve.rejectDuplicateExposures;
 const rejectDuplicateMacroProperties = project_resolve.rejectDuplicateMacroProperties;
@@ -982,7 +973,7 @@ fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8,
     errdefer {
         deinitNode(runtime.allocator, &node);
     }
-    try scanSql(runtime.allocator, sql, &node, graph);
+    try project_jinja.scanSql(runtime.allocator, sql, &node, graph);
     try graph.nodes.append(runtime.allocator, node);
 }
 
@@ -1155,7 +1146,7 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
 
 fn resolveMacroDependencies(graph: *Graph) !void {
     for (graph.macros.items) |*macro| {
-        try scanMacroSqlForKnownMacroCalls(graph.allocator, macro.macro_sql, graph, macro.unique_id, &macro.macro_depends_on);
+        try project_jinja.scanMacroSqlForKnownMacroCalls(graph.allocator, macro.macro_sql, graph, macro.unique_id, &macro.macro_depends_on);
         sortStrings(macro.macro_depends_on.items);
     }
 }
@@ -1180,195 +1171,6 @@ fn resolveDocDescription(graph: *Graph, package_name: []const u8, description: [
     try appendUnique(graph.allocator, doc_blocks, doc.unique_id);
     sortStrings(doc_blocks.items);
     return doc.block_contents;
-}
-
-fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
-    var index: usize = 0;
-    while (index + 1 < sql.len) {
-        if (sql[index] != '{') {
-            index += 1;
-            continue;
-        }
-        if (sql[index + 1] == '#') {
-            const end = std.mem.indexOfPos(u8, sql, index + 2, "#}") orelse return error.UnsupportedJinja;
-            index = end + 2;
-            continue;
-        }
-        const close = if (sql[index + 1] == '{')
-            std.mem.indexOfPos(u8, sql, index + 2, "}}")
-        else if (sql[index + 1] == '%')
-            std.mem.indexOfPos(u8, sql, index + 2, "%}")
-        else
-            null;
-        if (close) |end| {
-            try scanJinjaSpan(allocator, sql[index + 2 .. end], node, graph);
-            index = end + 2;
-            continue;
-        }
-        index += 1;
-    }
-}
-
-fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, graph: ?*const Graph) !void {
-    var i: usize = 0;
-    while (i < span.len) {
-        if (span[i] == '"' or span[i] == '\'') {
-            i = skipQuotedSpan(span, i) orelse return error.UnsupportedJinja;
-            continue;
-        }
-        if (!isIdentStart(span[i])) {
-            i += 1;
-            continue;
-        }
-        const start = i;
-        i += 1;
-        while (i < span.len and isIdentChar(span[i])) i += 1;
-        const ident = span[start..i];
-        const call = (try readJinjaCall(span, ident, i)) orelse continue;
-        const args = span[call.open + 1 .. call.close];
-
-        if (call.package_name) |package_name| {
-            if (graph) |known_graph| {
-                if (findMacroIdByPackageAndName(known_graph, package_name, call.name)) |macro_id| {
-                    try appendUnique(allocator, &node.macro_depends_on, macro_id);
-                    i = call.close + 1;
-                    continue;
-                }
-                if (hasMacroPackage(known_graph, package_name)) return error.UnresolvedMacro;
-            }
-            return error.UnsupportedJinja;
-        } else if (std.mem.eql(u8, call.name, "ref")) {
-            var strings = try parseLiteralArgs(allocator, args, error.UnsupportedDynamicRef);
-            defer strings.deinit(allocator);
-            if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedDynamicRef;
-            try node.refs.append(allocator, .{
-                .package = if (strings.items.len == 2) strings.items[0] else null,
-                .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
-            });
-        } else if (std.mem.eql(u8, call.name, "source")) {
-            var strings = try parseLiteralArgs(allocator, args, error.UnsupportedDynamicSource);
-            defer strings.deinit(allocator);
-            if (strings.items.len != 2) return error.UnsupportedDynamicSource;
-            try node.source_refs.append(allocator, .{
-                .source_name = strings.items[0],
-                .table_name = strings.items[1],
-            });
-        } else if (std.mem.eql(u8, call.name, "config")) {
-            try parseConfig(allocator, args, node);
-        } else {
-            if (graph) |known_graph| {
-                if (findMacroIdForUnqualifiedCall(known_graph, node.package_name, call.name)) |macro_id| {
-                    try appendUnique(allocator, &node.macro_depends_on, macro_id);
-                    i = call.close + 1;
-                    continue;
-                }
-            }
-            return error.UnsupportedJinja;
-        }
-        i = call.close + 1;
-    }
-}
-
-fn scanMacroSqlForKnownMacroCalls(allocator: std.mem.Allocator, sql: []const u8, graph: *const Graph, current_macro_id: []const u8, macro_depends_on: *std.ArrayList([]const u8)) !void {
-    var index: usize = 0;
-    while (index + 1 < sql.len) {
-        if (sql[index] != '{') {
-            index += 1;
-            continue;
-        }
-        if (sql[index + 1] == '#') {
-            const end = std.mem.indexOfPos(u8, sql, index + 2, "#}") orelse break;
-            index = end + 2;
-            continue;
-        }
-        const close = if (sql[index + 1] == '{')
-            std.mem.indexOfPos(u8, sql, index + 2, "}}")
-        else if (sql[index + 1] == '%')
-            std.mem.indexOfPos(u8, sql, index + 2, "%}")
-        else
-            null;
-        if (close) |end| {
-            try scanMacroSpanForKnownMacroCalls(allocator, sql[index + 2 .. end], graph, current_macro_id, macro_depends_on);
-            index = end + 2;
-            continue;
-        }
-        index += 1;
-    }
-}
-
-fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u8, graph: *const Graph, current_macro_id: []const u8, macro_depends_on: *std.ArrayList([]const u8)) !void {
-    var i: usize = 0;
-    const current_package = packageNameFromMacroUniqueId(current_macro_id) orelse graph.project_name;
-    while (i < span.len) {
-        if (span[i] == '"' or span[i] == '\'') {
-            i = skipQuotedSpan(span, i) orelse break;
-            continue;
-        }
-        if (!isIdentStart(span[i])) {
-            i += 1;
-            continue;
-        }
-        const start = i;
-        i += 1;
-        while (i < span.len and isIdentChar(span[i])) i += 1;
-        const ident = span[start..i];
-        const call = (readJinjaCall(span, ident, i) catch break) orelse continue;
-        const macro_id = if (call.package_name) |package_name| blk: {
-            const resolved = findMacroIdByPackageAndName(graph, package_name, call.name);
-            if (resolved == null and hasMacroPackage(graph, package_name)) return error.UnresolvedMacro;
-            break :blk resolved;
-        } else findMacroIdForUnqualifiedCall(graph, current_package, call.name);
-        if (macro_id) |resolved_macro_id| {
-            if (std.mem.eql(u8, resolved_macro_id, current_macro_id)) {
-                i = call.close + 1;
-                continue;
-            }
-            try appendUnique(allocator, macro_depends_on, resolved_macro_id);
-        }
-        i = call.close + 1;
-    }
-}
-
-fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !void {
-    if (findKeyword(args, "materialized")) |pos| {
-        if (findValueStart(args, pos + "materialized".len)) |value_pos| {
-            if (args[value_pos] != '"' and args[value_pos] != '\'') return error.UnsupportedJinja;
-            const parsed = try parseQuoted(allocator, args, value_pos);
-            node.materialized = parsed.value;
-            node.inline_materialized = true;
-        }
-    }
-    if (findKeyword(args, "tags")) |pos| {
-        if (findValueStart(args, pos + "tags".len)) |value_pos| {
-            try parseTagList(allocator, args[value_pos..], &node.tags);
-            node.inline_tags = true;
-            sortStrings(node.tags.items);
-        }
-    }
-}
-
-fn parseTagList(allocator: std.mem.Allocator, text: []const u8, tags: *std.ArrayList([]const u8)) !void {
-    var i = skipWs(text, 0);
-    if (i >= text.len) return;
-    if (text[i] == '"' or text[i] == '\'') {
-        const parsed = try parseQuoted(allocator, text, i);
-        try appendUnique(allocator, tags, parsed.value);
-        return;
-    }
-    if (text[i] != '[') return error.UnsupportedJinja;
-    i += 1;
-    while (i < text.len) {
-        i = skipWs(text, i);
-        if (i >= text.len or text[i] == ']') break;
-        if (text[i] == ',') {
-            i += 1;
-            continue;
-        }
-        if (text[i] != '"' and text[i] != '\'') return error.UnsupportedJinja;
-        const parsed = try parseQuoted(allocator, text, i);
-        try appendUnique(allocator, tags, parsed.value);
-        i = parsed.next;
-    }
 }
 
 fn appendMacroArgumentClone(graph: *Graph, arguments: *std.ArrayList(MacroArgument), source: MacroArgument) !void {
@@ -1424,42 +1226,4 @@ fn sortColumns(columns: []ColumnDef) void {
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lessThan);
-}
-
-test "sql scanner extracts refs sources and config tags from jinja spans" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var node = Node{
-        .package_name = "demo",
-        .unique_id = "model.demo.customers",
-        .name = "customers",
-        .path = "customers.sql",
-        .original_file_path = "models/customers.sql",
-        .raw_code = "",
-    };
-    defer {
-        node.tags.deinit(allocator);
-        node.refs.deinit(allocator);
-        node.source_refs.deinit(allocator);
-        node.depends_on.deinit(allocator);
-        node.macro_depends_on.deinit(allocator);
-    }
-
-    try scanSql(allocator,
-        \\{{ config(materialized="table", tags=["nightly", 'core']) }}
-        \\select * from {{ ref("stg_customers") }}
-        \\union all select * from {{ source('raw', "customers") }}
-        \\select {{ "ref('not_a_dependency')" }} as literal_ref
-        \\{# {{ ref("ignored") }} #}
-    , &node, null);
-
-    try std.testing.expectEqual(@as(usize, 1), node.refs.items.len);
-    try std.testing.expectEqualStrings("stg_customers", node.refs.items[0].name);
-    try std.testing.expectEqual(@as(usize, 1), node.source_refs.items.len);
-    try std.testing.expectEqualStrings("raw", node.source_refs.items[0].source_name);
-    try std.testing.expectEqualStrings("customers", node.source_refs.items[0].table_name);
-    try std.testing.expectEqualStrings("table", node.materialized);
-    try std.testing.expectEqual(@as(usize, 2), node.tags.items.len);
 }
