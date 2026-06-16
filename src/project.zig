@@ -2372,6 +2372,14 @@ fn matchesSelector(graph: *const Graph, node: *const Node, spec: SelectorSpec) b
 }
 
 fn matchesNodeSelectorExpression(graph: *const Graph, node: *const Node, value: []const u8) bool {
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (expressions.next()) |expression| {
+        if (matchesNodeSelectorIntersection(graph, node, expression)) return true;
+    }
+    return false;
+}
+
+fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value: []const u8) bool {
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
@@ -2419,6 +2427,14 @@ fn matchesTestSelector(graph: *const Graph, test_node: *const GenericTestNode, s
 }
 
 fn matchesTestSelectorExpression(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8) bool {
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (expressions.next()) |expression| {
+        if (matchesTestSelectorIntersection(graph, test_node, expression)) return true;
+    }
+    return false;
+}
+
+fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8) bool {
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
@@ -2454,6 +2470,14 @@ fn matchesSourceSelector(graph: *const Graph, source: *const SourceDef, spec: Se
 }
 
 fn matchesSourceSelectorExpression(graph: *const Graph, source: *const SourceDef, value: []const u8) bool {
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (expressions.next()) |expression| {
+        if (matchesSourceSelectorIntersection(graph, source, expression)) return true;
+    }
+    return false;
+}
+
+fn matchesSourceSelectorIntersection(graph: *const Graph, source: *const SourceDef, value: []const u8) bool {
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
@@ -2491,6 +2515,14 @@ fn matchesExposureSelector(graph: *const Graph, exposure: *const ExposureDef, sp
 }
 
 fn matchesExposureSelectorExpression(graph: *const Graph, exposure: *const ExposureDef, value: []const u8) bool {
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (expressions.next()) |expression| {
+        if (matchesExposureSelectorIntersection(graph, exposure, expression)) return true;
+    }
+    return false;
+}
+
+fn matchesExposureSelectorIntersection(graph: *const Graph, exposure: *const ExposureDef, value: []const u8) bool {
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
