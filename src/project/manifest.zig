@@ -552,3 +552,162 @@ fn modelNameFromUniqueId(unique_id: []const u8) []const u8 {
     }
     return unique_id;
 }
+
+fn renderSelectedJsonForTest(allocator: std.mem.Allocator, selected: []selector.SelectedResource) ![]u8 {
+    var out: Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try writeSelectedJson(&out.writer, selected);
+    return try out.toOwnedSlice();
+}
+
+fn renderJsonStringForTest(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    var out: Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try writeJsonString(&out.writer, value);
+    return try out.toOwnedSlice();
+}
+
+fn renderExposureDependsOnForTest(allocator: std.mem.Allocator, values: []const []const u8) ![]u8 {
+    var out: Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try writeExposureDependsOnNodes(&out.writer, values);
+    return try out.toOwnedSlice();
+}
+
+test "selected resource JSON writer preserves order and shape" {
+    var selected = [_]selector.SelectedResource{
+        .{ .unique_id = "model.demo.customers", .resource_type = "model", .name = "customers" },
+        .{ .unique_id = "source.demo.raw.customers", .resource_type = "source", .name = "customers" },
+    };
+
+    const rendered = try renderSelectedJsonForTest(std.testing.allocator, selected[0..]);
+    defer std.testing.allocator.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        "[{\"unique_id\":\"model.demo.customers\",\"resource_type\":\"model\",\"name\":\"customers\"},{\"unique_id\":\"source.demo.raw.customers\",\"resource_type\":\"source\",\"name\":\"customers\"}]\n",
+        rendered,
+    );
+}
+
+test "JSON string writer escapes special characters" {
+    const rendered = try renderJsonStringForTest(std.testing.allocator, "quote\" slash\\ line\n");
+    defer std.testing.allocator.free(rendered);
+
+    try std.testing.expectEqualStrings("\"quote\\\" slash\\\\ line\\n\"", rendered);
+}
+
+test "exposure dependency writer emits sources before other nodes" {
+    const values = [_][]const u8{
+        "model.demo.orders",
+        "source.demo.raw.customers",
+        "model.demo.customers",
+    };
+
+    const rendered = try renderExposureDependsOnForTest(std.testing.allocator, &values);
+    defer std.testing.allocator.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        "[\"source.demo.raw.customers\",\"model.demo.orders\",\"model.demo.customers\"]",
+        rendered,
+    );
+}
+
+test "manifest writer filters disabled resources and writes graph maps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.customers",
+        .source_name = "raw",
+        .table_name = "customers",
+        .original_file_path = "models/schema.yml",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select \"customer_id\" from {{ source('raw', 'customers') }}",
+        .description = "Customer \"model\"",
+    });
+    try graph.nodes.items[0].depends_on.append(allocator, "source.demo.raw.customers");
+    try graph.nodes.items[0].source_refs.append(allocator, .{ .source_name = "raw", .table_name = "customers" });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.disabled",
+        .name = "disabled",
+        .path = "disabled.sql",
+        .original_file_path = "models/disabled.sql",
+        .raw_code = "select 1",
+        .enabled = false,
+    });
+    try graph.exposures.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "exposure.demo.weekly_kpis",
+        .name = "weekly_kpis",
+        .exposure_type = "dashboard",
+        .path = "schema.yml",
+        .original_file_path = "models/schema.yml",
+        .owner_name = "Analytics",
+    });
+    try graph.exposures.items[0].depends_on.append(allocator, "model.demo.customers");
+    try graph.exposures.items[0].depends_on.append(allocator, "source.demo.raw.customers");
+    try graph.exposures.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "exposure.demo.hidden",
+        .name = "hidden",
+        .path = "schema.yml",
+        .original_file_path = "models/schema.yml",
+        .enabled = false,
+    });
+
+    const rendered = try renderManifest(std.testing.allocator, &graph);
+    defer std.testing.allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    const nodes = root.get("nodes").?.object;
+    try std.testing.expect(nodes.get("model.demo.customers") != null);
+    try std.testing.expect(nodes.get("model.demo.disabled") == null);
+
+    const disabled = root.get("disabled").?.object;
+    try std.testing.expect(disabled.get("model.demo.disabled") != null);
+
+    const exposures = root.get("exposures").?.object;
+    try std.testing.expect(exposures.get("exposure.demo.weekly_kpis") != null);
+    try std.testing.expect(exposures.get("exposure.demo.hidden") == null);
+    const exposure = exposures.get("exposure.demo.weekly_kpis").?.object;
+    const exposure_depends_on = exposure.get("depends_on").?.object;
+    const exposure_depends_on_nodes = exposure_depends_on.get("nodes").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), exposure_depends_on_nodes.len);
+    try std.testing.expectEqualStrings("source.demo.raw.customers", exposure_depends_on_nodes[0].string);
+    try std.testing.expectEqualStrings("model.demo.customers", exposure_depends_on_nodes[1].string);
+
+    const parent_map = root.get("parent_map").?.object;
+    const model_parents = parent_map.get("model.demo.customers").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), model_parents.len);
+    try std.testing.expectEqualStrings("source.demo.raw.customers", model_parents[0].string);
+    const exposure_parents = parent_map.get("exposure.demo.weekly_kpis").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), exposure_parents.len);
+    try std.testing.expectEqualStrings("model.demo.customers", exposure_parents[0].string);
+    try std.testing.expectEqualStrings("source.demo.raw.customers", exposure_parents[1].string);
+    try std.testing.expect(parent_map.get("exposure.demo.hidden") == null);
+
+    const child_map = root.get("child_map").?.object;
+    const source_children = child_map.get("source.demo.raw.customers").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), source_children.len);
+    try std.testing.expectEqualStrings("model.demo.customers", source_children[0].string);
+    try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", source_children[1].string);
+    const model_children = child_map.get("model.demo.customers").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), model_children.len);
+    try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", model_children[0].string);
+    try std.testing.expect(child_map.get("model.demo.disabled") == null);
+    try std.testing.expect(child_map.get("exposure.demo.hidden") == null);
+}
