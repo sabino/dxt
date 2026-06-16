@@ -74,6 +74,12 @@ const findMacroIdForUnqualifiedCall = project_resolve.findMacroIdForUnqualifiedC
 const findMacroIndexByPackageAndName = project_resolve.findMacroIndexByPackageAndName;
 const findModelIndexByName = project_resolve.findModelIndexByName;
 const hasMacroPackage = project_resolve.hasMacroPackage;
+const rejectDuplicateDocs = project_resolve.rejectDuplicateDocs;
+const rejectDuplicateExposures = project_resolve.rejectDuplicateExposures;
+const rejectDuplicateMacroProperties = project_resolve.rejectDuplicateMacroProperties;
+const rejectDuplicateMacros = project_resolve.rejectDuplicateMacros;
+const rejectDuplicateModels = project_resolve.rejectDuplicateModels;
+const rejectDuplicateSeeds = project_resolve.rejectDuplicateSeeds;
 const resolveDependencies = project_resolve.resolveDependencies;
 const resolveRefDependency = project_resolve.resolveRefDependency;
 
@@ -1207,86 +1213,6 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
     }
     sortGenericTestDefs(column.tests.items);
     try columns.append(graph.allocator, column);
-}
-
-fn rejectDuplicateModels(graph: *const Graph) !void {
-    var i: usize = 0;
-    while (i < graph.nodes.items.len) : (i += 1) {
-        var j = i + 1;
-        while (j < graph.nodes.items.len) : (j += 1) {
-            if (std.mem.eql(u8, graph.nodes.items[i].resource_type, "model") and
-                std.mem.eql(u8, graph.nodes.items[j].resource_type, "model") and
-                std.mem.eql(u8, graph.nodes.items[i].unique_id, graph.nodes.items[j].unique_id))
-            {
-                return error.DuplicateModelName;
-            }
-        }
-    }
-}
-
-fn rejectDuplicateSeeds(graph: *const Graph) !void {
-    var i: usize = 0;
-    while (i < graph.nodes.items.len) : (i += 1) {
-        var j = i + 1;
-        while (j < graph.nodes.items.len) : (j += 1) {
-            if (std.mem.eql(u8, graph.nodes.items[i].resource_type, "seed") and
-                std.mem.eql(u8, graph.nodes.items[j].resource_type, "seed") and
-                std.mem.eql(u8, graph.nodes.items[i].unique_id, graph.nodes.items[j].unique_id))
-            {
-                return error.DuplicateSeedName;
-            }
-        }
-    }
-}
-
-fn rejectDuplicateDocs(graph: *const Graph) !void {
-    var i: usize = 0;
-    while (i < graph.docs.items.len) : (i += 1) {
-        var j = i + 1;
-        while (j < graph.docs.items.len) : (j += 1) {
-            if (std.mem.eql(u8, graph.docs.items[i].unique_id, graph.docs.items[j].unique_id)) {
-                return error.DuplicateDocName;
-            }
-        }
-    }
-}
-
-fn rejectDuplicateExposures(graph: *const Graph) !void {
-    var i: usize = 0;
-    while (i < graph.exposures.items.len) : (i += 1) {
-        var j = i + 1;
-        while (j < graph.exposures.items.len) : (j += 1) {
-            if (std.mem.eql(u8, graph.exposures.items[i].unique_id, graph.exposures.items[j].unique_id)) {
-                return error.DuplicateExposureName;
-            }
-        }
-    }
-}
-
-fn rejectDuplicateMacroProperties(graph: *const Graph) !void {
-    var i: usize = 0;
-    while (i < graph.macro_properties.items.len) : (i += 1) {
-        var j = i + 1;
-        while (j < graph.macro_properties.items.len) : (j += 1) {
-            if (std.mem.eql(u8, graph.macro_properties.items[i].package_name, graph.macro_properties.items[j].package_name) and
-                std.mem.eql(u8, graph.macro_properties.items[i].name, graph.macro_properties.items[j].name))
-            {
-                return error.DuplicateMacroProperty;
-            }
-        }
-    }
-}
-
-fn rejectDuplicateMacros(graph: *const Graph) !void {
-    var i: usize = 0;
-    while (i < graph.macros.items.len) : (i += 1) {
-        var j = i + 1;
-        while (j < graph.macros.items.len) : (j += 1) {
-            if (std.mem.eql(u8, graph.macros.items[i].unique_id, graph.macros.items[j].unique_id)) {
-                return error.DuplicateMacroName;
-            }
-        }
-    }
 }
 
 fn resolveMacroDependencies(graph: *Graph) !void {
