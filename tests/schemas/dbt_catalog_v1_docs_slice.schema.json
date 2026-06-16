@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.getdbt.com/dbt/catalog/v1.json#dxt-docs-slice",
+  "title": "dxt dbt Catalog v1 docs-generate compatibility slice",
+  "$comment": "Pinned local compatibility slice for dbt Catalog v1. Source reference: https://schemas.getdbt.com/dbt/catalog/v1.json, checked 2026-06-16. This intentionally validates only the empty adapter-free catalog surface emitted before dxt has relation introspection.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["metadata", "nodes", "sources", "errors"],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dbt_schema_version",
+        "dbt_version",
+        "generated_at",
+        "invocation_id",
+        "invocation_started_at",
+        "env"
+      ],
+      "properties": {
+        "dbt_schema_version": {"const": "https://schemas.getdbt.com/dbt/catalog/v1.json"},
+        "dbt_version": {"type": "string"},
+        "generated_at": {"type": "string"},
+        "invocation_id": {"type": ["string", "null"]},
+        "invocation_started_at": {"type": ["string", "null"]},
+        "env": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "nodes": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "errors": {
+      "type": ["array", "null"],
+      "items": {"type": "string"}
+    }
+  }
+}
