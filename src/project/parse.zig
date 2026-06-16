@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const util = @import("util.zig");
 
 const JsonScalar = types.JsonScalar;
+const ExposureDef = types.ExposureDef;
 const GenericTestDef = types.GenericTestDef;
 const Graph = types.Graph;
 const MacroArgument = types.MacroArgument;
@@ -145,6 +146,34 @@ pub fn refDepFromValue(allocator: std.mem.Allocator, value: []const u8) !RefDep 
         };
     }
     return .{ .package = null, .name = try dupTrimmedScalar(allocator, trimmed) };
+}
+
+pub fn parseExposureDependency(allocator: std.mem.Allocator, raw_value: []const u8, exposure: *ExposureDef) !void {
+    const value = std.mem.trim(u8, raw_value, " \t\r");
+    if (std.mem.startsWith(u8, value, "ref(")) {
+        const args_start = std.mem.indexOfScalar(u8, value, '(') orelse return error.UnsupportedDynamicRef;
+        const args_end = findMatchingParen(value, args_start) orelse return error.UnsupportedDynamicRef;
+        var strings = try parseLiteralArgs(allocator, value[args_start + 1 .. args_end], error.UnsupportedDynamicRef);
+        defer strings.deinit(allocator);
+        if (strings.items.len == 1) {
+            try exposure.refs.append(allocator, .{ .package = null, .name = strings.items[0] });
+        } else if (strings.items.len == 2) {
+            try exposure.refs.append(allocator, .{ .package = strings.items[0], .name = strings.items[1] });
+        } else {
+            return error.UnsupportedDynamicRef;
+        }
+        return;
+    }
+    if (std.mem.startsWith(u8, value, "source(")) {
+        const args_start = std.mem.indexOfScalar(u8, value, '(') orelse return error.UnsupportedDynamicSource;
+        const args_end = findMatchingParen(value, args_start) orelse return error.UnsupportedDynamicSource;
+        var strings = try parseLiteralArgs(allocator, value[args_start + 1 .. args_end], error.UnsupportedDynamicSource);
+        defer strings.deinit(allocator);
+        if (strings.items.len != 2) return error.UnsupportedDynamicSource;
+        try exposure.source_refs.append(allocator, .{ .source_name = strings.items[0], .table_name = strings.items[1] });
+        return;
+    }
+    return error.UnsupportedYaml;
 }
 
 pub const GenericTestNames = struct {
@@ -495,6 +524,60 @@ test "refDepFromValue rejects unsupported dynamic or malformed refs" {
     try std.testing.expectError(error.UnsupportedRef, refDepFromValue(allocator, "ref(var('model'))"));
     try std.testing.expectError(error.UnsupportedRef, refDepFromValue(allocator, "ref('pkg', 'orders', 'extra')"));
     try std.testing.expectError(error.UnsupportedRef, refDepFromValue(allocator, "ref('orders'"));
+}
+
+test "parseExposureDependency records ref and source dependencies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var exposure = ExposureDef{
+        .package_name = "demo",
+        .unique_id = "exposure.demo.weekly_kpis",
+        .name = "weekly_kpis",
+        .path = "models/schema.yml",
+        .original_file_path = "models/schema.yml",
+    };
+    defer {
+        exposure.refs.deinit(allocator);
+        exposure.source_refs.deinit(allocator);
+    }
+
+    try parseExposureDependency(allocator, " ref('orders') ", &exposure);
+    try parseExposureDependency(allocator, "ref(\"pkg\", 'customers')", &exposure);
+    try parseExposureDependency(allocator, "source('raw', \"payments\")", &exposure);
+
+    try std.testing.expectEqual(@as(usize, 2), exposure.refs.items.len);
+    try std.testing.expect(exposure.refs.items[0].package == null);
+    try std.testing.expectEqualStrings("orders", exposure.refs.items[0].name);
+    try std.testing.expectEqualStrings("pkg", exposure.refs.items[1].package.?);
+    try std.testing.expectEqualStrings("customers", exposure.refs.items[1].name);
+    try std.testing.expectEqual(@as(usize, 1), exposure.source_refs.items.len);
+    try std.testing.expectEqualStrings("raw", exposure.source_refs.items[0].source_name);
+    try std.testing.expectEqualStrings("payments", exposure.source_refs.items[0].table_name);
+}
+
+test "parseExposureDependency rejects unsupported dependency forms" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var exposure = ExposureDef{
+        .package_name = "demo",
+        .unique_id = "exposure.demo.weekly_kpis",
+        .name = "weekly_kpis",
+        .path = "models/schema.yml",
+        .original_file_path = "models/schema.yml",
+    };
+    defer {
+        exposure.refs.deinit(allocator);
+        exposure.source_refs.deinit(allocator);
+    }
+
+    try std.testing.expectError(error.UnsupportedDynamicRef, parseExposureDependency(allocator, "ref(var('model'))", &exposure));
+    try std.testing.expectError(error.UnsupportedDynamicRef, parseExposureDependency(allocator, "ref('pkg', 'orders', 'extra')", &exposure));
+    try std.testing.expectError(error.UnsupportedDynamicSource, parseExposureDependency(allocator, "source('raw')", &exposure));
+    try std.testing.expectError(error.UnsupportedYaml, parseExposureDependency(allocator, "metric('orders')", &exposure));
 }
 
 test "synthesizeGenericTestNames preserves short generic test identities" {
