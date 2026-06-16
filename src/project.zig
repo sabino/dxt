@@ -3,6 +3,7 @@ const Io = std.Io;
 const project_config = @import("project/config.zig");
 const project_fs = @import("project/fs.zig");
 const project_jinja = @import("project/jinja.zig");
+const project_parse = @import("project/parse.zig");
 const project_resolve = @import("project/resolve.zig");
 const manifest = @import("project/manifest.zig");
 const selector = @import("project/selector.zig");
@@ -45,6 +46,9 @@ const splitKeyValue = util.splitKeyValue;
 const parseInlineStringList = util.parseInlineStringList;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 const sortStrings = util.sortStrings;
+const parseBool = project_parse.parseBool;
+const parseJsonScalar = project_parse.parseJsonScalar;
+const testNameFromYamlItem = project_parse.testNameFromYamlItem;
 const findKeyword = project_jinja.findKeyword;
 const findMatchingParen = project_jinja.findMatchingParen;
 const findValueStart = project_jinja.findValueStart;
@@ -1551,15 +1555,6 @@ fn appendMetaEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(MetaEnt
     sortMetaEntries(entries.items);
 }
 
-fn parseJsonScalar(allocator: std.mem.Allocator, value: []const u8) !JsonScalar {
-    const trimmed = std.mem.trim(u8, value, " \t\r");
-    const unquoted = try dupTrimmedScalar(allocator, trimmed);
-    if (std.mem.eql(u8, trimmed, "true") or std.mem.eql(u8, trimmed, "false")) return .{ .text = unquoted, .kind = .bool };
-    if (std.mem.eql(u8, trimmed, "null")) return .{ .text = unquoted, .kind = .null };
-    if (isJsonNumber(trimmed)) return .{ .text = unquoted, .kind = .number };
-    return .{ .text = unquoted, .kind = .string };
-}
-
 fn currentGenericTestDef(graph: *Graph, model_index: usize, current_column: ?usize, target: TestTarget, test_index: usize) !*GenericTestDef {
     if (target == .model) return &graph.model_properties.items[model_index].tests.items[test_index];
     if (target == .column) {
@@ -1838,64 +1833,6 @@ fn packageNameFromMacroUniqueId(unique_id: []const u8) ?[]const u8 {
     const package_start = "macro.".len;
     const package_end = std.mem.indexOfPos(u8, unique_id, package_start, ".") orelse return null;
     return unique_id[package_start..package_end];
-}
-
-fn parseBool(value: []const u8) !bool {
-    const trimmed = std.mem.trim(u8, value, " \t\r");
-    if (std.ascii.eqlIgnoreCase(trimmed, "true")) return true;
-    if (std.ascii.eqlIgnoreCase(trimmed, "false")) return false;
-    return error.UnsupportedYaml;
-}
-
-fn isJsonNumber(value: []const u8) bool {
-    if (value.len == 0) return false;
-    var i: usize = 0;
-    if (value[i] == '-') {
-        i += 1;
-        if (i == value.len) return false;
-    }
-    if (value[i] == '0') {
-        i += 1;
-        if (i < value.len and std.ascii.isDigit(value[i])) return false;
-    } else if (value[i] >= '1' and value[i] <= '9') {
-        i += 1;
-        while (i < value.len and std.ascii.isDigit(value[i])) : (i += 1) {}
-    } else {
-        return false;
-    }
-    if (i < value.len and value[i] == '.') {
-        i += 1;
-        var frac_digits: usize = 0;
-        while (i < value.len and std.ascii.isDigit(value[i])) : (i += 1) {
-            frac_digits += 1;
-        }
-        if (frac_digits == 0) return false;
-    }
-    if (i < value.len and (value[i] == 'e' or value[i] == 'E')) {
-        i += 1;
-        if (i < value.len and (value[i] == '+' or value[i] == '-')) i += 1;
-        var exp_digits: usize = 0;
-        while (i < value.len and std.ascii.isDigit(value[i])) : (i += 1) {
-            exp_digits += 1;
-        }
-        if (exp_digits == 0) return false;
-    }
-    return i == value.len;
-}
-
-test "json number parser rejects invalid leading zero forms" {
-    try std.testing.expect(isJsonNumber("0"));
-    try std.testing.expect(isJsonNumber("-12.5e+3"));
-    try std.testing.expect(!isJsonNumber("007"));
-    try std.testing.expect(!isJsonNumber("-01"));
-    try std.testing.expect(!isJsonNumber("1."));
-}
-
-fn testNameFromYamlItem(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
-    const trimmed = std.mem.trim(u8, value, " \t\r");
-    if (trimmed.len == 0) return error.UnsupportedYaml;
-    const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse trimmed.len;
-    return try dupTrimmedScalar(allocator, trimmed[0..colon]);
 }
 
 test "sql scanner extracts refs sources and config tags from jinja spans" {
