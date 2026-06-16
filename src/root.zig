@@ -74,7 +74,17 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
     }
     if (equals(command, "docs")) {
         if (args.len >= 3 and equals(args[2], "generate")) {
-            return planned("docs generate", args[3..], stdout, stderr, .common_only, .docs_generate);
+            if (hasHelp(args[3..])) {
+                try printCommandHelp("docs generate", stdout, .docs_generate);
+                return .ok;
+            }
+            const rt = runtime orelse {
+                try stderr.writeAll("error: runtime I/O is required for docs generate\n");
+                return .usage;
+            };
+            const options = parseOptions(rt.allocator, args[3..], stderr, .docs_generate) catch |err| return commandError(err, stderr);
+            project.docsGenerate(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+            return .ok;
         }
         try stderr.print("error: expected `dxt docs generate`\n", .{});
         return .usage;
@@ -89,6 +99,7 @@ const OptionMode = enum {
     common_only,
     common_and_select,
     compile,
+    docs_generate,
     list,
     build,
 };
@@ -226,19 +237,19 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             if (equals(arg, "--project-dir")) {
                 options.project_dir = value;
             } else if (equals(arg, "--profiles-dir")) {
-                if (mode != .compile) return error.UnsupportedCommandOption;
+                if (mode != .compile and mode != .docs_generate) return error.UnsupportedCommandOption;
                 options.profiles_dir = value;
             } else if (equals(arg, "--profile")) {
-                if (mode != .compile) return error.UnsupportedCommandOption;
+                if (mode != .compile and mode != .docs_generate) return error.UnsupportedCommandOption;
                 options.profile = value;
             } else if (equals(arg, "--target")) {
-                if (mode != .compile) return error.UnsupportedCommandOption;
+                if (mode != .compile and mode != .docs_generate) return error.UnsupportedCommandOption;
                 options.target = value;
             } else if (equals(arg, "--vars")) {
-                if (mode != .compile) return error.UnsupportedCommandOption;
+                if (mode != .compile and mode != .docs_generate) return error.UnsupportedCommandOption;
                 options.vars = value;
             } else if (equals(arg, "--threads")) {
-                if (mode != .compile) return error.UnsupportedCommandOption;
+                if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
                 options.threads = value;
             } else if (equals(arg, "--target-path")) {
                 if (mode == .list) return error.UnsupportedCommandOption;
@@ -355,7 +366,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
     }
 
     switch (mode) {
-        .common_and_select, .compile, .list, .build => {
+        .common_and_select, .compile, .docs_generate, .list, .build => {
             if (equals(arg, "--select") or equals(arg, "--exclude")) return true;
         },
         .common_only => {},
@@ -392,32 +403,33 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  ls               List resources from the supported parser graph.
         \\  compile          Compile supported dbt SQL/Jinja without executing.
         \\  build            Planned: run seeds, models, and tests.
-        \\  docs generate    Planned: generate docs artifacts.
+        \\  docs generate    Generate supported docs artifacts.
         \\
     );
 }
 
 fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !void {
     try writer.print("Usage: dxt {s} [options]\n\n", .{command});
-    if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile")) {
+    if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile") or equals(command, "docs generate")) {
         try writer.print("`dxt {s}` supports the M1 parser subset documented in PLAN.md.\n\n", .{command});
         try writer.writeAll("Options:\n");
         try writer.writeAll(
             \\  --project-dir <path>
             \\
         );
-        if (equals(command, "parse") or equals(command, "compile")) {
+        if (equals(command, "parse") or equals(command, "compile") or equals(command, "docs generate")) {
             try writer.writeAll(
                 \\  --target-path <path>
                 \\
             );
         }
-        if (equals(command, "compile")) {
+        if (equals(command, "compile") or equals(command, "docs generate")) {
             try writer.writeAll(
                 \\  --profiles-dir <path>
                 \\  --profile <name>
                 \\  --target <name>
                 \\  --vars <yaml>
+                \\  --threads <count>
                 \\
             );
         }
@@ -448,14 +460,13 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         \\
     );
     switch (mode) {
-        .project_selection, .list, .build => {
+        .project_selection, .list, .build, .docs_generate => {
             try writer.writeAll(
                 \\  --select <selector> [selector ...]
                 \\  --exclude <selector> [selector ...]
                 \\
             );
         },
-        .docs_generate => {},
     }
     switch (mode) {
         .list => {
@@ -472,7 +483,13 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\
             );
         },
-        .project_selection, .docs_generate => {},
+        .docs_generate => {
+            try writer.writeAll(
+                \\  --threads <count>
+                \\
+            );
+        },
+        .project_selection => {},
     }
 }
 
@@ -560,5 +577,6 @@ test "docs generate command is recognized" {
 
     const code = try run(&.{ "dxt", "docs", "generate", "--target-path", "target-dxt" }, &stdout.writer, &stderr.writer, null);
     try std.testing.expectEqual(ExitCode.usage, code);
-    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "dxt docs generate") != null);
+    try std.testing.expectEqualStrings("", stdout.written());
+    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for docs generate") != null);
 }

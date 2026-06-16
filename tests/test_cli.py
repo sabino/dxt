@@ -14,6 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 DXT = ROOT / "zig-out" / "bin" / "dxt"
 SCHEMA_VALIDATOR_PATH = ROOT / "scripts" / "validate_manifest_schema.py"
+CATALOG_SCHEMA = ROOT / "tests" / "schemas" / "dbt_catalog_v1_docs_slice.schema.json"
 SCHEMA_SPEC = importlib.util.spec_from_file_location("validate_manifest_schema", SCHEMA_VALIDATOR_PATH)
 assert SCHEMA_SPEC is not None
 assert SCHEMA_SPEC.loader is not None
@@ -287,6 +288,13 @@ def assert_manifest_schema_slice(manifest_path: Path) -> None:
     manifest = json.loads(manifest_path.read_text())
     schema = schema_validator.load_json(schema_validator.DEFAULT_SCHEMA)
     errors = schema_validator.validate_manifest(manifest, schema)
+    assert errors == []
+
+
+def assert_catalog_schema_slice(catalog_path: Path) -> None:
+    catalog = json.loads(catalog_path.read_text())
+    schema = schema_validator.load_json(CATALOG_SCHEMA)
+    errors = schema_validator.validate_manifest(catalog, schema)
     assert errors == []
 
 
@@ -2195,15 +2203,103 @@ def test_missing_project_file_fails(tmp_path: Path):
     assert "missing dbt_project.yml" in result.stderr
 
 
-def test_docs_generate_placeholder():
+def test_docs_generate_writes_manifest_catalog_and_compiled_sql(tmp_path: Path):
+    project = copy_fixture(tmp_path, "docs_blocks")
+    target = tmp_path / "docs-target"
     result = subprocess.run(
-        [DXT, "docs", "generate", "--target-path", "target-dxt"],
+        [
+            DXT,
+            "docs",
+            "generate",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--threads",
+            "4",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert "Generated docs artifacts for 1 compiled model(s)" in result.stdout
+
+    compiled_path = target / "compiled" / "docs_blocks" / "models" / "customers.sql"
+    assert compiled_path.read_text().strip() == "select 1 as customer_id"
+
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
+    assert manifest["nodes"]["model.docs_blocks.customers"]["compiled"] is True
+    assert manifest["nodes"]["model.docs_blocks.customers"]["compiled_path"].endswith(
+        "/compiled/docs_blocks/models/customers.sql"
+    )
+    assert sorted(manifest["docs"]) == [
+        "doc.docs_blocks.customer_id",
+        "doc.docs_blocks.customer_model",
+    ]
+    assert manifest["docs"]["doc.docs_blocks.customer_model"]["block_contents"] == "Customer model docs."
+
+    catalog_path = target / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    assert_catalog_schema_slice(catalog_path)
+    assert catalog["metadata"]["dbt_schema_version"] == "https://schemas.getdbt.com/dbt/catalog/v1.json"
+    assert catalog["metadata"]["dbt_version"] == "0.0.0"
+    assert catalog["metadata"]["invocation_id"] is None
+    assert catalog["metadata"]["invocation_started_at"] is None
+    assert catalog["metadata"]["env"] == {}
+    assert catalog["nodes"] == {}
+    assert catalog["sources"] == {}
+    assert catalog["errors"] is None
+    assert str(project) not in catalog_path.read_text()
+
+
+def test_docs_generate_applies_select_and_exclude_to_compiled_models(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    target = tmp_path / "docs-target"
+    result = subprocess.run(
+        [
+            DXT,
+            "docs",
+            "generate",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "orders",
+            "--exclude",
+            "from_source",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Generated docs artifacts for 1 compiled model(s)" in result.stdout
+    compiled_root = target / "compiled" / "compile_basic" / "models"
+    assert not (compiled_root / "customers.sql").exists()
+    assert (compiled_root / "orders.sql").exists()
+    assert not (compiled_root / "from_source.sql").exists()
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["nodes"]["model.compile_basic.orders"]["compiled"] is True
+    assert "compiled" not in manifest["nodes"]["model.compile_basic.customers"]
+    assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
+
+
+def test_docs_generate_fails_loudly_on_unsupported_compile_jinja(tmp_path: Path):
+    project = copy_fixture(tmp_path, "unsupported_macro_call")
+    result = subprocess.run(
+        [DXT, "docs", "generate", "--project-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "dxt docs generate" in result.stdout
+    assert "unsupported or malformed Jinja" in result.stderr
 
 
 def test_unknown_option_is_rejected():

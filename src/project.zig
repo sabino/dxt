@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const catalog = @import("project/catalog.zig");
 const compiler = @import("project/compiler.zig");
 const project_fs = @import("project/fs.zig");
 const project_jinja = @import("project/jinja.zig");
@@ -125,22 +126,73 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
 
+    const target_dir = try targetDir(runtime, options);
+    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir);
+    if (selected.len != 0 and !compile_result.saw_model) return error.UnsupportedCompileSelection;
+
+    const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
+    const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
+    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
+    try stdout.print("Compiled {d} model(s) into {s}\n", .{
+        compile_result.count,
+        util.normalizeForDisplay(compile_result.compiled_base),
+    });
+}
+
+pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options.project_dir, loader_callbacks);
+    defer graph.deinit();
+
+    try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+
+    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
+    const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
+
+    const target_dir = try targetDir(runtime, options);
+    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir);
+
+    const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
+    const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
+    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
+
+    const catalog_path = try pathJoin(runtime.allocator, &.{ target_dir, "catalog.json" });
+    const catalog_json = try catalog.renderCatalog(runtime.allocator);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = catalog_path, .data = catalog_json });
+
+    try stdout.print("Generated docs artifacts for {d} compiled model(s) into {s}\n", .{
+        compile_result.count,
+        util.normalizeForDisplay(target_dir),
+    });
+}
+
+const CompileResult = struct {
+    count: usize,
+    saw_model: bool,
+    compiled_base: []const u8,
+};
+
+fn targetDir(runtime: Runtime, options: Options) ![]const u8 {
     const target_path = options.target_path orelse project_loader.graphDefaultTarget(runtime, options.project_dir) catch "target";
-    const target_dir = if (std.fs.path.isAbsolute(target_path))
-        target_path
-    else
-        try pathJoin(runtime.allocator, &.{ options.project_dir, target_path });
+    if (std.fs.path.isAbsolute(target_path)) return target_path;
+    return try pathJoin(runtime.allocator, &.{ options.project_dir, target_path });
+}
+
+fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8) !CompileResult {
     const compiled_base = try pathJoin(runtime.allocator, &.{ target_dir, "compiled" });
     try std.Io.Dir.cwd().createDirPath(runtime.io, compiled_base);
 
     var compiled_count: usize = 0;
-    var saw_selected_resource = false;
+    var saw_selected_model = false;
     for (graph.nodes.items) |*node| {
         if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
         if (!selectionContains(selected, node.unique_id)) continue;
-        saw_selected_resource = true;
+        saw_selected_model = true;
 
-        const compiled_code = try compiler.compileModel(runtime.allocator, &graph, node);
+        const compiled_code = try compiler.compileModel(runtime.allocator, graph, node);
         const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, node.package_name, node.original_file_path });
         if (std.fs.path.dirname(compiled_path)) |parent| {
             try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
@@ -153,19 +205,10 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
         compiled_count += 1;
     }
 
-    if (selected.len != 0 and !saw_selected_resource) return error.UnsupportedCompileSelection;
-
-    const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
-    const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
-    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
-    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
-    try stdout.print("Compiled {d} model(s) into {s}\n", .{
-        compiled_count,
-        util.normalizeForDisplay(compiled_base),
-    });
+    return .{ .count = compiled_count, .saw_model = saw_selected_model, .compiled_base = compiled_base };
 }
 
-fn selectionContains(selected: []selector.SelectedResource, unique_id: []const u8) bool {
+fn selectionContains(selected: []const selector.SelectedResource, unique_id: []const u8) bool {
     for (selected) |item| {
         if (std.mem.eql(u8, item.unique_id, unique_id)) return true;
     }
