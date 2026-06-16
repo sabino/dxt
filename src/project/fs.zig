@@ -3,6 +3,29 @@ const types = @import("types.zig");
 
 const Runtime = types.Runtime;
 
+pub fn modelNameFromPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    return resourceNameFromPath(allocator, path, ".sql");
+}
+
+pub fn resourceNameFromPath(allocator: std.mem.Allocator, path: []const u8, suffix: []const u8) ![]const u8 {
+    const base = std.fs.path.basename(path);
+    if (std.mem.endsWith(u8, base, suffix)) {
+        return try allocator.dupe(u8, base[0 .. base.len - suffix.len]);
+    }
+    return try allocator.dupe(u8, base);
+}
+
+pub fn relativeUnderResourcePath(relative_path: []const u8, resource_root: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, relative_path, resource_root) and relative_path.len > resource_root.len and relative_path[resource_root.len] == '/') {
+        return relative_path[resource_root.len + 1 ..];
+    }
+    return relative_path;
+}
+
+pub fn pathJoin(allocator: std.mem.Allocator, parts: []const []const u8) ![]const u8 {
+    return try std.fs.path.join(allocator, parts);
+}
+
 pub fn discoverProjectFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8), md_files: *std.ArrayList([]const u8)) !void {
     const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
     defer closeLinuxFd(fd);
@@ -231,4 +254,34 @@ test "resource discovery skips generated and package directories" {
     try std.testing.expect(isIgnoredResourceDirectory(".zig-cache"));
     try std.testing.expect(isIgnoredResourceDirectory("zig-out"));
     try std.testing.expect(!isIgnoredResourceDirectory("models"));
+}
+
+test "resourceNameFromPath strips the requested suffix from the basename only" {
+    const allocator = std.testing.allocator;
+
+    const nested_model = try resourceNameFromPath(allocator, "models/staging/orders.sql", ".sql");
+    defer allocator.free(nested_model);
+    try std.testing.expectEqualStrings("orders", nested_model);
+
+    const seed = try resourceNameFromPath(allocator, "seeds/raw/customers.csv", ".csv");
+    defer allocator.free(seed);
+    try std.testing.expectEqualStrings("customers", seed);
+
+    const unchanged = try resourceNameFromPath(allocator, "models/staging/orders.sql", ".csv");
+    defer allocator.free(unchanged);
+    try std.testing.expectEqualStrings("orders.sql", unchanged);
+}
+
+test "modelNameFromPath strips sql suffix using resource name semantics" {
+    const allocator = std.testing.allocator;
+
+    const model = try modelNameFromPath(allocator, "models/marts/customers.sql");
+    defer allocator.free(model);
+    try std.testing.expectEqualStrings("customers", model);
+}
+
+test "relativeUnderResourcePath strips only slash-delimited resource roots" {
+    try std.testing.expectEqualStrings("staging/orders.sql", relativeUnderResourcePath("models/staging/orders.sql", "models"));
+    try std.testing.expectEqualStrings("models_extra/orders.sql", relativeUnderResourcePath("models_extra/orders.sql", "models"));
+    try std.testing.expectEqualStrings("models", relativeUnderResourcePath("models", "models"));
 }
