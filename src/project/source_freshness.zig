@@ -33,7 +33,7 @@ pub fn validateThreshold(threshold: FreshnessThreshold) !void {
 }
 
 pub fn unsupportedExecutionReason(source: *const SourceDef) ?[]const u8 {
-    if (source.loaded_at_query != null) return "source freshness currently does not support loaded_at_query";
+    if (source.loaded_at_query != null and source.loaded_at_field != null) return "source freshness cannot specify both loaded_at_field and loaded_at_query";
     return null;
 }
 
@@ -160,6 +160,21 @@ test "source freshness validation rejects partial thresholds at command boundary
     try std.testing.expectError(error.UnsupportedSourceFreshness, validateThreshold(.{ .warn_after = .{ .period = "hour" } }));
     try std.testing.expectError(error.UnsupportedSourceFreshness, validateThreshold(.{ .warn_after = .{ .count = 1 } }));
     try validateThreshold(.{ .warn_after = .{ .count = 1, .period = "hour" }, .filter = "customer_id > 0" });
+}
+
+test "source freshness rejects conflicting loaded_at settings" {
+    const source = SourceDef{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.orders",
+        .source_name = "raw",
+        .table_name = "orders",
+        .original_file_path = "models/schema.yml",
+        .loaded_at_field = "loaded_at",
+        .loaded_at_query = "select max(loaded_at) from raw.orders",
+        .freshness = .{},
+    };
+
+    try std.testing.expect(unsupportedExecutionReason(&source) != null);
 }
 
 test "sources writer emits dbt v3 success shape" {

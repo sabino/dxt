@@ -105,6 +105,15 @@ pub fn querySourceFreshness(runtime: Runtime, db_path: []const u8, source: *cons
 }
 
 pub fn renderSourceFreshnessSql(allocator: std.mem.Allocator, source: *const SourceDef) ![]const u8 {
+    if (source.loaded_at_query) |loaded_at_query| {
+        const query = std.mem.trim(u8, loaded_at_query, " \t\r\n");
+        if (query.len == 0) return error.UnsupportedSourceFreshness;
+        return try std.fmt.allocPrint(
+            allocator,
+            "with source_query as ({s}), freshness as (select (select * from source_query) as max_loaded_at, current_timestamp as snapshotted_at) select coalesce(strftime(max_loaded_at, '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(snapshotted_at, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(snapshotted_at) - epoch(max_loaded_at), 9.223372036854776e18) as age_seconds from freshness;",
+            .{query},
+        );
+    }
     const loaded_at_field = source.loaded_at_field orelse return error.UnsupportedSourceFreshness;
     const loaded_at_expression = std.mem.trim(u8, loaded_at_field, " \t\r\n");
     if (loaded_at_expression.len == 0) return error.UnsupportedSourceFreshness;
@@ -1135,6 +1144,28 @@ test "renderSourceFreshnessSql quotes source relation and renders loaded_at_fiel
     };
     const expression_sql = try renderSourceFreshnessSql(allocator, &expression_source);
     try std.testing.expect(std.mem.indexOf(u8, expression_sql, "max(cast(loaded_at as timestamp))") != null);
+}
+
+test "renderSourceFreshnessSql renders loaded_at_query as custom freshness SQL" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source = SourceDef{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.orders",
+        .source_name = "raw",
+        .table_name = "orders",
+        .original_file_path = "models/schema.yml",
+        .loaded_at_query = "select max(loaded_at) from raw.orders",
+        .freshness = .{ .filter = "ignored_for_custom_sql" },
+    };
+
+    const sql = try renderSourceFreshnessSql(allocator, &source);
+    try std.testing.expectEqualStrings(
+        "with source_query as (select max(loaded_at) from raw.orders), freshness as (select (select * from source_query) as max_loaded_at, current_timestamp as snapshotted_at) select coalesce(strftime(max_loaded_at, '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(snapshotted_at, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(snapshotted_at) - epoch(max_loaded_at), 9.223372036854776e18) as age_seconds from freshness;",
+        sql,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, sql, "ignored_for_custom_sql") == null);
 }
 
 test "renderSeedSql creates table from root project seed CSV" {

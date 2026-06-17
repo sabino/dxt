@@ -57,3 +57,13 @@ sources:
           error_after:
             count: 1
             period: day
+      - name: query_filtered_customers
+        loaded_at_query: select max(loaded_at) from raw.query_filtered_customers where customer_id > 0
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 1
+            period: day
+          filter: customer_id = 0

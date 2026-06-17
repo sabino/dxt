@@ -233,8 +233,8 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
                 had_failure = true;
                 continue;
             };
-            if (source.loaded_at_field == null) {
-                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires table-level loaded_at_field");
+            if (source.loaded_at_field == null and source.loaded_at_query == null) {
+                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires table-level loaded_at_field or loaded_at_query");
                 had_failure = true;
                 continue;
             }

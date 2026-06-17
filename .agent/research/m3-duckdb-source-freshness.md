@@ -12,12 +12,14 @@ The slice is intentionally narrow:
   `loaded_at_field` SQL text, table-level `freshness.warn_after` /
   `freshness.error_after`, `minute` / `hour` / `day` periods, success rows, and
   runtime-error rows. `freshness.filter` is appended as raw SQL in the
-  loaded-at-field query. Empty or all-null loaded-at values are emitted as
-  stale freshness results;
-- not supported: source-level inheritance, executing `loaded_at_query`,
-  metadata freshness, `config:` freshness overrides, hooks, concurrency,
-  source-status selectors, non-DuckDB adapters, or Python product runtime
-  behavior.
+  loaded-at-field query. Table-level raw `loaded_at_query` SQL is wrapped in
+  dbt's custom freshness query shape and is expected to return one timestamp
+  scalar. Empty or all-null loaded-at values are emitted as stale freshness
+  results;
+- not supported: source-level inheritance, Jinja rendering inside
+  `loaded_at_query`, metadata freshness, `config:` freshness overrides, hooks,
+  concurrency, source-status selectors, non-DuckDB adapters, or Python product
+  runtime behavior.
 
 ## Upstream References
 
@@ -28,6 +30,9 @@ dbt Core v1:
   status calculation, and result construction.
 - `FreshnessRunner.execute` passes `compiled_node.freshness.filter` into
   `adapter.calculate_freshness` for loaded-at-field freshness.
+- `FreshnessRunner.execute` renders `loaded_at_query` at runtime and calls
+  `adapter.calculate_freshness_from_custom_sql`; `freshness.filter` is not
+  passed to the custom-query path.
 - `core/dbt/task/freshness.py::FreshnessSelector.node_is_match` selects source
   nodes only when `node.has_freshness` is true.
 - `core/dbt/task/freshness.py::FreshnessTask.result_path` and
@@ -82,14 +87,15 @@ It also writes `manifest.json` as the current dxt command artifact baseline.
 Native Zig coverage:
 
 - table-level `loaded_at_field` and `freshness` parser regression;
-- table-level unsupported `loaded_at_query` and `freshness.filter` parser
-  regression;
+- table-level `loaded_at_query` and `freshness.filter` parser regression;
 - threshold status order: `error_after`, then `warn_after`, then `pass`;
 - success and runtime-error `sources.json` writer shapes;
 - DuckDB query SQL rendering, relation identifier quoting, raw
   `loaded_at_field` SQL-expression rendering, and empty loaded-at sentinel
   handling.
 - raw `freshness.filter` SQL placement in the loaded-at-field freshness query.
+- raw `loaded_at_query` custom freshness SQL rendering and conflict detection
+  when `loaded_at_field` and `loaded_at_query` are both configured.
 
 Python integration coverage:
 
@@ -97,11 +103,11 @@ Python integration coverage:
 - SQL-expression `loaded_at_field` creates a schema-valid warning result;
 - `freshness.filter` changes the selected max loaded-at value and is preserved
   in the emitted criteria;
+- `loaded_at_query` creates a schema-valid warning result and owns its own
+  filtering logic while preserving criteria;
 - empty loaded-at sources create schema-valid stale `error` results;
-- selected source missing `loaded_at_field` creates a schema-valid runtime-error
-  result and exits with failure.
-- selected sources with unsupported `loaded_at_query` create schema-valid
-  runtime-error results instead of silently ignoring the config.
+- selected source missing both `loaded_at_field` and `loaded_at_query` creates a
+  schema-valid runtime-error result and exits with failure.
 
 Schema coverage:
 
@@ -110,6 +116,7 @@ Schema coverage:
 
 ## Stop Conditions
 
-Stop before implementing source-level inheritance, `loaded_at_query`, metadata
-freshness, config overrides, hooks, source-status selectors, non-DuckDB
-adapters, threaded scheduling, or broader dbt command behavior.
+Stop before implementing source-level inheritance, Jinja rendering inside
+`loaded_at_query`, metadata freshness, config overrides, hooks, source-status
+selectors, non-DuckDB adapters, threaded scheduling, or broader dbt command
+behavior.

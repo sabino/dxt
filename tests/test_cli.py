@@ -4473,11 +4473,26 @@ def test_source_freshness_applies_filter_sql(tmp_path: Path):
     }
 
 
-@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness unsupported-config coverage")
-def test_source_freshness_writes_runtime_error_for_loaded_at_query(tmp_path: Path):
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness loaded-at-query coverage")
+def test_source_freshness_executes_loaded_at_query(tmp_path: Path):
     project = copy_fixture(tmp_path, "source_freshness")
     target = tmp_path / "freshness-target"
     target.mkdir()
+    db_path = target / "dxt.duckdb"
+    subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            "create schema raw; create table raw.query_customers as select 1 as customer_id, current_timestamp - interval '2 hours' as loaded_at;",
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
 
     result = subprocess.run(
         [
@@ -4495,19 +4510,83 @@ def test_source_freshness_writes_runtime_error_for_loaded_at_query(tmp_path: Pat
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 1
-    assert "one or more source freshness checks failed" in result.stderr
+    assert result.returncode == 0, result.stderr
 
     sources_path = target / "sources.json"
     assert_sources_schema_slice(sources_path)
     sources = json.loads(sources_path.read_text())
-    assert sources["results"] == [
-        {
-            "unique_id": "source.source_freshness.raw.query_customers",
-            "error": "source freshness currently does not support loaded_at_query",
-            "status": "runtime error",
-        }
-    ]
+    assert len(sources["results"]) == 1
+    result_row = sources["results"][0]
+    assert result_row["unique_id"] == "source.source_freshness.raw.query_customers"
+    assert result_row["status"] == "warn"
+    assert result_row["max_loaded_at"].endswith("Z")
+    assert result_row["snapshotted_at"].endswith("Z")
+    assert result_row["max_loaded_at_time_ago_in_s"] >= 3600
+    assert result_row["criteria"] == {
+        "warn_after": {"count": 1, "period": "hour"},
+        "error_after": {"count": 1, "period": "day"},
+        "filter": None,
+    }
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness loaded-at-query coverage")
+def test_source_freshness_loaded_at_query_owns_filtering(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_freshness")
+    target = tmp_path / "freshness-target"
+    target.mkdir()
+    db_path = target / "dxt.duckdb"
+    subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            (
+                "create schema raw; "
+                "create table raw.query_filtered_customers as "
+                "select 0 as customer_id, current_timestamp as loaded_at "
+                "union all "
+                "select 1 as customer_id, current_timestamp - interval '2 hours' as loaded_at;"
+            ),
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [
+            DXT,
+            "source",
+            "freshness",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.query_filtered_customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    sources_path = target / "sources.json"
+    assert_sources_schema_slice(sources_path)
+    sources = json.loads(sources_path.read_text())
+    assert len(sources["results"]) == 1
+    result_row = sources["results"][0]
+    assert result_row["unique_id"] == "source.source_freshness.raw.query_filtered_customers"
+    assert result_row["status"] == "warn"
+    assert result_row["max_loaded_at_time_ago_in_s"] >= 3600
+    assert result_row["criteria"] == {
+        "warn_after": {"count": 1, "period": "hour"},
+        "error_after": {"count": 1, "period": "day"},
+        "filter": "customer_id = 0",
+    }
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness runtime-error coverage")
@@ -4558,7 +4637,7 @@ def test_source_freshness_writes_runtime_error_result_for_missing_loaded_at_fiel
     result_row = sources["results"][0]
     assert result_row == {
         "unique_id": "source.source_freshness.raw.orders",
-        "error": "source freshness currently requires table-level loaded_at_field",
+        "error": "source freshness currently requires table-level loaded_at_field or loaded_at_query",
         "status": "runtime error",
     }
     assert str(project) not in sources_path.read_text()
