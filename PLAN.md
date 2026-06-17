@@ -318,6 +318,16 @@ narrow scalar `profiles.yml` parser. This slice lets parse-time static
 profiles, validate credentials, read host-global profile locations, implement
 project `dispatch:` config, execute macros, or open adapter connections.
 
+Current DuckDB seed build source note:
+`.agent/research/m3-duckdb-build-seeds.md` maps upstream dbt Core v1
+`SeedParser`, `SeedRunner`, `BuildTask`, `load_agate_table`, and run-results
+serialization plus Fusion seed resolution and DuckDB CSV materialization
+references to dxt's first seed execution slice. This slice is only root-project
+CSV seed-only `dxt build` execution through the Zig DuckDB CLI backend. It does
+not add `dxt seed`, `dxt run` seed execution, package seed execution, seed
+configs, mixed build DAG scheduling, tests, hooks, grants, docs persistence,
+full-refresh semantics, or adapter materialization macro execution.
+
 Current project dispatch config source note:
 `.agent/research/m2-project-dispatch-config.md` maps upstream dbt Core v1
 project `dispatch:` validation, `get_macro_search_order`, and

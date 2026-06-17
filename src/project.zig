@@ -197,7 +197,7 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     if (compile_result.count == 0) return error.UnsupportedRunSelection;
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
-    var executed: std.ArrayList(run_results.ModelResult) = .empty;
+    var executed: std.ArrayList(run_results.NodeResult) = .empty;
     defer executed.deinit(runtime.allocator);
     for (execution_order) |node| {
         try duckdb.executeModel(runtime, db_path, &graph, node);
@@ -228,17 +228,42 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
-    const execution_kind = firstExecutionKind(selected) orelse return error.UnsupportedBuildSelection;
+    const selected_kinds = classifyBuildSelection(selected);
+    if (selected_kinds.total == 0) return error.UnsupportedBuildSelection;
+    if (selected_kinds.seed == selected_kinds.total) {
+        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedSeedAdapterExecution;
+        const seed_nodes = try selectedSeedExecutionOrder(runtime, &graph, selected);
+        defer runtime.allocator.free(seed_nodes);
+        try validateSeedExecution(&graph, seed_nodes);
+
+        const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+        var executed: std.ArrayList(run_results.NodeResult) = .empty;
+        defer executed.deinit(runtime.allocator);
+        for (seed_nodes) |node| {
+            try duckdb.executeSeed(runtime, db_path, options.project_dir, &graph, node);
+            try executed.append(runtime.allocator, .{ .node = node });
+        }
+
+        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
+        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
+        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try stdout.print("Built {d} seed(s) into {s}; wrote artifacts into {s}\n", .{
+            executed.items.len,
+            util.normalizeForDisplay(db_path),
+            util.normalizeForDisplay(manifest_path),
+        });
+        return;
+    }
+
     try stdout.print("Prepared {d} selected resource(s), including {d} compiled model(s), into {s}\n", .{
         selected.len,
         compile_result.count,
         util.normalizeForDisplay(manifest_path),
     });
-    return switch (execution_kind) {
-        .seed => error.UnsupportedSeedExecution,
-        .model => error.UnsupportedModelExecution,
-        .test_resource => error.UnsupportedTestExecution,
-    };
+    if (selected_kinds.seed != 0) return error.UnsupportedMixedBuildExecution;
+    if (selected_kinds.model != 0) return error.UnsupportedModelExecution;
+    if (selected_kinds.test_resource != 0) return error.UnsupportedTestExecution;
+    return error.UnsupportedBuildSelection;
 }
 
 const CompileResult = struct {
@@ -247,23 +272,25 @@ const CompileResult = struct {
     compiled_base: []const u8,
 };
 
-const ExecutionKind = enum {
-    seed,
-    model,
-    test_resource,
+const BuildSelectionKinds = struct {
+    total: usize = 0,
+    seed: usize = 0,
+    model: usize = 0,
+    test_resource: usize = 0,
 };
 
-fn firstExecutionKind(selected: []const selector.SelectedResource) ?ExecutionKind {
+fn classifyBuildSelection(selected: []const selector.SelectedResource) BuildSelectionKinds {
+    var kinds = BuildSelectionKinds{ .total = selected.len };
     for (selected) |item| {
-        if (std.mem.eql(u8, item.resource_type, "seed")) return .seed;
+        if (std.mem.eql(u8, item.resource_type, "seed")) {
+            kinds.seed += 1;
+        } else if (std.mem.eql(u8, item.resource_type, "model")) {
+            kinds.model += 1;
+        } else if (std.mem.eql(u8, item.resource_type, "test")) {
+            kinds.test_resource += 1;
+        }
     }
-    for (selected) |item| {
-        if (std.mem.eql(u8, item.resource_type, "model")) return .model;
-    }
-    for (selected) |item| {
-        if (std.mem.eql(u8, item.resource_type, "test")) return .test_resource;
-    }
-    return null;
+    return kinds;
 }
 
 fn selectedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource) ![]*Node {
@@ -297,10 +324,39 @@ fn validateRunMaterializations(nodes: []const *Node) !void {
     }
 }
 
+fn selectedSeedExecutionOrder(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource) ![]*Node {
+    const selected_count = countSelectedGraphSeeds(graph, selected);
+    var ordered = try runtime.allocator.alloc(*Node, selected_count);
+    var index: usize = 0;
+    for (graph.nodes.items) |*node| {
+        if (!node.enabled or !std.mem.eql(u8, node.resource_type, "seed")) continue;
+        if (!selectionContains(selected, node.unique_id)) continue;
+        ordered[index] = node;
+        index += 1;
+    }
+    return ordered;
+}
+
+fn validateSeedExecution(graph: *const Graph, nodes: []const *Node) !void {
+    for (nodes) |node| {
+        if (!std.mem.eql(u8, node.package_name, graph.project_name)) return error.UnsupportedSeedExecution;
+        if (!std.mem.eql(u8, node.materialized, "seed")) return error.UnsupportedSeedExecution;
+    }
+}
+
 fn countSelectedGraphModels(graph: *const Graph, selected: []const selector.SelectedResource) usize {
     var count: usize = 0;
     for (graph.nodes.items) |node| {
         if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
+        if (selectionContains(selected, node.unique_id)) count += 1;
+    }
+    return count;
+}
+
+fn countSelectedGraphSeeds(graph: *const Graph, selected: []const selector.SelectedResource) usize {
+    var count: usize = 0;
+    for (graph.nodes.items) |node| {
+        if (!node.enabled or !std.mem.eql(u8, node.resource_type, "seed")) continue;
         if (selectionContains(selected, node.unique_id)) count += 1;
     }
     return count;

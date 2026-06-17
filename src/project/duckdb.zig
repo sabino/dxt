@@ -38,6 +38,15 @@ pub fn executeModel(runtime: Runtime, db_path: []const u8, graph: *const Graph, 
     try executeSql(runtime, db_path, sql);
 }
 
+pub fn executeSeed(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node) !void {
+    try dropRelationIfExists(runtime, db_path, graph, node, .view);
+
+    const sql = try renderSeedSql(runtime.allocator, project_dir, graph, node);
+    defer runtime.allocator.free(sql);
+
+    try executeSql(runtime, db_path, sql);
+}
+
 fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-batch", "-bail", "-c", sql },
@@ -101,9 +110,13 @@ fn relationObjectExists(runtime: Runtime, db_path: []const u8, graph: *const Gra
 
 fn dropConflictingMaterialization(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node) !void {
     const drop_kind: DuckDbObjectKind = if (std.mem.eql(u8, node.materialized, "table")) .view else .table;
-    if (!try relationObjectExists(runtime, db_path, graph, node, drop_kind)) return;
+    try dropRelationIfExists(runtime, db_path, graph, node, drop_kind);
+}
 
-    const drop_sql = try renderDropSql(runtime.allocator, graph, node, drop_kind);
+fn dropRelationIfExists(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, object_kind: DuckDbObjectKind) !void {
+    if (!try relationObjectExists(runtime, db_path, graph, node, object_kind)) return;
+
+    const drop_sql = try renderDropSql(runtime.allocator, graph, node, object_kind);
     defer runtime.allocator.free(drop_sql);
     try executeSql(runtime, db_path, drop_sql);
 }
@@ -137,6 +150,33 @@ pub fn renderModelSql(allocator: std.mem.Allocator, graph: *const Graph, node: *
         allocator,
         "create schema if not exists {s};\ncreate or replace {s} {s} as (\n{s}\n);\n",
         .{ quoted_schema, materialization_keyword, relation_name, compiled_code },
+    );
+}
+
+pub fn renderSeedSql(allocator: std.mem.Allocator, project_dir: []const u8, graph: *const Graph, node: *const Node) ![]const u8 {
+    if (!std.mem.eql(u8, node.resource_type, "seed") or !std.mem.eql(u8, node.materialized, "seed")) {
+        return error.UnsupportedSeedExecution;
+    }
+    if (!std.mem.eql(u8, node.package_name, graph.project_name)) {
+        return error.UnsupportedSeedExecution;
+    }
+
+    const seed_file_path = try project_fs.pathJoin(allocator, &.{ project_dir, node.original_file_path });
+    defer allocator.free(seed_file_path);
+    const seed_file_literal = try quoteSqlString(allocator, seed_file_path);
+    defer allocator.free(seed_file_literal);
+
+    const schema_name = try compiler.relationSchemaForNode(allocator, graph, node);
+    defer allocator.free(schema_name);
+    const quoted_schema = try compiler.quoteIdentifier(allocator, schema_name);
+    defer allocator.free(quoted_schema);
+    const relation_name = try compiler.relationNameForNode(allocator, graph, node);
+    defer allocator.free(relation_name);
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "create schema if not exists {s};\ncreate or replace table {s} as select * from read_csv_auto({s}, header = true);\n",
+        .{ quoted_schema, relation_name, seed_file_literal },
     );
 }
 
@@ -367,4 +407,38 @@ test "databasePath rejects unsupported connection strings for CLI backend" {
     defer graph.deinit();
 
     try std.testing.expectError(error.UnsupportedDuckDbPath, databasePath(allocator, "target", &graph));
+}
+
+test "renderSeedSql creates table from root project seed CSV" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.raw_customers",
+        .name = "raw_customers",
+        .path = "raw_customers.csv",
+        .original_file_path = "seeds/raw_customers.csv",
+        .raw_code = "",
+        .materialized = "seed",
+    });
+
+    const sql = try renderSeedSql(allocator, "project", &graph, &graph.nodes.items[0]);
+    try std.testing.expectEqualStrings(
+        "create schema if not exists \"analytics\";\ncreate or replace table \"analytics\".\"raw_customers\" as select * from read_csv_auto('project/seeds/raw_customers.csv', header = true);\n",
+        sql,
+    );
+}
+
+test "quoteSqlString escapes single quotes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const quoted = try quoteSqlString(allocator, "seed's/file.csv");
+    try std.testing.expectEqualStrings("'seed''s/file.csv'", quoted);
 }
