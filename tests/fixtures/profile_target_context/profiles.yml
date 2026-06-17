@@ -1,0 +1,11 @@
+profile_target_context:
+  target: pg
+  outputs:
+    pg:
+      type: postgres
+      schema: analytics
+      threads: 4
+    duck:
+      type: duckdb
+      schema: main
+      threads: 2

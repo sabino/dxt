@@ -273,7 +273,7 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         node.compiled = true;
         node.compiled_code = compiled_code;
         node.compiled_path = util.normalizeForDisplay(compiled_path);
-        node.relation_name = try compiler.relationNameForNode(runtime.allocator, node);
+        node.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
         compiled_count += 1;
     }
 
