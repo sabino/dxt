@@ -73,6 +73,8 @@ pub const SourceDef = struct {
     loaded_at_field: ?[]const u8 = null,
     loaded_at_query: ?[]const u8 = null,
     freshness: ?FreshnessThreshold = null,
+    tests: std.ArrayList(GenericTestDef) = .empty,
+    columns: std.ArrayList(ColumnDef) = .empty,
 };
 
 pub const FreshnessThreshold = struct {
@@ -255,7 +257,7 @@ pub const GenericTestNode = struct {
     accepted_values: std.ArrayList([]const u8) = .empty,
     relationship_to: []const u8 = "",
     relationship_field: []const u8 = "",
-    attached_node: []const u8,
+    attached_node: ?[]const u8 = null,
     refs: std.ArrayList(RefDep) = .empty,
     source_refs: std.ArrayList(SourceDep) = .empty,
     depends_on: std.ArrayList([]const u8) = .empty,
@@ -292,6 +294,9 @@ pub const Graph = struct {
         }
         for (self.tests.items) |*test_node| {
             deinitGenericTestNode(self.allocator, test_node);
+        }
+        for (self.sources.items) |*source| {
+            deinitSourceDef(self.allocator, source);
         }
         for (self.exposures.items) |*exposure| {
             deinitExposureDef(self.allocator, exposure);
@@ -370,6 +375,15 @@ pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTe
     test_node.source_refs.deinit(allocator);
     test_node.depends_on.deinit(allocator);
     test_node.macro_depends_on.deinit(allocator);
+}
+
+pub fn deinitSourceDef(allocator: std.mem.Allocator, source: *SourceDef) void {
+    deinitGenericTestDefs(allocator, &source.tests);
+    for (source.columns.items) |*column| {
+        column.doc_blocks.deinit(allocator);
+        deinitGenericTestDefs(allocator, &column.tests);
+    }
+    source.columns.deinit(allocator);
 }
 
 fn deinitExposureDef(allocator: std.mem.Allocator, exposure: *ExposureDef) void {

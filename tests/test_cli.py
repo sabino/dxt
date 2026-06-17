@@ -963,7 +963,7 @@ def test_build_prepare_reports_test_execution_boundary(tmp_path: Path):
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "build currently executes only selected DuckDB not_null/unique/accepted_values/relationships column generic tests" in result.stderr
+    assert "build currently executes only selected DuckDB model/seed not_null/unique/accepted_values/relationships column generic tests and source not_null/unique/accepted_values column generic tests" in result.stderr
     assert not (target / "run_results.json").exists()
     manifest = json.loads((target / "manifest.json").read_text())
     assert "compiled" not in manifest["nodes"]["model.model_properties.customers"]
@@ -1051,6 +1051,33 @@ models:
           - accepted_values:
               arguments:
                 values: ['new', 'returning']
+"""
+    )
+
+
+def write_source_column_test_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: source_column_tests
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+sources:
+  - name: raw
+    tables:
+      - name: customers
+        columns:
+          - name: customer_id
+            tests: [not_null, unique]
+          - name: customer_type
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['new', 'returning']
 """
     )
 
@@ -1249,6 +1276,73 @@ def test_build_executes_selected_duckdb_model_and_accepted_values_generic_test(t
     assert run_results["results"][1]["unique_id"].startswith(
         "test.accepted_values_tests.accepted_values_customers_customer_type__new__returning."
     )
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source column generic-test build execution slice")
+def test_build_executes_selected_duckdb_source_column_generic_tests(tmp_path: Path):
+    project = tmp_path / "source_column_tests"
+    write_source_column_test_project(project)
+    target = tmp_path / "build-target"
+    target.mkdir()
+    setup = subprocess.run(
+        [
+            DUCKDB,
+            str(target / "dxt.duckdb"),
+            "-batch",
+            "-bail",
+            "-c",
+            (
+                'create schema raw; '
+                'create table raw.customers as '
+                "select 1 as customer_id, 'new' as customer_type union all "
+                "select 2 as customer_id, 'returning' as customer_type"
+            ),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "source:raw.customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 3 source generic test(s)" in result.stdout
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["pass", "pass", "pass"]
+    assert [item["failures"] for item in run_results["results"]] == [0, 0, 0]
+    assert all(item["relation_name"] is None for item in run_results["results"])
+    assert all('"raw"."customers"' in item["compiled_code"] for item in run_results["results"])
+    assert run_results["results"][0]["unique_id"].startswith(
+        "test.source_column_tests.source_accepted_values_raw_customers_customer_type__new__returning."
+    )
+    assert run_results["results"][1]["unique_id"].startswith(
+        "test.source_column_tests.source_not_null_raw_customers_customer_id."
+    )
+    assert run_results["results"][2]["unique_id"].startswith(
+        "test.source_column_tests.source_unique_raw_customers_customer_id."
+    )
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    source_node = manifest["sources"]["source.source_column_tests.raw.customers"]
+    assert sorted(source_node["columns"]) == ["customer_id", "customer_type"]
+    assert source_node["columns"]["customer_id"]["name"] == "customer_id"
+    assert source_node["columns"]["customer_type"]["name"] == "customer_type"
+    source_test = manifest["nodes"][run_results["results"][1]["unique_id"]]
+    assert source_test["resource_type"] == "test"
+    assert source_test["attached_node"] is None
+    assert source_test["sources"] == [["raw", "customers"]]
+    assert source_test["refs"] == []
+    assert source_test["depends_on"]["nodes"] == ["source.source_column_tests.raw.customers"]
+    assert source_test["test_metadata"]["kwargs"]["model"] == "{{ get_where_subquery(source('raw', 'customers')) }}"
+    assert "source.source_column_tests.raw.customers" in manifest["parent_map"][source_test["unique_id"]]
+    assert source_test["unique_id"] in manifest["child_map"]["source.source_column_tests.raw.customers"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 relationships build execution slice")
@@ -1562,7 +1656,7 @@ models:
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "build currently executes only selected DuckDB not_null/unique/accepted_values/relationships column generic tests" in result.stderr
+    assert "build currently executes only selected DuckDB model/seed not_null/unique/accepted_values/relationships column generic tests and source not_null/unique/accepted_values column generic tests" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
@@ -1608,7 +1702,7 @@ def test_build_rejects_model_selection_with_unsupported_generic_test_before_duck
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "build currently executes only selected DuckDB not_null/unique/accepted_values/relationships column generic tests" in result.stderr
+    assert "build currently executes only selected DuckDB model/seed not_null/unique/accepted_values/relationships column generic tests and source not_null/unique/accepted_values column generic tests" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()

@@ -76,6 +76,8 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeJsonString(writer, source.table_name);
         try writer.writeAll(",\"original_file_path\":");
         try writeJsonString(writer, util.normalizeForDisplay(source.original_file_path));
+        try writer.writeAll(",\"columns\":");
+        try writeColumns(writer, source.columns.items);
         try writer.writeAll("}");
     }
     try writer.writeAll("\n  },\n  \"macros\": {");
@@ -338,19 +340,9 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) 
     try writeStringArray(writer, node.doc_blocks.items);
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
-    try writer.writeAll(",\"columns\":{");
-    for (node.columns.items, 0..) |column, index| {
-        if (index != 0) try writer.writeAll(",");
-        try writeJsonString(writer, column.name);
-        try writer.writeAll(":{\"name\":");
-        try writeJsonString(writer, column.name);
-        try writer.writeAll(",\"description\":");
-        try writeJsonString(writer, column.description);
-        try writer.writeAll(",\"meta\":{},\"data_type\":null,\"quote\":null,\"tags\":[],\"config\":{},\"doc_blocks\":");
-        try writeStringArray(writer, column.doc_blocks.items);
-        try writer.writeAll("}");
-    }
-    try writer.writeAll("},\"config\":{\"enabled\":");
+    try writer.writeAll(",\"columns\":");
+    try writeColumns(writer, node.columns.items);
+    try writer.writeAll(",\"config\":{\"enabled\":");
     try writer.writeAll(if (node.enabled) "true" else "false");
     try writer.writeAll(",\"materialized\":");
     try writeJsonString(writer, node.materialized);
@@ -400,6 +392,22 @@ fn writeSeedNode(writer: *Io.Writer, node: Node) !void {
     try writer.writeAll("}}");
 }
 
+fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
+    try writer.writeAll("{");
+    for (columns, 0..) |column, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writeJsonString(writer, column.name);
+        try writer.writeAll(":{\"name\":");
+        try writeJsonString(writer, column.name);
+        try writer.writeAll(",\"description\":");
+        try writeJsonString(writer, column.description);
+        try writer.writeAll(",\"meta\":{},\"data_type\":null,\"quote\":null,\"tags\":[],\"config\":{},\"doc_blocks\":");
+        try writeStringArray(writer, column.doc_blocks.items);
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("}");
+}
+
 fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_node: GenericTestNode) !void {
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, test_node.unique_id);
@@ -416,7 +424,11 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     try writer.writeAll(",\"patch_path\":null,\"language\":\"sql\",\"raw_code\":");
     try writeJsonString(writer, test_node.raw_code);
     try writer.writeAll(",\"attached_node\":");
-    try writeJsonString(writer, test_node.attached_node);
+    if (test_node.attached_node) |attached_node| {
+        try writeJsonString(writer, attached_node);
+    } else {
+        try writer.writeAll("null");
+    }
     try writer.writeAll(",\"column_name\":");
     if (test_node.column_name) |column_name| {
         try writeJsonString(writer, column_name);
@@ -426,8 +438,13 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     try writer.writeAll(",\"test_metadata\":{\"name\":");
     try writeJsonString(writer, test_node.test_name);
     try writer.writeAll(",\"kwargs\":{\"model\":");
-    const model_name = modelNameFromUniqueId(test_node.attached_node);
-    const model_kwarg = try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
+    const model_kwarg = if (test_node.attached_node) |attached_node| blk: {
+        const model_name = modelNameFromUniqueId(attached_node);
+        break :blk try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
+    } else blk: {
+        const source_ref = if (test_node.source_refs.items.len == 1) test_node.source_refs.items[0] else return error.UnsupportedManifest;
+        break :blk try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(source('{s}', '{s}')) }}}}", .{ source_ref.source_name, source_ref.table_name });
+    };
     defer allocator.free(model_kwarg);
     try writeJsonString(writer, model_kwarg);
     if (test_node.column_name) |column_name| {
@@ -630,6 +647,74 @@ test "exposure dependency writer emits sources before other nodes" {
     try std.testing.expectEqualStrings(
         "[\"source.demo.raw.customers\",\"model.demo.orders\",\"model.demo.customers\"]",
         rendered,
+    );
+}
+
+test "manifest writer emits source generic tests with null attached node" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.customers",
+        .source_name = "raw",
+        .table_name = "customers",
+        .original_file_path = "models/schema.yml",
+    });
+    try graph.sources.items[0].columns.append(allocator, .{
+        .name = "customer_id",
+        .description = "Customer identifier.",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.source_not_null_raw_customers_customer_id.abc",
+        .name = "source_not_null_raw_customers_customer_id",
+        .alias = "source_not_null_raw_customers_customer_id",
+        .path = "source_not_null_raw_customers_customer_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "customer_id",
+    });
+    try graph.tests.items[0].source_refs.append(allocator, .{ .source_name = "raw", .table_name = "customers" });
+    try graph.tests.items[0].depends_on.append(allocator, "source.demo.raw.customers");
+    try graph.tests.items[0].macro_depends_on.append(allocator, "macro.dbt.test_not_null");
+
+    const rendered = try renderManifest(std.testing.allocator, &graph);
+    defer std.testing.allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    const source_node = root.get("sources").?.object.get("source.demo.raw.customers").?.object;
+    const source_columns = source_node.get("columns").?.object;
+    const source_column = source_columns.get("customer_id").?.object;
+    try std.testing.expectEqualStrings("customer_id", source_column.get("name").?.string);
+    try std.testing.expectEqualStrings("Customer identifier.", source_column.get("description").?.string);
+    const test_node = root.get("nodes").?.object.get("test.demo.source_not_null_raw_customers_customer_id.abc").?.object;
+    try std.testing.expect(test_node.get("attached_node").? == .null);
+    const test_metadata = test_node.get("test_metadata").?.object;
+    const kwargs = test_metadata.get("kwargs").?.object;
+    try std.testing.expectEqualStrings("not_null", test_metadata.get("name").?.string);
+    try std.testing.expectEqualStrings("{{ get_where_subquery(source('raw', 'customers')) }}", kwargs.get("model").?.string);
+    try std.testing.expectEqualStrings("customer_id", kwargs.get("column_name").?.string);
+    const sources = test_node.get("sources").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), sources.len);
+    try std.testing.expectEqualStrings("raw", sources[0].array.items[0].string);
+    try std.testing.expectEqualStrings("customers", sources[0].array.items[1].string);
+    const parent_map = root.get("parent_map").?.object;
+    try std.testing.expectEqualStrings(
+        "source.demo.raw.customers",
+        parent_map.get("test.demo.source_not_null_raw_customers_customer_id.abc").?.array.items[0].string,
+    );
+    const child_map = root.get("child_map").?.object;
+    try std.testing.expectEqualStrings(
+        "test.demo.source_not_null_raw_customers_customer_id.abc",
+        child_map.get("source.demo.raw.customers").?.array.items[0].string,
     );
 }
 

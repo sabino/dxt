@@ -362,7 +362,7 @@
         "patch_path": {"type": ["string", "null"]},
         "language": {"type": "string"},
         "raw_code": {"type": "string"},
-        "attached_node": {"type": "string"},
+        "attached_node": {"type": ["string", "null"]},
         "column_name": {"type": ["string", "null"]},
         "test_metadata": {"$ref": "#/$defs/test_metadata"},
         "config": {"$ref": "#/$defs/test_config"},
@@ -386,7 +386,8 @@
         "package_name",
         "source_name",
         "name",
-        "original_file_path"
+        "original_file_path",
+        "columns"
       ],
       "properties": {
         "unique_id": {"type": "string"},
@@ -394,7 +395,11 @@
         "package_name": {"type": "string"},
         "source_name": {"type": "string"},
         "name": {"type": "string"},
-        "original_file_path": {"type": "string"}
+        "original_file_path": {"type": "string"},
+        "columns": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/column"}
+        }
       }
     },
     "macro": {

@@ -1,0 +1,13 @@
+version: 2
+sources:
+  - name: raw
+    tables:
+      - name: customers
+        columns:
+          - name: customer_id
+            tests: [not_null, unique]
+          - name: customer_type
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['new', 'returning']

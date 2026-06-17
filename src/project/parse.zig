@@ -32,6 +32,7 @@ const skipWs = jinja.skipWs;
 const findMacroIndexByPackageAndName = resolve.findMacroIndexByPackageAndName;
 
 const FreshnessTimeKey = enum { warn_after, error_after };
+const SourceTestTarget = enum { none, column };
 
 pub fn parseBool(value: []const u8) !bool {
     const trimmed = std.mem.trim(u8, value, " \t\r");
@@ -828,15 +829,27 @@ pub fn parseExposureDependency(allocator: std.mem.Allocator, raw_value: []const 
 pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     var in_sources = false;
     var in_tables = false;
+    var in_columns = false;
     var in_freshness = false;
+    var test_target: SourceTestTarget = .none;
+    var active_test_target: SourceTestTarget = .none;
+    var active_values_target: SourceTestTarget = .none;
     var freshness_time_key: ?FreshnessTimeKey = null;
     var sources_indent: usize = 0;
     var source_item_indent: ?usize = null;
     var table_item_indent: ?usize = null;
+    var columns_indent: usize = 0;
+    var column_item_indent: ?usize = null;
     var freshness_indent: usize = 0;
     var freshness_time_indent: usize = 0;
+    var tests_indent: usize = 0;
+    var active_test_indent: usize = 0;
+    var active_values_indent: usize = 0;
     var current_source: ?[]const u8 = null;
     var current_table_index: ?usize = null;
+    var current_column: ?usize = null;
+    var active_test_index: ?usize = null;
+    var active_values_index: ?usize = null;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
         const line = stripYamlComment(raw_line);
@@ -847,11 +860,19 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
         if (std.mem.eql(u8, trimmed, "sources:")) {
             in_sources = true;
             in_tables = false;
+            in_columns = false;
             sources_indent = indent;
             source_item_indent = null;
             table_item_indent = null;
+            column_item_indent = null;
             current_table_index = null;
+            current_column = null;
             in_freshness = false;
+            test_target = .none;
+            active_test_target = .none;
+            active_values_target = .none;
+            active_test_index = null;
+            active_values_index = null;
             freshness_time_key = null;
             continue;
         }
@@ -859,30 +880,108 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
         if (indent <= sources_indent and !std.mem.eql(u8, trimmed, "sources:")) {
             in_sources = false;
             in_tables = false;
+            in_columns = false;
             current_source = null;
             current_table_index = null;
+            current_column = null;
             in_freshness = false;
+            test_target = .none;
+            active_test_target = .none;
+            active_values_target = .none;
+            active_test_index = null;
+            active_values_index = null;
             freshness_time_key = null;
             continue;
         }
 
+        if (test_target != .none and indent <= tests_indent and !std.mem.startsWith(u8, trimmed, "- ")) {
+            test_target = .none;
+        }
+        if (active_test_index != null and indent <= active_test_indent) {
+            active_test_target = .none;
+            active_test_index = null;
+        }
+        if (active_values_index != null and indent <= active_values_indent) {
+            active_values_target = .none;
+            active_values_index = null;
+        }
+        if (in_columns and indent <= columns_indent and !std.mem.eql(u8, trimmed, "columns:")) {
+            in_columns = false;
+            current_column = null;
+            column_item_indent = null;
+            test_target = .none;
+            active_test_target = .none;
+            active_values_target = .none;
+            active_test_index = null;
+            active_values_index = null;
+        }
+
         if (std.mem.eql(u8, trimmed, "tables:")) {
             in_tables = true;
+            in_columns = false;
             table_item_indent = null;
+            column_item_indent = null;
             current_table_index = null;
+            current_column = null;
             in_freshness = false;
+            test_target = .none;
+            active_test_target = .none;
+            active_values_target = .none;
+            active_test_index = null;
+            active_values_index = null;
             freshness_time_key = null;
             continue;
         }
-        if (std.mem.startsWith(u8, trimmed, "- name:")) {
+        if (std.mem.startsWith(u8, trimmed, "- ")) {
+            if (active_values_index != null and indent > active_values_indent) {
+                const source = &graph.sources.items[current_table_index orelse return error.UnsupportedYaml];
+                const column_index = current_column orelse return error.UnsupportedYaml;
+                const test_def = try currentSourceGenericTestDef(source, column_index, active_values_target, active_values_index.?);
+                try test_def.accepted_values.append(allocator, try dupTrimmedScalar(allocator, trimmed[2..]));
+                continue;
+            }
+            if (test_target != .none and indent > tests_indent) {
+                const source = &graph.sources.items[current_table_index orelse return error.UnsupportedYaml];
+                const column_index = current_column orelse return error.UnsupportedYaml;
+                const test_name = try testNameFromYamlItem(allocator, trimmed[2..]);
+                active_test_index = try appendGenericTestDef(allocator, &source.columns.items[column_index].tests, test_name);
+                active_test_target = test_target;
+                active_test_indent = indent;
+                if (std.mem.indexOfScalar(u8, std.mem.trim(u8, trimmed[2..], " \t\r"), ':') == null) {
+                    active_test_target = .none;
+                    active_test_index = null;
+                }
+                continue;
+            }
+            if (!std.mem.startsWith(u8, trimmed, "- name:")) continue;
+
             const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
-            if (source_item_indent == null or indent == source_item_indent.?) {
+            if (in_columns and current_table_index != null and indent > columns_indent) {
+                var source = &graph.sources.items[current_table_index.?];
+                try source.columns.append(allocator, .{ .name = name });
+                current_column = source.columns.items.len - 1;
+                column_item_indent = indent;
+                test_target = .none;
+                active_test_target = .none;
+                active_values_target = .none;
+                active_test_index = null;
+                active_values_index = null;
+                in_freshness = false;
+            } else if (source_item_indent == null or indent == source_item_indent.?) {
                 source_item_indent = indent;
                 current_source = name;
                 in_tables = false;
+                in_columns = false;
                 table_item_indent = null;
+                column_item_indent = null;
                 current_table_index = null;
+                current_column = null;
                 in_freshness = false;
+                test_target = .none;
+                active_test_target = .none;
+                active_values_target = .none;
+                active_test_index = null;
+                active_values_index = null;
                 freshness_time_key = null;
             } else if (in_tables and (table_item_indent == null or indent == table_item_indent.?)) {
                 table_item_indent = indent;
@@ -896,15 +995,66 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                     .original_file_path = relative_path,
                 });
                 current_table_index = graph.sources.items.len - 1;
+                in_columns = false;
+                column_item_indent = null;
+                current_column = null;
                 in_freshness = false;
+                test_target = .none;
+                active_test_target = .none;
+                active_values_target = .none;
+                active_test_index = null;
+                active_values_index = null;
                 freshness_time_key = null;
             }
             continue;
         }
         if (in_tables and current_table_index != null and table_item_indent != null and indent > table_item_indent.?) {
-            if (std.mem.startsWith(u8, trimmed, "- ")) continue;
             const kv = splitKeyValue(trimmed) orelse continue;
             const source = &graph.sources.items[current_table_index.?];
+
+            if (active_test_index != null and indent > active_test_indent) {
+                if (std.mem.eql(u8, kv.key, "arguments")) {
+                    if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                    continue;
+                }
+                const column_index = current_column orelse return error.UnsupportedYaml;
+                const test_def = try currentSourceGenericTestDef(source, column_index, active_test_target, active_test_index.?);
+                if (std.mem.eql(u8, kv.key, "values")) {
+                    if (std.mem.trim(u8, kv.value, " \t").len == 0) {
+                        active_values_target = active_test_target;
+                        active_values_index = active_test_index;
+                        active_values_indent = indent;
+                    } else {
+                        try parseInlineStringList(allocator, kv.value, &test_def.accepted_values);
+                    }
+                    continue;
+                } else if (std.mem.eql(u8, kv.key, "to")) {
+                    test_def.relationship_to = try dupTrimmedScalar(allocator, kv.value);
+                    continue;
+                } else if (std.mem.eql(u8, kv.key, "field")) {
+                    test_def.relationship_field = try dupTrimmedScalar(allocator, kv.value);
+                    continue;
+                }
+            }
+
+            if (in_columns and current_column != null and column_item_indent != null and indent > column_item_indent.?) {
+                if (std.mem.eql(u8, kv.key, "description")) {
+                    source.columns.items[current_column.?].description = try dupTrimmedScalar(allocator, kv.value);
+                } else if (std.mem.eql(u8, kv.key, "tests") or std.mem.eql(u8, kv.key, "data_tests")) {
+                    if (std.mem.trim(u8, kv.value, " \t").len != 0) {
+                        try parseInlineGenericTestList(allocator, kv.value, &source.columns.items[current_column.?].tests);
+                    } else {
+                        test_target = .column;
+                        tests_indent = indent;
+                        active_test_target = .none;
+                        active_values_target = .none;
+                        active_test_index = null;
+                        active_values_index = null;
+                    }
+                }
+                continue;
+            }
+
             if (std.mem.eql(u8, kv.key, "loaded_at_field")) {
                 source.loaded_at_field = try dupTrimmedScalar(allocator, kv.value);
                 in_freshness = false;
@@ -912,6 +1062,19 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             } else if (std.mem.eql(u8, kv.key, "loaded_at_query")) {
                 source.loaded_at_query = try dupTrimmedScalar(allocator, kv.value);
                 in_freshness = false;
+                freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "columns")) {
+                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                in_columns = true;
+                columns_indent = indent;
+                current_column = null;
+                column_item_indent = null;
+                in_freshness = false;
+                test_target = .none;
+                active_test_target = .none;
+                active_values_target = .none;
+                active_test_index = null;
+                active_values_index = null;
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "freshness")) {
                 if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
@@ -936,6 +1099,11 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             }
         }
     }
+}
+
+fn currentSourceGenericTestDef(source: *types.SourceDef, column_index: usize, target: SourceTestTarget, test_index: usize) !*GenericTestDef {
+    if (target == .column) return &source.columns.items[column_index].tests.items[test_index];
+    return error.UnsupportedYaml;
 }
 
 fn applyFreshnessTimeKeyValue(allocator: std.mem.Allocator, source: *types.SourceDef, time_key: FreshnessTimeKey, kv: KeyValue) !void {
@@ -1148,11 +1316,12 @@ pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: Generi
         clean_args.deinit(allocator);
     }
 
+    const argument_name = if (std.mem.startsWith(u8, test_def.name, "source_")) test_def.name["source_".len..] else test_def.name;
     if (column_name) |column| try clean_args.append(allocator, try cleanTestNamePart(allocator, column));
-    if (std.mem.eql(u8, test_def.name, "relationships")) {
+    if (std.mem.eql(u8, argument_name, "relationships")) {
         try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_field));
         try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_to));
-    } else if (std.mem.eql(u8, test_def.name, "accepted_values")) {
+    } else if (std.mem.eql(u8, argument_name, "accepted_values")) {
         for (test_def.accepted_values.items) |value| {
             try clean_args.append(allocator, try cleanTestNamePart(allocator, value));
         }
@@ -1177,6 +1346,10 @@ pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: Generi
 pub fn genericTestUniqueId(allocator: std.mem.Allocator, package_name: []const u8, name: []const u8, test_def: GenericTestDef, model_name: []const u8, column_name: ?[]const u8) ![]const u8 {
     const model_kwarg = try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
     defer allocator.free(model_kwarg);
+    return try genericTestUniqueIdForModelKwarg(allocator, package_name, name, test_def, model_kwarg, column_name);
+}
+
+pub fn genericTestUniqueIdForModelKwarg(allocator: std.mem.Allocator, package_name: []const u8, name: []const u8, test_def: GenericTestDef, model_kwarg: []const u8, column_name: ?[]const u8) ![]const u8 {
     const metadata = try genericTestMetadataRepr(allocator, test_def, model_kwarg, column_name);
     defer allocator.free(metadata);
 
@@ -2149,6 +2322,49 @@ test "parseSourcesFromText records table-level source freshness" {
     try std.testing.expect(graph.sources.items[1].loaded_at_field == null);
     try std.testing.expectEqualStrings("select max(loaded_at) from raw.orders", graph.sources.items[1].loaded_at_query.?);
     try std.testing.expectEqual(@as(u64, 3), graph.sources.items[1].freshness.?.warn_after.?.count.?);
+}
+
+test "parseSourcesFromText records source column generic tests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    tables:
+        \\      - name: customers
+        \\        columns:
+        \\          - name: customer_id
+        \\            tests: [not_null, unique]
+        \\          - name: customer_type
+        \\            data_tests:
+        \\              - accepted_values:
+        \\                  values:
+        \\                    - new
+        \\                    - returning
+    ;
+
+    try parseSourcesFromText(allocator, yaml, "models/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.sources.items.len);
+    const source = graph.sources.items[0];
+    try std.testing.expectEqual(@as(usize, 2), source.columns.items.len);
+    try std.testing.expectEqualStrings("customer_id", source.columns.items[0].name);
+    try std.testing.expectEqual(@as(usize, 2), source.columns.items[0].tests.items.len);
+    try std.testing.expectEqualStrings("not_null", source.columns.items[0].tests.items[0].name);
+    try std.testing.expectEqualStrings("unique", source.columns.items[0].tests.items[1].name);
+    try std.testing.expectEqualStrings("customer_type", source.columns.items[1].name);
+    try std.testing.expectEqual(@as(usize, 1), source.columns.items[1].tests.items.len);
+    const accepted = source.columns.items[1].tests.items[0];
+    try std.testing.expectEqualStrings("accepted_values", accepted.name);
+    try std.testing.expectEqual(@as(usize, 2), accepted.accepted_values.items.len);
+    try std.testing.expectEqualStrings("new", accepted.accepted_values.items[0]);
+    try std.testing.expectEqualStrings("returning", accepted.accepted_values.items[1]);
 }
 
 test "parseExposuresFromText records exposure metadata and dependencies" {
