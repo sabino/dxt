@@ -58,7 +58,10 @@ pub fn compileModel(allocator: std.mem.Allocator, graph: *const Graph, node: *co
 }
 
 pub fn relationNameForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
-    return renderRelation(allocator, .{ .schema = graph.target_schema, .identifier = node.name });
+    const schema = try relationSchemaForNode(allocator, graph, node);
+    defer allocator.free(schema);
+    const identifier = relationIdentifierForNode(node);
+    return renderRelation(allocator, .{ .schema = schema, .identifier = identifier });
 }
 
 fn renderExpression(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, span: []const u8) ![]const u8 {
@@ -103,9 +106,9 @@ fn renderExpression(allocator: std.mem.Allocator, graph: *const Graph, node: *co
 }
 
 fn renderThisAttribute(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, attribute: []const u8) ![]const u8 {
-    if (std.mem.eql(u8, attribute, "schema")) return try allocator.dupe(u8, graph.target_schema);
+    if (std.mem.eql(u8, attribute, "schema")) return try relationSchemaForNode(allocator, graph, node);
     if (std.mem.eql(u8, attribute, "name") or std.mem.eql(u8, attribute, "table") or std.mem.eql(u8, attribute, "identifier")) {
-        return try allocator.dupe(u8, node.name);
+        return try allocator.dupe(u8, relationIdentifierForNode(node));
     }
     return error.UnsupportedJinja;
 }
@@ -149,6 +152,22 @@ fn findSourceByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Sour
         if (std.mem.eql(u8, source.unique_id, unique_id)) return source;
     }
     return null;
+}
+
+fn relationSchemaForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
+    if (node.config_schema) |custom_schema| {
+        const trimmed = std.mem.trim(u8, custom_schema, " \t\r\n");
+        return try std.fmt.allocPrint(allocator, "{s}_{s}", .{ graph.target_schema, trimmed });
+    }
+    return try allocator.dupe(u8, graph.target_schema);
+}
+
+fn relationIdentifierForNode(node: *const Node) []const u8 {
+    if (node.config_alias) |custom_alias| {
+        const trimmed = std.mem.trim(u8, custom_alias, " \t\r\n");
+        if (trimmed.len != 0) return trimmed;
+    }
+    return node.name;
 }
 
 fn renderRelation(allocator: std.mem.Allocator, relation: Relation) ![]const u8 {
@@ -281,6 +300,27 @@ test "relationNameForNode quotes identifiers" {
     try std.testing.expectEqualStrings("\"analytics\".\"customer_order\"", relation);
 }
 
+test "relationNameForNode applies inline schema and alias defaults" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select 1",
+        .config_schema = "mart",
+        .config_alias = "order_facts",
+    };
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    const relation = try relationNameForNode(allocator, &graph, &node);
+    defer allocator.free(relation);
+    try std.testing.expectEqualStrings("\"analytics_mart\".\"order_facts\"", relation);
+}
+
 test "compileModel renders target and this context" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -300,13 +340,15 @@ test "compileModel renders target and this context" {
         .name = "orders",
         .path = "orders.sql",
         .original_file_path = "models/orders.sql",
+        .config_schema = "mart",
+        .config_alias = "order_facts",
         .raw_code = "select '{{ target.profile_name }}' as profile_name, '{{ target.name }}' as target_name, '{{ target.target_name }}' as target_name_alias, '{{ target.type }}' as adapter_type, '{{ target.schema }}' as target_schema, '{{ this.schema }}' as this_schema, '{{ this.name }}' as this_name, '{{ this.table }}' as this_table, '{{ this.identifier }}' as this_identifier from {{ this }}",
     });
 
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
     defer allocator.free(compiled);
     try std.testing.expectEqualStrings(
-        "select 'demo_profile' as profile_name, 'dev' as target_name, 'dev' as target_name_alias, 'postgres' as adapter_type, 'analytics' as target_schema, 'analytics' as this_schema, 'orders' as this_name, 'orders' as this_table, 'orders' as this_identifier from \"analytics\".\"orders\"",
+        "select 'demo_profile' as profile_name, 'dev' as target_name, 'dev' as target_name_alias, 'postgres' as adapter_type, 'analytics' as target_schema, 'analytics_mart' as this_schema, 'order_facts' as this_name, 'order_facts' as this_table, 'order_facts' as this_identifier from \"analytics_mart\".\"order_facts\"",
         compiled,
     );
 }
