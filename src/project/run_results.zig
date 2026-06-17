@@ -251,3 +251,70 @@ test "run-results writer preserves mixed model and generic test order" {
     try std.testing.expectEqualStrings("pass", results[1].object.get("status").?.string);
     try std.testing.expectEqual(@as(i64, 0), results[1].object.get("failures").?.integer);
 }
+
+test "run-results writer preserves seed model and generic test shape" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.raw_customers",
+        .name = "raw_customers",
+        .path = "raw_customers.csv",
+        .original_file_path = "seeds/raw_customers.csv",
+        .raw_code = "",
+        .materialized = "seed",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select * from {{ ref(\"raw_customers\") }}",
+        .compiled = true,
+        .compiled_code = "select * from \"main\".\"raw_customers\"",
+        .relation_name = "\"main\".\"customers\"",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_customers_customer_id.abc",
+        .name = "not_null_customers_customer_id",
+        .alias = "not_null_customers_customer_id",
+        .path = "not_null_customers_customer_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "customer_id",
+        .attached_node = "model.demo.customers",
+    });
+
+    const rendered = try renderRunResults(allocator, &.{
+        .{ .node = &graph.nodes.items[0] },
+        .{ .node = &graph.nodes.items[1] },
+        .{
+            .test_node = &graph.tests.items[0],
+            .status = "pass",
+            .failures = 0,
+            .compiled_code = "select customer_id from customers where customer_id is null",
+        },
+    });
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const results = parsed.value.object.get("results").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+    try std.testing.expectEqualStrings("seed.demo.raw_customers", results[0].object.get("unique_id").?.string);
+    try std.testing.expectEqual(.null, results[0].object.get("compiled").?);
+    try std.testing.expectEqual(.null, results[0].object.get("compiled_code").?);
+    try std.testing.expectEqualStrings("model.demo.customers", results[1].object.get("unique_id").?.string);
+    try std.testing.expectEqual(true, results[1].object.get("compiled").?.bool);
+    try std.testing.expectEqualStrings("test.demo.not_null_customers_customer_id.abc", results[2].object.get("unique_id").?.string);
+    try std.testing.expectEqualStrings("pass", results[2].object.get("status").?.string);
+    try std.testing.expectEqual(true, results[2].object.get("compiled").?.bool);
+    try std.testing.expectEqual(.null, results[2].object.get("relation_name").?);
+}

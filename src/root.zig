@@ -172,7 +172,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model resources\n") catch {},
         error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources\n") catch {},
         error.UnsupportedBuildSelection => stderr.writeAll("error: build currently supports only selected model, seed, and test resources before execution\n") catch {},
-        error.UnsupportedMixedBuildExecution => stderr.writeAll("error: build currently executes only seed-only, model-only, model+supported-generic-test, or supported-generic-test-only selections; seed+model DAG execution is not implemented yet\n") catch {},
+        error.UnsupportedMixedBuildExecution => stderr.writeAll("error: build currently executes only seed-only, model-only, seed+model, seed+model+supported-generic-test, model+supported-generic-test, or supported-generic-test-only selections\n") catch {},
         error.UnsupportedAdapterExecution => stderr.writeAll("error: run currently executes only DuckDB SQL models\n") catch {},
         error.UnsupportedBuildAdapterExecution => stderr.writeAll("error: build currently executes only DuckDB models, seeds, and supported generic tests\n") catch {},
         error.UnsupportedSeedAdapterExecution => stderr.writeAll("error: build currently executes only DuckDB seeds\n") catch {},
@@ -187,7 +187,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
             return .failure;
         },
         error.UnsupportedModelExecution => stderr.writeAll("error: model execution requires a DuckDB adapter and materialization runner; not implemented yet\n") catch {},
-        error.UnsupportedSeedExecution => stderr.writeAll("error: seed execution requires a DuckDB adapter and seed runner; not implemented yet\n") catch {},
+        error.UnsupportedSeedExecution => stderr.writeAll("error: build currently executes only root-project DuckDB seeds with default CSV settings\n") catch {},
         error.UnsupportedTestExecution => stderr.writeAll("error: build currently executes only selected DuckDB not_null/unique column generic tests\n") catch {},
         error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by the implemented M1 parser command\n") catch {},
         else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},

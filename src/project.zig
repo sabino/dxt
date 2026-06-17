@@ -320,6 +320,53 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         }
         return;
     }
+    if (selected_kinds.seed != 0 and selected_kinds.model != 0 and selected_kinds.seed + selected_kinds.model + selected_kinds.test_resource == selected_kinds.total) {
+        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedBuildAdapterExecution;
+        const execution_order = try selectedSeedModelExecutionOrder(runtime, &graph, selected);
+        defer runtime.allocator.free(execution_order);
+        try validateSeedModelBuildExecution(&graph, execution_order);
+
+        const test_nodes = try selectedGenericTestExecutionOrder(runtime, &graph, selected);
+        defer runtime.allocator.free(test_nodes);
+        try validateGenericTestExecution(test_nodes);
+        try validateGenericTestsAttachToSelectedModels(test_nodes, selected);
+
+        const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+        var executed: std.ArrayList(run_results.NodeResult) = .empty;
+        defer {
+            deinitRunResults(runtime.allocator, executed.items);
+            executed.deinit(runtime.allocator);
+        }
+        var seed_count: usize = 0;
+        var model_count: usize = 0;
+        for (execution_order) |node| {
+            if (std.mem.eql(u8, node.resource_type, "seed")) {
+                try duckdb.executeSeed(runtime, db_path, options.project_dir, &graph, node);
+                seed_count += 1;
+            } else {
+                try duckdb.executeModel(runtime, db_path, &graph, node);
+                model_count += 1;
+            }
+            try executed.append(runtime.allocator, .{ .node = node });
+        }
+        const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
+
+        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
+        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
+        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try stdout.print("Built {d} seed(s), {d} model(s), and {d} generic test(s) into {s}; wrote artifacts into {s}\n", .{
+            seed_count,
+            model_count,
+            test_nodes.len,
+            util.normalizeForDisplay(db_path),
+            util.normalizeForDisplay(manifest_path),
+        });
+        if (test_summary.failed_tests != 0) {
+            try stdout.print("{d} generic test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
+            return error.TestFailure;
+        }
+        return;
+    }
 
     try stdout.print("Prepared {d} selected resource(s), including {d} compiled model(s), into {s}\n", .{
         selected.len,
@@ -384,6 +431,33 @@ fn selectedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []cons
     return try ordered.toOwnedSlice(runtime.allocator);
 }
 
+fn selectedSeedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource) ![]*Node {
+    const selected_count = countSelectedGraphSeeds(graph, selected) + countSelectedGraphModels(graph, selected);
+    var remaining = try runtime.allocator.alloc(bool, graph.nodes.items.len);
+    defer runtime.allocator.free(remaining);
+    @memset(remaining, false);
+    for (graph.nodes.items, 0..) |*node, index| {
+        remaining[index] = node.enabled and
+            (std.mem.eql(u8, node.resource_type, "seed") or std.mem.eql(u8, node.resource_type, "model")) and
+            selectionContains(selected, node.unique_id);
+    }
+
+    var ordered: std.ArrayList(*Node) = .empty;
+    errdefer ordered.deinit(runtime.allocator);
+    while (ordered.items.len < selected_count) {
+        var progressed = false;
+        for (graph.nodes.items, 0..) |*node, index| {
+            if (!remaining[index]) continue;
+            if (!selectedSeedModelDependenciesExecuted(selected, ordered.items, node)) continue;
+            try ordered.append(runtime.allocator, node);
+            remaining[index] = false;
+            progressed = true;
+        }
+        if (!progressed) return error.CyclicModelDependency;
+    }
+    return try ordered.toOwnedSlice(runtime.allocator);
+}
+
 fn validateRunMaterializations(nodes: []const *Node) !void {
     for (nodes) |node| {
         if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedModelMaterialization;
@@ -416,6 +490,19 @@ fn validateSeedExecution(graph: *const Graph, nodes: []const *Node) !void {
     }
 }
 
+fn validateSeedModelBuildExecution(graph: *const Graph, nodes: []const *Node) !void {
+    for (nodes) |node| {
+        if (std.mem.eql(u8, node.resource_type, "seed")) {
+            if (!std.mem.eql(u8, node.package_name, graph.project_name)) return error.UnsupportedSeedExecution;
+            if (!std.mem.eql(u8, node.materialized, "seed")) return error.UnsupportedSeedExecution;
+        } else if (std.mem.eql(u8, node.resource_type, "model")) {
+            if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedBuildModelMaterialization;
+        } else {
+            return error.UnsupportedBuildSelection;
+        }
+    }
+}
+
 fn selectedGenericTestExecutionOrder(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource) ![]*GenericTestNode {
     const selected_count = countSelectedGenericTests(graph, selected);
     var ordered = try runtime.allocator.alloc(*GenericTestNode, selected_count);
@@ -434,6 +521,12 @@ fn validateGenericTestExecution(nodes: []const *GenericTestNode) !void {
         if (!std.mem.eql(u8, test_node.test_name, "not_null") and !std.mem.eql(u8, test_node.test_name, "unique")) {
             return error.UnsupportedTestExecution;
         }
+    }
+}
+
+fn validateGenericTestsAttachToSelectedModels(nodes: []const *GenericTestNode, selected: []const selector.SelectedResource) !void {
+    for (nodes) |test_node| {
+        if (!selectionContains(selected, test_node.attached_node)) return error.UnsupportedTestExecution;
     }
 }
 
@@ -508,6 +601,15 @@ fn selectedModelDependenciesExecuted(selected: []const selector.SelectedResource
     return true;
 }
 
+fn selectedSeedModelDependenciesExecuted(selected: []const selector.SelectedResource, executed: []const *Node, node: *const Node) bool {
+    for (node.depends_on.items) |dependency| {
+        if (!std.mem.startsWith(u8, dependency, "model.") and !std.mem.startsWith(u8, dependency, "seed.")) continue;
+        if (!selectionContains(selected, dependency)) continue;
+        if (!executedContains(executed, dependency)) return false;
+    }
+    return true;
+}
+
 fn executedContains(executed: []const *Node, unique_id: []const u8) bool {
     for (executed) |node| {
         if (std.mem.eql(u8, node.unique_id, unique_id)) return true;
@@ -569,6 +671,45 @@ fn selectionContains(selected: []const selector.SelectedResource, unique_id: []c
         if (std.mem.eql(u8, item.unique_id, unique_id)) return true;
     }
     return false;
+}
+
+test "selected seed-model build order waits for selected seed dependencies" {
+    const allocator = std.testing.allocator;
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    var model = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.stg_customers",
+        .name = "stg_customers",
+        .path = "stg_customers.sql",
+        .original_file_path = "models/stg_customers.sql",
+        .raw_code = "select * from {{ ref(\"raw_customers\") }}",
+    };
+    try model.depends_on.append(allocator, "seed.demo.raw_customers");
+    try graph.nodes.append(allocator, model);
+    try graph.nodes.append(allocator, .{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.raw_customers",
+        .name = "raw_customers",
+        .path = "raw_customers.csv",
+        .original_file_path = "seeds/raw_customers.csv",
+        .raw_code = "",
+        .materialized = "seed",
+    });
+
+    const selected = [_]selector.SelectedResource{
+        .{ .unique_id = "model.demo.stg_customers", .name = "stg_customers", .resource_type = "model" },
+        .{ .unique_id = "seed.demo.raw_customers", .name = "raw_customers", .resource_type = "seed" },
+    };
+    const runtime = Runtime{ .allocator = allocator, .io = undefined };
+    const ordered = try selectedSeedModelExecutionOrder(runtime, &graph, &selected);
+    defer allocator.free(ordered);
+
+    try std.testing.expectEqual(@as(usize, 2), ordered.len);
+    try std.testing.expectEqualStrings("seed.demo.raw_customers", ordered[0].unique_id);
+    try std.testing.expectEqualStrings("model.demo.stg_customers", ordered[1].unique_id);
 }
 
 fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
