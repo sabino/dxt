@@ -345,7 +345,7 @@ def test_compile_docs_run_and_build_resolve_cli_vars(tmp_path: Path):
             "--target-path",
             str(build_target),
             "--select",
-            "orders",
+            "+orders",
             "--vars",
             "{customer_model: alt_customers}",
         ],
@@ -353,8 +353,13 @@ def test_compile_docs_run_and_build_resolve_cli_vars(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert build_result.returncode == 2
-    assert "model execution requires a DuckDB adapter" in build_result.stderr
+    if DUCKDB is None:
+        assert build_result.returncode == 2
+        assert "DuckDB execution requires the duckdb CLI" in build_result.stderr
+    else:
+        assert build_result.returncode == 0, build_result.stderr
+        assert "Built 2 model(s) and 0 generic test(s)" in build_result.stdout
+        assert_run_results_schema_slice(build_target / "run_results.json")
     assert 'from "main"."alt_customers"' in (
         build_target / "compiled" / "dynamic_var_ref" / "models" / "orders.sql"
     ).read_text()
@@ -706,22 +711,65 @@ target-path: target
     assert not (target / "run_results.json").exists()
 
 
-def test_build_prepare_compiles_model_then_stops_before_execution(tmp_path: Path):
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 model build execution slice")
+def test_build_executes_selected_duckdb_models_and_writes_run_results(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     target = tmp_path / "build-target"
     result = subprocess.run(
-        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "orders"],
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "+orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 2 model(s) and 0 generic test(s)" in result.stdout
+    assert (target / "compiled" / "compile_basic" / "models" / "orders.sql").exists()
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "model.compile_basic.customers",
+        "model.compile_basic.orders",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["success", "success"]
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["nodes"]["model.compile_basic.orders"]["compiled"] is True
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id, order_count from "main"."orders"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "1,1"
+
+
+def test_build_rejects_unsupported_model_materialization_before_duckdb(tmp_path: Path):
+    project = tmp_path / "unsupported_build_materialization"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: unsupported_build_materialization
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "events.sql").write_text(
+        "{{ config(materialized='incremental') }}\nselect 1 as id\n"
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "events"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "Prepared 1 selected resource(s), including 1 compiled model(s)" in result.stdout
-    assert "model execution requires a DuckDB adapter and materialization runner" in result.stderr
+    assert "build currently supports only table and view model materializations" in result.stderr
+    assert "run currently supports only table and view model materializations" not in result.stderr
     assert not (target / "run_results.json").exists()
-    assert (target / "compiled" / "compile_basic" / "models" / "orders.sql").exists()
-    manifest = json.loads((target / "manifest.json").read_text())
-    assert manifest["nodes"]["model.compile_basic.orders"]["compiled"] is True
+    assert not (target / "dxt.duckdb").exists()
+    assert (target / "manifest.json").exists()
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed build execution slice")
@@ -802,7 +850,7 @@ def test_build_rejects_mixed_seed_model_selection_before_execution(tmp_path: Pat
     )
     assert result.returncode == 2
     assert "Prepared 2 selected resource(s), including 1 compiled model(s)" in result.stdout
-    assert "build currently executes only seed-only or supported generic-test-only selections" in result.stderr
+    assert "build currently executes only seed-only, model-only, model+supported-generic-test" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "compiled" / "seed_ref" / "models" / "stg_customers.sql").exists()
@@ -824,6 +872,115 @@ def test_build_prepare_reports_test_execution_boundary(tmp_path: Path):
     manifest = json.loads((target / "manifest.json").read_text())
     assert "compiled" not in manifest["nodes"]["model.generic_test_arguments.customers"]
     assert sorted(manifest["child_map"]["model.generic_test_arguments.customers"])
+
+
+def write_supported_model_test_project(project: Path, customers_sql: str) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: build_model_tests
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text(customers_sql)
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: customers
+    config:
+      materialized: table
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+          - unique
+"""
+    )
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 model+test build execution slice")
+def test_build_executes_selected_duckdb_model_and_supported_generic_tests(tmp_path: Path):
+    project = tmp_path / "build_model_tests"
+    write_supported_model_test_project(
+        project,
+        "select 1 as customer_id, 'Ada' as customer_name\n",
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 model(s) and 2 generic test(s)" in result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "model.build_model_tests.customers",
+        "test.build_model_tests.not_null_customers_customer_id.5c9bf9911d",
+        "test.build_model_tests.unique_customers_customer_id.c5af1ff4b1",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["success", "pass", "pass"]
+    assert [item["failures"] for item in run_results["results"]] == [None, 0, 0]
+    assert run_results["results"][0]["relation_name"] == '"main"."customers"'
+    assert all(item["relation_name"] is None for item in run_results["results"][1:])
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id, customer_name from "main"."customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "1,Ada"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 model+test build execution slice")
+def test_build_reports_failing_model_attached_generic_tests_in_run_results(tmp_path: Path):
+    project = tmp_path / "build_model_tests"
+    write_supported_model_test_project(
+        project,
+        "select null as customer_id, 'Ada' as customer_name\n"
+        "union all\n"
+        "select 1 as customer_id, 'Bob' as customer_name\n"
+        "union all\n"
+        "select 1 as customer_id, 'Bea' as customer_name\n",
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Built 1 model(s) and 2 generic test(s)" in result.stdout
+    assert "2 generic test(s) failed with 2 failure row(s)" in result.stdout
+    assert "one or more generic tests failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["success", "fail", "fail"]
+    assert [item["failures"] for item in run_results["results"]] == [None, 1, 1]
+    assert all(item["message"] == "Got 1 result, configured to fail if != 0" for item in run_results["results"][1:])
+
+
+def test_build_rejects_model_selection_with_unsupported_generic_test_before_duckdb(tmp_path: Path):
+    project = copy_fixture(tmp_path, "model_properties")
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "build currently executes only selected DuckDB not_null/unique column generic tests" in result.stderr
+    assert not (target / "run_results.json").exists()
+    assert not (target / "dxt.duckdb").exists()
+    assert (target / "manifest.json").exists()
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test build execution slice")

@@ -199,3 +199,55 @@ test "run-results writer emits generic test pass and fail statuses" {
     try std.testing.expectEqualStrings("select 1 as failures", result.get("compiled_code").?.string);
     try std.testing.expectEqual(.null, result.get("relation_name").?);
 }
+
+test "run-results writer preserves mixed model and generic test order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1 as id",
+        .compiled = true,
+        .compiled_code = "select 1 as id",
+        .relation_name = "\"main\".\"customers\"",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_customers_customer_id.abc",
+        .name = "not_null_customers_customer_id",
+        .alias = "not_null_customers_customer_id",
+        .path = "not_null_customers_customer_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "customer_id",
+        .attached_node = "model.demo.customers",
+    });
+
+    const rendered = try renderRunResults(allocator, &.{
+        .{ .node = &graph.nodes.items[0] },
+        .{
+            .test_node = &graph.tests.items[0],
+            .status = "pass",
+            .failures = 0,
+            .compiled_code = "select * from customers where customer_id is null",
+        },
+    });
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const results = parsed.value.object.get("results").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqualStrings("model.demo.customers", results[0].object.get("unique_id").?.string);
+    try std.testing.expectEqualStrings("success", results[0].object.get("status").?.string);
+    try std.testing.expectEqualStrings("test.demo.not_null_customers_customer_id.abc", results[1].object.get("unique_id").?.string);
+    try std.testing.expectEqualStrings("pass", results[1].object.get("status").?.string);
+    try std.testing.expectEqual(@as(i64, 0), results[1].object.get("failures").?.integer);
+}
