@@ -354,13 +354,28 @@ adapter-dispatched test overrides, `quote: false`, singular tests, unit tests,
 source tests, custom configs, `store_failures`, or package/runtime macro
 behavior.
 
+Current DuckDB relationships generic test execution source note:
+`.agent/research/m3-duckdb-relationships-generic-tests.md` maps upstream dbt
+Core v1 schema generic-test parsing, build/test runner behavior, and
+run-results serialization plus Fusion's built-in `relationships` SQL macro and
+test materialization helpers to dxt's first executable `relationships` slice.
+This slice lets test-only, model+test, and seed+model+test `dxt build`
+selections execute selected DuckDB column-level ref-backed `relationships`
+tests when `to` and `field` arguments are present, using the dbt built-in
+non-null child left-join failure-row SQL shape and existing Run Results
+v6-shaped artifact behavior. It does not add generic macro execution,
+adapter-dispatched test overrides, non-ref relationship targets, source tests,
+singular tests, unit tests, custom configs, `store_failures`, or
+package/runtime macro behavior.
+
 Current DuckDB model and generic-test build source note:
 `.agent/research/m3-duckdb-build-model-tests.md` maps upstream dbt Core v1
 build runner queue/model/test behavior plus Fusion DAG and run-results
 references to dxt's first mixed model+test `build` branch. This slice lets
 selected DuckDB `table`/`view` SQL models execute before selected supported
-column-level `not_null`/`unique`/`accepted_values` generic tests, writes one Run
-Results v6-shaped artifact, and returns exit code `1` on test failure. It does
+column-level `not_null`/`unique`/`accepted_values`/`relationships` generic
+tests, writes one Run Results v6-shaped artifact, and returns exit code `1` on
+test failure. It does
 not add seed+model or seed+model+test DAG scheduling, wider tests, selector
 semantic changes, materialization macro execution, hooks, grants, docs
 persistence, catalog introspection, threaded scheduling, or partial/failed model
@@ -372,9 +387,10 @@ build queue/seed/model/test behavior plus Fusion DAG and run-results references
 to dxt's first selected seed/model dependency-order `build` branch. This slice
 lets selected root-project DuckDB CSV seeds execute before selected dependent
 DuckDB `table`/`view` SQL models, then executes selected supported column-level
-`not_null`/`unique`/`accepted_values` generic tests, writes one Run Results
-v6-shaped artifact, and returns exit code `1` on test failure. It does not add
-package seeds, wider tests, full dbt queue interleaving, skip/fail-fast
+`not_null`/`unique`/`accepted_values`/`relationships` generic tests, writes one
+Run Results v6-shaped artifact, and returns exit code `1` on test failure. It
+does not add package seeds, wider tests, full dbt queue interleaving,
+skip/fail-fast
 semantics, materialization macro execution, hooks, grants, docs persistence,
 catalog introspection, threaded scheduling, or partial/failed model run-results.
 
@@ -487,8 +503,9 @@ Tier 1 DuckDB execution:
 - Seeds.
 - Table and view models.
 - Ephemeral model.
-- Generic tests: `unique`, `not_null`, and default-quoted `accepted_values`
-  are started; `relationships` and wider generic-test config parity remain.
+- Generic tests: `unique`, `not_null`, default-quoted `accepted_values`, and
+  ref-backed `relationships` are started; wider generic-test config parity
+  remains.
 - Singular test.
 - Simple incremental model.
 - Docs generation and catalog introspection.

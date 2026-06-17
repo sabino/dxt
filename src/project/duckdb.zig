@@ -229,10 +229,12 @@ pub fn renderGenericTestSql(allocator: std.mem.Allocator, graph: *const Graph, t
     const is_not_null = std.mem.eql(u8, test_node.test_name, "not_null");
     const is_unique = std.mem.eql(u8, test_node.test_name, "unique");
     const is_accepted_values = std.mem.eql(u8, test_node.test_name, "accepted_values");
-    if (!is_not_null and !is_unique and !is_accepted_values) {
+    const is_relationships = std.mem.eql(u8, test_node.test_name, "relationships");
+    if (!is_not_null and !is_unique and !is_accepted_values and !is_relationships) {
         return error.UnsupportedTestExecution;
     }
     if (is_accepted_values and test_node.accepted_values.items.len == 0) return error.UnsupportedTestExecution;
+    if (is_relationships and (test_node.relationship_to.len == 0 or test_node.relationship_field.len == 0)) return error.UnsupportedTestExecution;
 
     const attached_node = findNodeByUniqueId(graph, test_node.attached_node) orelse return error.UnsupportedTestExecution;
     const relation_name = attached_node.relation_name orelse try compiler.relationNameForNode(allocator, graph, attached_node);
@@ -257,6 +259,19 @@ pub fn renderGenericTestSql(allocator: std.mem.Allocator, graph: *const Graph, t
             .{ quoted_column, relation_name, quoted_column, accepted_values },
         );
     }
+    if (is_relationships) {
+        const parent_node = findRelationshipTargetNode(graph, test_node) orelse return error.UnsupportedTestExecution;
+        const parent_relation_name = parent_node.relation_name orelse try compiler.relationNameForNode(allocator, graph, parent_node);
+        const should_free_parent_relation = parent_node.relation_name == null;
+        defer if (should_free_parent_relation) allocator.free(parent_relation_name);
+        const quoted_parent_field = try compiler.quoteIdentifier(allocator, test_node.relationship_field);
+        defer allocator.free(quoted_parent_field);
+        return try std.fmt.allocPrint(
+            allocator,
+            "with child as (\n    select {s} as from_field\n    from {s}\n    where {s} is not null\n),\nparent as (\n    select {s} as to_field\n    from {s}\n)\nselect\n    from_field\nfrom child\nleft join parent\n    on child.from_field = parent.to_field\nwhere parent.to_field is null",
+            .{ quoted_column, relation_name, quoted_column, quoted_parent_field, parent_relation_name },
+        );
+    }
     return try std.fmt.allocPrint(
         allocator,
         "select\n    {s} as unique_field,\n    count(*) as n_records\nfrom {s}\nwhere {s} is not null\ngroup by {s}\nhaving count(*) > 1",
@@ -277,6 +292,16 @@ fn findNodeByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Node {
         if (std.mem.eql(u8, node.unique_id, unique_id)) return node;
     }
     return null;
+}
+
+fn findRelationshipTargetNode(graph: *const Graph, test_node: *const GenericTestNode) ?*const Node {
+    var attached: ?*const Node = null;
+    for (test_node.depends_on.items) |unique_id| {
+        const node = findNodeByUniqueId(graph, unique_id) orelse continue;
+        if (!std.mem.eql(u8, unique_id, test_node.attached_node)) return node;
+        attached = node;
+    }
+    return attached;
 }
 
 fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
@@ -604,6 +629,92 @@ test "renderGenericTestSql renders accepted_values failure row query" {
         "with all_values as (\n    select\n        \"customer_type\" as value_field,\n        count(*) as n_records\n    from \"analytics\".\"customers\"\n    group by \"customer_type\"\n)\nselect *\nfrom all_values\nwhere value_field not in ('new', 'Bob''s')",
         sql,
     );
+}
+
+test "renderGenericTestSql renders relationships failure row query" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1 as customer_id",
+        .relation_name = "\"analytics\".\"customers\"",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select 1 as order_id, 1 as customer_id",
+        .relation_name = "\"analytics\".\"orders\"",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.relationships_orders_customer_id__customer_id__ref_customers_.abc",
+        .name = "relationships_orders_customer_id__customer_id__ref_customers_",
+        .alias = "relationships_orders_customer_id__customer_id__ref_customers_",
+        .path = "relationships_orders_customer_id__customer_id__ref_customers_.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_relationships(**_dbt_generic_test_kwargs) }}",
+        .test_name = "relationships",
+        .column_name = "customer_id",
+        .relationship_to = "ref('customers')",
+        .relationship_field = "customer_id",
+        .attached_node = "model.demo.orders",
+    });
+    try graph.tests.items[0].depends_on.append(allocator, "model.demo.customers");
+    try graph.tests.items[0].depends_on.append(allocator, "model.demo.orders");
+
+    const sql = try renderGenericTestSql(allocator, &graph, &graph.tests.items[0]);
+    try std.testing.expectEqualStrings(
+        "with child as (\n    select \"customer_id\" as from_field\n    from \"analytics\".\"orders\"\n    where \"customer_id\" is not null\n),\nparent as (\n    select \"customer_id\" as to_field\n    from \"analytics\".\"customers\"\n)\nselect\n    from_field\nfrom child\nleft join parent\n    on child.from_field = parent.to_field\nwhere parent.to_field is null",
+        sql,
+    );
+}
+
+test "renderGenericTestSql rejects unsupported relationships shapes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select 1 as order_id, 1 as customer_id",
+        .relation_name = "\"analytics\".\"orders\"",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.relationships_orders_customer_id__customer_id__ref_customers_.abc",
+        .name = "relationships_orders_customer_id__customer_id__ref_customers_",
+        .alias = "relationships_orders_customer_id__customer_id__ref_customers_",
+        .path = "relationships_orders_customer_id__customer_id__ref_customers_.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_relationships(**_dbt_generic_test_kwargs) }}",
+        .test_name = "relationships",
+        .column_name = "customer_id",
+        .relationship_to = "ref('customers')",
+        .relationship_field = "customer_id",
+        .attached_node = "model.demo.orders",
+    });
+    try std.testing.expectError(error.UnsupportedTestExecution, renderGenericTestSql(allocator, &graph, &graph.tests.items[0]));
+
+    try graph.tests.items[0].depends_on.append(allocator, "model.demo.orders");
+    graph.tests.items[0].relationship_field = "";
+    try std.testing.expectError(error.UnsupportedTestExecution, renderGenericTestSql(allocator, &graph, &graph.tests.items[0]));
 }
 
 test "renderGenericTestSql rejects unsupported accepted_values shapes" {

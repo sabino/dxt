@@ -522,6 +522,10 @@ fn validateGenericTestExecution(nodes: []const *GenericTestNode) !void {
             if (test_node.accepted_values.items.len == 0) return error.UnsupportedTestExecution;
             continue;
         }
+        if (std.mem.eql(u8, test_node.test_name, "relationships")) {
+            if (test_node.relationship_to.len == 0 or test_node.relationship_field.len == 0) return error.UnsupportedTestExecution;
+            continue;
+        }
         if (!std.mem.eql(u8, test_node.test_name, "not_null") and !std.mem.eql(u8, test_node.test_name, "unique")) {
             return error.UnsupportedTestExecution;
         }
