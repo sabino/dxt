@@ -268,7 +268,7 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
         const dep = SourceDep{ .source_name = strings.items[0], .table_name = strings.items[1] };
         const unique_id = try resolve.resolveSourceDependency(graph, node.package_name, dep);
         const source = findSourceByUniqueId(graph, unique_id) orelse return error.UnresolvedSource;
-        return try renderRelation(allocator, .{ .schema = source.source_name, .identifier = source.table_name });
+        return try relationNameForSource(allocator, source);
     }
     const current_package = context.current_macro_package orelse node.package_name;
     if (resolve.findMacroIdForUnqualifiedNamespaceCall(graph, current_package, call.name)) |macro_id| {
@@ -692,6 +692,18 @@ pub fn relationIdentifierForNode(node: *const Node) []const u8 {
     return node.name;
 }
 
+pub fn relationNameForSource(allocator: std.mem.Allocator, source: *const SourceDef) ![]const u8 {
+    return renderRelation(allocator, .{ .schema = sourceSchemaName(source), .identifier = source.table_name });
+}
+
+pub fn sourceSchemaName(source: *const SourceDef) []const u8 {
+    if (source.schema_name) |schema_name| {
+        const trimmed = std.mem.trim(u8, schema_name, " \t\r\n");
+        if (trimmed.len != 0) return trimmed;
+    }
+    return source.source_name;
+}
+
 fn renderRelation(allocator: std.mem.Allocator, relation: Relation) ![]const u8 {
     const schema = try quoteIdentifier(allocator, relation.schema);
     defer allocator.free(schema);
@@ -741,11 +753,12 @@ test "compileModel renders config refs and sources" {
         .source_name = "raw",
         .table_name = "payments",
         .original_file_path = "models/schema.yml",
+        .schema_name = "raw_source",
     });
 
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[1]);
     defer allocator.free(compiled);
-    try std.testing.expectEqualStrings("select * from \"main\".\"customers\" union all select * from \"raw\".\"payments\" ", compiled);
+    try std.testing.expectEqualStrings("select * from \"main\".\"customers\" union all select * from \"raw_source\".\"payments\" ", compiled);
 }
 
 test "compileModel rejects dynamic ref" {

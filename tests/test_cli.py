@@ -4478,6 +4478,90 @@ def test_source_freshness_checks_selected_duckdb_source_and_writes_sources_json(
     assert (target / "manifest.json").exists()
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for source freshness inheritance coverage")
+def test_source_freshness_inherits_source_config_and_applies_table_overrides(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_freshness_inheritance")
+    target = tmp_path / "freshness-target"
+    target.mkdir()
+    db_path = target / "dxt.duckdb"
+    subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            (
+                "create schema main_raw; "
+                "create table main_raw.inherited_customers as select 1 as customer_id, current_timestamp - interval '2 hours' as loaded_at; "
+                "create table main_raw.query_customers as select 1 as customer_id, current_timestamp - interval '2 hours' as loaded_at; "
+                "create table main_raw.override_customers as select 1 as customer_id, current_timestamp - interval '4 hours' as override_loaded_at;"
+            ),
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [
+            DXT,
+            "source",
+            "freshness",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Checked freshness for 3 source(s)" in result.stdout
+
+    sources_path = target / "sources.json"
+    assert_sources_schema_slice(sources_path)
+    rows = {row["unique_id"]: row for row in json.loads(sources_path.read_text())["results"]}
+    assert sorted(rows) == [
+        "source.source_freshness_inheritance.raw.inherited_customers",
+        "source.source_freshness_inheritance.raw.override_customers",
+        "source.source_freshness_inheritance.raw.query_customers",
+    ]
+    inherited = rows["source.source_freshness_inheritance.raw.inherited_customers"]
+    assert inherited["status"] == "warn"
+    assert inherited["criteria"] == {
+        "warn_after": {"count": 1, "period": "hour"},
+        "error_after": {"count": 1, "period": "day"},
+        "filter": None,
+    }
+    query_override = rows["source.source_freshness_inheritance.raw.query_customers"]
+    assert query_override["status"] == "warn"
+    assert query_override["criteria"] == inherited["criteria"]
+    table_override = rows["source.source_freshness_inheritance.raw.override_customers"]
+    assert table_override["status"] == "warn"
+    assert table_override["criteria"] == {
+        "warn_after": {"count": 3, "period": "hour"},
+        "error_after": {"count": 1, "period": "day"},
+        "filter": None,
+    }
+
+    manifest_path = target / "manifest.json"
+    assert_manifest_schema_slice(manifest_path)
+    manifest_sources = json.loads(manifest_path.read_text())["sources"]
+    null_source = manifest_sources["source.source_freshness_inheritance.raw.null_freshness_customers"]
+    assert null_source["schema"] == "main_raw"
+    assert null_source["relation_name"] == '"main_raw"."null_freshness_customers"'
+    assert null_source["loaded_at_field"] == "loaded_at"
+    assert null_source["loaded_at_query"] is None
+    assert null_source["freshness"] is None
+    assert null_source["config"]["freshness"] is None
+    query_source = manifest_sources["source.source_freshness_inheritance.raw.query_customers"]
+    assert query_source["loaded_at_field"] == "loaded_at"
+    assert query_source["loaded_at_query"] == "select max(loaded_at) from main_raw.query_customers"
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness expression coverage")
 def test_source_freshness_supports_loaded_at_field_sql_expression(tmp_path: Path):
     project = copy_fixture(tmp_path, "source_freshness")
@@ -4804,7 +4888,7 @@ def test_source_freshness_writes_runtime_error_result_for_missing_loaded_at_fiel
     result_row = sources["results"][0]
     assert result_row == {
         "unique_id": "source.source_freshness.raw.orders",
-        "error": "source freshness currently requires table-level loaded_at_field or loaded_at_query",
+        "error": "source freshness currently requires loaded_at_field or loaded_at_query",
         "status": "runtime error",
     }
     assert str(project) not in sources_path.read_text()

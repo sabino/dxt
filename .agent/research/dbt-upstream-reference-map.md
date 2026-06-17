@@ -83,20 +83,21 @@ Every compatibility slice should record:
   already-existing attached relations. Package
   seeds, wider generic/singular/unit tests, full dbt queue parity, and full
   materialization semantics remain future work.
-- `dxt source freshness` selects source nodes with table-level freshness
-  criteria, queries selected DuckDB source tables through table-level
+- `dxt source freshness` selects source nodes with resolved source/table
+  freshness criteria, queries selected DuckDB source tables through resolved
   `loaded_at_field` SQL text plus optional raw `freshness.filter` SQL or
-  through table-level raw `loaded_at_query` SQL, classifies `pass` / `warn` /
+  through resolved raw `loaded_at_query` SQL, classifies `pass` / `warn` /
   `error`, writes `manifest.json`, writes dbt-shaped `sources.json` v3 success
   rows, writes dbt-shaped runtime-error rows for unsupported per-source
-  execution gaps such as missing loaded-at configuration or conflicting
-  `loaded_at_field`/`loaded_at_query`, and returns failure when a selected
-  source is stale past `error_after` or has a runtime error. Empty or all-null
-  loaded-at values are emitted as stale freshness results. Source-level
-  inheritance, Jinja rendering inside `loaded_at_query`, metadata freshness,
-  `config:` overrides, source-status selectors, hooks, threaded scheduling,
-  non-DuckDB adapters, and embedded `libduckdb` remain future work. This is
-  documented in `.agent/research/m3-duckdb-source-freshness.md`.
+  execution gaps such as missing loaded-at configuration, and returns failure
+  when a selected source is stale past `error_after` or has a runtime error.
+  Empty or all-null loaded-at values are emitted as stale freshness results.
+  Source/table `config:` inheritance, dbt-shaped freshness threshold merging,
+  final `freshness: null`, and narrow source schema rendering are documented in
+  `.agent/research/m2-source-config-freshness-inheritance.md`. Jinja rendering
+  inside `loaded_at_query`, metadata freshness, source-status selectors, hooks,
+  threaded scheduling, non-DuckDB adapters, and embedded `libduckdb` remain
+  future work.
 - `src/project/loader.zig` now owns graph loading order, installed-package
   traversal, target-path lookup, project/package resource traversal,
   macro/property application sequencing, duplicate checks, and graph sorting.
@@ -375,8 +376,9 @@ touched.
   `src/project/duckdb.zig`, `src/project/source_freshness.zig`,
   `src/project/manifest.zig`.
 - Native tests: source-level/table-level `config.loaded_at_field`,
-  `config.loaded_at_query`, freshness merge/override/null behavior, and narrow
-  source schema rendering for `{{ target.schema }}_raw`.
+  `config.loaded_at_query`, dbt-shaped freshness merge/override/null behavior,
+  conflict rejection across top-level/config loaded-at syntax, and narrow source
+  schema rendering for `{{ target.schema }}_raw`.
 - Python/dbt oracle: fixture with inherited source freshness, table override,
   table null override, and DuckDB `dxt source freshness --select source:...`.
 - Artifact validation: Manifest v12 source fields after schema-slice expansion,

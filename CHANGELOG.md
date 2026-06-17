@@ -19,6 +19,10 @@ compatibility.
   such as `cents_to_dollars`, including adapter/default implementation
   selection, manifest macro dependency coverage, and DuckDB run/build
   integration coverage.
+- Source/table `config:` parsing for `loaded_at_field`, `loaded_at_query`, and
+  freshness inheritance, narrow source `schema: "{{ target.schema }}_raw"`
+  rendering, expanded Manifest v12-shaped source fields, and DuckDB source
+  freshness execution against resolved inherited source settings.
 
 ## 0.0.0-pre-alpha
 

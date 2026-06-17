@@ -1,0 +1,4 @@
+name: source_freshness_inheritance
+version: "1.0"
+model-paths: ["models"]
+target-path: target

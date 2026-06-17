@@ -12,8 +12,8 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `dxt compile` | Partial | Compiles selected enabled SQL models through the supported render-only Jinja subset and writes compiled SQL plus manifest fields. | Full Jinja, macro execution, adapter dispatch execution, arbitrary expressions, filters, hooks. |
 | `dxt run` | Partial | Executes selected enabled DuckDB SQL models with `table` and `view` materializations. | Seeds, tests, snapshots, incremental, ephemeral, hooks, grants, failure/partial run-results, full materialization macros. |
 | `dxt build` | Partial | Executes root-project CSV seeds, selected DuckDB models, supported model/seed/source column generic tests, and mixed selected seed/model/test subsets. | Full dbt queue semantics, package seeds, wider tests, source relationship/table tests, singular/unit tests, skip/fail-fast, store failures. |
-| `dxt docs generate` | Partial | Writes `manifest.json`, compiled SQL, and `catalog.json`; introspects selected existing DuckDB model/seed/source relations when available. | Docs-time execution, comments/owners/stats, source config, `docs serve`. |
-| `dxt source freshness` | Partial | Queries selected DuckDB source tables with table-level `loaded_at_field` or `loaded_at_query` and writes Sources v3-shaped results. | Source inheritance, metadata freshness, Jinja in freshness queries, source-status selectors, concurrency, non-DuckDB adapters. |
+| `dxt docs generate` | Partial | Writes `manifest.json`, compiled SQL, and `catalog.json`; introspects selected existing DuckDB model/seed/source relations when available. | Docs-time execution, comments/owners/stats, richer source config, `docs serve`. |
+| `dxt source freshness` | Partial | Queries selected DuckDB source tables with resolved source/table `loaded_at_field`, `loaded_at_query`, and freshness settings, then writes Sources v3-shaped results. | Metadata freshness, Jinja in freshness queries beyond narrow source schema rendering, source-status selectors, concurrency, non-DuckDB adapters. |
 | `version`, help | Supported | Basic CLI metadata and help. | Release version stamping beyond current build metadata. |
 | `debug`, `clean`, `deps`, `init`, `run-operation`, `snapshot`, `retry`, `clone`, `docs serve` | Planned | Not implemented. | Command-specific dbt parity. |
 
@@ -35,7 +35,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | --- | --- | --- | --- |
 | Models | Partial | SQL discovery, refs/sources/docs/macros, YAML properties, columns, tags, materialized config, compile/run/build subset. | Full config precedence, contracts, versions, groups, access, incremental/ephemeral/snapshots, hooks/grants. |
 | Seeds | Partial | CSV discovery and root-project DuckDB seed build execution. | Package seeds, seed configs, `dxt seed`, full materialization semantics. |
-| Sources | Partial | YAML source tables, freshness fields, source refs, source columns, source column tests, catalog/source freshness subset. | Source-level inheritance, table-level tests, source relationships, relation config, metadata freshness. |
+| Sources | Partial | YAML source tables, source/table freshness config inheritance, narrow source schema rendering, source refs, source columns, source column tests, catalog/source freshness subset. | Table-level tests, source relationships, richer relation config, metadata freshness. |
 | Exposures | Partial | YAML exposure parsing with refs/sources, tags, metadata, owner fields. | Full validation and richer artifact parity. |
 | Macros | Partial | Macro/test/data_test/materialization block extraction, macro properties, static macro dependency lookup. | Macro execution, namespace execution, adapter dispatch execution, bundled dbt internals. |
 | Docs blocks | Partial | Markdown docs block parsing and literal `doc()` descriptions. | Dynamic doc expressions and docs serve. |
@@ -54,7 +54,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `target`, `this` | Partial | Narrow compile context for selected fields. |
 | `{% set %}` / `{% for %}` | Partial | Static string-list assignments and simple loops only. |
 | `execute`, `run_query`, `statement`, adapter introspection | Planned | Parse-time/runtime boundary work remains. |
-| Macro execution and dispatch | Planned | Current behavior is static discovery/dependency extraction only. |
+| Macro execution and dispatch | Partial | Static discovery/dependency extraction plus a narrow Jaffle-style adapter dispatch wrapper rendering subset. |
 
 ## Selectors
 

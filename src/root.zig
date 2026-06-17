@@ -197,7 +197,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedSeedAdapterExecution => stderr.writeAll("error: build currently executes only DuckDB seeds\n") catch {},
         error.UnsupportedSourceFreshnessAdapter => stderr.writeAll("error: source freshness currently supports only DuckDB sources\n") catch {},
         error.UnsupportedSourceFreshnessSelection => stderr.writeAll("error: source freshness currently supports only selected source resources\n") catch {},
-        error.UnsupportedSourceFreshness => stderr.writeAll("error: source freshness currently requires table-level loaded_at_field or loaded_at_query and complete table-level freshness thresholds\n") catch {},
+        error.UnsupportedSourceFreshness => stderr.writeAll("error: source freshness currently requires loaded_at_field or loaded_at_query and complete freshness thresholds\n") catch {},
         error.UnsupportedModelMaterialization => stderr.writeAll("error: run currently supports only table and view model materializations\n") catch {},
         error.UnsupportedBuildModelMaterialization => stderr.writeAll("error: build currently supports only table and view model materializations\n") catch {},
         error.UnsupportedDuckDbPath => stderr.writeAll("error: this DuckDB execution slice supports only local DuckDB database file paths\n") catch {},
