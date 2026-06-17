@@ -518,6 +518,10 @@ fn selectedGenericTestExecutionOrder(runtime: Runtime, graph: *Graph, selected: 
 fn validateGenericTestExecution(nodes: []const *GenericTestNode) !void {
     for (nodes) |test_node| {
         if (test_node.column_name == null) return error.UnsupportedTestExecution;
+        if (std.mem.eql(u8, test_node.test_name, "accepted_values")) {
+            if (test_node.accepted_values.items.len == 0) return error.UnsupportedTestExecution;
+            continue;
+        }
         if (!std.mem.eql(u8, test_node.test_name, "not_null") and !std.mem.eql(u8, test_node.test_name, "unique")) {
             return error.UnsupportedTestExecution;
         }
