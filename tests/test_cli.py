@@ -1180,6 +1180,31 @@ def test_parse_static_adapter_dispatch_dependencies(tmp_path: Path):
     assert str(project) not in manifest_path.read_text()
 
 
+def test_parse_static_adapter_dispatch_uses_project_dispatch_config(tmp_path: Path):
+    project = copy_fixture(tmp_path, "adapter_dispatch_project_config")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest_path = project / "target-dxt" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_manifest_schema_slice(manifest_path)
+
+    assert sorted(manifest["macros"]) == [
+        "macro.adapter_dispatch_project_config.default__render_value",
+        "macro.override_pkg.duckdb__render_value",
+        "macro.util_pkg.duckdb__render_value",
+    ]
+    assert manifest["nodes"]["model.adapter_dispatch_project_config.root_dispatch_config"]["depends_on"]["macros"] == [
+        "macro.override_pkg.duckdb__render_value"
+    ]
+    assert str(project) not in manifest_path.read_text()
+
+
 def test_parse_static_adapter_dispatch_uses_profile_adapter_type(tmp_path: Path):
     project = copy_fixture(tmp_path, "profile_adapter_dispatch")
 

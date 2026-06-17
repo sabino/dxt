@@ -97,6 +97,14 @@ pub fn findMacroIdForAdapterDispatch(graph: *const Graph, current_package: []con
     if (std.mem.indexOfScalar(u8, macro_name, '.') != null) return null;
 
     const namespace = macro_namespace orelse "";
+    if (namespace.len != 0) {
+        if (findDispatchConfig(graph, namespace)) |config| {
+            if (config.search_order.items.len != 0) {
+                return findDispatchMacroIdInConfiguredOrder(graph, config.search_order.items, adapter_prefixes, macro_name);
+            }
+        }
+    }
+
     const use_dependency_namespace = namespace.len != 0 and
         !std.mem.eql(u8, namespace, graph.project_name) and
         !std.mem.eql(u8, namespace, "dbt") and
@@ -375,6 +383,22 @@ fn findNonInternalPackageMacroIdByName(graph: *const Graph, current_package: []c
     return null;
 }
 
+fn findDispatchConfig(graph: *const Graph, macro_namespace: []const u8) ?*const types.DispatchConfig {
+    for (graph.dispatch_configs.items) |*config| {
+        if (std.mem.eql(u8, config.macro_namespace, macro_namespace)) return config;
+    }
+    return null;
+}
+
+fn findDispatchMacroIdInConfiguredOrder(graph: *const Graph, search_order: []const []const u8, adapter_prefixes: []const []const u8, macro_name: []const u8) ?[]const u8 {
+    for (search_order) |package_name| {
+        for (adapter_prefixes) |prefix| {
+            if (findDispatchMacroIdByPackageAndName(graph, package_name, prefix, macro_name)) |macro_id| return macro_id;
+        }
+    }
+    return null;
+}
+
 fn findDispatchMacroIdInNamespace(graph: *const Graph, package_name: []const u8, prefix: []const u8, macro_name: []const u8) ?[]const u8 {
     if (findDispatchMacroIdByPackageAndName(graph, package_name, prefix, macro_name)) |macro_id| return macro_id;
     if (!std.mem.eql(u8, package_name, graph.project_name)) {
@@ -434,6 +458,16 @@ fn appendMacro(graph: *Graph, package_name: []const u8, name: []const u8) !void 
         .path = "",
         .original_file_path = "",
         .macro_sql = "",
+    });
+}
+
+fn appendDispatchConfig(graph: *Graph, macro_namespace: []const u8, search_order: []const []const u8) !void {
+    var order: std.ArrayList([]const u8) = .empty;
+    errdefer order.deinit(graph.allocator);
+    try order.appendSlice(graph.allocator, search_order);
+    try graph.dispatch_configs.append(graph.allocator, .{
+        .macro_namespace = macro_namespace,
+        .search_order = order,
     });
 }
 
@@ -540,6 +574,45 @@ test "adapter dispatch lookup follows prefixes and package search order" {
     try std.testing.expectEqualStrings("macro.dbt.default__internal_only", findMacroIdForAdapterDispatch(&graph, "pkg", "internal_only", "dbt", prefixes).?);
     try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "pkg", "pkg.render", null, prefixes) == null);
     try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "pkg", "missing", "pkg", prefixes) == null);
+}
+
+test "adapter dispatch configured search order overrides dependency fallback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
+    defer graph.deinit();
+
+    try appendMacro(&graph, "demo", "duckdb__render");
+    try appendMacro(&graph, "demo", "default__project_default");
+    try appendMacro(&graph, "override_pkg", "duckdb__render");
+    try appendMacro(&graph, "override_pkg", "default__project_default");
+    try appendMacro(&graph, "util_pkg", "duckdb__render");
+    try appendMacro(&graph, "util_pkg", "default__project_default");
+    try appendMacro(&graph, "dbt", "default__dispatchable");
+    try appendDispatchConfig(&graph, "util_pkg", &[_][]const u8{ "override_pkg", "util_pkg" });
+    try appendDispatchConfig(&graph, "dbt", &[_][]const u8{ "demo", "dbt" });
+
+    const prefixes = &[_][]const u8{ "duckdb", "default" };
+
+    try std.testing.expectEqualStrings("macro.override_pkg.duckdb__render", findMacroIdForAdapterDispatch(&graph, "util_pkg", "render", "util_pkg", prefixes).?);
+    try std.testing.expectEqualStrings("macro.override_pkg.default__project_default", findMacroIdForAdapterDispatch(&graph, "util_pkg", "project_default", "util_pkg", prefixes).?);
+    try std.testing.expectEqualStrings("macro.dbt.default__dispatchable", findMacroIdForAdapterDispatch(&graph, "demo", "dispatchable", "dbt", prefixes).?);
+    try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "util_pkg", "missing", "util_pkg", prefixes) == null);
+}
+
+test "adapter dispatch empty configured search order follows dbt core dependency fallback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
+    defer graph.deinit();
+
+    try appendMacro(&graph, "demo", "default__render");
+    try appendMacro(&graph, "util_pkg", "duckdb__render");
+    try appendDispatchConfig(&graph, "util_pkg", &[_][]const u8{});
+
+    const prefixes = &[_][]const u8{ "duckdb", "default" };
+
+    try std.testing.expectEqualStrings("macro.demo.default__render", findMacroIdForAdapterDispatch(&graph, "util_pkg", "render", "util_pkg", prefixes).?);
 }
 
 test "macro unique id package extraction accepts only macro ids" {
