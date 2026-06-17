@@ -66,6 +66,8 @@ def test_root_help_uses_canonical_name():
     result = subprocess.run([DXT, "--help"], cwd=ROOT, check=True, text=True, capture_output=True)
     assert "Data eXecution & Transformation" in result.stdout
     assert "Data Transformation eXecutor" not in result.stdout
+    assert "Execute supported selected DuckDB seeds, models, and tests." in result.stdout
+    assert "Preflight selected seeds, models, and tests without running SQL." not in result.stdout
     assert result.stderr == ""
 
 

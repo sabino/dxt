@@ -49,6 +49,27 @@ small edit.
 
 Long-running loops must have explicit stop conditions and logs under ignored paths such as `.agent/runs/`.
 
+## Documentation And Release Automation
+
+Durable public documentation now has a dedicated home under `docs/`:
+
+- `docs/PRIMER.md` explains the product contract, runtime boundary, source-grounded compatibility loop, and validation layers.
+- `docs/COMPATIBILITY.md` is the current support matrix for commands, flags, resources, Jinja, selectors, artifacts, adapters, and validation.
+- `docs/ARCHITECTURE.md` records the Zig module ownership map and Mermaid diagrams for runtime, parse/artifact, execution, and future cross-database planning.
+- `docs/RELEASES.md` documents the GitHub release process and native binary artifact policy.
+- `CHANGELOG.md` tracks shipped pre-alpha slices and should be updated for every coherent PR that changes user-visible behavior, compatibility scope, docs, release automation, or safety rules.
+
+Keep `README.md` as a concise front door. Keep active sequencing, risks, stop
+conditions, and milestone status in this ExecPlan. Promote stable conclusions
+from `.agent/research/` into docs when they become durable public behavior.
+
+GitHub release automation lives in `.github/workflows/release.yml`. Tagged
+`v*.*.*` releases build `ReleaseSafe` native Zig binaries for the initial Linux
+target matrix, package public docs, generate checksums, and create a draft
+GitHub Release. Release jobs must keep running public-safety and runtime-boundary
+checks before upload, block tag/version mismatches, and avoid macOS or Windows
+artifacts until the Linux-specific filesystem discovery code is portable.
+
 ## Public Safety Rules
 
 - Do not commit local absolute paths, private hostnames, shell history, credentials, API keys, tokens, session transcripts, or private data.

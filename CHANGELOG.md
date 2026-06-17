@@ -1,0 +1,72 @@
+# Changelog
+
+All notable changes to `dxt` are documented here.
+
+This project is pre-alpha. Entries describe supported slices, not full dbt
+compatibility.
+
+## Unreleased
+
+### Added
+
+- Documentation baseline with a reader-focused README, primer, compatibility
+  matrix, architecture diagrams, release process, and changelog.
+- GitHub Actions release workflow for tagged native Zig binary artifacts and
+  checksums.
+
+## 0.0.0-pre-alpha
+
+### Added
+
+- Zig product runtime scaffold with `dxt` CLI entrypoint, help, and version
+  command.
+- Artifact-first parser slices for supported dbt project files, SQL models,
+  CSV seeds, sources, exposures, docs blocks, macros, materialization blocks,
+  and generic test nodes.
+- Deterministic Manifest v12-shaped artifact writer for the supported resource
+  subset.
+- Selector engine subset for names/FQN, tags, paths, files, packages, resource
+  types, materialization config, sources, exposures, wildcards, graph expansion,
+  and excludes.
+- Render-only compile support for literal and narrow scalar var-backed
+  `ref()` / `source()`, literal `doc()`, inline `config()`, selected `target`
+  and `this` fields, static string-list `{% set %}`, and simple `{% for %}`
+  loops.
+- Static macro dependency extraction, macro property parsing, macro argument
+  validation support, and project `dispatch:` search-order parsing for literal
+  `adapter.dispatch(...)` dependency extraction.
+- Narrow `profiles.yml` adapter identity support for adapter type, target
+  schema, profile name, target name, and DuckDB database path.
+- DuckDB `run` execution for selected SQL models with `table` and `view`
+  materializations.
+- DuckDB `build` execution for root-project CSV seeds, selected model DAG
+  subsets, selected seed/model/test subsets, and supported built-in column
+  generic tests.
+- DuckDB generic test execution for model/seed column `not_null`, `unique`,
+  default-quoted `accepted_values`, and ref-backed `relationships`.
+- DuckDB source column generic test execution for source column `not_null`,
+  `unique`, and default-quoted `accepted_values`.
+- DuckDB docs catalog generation for selected existing model, seed, and source
+  relations.
+- DuckDB source freshness execution with table-level `loaded_at_field`,
+  optional freshness filters, table-level `loaded_at_query`, Sources v3-shaped
+  success/runtime-error rows, and stale empty/all-null handling.
+- Run Results v6-shaped, Catalog v1-shaped, and Sources v3-shaped artifact
+  slices for supported execution paths.
+- Developer-side public Jaffle Shop DuckDB parse/build gates.
+- Developer-side dbt Core oracle harness for supported synthetic M1 fixtures.
+- Runtime-boundary and public-safety scan scripts.
+
+### Changed
+
+- `src/project.zig` is treated as a public/orchestration facade in transition,
+  with product logic moving toward focused `src/project/*.zig` modules.
+- Documentation and planning now require each compatibility slice to name
+  upstream dbt Core v1 and relevant Fusion source references.
+
+### Compatibility
+
+- Current compatibility is a documented dbt Core subset, not full dbt Core
+  parity.
+- Python remains developer-only and does not implement product CLI, parser,
+  compiler, artifact writer, runner, planner, adapter, or runtime behavior.

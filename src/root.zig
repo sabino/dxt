@@ -431,7 +431,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  ls               List resources from the supported parser graph.
         \\  compile          Compile supported dbt SQL/Jinja without executing.
         \\  run              Execute supported selected DuckDB SQL models.
-        \\  build            Preflight selected seeds, models, and tests without running SQL.
+        \\  build            Execute supported selected DuckDB seeds, models, and tests.
         \\  source freshness Check freshness for supported DuckDB sources.
         \\  docs generate    Generate supported docs artifacts.
         \\
