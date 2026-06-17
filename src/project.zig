@@ -43,6 +43,7 @@ const appendGenericTestDefClone = project_parse.appendGenericTestDefClone;
 const parseBool = project_parse.parseBool;
 const parseExposuresFromText = project_parse.parseExposuresFromText;
 const genericTestUniqueId = project_parse.genericTestUniqueId;
+const genericTestUniqueIdForModelKwarg = project_parse.genericTestUniqueIdForModelKwarg;
 const parseInlineGenericTestList = project_parse.parseInlineGenericTestList;
 const parseMacroPropertiesFromText = project_parse.parseMacroPropertiesFromText;
 const parseMacros = project_parse.parseMacros;
@@ -383,6 +384,34 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         }
         return;
     }
+    if (selected_kinds.source != 0 and selected_kinds.test_resource != 0 and selected_kinds.source + selected_kinds.test_resource == selected_kinds.total) {
+        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedTestExecution;
+        const test_nodes = try selectedGenericTestExecutionOrder(runtime, &graph, selected);
+        defer runtime.allocator.free(test_nodes);
+        try validateGenericTestExecution(test_nodes);
+
+        const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+        var executed: std.ArrayList(run_results.NodeResult) = .empty;
+        defer {
+            deinitRunResults(runtime.allocator, executed.items);
+            executed.deinit(runtime.allocator);
+        }
+        const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
+
+        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
+        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
+        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try stdout.print("Built {d} source generic test(s) against {s}; wrote artifacts into {s}\n", .{
+            executed.items.len,
+            util.normalizeForDisplay(db_path),
+            util.normalizeForDisplay(manifest_path),
+        });
+        if (test_summary.failed_tests != 0) {
+            try stdout.print("{d} generic test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
+            return error.TestFailure;
+        }
+        return;
+    }
     if (selected_kinds.model != 0 and selected_kinds.seed == 0 and selected_kinds.model + selected_kinds.test_resource == selected_kinds.total) {
         if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedBuildAdapterExecution;
         const execution_order = try selectedModelExecutionOrder(runtime, &graph, selected);
@@ -490,6 +519,7 @@ const BuildSelectionKinds = struct {
     total: usize = 0,
     seed: usize = 0,
     model: usize = 0,
+    source: usize = 0,
     test_resource: usize = 0,
 };
 
@@ -500,6 +530,8 @@ fn classifyBuildSelection(selected: []const selector.SelectedResource) BuildSele
             kinds.seed += 1;
         } else if (std.mem.eql(u8, item.resource_type, "model")) {
             kinds.model += 1;
+        } else if (std.mem.eql(u8, item.resource_type, "source")) {
+            kinds.source += 1;
         } else if (std.mem.eql(u8, item.resource_type, "test")) {
             kinds.test_resource += 1;
         }
@@ -635,7 +667,8 @@ fn validateGenericTestExecution(nodes: []const *GenericTestNode) !void {
 
 fn validateGenericTestsAttachToSelectedModels(nodes: []const *GenericTestNode, selected: []const selector.SelectedResource) !void {
     for (nodes) |test_node| {
-        if (!selectionContains(selected, test_node.attached_node)) return error.UnsupportedTestExecution;
+        const attached_node = test_node.attached_node orelse return error.UnsupportedTestExecution;
+        if (!selectionContains(selected, attached_node)) return error.UnsupportedTestExecution;
     }
 }
 
@@ -1183,6 +1216,15 @@ fn materializeGenericTests(graph: *Graph) !void {
             }
         }
     }
+    for (graph.sources.items) |*source| {
+        for (source.columns.items) |column| {
+            for (column.tests.items) |test_def| {
+                if (isSupportedSourceGenericTest(test_def)) {
+                    try appendSourceGenericTestNode(graph, source, test_def, column.name);
+                }
+            }
+        }
+    }
 }
 
 fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTestDef, column_name: ?[]const u8) !void {
@@ -1230,11 +1272,68 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
     try graph.tests.append(graph.allocator, test_node);
 }
 
+fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def: GenericTestDef, column_name: []const u8) !void {
+    const source_target_name = try std.fmt.allocPrint(graph.allocator, "{s}_{s}", .{ source.source_name, source.table_name });
+    defer graph.allocator.free(source_target_name);
+    const source_test_name = try std.fmt.allocPrint(graph.allocator, "source_{s}", .{test_def.name});
+    defer graph.allocator.free(source_test_name);
+    const source_model_kwarg = try std.fmt.allocPrint(graph.allocator, "{{{{ get_where_subquery(source('{s}', '{s}')) }}}}", .{ source.source_name, source.table_name });
+    defer graph.allocator.free(source_model_kwarg);
+    const source_test_def = GenericTestDef{
+        .name = source_test_name,
+        .accepted_values = test_def.accepted_values,
+        .relationship_to = test_def.relationship_to,
+        .relationship_field = test_def.relationship_field,
+    };
+    const names = try synthesizeGenericTestNames(graph.allocator, source_test_def, source_target_name, column_name);
+    const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, source.package_name, names.full, test_def, source_model_kwarg, column_name);
+    for (graph.tests.items) |existing| {
+        if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
+    }
+
+    const raw_code = if (std.mem.eql(u8, names.compiled, names.full))
+        try std.fmt.allocPrint(graph.allocator, "{{{{ test_{s}(**_dbt_generic_test_kwargs) }}}}", .{test_def.name})
+    else
+        try std.fmt.allocPrint(graph.allocator, "{{{{ test_{s}(**_dbt_generic_test_kwargs) }}}}{{{{ config(alias=\"{s}\") }}}}", .{ test_def.name, names.compiled });
+    var test_node = GenericTestNode{
+        .package_name = source.package_name,
+        .unique_id = unique_id,
+        .name = names.full,
+        .alias = names.compiled,
+        .path = try std.fmt.allocPrint(graph.allocator, "{s}.sql", .{names.compiled}),
+        .original_file_path = source.original_file_path,
+        .raw_code = raw_code,
+        .test_name = test_def.name,
+        .column_name = column_name,
+        .relationship_to = test_def.relationship_to,
+        .relationship_field = test_def.relationship_field,
+        .attached_node = null,
+    };
+    errdefer deinitGenericTestNode(graph.allocator, &test_node);
+
+    for (test_def.accepted_values.items) |value| {
+        try test_node.accepted_values.append(graph.allocator, value);
+    }
+    try test_node.source_refs.append(graph.allocator, .{ .source_name = source.source_name, .table_name = source.table_name });
+    try test_node.depends_on.append(graph.allocator, source.unique_id);
+    try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
+    if (!std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
+        try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
+    }
+    try graph.tests.append(graph.allocator, test_node);
+}
+
 fn isSupportedGenericTest(test_def: GenericTestDef) bool {
     return std.mem.eql(u8, test_def.name, "not_null") or
         std.mem.eql(u8, test_def.name, "unique") or
         (std.mem.eql(u8, test_def.name, "accepted_values") and test_def.accepted_values.items.len != 0) or
         (std.mem.eql(u8, test_def.name, "relationships") and test_def.relationship_to.len != 0 and test_def.relationship_field.len != 0);
+}
+
+fn isSupportedSourceGenericTest(test_def: GenericTestDef) bool {
+    return std.mem.eql(u8, test_def.name, "not_null") or
+        std.mem.eql(u8, test_def.name, "unique") or
+        (std.mem.eql(u8, test_def.name, "accepted_values") and test_def.accepted_values.items.len != 0);
 }
 
 fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {

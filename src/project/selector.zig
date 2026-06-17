@@ -166,8 +166,9 @@ fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNod
 }
 
 fn matchesAttachedNodeNameOrFqnSelector(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8) bool {
+    const attached_node = test_node.attached_node orelse return false;
     for (graph.nodes.items) |*node| {
-        if (!node.enabled or !std.mem.eql(u8, node.unique_id, test_node.attached_node)) continue;
+        if (!node.enabled or !std.mem.eql(u8, node.unique_id, attached_node)) continue;
         if (std.mem.startsWith(u8, value, "tag:")) {
             const tag = value["tag:".len..];
             for (node.tags.items) |node_tag| {

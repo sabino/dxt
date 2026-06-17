@@ -486,10 +486,8 @@ pub fn renderGenericTestSql(allocator: std.mem.Allocator, graph: *const Graph, t
     if (is_accepted_values and test_node.accepted_values.items.len == 0) return error.UnsupportedTestExecution;
     if (is_relationships and (test_node.relationship_to.len == 0 or test_node.relationship_field.len == 0)) return error.UnsupportedTestExecution;
 
-    const attached_node = findNodeByUniqueId(graph, test_node.attached_node) orelse return error.UnsupportedTestExecution;
-    const relation_name = attached_node.relation_name orelse try compiler.relationNameForNode(allocator, graph, attached_node);
-    const should_free_relation = attached_node.relation_name == null;
-    defer if (should_free_relation) allocator.free(relation_name);
+    const relation_name = try genericTestRelationName(allocator, graph, test_node);
+    defer allocator.free(relation_name);
     const quoted_column = try compiler.quoteIdentifier(allocator, column_name);
     defer allocator.free(quoted_column);
 
@@ -544,11 +542,34 @@ fn findNodeByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Node {
     return null;
 }
 
+fn findSourceByRef(graph: *const Graph, source_ref: types.SourceDep) ?*const SourceDef {
+    for (graph.sources.items) |*source| {
+        if (std.mem.eql(u8, source.source_name, source_ref.source_name) and std.mem.eql(u8, source.table_name, source_ref.table_name)) return source;
+    }
+    return null;
+}
+
+fn genericTestRelationName(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
+    if (test_node.attached_node) |attached_unique_id| {
+        const attached_node = findNodeByUniqueId(graph, attached_unique_id) orelse return error.UnsupportedTestExecution;
+        if (attached_node.relation_name) |relation_name| return try allocator.dupe(u8, relation_name);
+        return try compiler.relationNameForNode(allocator, graph, attached_node);
+    }
+    if (test_node.source_refs.items.len != 1) return error.UnsupportedTestExecution;
+    const source = findSourceByRef(graph, test_node.source_refs.items[0]) orelse return error.UnsupportedTestExecution;
+    const quoted_schema = try compiler.quoteIdentifier(allocator, source.source_name);
+    defer allocator.free(quoted_schema);
+    const quoted_table = try compiler.quoteIdentifier(allocator, source.table_name);
+    defer allocator.free(quoted_table);
+    return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ quoted_schema, quoted_table });
+}
+
 fn findRelationshipTargetNode(graph: *const Graph, test_node: *const GenericTestNode) ?*const Node {
     var attached: ?*const Node = null;
+    const attached_unique_id = test_node.attached_node orelse return null;
     for (test_node.depends_on.items) |unique_id| {
         const node = findNodeByUniqueId(graph, unique_id) orelse continue;
-        if (!std.mem.eql(u8, unique_id, test_node.attached_node)) return node;
+        if (!std.mem.eql(u8, unique_id, attached_unique_id)) return node;
         attached = node;
     }
     return attached;
@@ -877,6 +898,41 @@ test "renderGenericTestSql renders accepted_values failure row query" {
     const sql = try renderGenericTestSql(allocator, &graph, &graph.tests.items[0]);
     try std.testing.expectEqualStrings(
         "with all_values as (\n    select\n        \"customer_type\" as value_field,\n        count(*) as n_records\n    from \"analytics\".\"customers\"\n    group by \"customer_type\"\n)\nselect *\nfrom all_values\nwhere value_field not in ('new', 'Bob''s')",
+        sql,
+    );
+}
+
+test "renderGenericTestSql renders source generic tests against source relation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.customers",
+        .source_name = "raw",
+        .table_name = "customers",
+        .original_file_path = "models/schema.yml",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.source_not_null_raw_customers_customer_id.abc",
+        .name = "source_not_null_raw_customers_customer_id",
+        .alias = "source_not_null_raw_customers_customer_id",
+        .path = "source_not_null_raw_customers_customer_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "customer_id",
+    });
+    try graph.tests.items[0].source_refs.append(allocator, .{ .source_name = "raw", .table_name = "customers" });
+    try graph.tests.items[0].depends_on.append(allocator, "source.demo.raw.customers");
+
+    const sql = try renderGenericTestSql(allocator, &graph, &graph.tests.items[0]);
+    try std.testing.expectEqualStrings(
+        "select \"customer_id\"\nfrom \"raw\".\"customers\"\nwhere \"customer_id\" is null",
         sql,
     );
 }
