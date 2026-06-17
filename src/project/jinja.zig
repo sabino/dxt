@@ -8,11 +8,14 @@ const Node = types.Node;
 
 const appendUnique = util.appendUnique;
 const sortStrings = util.sortStrings;
+const findMacroIdForAdapterDispatch = resolve.findMacroIdForAdapterDispatch;
 const findMacroIdByPackageAndName = resolve.findMacroIdByPackageAndName;
 const findMacroIdForUnqualifiedMacroDependency = resolve.findMacroIdForUnqualifiedMacroDependency;
 const findMacroIdForUnqualifiedNamespaceCall = resolve.findMacroIdForUnqualifiedNamespaceCall;
 const hasMacroPackage = resolve.hasMacroPackage;
 const packageNameFromMacroUniqueId = resolve.packageNameFromMacroUniqueId;
+
+const defaultDispatchPrefixes = [_][]const u8{ "duckdb", "default" };
 
 pub const JinjaCall = struct {
     package_name: ?[]const u8,
@@ -24,6 +27,11 @@ pub const JinjaCall = struct {
 pub const ParsedString = struct {
     value: []const u8,
     next: usize,
+};
+
+const AdapterDispatchArgs = struct {
+    macro_name: []const u8,
+    macro_namespace: ?[]const u8 = null,
 };
 
 pub fn readJinjaCall(span: []const u8, first_ident: []const u8, first_ident_end: usize) !?JinjaCall {
@@ -272,6 +280,15 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
 
         if (call.package_name) |package_name| {
             if (graph) |known_graph| {
+                if (std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "dispatch")) {
+                    const dispatch_args = try parseAdapterDispatchArgs(allocator, args);
+                    if (findMacroIdForAdapterDispatch(known_graph, node.package_name, dispatch_args.macro_name, dispatch_args.macro_namespace, &defaultDispatchPrefixes)) |macro_id| {
+                        try appendUnique(allocator, &node.macro_depends_on, macro_id);
+                        i = call.close + 1;
+                        continue;
+                    }
+                    return error.UnresolvedMacro;
+                }
                 if (findMacroIdByPackageAndName(known_graph, package_name, call.name)) |macro_id| {
                     try appendUnique(allocator, &node.macro_depends_on, macro_id);
                     i = call.close + 1;
@@ -357,6 +374,16 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
         const ident = span[start..i];
         const call = (readJinjaCall(span, ident, i) catch break) orelse continue;
         const macro_id = if (call.package_name) |package_name| blk: {
+            if (std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "dispatch")) {
+                const args = span[call.open + 1 .. call.close];
+                const dispatch_args = parseAdapterDispatchArgs(allocator, args) catch {
+                    i = call.close + 1;
+                    continue;
+                };
+                const resolved = findMacroIdForAdapterDispatch(graph, current_package, dispatch_args.macro_name, dispatch_args.macro_namespace, &defaultDispatchPrefixes);
+                if (resolved == null) return error.UnresolvedMacro;
+                break :blk resolved;
+            }
             const resolved = findMacroIdByPackageAndName(graph, package_name, call.name);
             if (resolved == null and hasMacroPackage(graph, package_name)) return error.UnresolvedMacro;
             break :blk resolved;
@@ -370,6 +397,72 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
         }
         i = call.close + 1;
     }
+}
+
+fn parseAdapterDispatchArgs(allocator: std.mem.Allocator, args: []const u8) !AdapterDispatchArgs {
+    var result = AdapterDispatchArgs{ .macro_name = "" };
+    var positional_count: usize = 0;
+    var saw_keyword = false;
+    var i: usize = 0;
+
+    while (i < args.len) {
+        i = skipWs(args, i);
+        if (i >= args.len) break;
+        if (args[i] == ',') return error.UnsupportedJinja;
+
+        var key: ?[]const u8 = null;
+        if (isIdentStart(args[i])) {
+            const key_start = i;
+            i += 1;
+            while (i < args.len and isIdentChar(args[i])) i += 1;
+            const maybe_key = args[key_start..i];
+            const after_key = skipWs(args, i);
+            if (after_key < args.len and args[after_key] == '=') {
+                key = maybe_key;
+                i = skipWs(args, after_key + 1);
+            } else {
+                return error.UnsupportedJinja;
+            }
+        }
+
+        if (i >= args.len or (args[i] != '"' and args[i] != '\'')) return error.UnsupportedJinja;
+        const parsed = try parseQuoted(allocator, args, i);
+        i = skipWs(args, parsed.next);
+
+        if (key) |name| {
+            saw_keyword = true;
+            if (std.mem.eql(u8, name, "macro_name")) {
+                if (result.macro_name.len != 0) return error.UnsupportedJinja;
+                result.macro_name = parsed.value;
+            } else if (std.mem.eql(u8, name, "macro_namespace")) {
+                if (result.macro_namespace != null) return error.UnsupportedJinja;
+                result.macro_namespace = parsed.value;
+            } else if (std.mem.eql(u8, name, "packages")) {
+                return error.UnsupportedJinja;
+            } else {
+                return error.UnsupportedJinja;
+            }
+        } else {
+            if (saw_keyword) return error.UnsupportedJinja;
+            if (positional_count == 0) {
+                result.macro_name = parsed.value;
+            } else if (positional_count == 1) {
+                result.macro_namespace = parsed.value;
+            } else {
+                return error.UnsupportedJinja;
+            }
+            positional_count += 1;
+        }
+
+        if (i < args.len) {
+            if (args[i] != ',') return error.UnsupportedJinja;
+            i += 1;
+        }
+    }
+
+    if (result.macro_name.len == 0) return error.UnsupportedJinja;
+    if (std.mem.indexOfScalar(u8, result.macro_name, '.') != null) return error.UnsupportedJinja;
+    return result;
 }
 
 fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !void {
@@ -639,6 +732,48 @@ test "sql scanner uses package root and dbt macro namespace order" {
     try std.testing.expectEqualStrings("macro.demo.same_name", root_node.macro_depends_on.items[0]);
 }
 
+test "sql scanner records literal adapter dispatch dependencies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    _ = try appendTestMacro(&graph, "demo", "default__render_value");
+    _ = try appendTestMacro(&graph, "pkg", "duckdb__render_value");
+    _ = try appendTestMacro(&graph, "pkg", "default__package_value");
+    _ = try appendTestMacro(&graph, "dbt", "default__internal_value");
+
+    var node = Node{
+        .package_name = "pkg",
+        .unique_id = "model.pkg.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator,
+        \\select
+        \\  {{ adapter.dispatch('render_value')('customer_id') }},
+        \\  {{ adapter.dispatch("package_value", "pkg")("customer_id") }},
+        \\  {{ adapter.dispatch(macro_name='internal_value', macro_namespace='dbt')("customer_id") }}
+    , &node, &graph);
+
+    try std.testing.expectEqual(@as(usize, 3), node.macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.pkg.duckdb__render_value", node.macro_depends_on.items[0]);
+    try std.testing.expectEqualStrings("macro.pkg.default__package_value", node.macro_depends_on.items[1]);
+    try std.testing.expectEqualStrings("macro.dbt.default__internal_value", node.macro_depends_on.items[2]);
+
+    try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ adapter.dispatch(var('macro_name'))() }}", &node, &graph));
+    try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ adapter.dispatch('pkg.render_value')() }}", &node, &graph));
+    try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ adapter.dispatch('render_value', packages=['pkg'])() }}", &node, &graph));
+    try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ adapter.dispatch(macro_name='render_value', 'pkg')() }}", &node, &graph));
+    try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ adapter.dispatch(, 'render_value')() }}", &node, &graph));
+    try std.testing.expectError(error.UnresolvedMacro, scanSql(allocator, "{{ adapter.dispatch('missing')() }}", &node, &graph));
+}
+
 test "sql scanner resolves vars inside ref and source calls" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -731,4 +866,33 @@ test "macro scanner uses package root and dbt macro namespace order" {
     try std.testing.expectEqualStrings("macro.demo.root_only", macro_depends_on.items[1]);
     try std.testing.expectEqualStrings("macro.other_pkg.package_only", macro_depends_on.items[2]);
     try std.testing.expectEqualStrings("macro.dbt.internal_only", macro_depends_on.items[3]);
+}
+
+test "macro scanner records literal adapter dispatch dependencies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    const current_macro = try appendTestMacro(&graph, "pkg", "wrap");
+    _ = try appendTestMacro(&graph, "demo", "default__render_value");
+    _ = try appendTestMacro(&graph, "pkg", "duckdb__render_value");
+    _ = try appendTestMacro(&graph, "pkg", "default__package_value");
+
+    var macro_depends_on: std.ArrayList([]const u8) = .empty;
+    defer macro_depends_on.deinit(allocator);
+
+    try scanMacroSqlForKnownMacroCalls(allocator,
+        \\{% macro wrap(column_name) %}
+        \\  {{ adapter.dispatch('render_value')(column_name) }}
+        \\  {{ adapter.dispatch('package_value', macro_namespace='pkg')(column_name) }}
+        \\{% endmacro %}
+    , &graph, current_macro, &macro_depends_on);
+
+    try std.testing.expectEqual(@as(usize, 2), macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.pkg.duckdb__render_value", macro_depends_on.items[0]);
+    try std.testing.expectEqualStrings("macro.pkg.default__package_value", macro_depends_on.items[1]);
+
+    try std.testing.expectError(error.UnresolvedMacro, scanMacroSqlForKnownMacroCalls(allocator, "{{ adapter.dispatch('missing')() }}", &graph, current_macro, &macro_depends_on));
 }
