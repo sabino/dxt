@@ -31,6 +31,10 @@ dbt Core v1:
   `process_run_result`: maps executed compiled nodes into run-result fields.
 - `core/dbt/compilation.py::Compiler.compile_node` and `write_graph_file`:
   compiled SQL is attached to the node and written before execution artifacts.
+- `core/dbt/task/run.py::_is_incremental` and
+  `core/dbt/parser/unit_tests.py` references to `macro.dbt.is_incremental`:
+  incremental models commonly include `is_incremental()` in parseable SQL even
+  when this slice still rejects incremental materialization before execution.
 
 dbt Core v2 / Fusion:
 
@@ -50,6 +54,10 @@ dbt Core v2 / Fusion:
   and `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/materializations/models/view.sql`:
   full dbt table/view materializations stage through intermediate and backup
   relations. dxt intentionally stops short of that full parity in this slice.
+- `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/materializations/models/incremental/is_incremental.sql`:
+  Fusion carries `is_incremental()` as a dbt macro. dxt parses the zero-argument
+  call narrowly so run can report the unsupported incremental boundary before
+  compile-time Jinja rendering.
 
 ## dxt Ownership
 
@@ -65,14 +73,16 @@ dbt Core v2 / Fusion:
 
 ## Validation
 
-- Native Zig tests cover DuckDB materialization SQL rendering, unsupported
-  materialization rejection, DuckDB profile `path` capture, and run-results JSON
+- Native Zig tests cover DuckDB materialization SQL rendering, conflicting
+  table/view drop SQL, unsupported materialization rejection, DuckDB profile
+  `path` capture, `is_incremental()` config scanning, and run-results JSON
   shape.
 - Pytest black-box coverage executes `dxt run` against copied and generated
   fixtures, verifies dependency-order execution where lexical order conflicts
-  with graph order, checks profile-relative DuckDB paths, queries the resulting
-  DuckDB database through the DuckDB CLI, validates `run_results.json` against
-  the pinned schema slice, and keeps non-model, non-DuckDB,
+  with graph order, checks table-to-view replacement on rerun, checks
+  profile-relative DuckDB paths, queries the resulting DuckDB database through
+  the DuckDB CLI, validates `run_results.json` against the pinned schema slice,
+  and keeps non-model, non-DuckDB,
   unsupported-materialization, and `build` boundaries explicit.
 
 ## Stop Conditions

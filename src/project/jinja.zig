@@ -329,6 +329,8 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
             });
         } else if (std.mem.eql(u8, call.name, "config")) {
             try parseConfig(allocator, args, node);
+        } else if (std.mem.eql(u8, call.name, "is_incremental")) {
+            if (std.mem.trim(u8, args, " \t\r\n").len != 0) return error.UnsupportedJinja;
         } else {
             if (graph) |known_graph| {
                 if (findMacroIdForUnqualifiedNamespaceCall(known_graph, node.package_name, call.name)) |macro_id| {
@@ -708,6 +710,32 @@ test "sql scanner extracts refs sources and config tags from jinja spans" {
     try std.testing.expectEqualStrings("mart", node.config_schema.?);
     try std.testing.expectEqualStrings("customer_orders", node.config_alias.?);
     try std.testing.expectEqual(@as(usize, 2), node.tags.items.len);
+}
+
+test "sql scanner tolerates is_incremental while extracting config" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.events",
+        .name = "events",
+        .path = "events.sql",
+        .original_file_path = "models/events.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator,
+        \\{{ config(materialized='incremental') }}
+        \\select 1 as id
+        \\{% if is_incremental() %}
+        \\where id > 0
+        \\{% endif %}
+    , &node, null);
+    try std.testing.expectEqualStrings("incremental", node.materialized);
+    try std.testing.expect(node.inline_materialized);
 }
 
 test "sql scanner records known unqualified and package macro calls" {

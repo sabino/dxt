@@ -441,6 +441,47 @@ def test_run_executes_selected_duckdb_models_and_writes_run_results(tmp_path: Pa
     assert query.stdout.strip() == "1,1"
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
+def test_run_replaces_existing_relation_when_materialization_type_changes(tmp_path: Path):
+    project = tmp_path / "run_replace_materialization"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: run_replace_materialization
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    model_path = project / "models" / "customers.sql"
+    model_path.write_text("{{ config(materialized='table') }}\nselect 1 as customer_id\n")
+    target = tmp_path / "run-target"
+    first = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert first.returncode == 0, first.stderr
+
+    model_path.write_text("{{ config(materialized='view') }}\nselect 2 as customer_id\n")
+    second = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert second.returncode == 0, second.stderr
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "main"."customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "2"
+
+
 def test_run_prepare_rejects_non_model_selection(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     target = tmp_path / "run-target"
@@ -465,7 +506,14 @@ model-paths: ["models"]
 target-path: target
 """
     )
-    (project / "models" / "events.sql").write_text("{{ config(materialized='incremental') }}\nselect 1 as id\n")
+    (project / "models" / "events.sql").write_text(
+        """{{ config(materialized='incremental') }}
+select 1 as id
+{% if is_incremental() %}
+where id > 0
+{% endif %}
+"""
+    )
     target = tmp_path / "run-target"
     result = subprocess.run(
         [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "events"],

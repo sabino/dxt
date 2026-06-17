@@ -186,15 +186,16 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
         if (selected_any.len != 0) return error.UnsupportedRunSelection;
     }
 
+    const execution_order = try selectedModelExecutionOrder(runtime, &graph, selected_models);
+    defer runtime.allocator.free(execution_order);
+    if (execution_order.len == 0) return error.UnsupportedRunSelection;
+    try validateRunMaterializations(execution_order);
+
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected_models, target_dir);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     if (compile_result.count == 0) return error.UnsupportedRunSelection;
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
-    const execution_order = try selectedModelExecutionOrder(runtime, &graph, selected_models);
-    defer runtime.allocator.free(execution_order);
-    try validateRunMaterializations(execution_order);
-
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
     var executed: std.ArrayList(run_results.ModelResult) = .empty;
     defer executed.deinit(runtime.allocator);
