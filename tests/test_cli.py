@@ -1136,6 +1136,61 @@ def test_parse_macro_namespace_search_order(tmp_path: Path):
     assert str(project) not in manifest_path.read_text()
 
 
+def test_parse_static_adapter_dispatch_dependencies(tmp_path: Path):
+    project = copy_fixture(tmp_path, "adapter_dispatch_static")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest_path = project / "target-dxt" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_manifest_schema_slice(manifest_path)
+
+    root_render = "macro.adapter_dispatch_static.default__render_value"
+    root_package_value = "macro.adapter_dispatch_static.default__package_value"
+    package_render = "macro.util_pkg.duckdb__render_value"
+    package_value = "macro.util_pkg.duckdb__package_value"
+    package_wrap = "macro.util_pkg.wrap_dispatch"
+
+    assert sorted(manifest["macros"]) == [
+        root_package_value,
+        root_render,
+        package_value,
+        package_render,
+        package_wrap,
+    ]
+    assert manifest["nodes"]["model.adapter_dispatch_static.root_dispatch"]["depends_on"]["macros"] == [
+        root_render
+    ]
+    assert manifest["nodes"]["model.adapter_dispatch_static.root_dispatch_package"]["depends_on"]["macros"] == [
+        root_package_value
+    ]
+    assert manifest["nodes"]["model.util_pkg.package_dispatch"]["depends_on"]["macros"] == [
+        package_render
+    ]
+    assert manifest["macros"][package_wrap]["depends_on"]["macros"] == [
+        root_package_value,
+        package_render,
+    ]
+    assert str(project) not in manifest_path.read_text()
+
+
+def test_parse_missing_adapter_dispatch_fails(tmp_path: Path):
+    project = copy_fixture(tmp_path, "adapter_dispatch_missing")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "unresolved macro reference" in result.stderr
+
+
 def test_macro_paths_replace_default_macro_directory(tmp_path: Path):
     project = copy_fixture(tmp_path, "macro_paths_custom")
     result = subprocess.run(

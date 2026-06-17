@@ -93,6 +93,33 @@ pub fn findMacroIdForUnqualifiedMacroDependency(graph: *const Graph, package_nam
     return null;
 }
 
+pub fn findMacroIdForAdapterDispatch(graph: *const Graph, current_package: []const u8, macro_name: []const u8, macro_namespace: ?[]const u8, adapter_prefixes: []const []const u8) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, macro_name, '.') != null) return null;
+
+    const namespace = macro_namespace orelse "";
+    const use_dependency_namespace = namespace.len != 0 and
+        !std.mem.eql(u8, namespace, graph.project_name) and
+        !std.mem.eql(u8, namespace, "dbt") and
+        hasMacroPackage(graph, namespace);
+
+    if (use_dependency_namespace) {
+        for (adapter_prefixes) |prefix| {
+            if (findDispatchMacroIdByPackageAndName(graph, graph.project_name, prefix, macro_name)) |macro_id| return macro_id;
+        }
+        for (adapter_prefixes) |prefix| {
+            if (findDispatchMacroIdByPackageAndName(graph, namespace, prefix, macro_name)) |macro_id| return macro_id;
+        }
+        return null;
+    }
+
+    for (adapter_prefixes) |prefix| {
+        if (findDispatchMacroIdInNamespace(graph, current_package, prefix, macro_name)) |macro_id| {
+            return macro_id;
+        }
+    }
+    return null;
+}
+
 pub fn findMacroIndexByPackageAndName(graph: *const Graph, package_name: []const u8, name: []const u8) ?usize {
     for (graph.macros.items, 0..) |macro, index| {
         if (std.mem.eql(u8, macro.package_name, package_name) and std.mem.eql(u8, macro.name, name)) return index;
@@ -348,6 +375,30 @@ fn findNonInternalPackageMacroIdByName(graph: *const Graph, current_package: []c
     return null;
 }
 
+fn findDispatchMacroIdInNamespace(graph: *const Graph, package_name: []const u8, prefix: []const u8, macro_name: []const u8) ?[]const u8 {
+    if (findDispatchMacroIdByPackageAndName(graph, package_name, prefix, macro_name)) |macro_id| return macro_id;
+    if (!std.mem.eql(u8, package_name, graph.project_name)) {
+        if (findDispatchMacroIdByPackageAndName(graph, graph.project_name, prefix, macro_name)) |macro_id| return macro_id;
+    }
+    if (findDispatchMacroIdByPackageAndName(graph, "dbt", prefix, macro_name)) |macro_id| return macro_id;
+    return null;
+}
+
+fn findDispatchMacroIdByPackageAndName(graph: *const Graph, package_name: []const u8, prefix: []const u8, macro_name: []const u8) ?[]const u8 {
+    for (graph.macros.items) |macro| {
+        if (!std.mem.eql(u8, macro.package_name, package_name)) continue;
+        if (dispatchMacroNameMatches(macro.name, prefix, macro_name)) return macro.unique_id;
+    }
+    return null;
+}
+
+fn dispatchMacroNameMatches(candidate: []const u8, prefix: []const u8, macro_name: []const u8) bool {
+    if (candidate.len != prefix.len + "__".len + macro_name.len) return false;
+    if (!std.mem.startsWith(u8, candidate, prefix)) return false;
+    if (!std.mem.eql(u8, candidate[prefix.len .. prefix.len + "__".len], "__")) return false;
+    return std.mem.eql(u8, candidate[prefix.len + "__".len ..], macro_name);
+}
+
 fn findProjectMacroIndexByName(graph: *const Graph, name: []const u8) ?usize {
     return findMacroIndexByPackageAndName(graph, graph.project_name, name);
 }
@@ -462,6 +513,33 @@ test "unqualified macro dependency lookup falls back to other packages before db
     try std.testing.expectEqualStrings("macro.other_pkg.package_only", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "package_only").?);
     try std.testing.expectEqualStrings("macro.other_pkg.internal_shadow", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "internal_shadow").?);
     try std.testing.expectEqualStrings("macro.dbt.internal_only", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "internal_only").?);
+}
+
+test "adapter dispatch lookup follows prefixes and package search order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
+    defer graph.deinit();
+
+    try appendMacro(&graph, "demo", "default__render");
+    try appendMacro(&graph, "demo", "duckdb__root_only");
+    try appendMacro(&graph, "demo", "default__namespace_order");
+    try appendMacro(&graph, "pkg", "duckdb__render");
+    try appendMacro(&graph, "pkg", "default__render");
+    try appendMacro(&graph, "pkg", "default__package_only");
+    try appendMacro(&graph, "pkg", "duckdb__namespace_order");
+    try appendMacro(&graph, "dbt", "default__internal_only");
+
+    const prefixes = &[_][]const u8{ "duckdb", "default" };
+
+    try std.testing.expectEqualStrings("macro.pkg.duckdb__render", findMacroIdForAdapterDispatch(&graph, "pkg", "render", null, prefixes).?);
+    try std.testing.expectEqualStrings("macro.demo.default__render", findMacroIdForAdapterDispatch(&graph, "pkg", "render", "pkg", prefixes).?);
+    try std.testing.expectEqualStrings("macro.pkg.default__package_only", findMacroIdForAdapterDispatch(&graph, "pkg", "package_only", "pkg", prefixes).?);
+    try std.testing.expectEqualStrings("macro.demo.duckdb__root_only", findMacroIdForAdapterDispatch(&graph, "pkg", "root_only", "pkg", prefixes).?);
+    try std.testing.expectEqualStrings("macro.demo.default__namespace_order", findMacroIdForAdapterDispatch(&graph, "pkg", "namespace_order", "pkg", prefixes).?);
+    try std.testing.expectEqualStrings("macro.dbt.default__internal_only", findMacroIdForAdapterDispatch(&graph, "pkg", "internal_only", "dbt", prefixes).?);
+    try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "pkg", "pkg.render", null, prefixes) == null);
+    try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "pkg", "missing", "pkg", prefixes) == null);
 }
 
 test "macro unique id package extraction accepts only macro ids" {
