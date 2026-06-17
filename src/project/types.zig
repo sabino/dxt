@@ -32,6 +32,7 @@ pub const VarEntry = struct {
 
 pub const ProjectConfig = struct {
     name: []const u8,
+    profile_name: ?[]const u8 = null,
     model_paths: std.ArrayList([]const u8) = .empty,
     seed_paths: std.ArrayList([]const u8) = .empty,
     macro_paths: std.ArrayList([]const u8) = .empty,
@@ -242,6 +243,9 @@ pub const GenericTestNode = struct {
 pub const Graph = struct {
     allocator: std.mem.Allocator,
     project_name: []const u8,
+    adapter_type: []const u8 = "duckdb",
+    profile_name: ?[]const u8 = null,
+    target_name: ?[]const u8 = null,
     vars: std.ArrayList(VarEntry) = .empty,
     nodes: std.ArrayList(Node) = .empty,
     tests: std.ArrayList(GenericTestNode) = .empty,
@@ -288,6 +292,12 @@ pub const Graph = struct {
         self.macro_argument_warnings.deinit(self.allocator);
         self.vars.deinit(self.allocator);
     }
+};
+
+pub const AdapterIdentity = struct {
+    profile_name: []const u8,
+    target_name: []const u8,
+    adapter_type: []const u8,
 };
 
 pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig) void {

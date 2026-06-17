@@ -40,6 +40,8 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
 
     try writer.writeAll("{\n  \"metadata\": {\"project_name\": ");
     try writeJsonString(writer, graph.project_name);
+    try writer.writeAll(",\"adapter_type\":");
+    try writeJsonString(writer, graph.adapter_type);
     try writer.writeAll("},\n  \"nodes\": {");
     var node_index: usize = 0;
     for (graph.nodes.items) |node| {
@@ -692,6 +694,9 @@ test "manifest writer filters disabled resources and writes graph maps" {
     defer parsed.deinit();
 
     const root = parsed.value.object;
+    const metadata = root.get("metadata").?.object;
+    try std.testing.expectEqualStrings("duckdb", metadata.get("adapter_type").?.string);
+
     const nodes = root.get("nodes").?.object;
     try std.testing.expect(nodes.get("model.demo.customers") != null);
     try std.testing.expect(nodes.get("model.demo.disabled") == null);

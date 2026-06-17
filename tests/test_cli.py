@@ -412,6 +412,7 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
     }
     assert "dxt_metadata" not in manifest
     assert isinstance(manifest["metadata"].get("project_name"), str)
+    assert isinstance(manifest["metadata"].get("adapter_type"), str)
     assert "generated_by" not in manifest["metadata"]
     assert manifest["group_map"] == {}
     assert manifest["saved_queries"] == {}
@@ -1175,6 +1176,83 @@ def test_parse_static_adapter_dispatch_dependencies(tmp_path: Path):
     assert manifest["macros"][package_wrap]["depends_on"]["macros"] == [
         root_package_value,
         package_render,
+    ]
+    assert str(project) not in manifest_path.read_text()
+
+
+def test_parse_static_adapter_dispatch_uses_profile_adapter_type(tmp_path: Path):
+    project = copy_fixture(tmp_path, "profile_adapter_dispatch")
+
+    result = subprocess.run(
+        [
+            DXT,
+            "parse",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--target-path",
+            "target-dxt",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest_path = project / "target-dxt" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_manifest_schema_slice(manifest_path)
+    assert manifest["metadata"]["adapter_type"] == "postgres"
+    assert manifest["nodes"]["model.profile_adapter_dispatch.profile_dispatch"]["depends_on"]["macros"] == [
+        "macro.profile_adapter_dispatch.postgres__render_value"
+    ]
+
+    duck_result = subprocess.run(
+        [
+            DXT,
+            "parse",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--target",
+            "duck",
+            "--target-path",
+            "target-duck",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert duck_result.returncode == 0, duck_result.stderr
+    duck_manifest = json.loads((project / "target-duck" / "manifest.json").read_text())
+    assert duck_manifest["metadata"]["adapter_type"] == "duckdb"
+    assert duck_manifest["nodes"]["model.profile_adapter_dispatch.profile_dispatch"]["depends_on"]["macros"] == [
+        "macro.profile_adapter_dispatch.duckdb__render_value"
+    ]
+
+    redshift_result = subprocess.run(
+        [
+            DXT,
+            "parse",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--target",
+            "rs",
+            "--target-path",
+            "target-rs",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert redshift_result.returncode == 0, redshift_result.stderr
+    redshift_manifest = json.loads((project / "target-rs" / "manifest.json").read_text())
+    assert redshift_manifest["metadata"]["adapter_type"] == "redshift"
+    assert redshift_manifest["nodes"]["model.profile_adapter_dispatch.profile_dispatch"]["depends_on"]["macros"] == [
+        "macro.profile_adapter_dispatch.postgres__render_value"
     ]
     assert str(project) not in manifest_path.read_text()
 
@@ -2547,7 +2625,7 @@ def test_missing_package_macro_in_macro_body_fails_loudly(tmp_path: Path):
     assert "unresolved macro reference" in result.stderr
 
 
-def test_implemented_parse_rejects_unsupported_profile_flags(tmp_path: Path):
+def test_parse_profile_flags_require_profiles_yml(tmp_path: Path):
     project = copy_fixture(tmp_path, "single_model")
     result = subprocess.run(
         [DXT, "parse", "--project-dir", str(project), "--profiles-dir", str(project)],
@@ -2556,7 +2634,7 @@ def test_implemented_parse_rejects_unsupported_profile_flags(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "not supported" in result.stderr
+    assert "missing profiles.yml" in result.stderr
 
 
 def test_duplicate_model_name_fails(tmp_path: Path):

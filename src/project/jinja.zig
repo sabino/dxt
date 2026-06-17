@@ -15,8 +15,6 @@ const findMacroIdForUnqualifiedNamespaceCall = resolve.findMacroIdForUnqualified
 const hasMacroPackage = resolve.hasMacroPackage;
 const packageNameFromMacroUniqueId = resolve.packageNameFromMacroUniqueId;
 
-const defaultDispatchPrefixes = [_][]const u8{ "duckdb", "default" };
-
 pub const JinjaCall = struct {
     package_name: ?[]const u8,
     name: []const u8,
@@ -32,6 +30,15 @@ pub const ParsedString = struct {
 const AdapterDispatchArgs = struct {
     macro_name: []const u8,
     macro_namespace: ?[]const u8 = null,
+};
+
+const DispatchPrefixes = struct {
+    values: [3][]const u8 = undefined,
+    len: usize = 0,
+
+    fn slice(self: *const DispatchPrefixes) []const []const u8 {
+        return self.values[0..self.len];
+    }
 };
 
 pub fn readJinjaCall(span: []const u8, first_ident: []const u8, first_ident_end: usize) !?JinjaCall {
@@ -282,7 +289,8 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
             if (graph) |known_graph| {
                 if (std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "dispatch")) {
                     const dispatch_args = try parseAdapterDispatchArgs(allocator, args);
-                    if (findMacroIdForAdapterDispatch(known_graph, node.package_name, dispatch_args.macro_name, dispatch_args.macro_namespace, &defaultDispatchPrefixes)) |macro_id| {
+                    const dispatch_prefixes = dispatchPrefixesForAdapter(known_graph.adapter_type);
+                    if (findMacroIdForAdapterDispatch(known_graph, node.package_name, dispatch_args.macro_name, dispatch_args.macro_namespace, dispatch_prefixes.slice())) |macro_id| {
                         try appendUnique(allocator, &node.macro_depends_on, macro_id);
                         i = call.close + 1;
                         continue;
@@ -380,7 +388,8 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
                     i = call.close + 1;
                     continue;
                 };
-                const resolved = findMacroIdForAdapterDispatch(graph, current_package, dispatch_args.macro_name, dispatch_args.macro_namespace, &defaultDispatchPrefixes);
+                const dispatch_prefixes = dispatchPrefixesForAdapter(graph.adapter_type);
+                const resolved = findMacroIdForAdapterDispatch(graph, current_package, dispatch_args.macro_name, dispatch_args.macro_namespace, dispatch_prefixes.slice());
                 if (resolved == null) return error.UnresolvedMacro;
                 break :blk resolved;
             }
@@ -397,6 +406,24 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
         }
         i = call.close + 1;
     }
+}
+
+fn dispatchPrefixesForAdapter(adapter_type: []const u8) DispatchPrefixes {
+    var prefixes = DispatchPrefixes{};
+    if (std.mem.eql(u8, adapter_type, "redshift")) {
+        prefixes.values = .{ "redshift", "postgres", "default" };
+        prefixes.len = 3;
+    } else if (std.mem.eql(u8, adapter_type, "databricks")) {
+        prefixes.values = .{ "databricks", "spark", "default" };
+        prefixes.len = 3;
+    } else if (std.mem.eql(u8, adapter_type, "postgresql")) {
+        prefixes.values = .{ "postgres", "default", undefined };
+        prefixes.len = 2;
+    } else {
+        prefixes.values = .{ adapter_type, "default", undefined };
+        prefixes.len = 2;
+    }
+    return prefixes;
 }
 
 fn parseAdapterDispatchArgs(allocator: std.mem.Allocator, args: []const u8) !AdapterDispatchArgs {
@@ -772,6 +799,41 @@ test "sql scanner records literal adapter dispatch dependencies" {
     try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ adapter.dispatch(macro_name='render_value', 'pkg')() }}", &node, &graph));
     try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ adapter.dispatch(, 'render_value')() }}", &node, &graph));
     try std.testing.expectError(error.UnresolvedMacro, scanSql(allocator, "{{ adapter.dispatch('missing')() }}", &node, &graph));
+}
+
+test "adapter dispatch prefixes come from graph adapter type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .adapter_type = "postgres" };
+    defer graph.deinit();
+    _ = try appendTestMacro(&graph, "demo", "duckdb__render_value");
+    _ = try appendTestMacro(&graph, "demo", "postgres__render_value");
+    _ = try appendTestMacro(&graph, "demo", "default__render_value");
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator, "select {{ adapter.dispatch('render_value')('customer_id') }}", &node, &graph);
+    try std.testing.expectEqual(@as(usize, 1), node.macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.demo.postgres__render_value", node.macro_depends_on.items[0]);
+
+    const redshift_prefixes = dispatchPrefixesForAdapter("redshift");
+    try std.testing.expectEqual(@as(usize, 3), redshift_prefixes.slice().len);
+    try std.testing.expectEqualStrings("redshift", redshift_prefixes.slice()[0]);
+    try std.testing.expectEqualStrings("postgres", redshift_prefixes.slice()[1]);
+    try std.testing.expectEqualStrings("default", redshift_prefixes.slice()[2]);
+
+    const databricks_prefixes = dispatchPrefixesForAdapter("databricks");
+    try std.testing.expectEqualStrings("spark", databricks_prefixes.slice()[1]);
 }
 
 test "sql scanner resolves vars inside ref and source calls" {

@@ -162,6 +162,8 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
         if (splitKeyValue(trimmed)) |kv| {
             if (std.mem.eql(u8, kv.key, "name")) {
                 config.name = try dupTrimmedScalar(allocator, kv.value);
+            } else if (std.mem.eql(u8, kv.key, "profile")) {
+                config.profile_name = try dupTrimmedScalar(allocator, kv.value);
             } else if (std.mem.eql(u8, kv.key, "target-path")) {
                 config.target_path = try dupTrimmedScalar(allocator, kv.value);
             } else if (std.mem.eql(u8, kv.key, "model-paths")) {
@@ -525,6 +527,7 @@ test "project config parser applies defaults for omitted paths" {
     defer deinitProjectConfig(allocator, &config);
 
     try std.testing.expectEqualStrings("demo", config.name);
+    try std.testing.expect(config.profile_name == null);
     try std.testing.expectEqualStrings("target", config.target_path);
     try std.testing.expectEqual(@as(usize, 1), config.model_paths.items.len);
     try std.testing.expectEqualStrings("models", config.model_paths.items[0]);
@@ -550,6 +553,7 @@ test "project config parser reads paths and nested docs configs" {
 
     const text =
         \\name: demo
+        \\profile: analytics
         \\target-path: target-dxt
         \\model-paths: ["models", marts]
         \\seed-paths:
@@ -578,6 +582,7 @@ test "project config parser reads paths and nested docs configs" {
     defer deinitProjectConfig(allocator, &config);
 
     try std.testing.expectEqualStrings("demo", config.name);
+    try std.testing.expectEqualStrings("analytics", config.profile_name.?);
     try std.testing.expectEqualStrings("target-dxt", config.target_path);
     try std.testing.expectEqual(@as(usize, 2), config.model_paths.items.len);
     try std.testing.expectEqualStrings("models", config.model_paths.items[0]);
