@@ -15,6 +15,16 @@ pub const CatalogEntry = struct {
     columns: std.ArrayList(CatalogColumn) = .empty,
 };
 
+pub const CatalogEntries = struct {
+    nodes: std.ArrayList(CatalogEntry) = .empty,
+    sources: std.ArrayList(CatalogEntry) = .empty,
+};
+
+pub fn deinitCatalogEntries(allocator: std.mem.Allocator, entries: *CatalogEntries) void {
+    deinitEntries(allocator, &entries.nodes);
+    deinitEntries(allocator, &entries.sources);
+}
+
 pub fn deinitEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(CatalogEntry)) void {
     for (entries.items) |*entry| {
         allocator.free(entry.unique_id);
@@ -30,7 +40,7 @@ pub fn deinitEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Catal
     entries.deinit(allocator);
 }
 
-pub fn renderCatalog(allocator: std.mem.Allocator, entries: []const CatalogEntry) ![]const u8 {
+pub fn renderCatalog(allocator: std.mem.Allocator, nodes: []const CatalogEntry, sources: []const CatalogEntry) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
@@ -43,6 +53,14 @@ pub fn renderCatalog(allocator: std.mem.Allocator, entries: []const CatalogEntry
     try writeJsonString(writer, "1970-01-01T00:00:00Z");
     try writer.writeAll(", \"invocation_id\": null, \"invocation_started_at\": null, \"env\": {}");
     try writer.writeAll("},\n  \"nodes\": {");
+    try writeCatalogEntryMap(writer, nodes);
+    try writer.writeAll("},\n  \"sources\": {");
+    try writeCatalogEntryMap(writer, sources);
+    try writer.writeAll("},\n  \"errors\": null\n}\n");
+    return try out.toOwnedSlice();
+}
+
+fn writeCatalogEntryMap(writer: *Io.Writer, entries: []const CatalogEntry) !void {
     for (entries, 0..) |entry, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("\n    ");
@@ -72,8 +90,6 @@ pub fn renderCatalog(allocator: std.mem.Allocator, entries: []const CatalogEntry
         try writer.writeAll("}");
     }
     if (entries.len != 0) try writer.writeAll("\n  ");
-    try writer.writeAll("},\n  \"sources\": {},\n  \"errors\": null\n}\n");
-    return try out.toOwnedSlice();
 }
 
 fn writeJsonString(writer: *Io.Writer, value: []const u8) !void {
@@ -81,7 +97,7 @@ fn writeJsonString(writer: *Io.Writer, value: []const u8) !void {
 }
 
 test "catalog writer emits deterministic empty dbt catalog shape" {
-    const rendered = try renderCatalog(std.testing.allocator, &.{});
+    const rendered = try renderCatalog(std.testing.allocator, &.{}, &.{});
     defer std.testing.allocator.free(rendered);
 
     try std.testing.expectEqualStrings(
@@ -112,7 +128,7 @@ test "catalog writer emits selected relation metadata and ordered columns" {
             .columns = columns,
         },
     };
-    const rendered = try renderCatalog(std.testing.allocator, &entries);
+    const rendered = try renderCatalog(std.testing.allocator, &entries, &.{});
     defer std.testing.allocator.free(rendered);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
@@ -126,4 +142,30 @@ test "catalog writer emits selected relation metadata and ordered columns" {
     try std.testing.expectEqual(@as(usize, 2), rendered_columns.count());
     try std.testing.expectEqualStrings("INTEGER", rendered_columns.get("customer_id").?.object.get("type").?.string);
     try std.testing.expectEqual(@as(i64, 2), rendered_columns.get("order_count").?.object.get("index").?.integer);
+}
+
+test "catalog writer emits selected source metadata separately from nodes" {
+    var columns: std.ArrayList(CatalogColumn) = .empty;
+    defer columns.deinit(std.testing.allocator);
+    try columns.append(std.testing.allocator, .{ .name = "customer_id", .data_type = "INTEGER", .index = 1 });
+    const source_entries = [_]CatalogEntry{
+        .{
+            .unique_id = "source.demo.raw.customers",
+            .schema = "raw",
+            .name = "customers",
+            .relation_type = "BASE TABLE",
+            .columns = columns,
+        },
+    };
+    const rendered = try renderCatalog(std.testing.allocator, &.{}, &source_entries);
+    defer std.testing.allocator.free(rendered);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("nodes").?.object.count() == 0);
+    const sources = parsed.value.object.get("sources").?.object;
+    const raw_customers = sources.get("source.demo.raw.customers").?.object;
+    try std.testing.expectEqualStrings("source.demo.raw.customers", raw_customers.get("unique_id").?.string);
+    try std.testing.expectEqualStrings("raw", raw_customers.get("metadata").?.object.get("schema").?.string);
+    try std.testing.expectEqualStrings("customers", raw_customers.get("metadata").?.object.get("name").?.string);
 }

@@ -2,9 +2,9 @@
 
 ## Goal
 
-Make `dxt docs generate` emit dbt-shaped `catalog.json` node entries for
-selected model and seed relations that already exist in the local DuckDB target
-database.
+Make `dxt docs generate` emit dbt-shaped `catalog.json` node and source entries
+for selected model, seed, and source relations that already exist in the local
+DuckDB target database.
 
 This is a docs artifact compatibility slice. It does not execute resources
 during docs generation and it preserves the existing empty catalog behavior when
@@ -38,8 +38,8 @@ dbt Core v2 / Fusion:
 - `src/project/catalog.zig` owns deterministic dbt-shaped `catalog.json`
   serialization.
 - `src/project/duckdb.zig` owns this slice's DuckDB CLI-backed
-  relation/column introspection for already-materialized selected model and
-  seed nodes.
+  relation/column introspection for already-materialized selected model, seed,
+  and source relations.
 
 ## Supported Behavior
 
@@ -47,9 +47,13 @@ dbt Core v2 / Fusion:
   `manifest.json`.
 - If the resolved DuckDB file does not exist, `catalog.json` remains empty.
 - If the selected relation does not exist in the DuckDB file, that selected node
-  is omitted from `catalog.json`.
+  or source is omitted from `catalog.json`.
 - If an existing DuckDB file contains selected model or seed relations, the
-  catalog `nodes` map includes:
+  catalog `nodes` map includes dbt-shaped table entries.
+- If an existing DuckDB file contains selected source relations, the catalog
+  `sources` map includes dbt-shaped table entries using the current dxt source
+  relation contract of `source_name.table_name`.
+- Catalog table entries include:
   - `metadata.type` from DuckDB `information_schema.tables.table_type`;
   - `metadata.schema`;
   - `metadata.name`;
@@ -64,7 +68,6 @@ dbt Core v2 / Fusion:
 
 - Do not run models, seeds, tests, snapshots, or materializations during docs
   generation.
-- Do not catalog sources yet.
 - Do not emit comments, owners, row counts, table size, freshness, or richer
   stats.
 - Do not support non-DuckDB adapter catalog introspection in this slice.
@@ -77,14 +80,17 @@ dbt Core v2 / Fusion:
 Affected artifacts:
 
 - `catalog.json` `nodes` map for selected model/seed relations.
+- `catalog.json` `sources` map for selected source relations.
 - The local catalog schema slice now allows dbt-shaped catalog table entries.
 
 Validation gates:
 
 - native Zig catalog writer tests for empty and non-empty catalog shape;
-- native Zig DuckDB JSON row mapping test;
+- native Zig DuckDB JSON row mapping tests for nodes and sources;
 - pytest CLI coverage for empty docs catalogs without a database;
-- pytest CLI coverage for build-then-docs catalog entries from an existing
+- pytest CLI coverage for build-then-docs node catalog entries from an existing
+  DuckDB file;
+- pytest CLI coverage for selected source catalog entries from an existing
   DuckDB file;
 - `zig build test`;
 - focused docs/catalog pytest;
@@ -92,6 +98,7 @@ Validation gates:
 
 ## Stop Conditions
 
-Stop before adding source catalog entries, docs persistence, adapter comments,
-owners, richer stats, live non-DuckDB catalog adapters, `docs serve`, embedded
-DuckDB, or a generic adapter ABI refactor.
+Stop before adding docs persistence, adapter comments, owners, richer stats,
+source relation config such as database/schema/identifier overrides, source
+freshness or `sources.json`, live non-DuckDB catalog adapters, `docs serve`,
+embedded DuckDB, or a generic adapter ABI refactor.
