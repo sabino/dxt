@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.getdbt.com/dbt/run-results/v6.json#dxt-m3-slice",
   "title": "dxt dbt Run Results v6 M3 compatibility slice",
-  "$comment": "Pinned local compatibility slice for dbt Run Results v6. Source reference: https://schemas.getdbt.com/dbt/run-results/v6.json, checked 2026-06-17. This validates the first DuckDB SQL-model and seed execution surfaces.",
+  "$comment": "Pinned local compatibility slice for dbt Run Results v6. Source reference: https://schemas.getdbt.com/dbt/run-results/v6.json, checked 2026-06-17. This validates the first DuckDB SQL-model, seed, and generic-test execution surfaces.",
   "type": "object",
   "additionalProperties": false,
   "required": ["metadata", "results", "elapsed_time"],
