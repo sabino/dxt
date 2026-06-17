@@ -49,7 +49,11 @@ pub fn loadGraph(runtime: Runtime, project_dir: []const u8, cli_vars: ?[]const u
     var config = try loadProjectConfig(runtime, project_dir);
     defer deinitProjectConfig(runtime.allocator, &config);
 
-    var graph = Graph{ .allocator = runtime.allocator, .project_name = config.name };
+    var graph = Graph{
+        .allocator = runtime.allocator,
+        .project_name = config.name,
+        .validate_macro_args = config.validate_macro_args,
+    };
     errdefer graph.deinit();
     try graph.vars.appendSlice(runtime.allocator, config.vars.items);
     if (cli_vars) |vars_text| {

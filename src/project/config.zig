@@ -189,6 +189,7 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
 
     if (config.name.len == 0) return error.InvalidProjectName;
     try parseProjectVars(allocator, text, &config.vars);
+    try parseProjectFlags(text, &config);
     try parseProjectModelPathConfigs(allocator, text, &config.model_path_configs);
     try parseProjectSeedDocs(allocator, text, &config.seed_docs);
     if (config.model_paths.items.len == 0) {
@@ -201,6 +202,54 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
         try config.macro_paths.append(allocator, "macros");
     }
     return config;
+}
+
+fn parseProjectFlags(text: []const u8, config: *ProjectConfig) !void {
+    var in_flags = false;
+    var flags_indent: usize = 0;
+    var direct_child_indent: ?usize = null;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (in_flags and indent <= flags_indent and !std.mem.eql(u8, trimmed, "flags:")) {
+            in_flags = false;
+            direct_child_indent = null;
+        }
+        if (!in_flags) {
+            const kv = splitKeyValue(trimmed) orelse continue;
+            if (!std.mem.eql(u8, kv.key, "flags")) continue;
+            const value = std.mem.trim(u8, kv.value, " \t\r");
+            if (value.len == 0) {
+                in_flags = true;
+                flags_indent = indent;
+                direct_child_indent = null;
+            } else if (!std.mem.eql(u8, value, "{}")) {
+                return error.UnsupportedYaml;
+            }
+            continue;
+        }
+
+        if (indent <= flags_indent) continue;
+        if (direct_child_indent == null) direct_child_indent = indent;
+        if (indent != direct_child_indent.?) continue;
+
+        const kv = splitKeyValue(trimmed) orelse continue;
+        if (std.mem.eql(u8, kv.key, "validate_macro_args")) {
+            config.validate_macro_args = try parseStrictBool(kv.value);
+        }
+    }
+}
+
+fn parseStrictBool(value: []const u8) !bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    if (std.ascii.eqlIgnoreCase(trimmed, "true")) return true;
+    if (std.ascii.eqlIgnoreCase(trimmed, "false")) return false;
+    return error.UnsupportedYaml;
 }
 
 fn parseProjectVars(allocator: std.mem.Allocator, text: []const u8, vars: *std.ArrayList(VarEntry)) !void {
@@ -483,6 +532,7 @@ test "project config parser applies defaults for omitted paths" {
     try std.testing.expectEqualStrings("seeds", config.seed_paths.items[0]);
     try std.testing.expectEqual(@as(usize, 1), config.macro_paths.items.len);
     try std.testing.expectEqualStrings("macros", config.macro_paths.items[0]);
+    try std.testing.expect(!config.validate_macro_args);
 }
 
 test "project config parser rejects missing project name" {
@@ -506,6 +556,8 @@ test "project config parser reads paths and nested docs configs" {
         \\  - data
         \\macro-paths:
         \\  - custom_macros
+        \\flags:
+        \\  validate_macro_args: true
         \\vars:
         \\  orders_model: customers
         \\  package_scope:
@@ -535,6 +587,7 @@ test "project config parser reads paths and nested docs configs" {
     try std.testing.expectEqual(@as(usize, 1), config.macro_paths.items.len);
     try std.testing.expectEqualStrings("custom_macros", config.macro_paths.items[0]);
     try std.testing.expect(config.macro_paths_set);
+    try std.testing.expect(config.validate_macro_args);
     try std.testing.expectEqual(@as(usize, 1), config.vars.items.len);
     try std.testing.expectEqualStrings("orders_model", config.vars.items[0].name);
     try std.testing.expectEqualStrings("customers", config.vars.items[0].value);

@@ -699,6 +699,9 @@ fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
     for (graph.unmatched_macro_properties.items) |property| {
         try stderr.print("warning: did not find matching macro for macro property `{s}` in {s}\n", .{ property.name, util.normalizeForDisplay(property.patch_path) });
     }
+    for (graph.macro_argument_warnings.items) |warning| {
+        try stderr.print("warning: {s}\n", .{warning});
+    }
 }
 
 fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.ArrayList(ColumnDef), source: ColumnDef) !void {

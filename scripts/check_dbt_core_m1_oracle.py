@@ -26,6 +26,7 @@ DEFAULT_FIXTURES = [
     "macro_artifacts",
     "macro_block_variants",
     "macro_properties",
+    "macro_validate_args",
     "macro_paths_custom",
     "package_macro_namespace",
     "package_ref_selector",
@@ -405,6 +406,7 @@ def compare_macro(
         normalize_macro_deps(dxt_macro.get("depends_on", {}).get("macros"), packages),
         normalize_macro_deps(dbt_macro.get("depends_on", {}).get("macros"), packages),
     )
+    assert_equal(f"{label} arguments", dxt_macro.get("arguments"), dbt_macro.get("arguments"))
 
 
 def compare_manifest(

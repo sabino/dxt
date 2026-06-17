@@ -1,0 +1,7 @@
+name: macro_validate_args
+version: "1.0"
+profile: default
+model-paths: ["models"]
+target-path: target
+flags:
+  validate_macro_args: true

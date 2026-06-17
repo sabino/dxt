@@ -11,6 +11,7 @@ const GenericTestDef = types.GenericTestDef;
 const Graph = types.Graph;
 const MacroDef = types.MacroDef;
 const MacroArgument = types.MacroArgument;
+const MacroProperty = types.MacroProperty;
 const MetaEntry = types.MetaEntry;
 const RefDep = types.RefDep;
 const dupTrimmedScalar = util.dupTrimmedScalar;
@@ -147,7 +148,7 @@ pub fn parseMacrosFromText(allocator: std.mem.Allocator, text: []const u8, relat
             index = close + 2;
             continue;
         }
-        var macro_tag = parseMacroOpenTag(allocator, tag) catch |err| switch (err) {
+        var macro_tag = parseMacroOpenTag(allocator, tag, graph.validate_macro_args) catch |err| switch (err) {
             error.NotMacroBlock => {
                 index = close + 2;
                 continue;
@@ -160,6 +161,11 @@ pub fn parseMacrosFromText(allocator: std.mem.Allocator, text: []const u8, relat
 
         const macro_sql = std.mem.trim(u8, text[open .. end.close + 2], " \t\r\n");
         var macro = try macroDefFromParts(allocator, package_name, macro_tag.name, relative_path, macro_sql);
+        macro.signature_arguments = macro_tag.arguments;
+        macro_tag.arguments = .empty;
+        if (graph.validate_macro_args) {
+            try appendMacroArgumentClones(graph, &macro.arguments, macro.signature_arguments.items);
+        }
         macro.supported_languages = macro_tag.supported_languages;
         macro_tag.supported_languages = .empty;
         macro.has_supported_languages = macro_tag.has_supported_languages;
@@ -223,22 +229,28 @@ fn findJinjaExprClose(text: []const u8, open: usize) ?usize {
 const MacroOpenTag = struct {
     name: []const u8,
     end_tag: []const u8,
+    arguments: std.ArrayList(MacroArgument) = .empty,
     supported_languages: std.ArrayList([]const u8) = .empty,
     has_supported_languages: bool = false,
 };
 
-fn parseMacroOpenTag(allocator: std.mem.Allocator, tag: []const u8) !MacroOpenTag {
+const CallableBlock = struct {
+    name: []const u8,
+    arguments: std.ArrayList(MacroArgument) = .empty,
+};
+
+fn parseMacroOpenTag(allocator: std.mem.Allocator, tag: []const u8, extract_arguments: bool) !MacroOpenTag {
     if (std.mem.startsWith(u8, tag, "macro") and tag.len > "macro".len and std.ascii.isWhitespace(tag["macro".len])) {
-        const name = try parseCallableBlockName(tag, "macro");
-        return .{ .name = name, .end_tag = "endmacro" };
+        const block = try parseCallableBlock(allocator, tag, "macro", extract_arguments);
+        return .{ .name = block.name, .end_tag = "endmacro", .arguments = block.arguments };
     }
     if (std.mem.startsWith(u8, tag, "test") and tag.len > "test".len and std.ascii.isWhitespace(tag["test".len])) {
-        const name = try parseCallableBlockName(tag, "test");
-        return .{ .name = try std.fmt.allocPrint(allocator, "test_{s}", .{name}), .end_tag = "endtest" };
+        const block = try parseCallableBlock(allocator, tag, "test", extract_arguments);
+        return .{ .name = try std.fmt.allocPrint(allocator, "test_{s}", .{block.name}), .end_tag = "endtest", .arguments = block.arguments };
     }
     if (std.mem.startsWith(u8, tag, "data_test") and tag.len > "data_test".len and std.ascii.isWhitespace(tag["data_test".len])) {
-        const name = try parseCallableBlockName(tag, "data_test");
-        return .{ .name = try std.fmt.allocPrint(allocator, "test_{s}", .{name}), .end_tag = "enddata_test" };
+        const block = try parseCallableBlock(allocator, tag, "data_test", extract_arguments);
+        return .{ .name = try std.fmt.allocPrint(allocator, "test_{s}", .{block.name}), .end_tag = "enddata_test", .arguments = block.arguments };
     }
     if (std.mem.startsWith(u8, tag, "materialization") and tag.len > "materialization".len and std.ascii.isWhitespace(tag["materialization".len])) {
         return try parseMaterializationOpenTag(allocator, tag);
@@ -246,15 +258,62 @@ fn parseMacroOpenTag(allocator: std.mem.Allocator, tag: []const u8) !MacroOpenTa
     return error.NotMacroBlock;
 }
 
-fn parseCallableBlockName(tag: []const u8, keyword: []const u8) ![]const u8 {
+fn parseCallableBlock(allocator: std.mem.Allocator, tag: []const u8, keyword: []const u8, extract_arguments: bool) !CallableBlock {
     const name_start = skipWs(tag, keyword.len);
     if (name_start >= tag.len or !isIdentStart(tag[name_start])) return error.MalformedMacroBlock;
     var name_end = name_start + 1;
     while (name_end < tag.len and isIdentChar(tag[name_end])) name_end += 1;
     const call_pos = skipWs(tag, name_end);
     if (call_pos >= tag.len or tag[call_pos] != '(') return error.MalformedMacroBlock;
-    _ = findMatchingParen(tag, call_pos) orelse return error.MalformedMacroBlock;
-    return tag[name_start..name_end];
+    const close = findMatchingParen(tag, call_pos) orelse return error.MalformedMacroBlock;
+    var arguments: std.ArrayList(MacroArgument) = .empty;
+    errdefer arguments.deinit(allocator);
+    if (extract_arguments) {
+        parseSignatureArguments(allocator, tag[call_pos + 1 .. close], &arguments) catch {
+            arguments.clearRetainingCapacity();
+        };
+    }
+    return .{ .name = tag[name_start..name_end], .arguments = arguments };
+}
+
+fn parseSignatureArguments(allocator: std.mem.Allocator, text: []const u8, out: *std.ArrayList(MacroArgument)) !void {
+    var start: usize = 0;
+    var pos: usize = 0;
+    var depth: usize = 0;
+    while (pos < text.len) : (pos += 1) {
+        const ch = text[pos];
+        if (ch == '"' or ch == '\'') {
+            pos = (skipQuotedSpan(text, pos) orelse return error.MalformedMacroBlock) - 1;
+            continue;
+        }
+        if (ch == '(' or ch == '[' or ch == '{') {
+            depth += 1;
+            continue;
+        }
+        if (ch == ')' or ch == ']' or ch == '}') {
+            if (depth == 0) return error.MalformedMacroBlock;
+            depth -= 1;
+            continue;
+        }
+        if (ch == ',' and depth == 0) {
+            try appendSignatureArgument(allocator, text[start..pos], out);
+            start = pos + 1;
+        }
+    }
+    if (depth != 0) return error.MalformedMacroBlock;
+    try appendSignatureArgument(allocator, text[start..], out);
+}
+
+fn appendSignatureArgument(allocator: std.mem.Allocator, segment: []const u8, out: *std.ArrayList(MacroArgument)) !void {
+    const trimmed = std.mem.trim(u8, segment, " \t\r\n");
+    if (trimmed.len == 0) return;
+    if (!isIdentStart(trimmed[0])) return error.MalformedMacroBlock;
+    var name_end: usize = 1;
+    while (name_end < trimmed.len and isIdentChar(trimmed[name_end])) name_end += 1;
+    const rest = skipWs(trimmed, name_end);
+    if (rest < trimmed.len and trimmed[rest] != '=' and trimmed[rest] != ':') return error.MalformedMacroBlock;
+    const name = try allocator.dupe(u8, trimmed[0..name_end]);
+    try out.append(allocator, .{ .name = name });
 }
 
 fn parseMaterializationOpenTag(allocator: std.mem.Allocator, tag: []const u8) !MacroOpenTag {
@@ -595,21 +654,127 @@ pub fn applyMacroProperties(graph: *Graph) !void {
         for (property.meta.items) |entry| {
             try appendMetaEntry(graph.allocator, &macro.meta, entry.key, entry.value);
         }
-        for (property.arguments.items) |argument| {
-            try appendMacroArgumentClone(graph, &macro.arguments, argument);
+        if (graph.validate_macro_args) {
+            try validateMacroPatchArguments(graph, macro, property);
+            if (property.arguments.items.len != 0) {
+                macro.arguments.clearRetainingCapacity();
+                try appendMacroArgumentClones(graph, &macro.arguments, property.arguments.items);
+            }
+        } else {
+            macro.arguments.clearRetainingCapacity();
+            try appendMacroArgumentClones(graph, &macro.arguments, property.arguments.items);
         }
     }
 }
 
-fn appendMacroArgumentClone(graph: *Graph, arguments: *std.ArrayList(MacroArgument), source: MacroArgument) !void {
-    for (arguments.items) |*existing| {
-        if (std.mem.eql(u8, existing.name, source.name)) {
-            if (source.type.len != 0) existing.type = source.type;
-            if (source.description.len != 0) existing.description = source.description;
-            return;
+fn validateMacroPatchArguments(graph: *Graph, macro: *const MacroDef, property: MacroProperty) !void {
+    if (property.arguments.items.len == 0) return;
+    const signature_arguments = macro.signature_arguments.items;
+    const count = @min(signature_arguments.len, property.arguments.items.len);
+    for (property.arguments.items[0..count], signature_arguments[0..count]) |patch_arg, macro_arg| {
+        if (!std.mem.eql(u8, patch_arg.name, macro_arg.name)) {
+            try appendMacroArgumentWarning(
+                graph,
+                "Argument {s} in yaml for macro {s} does not match the jinja definition.",
+                .{ patch_arg.name, macro.name },
+            );
         }
     }
-    try arguments.append(graph.allocator, source);
+    if (property.arguments.items.len != signature_arguments.len) {
+        try appendMacroArgumentWarning(
+            graph,
+            "The number of arguments in the yaml for macro {s} does not match the jinja definition.",
+            .{macro.name},
+        );
+    }
+    for (property.arguments.items) |patch_arg| {
+        if (patch_arg.type.len != 0 and !isValidMacroArgumentType(patch_arg.type)) {
+            try appendMacroArgumentWarning(
+                graph,
+                "Argument {s} in the yaml for macro {s} has an invalid type.",
+                .{ patch_arg.name, macro.name },
+            );
+        }
+    }
+}
+
+fn appendMacroArgumentWarning(graph: *Graph, comptime fmt: []const u8, args: anytype) !void {
+    try graph.macro_argument_warnings.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, fmt, args));
+}
+
+fn appendMacroArgumentClones(graph: *Graph, arguments: *std.ArrayList(MacroArgument), source: []const MacroArgument) !void {
+    for (source) |argument| {
+        try arguments.append(graph.allocator, .{
+            .name = argument.name,
+            .type = argument.type,
+            .description = argument.description,
+        });
+    }
+}
+
+pub fn isValidMacroArgumentType(value: []const u8) bool {
+    var parser = MacroArgumentTypeParser{ .text = value };
+    return parser.parseType() and parser.finished();
+}
+
+const MacroArgumentTypeParser = struct {
+    text: []const u8,
+    index: usize = 0,
+
+    fn parseType(self: *MacroArgumentTypeParser) bool {
+        self.skipIgnored();
+        const start = self.index;
+        while (self.index < self.text.len and self.text[self.index] >= 'a' and self.text[self.index] <= 'z') {
+            self.index += 1;
+        }
+        if (start == self.index) return false;
+        const name = self.text[start..self.index];
+        const arg_count = macroArgumentTypeParamCount(name) orelse return false;
+        if (arg_count == 0) return true;
+        self.skipIgnored();
+        if (self.index >= self.text.len or self.text[self.index] != '[') return false;
+        self.index += 1;
+        var arg_index: usize = 0;
+        while (arg_index < arg_count) : (arg_index += 1) {
+            if (!self.parseType()) return false;
+            self.skipIgnored();
+            if (arg_index + 1 < arg_count) {
+                if (self.index >= self.text.len or self.text[self.index] != ',') return false;
+                self.index += 1;
+            }
+        }
+        self.skipIgnored();
+        if (self.index >= self.text.len or self.text[self.index] != ']') return false;
+        self.index += 1;
+        return true;
+    }
+
+    fn finished(self: *MacroArgumentTypeParser) bool {
+        self.skipIgnored();
+        return self.index == self.text.len;
+    }
+
+    fn skipIgnored(self: *MacroArgumentTypeParser) void {
+        while (self.index < self.text.len and (self.text[self.index] == ' ' or self.text[self.index] == '\t')) {
+            self.index += 1;
+        }
+    }
+};
+
+fn macroArgumentTypeParamCount(name: []const u8) ?usize {
+    if (std.mem.eql(u8, name, "str")) return 0;
+    if (std.mem.eql(u8, name, "string")) return 0;
+    if (std.mem.eql(u8, name, "bool")) return 0;
+    if (std.mem.eql(u8, name, "int")) return 0;
+    if (std.mem.eql(u8, name, "integer")) return 0;
+    if (std.mem.eql(u8, name, "float")) return 0;
+    if (std.mem.eql(u8, name, "any")) return 0;
+    if (std.mem.eql(u8, name, "list")) return 1;
+    if (std.mem.eql(u8, name, "dict")) return 2;
+    if (std.mem.eql(u8, name, "optional")) return 1;
+    if (std.mem.eql(u8, name, "relation")) return 0;
+    if (std.mem.eql(u8, name, "column")) return 0;
+    return null;
 }
 
 pub fn refDepFromValue(allocator: std.mem.Allocator, value: []const u8) !RefDep {
@@ -1169,6 +1334,43 @@ test "parseMacrosFromText extracts top-level macro blocks" {
         "{% macro format_id(column_name) %}\n    cast({{ column_name }} as varchar)\n{% endmacro %}",
         graph.macros.items[0].macro_sql,
     );
+    try std.testing.expectEqual(@as(usize, 0), graph.macros.items[0].arguments.items.len);
+    try std.testing.expectEqual(@as(usize, 0), graph.macros.items[0].signature_arguments.items.len);
+}
+
+test "parseMacrosFromText extracts macro signature arguments when enabled" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .validate_macro_args = true };
+    defer graph.deinit();
+
+    const sql =
+        \\{% macro format_id(column_name, optional_suffix='', options={"suffix": ","}, typed_arg: string='x') %}
+        \\    cast({{ column_name }} as varchar)
+        \\{% endmacro %}
+        \\
+        \\{% test positive_value(model, column_name) %}
+        \\    select * from {{ model }} where {{ column_name }} <= 0
+        \\{% endtest %}
+    ;
+
+    try parseMacrosFromText(allocator, sql, "macros/format_id.sql", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 2), graph.macros.items.len);
+    try std.testing.expectEqualStrings("format_id", graph.macros.items[0].name);
+    try std.testing.expectEqual(@as(usize, 4), graph.macros.items[0].signature_arguments.items.len);
+    try std.testing.expectEqualStrings("column_name", graph.macros.items[0].signature_arguments.items[0].name);
+    try std.testing.expectEqualStrings("optional_suffix", graph.macros.items[0].signature_arguments.items[1].name);
+    try std.testing.expectEqualStrings("options", graph.macros.items[0].signature_arguments.items[2].name);
+    try std.testing.expectEqualStrings("typed_arg", graph.macros.items[0].signature_arguments.items[3].name);
+    try std.testing.expectEqual(@as(usize, 4), graph.macros.items[0].arguments.items.len);
+    try std.testing.expectEqualStrings("column_name", graph.macros.items[0].arguments.items[0].name);
+    try std.testing.expectEqualStrings("test_positive_value", graph.macros.items[1].name);
+    try std.testing.expectEqual(@as(usize, 2), graph.macros.items[1].arguments.items.len);
+    try std.testing.expectEqualStrings("model", graph.macros.items[1].arguments.items[0].name);
+    try std.testing.expectEqualStrings("column_name", graph.macros.items[1].arguments.items[1].name);
 }
 
 test "parseMacrosFromText extracts dbt macro block variants" {
@@ -1522,7 +1724,7 @@ test "parseMacroPropertiesFromText rejects nested macro meta" {
     );
 }
 
-test "applyMacroProperties applies descriptions patch paths and merges arguments" {
+test "applyMacroProperties applies descriptions patch paths and replaces arguments" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1538,12 +1740,6 @@ test "applyMacroProperties applies descriptions patch paths and merges arguments
         .original_file_path = "macros/format_id.sql",
         .macro_sql = "",
     });
-    try graph.macros.items[0].arguments.append(allocator, .{
-        .name = "column_name",
-        .type = "string",
-        .description = "",
-    });
-
     try graph.macro_properties.append(allocator, .{
         .package_name = "demo",
         .name = "format_id",
@@ -1580,10 +1776,118 @@ test "applyMacroProperties applies descriptions patch paths and merges arguments
     try std.testing.expectEqualStrings("2", graph.macros.items[0].meta.items[1].value.text);
     try std.testing.expectEqual(@as(usize, 2), graph.macros.items[0].arguments.items.len);
     try std.testing.expectEqualStrings("column_name", graph.macros.items[0].arguments.items[0].name);
-    try std.testing.expectEqualStrings("string", graph.macros.items[0].arguments.items[0].type);
+    try std.testing.expectEqualStrings("", graph.macros.items[0].arguments.items[0].type);
     try std.testing.expectEqualStrings("Identifier expression.", graph.macros.items[0].arguments.items[0].description);
     try std.testing.expectEqualStrings("quote", graph.macros.items[0].arguments.items[1].name);
     try std.testing.expectEqualStrings("bool", graph.macros.items[0].arguments.items[1].type);
+}
+
+test "applyMacroProperties validates macro patch arguments when enabled" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .validate_macro_args = true };
+    defer graph.deinit();
+
+    try graph.macros.append(allocator, .{
+        .unique_id = "macro.demo.format_id",
+        .package_name = "demo",
+        .name = "format_id",
+        .path = "macros/format_id.sql",
+        .original_file_path = "macros/format_id.sql",
+        .macro_sql = "",
+    });
+    try graph.macros.items[0].signature_arguments.append(allocator, .{ .name = "column_name" });
+    try graph.macros.items[0].signature_arguments.append(allocator, .{ .name = "quote" });
+    try graph.macros.items[0].arguments.append(allocator, .{ .name = "column_name" });
+    try graph.macros.items[0].arguments.append(allocator, .{ .name = "quote" });
+
+    try graph.macro_properties.append(allocator, .{
+        .package_name = "demo",
+        .name = "format_id",
+        .patch_path = "macros/schema.yml",
+    });
+    try graph.macro_properties.items[0].arguments.append(allocator, .{
+        .name = "column_name",
+        .type = "string",
+        .description = "Column expression.",
+    });
+    try graph.macro_properties.items[0].arguments.append(allocator, .{
+        .name = "bad_name",
+        .type = "list",
+        .description = "Bad argument.",
+    });
+    try graph.macro_properties.items[0].arguments.append(allocator, .{
+        .name = "extra_arg",
+        .type = "optional[string]",
+        .description = "Extra argument.",
+    });
+
+    try applyMacroProperties(&graph);
+
+    try std.testing.expectEqual(@as(usize, 3), graph.macros.items[0].arguments.items.len);
+    try std.testing.expectEqualStrings("column_name", graph.macros.items[0].arguments.items[0].name);
+    try std.testing.expectEqualStrings("string", graph.macros.items[0].arguments.items[0].type);
+    try std.testing.expectEqualStrings("bad_name", graph.macros.items[0].arguments.items[1].name);
+    try std.testing.expectEqualStrings("extra_arg", graph.macros.items[0].arguments.items[2].name);
+    try std.testing.expectEqual(@as(usize, 3), graph.macro_argument_warnings.items.len);
+    try std.testing.expectEqualStrings(
+        "Argument bad_name in yaml for macro format_id does not match the jinja definition.",
+        graph.macro_argument_warnings.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "The number of arguments in the yaml for macro format_id does not match the jinja definition.",
+        graph.macro_argument_warnings.items[1],
+    );
+    try std.testing.expectEqualStrings(
+        "Argument bad_name in the yaml for macro format_id has an invalid type.",
+        graph.macro_argument_warnings.items[2],
+    );
+}
+
+test "applyMacroProperties keeps signature arguments without YAML arguments when validation enabled" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .validate_macro_args = true };
+    defer graph.deinit();
+
+    try graph.macros.append(allocator, .{
+        .unique_id = "macro.demo.format_id",
+        .package_name = "demo",
+        .name = "format_id",
+        .path = "macros/format_id.sql",
+        .original_file_path = "macros/format_id.sql",
+        .macro_sql = "",
+    });
+    try graph.macros.items[0].signature_arguments.append(allocator, .{ .name = "column_name" });
+    try graph.macros.items[0].arguments.append(allocator, .{ .name = "column_name" });
+    try graph.macro_properties.append(allocator, .{
+        .package_name = "demo",
+        .name = "format_id",
+        .patch_path = "macros/schema.yml",
+        .description = "Formats an identifier.",
+    });
+
+    try applyMacroProperties(&graph);
+
+    try std.testing.expectEqualStrings("Formats an identifier.", graph.macros.items[0].description);
+    try std.testing.expectEqual(@as(usize, 1), graph.macros.items[0].arguments.items.len);
+    try std.testing.expectEqualStrings("column_name", graph.macros.items[0].arguments.items[0].name);
+    try std.testing.expectEqual(@as(usize, 0), graph.macro_argument_warnings.items.len);
+}
+
+test "isValidMacroArgumentType follows dbt Core macro annotation types" {
+    try std.testing.expect(isValidMacroArgumentType("string"));
+    try std.testing.expect(isValidMacroArgumentType("list[string]"));
+    try std.testing.expect(isValidMacroArgumentType("dict[string, optional[int]]"));
+    try std.testing.expect(isValidMacroArgumentType("optional[relation]"));
+    try std.testing.expect(!isValidMacroArgumentType("list"));
+    try std.testing.expect(!isValidMacroArgumentType("dict[string]"));
+    try std.testing.expect(!isValidMacroArgumentType("boolean"));
+    try std.testing.expect(!isValidMacroArgumentType("string | int"));
 }
 
 test "applyMacroProperties records unmatched macro properties" {

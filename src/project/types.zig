@@ -39,6 +39,7 @@ pub const ProjectConfig = struct {
     vars: std.ArrayList(VarEntry) = .empty,
     seed_docs: DocsConfig = .{},
     macro_paths_set: bool = false,
+    validate_macro_args: bool = false,
     target_path: []const u8 = "target",
 };
 
@@ -144,6 +145,7 @@ pub const MacroDef = struct {
     meta: std.ArrayList(MetaEntry) = .empty,
     docs: DocsConfig = .{},
     arguments: std.ArrayList(MacroArgument) = .empty,
+    signature_arguments: std.ArrayList(MacroArgument) = .empty,
     macro_depends_on: std.ArrayList([]const u8) = .empty,
     supported_languages: std.ArrayList([]const u8) = .empty,
     has_supported_languages: bool = false,
@@ -251,6 +253,8 @@ pub const Graph = struct {
     macro_properties: std.ArrayList(MacroProperty) = .empty,
     unmatched_model_properties: std.ArrayList(UnmatchedModelProperty) = .empty,
     unmatched_macro_properties: std.ArrayList(UnmatchedMacroProperty) = .empty,
+    macro_argument_warnings: std.ArrayList([]const u8) = .empty,
+    validate_macro_args: bool = false,
 
     pub fn deinit(self: *Graph) void {
         for (self.nodes.items) |*node| {
@@ -281,6 +285,7 @@ pub const Graph = struct {
         self.macro_properties.deinit(self.allocator);
         self.unmatched_model_properties.deinit(self.allocator);
         self.unmatched_macro_properties.deinit(self.allocator);
+        self.macro_argument_warnings.deinit(self.allocator);
         self.vars.deinit(self.allocator);
     }
 };
@@ -330,6 +335,7 @@ fn deinitExposureDef(allocator: std.mem.Allocator, exposure: *ExposureDef) void 
 fn deinitMacro(allocator: std.mem.Allocator, macro: *MacroDef) void {
     macro.meta.deinit(allocator);
     macro.arguments.deinit(allocator);
+    macro.signature_arguments.deinit(allocator);
     macro.macro_depends_on.deinit(allocator);
     macro.supported_languages.deinit(allocator);
 }

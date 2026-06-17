@@ -1374,6 +1374,44 @@ def test_parse_macro_property_yaml(tmp_path: Path):
     ]
 
 
+def test_parse_macro_validate_args_flag_emits_signature_args_and_warnings(tmp_path: Path):
+    project = copy_fixture(tmp_path, "macro_validate_args")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Argument wrong_name in yaml for macro bad_macro does not match the jinja definition." in result.stderr
+    assert "The number of arguments in the yaml for macro bad_macro does not match the jinja definition." in result.stderr
+    assert "Argument wrong_name in the yaml for macro bad_macro has an invalid type." in result.stderr
+
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert_manifest_schema_slice(project / "target-dxt" / "manifest.json")
+    assert manifest["macros"]["macro.macro_validate_args.plain_macro"]["arguments"] == [
+        {"name": "column_name", "type": None, "description": ""},
+        {"name": "optional_suffix", "type": None, "description": ""},
+    ]
+    assert manifest["macros"]["macro.macro_validate_args.patched_macro"]["arguments"] == [
+        {
+            "name": "column_name",
+            "type": "string",
+            "description": "Column expression.",
+        },
+        {
+            "name": "quote",
+            "type": "bool",
+            "description": "Whether to quote.",
+        },
+    ]
+    assert manifest["macros"]["macro.macro_validate_args.bad_macro"]["arguments"] == [
+        {"name": "first_arg", "type": "string", "description": ""},
+        {"name": "wrong_name", "type": "list", "description": ""},
+        {"name": "extra_arg", "type": "optional[string]", "description": ""},
+    ]
+
+
 def test_duplicate_macro_property_fails_loudly(tmp_path: Path):
     project = copy_fixture(tmp_path, "duplicate_macro_property")
     result = subprocess.run(
