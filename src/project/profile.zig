@@ -27,7 +27,12 @@ pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *c
     };
 
     const selected_profile = options.profile orelse config.profile_name orelse return error.MissingProfileName;
-    return try parseAdapterIdentityText(runtime.allocator, text, selected_profile, options.target);
+    var identity = try parseAdapterIdentityText(runtime.allocator, text, selected_profile, options.target);
+    if (identity.database_path != null) {
+        const base = std.fs.path.dirname(profiles_path) orelse ".";
+        identity.database_path_base = try runtime.allocator.dupe(u8, base);
+    }
+    return identity;
 }
 
 pub fn parseAdapterIdentityText(allocator: std.mem.Allocator, text: []const u8, selected_profile: []const u8, target_override: ?[]const u8) !AdapterIdentity {
@@ -50,11 +55,16 @@ pub fn parseAdapterIdentityText(allocator: std.mem.Allocator, text: []const u8, 
         try allocator.dupe(u8, "main")
     else
         return error.MissingProfileSchema;
+    const database_path = if (std.mem.eql(u8, normalized_adapter_type, "duckdb"))
+        try findProfileOutputScalar(allocator, text, profile_name, target_name, "path", error.MissingProfileDatabasePath)
+    else
+        null;
     return .{
         .profile_name = profile_name,
         .target_name = target_name,
         .adapter_type = normalized_adapter_type,
         .target_schema = target_schema,
+        .database_path = database_path,
     };
 }
 
@@ -278,6 +288,27 @@ test "profile parser defaults missing target to default" {
     try std.testing.expectEqualStrings("default", identity.target_name);
     try std.testing.expectEqualStrings("duckdb", identity.adapter_type);
     try std.testing.expectEqualStrings("main", identity.target_schema);
+}
+
+test "profile parser captures scalar duckdb path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const text =
+        \\analytics:
+        \\  target: duck
+        \\  outputs:
+        \\    duck:
+        \\      type: duckdb
+        \\      schema: analytics
+        \\      path: "warehouse.duckdb"
+    ;
+
+    const identity = try parseAdapterIdentityText(allocator, text, "analytics", null);
+    try std.testing.expectEqualStrings("duckdb", identity.adapter_type);
+    try std.testing.expectEqualStrings("analytics", identity.target_schema);
+    try std.testing.expectEqualStrings("warehouse.duckdb", identity.database_path.?);
 }
 
 test "profile parser reports missing profile target and type" {

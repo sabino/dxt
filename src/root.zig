@@ -164,12 +164,19 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingProfileTarget => stderr.writeAll("error: selected target was not found in profiles.yml\n") catch {},
         error.MissingProfileType => stderr.writeAll("error: selected profile target must define adapter type\n") catch {},
         error.MissingProfileSchema => stderr.writeAll("error: selected profile target must define a non-empty schema when schema is present\n") catch {},
+        error.MissingProfileDatabasePath => stderr.writeAll("error: selected DuckDB profile target must define a non-empty path when path is present\n") catch {},
         error.InvalidOutput => stderr.writeAll("error: --output must be text or json\n") catch {},
         error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, or test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
         error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model resources\n") catch {},
-        error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources before execution\n") catch {},
+        error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources\n") catch {},
         error.UnsupportedBuildSelection => stderr.writeAll("error: build currently supports only selected model, seed, and test resources before execution\n") catch {},
+        error.UnsupportedAdapterExecution => stderr.writeAll("error: run currently executes only DuckDB SQL models\n") catch {},
+        error.UnsupportedModelMaterialization => stderr.writeAll("error: run currently supports only table and view model materializations\n") catch {},
+        error.UnsupportedDuckDbPath => stderr.writeAll("error: this DuckDB execution slice supports only local DuckDB database file paths\n") catch {},
+        error.CyclicModelDependency => stderr.writeAll("error: selected model graph contains a cycle\n") catch {},
+        error.DuckDbCliNotFound => stderr.writeAll("error: DuckDB execution requires the duckdb CLI on PATH for this M3 slice\n") catch {},
+        error.DuckDbExecutionFailed => stderr.writeAll("error: DuckDB model execution failed\n") catch {},
         error.UnsupportedModelExecution => stderr.writeAll("error: model execution requires a DuckDB adapter and materialization runner; not implemented yet\n") catch {},
         error.UnsupportedSeedExecution => stderr.writeAll("error: seed execution requires a DuckDB adapter and seed runner; not implemented yet\n") catch {},
         error.UnsupportedTestExecution => stderr.writeAll("error: test execution requires a DuckDB adapter and test runner; not implemented yet\n") catch {},
@@ -388,7 +395,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  parse            Parse a supported dbt project subset and emit manifest artifacts.
         \\  ls               List resources from the supported parser graph.
         \\  compile          Compile supported dbt SQL/Jinja without executing.
-        \\  run              Preflight selected model execution without running SQL.
+        \\  run              Execute supported selected DuckDB SQL models.
         \\  build            Preflight selected seeds, models, and tests without running SQL.
         \\  docs generate    Generate supported docs artifacts.
         \\

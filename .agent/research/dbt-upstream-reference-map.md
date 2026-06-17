@@ -53,6 +53,7 @@ Every compatibility slice should record:
 | Artifact schemas | `schemas/dbt/manifest/v12.json`, `schemas/dbt/run-results/v6.json`, `schemas/dbt/sources/v3.json`, `schemas/dbt/catalog/v1.json` | v2 still emits JSON for compatibility and adds Parquet artifacts per README; manifest builder in `crates/dbt-schemas/src/schemas/manifest/manifest.rs` | `src/project/manifest.zig`, future run/catalog/source writers and schema validators under tests/scripts |
 | Command surface | dbt v1 command behavior through parser/runner contracts and artifacts | `crates/dbt-clap-core/src/commands.rs::CoreCommand`, static-analysis flags and command parsing | `src/root.zig`, `src/main.zig`, future command-specific modules |
 | Adapter capability and SQL identity | v1 adapter behavior is distributed across adapters and context providers | `crates/dbt-adapter-core/src/lib.rs::AdapterType`, `quote_char`, static-analysis support matrix, microbatch capability; `crates/dbt-adapter-sql/src/ident.rs`, `statements.rs`, `types/*` | Future `src/project/adapter.zig`, `src/project/sql.zig`, and cross-database planner modules |
+| DuckDB SQL model execution and run results | `schemas/dbt/run-results/v6.json`; `core/dbt/artifacts/schemas/run/v5/run.py::RunResultOutput`, `process_run_result`, `RunResultsArtifact.from_execution_results`; `core/dbt/compilation.py::Compiler.compile_node`, `write_graph_file` | `crates/dbt-auth/src/duckdb/mod.rs::DuckDbAuth.configure`; `crates/dbt-loader/src/dbt_macro_assets/dbt-duckdb/macros/adapters.sql::duckdb__create_table_as`, `duckdb__create_view_as`; `crates/dbt-loader/src/dbt_macro_assets/dbt-duckdb/macros/materializations/table.sql`; `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/materializations/models/view.sql`; `crates/dbt-schemas/src/schemas/run_results.rs::RunResultOutput`, `RunResultsArtifact`; `crates/dbt-tasks-core/src/stats_to_results.rs`, `utils.rs::build_run_results_artifact` | `src/project/duckdb.zig` owns the first CLI-backed DuckDB execution slice, local-file path guardrails, and table/view SQL rendering; `src/project.zig` currently owns selected-model dependency ordering until a runner module exists; `src/project/run_results.zig` owns the minimal v6 run-results writer; future adapter ABI should replace the CLI backend with embedded DuckDB/linking and add task timing, adapter responses, relation staging, DAG scheduling, seeds, and tests |
 | Fusion-style scalable artifacts | v1 JSON artifacts remain the base compatibility contract | README v2 notes JSON compatibility plus Parquet artifacts; `crates/dbt-index-core/src/ingest/ingest_state.rs`, `crates/dbt-index-core/src/db.rs` define metadata parquet directories and DuckDB views under `dbt.*` and `dbt_rt.*` | Future parse cache/state store, not M1 product behavior |
 | Semantic layer and metrics | `schema_yaml_readers.py::MetricParser`, `SemanticModelParser`, `SavedQueryParser`; `manifest.py::process_metrics`, semantic manifest validation and writer | `crates/dbt-schemas/src/schemas/semantic_layer/*`, `crates/dbt-schemas/src/schemas/manifest/semantic_model.rs`, `crates/dbt-parser/src/resolve/resolve_semantic_models.rs`, `crates/dbt-parser/src/resolve/validate_semantic_models.rs`, `crates/dbt-metricflow/*` | Future `src/project/semantic.zig`, semantic manifest writer, metric planner; M1 should keep empty maps schema-valid until implemented |
 
@@ -61,9 +62,14 @@ Every compatibility slice should record:
 - Product runtime is Zig and remains so.
 - Current implemented command surface is `parse`, `ls`, `compile`, `docs
   generate`, `run`, `build`, `version`, and help. `compile` and `docs generate`
-  are render-only artifact boundaries for the supported parser graph. `run` and
-  `build` are truthful preflight boundaries that parse, select, compile, write
-  artifacts, and then fail before adapter execution.
+  are render-only artifact boundaries for the supported parser graph. `run`
+  now executes selected enabled DuckDB SQL models with `table` and `view`
+  materializations through a Zig-owned external CLI backend, validates
+  supported materializations before opening DuckDB, executes selected models in
+  dependency order, writes `manifest.json`, compiled SQL, and a minimal v6
+  `run_results.json`. `build` remains a truthful preflight boundary that parses,
+  selects, compiles, writes artifacts, and then fails before seed/model/test
+  execution.
 - `src/project/loader.zig` now owns graph loading order, installed-package
   traversal, target-path lookup, project/package resource traversal,
   macro/property application sequencing, duplicate checks, and graph sorting.
@@ -92,6 +98,12 @@ Every compatibility slice should record:
   `src/project/compiler.zig` for render-only model/ref relation names and
   narrow `target.*` / `this` compile expressions. This is documented in
   `.agent/research/m2-target-schema-this-compile.md`.
+- DuckDB profile `path` is parsed in `src/project/profile.zig`, copied into the
+  graph by `src/project/loader.zig`, and consumed by `src/project/duckdb.zig`
+  for the first `dxt run` execution slice. Relative paths resolve from the
+  loaded `profiles.yml` directory; `:memory:` and MotherDuck connection strings
+  are rejected for this CLI-backed slice. This is documented in
+  `.agent/research/m3-duckdb-run-sql-models.md`.
 - Literal inline model `config(schema=..., alias=...)` is scanned in
   `src/project/jinja.zig`, stored on `src/project/types.zig` nodes, and consumed
   by `src/project/compiler.zig` for default render-only relation names, refs to

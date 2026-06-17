@@ -154,7 +154,7 @@ fn findSourceByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Sour
     return null;
 }
 
-fn relationSchemaForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
+pub fn relationSchemaForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
     if (node.config_schema) |custom_schema| {
         const trimmed = std.mem.trim(u8, custom_schema, " \t\r\n");
         return try std.fmt.allocPrint(allocator, "{s}_{s}", .{ graph.target_schema, trimmed });
@@ -162,7 +162,7 @@ fn relationSchemaForNode(allocator: std.mem.Allocator, graph: *const Graph, node
     return try allocator.dupe(u8, graph.target_schema);
 }
 
-fn relationIdentifierForNode(node: *const Node) []const u8 {
+pub fn relationIdentifierForNode(node: *const Node) []const u8 {
     if (node.config_alias) |custom_alias| {
         const trimmed = std.mem.trim(u8, custom_alias, " \t\r\n");
         if (trimmed.len != 0) return trimmed;
@@ -178,7 +178,7 @@ fn renderRelation(allocator: std.mem.Allocator, relation: Relation) ![]const u8 
     return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ schema, identifier });
 }
 
-fn quoteIdentifier(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+pub fn quoteIdentifier(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.append(allocator, '"');
