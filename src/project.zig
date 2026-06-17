@@ -230,12 +230,12 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
                 continue;
             }
             source_freshness.validateThreshold(source.freshness.?) catch {
-                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires complete table-level freshness thresholds");
+                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires complete freshness thresholds");
                 had_failure = true;
                 continue;
             };
             if (source.loaded_at_field == null and source.loaded_at_query == null) {
-                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires table-level loaded_at_field or loaded_at_query");
+                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires loaded_at_field or loaded_at_query");
                 had_failure = true;
                 continue;
             }

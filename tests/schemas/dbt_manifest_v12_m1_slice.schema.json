@@ -164,6 +164,38 @@
         "node_color": {"type": ["string", "null"]}
       }
     },
+    "freshness_time": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "period"],
+      "properties": {
+        "count": {"type": ["integer", "null"]},
+        "period": {"type": ["string", "null"]}
+      }
+    },
+    "freshness_threshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["warn_after", "error_after", "filter"],
+      "properties": {
+        "warn_after": {"anyOf": [{"$ref": "#/$defs/freshness_time"}, {"type": "null"}]},
+        "error_after": {"anyOf": [{"$ref": "#/$defs/freshness_time"}, {"type": "null"}]},
+        "filter": {"type": ["string", "null"]}
+      }
+    },
+    "source_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "freshness", "loaded_at_field", "loaded_at_query", "meta", "tags"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "freshness": {"anyOf": [{"$ref": "#/$defs/freshness_threshold"}, {"type": "null"}]},
+        "loaded_at_field": {"type": ["string", "null"]},
+        "loaded_at_query": {"type": ["string", "null"]},
+        "meta": {"type": "object"},
+        "tags": {"$ref": "#/$defs/unique_id_array"}
+      }
+    },
     "macro_argument": {
       "type": "object",
       "additionalProperties": false,
@@ -386,7 +418,19 @@
         "package_name",
         "source_name",
         "name",
+        "database",
+        "schema",
+        "identifier",
+        "relation_name",
+        "path",
         "original_file_path",
+        "fqn",
+        "source_description",
+        "loader",
+        "loaded_at_field",
+        "loaded_at_query",
+        "freshness",
+        "config",
         "columns"
       ],
       "properties": {
@@ -395,7 +439,19 @@
         "package_name": {"type": "string"},
         "source_name": {"type": "string"},
         "name": {"type": "string"},
+        "database": {"type": ["string", "null"]},
+        "schema": {"type": "string"},
+        "identifier": {"type": "string"},
+        "relation_name": {"type": "string"},
+        "path": {"type": "string"},
         "original_file_path": {"type": "string"},
+        "fqn": {"$ref": "#/$defs/unique_id_array"},
+        "source_description": {"type": "string"},
+        "loader": {"type": "string"},
+        "loaded_at_field": {"type": ["string", "null"]},
+        "loaded_at_query": {"type": ["string", "null"]},
+        "freshness": {"anyOf": [{"$ref": "#/$defs/freshness_threshold"}, {"type": "null"}]},
+        "config": {"$ref": "#/$defs/source_config"},
         "columns": {
           "type": "object",
           "additionalProperties": {"$ref": "#/$defs/column"}

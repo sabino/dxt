@@ -32,7 +32,16 @@ const skipWs = jinja.skipWs;
 const findMacroIndexByPackageAndName = resolve.findMacroIndexByPackageAndName;
 
 const FreshnessTimeKey = enum { warn_after, error_after };
+const SourceConfigScope = enum { none, source, table };
+const FreshnessScope = enum { none, source, table };
 const SourceTestTarget = enum { none, column };
+
+const SourceDefaults = struct {
+    schema_name: ?[]const u8 = null,
+    loaded_at_field: ?[]const u8 = null,
+    loaded_at_query: ?[]const u8 = null,
+    freshness: ?types.FreshnessThreshold = null,
+};
 
 pub fn parseBool(value: []const u8) !bool {
     const trimmed = std.mem.trim(u8, value, " \t\r");
@@ -830,16 +839,20 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
     var in_sources = false;
     var in_tables = false;
     var in_columns = false;
-    var in_freshness = false;
+    var config_scope: SourceConfigScope = .none;
+    var freshness_scope: FreshnessScope = .none;
     var test_target: SourceTestTarget = .none;
     var active_test_target: SourceTestTarget = .none;
     var active_values_target: SourceTestTarget = .none;
     var freshness_time_key: ?FreshnessTimeKey = null;
+    var freshness_time_scope: FreshnessScope = .none;
+    var freshness_time_update = types.FreshnessTime{};
     var sources_indent: usize = 0;
     var source_item_indent: ?usize = null;
     var table_item_indent: ?usize = null;
     var columns_indent: usize = 0;
     var column_item_indent: ?usize = null;
+    var config_indent: usize = 0;
     var freshness_indent: usize = 0;
     var freshness_time_indent: usize = 0;
     var tests_indent: usize = 0;
@@ -850,12 +863,32 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
     var current_column: ?usize = null;
     var active_test_index: ?usize = null;
     var active_values_index: ?usize = null;
+    var source_defaults = SourceDefaults{};
+    var source_top_loaded_at_field = false;
+    var source_top_loaded_at_query = false;
+    var source_config_loaded_at_field = false;
+    var source_config_loaded_at_query = false;
+    var table_top_loaded_at_field = false;
+    var table_top_loaded_at_query = false;
+    var table_config_loaded_at_field = false;
+    var table_config_loaded_at_query = false;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
         const line = stripYamlComment(raw_line);
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
         const indent = leadingSpaces(line);
+
+        if (freshness_time_key != null and indent <= freshness_time_indent) {
+            try applyPendingFreshnessTime(
+                if (freshness_time_scope == .table and current_table_index != null) &graph.sources.items[current_table_index.?].freshness else &source_defaults.freshness,
+                freshness_time_key.?,
+                freshness_time_update,
+            );
+            freshness_time_key = null;
+            freshness_time_scope = .none;
+            freshness_time_update = .{};
+        }
 
         if (std.mem.eql(u8, trimmed, "sources:")) {
             in_sources = true;
@@ -867,13 +900,23 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             column_item_indent = null;
             current_table_index = null;
             current_column = null;
-            in_freshness = false;
+            config_scope = .none;
+            freshness_scope = .none;
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
             active_test_index = null;
             active_values_index = null;
             freshness_time_key = null;
+            source_defaults = .{};
+            source_top_loaded_at_field = false;
+            source_top_loaded_at_query = false;
+            source_config_loaded_at_field = false;
+            source_config_loaded_at_query = false;
+            table_top_loaded_at_field = false;
+            table_top_loaded_at_query = false;
+            table_config_loaded_at_field = false;
+            table_config_loaded_at_query = false;
             continue;
         }
         if (!in_sources) continue;
@@ -884,7 +927,8 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             current_source = null;
             current_table_index = null;
             current_column = null;
-            in_freshness = false;
+            config_scope = .none;
+            freshness_scope = .none;
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -892,6 +936,16 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             active_values_index = null;
             freshness_time_key = null;
             continue;
+        }
+
+        if (config_scope != .none and indent <= config_indent and !std.mem.eql(u8, trimmed, "config:")) {
+            config_scope = .none;
+        }
+        if (freshness_scope != .none and indent <= freshness_indent) {
+            freshness_scope = .none;
+            freshness_time_key = null;
+            freshness_time_scope = .none;
+            freshness_time_update = .{};
         }
 
         if (test_target != .none and indent <= tests_indent and !std.mem.startsWith(u8, trimmed, "- ")) {
@@ -909,6 +963,9 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             in_columns = false;
             current_column = null;
             column_item_indent = null;
+            config_scope = if (config_scope == .table) .none else config_scope;
+            freshness_scope = if (freshness_scope == .table) .none else freshness_scope;
+            freshness_time_key = null;
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -923,7 +980,8 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             column_item_indent = null;
             current_table_index = null;
             current_column = null;
-            in_freshness = false;
+            config_scope = .none;
+            freshness_scope = .none;
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -966,7 +1024,9 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 active_values_target = .none;
                 active_test_index = null;
                 active_values_index = null;
-                in_freshness = false;
+                config_scope = .none;
+                freshness_scope = .none;
+                freshness_time_key = null;
             } else if (source_item_indent == null or indent == source_item_indent.?) {
                 source_item_indent = indent;
                 current_source = name;
@@ -976,13 +1036,23 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 column_item_indent = null;
                 current_table_index = null;
                 current_column = null;
-                in_freshness = false;
+                config_scope = .none;
+                freshness_scope = .none;
                 test_target = .none;
                 active_test_target = .none;
                 active_values_target = .none;
                 active_test_index = null;
                 active_values_index = null;
                 freshness_time_key = null;
+                source_defaults = .{};
+                source_top_loaded_at_field = false;
+                source_top_loaded_at_query = false;
+                source_config_loaded_at_field = false;
+                source_config_loaded_at_query = false;
+                table_top_loaded_at_field = false;
+                table_top_loaded_at_query = false;
+                table_config_loaded_at_field = false;
+                table_config_loaded_at_query = false;
             } else if (in_tables and (table_item_indent == null or indent == table_item_indent.?)) {
                 table_item_indent = indent;
                 const source_name = current_source orelse return error.UnsupportedYaml;
@@ -993,18 +1063,27 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                     .source_name = source_name,
                     .table_name = name,
                     .original_file_path = relative_path,
+                    .schema_name = source_defaults.schema_name,
+                    .loaded_at_field = source_defaults.loaded_at_field,
+                    .loaded_at_query = source_defaults.loaded_at_query,
+                    .freshness = source_defaults.freshness,
                 });
                 current_table_index = graph.sources.items.len - 1;
                 in_columns = false;
                 column_item_indent = null;
                 current_column = null;
-                in_freshness = false;
+                config_scope = .none;
+                freshness_scope = .none;
                 test_target = .none;
                 active_test_target = .none;
                 active_values_target = .none;
                 active_test_index = null;
                 active_values_index = null;
                 freshness_time_key = null;
+                table_top_loaded_at_field = false;
+                table_top_loaded_at_query = false;
+                table_config_loaded_at_field = false;
+                table_config_loaded_at_query = false;
             }
             continue;
         }
@@ -1037,6 +1116,33 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 }
             }
 
+            if (freshness_scope == .table and indent > freshness_indent) {
+                if (std.mem.eql(u8, kv.key, "filter")) {
+                    try applyFreshnessFilter(allocator, &source.freshness, kv);
+                    continue;
+                }
+                if (std.mem.eql(u8, kv.key, "warn_after")) {
+                    if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                    freshness_time_key = .warn_after;
+                    freshness_time_scope = .table;
+                    freshness_time_update = .{};
+                    freshness_time_indent = indent;
+                    continue;
+                }
+                if (std.mem.eql(u8, kv.key, "error_after")) {
+                    if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                    freshness_time_key = .error_after;
+                    freshness_time_scope = .table;
+                    freshness_time_update = .{};
+                    freshness_time_indent = indent;
+                    continue;
+                }
+                if (freshness_time_key != null and indent > freshness_time_indent) {
+                    try applyFreshnessTimeKeyValue(allocator, &freshness_time_update, kv);
+                    continue;
+                }
+            }
+
             if (in_columns and current_column != null and column_item_indent != null and indent > column_item_indent.?) {
                 if (std.mem.eql(u8, kv.key, "description")) {
                     source.columns.items[current_column.?].description = try dupTrimmedScalar(allocator, kv.value);
@@ -1055,13 +1161,32 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 continue;
             }
 
-            if (std.mem.eql(u8, kv.key, "loaded_at_field")) {
-                source.loaded_at_field = try dupTrimmedScalar(allocator, kv.value);
-                in_freshness = false;
+            const table_config = config_scope == .table and indent > config_indent;
+            if (std.mem.eql(u8, kv.key, "config")) {
+                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                config_scope = .table;
+                config_indent = indent;
+                freshness_scope = .none;
+                freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "loaded_at_field")) {
+                if ((table_top_loaded_at_query or table_config_loaded_at_query) and !isYamlNull(kv.value)) return error.UnsupportedYaml;
+                if (table_config) {
+                    table_config_loaded_at_field = true;
+                } else {
+                    table_top_loaded_at_field = true;
+                }
+                try setLoadedAtField(allocator, &source.loaded_at_field, &source.loaded_at_query, kv.value);
+                freshness_scope = .none;
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "loaded_at_query")) {
-                source.loaded_at_query = try dupTrimmedScalar(allocator, kv.value);
-                in_freshness = false;
+                if ((table_top_loaded_at_field or table_config_loaded_at_field) and !isYamlNull(kv.value)) return error.UnsupportedYaml;
+                if (table_config) {
+                    table_config_loaded_at_query = true;
+                } else {
+                    table_top_loaded_at_query = true;
+                }
+                try setLoadedAtQuery(allocator, &source.loaded_at_field, &source.loaded_at_query, kv.value);
+                freshness_scope = .none;
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "columns")) {
                 if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
@@ -1069,7 +1194,8 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 columns_indent = indent;
                 current_column = null;
                 column_item_indent = null;
-                in_freshness = false;
+                config_scope = .none;
+                freshness_scope = .none;
                 test_target = .none;
                 active_test_target = .none;
                 active_values_target = .none;
@@ -1077,27 +1203,89 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 active_values_index = null;
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "freshness")) {
-                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
-                if (source.freshness == null) source.freshness = .{};
-                in_freshness = true;
+                try beginFreshnessBlock(&source.freshness, kv.value);
+                freshness_scope = if (source.freshness == null and isYamlNull(kv.value)) .none else .table;
                 freshness_indent = indent;
                 freshness_time_key = null;
-            } else if (in_freshness and indent > freshness_indent and std.mem.eql(u8, kv.key, "filter")) {
-                var freshness = source.freshness orelse types.FreshnessThreshold{};
-                freshness.filter = try dupTrimmedScalar(allocator, kv.value);
-                source.freshness = freshness;
-            } else if (in_freshness and indent > freshness_indent and std.mem.eql(u8, kv.key, "warn_after")) {
+            }
+            continue;
+        }
+
+        if (current_source != null and source_item_indent != null and indent > source_item_indent.?) {
+            const kv = splitKeyValue(trimmed) orelse continue;
+
+            if (freshness_scope == .source and indent > freshness_indent) {
+                if (std.mem.eql(u8, kv.key, "filter")) {
+                    try applyFreshnessFilter(allocator, &source_defaults.freshness, kv);
+                    continue;
+                }
+                if (std.mem.eql(u8, kv.key, "warn_after")) {
+                    if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                    freshness_time_key = .warn_after;
+                    freshness_time_scope = .source;
+                    freshness_time_update = .{};
+                    freshness_time_indent = indent;
+                    continue;
+                }
+                if (std.mem.eql(u8, kv.key, "error_after")) {
+                    if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                    freshness_time_key = .error_after;
+                    freshness_time_scope = .source;
+                    freshness_time_update = .{};
+                    freshness_time_indent = indent;
+                    continue;
+                }
+                if (freshness_time_key != null and indent > freshness_time_indent) {
+                    try applyFreshnessTimeKeyValue(allocator, &freshness_time_update, kv);
+                    continue;
+                }
+            }
+
+            const source_config = config_scope == .source and indent > config_indent;
+            if (std.mem.eql(u8, kv.key, "config")) {
                 if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
-                freshness_time_key = .warn_after;
-                freshness_time_indent = indent;
-            } else if (in_freshness and indent > freshness_indent and std.mem.eql(u8, kv.key, "error_after")) {
-                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
-                freshness_time_key = .error_after;
-                freshness_time_indent = indent;
-            } else if (in_freshness and freshness_time_key != null and indent > freshness_time_indent) {
-                try applyFreshnessTimeKeyValue(allocator, source, freshness_time_key.?, kv);
+                config_scope = .source;
+                config_indent = indent;
+                freshness_scope = .none;
+                freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "schema")) {
+                source_defaults.schema_name = try dupSourceSchemaScalar(allocator, graph, kv.value);
+                freshness_scope = .none;
+                freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "loaded_at_field")) {
+                if ((source_top_loaded_at_query or source_config_loaded_at_query) and !isYamlNull(kv.value)) return error.UnsupportedYaml;
+                if (source_config) {
+                    source_config_loaded_at_field = true;
+                } else {
+                    source_top_loaded_at_field = true;
+                }
+                try setLoadedAtField(allocator, &source_defaults.loaded_at_field, &source_defaults.loaded_at_query, kv.value);
+                freshness_scope = .none;
+                freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "loaded_at_query")) {
+                if ((source_top_loaded_at_field or source_config_loaded_at_field) and !isYamlNull(kv.value)) return error.UnsupportedYaml;
+                if (source_config) {
+                    source_config_loaded_at_query = true;
+                } else {
+                    source_top_loaded_at_query = true;
+                }
+                try setLoadedAtQuery(allocator, &source_defaults.loaded_at_field, &source_defaults.loaded_at_query, kv.value);
+                freshness_scope = .none;
+                freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "freshness")) {
+                try beginFreshnessBlock(&source_defaults.freshness, kv.value);
+                freshness_scope = if (source_defaults.freshness == null and isYamlNull(kv.value)) .none else .source;
+                freshness_indent = indent;
+                freshness_time_key = null;
             }
         }
+    }
+    if (freshness_time_key != null) {
+        try applyPendingFreshnessTime(
+            if (freshness_time_scope == .table and current_table_index != null) &graph.sources.items[current_table_index.?].freshness else &source_defaults.freshness,
+            freshness_time_key.?,
+            freshness_time_update,
+        );
     }
 }
 
@@ -1106,13 +1294,39 @@ fn currentSourceGenericTestDef(source: *types.SourceDef, column_index: usize, ta
     return error.UnsupportedYaml;
 }
 
-fn applyFreshnessTimeKeyValue(allocator: std.mem.Allocator, source: *types.SourceDef, time_key: FreshnessTimeKey, kv: KeyValue) !void {
+fn isYamlNull(value: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    return std.mem.eql(u8, trimmed, "null") or std.mem.eql(u8, trimmed, "~");
+}
+
+fn setLoadedAtField(allocator: std.mem.Allocator, field: *?[]const u8, query: *?[]const u8, value: []const u8) !void {
+    field.* = if (isYamlNull(value)) null else try dupTrimmedScalar(allocator, value);
+    query.* = null;
+}
+
+fn setLoadedAtQuery(allocator: std.mem.Allocator, field: *?[]const u8, query: *?[]const u8, value: []const u8) !void {
+    query.* = if (isYamlNull(value)) null else try dupTrimmedScalar(allocator, value);
+    _ = field;
+}
+
+fn beginFreshnessBlock(freshness: *?types.FreshnessThreshold, value: []const u8) !void {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    if (isYamlNull(trimmed)) {
+        freshness.* = null;
+        return;
+    }
+    if (trimmed.len != 0) return error.UnsupportedYaml;
+    if (freshness.* == null) freshness.* = .{};
+}
+
+fn applyFreshnessFilter(allocator: std.mem.Allocator, freshness: *?types.FreshnessThreshold, kv: KeyValue) !void {
+    var value = freshness.* orelse types.FreshnessThreshold{};
+    value.filter = try dupTrimmedScalar(allocator, kv.value);
+    freshness.* = value;
+}
+
+fn applyFreshnessTimeKeyValue(allocator: std.mem.Allocator, time: *types.FreshnessTime, kv: KeyValue) !void {
     if (!std.mem.eql(u8, kv.key, "count") and !std.mem.eql(u8, kv.key, "period")) return;
-    var freshness = source.freshness orelse types.FreshnessThreshold{};
-    var time = switch (time_key) {
-        .warn_after => freshness.warn_after orelse types.FreshnessTime{},
-        .error_after => freshness.error_after orelse types.FreshnessTime{},
-    };
     if (std.mem.eql(u8, kv.key, "count")) {
         const count_text = std.mem.trim(u8, kv.value, " \t\r");
         time.count = try std.fmt.parseUnsigned(u64, count_text, 10);
@@ -1121,11 +1335,36 @@ fn applyFreshnessTimeKeyValue(allocator: std.mem.Allocator, source: *types.Sourc
         if (!std.mem.eql(u8, period, "minute") and !std.mem.eql(u8, period, "hour") and !std.mem.eql(u8, period, "day")) return error.UnsupportedYaml;
         time.period = period;
     }
+}
+
+fn applyPendingFreshnessTime(freshness_target: *?types.FreshnessThreshold, time_key: FreshnessTimeKey, time: types.FreshnessTime) !void {
+    if (time.count == null or time.period == null) return;
+    var freshness = freshness_target.* orelse types.FreshnessThreshold{};
     switch (time_key) {
         .warn_after => freshness.warn_after = time,
         .error_after => freshness.error_after = time,
     }
-    source.freshness = freshness;
+    freshness_target.* = freshness;
+}
+
+fn dupSourceSchemaScalar(allocator: std.mem.Allocator, graph: *const Graph, value: []const u8) ![]const u8 {
+    const scalar = try dupTrimmedScalar(allocator, value);
+    if (std.mem.indexOf(u8, scalar, "{{") == null) return scalar;
+
+    const token = "{{ target.schema }}";
+    if (std.mem.indexOf(u8, scalar, token) == null) return error.UnsupportedYaml;
+
+    var out: std.ArrayList(u8) = .empty;
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, scalar, cursor, token)) |start| {
+        try out.appendSlice(allocator, scalar[cursor..start]);
+        try out.appendSlice(allocator, graph.target_schema);
+        cursor = start + token.len;
+    }
+    try out.appendSlice(allocator, scalar[cursor..]);
+    const rendered = try out.toOwnedSlice(allocator);
+    if (std.mem.indexOf(u8, rendered, "{{") != null or std.mem.indexOf(u8, rendered, "}}") != null) return error.UnsupportedYaml;
+    return rendered;
 }
 
 pub fn parseExposuresFromText(allocator: std.mem.Allocator, text: []const u8, resource_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
@@ -2322,6 +2561,142 @@ test "parseSourcesFromText records table-level source freshness" {
     try std.testing.expect(graph.sources.items[1].loaded_at_field == null);
     try std.testing.expectEqualStrings("select max(loaded_at) from raw.orders", graph.sources.items[1].loaded_at_query.?);
     try std.testing.expectEqual(@as(u64, 3), graph.sources.items[1].freshness.?.warn_after.?.count.?);
+}
+
+test "parseSourcesFromText applies source config defaults and table overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    schema: "{{ target.schema }}_raw"
+        \\    config:
+        \\      loaded_at_field: loaded_at
+        \\      freshness:
+        \\        warn_after:
+        \\          count: 12
+        \\          period: hour
+        \\        error_after:
+        \\          count: 1
+        \\          period: day
+        \\        filter: id > 0
+        \\    tables:
+        \\      - name: inherited
+        \\      - name: query_override
+        \\        config:
+        \\          loaded_at_query: select max(loaded_at) from raw.query_override
+        \\      - name: threshold_override
+        \\        freshness:
+        \\          warn_after:
+        \\            count: 3
+        \\      - name: disabled_freshness
+        \\        freshness: null
+    ;
+
+    try parseSourcesFromText(allocator, yaml, "models/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 4), graph.sources.items.len);
+    const inherited = graph.sources.items[0];
+    try std.testing.expectEqualStrings("analytics_raw", inherited.schema_name.?);
+    try std.testing.expectEqualStrings("loaded_at", inherited.loaded_at_field.?);
+    try std.testing.expect(inherited.loaded_at_query == null);
+    try std.testing.expectEqual(@as(u64, 12), inherited.freshness.?.warn_after.?.count.?);
+    try std.testing.expectEqualStrings("hour", inherited.freshness.?.warn_after.?.period.?);
+    try std.testing.expectEqual(@as(u64, 1), inherited.freshness.?.error_after.?.count.?);
+    try std.testing.expectEqualStrings("id > 0", inherited.freshness.?.filter.?);
+
+    const query_override = graph.sources.items[1];
+    try std.testing.expectEqualStrings("loaded_at", query_override.loaded_at_field.?);
+    try std.testing.expectEqualStrings("select max(loaded_at) from raw.query_override", query_override.loaded_at_query.?);
+    try std.testing.expectEqual(@as(u64, 12), query_override.freshness.?.warn_after.?.count.?);
+
+    const threshold_override = graph.sources.items[2];
+    try std.testing.expectEqualStrings("loaded_at", threshold_override.loaded_at_field.?);
+    try std.testing.expectEqual(@as(u64, 12), threshold_override.freshness.?.warn_after.?.count.?);
+    try std.testing.expectEqualStrings("hour", threshold_override.freshness.?.warn_after.?.period.?);
+    try std.testing.expectEqual(@as(u64, 1), threshold_override.freshness.?.error_after.?.count.?);
+
+    const disabled_freshness = graph.sources.items[3];
+    try std.testing.expectEqualStrings("loaded_at", disabled_freshness.loaded_at_field.?);
+    try std.testing.expect(disabled_freshness.freshness == null);
+}
+
+test "parseSourcesFromText rejects same-layer source loaded_at conflicts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    loaded_at_field: loaded_at
+        \\    config:
+        \\      loaded_at_query: select max(loaded_at) from raw.orders
+        \\    tables:
+        \\      - name: orders
+    ;
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try std.testing.expectError(error.UnsupportedYaml, parseSourcesFromText(allocator, yaml, "models/schema.yml", "demo", &graph));
+
+    const inverse_yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    loaded_at_query: select max(loaded_at) from raw.orders
+        \\    config:
+        \\      loaded_at_field: loaded_at
+        \\    tables:
+        \\      - name: orders
+    ;
+
+    var inverse_graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer inverse_graph.deinit();
+    try std.testing.expectError(error.UnsupportedYaml, parseSourcesFromText(allocator, inverse_yaml, "models/schema.yml", "demo", &inverse_graph));
+}
+
+test "parseSourcesFromText rejects same-layer table loaded_at conflicts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    tables:
+        \\      - name: orders
+        \\        loaded_at_field: loaded_at
+        \\        config:
+        \\          loaded_at_query: select max(loaded_at) from raw.orders
+    ;
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try std.testing.expectError(error.UnsupportedYaml, parseSourcesFromText(allocator, yaml, "models/schema.yml", "demo", &graph));
+
+    const inverse_yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    tables:
+        \\      - name: orders
+        \\        loaded_at_query: select max(loaded_at) from raw.orders
+        \\        config:
+        \\          loaded_at_field: loaded_at
+    ;
+
+    var inverse_graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer inverse_graph.deinit();
+    try std.testing.expectError(error.UnsupportedYaml, parseSourcesFromText(allocator, inverse_yaml, "models/schema.yml", "demo", &inverse_graph));
 }
 
 test "parseSourcesFromText records source column generic tests" {

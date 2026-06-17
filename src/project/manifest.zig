@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const compiler = @import("compiler.zig");
 const selector = @import("selector.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
@@ -66,19 +67,8 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("\n    ");
         try writeJsonString(writer, source.unique_id);
-        try writer.writeAll(": {\"unique_id\":");
-        try writeJsonString(writer, source.unique_id);
-        try writer.writeAll(",\"resource_type\":\"source\",\"package_name\":");
-        try writeJsonString(writer, source.package_name);
-        try writer.writeAll(",\"source_name\":");
-        try writeJsonString(writer, source.source_name);
-        try writer.writeAll(",\"name\":");
-        try writeJsonString(writer, source.table_name);
-        try writer.writeAll(",\"original_file_path\":");
-        try writeJsonString(writer, util.normalizeForDisplay(source.original_file_path));
-        try writer.writeAll(",\"columns\":");
-        try writeColumns(writer, source.columns.items);
-        try writer.writeAll("}");
+        try writer.writeAll(": ");
+        try writeSourceNode(allocator, writer, source);
     }
     try writer.writeAll("\n  },\n  \"macros\": {");
     for (graph.macros.items, 0..) |macro, index| {
@@ -261,6 +251,52 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
         try writer.writeAll("null");
     }
     try writer.writeAll("}");
+}
+
+fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: SourceDef) !void {
+    const schema_name = compiler.sourceSchemaName(&source);
+    const relation_name = try compiler.relationNameForSource(allocator, &source);
+    defer allocator.free(relation_name);
+
+    try writer.writeAll("{\"unique_id\":");
+    try writeJsonString(writer, source.unique_id);
+    try writer.writeAll(",\"resource_type\":\"source\",\"package_name\":");
+    try writeJsonString(writer, source.package_name);
+    try writer.writeAll(",\"source_name\":");
+    try writeJsonString(writer, source.source_name);
+    try writer.writeAll(",\"name\":");
+    try writeJsonString(writer, source.table_name);
+    try writer.writeAll(",\"database\":null,\"schema\":");
+    try writeJsonString(writer, schema_name);
+    try writer.writeAll(",\"identifier\":");
+    try writeJsonString(writer, source.table_name);
+    try writer.writeAll(",\"relation_name\":");
+    try writeJsonString(writer, relation_name);
+    try writer.writeAll(",\"path\":");
+    try writeJsonString(writer, util.normalizeForDisplay(source.original_file_path));
+    try writer.writeAll(",\"original_file_path\":");
+    try writeJsonString(writer, util.normalizeForDisplay(source.original_file_path));
+    try writer.writeAll(",\"fqn\":[");
+    try writeJsonString(writer, source.package_name);
+    try writer.writeAll(",");
+    try writeJsonString(writer, source.source_name);
+    try writer.writeAll(",");
+    try writeJsonString(writer, source.table_name);
+    try writer.writeAll("],\"source_description\":\"\",\"loader\":\"\",\"loaded_at_field\":");
+    try writeNullableString(writer, source.loaded_at_field);
+    try writer.writeAll(",\"loaded_at_query\":");
+    try writeNullableString(writer, source.loaded_at_query);
+    try writer.writeAll(",\"freshness\":");
+    try writeFreshnessThreshold(writer, source.freshness);
+    try writer.writeAll(",\"columns\":");
+    try writeColumns(writer, source.columns.items);
+    try writer.writeAll(",\"config\":{\"enabled\":true,\"freshness\":");
+    try writeFreshnessThreshold(writer, source.freshness);
+    try writer.writeAll(",\"loaded_at_field\":");
+    try writeNullableString(writer, source.loaded_at_field);
+    try writer.writeAll(",\"loaded_at_query\":");
+    try writeNullableString(writer, source.loaded_at_query);
+    try writer.writeAll(",\"meta\":{},\"tags\":[]}}");
 }
 
 fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {
@@ -509,6 +545,36 @@ fn writeNullableString(writer: *Io.Writer, value: ?[]const u8) !void {
     }
 }
 
+fn writeFreshnessThreshold(writer: *Io.Writer, value: ?types.FreshnessThreshold) !void {
+    const threshold = value orelse {
+        try writer.writeAll("null");
+        return;
+    };
+    try writer.writeAll("{\"warn_after\":");
+    try writeFreshnessTime(writer, threshold.warn_after);
+    try writer.writeAll(",\"error_after\":");
+    try writeFreshnessTime(writer, threshold.error_after);
+    try writer.writeAll(",\"filter\":");
+    try writeNullableString(writer, threshold.filter);
+    try writer.writeAll("}");
+}
+
+fn writeFreshnessTime(writer: *Io.Writer, value: ?types.FreshnessTime) !void {
+    const time = value orelse {
+        try writer.writeAll("null");
+        return;
+    };
+    try writer.writeAll("{\"count\":");
+    if (time.count) |count| {
+        try writer.print("{d}", .{count});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"period\":");
+    try writeNullableString(writer, time.period);
+    try writer.writeAll("}");
+}
+
 fn writeMetaObject(writer: *Io.Writer, entries: []const MetaEntry) !void {
     try writer.writeAll("{");
     for (entries, 0..) |entry, index| {
@@ -664,6 +730,13 @@ test "manifest writer emits source generic tests with null attached node" {
         .source_name = "raw",
         .table_name = "customers",
         .original_file_path = "models/schema.yml",
+        .schema_name = "analytics_raw",
+        .loaded_at_field = "loaded_at",
+        .freshness = .{
+            .warn_after = .{ .count = 12, .period = "hour" },
+            .error_after = .{ .count = 1, .period = "day" },
+            .filter = "customer_id > 0",
+        },
     });
     try graph.sources.items[0].columns.append(allocator, .{
         .name = "customer_id",
@@ -691,6 +764,19 @@ test "manifest writer emits source generic tests with null attached node" {
 
     const root = parsed.value.object;
     const source_node = root.get("sources").?.object.get("source.demo.raw.customers").?.object;
+    try std.testing.expectEqualStrings("analytics_raw", source_node.get("schema").?.string);
+    try std.testing.expectEqualStrings("customers", source_node.get("identifier").?.string);
+    try std.testing.expectEqualStrings("\"analytics_raw\".\"customers\"", source_node.get("relation_name").?.string);
+    try std.testing.expectEqualStrings("loaded_at", source_node.get("loaded_at_field").?.string);
+    try std.testing.expect(source_node.get("loaded_at_query").? == .null);
+    const freshness = source_node.get("freshness").?.object;
+    try std.testing.expectEqual(@as(i64, 12), freshness.get("warn_after").?.object.get("count").?.integer);
+    try std.testing.expectEqualStrings("hour", freshness.get("warn_after").?.object.get("period").?.string);
+    try std.testing.expectEqual(@as(i64, 1), freshness.get("error_after").?.object.get("count").?.integer);
+    try std.testing.expectEqualStrings("customer_id > 0", freshness.get("filter").?.string);
+    const source_config = source_node.get("config").?.object;
+    try std.testing.expect(source_config.get("enabled").?.bool);
+    try std.testing.expectEqualStrings("loaded_at", source_config.get("loaded_at_field").?.string);
     const source_columns = source_node.get("columns").?.object;
     const source_column = source_columns.get("customer_id").?.object;
     try std.testing.expectEqualStrings("customer_id", source_column.get("name").?.string);

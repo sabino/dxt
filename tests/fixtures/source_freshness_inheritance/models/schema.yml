@@ -1,0 +1,28 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: "{{ target.schema }}_raw"
+    config:
+      loaded_at_field: loaded_at
+      freshness:
+        warn_after:
+          count: 1
+          period: hour
+        error_after:
+          count: 1
+          period: day
+    tables:
+      - name: inherited_customers
+      - name: query_customers
+        config:
+          loaded_at_query: select max(loaded_at) from main_raw.query_customers
+      - name: override_customers
+        config:
+          loaded_at_field: override_loaded_at
+          freshness:
+            warn_after:
+              count: 3
+              period: hour
+      - name: null_freshness_customers
+        freshness: null

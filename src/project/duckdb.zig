@@ -117,7 +117,7 @@ pub fn renderSourceFreshnessSql(allocator: std.mem.Allocator, source: *const Sou
     const loaded_at_field = source.loaded_at_field orelse return error.UnsupportedSourceFreshness;
     const loaded_at_expression = std.mem.trim(u8, loaded_at_field, " \t\r\n");
     if (loaded_at_expression.len == 0) return error.UnsupportedSourceFreshness;
-    const quoted_schema = try compiler.quoteIdentifier(allocator, source.source_name);
+    const quoted_schema = try compiler.quoteIdentifier(allocator, compiler.sourceSchemaName(source));
     defer allocator.free(quoted_schema);
     const quoted_table = try compiler.quoteIdentifier(allocator, source.table_name);
     defer allocator.free(quoted_table);
@@ -214,7 +214,7 @@ fn catalogEntryForNode(allocator: std.mem.Allocator, graph: *const Graph, node: 
 }
 
 fn catalogEntryForSource(allocator: std.mem.Allocator, source: *const SourceDef, rows: []const std.json.Value) !?catalog.CatalogEntry {
-    return try catalogEntryForRelation(allocator, source.unique_id, source.source_name, source.table_name, rows);
+    return try catalogEntryForRelation(allocator, source.unique_id, compiler.sourceSchemaName(source), source.table_name, rows);
 }
 
 fn catalogEntryForRelation(allocator: std.mem.Allocator, unique_id: []const u8, schema_name: []const u8, identifier: []const u8, rows: []const std.json.Value) !?catalog.CatalogEntry {
@@ -557,7 +557,7 @@ fn genericTestRelationName(allocator: std.mem.Allocator, graph: *const Graph, te
     }
     if (test_node.source_refs.items.len != 1) return error.UnsupportedTestExecution;
     const source = findSourceByRef(graph, test_node.source_refs.items[0]) orelse return error.UnsupportedTestExecution;
-    const quoted_schema = try compiler.quoteIdentifier(allocator, source.source_name);
+    const quoted_schema = try compiler.quoteIdentifier(allocator, compiler.sourceSchemaName(source));
     defer allocator.free(quoted_schema);
     const quoted_table = try compiler.quoteIdentifier(allocator, source.table_name);
     defer allocator.free(quoted_table);
@@ -1146,11 +1146,12 @@ test "catalogEntryForSource maps DuckDB JSON rows to catalog source metadata" {
         .source_name = "raw",
         .table_name = "customers",
         .original_file_path = "models/schema.yml",
+        .schema_name = "analytics_raw",
     };
 
     const rows_json =
         \\[
-        \\  {"table_schema":"raw","table_name":"customers","table_type":"BASE TABLE","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"}
+        \\  {"table_schema":"analytics_raw","table_name":"customers","table_type":"BASE TABLE","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"}
         \\]
     ;
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rows_json, .{});
@@ -1162,7 +1163,7 @@ test "catalogEntryForSource maps DuckDB JSON rows to catalog source metadata" {
     }
 
     try std.testing.expectEqualStrings("source.demo.raw.customers", entry.unique_id);
-    try std.testing.expectEqualStrings("raw", entry.schema);
+    try std.testing.expectEqualStrings("analytics_raw", entry.schema);
     try std.testing.expectEqualStrings("customers", entry.name);
     try std.testing.expectEqualStrings("BASE TABLE", entry.relation_type);
     try std.testing.expectEqualStrings("customer_id", entry.columns.items[0].name);
@@ -1179,13 +1180,14 @@ test "renderSourceFreshnessSql quotes source relation and renders loaded_at_fiel
         .source_name = "raw",
         .table_name = "orders",
         .original_file_path = "models/schema.yml",
+        .schema_name = "analytics_raw",
         .loaded_at_field = "loaded_at",
         .freshness = .{ .filter = "order_id > 0" },
     };
 
     const sql = try renderSourceFreshnessSql(allocator, &source);
     try std.testing.expectEqualStrings(
-        "select coalesce(strftime(max(loaded_at), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max(loaded_at)), 9.223372036854776e18) as age_seconds from \"raw\".\"orders\" where order_id > 0;",
+        "select coalesce(strftime(max(loaded_at), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max(loaded_at)), 9.223372036854776e18) as age_seconds from \"analytics_raw\".\"orders\" where order_id > 0;",
         sql,
     );
 
