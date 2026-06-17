@@ -37,11 +37,17 @@ pub const ProjectConfig = struct {
     seed_paths: std.ArrayList([]const u8) = .empty,
     macro_paths: std.ArrayList([]const u8) = .empty,
     model_path_configs: std.ArrayList(ModelPathConfig) = .empty,
+    dispatch_configs: std.ArrayList(DispatchConfig) = .empty,
     vars: std.ArrayList(VarEntry) = .empty,
     seed_docs: DocsConfig = .{},
     macro_paths_set: bool = false,
     validate_macro_args: bool = false,
     target_path: []const u8 = "target",
+};
+
+pub const DispatchConfig = struct {
+    macro_namespace: []const u8,
+    search_order: std.ArrayList([]const u8) = .empty,
 };
 
 pub const ModelPathConfig = struct {
@@ -258,6 +264,7 @@ pub const Graph = struct {
     unmatched_model_properties: std.ArrayList(UnmatchedModelProperty) = .empty,
     unmatched_macro_properties: std.ArrayList(UnmatchedMacroProperty) = .empty,
     macro_argument_warnings: std.ArrayList([]const u8) = .empty,
+    dispatch_configs: std.ArrayList(DispatchConfig) = .empty,
     validate_macro_args: bool = false,
 
     pub fn deinit(self: *Graph) void {
@@ -290,6 +297,7 @@ pub const Graph = struct {
         self.unmatched_model_properties.deinit(self.allocator);
         self.unmatched_macro_properties.deinit(self.allocator);
         self.macro_argument_warnings.deinit(self.allocator);
+        deinitDispatchConfigs(self.allocator, &self.dispatch_configs);
         self.vars.deinit(self.allocator);
     }
 };
@@ -308,7 +316,15 @@ pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig)
     config.seed_paths.deinit(allocator);
     config.macro_paths.deinit(allocator);
     config.model_path_configs.deinit(allocator);
+    deinitDispatchConfigs(allocator, &config.dispatch_configs);
     config.vars.deinit(allocator);
+}
+
+pub fn deinitDispatchConfigs(allocator: std.mem.Allocator, configs: *std.ArrayList(DispatchConfig)) void {
+    for (configs.items) |*config| {
+        config.search_order.deinit(allocator);
+    }
+    configs.deinit(allocator);
 }
 
 pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {

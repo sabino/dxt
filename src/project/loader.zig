@@ -9,6 +9,7 @@ const util = @import("util.zig");
 
 const Runtime = types.Runtime;
 const Options = types.Options;
+const DispatchConfig = types.DispatchConfig;
 const Graph = types.Graph;
 const loadProjectConfig = project_config.loadProjectConfig;
 const deinitProjectConfig = types.deinitProjectConfig;
@@ -63,6 +64,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         graph.profile_name = identity.profile_name;
         graph.target_name = identity.target_name;
     }
+    try appendDispatchConfigsToGraph(runtime.allocator, &graph, config.dispatch_configs.items);
     try graph.vars.appendSlice(runtime.allocator, config.vars.items);
     if (options.vars) |vars_text| {
         try parseVarsText(runtime.allocator, vars_text, &graph.vars);
@@ -131,6 +133,18 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     try rejectDuplicateMacros(&graph);
     try callbacks.resolve_macro_dependencies(&graph);
     return graph;
+}
+
+fn appendDispatchConfigsToGraph(allocator: std.mem.Allocator, graph: *Graph, configs: []const DispatchConfig) !void {
+    for (configs) |config| {
+        var search_order: std.ArrayList([]const u8) = .empty;
+        errdefer search_order.deinit(allocator);
+        try search_order.appendSlice(allocator, config.search_order.items);
+        try graph.dispatch_configs.append(allocator, .{
+            .macro_namespace = config.macro_namespace,
+            .search_order = search_order,
+        });
+    }
 }
 
 fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []const u8, macro_paths: []const []const u8, parse_properties: bool, callbacks: Callbacks, graph: *Graph) !void {

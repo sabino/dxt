@@ -644,6 +644,16 @@ fn appendTestMacro(graph: *Graph, package_name: []const u8, name: []const u8) ![
     return unique_id;
 }
 
+fn appendTestDispatchConfig(graph: *Graph, macro_namespace: []const u8, search_order: []const []const u8) !void {
+    var order: std.ArrayList([]const u8) = .empty;
+    errdefer order.deinit(graph.allocator);
+    try order.appendSlice(graph.allocator, search_order);
+    try graph.dispatch_configs.append(graph.allocator, .{
+        .macro_namespace = macro_namespace,
+        .search_order = order,
+    });
+}
+
 test "sql scanner extracts refs sources and config tags from jinja spans" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -799,6 +809,33 @@ test "sql scanner records literal adapter dispatch dependencies" {
     try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ adapter.dispatch(macro_name='render_value', 'pkg')() }}", &node, &graph));
     try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ adapter.dispatch(, 'render_value')() }}", &node, &graph));
     try std.testing.expectError(error.UnresolvedMacro, scanSql(allocator, "{{ adapter.dispatch('missing')() }}", &node, &graph));
+}
+
+test "sql scanner uses configured adapter dispatch search order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    _ = try appendTestMacro(&graph, "demo", "default__render_value");
+    _ = try appendTestMacro(&graph, "override_pkg", "duckdb__render_value");
+    _ = try appendTestMacro(&graph, "util_pkg", "duckdb__render_value");
+    try appendTestDispatchConfig(&graph, "util_pkg", &[_][]const u8{ "override_pkg", "util_pkg" });
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator, "select {{ adapter.dispatch('render_value', 'util_pkg')('customer_id') }}", &node, &graph);
+    try std.testing.expectEqual(@as(usize, 1), node.macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.override_pkg.duckdb__render_value", node.macro_depends_on.items[0]);
 }
 
 test "adapter dispatch prefixes come from graph adapter type" {

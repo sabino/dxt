@@ -5,6 +5,7 @@ const util = @import("util.zig");
 const Runtime = types.Runtime;
 const ProjectConfig = types.ProjectConfig;
 const ModelPathConfig = types.ModelPathConfig;
+const DispatchConfig = types.DispatchConfig;
 const DocsConfig = types.DocsConfig;
 const Graph = types.Graph;
 const VarEntry = types.VarEntry;
@@ -192,6 +193,7 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
     if (config.name.len == 0) return error.InvalidProjectName;
     try parseProjectVars(allocator, text, &config.vars);
     try parseProjectFlags(text, &config);
+    try parseProjectDispatchConfigs(allocator, text, &config.dispatch_configs);
     try parseProjectModelPathConfigs(allocator, text, &config.model_path_configs);
     try parseProjectSeedDocs(allocator, text, &config.seed_docs);
     if (config.model_paths.items.len == 0) {
@@ -312,6 +314,118 @@ fn sortVars(vars: []VarEntry) void {
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lessThan);
+}
+
+const DispatchParseState = struct {
+    config: DispatchConfig,
+    has_macro_namespace: bool = false,
+    has_search_order: bool = false,
+    reading_search_order: bool = false,
+    search_order_indent: usize = 0,
+};
+
+fn parseProjectDispatchConfigs(allocator: std.mem.Allocator, text: []const u8, configs: *std.ArrayList(DispatchConfig)) !void {
+    var in_dispatch = false;
+    var dispatch_indent: usize = 0;
+    var entry: ?DispatchParseState = null;
+    var saw_entry = false;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (in_dispatch and indent <= dispatch_indent and !std.mem.eql(u8, trimmed, "dispatch:")) {
+            if (entry) |*current| try finishDispatchEntry(allocator, configs, current);
+            entry = null;
+            in_dispatch = false;
+            saw_entry = false;
+        }
+        if (!in_dispatch) {
+            const kv = splitKeyValue(trimmed) orelse continue;
+            if (indent != 0) continue;
+            if (!std.mem.eql(u8, kv.key, "dispatch")) continue;
+            const value = std.mem.trim(u8, kv.value, " \t\r");
+            if (value.len == 0) {
+                in_dispatch = true;
+                dispatch_indent = indent;
+            } else if (!std.mem.eql(u8, value, "[]")) {
+                return error.UnsupportedYaml;
+            }
+            continue;
+        }
+
+        if (indent <= dispatch_indent) continue;
+        if (entry) |*current| {
+            if (current.reading_search_order) {
+                if (indent <= current.search_order_indent) {
+                    current.reading_search_order = false;
+                } else {
+                    if (!std.mem.startsWith(u8, trimmed, "- ")) return error.UnsupportedYaml;
+                    try current.config.search_order.append(allocator, try dupTrimmedScalar(allocator, trimmed[2..]));
+                    current.has_search_order = true;
+                    continue;
+                }
+            }
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "- ")) {
+            if (entry) |*current| try finishDispatchEntry(allocator, configs, current);
+            entry = DispatchParseState{ .config = .{ .macro_namespace = "" } };
+            saw_entry = true;
+            const rest = std.mem.trim(u8, trimmed[2..], " \t\r");
+            if (rest.len != 0) {
+                const kv = splitKeyValue(rest) orelse return error.UnsupportedYaml;
+                if (entry) |*current| try applyDispatchEntryKeyValue(allocator, current, kv, indent);
+            }
+            continue;
+        }
+
+        if (entry == null) return error.UnsupportedYaml;
+        const kv = splitKeyValue(trimmed) orelse return error.UnsupportedYaml;
+        if (entry) |*current| try applyDispatchEntryKeyValue(allocator, current, kv, indent);
+    }
+
+    if (in_dispatch) {
+        if (entry) |*current| try finishDispatchEntry(allocator, configs, current);
+        if (!saw_entry) return error.UnsupportedYaml;
+    }
+}
+
+fn applyDispatchEntryKeyValue(allocator: std.mem.Allocator, state: *DispatchParseState, kv: KeyValue, indent: usize) !void {
+    if (std.mem.eql(u8, kv.key, "macro_namespace")) {
+        const value = try dupTrimmedScalar(allocator, kv.value);
+        if (value.len == 0) return error.UnsupportedYaml;
+        state.config.macro_namespace = value;
+        state.has_macro_namespace = true;
+        state.reading_search_order = false;
+    } else if (std.mem.eql(u8, kv.key, "search_order")) {
+        state.config.search_order.clearRetainingCapacity();
+        state.has_search_order = false;
+        const value = std.mem.trim(u8, kv.value, " \t\r");
+        if (value.len == 0) {
+            state.reading_search_order = true;
+            state.search_order_indent = indent;
+        } else {
+            if (value[0] != '[') return error.UnsupportedYaml;
+            try parseInlineStringList(allocator, value, &state.config.search_order);
+            state.has_search_order = true;
+            state.reading_search_order = false;
+        }
+    } else {
+        return error.UnsupportedYaml;
+    }
+}
+
+fn finishDispatchEntry(allocator: std.mem.Allocator, configs: *std.ArrayList(DispatchConfig), state: *DispatchParseState) !void {
+    state.reading_search_order = false;
+    if (!state.has_macro_namespace or !state.has_search_order) return error.UnsupportedYaml;
+    try configs.append(allocator, state.config);
+    state.config = .{ .macro_namespace = "" };
+    state.has_macro_namespace = false;
+    state.has_search_order = false;
 }
 
 const PathStackEntry = struct {
@@ -609,6 +723,84 @@ test "project config parser reads paths and nested docs configs" {
     try std.testing.expectEqualStrings("#336699", model_config.docs.node_color.?);
     try std.testing.expect(config.seed_docs.configured);
     try std.testing.expect(!config.seed_docs.show);
+}
+
+test "project config parser reads dispatch search order entries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const text =
+        \\name: demo
+        \\dispatch:
+        \\  - macro_namespace: util_pkg
+        \\    search_order: ["override_pkg", demo, util_pkg]
+        \\  - macro_namespace: dbt
+        \\    search_order:
+        \\      - demo
+        \\      - dbt
+    ;
+
+    var config = try parseProjectConfigText(allocator, text);
+    defer deinitProjectConfig(allocator, &config);
+
+    try std.testing.expectEqual(@as(usize, 2), config.dispatch_configs.items.len);
+    try std.testing.expectEqualStrings("util_pkg", config.dispatch_configs.items[0].macro_namespace);
+    try std.testing.expectEqual(@as(usize, 3), config.dispatch_configs.items[0].search_order.items.len);
+    try std.testing.expectEqualStrings("override_pkg", config.dispatch_configs.items[0].search_order.items[0]);
+    try std.testing.expectEqualStrings("demo", config.dispatch_configs.items[0].search_order.items[1]);
+    try std.testing.expectEqualStrings("util_pkg", config.dispatch_configs.items[0].search_order.items[2]);
+    try std.testing.expectEqualStrings("dbt", config.dispatch_configs.items[1].macro_namespace);
+    try std.testing.expectEqual(@as(usize, 2), config.dispatch_configs.items[1].search_order.items.len);
+    try std.testing.expectEqualStrings("demo", config.dispatch_configs.items[1].search_order.items[0]);
+    try std.testing.expectEqualStrings("dbt", config.dispatch_configs.items[1].search_order.items[1]);
+}
+
+test "project config parser rejects malformed dispatch entries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(error.UnsupportedYaml, parseProjectConfigText(allocator,
+        \\name: demo
+        \\dispatch:
+        \\  - search_order: [demo]
+    ));
+    try std.testing.expectError(error.UnsupportedYaml, parseProjectConfigText(allocator,
+        \\name: demo
+        \\dispatch:
+        \\  - macro_namespace: util_pkg
+    ));
+    try std.testing.expectError(error.UnsupportedYaml, parseProjectConfigText(allocator,
+        \\name: demo
+        \\dispatch:
+        \\  - macro_namespace: util_pkg
+        \\    search_order: demo
+    ));
+    try std.testing.expectError(error.UnsupportedYaml, parseProjectConfigText(allocator,
+        \\name: demo
+        \\dispatch:
+        \\  - macro_namespace: util_pkg
+        \\    search_order:
+    ));
+}
+
+test "project config parser ignores nested keys named dispatch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var config = try parseProjectConfigText(allocator,
+        \\name: demo
+        \\vars:
+        \\  dispatch: value
+    );
+    defer deinitProjectConfig(allocator, &config);
+
+    try std.testing.expectEqual(@as(usize, 0), config.dispatch_configs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), config.vars.items.len);
+    try std.testing.expectEqualStrings("dispatch", config.vars.items[0].name);
+    try std.testing.expectEqualStrings("value", config.vars.items[0].value);
 }
 
 test "vars parser accepts inline and multiline scalar maps with later override" {

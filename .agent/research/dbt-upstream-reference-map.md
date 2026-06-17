@@ -82,6 +82,11 @@ Every compatibility slice should record:
 - Existing extracted modules are `types`, `util`, `config`, `fs`, `jinja`,
   `loader`, `resolve`, `parse`, `selector`, `manifest`, `compiler`, and
   `catalog`.
+- Root-project `dispatch:` config is parsed in `src/project/config.zig`, copied
+  into the graph by `src/project/loader.zig`, and consumed by
+  `src/project/resolve.zig` for static `adapter.dispatch(...)`
+  `depends_on.macros` extraction. This is documented in
+  `.agent/research/m2-project-dispatch-config.md`.
 - The test base includes native Zig tests for module-level helpers and pytest
   integration tests for CLI/artifact fixtures plus a pinned local Manifest v12
   schema slice.

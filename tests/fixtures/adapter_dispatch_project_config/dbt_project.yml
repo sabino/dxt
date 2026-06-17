@@ -1,0 +1,10 @@
+name: adapter_dispatch_project_config
+version: 1.0.0
+config-version: 2
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+
+dispatch:
+  - macro_namespace: util_pkg
+    search_order: ["override_pkg", "util_pkg"]
