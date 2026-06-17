@@ -129,6 +129,65 @@ def test_compile_select_limits_compiled_models_but_keeps_graph_context(tmp_path:
     assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
 
 
+def assert_profile_target_context_outputs(target: Path, command_name: str) -> None:
+    compiled_root = target / "compiled" / "profile_target_context" / "models"
+    current_sql = (compiled_root / "current_context.sql").read_text()
+    assert "'profile_target_context' as profile_name" in current_sql
+    assert "'pg' as target_name" in current_sql
+    assert "'pg' as target_name_alias" in current_sql
+    assert "'postgres' as adapter_type" in current_sql
+    assert "'analytics' as target_schema" in current_sql
+    assert "'analytics' as this_schema" in current_sql
+    assert "'current_context' as this_name" in current_sql
+    assert "'current_context' as this_table" in current_sql
+    assert "'current_context' as this_identifier" in current_sql
+    assert 'from "analytics"."current_context"' in current_sql
+    assert (compiled_root / "downstream.sql").read_text().strip() == 'select *\nfrom "analytics"."current_context"'
+
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
+    current = manifest["nodes"]["model.profile_target_context.current_context"]
+    downstream = manifest["nodes"]["model.profile_target_context.downstream"]
+    assert current["relation_name"] == '"analytics"."current_context"'
+    assert downstream["compiled_code"].strip() == 'select *\nfrom "analytics"."current_context"'
+    if command_name == "docs generate":
+        assert (target / "catalog.json").exists()
+    else:
+        assert not (target / "run_results.json").exists()
+
+
+def test_compile_docs_run_and_build_render_profile_target_and_this_context(tmp_path: Path):
+    project = copy_fixture(tmp_path, "profile_target_context")
+    commands = [
+        ("compile", [DXT, "compile"], 0),
+        ("docs generate", [DXT, "docs", "generate"], 0),
+        ("run", [DXT, "run"], 2),
+        ("build", [DXT, "build"], 2),
+    ]
+    for index, (command_name, command, expected_returncode) in enumerate(commands):
+        target = tmp_path / f"profile-target-{index}"
+        result = subprocess.run(
+            [
+                *command,
+                "--project-dir",
+                str(project),
+                "--profiles-dir",
+                str(project),
+                "--target",
+                "pg",
+                "--target-path",
+                str(target),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == expected_returncode, result.stderr
+        assert_profile_target_context_outputs(target, command_name)
+
+
 def test_compile_docs_run_and_build_resolve_cli_vars(tmp_path: Path):
     project = copy_fixture(tmp_path, "dynamic_var_ref")
 

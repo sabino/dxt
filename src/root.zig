@@ -163,6 +163,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingProfileOutputs => stderr.writeAll("error: selected profile must define outputs in profiles.yml\n") catch {},
         error.MissingProfileTarget => stderr.writeAll("error: selected target was not found in profiles.yml\n") catch {},
         error.MissingProfileType => stderr.writeAll("error: selected profile target must define adapter type\n") catch {},
+        error.MissingProfileSchema => stderr.writeAll("error: selected profile target must define a non-empty schema when schema is present\n") catch {},
         error.InvalidOutput => stderr.writeAll("error: --output must be text or json\n") catch {},
         error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, or test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},

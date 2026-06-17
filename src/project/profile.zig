@@ -42,11 +42,19 @@ pub fn parseAdapterIdentityText(allocator: std.mem.Allocator, text: []const u8, 
         try allocator.dupe(u8, "default");
     if (target_name.len == 0) return error.MissingProfileTarget;
 
-    const adapter_type = try findProfileOutputType(allocator, text, profile_name, target_name);
+    const adapter_type = (try findProfileOutputScalar(allocator, text, profile_name, target_name, "type", error.MissingProfileType)) orelse return error.MissingProfileType;
+    const normalized_adapter_type = try normalizeAdapterType(allocator, adapter_type);
+    const target_schema = if (try findProfileOutputScalar(allocator, text, profile_name, target_name, "schema", error.MissingProfileSchema)) |schema|
+        schema
+    else if (std.mem.eql(u8, normalized_adapter_type, "duckdb"))
+        try allocator.dupe(u8, "main")
+    else
+        return error.MissingProfileSchema;
     return .{
         .profile_name = profile_name,
         .target_name = target_name,
-        .adapter_type = try normalizeAdapterType(allocator, adapter_type),
+        .adapter_type = normalized_adapter_type,
+        .target_schema = target_schema,
     };
 }
 
@@ -94,7 +102,14 @@ fn findProfileTarget(allocator: std.mem.Allocator, text: []const u8, selected_pr
     return null;
 }
 
-fn findProfileOutputType(allocator: std.mem.Allocator, text: []const u8, selected_profile: []const u8, selected_target: []const u8) ![]const u8 {
+fn findProfileOutputScalar(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    selected_profile: []const u8,
+    selected_target: []const u8,
+    wanted_key: []const u8,
+    comptime empty_value_error: anyerror,
+) !?[]const u8 {
     var profile_found = false;
     var outputs_found = false;
     var target_found = false;
@@ -170,17 +185,19 @@ fn findProfileOutputType(allocator: std.mem.Allocator, text: []const u8, selecte
 
         if (target_child_indent == null) target_child_indent = indent;
         if (indent != target_child_indent.?) continue;
-        if (std.mem.eql(u8, kv.key, "type")) {
+        if (std.mem.eql(u8, kv.key, wanted_key)) {
             const value = std.mem.trim(u8, kv.value, " \t\r");
-            if (value.len == 0) return error.MissingProfileType;
-            return try dupTrimmedScalar(allocator, value);
+            if (value.len == 0) return empty_value_error;
+            const scalar = try dupTrimmedScalar(allocator, value);
+            if (scalar.len == 0) return empty_value_error;
+            return scalar;
         }
     }
 
     if (!profile_found) return error.MissingProfile;
     if (!outputs_found) return error.MissingProfileOutputs;
     if (!target_found) return error.MissingProfileTarget;
-    return error.MissingProfileType;
+    return null;
 }
 
 pub fn normalizeAdapterType(allocator: std.mem.Allocator, raw_value: []const u8) ![]const u8 {
@@ -220,6 +237,7 @@ test "profile parser selects project profile target and adapter type" {
     try std.testing.expectEqualStrings("analytics", identity.profile_name);
     try std.testing.expectEqualStrings("pg", identity.target_name);
     try std.testing.expectEqualStrings("postgres", identity.adapter_type);
+    try std.testing.expectEqualStrings("analytics", identity.target_schema);
 }
 
 test "profile parser applies target override and postgres alias normalization" {
@@ -233,6 +251,7 @@ test "profile parser applies target override and postgres alias normalization" {
         \\  outputs:
         \\    pg:
         \\      type: postgresql
+        \\      schema: analytics
         \\    duck:
         \\      type: duckdb
     ;
@@ -240,6 +259,7 @@ test "profile parser applies target override and postgres alias normalization" {
     const identity = try parseAdapterIdentityText(allocator, text, "analytics", "pg");
     try std.testing.expectEqualStrings("pg", identity.target_name);
     try std.testing.expectEqualStrings("postgres", identity.adapter_type);
+    try std.testing.expectEqualStrings("analytics", identity.target_schema);
 }
 
 test "profile parser defaults missing target to default" {
@@ -257,6 +277,7 @@ test "profile parser defaults missing target to default" {
     const identity = try parseAdapterIdentityText(allocator, text, "analytics", null);
     try std.testing.expectEqualStrings("default", identity.target_name);
     try std.testing.expectEqualStrings("duckdb", identity.adapter_type);
+    try std.testing.expectEqualStrings("main", identity.target_schema);
 }
 
 test "profile parser reports missing profile target and type" {
@@ -274,5 +295,6 @@ test "profile parser reports missing profile target and type" {
 
     try std.testing.expectError(error.MissingProfileTarget, parseAdapterIdentityText(allocator, text, "analytics", null));
     try std.testing.expectError(error.MissingProfileType, parseAdapterIdentityText(allocator, text, "analytics", "dev"));
+    try std.testing.expectError(error.MissingProfileSchema, parseAdapterIdentityText(allocator, "analytics:\n  outputs:\n    default:\n      type: postgres\n", "analytics", null));
     try std.testing.expectError(error.MissingProfile, parseAdapterIdentityText(allocator, text, "other", null));
 }

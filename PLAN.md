@@ -329,6 +329,19 @@ root-project dispatch config parser. This slice lets static
 parse installed-package dispatch as root config, render Jinja in project config,
 or run adapters.
 
+Current target schema and `this` compile context source note:
+`.agent/research/m2-target-schema-this-compile.md` maps upstream dbt Core v1
+profile target context, model `this`, relation-name assignment, and compile
+context behavior plus Fusion target-context and compile-context references to
+dxt's narrow render-only implementation. This slice lets `compile`, `docs
+generate`, and run/build preflight compile selected models with profile-derived
+target schema, `target.name`, `target.target_name`, `target.schema`,
+`target.type`, `target.profile_name`, `this`, `this.schema`, `this.name`,
+`this.table`, and `this.identifier`. It does not implement arbitrary Jinja,
+adapter-specific target fields, custom schema/alias/database generation, live
+adapter connections, materialization execution, catalog introspection, or
+run-results artifacts.
+
 The next source-grounded M1/M2 slices after macro block variant support are:
 
 1. Extend the render-only artifact boundary to adapter-free docs generation:
@@ -361,8 +374,10 @@ The next source-grounded M1/M2 slices after macro block variant support are:
 5. Grow artifact schema coverage only alongside emitted fields, using v1 JSON
    schemas and v2 manifest builder behavior while keeping dxt-specific metadata
    out of dbt schemas.
-6. Add adapter relation identity and target context values after the render-only
-   compile boundary is stable, using v1 compile runner/compiler behavior plus
+6. Continue adapter relation identity beyond the current two-part
+   profile-schema relation rendering: database include policy, quoting config,
+   adapter-specific target fields, custom schema/alias/database generation, and
+   source/model relation parity, using v1 compile runner/compiler behavior plus
    v2 adapter core/SQL identity references.
 
 ## Fixture Ladder
