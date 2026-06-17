@@ -1,0 +1,102 @@
+# Compatibility Matrix
+
+`dxt` is pre-alpha. The current surface is a documented subset of dbt Core
+behavior, with DuckDB as the first deterministic execution adapter.
+
+## Commands
+
+| Command | Status | Current support | Planned gaps |
+| --- | --- | --- | --- |
+| `dxt parse` | Partial | Loads supported project files and writes a deterministic Manifest v12-shaped slice. | Full dbt parser parity, disabled resource maps, saved queries, semantic resources, full package behavior. |
+| `dxt ls` | Partial | Lists selected graph resources in text or JSON for supported selector syntax. | YAML selectors, state/result/source-status selectors, full indirect-selection parity. |
+| `dxt compile` | Partial | Compiles selected enabled SQL models through the supported render-only Jinja subset and writes compiled SQL plus manifest fields. | Full Jinja, macro execution, adapter dispatch execution, arbitrary expressions, filters, hooks. |
+| `dxt run` | Partial | Executes selected enabled DuckDB SQL models with `table` and `view` materializations. | Seeds, tests, snapshots, incremental, ephemeral, hooks, grants, failure/partial run-results, full materialization macros. |
+| `dxt build` | Partial | Executes root-project CSV seeds, selected DuckDB models, supported model/seed/source column generic tests, and mixed selected seed/model/test subsets. | Full dbt queue semantics, package seeds, wider tests, source relationship/table tests, singular/unit tests, skip/fail-fast, store failures. |
+| `dxt docs generate` | Partial | Writes `manifest.json`, compiled SQL, and `catalog.json`; introspects selected existing DuckDB model/seed/source relations when available. | Docs-time execution, comments/owners/stats, source config, `docs serve`. |
+| `dxt source freshness` | Partial | Queries selected DuckDB source tables with table-level `loaded_at_field` or `loaded_at_query` and writes Sources v3-shaped results. | Source inheritance, metadata freshness, Jinja in freshness queries, source-status selectors, concurrency, non-DuckDB adapters. |
+| `version`, help | Supported | Basic CLI metadata and help. | Release version stamping beyond current build metadata. |
+| `debug`, `clean`, `deps`, `init`, `run-operation`, `snapshot`, `retry`, `clone`, `docs serve` | Planned | Not implemented. | Command-specific dbt parity. |
+
+## Flags
+
+| Flag | Status | Notes |
+| --- | --- | --- |
+| `--project-dir` | Supported | Used by all project commands. |
+| `--profiles-dir`, `--profile`, `--target` | Partial | Narrow scalar `profiles.yml` handling for adapter type, schema, target name, profile name, and DuckDB path. |
+| `--target-path` | Supported | Overrides project target path for artifacts and default DuckDB file. |
+| `--vars` | Partial | Scalar CLI vars for narrow `ref()` / `source()` argument resolution. |
+| `--select`, `--exclude` | Partial | Supported selector subset with graph expansion. |
+| `--threads`, `--full-refresh` | Accepted/planned | Product semantics are not complete yet. |
+| `--output json` | Partial | Supported by `ls`. |
+
+## dbt Resources
+
+| Resource | Status | Current support | Planned gaps |
+| --- | --- | --- | --- |
+| Models | Partial | SQL discovery, refs/sources/docs/macros, YAML properties, columns, tags, materialized config, compile/run/build subset. | Full config precedence, contracts, versions, groups, access, incremental/ephemeral/snapshots, hooks/grants. |
+| Seeds | Partial | CSV discovery and root-project DuckDB seed build execution. | Package seeds, seed configs, `dxt seed`, full materialization semantics. |
+| Sources | Partial | YAML source tables, freshness fields, source refs, source columns, source column tests, catalog/source freshness subset. | Source-level inheritance, table-level tests, source relationships, relation config, metadata freshness. |
+| Exposures | Partial | YAML exposure parsing with refs/sources, tags, metadata, owner fields. | Full validation and richer artifact parity. |
+| Macros | Partial | Macro/test/data_test/materialization block extraction, macro properties, static macro dependency lookup. | Macro execution, namespace execution, adapter dispatch execution, bundled dbt internals. |
+| Docs blocks | Partial | Markdown docs block parsing and literal `doc()` descriptions. | Dynamic doc expressions and docs serve. |
+| Generic tests | Partial | Manifest nodes and DuckDB execution for supported built-ins. | Custom macro-backed tests, singular tests, unit tests, configs, store failures. |
+| Analyses, snapshots, semantic models, metrics, saved queries, functions, groups, unit tests | Planned | Not first-class yet or only empty artifact maps where needed. | Full parser, graph, artifact, and execution semantics. |
+
+## Jinja And Macros
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `ref()` | Partial | Literal and narrow scalar var-backed refs. |
+| `source()` | Partial | Literal and narrow scalar var-backed sources. |
+| `config()` | Partial | Inline tags, materialized, schema, alias in supported literal forms. |
+| `var()` | Partial | Scalar CLI vars for selected dependency arguments. |
+| `doc()` | Partial | Literal doc references. |
+| `target`, `this` | Partial | Narrow compile context for selected fields. |
+| `{% set %}` / `{% for %}` | Partial | Static string-list assignments and simple loops only. |
+| `execute`, `run_query`, `statement`, adapter introspection | Planned | Parse-time/runtime boundary work remains. |
+| Macro execution and dispatch | Planned | Current behavior is static discovery/dependency extraction only. |
+
+## Selectors
+
+| Selector surface | Status |
+| --- | --- |
+| Names/FQN subset | Partial |
+| `+` graph expansion | Partial |
+| `--exclude` | Partial |
+| `tag:`, `path:`, `package:`, `resource_type:`, `test_type:`, `config.materialized:` | Partial |
+| `source:`, `exposure:`, selected generic test names | Partial |
+| Wildcards | Partial; pinned to observed dbt Core behavior where tested. |
+| YAML selectors, `@`, state/result/source-status/test-type/access/group/version selectors | Planned |
+
+## Artifacts
+
+| Artifact | Status | Current support |
+| --- | --- | --- |
+| `manifest.json` | Partial | Deterministic Manifest v12-shaped slice for supported resources, dependencies, source columns, tests, and maps. |
+| `run_results.json` | Partial | Run Results v6-shaped rows for supported model/seed/test execution. |
+| `catalog.json` | Partial | Catalog v1-shaped entries for selected existing DuckDB relations. |
+| `sources.json` | Partial | Sources v3-shaped freshness rows for supported source freshness queries. |
+| `semantic_manifest.json` | Planned | Semantic resource support remains future work. |
+| `partial_parse.msgpack` / parse cache | Planned | Future performance/state work. |
+
+## Adapters And Execution
+
+| Adapter/execution area | Status | Notes |
+| --- | --- | --- |
+| DuckDB | Partial | Current execution uses a Zig-owned external DuckDB CLI backend. |
+| Embedded DuckDB | Planned | Long-term native adapter direction. |
+| Postgres | Planned | Next server-database semantics target after adapter ABI. |
+| Snowflake, BigQuery, Redshift | Planned | After adapter ABI and conformance tests stabilize. |
+| Cross-database planner | Planned | Architecture requires pushdown, staging, movement policy, and cost guards. |
+
+## Validation
+
+| Gate | Status | Purpose |
+| --- | --- | --- |
+| `zig build` | Supported | Native compile gate. |
+| `zig build test` | Supported | Native unit/regression gate. |
+| `pytest -q` | Supported | Black-box CLI/artifact fixture gate. |
+| Runtime-boundary scan | Supported | Prevents Python product-runtime drift. |
+| Public-safety scan | Supported | Prevents secrets/local paths/generated noise. |
+| Jaffle parse/build scripts | Partial | Public fixture compatibility gates for current supported subset. |
+| dbt Core oracle harness | Partial | Optional developer-side comparison for supported M1 fixtures. |

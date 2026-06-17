@@ -1,0 +1,196 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to package, for example v0.1.0-alpha.1"
+        required: true
+      dry_run:
+        description: "Build and package without creating/updating a release"
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify release candidate
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+            git fetch --tags --force
+            git checkout "${tag}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "release tag must look like v0.1.0 or v0.1.0-alpha.1" >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${tag#v}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Check whitespace
+        run: git show --check --format=short --no-renames HEAD
+
+      - name: Check Zig formatting
+        run: |
+          zig fmt --check build.zig build.zig.zon
+          find src -name '*.zig' -print0 | sort -z | xargs -0 zig fmt --check
+
+      - name: Run public-safety scan
+        run: python scripts/check_public_safety.py
+
+      - name: Check runtime boundary
+        run: python scripts/check_runtime_boundary.py
+
+      - name: Build Zig binary
+        run: zig build --summary all
+
+      - name: Run Zig tests
+        run: zig build test --summary all
+
+      - name: Build release-safe binary
+        run: zig build -Doptimize=ReleaseSafe --summary all
+
+      - name: Version consistency
+        run: |
+          test "$(./zig-out/bin/dxt version)" = "${{ steps.version.outputs.version }}"
+          grep -q ".version = \"${{ steps.version.outputs.version }}\"" build.zig.zon
+
+  package:
+    name: package ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-gnu
+            smoke: true
+          - target: aarch64-linux-gnu
+            smoke: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build target
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
+
+      - name: Smoke test native target
+        if: matrix.smoke
+        run: |
+          ./zig-out/bin/dxt --help
+          test "$(./zig-out/bin/dxt version)" = "${{ needs.verify.outputs.version }}"
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${{ needs.verify.outputs.version }}"
+          name="dxt-v${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp zig-out/bin/dxt "dist/${name}/dxt"
+          cp README.md CHANGELOG.md SECURITY.md "dist/${name}/"
+          cp -R docs "dist/${name}/docs"
+          test ! -f LICENSE || cp LICENSE "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          tar -tzf "dist/${name}.tar.gz"
+          if strings "dist/${name}/dxt" | grep -E '/home/|/media/|github_pat_|gh[opsu]_|sk-'; then
+            echo "binary appears to contain a private path or token pattern" >&2
+            exit 1
+          fi
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxt-${{ needs.verify.outputs.tag }}-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: create draft release
+    runs-on: ubuntu-latest
+    needs:
+      - verify
+      - package
+    if: github.event_name == 'push' || inputs.dry_run != 'true'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > "dxt-${{ needs.verify.outputs.tag }}-SHA256SUMS.txt"
+          cat "dxt-${{ needs.verify.outputs.tag }}-SHA256SUMS.txt"
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${{ needs.verify.outputs.tag }}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" dist/* --clobber
+          else
+            gh release create "${tag}" dist/* \
+              --draft \
+              --verify-tag \
+              --title "dxt ${tag}" \
+              --generate-notes
+          fi
