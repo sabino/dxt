@@ -112,6 +112,15 @@ pub fn renderSourceFreshnessSql(allocator: std.mem.Allocator, source: *const Sou
     defer allocator.free(quoted_schema);
     const quoted_table = try compiler.quoteIdentifier(allocator, source.table_name);
     defer allocator.free(quoted_table);
+    const filter = if (source.freshness) |threshold| threshold.filter else null;
+    const filter_expression = if (filter) |value| std.mem.trim(u8, value, " \t\r\n") else "";
+    if (filter_expression.len != 0) {
+        return try std.fmt.allocPrint(
+            allocator,
+            "select coalesce(strftime(max({s}), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max({s})), 9.223372036854776e18) as age_seconds from {s}.{s} where {s};",
+            .{ loaded_at_expression, loaded_at_expression, quoted_schema, quoted_table, filter_expression },
+        );
+    }
     return try std.fmt.allocPrint(
         allocator,
         "select coalesce(strftime(max({s}), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max({s})), 9.223372036854776e18) as age_seconds from {s}.{s};",
@@ -1106,12 +1115,12 @@ test "renderSourceFreshnessSql quotes source relation and renders loaded_at_fiel
         .table_name = "orders",
         .original_file_path = "models/schema.yml",
         .loaded_at_field = "loaded_at",
-        .freshness = .{},
+        .freshness = .{ .filter = "order_id > 0" },
     };
 
     const sql = try renderSourceFreshnessSql(allocator, &source);
     try std.testing.expectEqualStrings(
-        "select coalesce(strftime(max(loaded_at), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max(loaded_at)), 9.223372036854776e18) as age_seconds from \"raw\".\"orders\";",
+        "select coalesce(strftime(max(loaded_at), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max(loaded_at)), 9.223372036854776e18) as age_seconds from \"raw\".\"orders\" where order_id > 0;",
         sql,
     );
 

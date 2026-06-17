@@ -30,14 +30,10 @@ pub fn isRunnableSource(source: *const SourceDef) bool {
 pub fn validateThreshold(threshold: FreshnessThreshold) !void {
     if (threshold.warn_after) |time| try validateTime(time);
     if (threshold.error_after) |time| try validateTime(time);
-    if (threshold.filter != null) return error.UnsupportedSourceFreshness;
 }
 
 pub fn unsupportedExecutionReason(source: *const SourceDef) ?[]const u8 {
     if (source.loaded_at_query != null) return "source freshness currently does not support loaded_at_query";
-    if (source.freshness) |threshold| {
-        if (threshold.filter != null) return "source freshness currently does not support freshness filters";
-    }
     return null;
 }
 
@@ -163,7 +159,7 @@ test "source freshness status follows error warn pass threshold order" {
 test "source freshness validation rejects partial thresholds at command boundary" {
     try std.testing.expectError(error.UnsupportedSourceFreshness, validateThreshold(.{ .warn_after = .{ .period = "hour" } }));
     try std.testing.expectError(error.UnsupportedSourceFreshness, validateThreshold(.{ .warn_after = .{ .count = 1 } }));
-    try validateThreshold(.{ .warn_after = .{ .count = 1, .period = "hour" } });
+    try validateThreshold(.{ .warn_after = .{ .count = 1, .period = "hour" }, .filter = "customer_id > 0" });
 }
 
 test "sources writer emits dbt v3 success shape" {

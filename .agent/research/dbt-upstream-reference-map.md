@@ -85,16 +85,16 @@ Every compatibility slice should record:
   materialization semantics remain future work.
 - `dxt source freshness` selects source nodes with table-level freshness
   criteria, queries selected DuckDB source tables through table-level
-  `loaded_at_field` SQL text, classifies `pass` / `warn` / `error`, writes
-  `manifest.json`, writes dbt-shaped `sources.json` v3 success rows, writes
-  dbt-shaped runtime-error rows for unsupported per-source execution gaps such
-  as missing `loaded_at_field`, `loaded_at_query`, or `freshness.filter`, and
-  returns failure when a selected source is stale past `error_after` or has a
-  runtime error. Empty or all-null loaded-at values are emitted as stale
-  freshness results. Source-level inheritance, executing `loaded_at_query`,
-  metadata freshness, applying `freshness.filter`, `config:` overrides,
-  source-status selectors, hooks, threaded scheduling, non-DuckDB adapters, and
-  embedded `libduckdb` remain future work. This is documented in
+  `loaded_at_field` SQL text and optional raw `freshness.filter` SQL,
+  classifies `pass` / `warn` / `error`, writes `manifest.json`, writes
+  dbt-shaped `sources.json` v3 success rows, writes dbt-shaped runtime-error
+  rows for unsupported per-source execution gaps such as missing
+  `loaded_at_field` or `loaded_at_query`, and returns failure when a selected
+  source is stale past `error_after` or has a runtime error. Empty or all-null
+  loaded-at values are emitted as stale freshness results. Source-level
+  inheritance, executing `loaded_at_query`, metadata freshness, `config:`
+  overrides, source-status selectors, hooks, threaded scheduling, non-DuckDB
+  adapters, and embedded `libduckdb` remain future work. This is documented in
   `.agent/research/m3-duckdb-source-freshness.md`.
 - `src/project/loader.zig` now owns graph loading order, installed-package
   traversal, target-path lookup, project/package resource traversal,

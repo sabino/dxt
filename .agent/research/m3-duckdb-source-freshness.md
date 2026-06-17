@@ -11,12 +11,13 @@ The slice is intentionally narrow:
 - supported: selected source resources, DuckDB local database files, table-level
   `loaded_at_field` SQL text, table-level `freshness.warn_after` /
   `freshness.error_after`, `minute` / `hour` / `day` periods, success rows, and
-  runtime-error rows. Empty or all-null loaded-at values are emitted as stale
-  freshness results;
+  runtime-error rows. `freshness.filter` is appended as raw SQL in the
+  loaded-at-field query. Empty or all-null loaded-at values are emitted as
+  stale freshness results;
 - not supported: source-level inheritance, executing `loaded_at_query`,
-  metadata freshness, applying `freshness.filter`, `config:` freshness
-  overrides, hooks, concurrency, source-status selectors, non-DuckDB adapters,
-  or Python product runtime behavior.
+  metadata freshness, `config:` freshness overrides, hooks, concurrency,
+  source-status selectors, non-DuckDB adapters, or Python product runtime
+  behavior.
 
 ## Upstream References
 
@@ -25,6 +26,8 @@ dbt Core v1:
 - `core/dbt/task/freshness.py::FreshnessRunner.execute` defines the runtime
   freshness paths: custom loaded-at query, loaded-at field, adapter metadata,
   status calculation, and result construction.
+- `FreshnessRunner.execute` passes `compiled_node.freshness.filter` into
+  `adapter.calculate_freshness` for loaded-at-field freshness.
 - `core/dbt/task/freshness.py::FreshnessSelector.node_is_match` selects source
   nodes only when `node.has_freshness` is true.
 - `core/dbt/task/freshness.py::FreshnessTask.result_path` and
@@ -86,17 +89,19 @@ Native Zig coverage:
 - DuckDB query SQL rendering, relation identifier quoting, raw
   `loaded_at_field` SQL-expression rendering, and empty loaded-at sentinel
   handling.
+- raw `freshness.filter` SQL placement in the loaded-at-field freshness query.
 
 Python integration coverage:
 
 - selected DuckDB source freshness creates a schema-valid warning result;
 - SQL-expression `loaded_at_field` creates a schema-valid warning result;
+- `freshness.filter` changes the selected max loaded-at value and is preserved
+  in the emitted criteria;
 - empty loaded-at sources create schema-valid stale `error` results;
 - selected source missing `loaded_at_field` creates a schema-valid runtime-error
   result and exits with failure.
-- selected sources with unsupported `loaded_at_query` or `freshness.filter`
-  create schema-valid runtime-error results instead of silently ignoring the
-  config.
+- selected sources with unsupported `loaded_at_query` create schema-valid
+  runtime-error results instead of silently ignoring the config.
 
 Schema coverage:
 
@@ -106,5 +111,5 @@ Schema coverage:
 ## Stop Conditions
 
 Stop before implementing source-level inheritance, `loaded_at_query`, metadata
-freshness, filters, config overrides, hooks, source-status selectors,
-non-DuckDB adapters, threaded scheduling, or broader dbt command behavior.
+freshness, config overrides, hooks, source-status selectors, non-DuckDB
+adapters, threaded scheduling, or broader dbt command behavior.
