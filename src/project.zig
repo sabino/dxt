@@ -11,6 +11,7 @@ const project_resolve = @import("project/resolve.zig");
 const manifest = @import("project/manifest.zig");
 const run_results = @import("project/run_results.zig");
 const selector = @import("project/selector.zig");
+const source_freshness = @import("project/source_freshness.zig");
 const types = @import("project/types.zig");
 const util = @import("project/util.zig");
 
@@ -24,6 +25,7 @@ const DocBlock = types.DocBlock;
 const ModelProperty = types.ModelProperty;
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
+const SourceDef = types.SourceDef;
 const Graph = types.Graph;
 const deinitNode = types.deinitNode;
 const deinitGenericTestNode = types.deinitGenericTestNode;
@@ -179,6 +181,95 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
         compile_result.count,
         util.normalizeForDisplay(target_dir),
     });
+}
+
+pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
+    defer graph.deinit();
+
+    try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+
+    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
+    const selected_sources = try selector.selectResources(runtime.allocator, &graph, "source", select, exclude);
+    if (selected_sources.len == 0 and options.select != null) {
+        const selected_any = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
+        if (selected_any.len != 0) return error.UnsupportedSourceFreshnessSelection;
+    }
+
+    const target_dir = try targetDir(runtime, options);
+    const manifest_path = try writeManifest(runtime, &graph, target_dir);
+
+    var results: std.ArrayList(source_freshness.CheckResult) = .empty;
+    defer {
+        source_freshness.deinitResults(runtime.allocator, results.items);
+        results.deinit(runtime.allocator);
+    }
+
+    var runnable_count: usize = 0;
+    var had_failure = false;
+    for (graph.sources.items) |*source| {
+        if (!selectionContains(selected_sources, source.unique_id)) continue;
+        if (!source_freshness.isRunnableSource(source)) continue;
+        runnable_count += 1;
+    }
+
+    if (runnable_count != 0) {
+        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedSourceFreshnessAdapter;
+        const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+        defer runtime.allocator.free(db_path);
+
+        for (graph.sources.items) |*source| {
+            if (!selectionContains(selected_sources, source.unique_id)) continue;
+            if (!source_freshness.isRunnableSource(source)) continue;
+            if (source_freshness.unsupportedExecutionReason(source)) |message| {
+                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, message);
+                had_failure = true;
+                continue;
+            }
+            source_freshness.validateThreshold(source.freshness.?) catch {
+                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires complete table-level freshness thresholds");
+                had_failure = true;
+                continue;
+            };
+            if (source.loaded_at_field == null) {
+                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires table-level loaded_at_field");
+                had_failure = true;
+                continue;
+            }
+            const query_result = duckdb.querySourceFreshness(runtime, db_path, source) catch |err| switch (err) {
+                error.DuckDbCliNotFound => return error.DuckDbCliNotFound,
+                else => {
+                    const message = try formatSourceFreshnessError(runtime.allocator, err);
+                    try appendOwnedSourceFreshnessRuntimeError(runtime.allocator, &results, source, message);
+                    had_failure = true;
+                    continue;
+                },
+            };
+            const status = try source_freshness.statusForAge(query_result.age_seconds, source.freshness.?);
+            if (std.mem.eql(u8, status, "error")) had_failure = true;
+            results.append(runtime.allocator, .{
+                .source = source,
+                .status = status,
+                .max_loaded_at = query_result.max_loaded_at,
+                .snapshotted_at = query_result.snapshotted_at,
+                .age_seconds = query_result.age_seconds,
+            }) catch |err| {
+                duckdb.deinitFreshnessQueryResult(runtime.allocator, query_result);
+                return err;
+            };
+        }
+    }
+
+    const sources_path = try pathJoin(runtime.allocator, &.{ target_dir, "sources.json" });
+    const sources_json = try source_freshness.renderSources(runtime.allocator, results.items);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = sources_path, .data = sources_json });
+    try stdout.print("Checked freshness for {d} source(s); wrote artifacts into {s}\n", .{
+        results.items.len,
+        util.normalizeForDisplay(manifest_path),
+    });
+    if (had_failure) return error.SourceFreshnessFailure;
 }
 
 pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
@@ -641,6 +732,25 @@ fn formatTestFailureMessage(allocator: std.mem.Allocator, failures: u64) ![]cons
         "Got {d} {s}, configured to fail if != 0",
         .{ failures, if (failures == 1) "result" else "results" },
     );
+}
+
+fn appendSourceFreshnessRuntimeError(allocator: std.mem.Allocator, results: *std.ArrayList(source_freshness.CheckResult), source: *const SourceDef, message: []const u8) !void {
+    try appendOwnedSourceFreshnessRuntimeError(allocator, results, source, try allocator.dupe(u8, message));
+}
+
+fn appendOwnedSourceFreshnessRuntimeError(allocator: std.mem.Allocator, results: *std.ArrayList(source_freshness.CheckResult), source: *const SourceDef, message: []const u8) !void {
+    results.append(allocator, .{
+        .source = source,
+        .status = "runtime error",
+        .error_message = message,
+    }) catch |err| {
+        allocator.free(message);
+        return err;
+    };
+}
+
+fn formatSourceFreshnessError(allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
+    return try std.fmt.allocPrint(allocator, "source freshness query failed: {s}", .{@errorName(err)});
 }
 
 fn targetDir(runtime: Runtime, options: Options) ![]const u8 {

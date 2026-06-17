@@ -16,6 +16,7 @@ DXT = ROOT / "zig-out" / "bin" / "dxt"
 SCHEMA_VALIDATOR_PATH = ROOT / "scripts" / "validate_manifest_schema.py"
 CATALOG_SCHEMA = ROOT / "tests" / "schemas" / "dbt_catalog_v1_docs_slice.schema.json"
 RUN_RESULTS_SCHEMA = ROOT / "tests" / "schemas" / "dbt_run_results_v6_m3_slice.schema.json"
+SOURCES_SCHEMA = ROOT / "tests" / "schemas" / "dbt_sources_v3_m3_slice.schema.json"
 DUCKDB = shutil.which("duckdb")
 SCHEMA_SPEC = importlib.util.spec_from_file_location("validate_manifest_schema", SCHEMA_VALIDATOR_PATH)
 assert SCHEMA_SPEC is not None
@@ -1836,6 +1837,13 @@ def assert_run_results_schema_slice(run_results_path: Path) -> None:
     run_results = json.loads(run_results_path.read_text())
     schema = schema_validator.load_json(RUN_RESULTS_SCHEMA)
     errors = schema_validator.validate_manifest(run_results, schema)
+    assert errors == []
+
+
+def assert_sources_schema_slice(sources_path: Path) -> None:
+    sources = json.loads(sources_path.read_text())
+    schema = schema_validator.load_json(SOURCES_SCHEMA)
+    errors = schema_validator.validate_manifest(sources, schema)
     assert errors == []
 
 
@@ -4232,6 +4240,305 @@ def test_docs_generate_catalogs_selected_duckdb_sources(tmp_path: Path):
     assert source["columns"]["customer_name"]["type"] == "VARCHAR"
     assert source["unique_id"] == "source.source_ref.raw.customers"
     assert str(project) not in catalog_path.read_text()
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness execution coverage")
+def test_source_freshness_checks_selected_duckdb_source_and_writes_sources_json(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_freshness")
+    target = tmp_path / "freshness-target"
+    target.mkdir()
+    db_path = target / "dxt.duckdb"
+    subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            "create schema raw; create table raw.customers as select 1 as customer_id, current_timestamp - interval '2 hours' as loaded_at;",
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [
+            DXT,
+            "source",
+            "freshness",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Checked freshness for 1 source(s)" in result.stdout
+    assert result.stderr == ""
+
+    sources_path = target / "sources.json"
+    assert_sources_schema_slice(sources_path)
+    sources = json.loads(sources_path.read_text())
+    assert sources["metadata"]["dbt_schema_version"] == "https://schemas.getdbt.com/dbt/sources/v3.json"
+    assert sources["metadata"]["dbt_version"] == "0.0.0"
+    assert sources["metadata"]["invocation_id"] is None
+    assert sources["metadata"]["invocation_started_at"] is None
+    assert sources["metadata"]["env"] == {}
+    assert len(sources["results"]) == 1
+    result_row = sources["results"][0]
+    assert result_row["unique_id"] == "source.source_freshness.raw.customers"
+    assert result_row["status"] == "warn"
+    assert result_row["max_loaded_at"].endswith("Z")
+    assert result_row["snapshotted_at"].endswith("Z")
+    assert result_row["max_loaded_at_time_ago_in_s"] >= 3600
+    assert result_row["criteria"] == {
+        "warn_after": {"count": 1, "period": "hour"},
+        "error_after": {"count": 1, "period": "day"},
+        "filter": None,
+    }
+    assert result_row["adapter_response"] == {}
+    assert result_row["timing"] == [{"name": "execute", "started_at": None, "completed_at": None}]
+    assert result_row["thread_id"] == "Thread-1"
+    assert result_row["execution_time"] == 0.0
+    assert str(project) not in sources_path.read_text()
+    assert (target / "manifest.json").exists()
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness expression coverage")
+def test_source_freshness_supports_loaded_at_field_sql_expression(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_freshness")
+    target = tmp_path / "freshness-target"
+    target.mkdir()
+    db_path = target / "dxt.duckdb"
+    subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            "create schema raw; create table raw.expression_customers as select 1 as customer_id, current_timestamp - interval '2 hours' as loaded_at;",
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [
+            DXT,
+            "source",
+            "freshness",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.expression_customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    sources_path = target / "sources.json"
+    assert_sources_schema_slice(sources_path)
+    sources = json.loads(sources_path.read_text())
+    assert len(sources["results"]) == 1
+    result_row = sources["results"][0]
+    assert result_row["unique_id"] == "source.source_freshness.raw.expression_customers"
+    assert result_row["status"] == "warn"
+    assert result_row["max_loaded_at_time_ago_in_s"] >= 3600
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness empty-table coverage")
+def test_source_freshness_treats_empty_loaded_at_as_stale_result(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_freshness")
+    target = tmp_path / "freshness-target"
+    target.mkdir()
+    db_path = target / "dxt.duckdb"
+    subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            "create schema raw; create table raw.empty_customers (customer_id integer, loaded_at timestamp);",
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [
+            DXT,
+            "source",
+            "freshness",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.empty_customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "one or more source freshness checks failed" in result.stderr
+
+    sources_path = target / "sources.json"
+    assert_sources_schema_slice(sources_path)
+    sources = json.loads(sources_path.read_text())
+    assert len(sources["results"]) == 1
+    result_row = sources["results"][0]
+    assert result_row["unique_id"] == "source.source_freshness.raw.empty_customers"
+    assert result_row["status"] == "error"
+    assert "error" not in result_row
+    assert result_row["max_loaded_at"] == "0001-01-01T00:00:00Z"
+    assert result_row["snapshotted_at"].endswith("Z")
+    assert result_row["max_loaded_at_time_ago_in_s"] > 86400
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness unsupported-config coverage")
+def test_source_freshness_writes_runtime_error_for_unsupported_filter(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_freshness")
+    target = tmp_path / "freshness-target"
+    target.mkdir()
+
+    result = subprocess.run(
+        [
+            DXT,
+            "source",
+            "freshness",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.filtered_customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "one or more source freshness checks failed" in result.stderr
+
+    sources_path = target / "sources.json"
+    assert_sources_schema_slice(sources_path)
+    sources = json.loads(sources_path.read_text())
+    assert sources["results"] == [
+        {
+            "unique_id": "source.source_freshness.raw.filtered_customers",
+            "error": "source freshness currently does not support freshness filters",
+            "status": "runtime error",
+        }
+    ]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness unsupported-config coverage")
+def test_source_freshness_writes_runtime_error_for_loaded_at_query(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_freshness")
+    target = tmp_path / "freshness-target"
+    target.mkdir()
+
+    result = subprocess.run(
+        [
+            DXT,
+            "source",
+            "freshness",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.query_customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "one or more source freshness checks failed" in result.stderr
+
+    sources_path = target / "sources.json"
+    assert_sources_schema_slice(sources_path)
+    sources = json.loads(sources_path.read_text())
+    assert sources["results"] == [
+        {
+            "unique_id": "source.source_freshness.raw.query_customers",
+            "error": "source freshness currently does not support loaded_at_query",
+            "status": "runtime error",
+        }
+    ]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness runtime-error coverage")
+def test_source_freshness_writes_runtime_error_result_for_missing_loaded_at_field(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_freshness")
+    target = tmp_path / "freshness-target"
+    target.mkdir()
+    db_path = target / "dxt.duckdb"
+    subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            "create schema raw; create table raw.orders (order_id integer);",
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [
+            DXT,
+            "source",
+            "freshness",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.orders",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Checked freshness for 1 source(s)" in result.stdout
+    assert "one or more source freshness checks failed" in result.stderr
+
+    sources_path = target / "sources.json"
+    assert_sources_schema_slice(sources_path)
+    sources = json.loads(sources_path.read_text())
+    assert len(sources["results"]) == 1
+    result_row = sources["results"][0]
+    assert result_row == {
+        "unique_id": "source.source_freshness.raw.orders",
+        "error": "source freshness currently requires table-level loaded_at_field",
+        "status": "runtime error",
+    }
+    assert str(project) not in sources_path.read_text()
 
 
 def test_docs_generate_applies_select_and_exclude_to_compiled_models(tmp_path: Path):

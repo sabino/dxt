@@ -53,6 +53,7 @@ Every compatibility slice should record:
 | Selector grammar and methods | `core/dbt/graph/selector_spec.py`, `selector.py`, `selector_methods.py`, `cli.py`, `graph.py`, `queue.py`; methods include FQN, tag, group, access, source, exposure, metric, semantic_model, saved_query, unit_test, path, file, package, config, resource_type, test_name, test_type, state, result, source_status, version, selector | `crates/dbt-parser/src/resolver.rs` selector YAML loading; command flags in `crates/dbt-clap-core/src/commands.rs` | `src/project/selector.zig` and CLI validation in `src/root.zig`; future state/result/source-status work in `src/project/state.zig` |
 | Artifact schemas | `schemas/dbt/manifest/v12.json`, `schemas/dbt/run-results/v6.json`, `schemas/dbt/sources/v3.json`, `schemas/dbt/catalog/v1.json` | v2 still emits JSON for compatibility and adds Parquet artifacts per README; manifest builder in `crates/dbt-schemas/src/schemas/manifest/manifest.rs` | `src/project/manifest.zig`, future run/catalog/source writers and schema validators under tests/scripts |
 | Docs catalog generation | `core/dbt/task/docs/generate.py::GenerateTask.run`, selected source handling in `_get_selected_source_ids`, `Catalog`, `Catalog.make_unique_id_map`, `build_catalog_table`, `format_stats`; `core/dbt/artifacts/schemas/catalog/v1/catalog.py::CatalogArtifact`, `CatalogResults` | `crates/dbt-schemas/src/schemas/legacy_catalog/catalog.rs::CatalogTable`, `ColumnMetadata`, `CatalogNodeStats`, `DbtCatalog`, `build_catalog`; Fusion index metadata in `crates/dbt-index-core/src/ingest/ingest_state.rs` | `src/project.zig` owns current docs orchestration; `src/project/catalog.zig` owns dbt-shaped catalog JSON for `nodes` and `sources`; `src/project/duckdb.zig` owns the first local DuckDB relation/column introspection for already-materialized selected model/seed nodes and selected source relations |
+| Source freshness and `sources.json` | `core/dbt/task/freshness.py::FreshnessRunner.execute`, `FreshnessSelector.node_is_match`, `FreshnessTask.result_path`, `FreshnessTask.get_result`; `core/dbt/artifacts/schemas/freshness/v3/freshness.py::FreshnessExecutionResultArtifact`, `SourceFreshnessOutput`, `SourceFreshnessRuntimeError`; `core/dbt/parser/sources.py::SourceParser.parse_source`, `calculate_loaded_at_field_query_from_raw_target`, `merge_source_freshness`; `schemas/dbt/sources/v3.json` | `crates/dbt-schemas/src/schemas/sources.rs::FreshnessResultsArtifact`, `FreshnessResultsMetadata`, `FreshnessResultsNode`; `crates/dbt-scheduler/src/node_selector.rs::match_source_status`; wider parse merge references in `crates/dbt-parser/src/resolve/resolve_sources.rs` | `src/root.zig` owns `dxt source freshness` command dispatch; `src/project.zig` owns first orchestration until runner extraction; `src/project/types.zig` owns source freshness fields; `src/project/parse.zig` owns table-level YAML parsing; `src/project/duckdb.zig` owns DuckDB loaded-at-field query execution; `src/project/source_freshness.zig` owns status calculation and `sources.json` v3 rendering |
 | Command surface | dbt v1 command behavior through parser/runner contracts and artifacts | `crates/dbt-clap-core/src/commands.rs::CoreCommand`, static-analysis flags and command parsing | `src/root.zig`, `src/main.zig`, future command-specific modules |
 | Adapter capability and SQL identity | v1 adapter behavior is distributed across adapters and context providers | `crates/dbt-adapter-core/src/lib.rs::AdapterType`, `quote_char`, static-analysis support matrix, microbatch capability; `crates/dbt-adapter-sql/src/ident.rs`, `statements.rs`, `types/*` | Future `src/project/adapter.zig`, `src/project/sql.zig`, and cross-database planner modules |
 | DuckDB SQL model execution and run results | `schemas/dbt/run-results/v6.json`; `core/dbt/artifacts/schemas/run/v5/run.py::RunResultOutput`, `process_run_result`, `RunResultsArtifact.from_execution_results`; `core/dbt/compilation.py::Compiler.compile_node`, `write_graph_file` | `crates/dbt-auth/src/duckdb/mod.rs::DuckDbAuth.configure`; `crates/dbt-loader/src/dbt_macro_assets/dbt-duckdb/macros/adapters.sql::duckdb__create_table_as`, `duckdb__create_view_as`; `crates/dbt-loader/src/dbt_macro_assets/dbt-duckdb/macros/materializations/table.sql`; `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/materializations/models/view.sql`; `crates/dbt-schemas/src/schemas/run_results.rs::RunResultOutput`, `RunResultsArtifact`; `crates/dbt-tasks-core/src/stats_to_results.rs`, `utils.rs::build_run_results_artifact` | `src/project/duckdb.zig` owns the first CLI-backed DuckDB execution slice, local-file path guardrails, and table/view SQL rendering; `src/project.zig` currently owns selected-model dependency ordering until a runner module exists; `src/project/run_results.zig` owns the minimal v6 run-results writer; future adapter ABI should replace the CLI backend with embedded DuckDB/linking and add task timing, adapter responses, relation staging, DAG scheduling, seeds, and tests |
@@ -67,7 +68,7 @@ Every compatibility slice should record:
 
 - Product runtime is Zig and remains so.
 - Current implemented command surface is `parse`, `ls`, `compile`, `docs
-  generate`, `run`, `build`, `version`, and help. `compile` and `docs generate`
+  generate`, `source freshness`, `run`, `build`, `version`, and help. `compile` and `docs generate`
   are render-only artifact boundaries for the supported parser graph. `run`
   executes selected enabled DuckDB SQL models with `table` and `view`
   materializations through a Zig-owned external CLI backend, validates
@@ -82,6 +83,19 @@ Every compatibility slice should record:
   already-existing attached relations. Package
   seeds, wider generic/singular/unit tests, full dbt queue parity, and full
   materialization semantics remain future work.
+- `dxt source freshness` selects source nodes with table-level freshness
+  criteria, queries selected DuckDB source tables through table-level
+  `loaded_at_field` SQL text, classifies `pass` / `warn` / `error`, writes
+  `manifest.json`, writes dbt-shaped `sources.json` v3 success rows, writes
+  dbt-shaped runtime-error rows for unsupported per-source execution gaps such
+  as missing `loaded_at_field`, `loaded_at_query`, or `freshness.filter`, and
+  returns failure when a selected source is stale past `error_after` or has a
+  runtime error. Empty or all-null loaded-at values are emitted as stale
+  freshness results. Source-level inheritance, executing `loaded_at_query`,
+  metadata freshness, applying `freshness.filter`, `config:` overrides,
+  source-status selectors, hooks, threaded scheduling, non-DuckDB adapters, and
+  embedded `libduckdb` remain future work. This is documented in
+  `.agent/research/m3-duckdb-source-freshness.md`.
 - `src/project/loader.zig` now owns graph loading order, installed-package
   traversal, target-path lookup, project/package resource traversal,
   macro/property application sequencing, duplicate checks, and graph sorting.
@@ -166,7 +180,7 @@ Every compatibility slice should record:
   already exist are emitted under `catalog.json.sources` using the current
   source relation contract. Broader parse-time Jinja context, macro namespace,
   adapter dispatch, docs-time execution, source relation config, catalog
-  comments/owners/stats, and run-results behavior remain future
+  comments/owners/stats, source-status selectors, and broader source freshness behavior remain future
   source-grounded slices.
 
 ## Next Source-Grounded Slices

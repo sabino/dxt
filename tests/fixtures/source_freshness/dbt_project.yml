@@ -1,0 +1,4 @@
+name: source_freshness
+version: "1.0"
+model-paths: ["models"]
+target-path: target

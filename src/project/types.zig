@@ -70,6 +70,20 @@ pub const SourceDef = struct {
     source_name: []const u8,
     table_name: []const u8,
     original_file_path: []const u8,
+    loaded_at_field: ?[]const u8 = null,
+    loaded_at_query: ?[]const u8 = null,
+    freshness: ?FreshnessThreshold = null,
+};
+
+pub const FreshnessThreshold = struct {
+    warn_after: ?FreshnessTime = null,
+    error_after: ?FreshnessTime = null,
+    filter: ?[]const u8 = null,
+};
+
+pub const FreshnessTime = struct {
+    count: ?u64 = null,
+    period: ?[]const u8 = null,
 };
 
 pub const ExposureDef = struct {

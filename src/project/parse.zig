@@ -14,6 +14,7 @@ const MacroArgument = types.MacroArgument;
 const MacroProperty = types.MacroProperty;
 const MetaEntry = types.MetaEntry;
 const RefDep = types.RefDep;
+const KeyValue = util.KeyValue;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 const isIdentChar = jinja.isIdentChar;
 const isIdentStart = jinja.isIdentStart;
@@ -29,6 +30,8 @@ const parseLiteralArgs = jinja.parseLiteralArgs;
 const skipQuotedSpan = jinja.skipQuotedSpan;
 const skipWs = jinja.skipWs;
 const findMacroIndexByPackageAndName = resolve.findMacroIndexByPackageAndName;
+
+const FreshnessTimeKey = enum { warn_after, error_after };
 
 pub fn parseBool(value: []const u8) !bool {
     const trimmed = std.mem.trim(u8, value, " \t\r");
@@ -825,10 +828,15 @@ pub fn parseExposureDependency(allocator: std.mem.Allocator, raw_value: []const 
 pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     var in_sources = false;
     var in_tables = false;
+    var in_freshness = false;
+    var freshness_time_key: ?FreshnessTimeKey = null;
     var sources_indent: usize = 0;
     var source_item_indent: ?usize = null;
     var table_item_indent: ?usize = null;
+    var freshness_indent: usize = 0;
+    var freshness_time_indent: usize = 0;
     var current_source: ?[]const u8 = null;
+    var current_table_index: ?usize = null;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
         const line = stripYamlComment(raw_line);
@@ -842,6 +850,9 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             sources_indent = indent;
             source_item_indent = null;
             table_item_indent = null;
+            current_table_index = null;
+            in_freshness = false;
+            freshness_time_key = null;
             continue;
         }
         if (!in_sources) continue;
@@ -849,12 +860,18 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             in_sources = false;
             in_tables = false;
             current_source = null;
+            current_table_index = null;
+            in_freshness = false;
+            freshness_time_key = null;
             continue;
         }
 
         if (std.mem.eql(u8, trimmed, "tables:")) {
             in_tables = true;
             table_item_indent = null;
+            current_table_index = null;
+            in_freshness = false;
+            freshness_time_key = null;
             continue;
         }
         if (std.mem.startsWith(u8, trimmed, "- name:")) {
@@ -864,6 +881,9 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 current_source = name;
                 in_tables = false;
                 table_item_indent = null;
+                current_table_index = null;
+                in_freshness = false;
+                freshness_time_key = null;
             } else if (in_tables and (table_item_indent == null or indent == table_item_indent.?)) {
                 table_item_indent = indent;
                 const source_name = current_source orelse return error.UnsupportedYaml;
@@ -875,9 +895,69 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                     .table_name = name,
                     .original_file_path = relative_path,
                 });
+                current_table_index = graph.sources.items.len - 1;
+                in_freshness = false;
+                freshness_time_key = null;
+            }
+            continue;
+        }
+        if (in_tables and current_table_index != null and table_item_indent != null and indent > table_item_indent.?) {
+            if (std.mem.startsWith(u8, trimmed, "- ")) continue;
+            const kv = splitKeyValue(trimmed) orelse continue;
+            const source = &graph.sources.items[current_table_index.?];
+            if (std.mem.eql(u8, kv.key, "loaded_at_field")) {
+                source.loaded_at_field = try dupTrimmedScalar(allocator, kv.value);
+                in_freshness = false;
+                freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "loaded_at_query")) {
+                source.loaded_at_query = try dupTrimmedScalar(allocator, kv.value);
+                in_freshness = false;
+                freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "freshness")) {
+                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                if (source.freshness == null) source.freshness = .{};
+                in_freshness = true;
+                freshness_indent = indent;
+                freshness_time_key = null;
+            } else if (in_freshness and indent > freshness_indent and std.mem.eql(u8, kv.key, "filter")) {
+                var freshness = source.freshness orelse types.FreshnessThreshold{};
+                freshness.filter = try dupTrimmedScalar(allocator, kv.value);
+                source.freshness = freshness;
+            } else if (in_freshness and indent > freshness_indent and std.mem.eql(u8, kv.key, "warn_after")) {
+                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                freshness_time_key = .warn_after;
+                freshness_time_indent = indent;
+            } else if (in_freshness and indent > freshness_indent and std.mem.eql(u8, kv.key, "error_after")) {
+                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                freshness_time_key = .error_after;
+                freshness_time_indent = indent;
+            } else if (in_freshness and freshness_time_key != null and indent > freshness_time_indent) {
+                try applyFreshnessTimeKeyValue(allocator, source, freshness_time_key.?, kv);
             }
         }
     }
+}
+
+fn applyFreshnessTimeKeyValue(allocator: std.mem.Allocator, source: *types.SourceDef, time_key: FreshnessTimeKey, kv: KeyValue) !void {
+    if (!std.mem.eql(u8, kv.key, "count") and !std.mem.eql(u8, kv.key, "period")) return;
+    var freshness = source.freshness orelse types.FreshnessThreshold{};
+    var time = switch (time_key) {
+        .warn_after => freshness.warn_after orelse types.FreshnessTime{},
+        .error_after => freshness.error_after orelse types.FreshnessTime{},
+    };
+    if (std.mem.eql(u8, kv.key, "count")) {
+        const count_text = std.mem.trim(u8, kv.value, " \t\r");
+        time.count = try std.fmt.parseUnsigned(u64, count_text, 10);
+    } else {
+        const period = try dupTrimmedScalar(allocator, kv.value);
+        if (!std.mem.eql(u8, period, "minute") and !std.mem.eql(u8, period, "hour") and !std.mem.eql(u8, period, "day")) return error.UnsupportedYaml;
+        time.period = period;
+    }
+    switch (time_key) {
+        .warn_after => freshness.warn_after = time,
+        .error_after => freshness.error_after = time,
+    }
+    source.freshness = freshness;
 }
 
 pub fn parseExposuresFromText(allocator: std.mem.Allocator, text: []const u8, resource_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
@@ -2022,6 +2102,53 @@ test "parseSourcesFromText records source tables with package IDs" {
     try std.testing.expectEqualStrings("source.pkg.raw.payments", graph.sources.items[1].unique_id);
     try std.testing.expectEqualStrings("source.pkg.app.users", graph.sources.items[2].unique_id);
     try std.testing.expectEqualStrings("models/schema.yml", graph.sources.items[2].original_file_path);
+}
+
+test "parseSourcesFromText records table-level source freshness" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    tables:
+        \\      - name: customers
+        \\        loaded_at_field: loaded_at
+        \\        freshness:
+        \\          warn_after:
+        \\            count: 12
+        \\            period: hour
+        \\          error_after:
+        \\            count: 1
+        \\            period: day
+        \\          filter: customer_id > 0
+        \\      - name: orders
+        \\        loaded_at_query: select max(loaded_at) from raw.orders
+        \\        freshness:
+        \\          warn_after:
+        \\            count: 3
+        \\            period: hour
+    ;
+
+    try parseSourcesFromText(allocator, yaml, "models/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 2), graph.sources.items.len);
+    const customers = graph.sources.items[0];
+    try std.testing.expectEqualStrings("loaded_at", customers.loaded_at_field.?);
+    const freshness = customers.freshness.?;
+    try std.testing.expectEqual(@as(u64, 12), freshness.warn_after.?.count.?);
+    try std.testing.expectEqualStrings("hour", freshness.warn_after.?.period.?);
+    try std.testing.expectEqual(@as(u64, 1), freshness.error_after.?.count.?);
+    try std.testing.expectEqualStrings("day", freshness.error_after.?.period.?);
+    try std.testing.expectEqualStrings("customer_id > 0", freshness.filter.?);
+    try std.testing.expect(graph.sources.items[1].loaded_at_field == null);
+    try std.testing.expectEqualStrings("select max(loaded_at) from raw.orders", graph.sources.items[1].loaded_at_query.?);
+    try std.testing.expectEqual(@as(u64, 3), graph.sources.items[1].freshness.?.warn_after.?.count.?);
 }
 
 test "parseExposuresFromText records exposure metadata and dependencies" {

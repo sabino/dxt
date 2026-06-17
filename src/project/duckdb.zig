@@ -18,6 +18,17 @@ pub const GenericTestExecutionResult = struct {
     failures: u64,
 };
 
+pub const FreshnessQueryResult = struct {
+    max_loaded_at: []const u8,
+    snapshotted_at: []const u8,
+    age_seconds: f64,
+};
+
+pub fn deinitFreshnessQueryResult(allocator: std.mem.Allocator, result: FreshnessQueryResult) void {
+    allocator.free(result.max_loaded_at);
+    allocator.free(result.snapshotted_at);
+}
+
 pub fn databasePath(allocator: std.mem.Allocator, target_dir: []const u8, graph: *const Graph) ![]const u8 {
     if (graph.database_path) |configured_path| {
         if (isUnsupportedConnectionPath(configured_path)) return error.UnsupportedDuckDbPath;
@@ -63,6 +74,49 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
     defer runtime.allocator.free(execution_sql);
     const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
     return .{ .compiled_code = compiled_sql, .failures = failures };
+}
+
+pub fn querySourceFreshness(runtime: Runtime, db_path: []const u8, source: *const SourceDef) !FreshnessQueryResult {
+    if (!databaseFileExists(runtime, db_path)) return error.DuckDbExecutionFailed;
+    const sql = try renderSourceFreshnessSql(runtime.allocator, source);
+    defer runtime.allocator.free(sql);
+
+    const result = std.process.run(runtime.allocator, runtime.io, .{
+        .argv = &.{ "duckdb", "-readonly", db_path, "-json", "-batch", "-bail", "-c", sql },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch |err| switch (err) {
+        error.FileNotFound => return error.DuckDbCliNotFound,
+        else => return err,
+    };
+    errdefer runtime.allocator.free(result.stdout);
+    defer runtime.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code == 0) {
+            const parsed = try parseFreshnessQueryJson(runtime.allocator, result.stdout);
+            runtime.allocator.free(result.stdout);
+            return parsed;
+        },
+        else => {},
+    }
+    runtime.allocator.free(result.stdout);
+    return error.DuckDbExecutionFailed;
+}
+
+pub fn renderSourceFreshnessSql(allocator: std.mem.Allocator, source: *const SourceDef) ![]const u8 {
+    const loaded_at_field = source.loaded_at_field orelse return error.UnsupportedSourceFreshness;
+    const loaded_at_expression = std.mem.trim(u8, loaded_at_field, " \t\r\n");
+    if (loaded_at_expression.len == 0) return error.UnsupportedSourceFreshness;
+    const quoted_schema = try compiler.quoteIdentifier(allocator, source.source_name);
+    defer allocator.free(quoted_schema);
+    const quoted_table = try compiler.quoteIdentifier(allocator, source.table_name);
+    defer allocator.free(quoted_table);
+    return try std.fmt.allocPrint(
+        allocator,
+        "select coalesce(strftime(max({s}), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max({s})), 9.223372036854776e18) as age_seconds from {s}.{s};",
+        .{ loaded_at_expression, loaded_at_expression, quoted_schema, quoted_table },
+    );
 }
 
 pub fn collectCatalogEntries(runtime: Runtime, db_path: []const u8, graph: *const Graph, selected: []const selector.SelectedResource) !catalog.CatalogEntries {
@@ -181,10 +235,36 @@ fn catalogEntryForRelation(allocator: std.mem.Allocator, unique_id: []const u8, 
     return entry;
 }
 
+fn parseFreshnessQueryJson(allocator: std.mem.Allocator, rows_json: []const u8) !FreshnessQueryResult {
+    var parsed_rows = try std.json.parseFromSlice(std.json.Value, allocator, rows_json, .{});
+    defer parsed_rows.deinit();
+    if (parsed_rows.value != .array) return error.DuckDbExecutionFailed;
+    if (parsed_rows.value.array.items.len != 1) return error.DuckDbExecutionFailed;
+    const row = parsed_rows.value.array.items[0];
+    const object = if (row == .object) row.object else return error.DuckDbExecutionFailed;
+    const max_loaded_at = jsonObjectString(object, "max_loaded_at") orelse return error.DuckDbExecutionFailed;
+    const snapshotted_at = jsonObjectString(object, "snapshotted_at") orelse return error.DuckDbExecutionFailed;
+    const age_seconds = jsonObjectNumber(object, "age_seconds") orelse return error.DuckDbExecutionFailed;
+    return .{
+        .max_loaded_at = try allocator.dupe(u8, max_loaded_at),
+        .snapshotted_at = try allocator.dupe(u8, snapshotted_at),
+        .age_seconds = age_seconds,
+    };
+}
+
 fn jsonObjectString(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const value = object.get(key) orelse return null;
     if (value != .string) return null;
     return value.string;
+}
+
+fn jsonObjectNumber(object: std.json.ObjectMap, key: []const u8) ?f64 {
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .float => |float| float,
+        .integer => |integer| @floatFromInt(integer),
+        else => null,
+    };
 }
 
 fn jsonObjectUnsigned(object: std.json.ObjectMap, key: []const u8) ?u64 {
@@ -1013,6 +1093,39 @@ test "catalogEntryForSource maps DuckDB JSON rows to catalog source metadata" {
     try std.testing.expectEqualStrings("BASE TABLE", entry.relation_type);
     try std.testing.expectEqualStrings("customer_id", entry.columns.items[0].name);
     try std.testing.expectEqualStrings("INTEGER", entry.columns.items[0].data_type);
+}
+
+test "renderSourceFreshnessSql quotes source relation and renders loaded_at_field as SQL" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source = SourceDef{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.orders",
+        .source_name = "raw",
+        .table_name = "orders",
+        .original_file_path = "models/schema.yml",
+        .loaded_at_field = "loaded_at",
+        .freshness = .{},
+    };
+
+    const sql = try renderSourceFreshnessSql(allocator, &source);
+    try std.testing.expectEqualStrings(
+        "select coalesce(strftime(max(loaded_at), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max(loaded_at)), 9.223372036854776e18) as age_seconds from \"raw\".\"orders\";",
+        sql,
+    );
+
+    const expression_source = SourceDef{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.events",
+        .source_name = "raw",
+        .table_name = "events",
+        .original_file_path = "models/schema.yml",
+        .loaded_at_field = "cast(loaded_at as timestamp)",
+        .freshness = .{},
+    };
+    const expression_sql = try renderSourceFreshnessSql(allocator, &expression_source);
+    try std.testing.expect(std.mem.indexOf(u8, expression_sql, "max(cast(loaded_at as timestamp))") != null);
 }
 
 test "renderSeedSql creates table from root project seed CSV" {
