@@ -9,6 +9,7 @@ const Runtime = types.Runtime;
 const Graph = types.Graph;
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
+const SourceDef = types.SourceDef;
 
 const DuckDbObjectKind = enum { table, view };
 
@@ -64,9 +65,9 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
     return .{ .compiled_code = compiled_sql, .failures = failures };
 }
 
-pub fn collectCatalogEntries(runtime: Runtime, db_path: []const u8, graph: *const Graph, selected: []const selector.SelectedResource) !std.ArrayList(catalog.CatalogEntry) {
-    var entries: std.ArrayList(catalog.CatalogEntry) = .empty;
-    errdefer catalog.deinitEntries(runtime.allocator, &entries);
+pub fn collectCatalogEntries(runtime: Runtime, db_path: []const u8, graph: *const Graph, selected: []const selector.SelectedResource) !catalog.CatalogEntries {
+    var entries: catalog.CatalogEntries = .{};
+    errdefer catalog.deinitCatalogEntries(runtime.allocator, &entries);
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return entries;
     if (!databaseFileExists(runtime, db_path)) return entries;
 
@@ -81,7 +82,12 @@ pub fn collectCatalogEntries(runtime: Runtime, db_path: []const u8, graph: *cons
         if (!selectionContains(selected, node.unique_id)) continue;
         if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed")) continue;
         const entry = try catalogEntryForNode(runtime.allocator, graph, node, rows) orelse continue;
-        try entries.append(runtime.allocator, entry);
+        try entries.nodes.append(runtime.allocator, entry);
+    }
+    for (graph.sources.items) |*source| {
+        if (!selectionContains(selected, source.unique_id)) continue;
+        const entry = try catalogEntryForSource(runtime.allocator, source, rows) orelse continue;
+        try entries.sources.append(runtime.allocator, entry);
     }
 
     return entries;
@@ -132,8 +138,16 @@ fn catalogEntryForNode(allocator: std.mem.Allocator, graph: *const Graph, node: 
     defer allocator.free(schema_name);
     const identifier = compiler.relationIdentifierForNode(node);
 
+    return try catalogEntryForRelation(allocator, node.unique_id, schema_name, identifier, rows);
+}
+
+fn catalogEntryForSource(allocator: std.mem.Allocator, source: *const SourceDef, rows: []const std.json.Value) !?catalog.CatalogEntry {
+    return try catalogEntryForRelation(allocator, source.unique_id, source.source_name, source.table_name, rows);
+}
+
+fn catalogEntryForRelation(allocator: std.mem.Allocator, unique_id: []const u8, schema_name: []const u8, identifier: []const u8, rows: []const std.json.Value) !?catalog.CatalogEntry {
     var entry = catalog.CatalogEntry{
-        .unique_id = try allocator.dupe(u8, node.unique_id),
+        .unique_id = try allocator.dupe(u8, unique_id),
         .schema = try allocator.dupe(u8, schema_name),
         .name = try allocator.dupe(u8, identifier),
         .relation_type = try allocator.dupe(u8, ""),
@@ -966,6 +980,39 @@ test "catalogEntryForNode maps DuckDB JSON rows to catalog metadata" {
     try std.testing.expectEqualStrings("INTEGER", entry.columns.items[0].data_type);
     try std.testing.expectEqual(@as(u64, 2), entry.columns.items[1].index);
     try std.testing.expectEqualStrings("BIGINT", entry.columns.items[1].data_type);
+}
+
+test "catalogEntryForSource maps DuckDB JSON rows to catalog source metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source = SourceDef{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.customers",
+        .source_name = "raw",
+        .table_name = "customers",
+        .original_file_path = "models/schema.yml",
+    };
+
+    const rows_json =
+        \\[
+        \\  {"table_schema":"raw","table_name":"customers","table_type":"BASE TABLE","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"}
+        \\]
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rows_json, .{});
+    defer parsed.deinit();
+    const entry = (try catalogEntryForSource(allocator, &source, parsed.value.array.items)).?;
+    defer {
+        var owned = entry;
+        deinitCatalogEntry(allocator, &owned);
+    }
+
+    try std.testing.expectEqualStrings("source.demo.raw.customers", entry.unique_id);
+    try std.testing.expectEqualStrings("raw", entry.schema);
+    try std.testing.expectEqualStrings("customers", entry.name);
+    try std.testing.expectEqualStrings("BASE TABLE", entry.relation_type);
+    try std.testing.expectEqualStrings("customer_id", entry.columns.items[0].name);
+    try std.testing.expectEqualStrings("INTEGER", entry.columns.items[0].data_type);
 }
 
 test "renderSeedSql creates table from root project seed CSV" {

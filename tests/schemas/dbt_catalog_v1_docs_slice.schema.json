@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.getdbt.com/dbt/catalog/v1.json#dxt-docs-slice",
   "title": "dxt dbt Catalog v1 docs-generate compatibility slice",
-  "$comment": "Pinned local compatibility slice for dbt Catalog v1. Source reference: https://schemas.getdbt.com/dbt/catalog/v1.json, checked 2026-06-16. This validates the current dxt docs-generate surface: metadata, model/seed node catalog entries when DuckDB relation introspection is available, empty sources, and errors.",
+  "$comment": "Pinned local compatibility slice for dbt Catalog v1. Source reference: https://schemas.getdbt.com/dbt/catalog/v1.json, checked 2026-06-16. This validates the current dxt docs-generate surface: metadata, model/seed node and source catalog entries when DuckDB relation introspection is available, and errors.",
   "type": "object",
   "additionalProperties": false,
   "required": ["metadata", "nodes", "sources", "errors"],
@@ -36,7 +36,7 @@
     },
     "sources": {
       "type": "object",
-      "additionalProperties": false
+      "additionalProperties": {"$ref": "#/$defs/catalogTable"}
     },
     "errors": {
       "type": ["array", "null"],

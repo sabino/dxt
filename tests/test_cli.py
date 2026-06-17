@@ -4168,6 +4168,72 @@ def test_docs_generate_catalogs_existing_duckdb_relations(tmp_path: Path):
     assert str(project) not in catalog_path.read_text()
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 docs source catalog execution coverage")
+def test_docs_generate_catalogs_selected_duckdb_sources(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_ref")
+    target = tmp_path / "docs-target"
+    target.mkdir()
+    db_path = target / "dxt.duckdb"
+    subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            "create schema raw; create table raw.customers (customer_id integer, customer_name varchar);",
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [
+            DXT,
+            "docs",
+            "generate",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Generated docs artifacts for 0 compiled model(s)" in result.stdout
+
+    catalog_path = target / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    assert_catalog_schema_slice(catalog_path)
+    assert catalog["nodes"] == {}
+    assert sorted(catalog["sources"]) == ["source.source_ref.raw.customers"]
+    source = catalog["sources"]["source.source_ref.raw.customers"]
+    assert source["metadata"] == {
+        "type": "BASE TABLE",
+        "schema": "raw",
+        "name": "customers",
+        "database": None,
+        "comment": None,
+        "owner": None,
+    }
+    assert list(source["columns"]) == ["customer_id", "customer_name"]
+    assert source["columns"]["customer_id"] == {
+        "type": "INTEGER",
+        "index": 1,
+        "name": "customer_id",
+        "comment": None,
+    }
+    assert source["columns"]["customer_name"]["type"] == "VARCHAR"
+    assert source["unique_id"] == "source.source_ref.raw.customers"
+    assert str(project) not in catalog_path.read_text()
+
+
 def test_docs_generate_applies_select_and_exclude_to_compiled_models(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     target = tmp_path / "docs-target"
