@@ -283,6 +283,14 @@ Fusion var/ref/source behavior to the narrow dxt implementation. This slice is
 only scalar `var('name')` / `var('name', 'default')` dependency-argument
 support for `ref()` and `source()`, not general dbt `var()` compatibility.
 
+Current macro argument validation source note:
+`.agent/research/m1-macro-arg-validation-slice.md` maps upstream dbt Core v1
+`MacroParser` and `MacroPatchParser` behavior plus Fusion macro patch references
+to the narrow dxt implementation. This slice is only
+`flags.validate_macro_args` macro signature argument extraction and YAML patch
+argument validation/replacement for manifest artifacts, not macro execution,
+namespace precedence, adapter dispatch, or Fusion-only default/type behavior.
+
 The next source-grounded M1/M2 slices after macro block variant support are:
 
 1. Extend the render-only artifact boundary to adapter-free docs generation:
@@ -649,4 +657,4 @@ Exit criteria:
 - Selector wildcard behavior is currently pinned to observed dbt Core 1.10 behavior. dbt Fusion preview currently differs for resource-type-prefixed wildcard selectors such as `model.<package>.*` and filename-suffix path selectors such as `path:*orders.sql`; a future Fusion-compatibility slice must decide whether to support a selector dialect switch or a compatible superset.
 - Compatibility planning now uses a source-grounded reference map under `.agent/research/dbt-upstream-reference-map.md`; future feature slices should name upstream dbt v1/v2 source references, dxt Zig owners, affected artifact fields, validation gates, and stop conditions before implementation.
 - The committed dbt Core M1 oracle harness lives in `scripts/check_dbt_core_m1_oracle.py`. It is optional developer-side Python tooling that requires `dbt-core` and `dbt-duckdb`, invokes dbt Core through its Python runner, runs `dxt parse` through the Zig binary, and compares stable manifest slices for the supported synthetic M1 fixture ladder. It ignores dbt internal package docs/macros that are outside the current dxt artifact scope, records a known allowed gap for installed-package exposure refs that dbt Core resolves to a root same-name model while dxt currently resolves package-local, and leaves full source-map parity, full artifact schemas, and execution parity for later slices.
-- Before broadening M2 product implementation, close or explicitly re-scope the remaining M1 macro-compatibility behavior gaps: macro argument extraction under dbt's `validate_macro_args` semantics, macro patch validation, and namespace precedence. Macro `docs`/`meta` patch fields are covered for the current scalar artifact subset. `{% data_test %}` has native source-grounded parser coverage, but the local dbt Core 1.10 oracle rejects that tag before writing artifacts, so dbt-oracle coverage currently pins `{% test %}` and `{% materialization %}` block parity.
+- Before broadening M2 product implementation, close or explicitly re-scope the remaining M1 macro-compatibility behavior gaps. Macro `docs`/`meta` patch fields are covered for the current scalar artifact subset. Macro argument extraction under dbt Core v1 `flags.validate_macro_args` semantics and YAML patch argument validation/replacement are now implemented for the manifest artifact surface; deeper macro namespace precedence and adapter dispatch remain planned. `{% data_test %}` has native source-grounded parser coverage, but the local dbt Core 1.10 oracle rejects that tag before writing artifacts, so dbt-oracle coverage currently pins `{% test %}` and `{% materialization %}` block parity.
