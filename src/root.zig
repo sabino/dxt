@@ -188,7 +188,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         },
         error.UnsupportedModelExecution => stderr.writeAll("error: model execution requires a DuckDB adapter and materialization runner; not implemented yet\n") catch {},
         error.UnsupportedSeedExecution => stderr.writeAll("error: build currently executes only root-project DuckDB seeds with default CSV settings\n") catch {},
-        error.UnsupportedTestExecution => stderr.writeAll("error: build currently executes only selected DuckDB not_null/unique/accepted_values column generic tests\n") catch {},
+        error.UnsupportedTestExecution => stderr.writeAll("error: build currently executes only selected DuckDB not_null/unique/accepted_values/relationships column generic tests\n") catch {},
         error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by the implemented M1 parser command\n") catch {},
         else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},
     }

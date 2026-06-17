@@ -873,7 +873,7 @@ def test_build_executes_selected_duckdb_seed_and_dependent_model(tmp_path: Path)
 
 
 def test_build_prepare_reports_test_execution_boundary(tmp_path: Path):
-    project = copy_fixture(tmp_path, "generic_test_arguments")
+    project = copy_fixture(tmp_path, "model_properties")
     target = tmp_path / "build-target"
     result = subprocess.run(
         [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "test_type:generic"],
@@ -883,11 +883,11 @@ def test_build_prepare_reports_test_execution_boundary(tmp_path: Path):
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "build currently executes only selected DuckDB not_null/unique/accepted_values column generic tests" in result.stderr
+    assert "build currently executes only selected DuckDB not_null/unique/accepted_values/relationships column generic tests" in result.stderr
     assert not (target / "run_results.json").exists()
     manifest = json.loads((target / "manifest.json").read_text())
-    assert "compiled" not in manifest["nodes"]["model.generic_test_arguments.customers"]
-    assert sorted(manifest["child_map"]["model.generic_test_arguments.customers"])
+    assert "compiled" not in manifest["nodes"]["model.model_properties.customers"]
+    assert sorted(manifest["child_map"]["model.model_properties.customers"])
 
 
 def write_seed_model_test_project(project: Path, seed_csv: str, schema_tests: str | None = None) -> None:
@@ -971,6 +971,37 @@ models:
           - accepted_values:
               arguments:
                 values: ['new', 'returning']
+"""
+    )
+
+
+def write_relationships_model_test_project(project: Path, customers_sql: str, orders_sql: str) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: relationships_tests
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text(customers_sql)
+    (project / "models" / "orders.sql").write_text(orders_sql)
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: customers
+    config:
+      materialized: table
+  - name: orders
+    config:
+      materialized: table
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('customers')
+                field: customer_id
 """
     )
 
@@ -1140,6 +1171,138 @@ def test_build_executes_selected_duckdb_model_and_accepted_values_generic_test(t
     )
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 relationships build execution slice")
+def test_build_executes_selected_duckdb_relationships_generic_test(tmp_path: Path):
+    project = tmp_path / "relationships_tests"
+    write_relationships_model_test_project(
+        project,
+        "{{ config(materialized='table') }}\n"
+        "select 1 as customer_id, 'Ada' as customer_name\n"
+        "union all\n"
+        "select 2 as customer_id, 'Bob' as customer_name\n",
+        "{{ config(materialized='table') }}\n"
+        "select 10 as order_id, 1 as customer_id\n"
+        "union all\n"
+        "select 11 as order_id, null as customer_id\n",
+    )
+    target = tmp_path / "build-target"
+    run_result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+
+    build_result = subprocess.run(
+        [
+            DXT,
+            "build",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "relationships_orders_customer_id__customer_id__ref_customers_",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build_result.returncode == 0, build_result.stderr
+    assert "Built 1 generic test(s)" in build_result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    result = run_results["results"][0]
+    assert result["unique_id"].startswith(
+        "test.relationships_tests.relationships_orders_customer_id__customer_id__ref_customers_."
+    )
+    assert result["status"] == "pass"
+    assert result["failures"] == 0
+    assert result["compiled"] is True
+    assert "with child as" in result["compiled_code"]
+    assert "left join parent" in result["compiled_code"]
+    assert "where parent.to_field is null" in result["compiled_code"]
+    assert "dbt_internal_test" not in result["compiled_code"]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 relationships build execution slice")
+def test_build_reports_failing_duckdb_relationships_generic_test(tmp_path: Path):
+    project = tmp_path / "relationships_tests"
+    write_relationships_model_test_project(
+        project,
+        "{{ config(materialized='table') }}\n"
+        "select 1 as customer_id, 'Ada' as customer_name\n",
+        "{{ config(materialized='table') }}\n"
+        "select 10 as order_id, 1 as customer_id\n"
+        "union all\n"
+        "select 11 as order_id, 999 as customer_id\n"
+        "union all\n"
+        "select 12 as order_id, null as customer_id\n",
+    )
+    target = tmp_path / "build-target"
+    run_result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+
+    build_result = subprocess.run(
+        [
+            DXT,
+            "build",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "relationships_orders_customer_id__customer_id__ref_customers_",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build_result.returncode == 1
+    assert "1 generic test(s) failed with 1 failure row(s)" in build_result.stdout
+    assert "one or more generic tests failed" in build_result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["fail"]
+    assert [item["failures"] for item in run_results["results"]] == [1]
+    assert run_results["results"][0]["message"] == "Got 1 result, configured to fail if != 0"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 relationships model+test build execution slice")
+def test_build_executes_selected_duckdb_models_and_relationships_generic_test(tmp_path: Path):
+    project = tmp_path / "relationships_tests"
+    write_relationships_model_test_project(
+        project,
+        "{{ config(materialized='table') }}\nselect 1 as customer_id, 'Ada' as customer_name\n",
+        "{{ config(materialized='table') }}\nselect 10 as order_id, 1 as customer_id\n",
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 2 model(s) and 1 generic test(s)" in result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"][:2]] == [
+        "model.relationships_tests.customers",
+        "model.relationships_tests.orders",
+    ]
+    assert run_results["results"][2]["unique_id"].startswith(
+        "test.relationships_tests.relationships_orders_customer_id__customer_id__ref_customers_."
+    )
+    assert [item["status"] for item in run_results["results"]] == ["success", "success", "pass"]
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed+model+test build execution slice")
 def test_build_executes_selected_duckdb_seed_model_and_supported_generic_tests(tmp_path: Path):
     project = tmp_path / "build_seed_model_tests"
@@ -1209,6 +1372,70 @@ def test_build_executes_selected_duckdb_seed_model_and_accepted_values_generic_t
     )
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 relationships seed+model+test build execution slice")
+def test_build_executes_selected_duckdb_seed_model_and_relationships_generic_test(tmp_path: Path):
+    project = tmp_path / "build_seed_model_relationships_tests"
+    (project / "models").mkdir(parents=True)
+    (project / "seeds").mkdir()
+    (project / "dbt_project.yml").write_text(
+        """name: build_seed_model_relationships_tests
+version: "1.0"
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: target
+"""
+    )
+    (project / "seeds" / "raw_customers.csv").write_text("customer_id,customer_name\n1,Ada\n")
+    (project / "seeds" / "raw_orders.csv").write_text("order_id,customer_id\n10,1\n")
+    (project / "models" / "customers.sql").write_text(
+        """{{ config(materialized='table') }}
+select try_cast(customer_id as integer) as customer_id, customer_name
+from {{ ref("raw_customers") }}
+"""
+    )
+    (project / "models" / "orders.sql").write_text(
+        """{{ config(materialized='table') }}
+select try_cast(o.order_id as integer) as order_id, try_cast(o.customer_id as integer) as customer_id
+from {{ ref("raw_orders") }} as o
+left join {{ ref("customers") }} as c on try_cast(o.customer_id as integer) = c.customer_id
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('customers')
+                field: customer_id
+"""
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "+orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 2 seed(s), 2 model(s), and 1 generic test(s)" in result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"][:4]] == [
+        "seed.build_seed_model_relationships_tests.raw_customers",
+        "seed.build_seed_model_relationships_tests.raw_orders",
+        "model.build_seed_model_relationships_tests.customers",
+        "model.build_seed_model_relationships_tests.orders",
+    ]
+    assert run_results["results"][4]["unique_id"].startswith(
+        "test.build_seed_model_relationships_tests.relationships_orders_customer_id__customer_id__ref_customers_."
+    )
+    assert [item["status"] for item in run_results["results"]] == ["success", "success", "success", "success", "pass"]
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed+model+test build execution slice")
 def test_build_reports_failing_seed_model_attached_generic_tests_in_run_results(tmp_path: Path):
     project = tmp_path / "build_seed_model_tests"
@@ -1238,11 +1465,14 @@ def test_build_rejects_seed_model_with_unsupported_generic_test_before_duckdb(tm
     write_seed_model_test_project(
         project,
         "customer_id,customer_name\n1,Ada\n",
-        """          - relationships:
-              arguments:
-                to: ref('customers')
-                field: customer_id
-""",
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: customers
+    tests:
+      - unique
+"""
     )
     target = tmp_path / "build-target"
     result = subprocess.run(
@@ -1252,7 +1482,7 @@ def test_build_rejects_seed_model_with_unsupported_generic_test_before_duckdb(tm
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "build currently executes only selected DuckDB not_null/unique/accepted_values column generic tests" in result.stderr
+    assert "build currently executes only selected DuckDB not_null/unique/accepted_values/relationships column generic tests" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
@@ -1298,7 +1528,7 @@ def test_build_rejects_model_selection_with_unsupported_generic_test_before_duck
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "build currently executes only selected DuckDB not_null/unique/accepted_values column generic tests" in result.stderr
+    assert "build currently executes only selected DuckDB not_null/unique/accepted_values/relationships column generic tests" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
