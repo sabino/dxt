@@ -131,6 +131,85 @@ def test_compile_select_limits_compiled_models_but_keeps_graph_context(tmp_path:
     assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
 
 
+def write_static_loop_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: static_loop_compile
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "payments.sql").write_text(
+        """{{ config(materialized='table') }}
+select 1 as order_id, 'credit_card' as payment_method, 10 as amount
+union all
+select 1 as order_id, 'coupon' as payment_method, 2 as amount
+"""
+    )
+    (project / "models" / "orders.sql").write_text(
+        """{{ config(materialized='table') }}
+{% set payment_methods = ['credit_card', 'coupon'] %}
+with payments as (
+    select * from {{ ref('payments') }}
+),
+order_payments as (
+    select
+        order_id,
+        {% for payment_method in payment_methods -%}
+        sum(case when payment_method = '{{ payment_method }}' then amount else 0 end) as {{ payment_method }}_amount,
+        {% endfor -%}
+        sum(amount) as total_amount
+    from payments
+    group by order_id
+)
+select * from order_payments
+"""
+    )
+
+
+def test_compile_expands_static_jinja_set_for_loop(tmp_path: Path):
+    project = tmp_path / "static_loop_compile"
+    write_static_loop_project(project)
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    compiled = (target / "compiled" / "static_loop_compile" / "models" / "orders.sql").read_text()
+    assert "credit_card_amount" in compiled
+    assert "coupon_amount" in compiled
+    assert "{{" not in compiled
+    assert "{%" not in compiled
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M2 static loop build execution coverage")
+def test_build_executes_model_with_static_jinja_set_for_loop(tmp_path: Path):
+    project = tmp_path / "static_loop_compile"
+    write_static_loop_project(project)
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "+orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 2 model(s) and 0 generic test(s)" in result.stdout
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select credit_card_amount, coupon_amount, total_amount from "main"."orders"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "10,2,12"
+
+
 def assert_profile_target_context_outputs(target: Path, command_name: str) -> None:
     compiled_root = target / "compiled" / "profile_target_context" / "models"
     current_sql = (compiled_root / "current_context.sql").read_text()
