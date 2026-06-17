@@ -12,6 +12,7 @@ const loadProjectConfig = project_config.loadProjectConfig;
 const deinitProjectConfig = types.deinitProjectConfig;
 const applyProjectModelPathConfigs = project_config.applyProjectModelPathConfigs;
 const applyProjectSeedDocs = project_config.applyProjectSeedDocs;
+const parseVarsText = project_config.parseVarsText;
 const discoverChildDirectories = project_fs.discoverChildDirectories;
 const discoverProjectFiles = project_fs.discoverProjectFiles;
 const discoverSeedFiles = project_fs.discoverSeedFiles;
@@ -44,12 +45,16 @@ pub fn graphDefaultTarget(runtime: Runtime, project_dir: []const u8) ![]const u8
     return config.target_path;
 }
 
-pub fn loadGraph(runtime: Runtime, project_dir: []const u8, callbacks: Callbacks) !Graph {
+pub fn loadGraph(runtime: Runtime, project_dir: []const u8, cli_vars: ?[]const u8, callbacks: Callbacks) !Graph {
     var config = try loadProjectConfig(runtime, project_dir);
     defer deinitProjectConfig(runtime.allocator, &config);
 
     var graph = Graph{ .allocator = runtime.allocator, .project_name = config.name };
     errdefer graph.deinit();
+    try graph.vars.appendSlice(runtime.allocator, config.vars.items);
+    if (cli_vars) |vars_text| {
+        try parseVarsText(runtime.allocator, vars_text, &graph.vars);
+    }
 
     try loadProjectMacros(runtime, project_dir, config.name, config.macro_paths.items, true, callbacks, &graph);
     try loadInstalledPackageMacros(runtime, project_dir, callbacks, &graph);

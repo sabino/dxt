@@ -1,0 +1,8 @@
+name: dynamic_var_ref
+version: "1.0"
+profile: default
+model-paths: ["models"]
+target-path: target
+vars:
+  customer_model: customers
+  raw_table: payments

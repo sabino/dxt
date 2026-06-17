@@ -129,6 +129,109 @@ def test_compile_select_limits_compiled_models_but_keeps_graph_context(tmp_path:
     assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
 
 
+def test_compile_docs_run_and_build_resolve_cli_vars(tmp_path: Path):
+    project = copy_fixture(tmp_path, "dynamic_var_ref")
+
+    compile_target = tmp_path / "compile-target"
+    compile_result = subprocess.run(
+        [
+            DXT,
+            "compile",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(compile_target),
+            "--select",
+            "orders",
+            "--vars",
+            "{customer_model: alt_customers}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    assert 'from "main"."alt_customers"' in (
+        compile_target / "compiled" / "dynamic_var_ref" / "models" / "orders.sql"
+    ).read_text()
+    compile_manifest = json.loads((compile_target / "manifest.json").read_text())
+    assert compile_manifest["nodes"]["model.dynamic_var_ref.orders"]["depends_on"]["nodes"] == [
+        "model.dynamic_var_ref.alt_customers"
+    ]
+
+    docs_target = tmp_path / "docs-target"
+    docs_result = subprocess.run(
+        [
+            DXT,
+            "docs",
+            "generate",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(docs_target),
+            "--select",
+            "from_source",
+            "--vars",
+            "{raw_table: transactions}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert docs_result.returncode == 0, docs_result.stderr
+    assert 'from "raw"."transactions"' in (
+        docs_target / "compiled" / "dynamic_var_ref" / "models" / "from_source.sql"
+    ).read_text()
+
+    run_target = tmp_path / "run-target"
+    run_result = subprocess.run(
+        [
+            DXT,
+            "run",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(run_target),
+            "--select",
+            "orders",
+            "--vars",
+            "{customer_model: alt_customers}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert run_result.returncode == 2
+    assert "model execution requires a DuckDB adapter" in run_result.stderr
+    assert 'from "main"."alt_customers"' in (
+        run_target / "compiled" / "dynamic_var_ref" / "models" / "orders.sql"
+    ).read_text()
+
+    build_target = tmp_path / "build-target"
+    build_result = subprocess.run(
+        [
+            DXT,
+            "build",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(build_target),
+            "--select",
+            "orders",
+            "--vars",
+            "{customer_model: alt_customers}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build_result.returncode == 2
+    assert "model execution requires a DuckDB adapter" in build_result.stderr
+    assert 'from "main"."alt_customers"' in (
+        build_target / "compiled" / "dynamic_var_ref" / "models" / "orders.sql"
+    ).read_text()
+
+
 def test_compile_rejects_selection_without_models(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     result = subprocess.run(
@@ -1380,6 +1483,58 @@ def test_parse_source_dependency(tmp_path: Path):
     assert node["sources"] == [["raw", "customers"]]
 
 
+def test_parse_and_ls_resolve_vars_inside_ref_and_source(tmp_path: Path):
+    project = copy_fixture(tmp_path, "dynamic_var_ref")
+    result = subprocess.run(
+        [
+            DXT,
+            "parse",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            "target-dxt",
+            "--vars",
+            "{raw_table: transactions}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    orders = manifest["nodes"]["model.dynamic_var_ref.orders"]
+    assert orders["refs"] == [{"name": "customers", "package": None, "version": None}]
+    assert orders["depends_on"]["nodes"] == ["model.dynamic_var_ref.customers"]
+    from_source = manifest["nodes"]["model.dynamic_var_ref.from_source"]
+    assert from_source["sources"] == [["raw", "transactions"]]
+    assert from_source["depends_on"]["nodes"] == ["source.dynamic_var_ref.raw.transactions"]
+    assert manifest["parent_map"]["model.dynamic_var_ref.orders"] == ["model.dynamic_var_ref.customers"]
+    assert "model.dynamic_var_ref.orders" in manifest["child_map"]["model.dynamic_var_ref.customers"]
+
+    ls_result = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--select",
+            "alt_customers+",
+            "--vars",
+            "{customer_model: alt_customers}",
+            "--output",
+            "json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_result.returncode == 0, ls_result.stderr
+    assert [item["unique_id"] for item in json.loads(ls_result.stdout)] == [
+        "model.dynamic_var_ref.alt_customers",
+        "model.dynamic_var_ref.orders",
+    ]
+
+
 def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     project = copy_fixture(tmp_path, "seed_ref")
     command = [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"]
@@ -2170,7 +2325,7 @@ def test_dynamic_ref_fails_loudly(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "unsupported dynamic ref" in result.stderr
+    assert "unresolved var" in result.stderr
 
 
 def test_dynamic_doc_fails_loudly(tmp_path: Path):
@@ -2257,10 +2412,10 @@ def test_missing_package_macro_in_macro_body_fails_loudly(tmp_path: Path):
     assert "unresolved macro reference" in result.stderr
 
 
-def test_implemented_parse_rejects_ignored_dbt_flags(tmp_path: Path):
+def test_implemented_parse_rejects_unsupported_profile_flags(tmp_path: Path):
     project = copy_fixture(tmp_path, "single_model")
     result = subprocess.run(
-        [DXT, "parse", "--project-dir", str(project), "--vars", "{}"],
+        [DXT, "parse", "--project-dir", str(project), "--profiles-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
