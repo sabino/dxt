@@ -63,10 +63,10 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | Names/FQN subset | Partial |
 | `+` graph expansion | Partial |
 | `--exclude` | Partial |
-| `tag:`, `path:`, `package:`, `resource_type:`, `test_type:`, `config.materialized:` | Partial |
+| `tag:`, `path:`, `file:`, `package:`, `resource_type:`, `test_type:`, `config.materialized:` | Partial |
 | `source:`, `exposure:`, selected generic test names | Partial |
 | Wildcards | Partial; pinned to observed dbt Core behavior where tested. |
-| YAML selectors, `@`, state/result/source-status/test-type/access/group/version selectors | Planned |
+| YAML selectors, `@`, depth-limited `+`, state/result/source-status/access/group/version selectors | Planned |
 
 ## Artifacts
 

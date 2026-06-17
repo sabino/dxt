@@ -23,6 +23,8 @@ compatibility.
   freshness inheritance, narrow source `schema: "{{ target.schema }}_raw"`
   rendering, expanded Manifest v12-shaped source fields, and DuckDB source
   freshness execution against resolved inherited source settings.
+- `file:` selector support for basename/stem matching across selectable graph
+  resources, with selector reuse covered through `ls` and `docs generate`.
 
 ## 0.0.0-pre-alpha
 

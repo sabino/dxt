@@ -350,6 +350,7 @@ fn validateSelectorMethod(part: []const u8) !void {
     const prefixes = [_][]const u8{
         "tag:",
         "path:",
+        "file:",
         "source:",
         "exposure:",
         "package:",
