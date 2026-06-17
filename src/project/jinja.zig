@@ -9,7 +9,8 @@ const Node = types.Node;
 const appendUnique = util.appendUnique;
 const sortStrings = util.sortStrings;
 const findMacroIdByPackageAndName = resolve.findMacroIdByPackageAndName;
-const findMacroIdForUnqualifiedCall = resolve.findMacroIdForUnqualifiedCall;
+const findMacroIdForUnqualifiedMacroDependency = resolve.findMacroIdForUnqualifiedMacroDependency;
+const findMacroIdForUnqualifiedNamespaceCall = resolve.findMacroIdForUnqualifiedNamespaceCall;
 const hasMacroPackage = resolve.hasMacroPackage;
 const packageNameFromMacroUniqueId = resolve.packageNameFromMacroUniqueId;
 
@@ -299,7 +300,7 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
             try parseConfig(allocator, args, node);
         } else {
             if (graph) |known_graph| {
-                if (findMacroIdForUnqualifiedCall(known_graph, node.package_name, call.name)) |macro_id| {
+                if (findMacroIdForUnqualifiedNamespaceCall(known_graph, node.package_name, call.name)) |macro_id| {
                     try appendUnique(allocator, &node.macro_depends_on, macro_id);
                     i = call.close + 1;
                     continue;
@@ -359,7 +360,7 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
             const resolved = findMacroIdByPackageAndName(graph, package_name, call.name);
             if (resolved == null and hasMacroPackage(graph, package_name)) return error.UnresolvedMacro;
             break :blk resolved;
-        } else findMacroIdForUnqualifiedCall(graph, current_package, call.name);
+        } else findMacroIdForUnqualifiedMacroDependency(graph, current_package, call.name);
         if (macro_id) |resolved_macro_id| {
             if (std.mem.eql(u8, resolved_macro_id, current_macro_id)) {
                 i = call.close + 1;
@@ -590,6 +591,54 @@ test "sql scanner records known unqualified and package macro calls" {
     try std.testing.expectEqualStrings("nightly", node.tags.items[0]);
 }
 
+test "sql scanner uses package root and dbt macro namespace order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    _ = try appendTestMacro(&graph, "demo", "same_name");
+    _ = try appendTestMacro(&graph, "demo", "root_only");
+    _ = try appendTestMacro(&graph, "other_pkg", "package_only");
+    _ = try appendTestMacro(&graph, "pkg", "same_name");
+    _ = try appendTestMacro(&graph, "dbt", "internal_only");
+
+    var package_node = Node{
+        .package_name = "pkg",
+        .unique_id = "model.pkg.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &package_node);
+
+    try scanSql(allocator,
+        \\select {{ same_name('id') }}, {{ root_only('id') }}, {{ internal_only('id') }}
+    , &package_node, &graph);
+
+    try std.testing.expectEqual(@as(usize, 3), package_node.macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.pkg.same_name", package_node.macro_depends_on.items[0]);
+    try std.testing.expectEqualStrings("macro.demo.root_only", package_node.macro_depends_on.items[1]);
+    try std.testing.expectEqualStrings("macro.dbt.internal_only", package_node.macro_depends_on.items[2]);
+    try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "select {{ package_only('id') }}", &package_node, &graph));
+
+    var root_node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &root_node);
+
+    try scanSql(allocator, "select {{ same_name('id') }}", &root_node, &graph);
+    try std.testing.expectEqual(@as(usize, 1), root_node.macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.demo.same_name", root_node.macro_depends_on.items[0]);
+}
+
 test "sql scanner resolves vars inside ref and source calls" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -649,4 +698,37 @@ test "macro scanner records known dependencies skips self and rejects missing kn
     try std.testing.expectEqualStrings("macro.pkg.star", macro_depends_on.items[1]);
 
     try std.testing.expectError(error.UnresolvedMacro, scanMacroSqlForKnownMacroCalls(allocator, "{{ pkg.missing() }}", &graph, current_macro, &macro_depends_on));
+}
+
+test "macro scanner uses package root and dbt macro namespace order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    _ = try appendTestMacro(&graph, "demo", "same_name");
+    _ = try appendTestMacro(&graph, "demo", "root_only");
+    const current_macro = try appendTestMacro(&graph, "pkg", "wrap");
+    _ = try appendTestMacro(&graph, "pkg", "same_name");
+    _ = try appendTestMacro(&graph, "other_pkg", "package_only");
+    _ = try appendTestMacro(&graph, "dbt", "internal_only");
+
+    var macro_depends_on: std.ArrayList([]const u8) = .empty;
+    defer macro_depends_on.deinit(allocator);
+
+    try scanMacroSqlForKnownMacroCalls(allocator,
+        \\{% macro wrap(column_name) %}
+        \\  {{ same_name(column_name) }}
+        \\  {{ root_only(column_name) }}
+        \\  {{ package_only(column_name) }}
+        \\  {{ internal_only(column_name) }}
+        \\{% endmacro %}
+    , &graph, current_macro, &macro_depends_on);
+
+    try std.testing.expectEqual(@as(usize, 4), macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.pkg.same_name", macro_depends_on.items[0]);
+    try std.testing.expectEqualStrings("macro.demo.root_only", macro_depends_on.items[1]);
+    try std.testing.expectEqualStrings("macro.other_pkg.package_only", macro_depends_on.items[2]);
+    try std.testing.expectEqualStrings("macro.dbt.internal_only", macro_depends_on.items[3]);
 }

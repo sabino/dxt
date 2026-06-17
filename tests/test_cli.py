@@ -1094,6 +1094,48 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
     assert json.loads(ls_unknown_package.stdout) == []
 
 
+def test_parse_macro_namespace_search_order(tmp_path: Path):
+    project = copy_fixture(tmp_path, "macro_namespace_search_order")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    manifest_path = project / "target-dxt" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_manifest_schema_slice(manifest_path)
+
+    root_same = "macro.macro_namespace_search_order.same_name"
+    root_only = "macro.macro_namespace_search_order.root_only"
+    other_shared = "macro.other_pkg.shared"
+    package_same = "macro.util_pkg.same_name"
+    package_wrap = "macro.util_pkg.pkg_wrap"
+    assert sorted(manifest["macros"]) == [
+        root_only,
+        root_same,
+        other_shared,
+        package_wrap,
+        package_same,
+    ]
+    assert manifest["nodes"]["model.macro_namespace_search_order.root_local"]["depends_on"]["macros"] == [
+        root_same
+    ]
+    assert manifest["nodes"]["model.macro_namespace_search_order.root_qualified_pkg"]["depends_on"]["macros"] == [
+        package_same
+    ]
+    assert manifest["nodes"]["model.util_pkg.pkg_local"]["depends_on"]["macros"] == [package_same]
+    assert manifest["nodes"]["model.util_pkg.pkg_root_fallback"]["depends_on"]["macros"] == [root_only]
+    assert manifest["macros"][package_wrap]["depends_on"]["macros"] == [
+        root_only,
+        other_shared,
+        package_same,
+    ]
+    assert str(project) not in manifest_path.read_text()
+
+
 def test_macro_paths_replace_default_macro_directory(tmp_path: Path):
     project = copy_fixture(tmp_path, "macro_paths_custom")
     result = subprocess.run(

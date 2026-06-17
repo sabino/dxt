@@ -74,11 +74,22 @@ pub fn findMacroIdByPackageAndName(graph: *const Graph, package_name: []const u8
     return null;
 }
 
-pub fn findMacroIdForUnqualifiedCall(graph: *const Graph, package_name: []const u8, name: []const u8) ?[]const u8 {
+pub fn findMacroIdForUnqualifiedNamespaceCall(graph: *const Graph, package_name: []const u8, name: []const u8) ?[]const u8 {
     if (findMacroIdByPackageAndName(graph, package_name, name)) |macro_id| return macro_id;
     if (!std.mem.eql(u8, package_name, graph.project_name)) {
-        return findProjectMacroIdByName(graph, name);
+        if (findProjectMacroIdByName(graph, name)) |macro_id| return macro_id;
     }
+    if (findMacroIdByPackageAndName(graph, "dbt", name)) |macro_id| return macro_id;
+    return null;
+}
+
+pub fn findMacroIdForUnqualifiedMacroDependency(graph: *const Graph, package_name: []const u8, name: []const u8) ?[]const u8 {
+    if (findMacroIdByPackageAndName(graph, package_name, name)) |macro_id| return macro_id;
+    if (!std.mem.eql(u8, package_name, graph.project_name)) {
+        if (findProjectMacroIdByName(graph, name)) |macro_id| return macro_id;
+    }
+    if (findNonInternalPackageMacroIdByName(graph, package_name, name)) |macro_id| return macro_id;
+    if (findMacroIdByPackageAndName(graph, "dbt", name)) |macro_id| return macro_id;
     return null;
 }
 
@@ -326,6 +337,17 @@ fn findProjectMacroIdByName(graph: *const Graph, name: []const u8) ?[]const u8 {
     return findMacroIdByPackageAndName(graph, graph.project_name, name);
 }
 
+fn findNonInternalPackageMacroIdByName(graph: *const Graph, current_package: []const u8, name: []const u8) ?[]const u8 {
+    for (graph.macros.items) |macro| {
+        if (!std.mem.eql(u8, macro.name, name)) continue;
+        if (std.mem.eql(u8, macro.package_name, current_package)) continue;
+        if (std.mem.eql(u8, macro.package_name, graph.project_name)) continue;
+        if (std.mem.eql(u8, macro.package_name, "dbt")) continue;
+        return macro.unique_id;
+    }
+    return null;
+}
+
 fn findProjectMacroIndexByName(graph: *const Graph, name: []const u8) ?usize {
     return findMacroIndexByPackageAndName(graph, graph.project_name, name);
 }
@@ -398,7 +420,7 @@ test "model and macro index helpers preserve package lookup semantics" {
     try std.testing.expectEqual(@as(?usize, 0), findProjectMacroIndexByName(&graph, "format_id"));
 }
 
-test "unqualified macro lookup prefers current package then project package" {
+test "unqualified macro namespace lookup prefers current package root then dbt internal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
@@ -407,12 +429,39 @@ test "unqualified macro lookup prefers current package then project package" {
     try appendMacro(&graph, "demo", "format_id");
     try appendMacro(&graph, "pkg", "format_id");
     try appendMacro(&graph, "demo", "project_only");
+    try appendMacro(&graph, "other_pkg", "package_only");
+    try appendMacro(&graph, "dbt", "internal_only");
+    try appendMacro(&graph, "dbt", "project_only");
+    try appendMacro(&graph, "dbt", "format_id");
 
-    try std.testing.expectEqualStrings("macro.pkg.format_id", findMacroIdForUnqualifiedCall(&graph, "pkg", "format_id").?);
-    try std.testing.expectEqualStrings("macro.demo.project_only", findMacroIdForUnqualifiedCall(&graph, "pkg", "project_only").?);
-    try std.testing.expect(findMacroIdForUnqualifiedCall(&graph, "demo", "missing") == null);
+    try std.testing.expectEqualStrings("macro.pkg.format_id", findMacroIdForUnqualifiedNamespaceCall(&graph, "pkg", "format_id").?);
+    try std.testing.expectEqualStrings("macro.demo.project_only", findMacroIdForUnqualifiedNamespaceCall(&graph, "pkg", "project_only").?);
+    try std.testing.expectEqualStrings("macro.dbt.internal_only", findMacroIdForUnqualifiedNamespaceCall(&graph, "pkg", "internal_only").?);
+    try std.testing.expectEqualStrings("macro.demo.format_id", findMacroIdForUnqualifiedNamespaceCall(&graph, "demo", "format_id").?);
+    try std.testing.expect(findMacroIdForUnqualifiedNamespaceCall(&graph, "pkg", "package_only") == null);
+    try std.testing.expect(findMacroIdForUnqualifiedNamespaceCall(&graph, "demo", "missing") == null);
     try std.testing.expect(hasMacroPackage(&graph, "pkg"));
     try std.testing.expect(!hasMacroPackage(&graph, "other"));
+}
+
+test "unqualified macro dependency lookup falls back to other packages before dbt internal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
+    defer graph.deinit();
+
+    try appendMacro(&graph, "demo", "root_only");
+    try appendMacro(&graph, "pkg", "local_only");
+    try appendMacro(&graph, "other_pkg", "package_only");
+    try appendMacro(&graph, "other_pkg", "internal_shadow");
+    try appendMacro(&graph, "dbt", "internal_only");
+    try appendMacro(&graph, "dbt", "internal_shadow");
+
+    try std.testing.expectEqualStrings("macro.pkg.local_only", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "local_only").?);
+    try std.testing.expectEqualStrings("macro.demo.root_only", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "root_only").?);
+    try std.testing.expectEqualStrings("macro.other_pkg.package_only", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "package_only").?);
+    try std.testing.expectEqualStrings("macro.other_pkg.internal_shadow", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "internal_shadow").?);
+    try std.testing.expectEqualStrings("macro.dbt.internal_only", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "internal_only").?);
 }
 
 test "macro unique id package extraction accepts only macro ids" {
