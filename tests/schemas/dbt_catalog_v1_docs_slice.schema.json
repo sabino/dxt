@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.getdbt.com/dbt/catalog/v1.json#dxt-docs-slice",
   "title": "dxt dbt Catalog v1 docs-generate compatibility slice",
-  "$comment": "Pinned local compatibility slice for dbt Catalog v1. Source reference: https://schemas.getdbt.com/dbt/catalog/v1.json, checked 2026-06-16. This intentionally validates only the empty adapter-free catalog surface emitted before dxt has relation introspection.",
+  "$comment": "Pinned local compatibility slice for dbt Catalog v1. Source reference: https://schemas.getdbt.com/dbt/catalog/v1.json, checked 2026-06-16. This validates the current dxt docs-generate surface: metadata, model/seed node catalog entries when DuckDB relation introspection is available, empty sources, and errors.",
   "type": "object",
   "additionalProperties": false,
   "required": ["metadata", "nodes", "sources", "errors"],
@@ -32,7 +32,7 @@
     },
     "nodes": {
       "type": "object",
-      "additionalProperties": false
+      "additionalProperties": {"$ref": "#/$defs/catalogTable"}
     },
     "sources": {
       "type": "object",
@@ -41,6 +41,61 @@
     "errors": {
       "type": ["array", "null"],
       "items": {"type": "string"}
+    }
+  },
+  "$defs": {
+    "catalogTable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metadata", "columns", "stats", "unique_id"],
+      "properties": {
+        "metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "schema", "name", "database", "comment", "owner"],
+          "properties": {
+            "type": {"type": "string"},
+            "schema": {"type": "string"},
+            "name": {"type": "string"},
+            "database": {"type": ["string", "null"]},
+            "comment": {"type": ["string", "null"]},
+            "owner": {"type": ["string", "null"]}
+          }
+        },
+        "columns": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/column"}
+        },
+        "stats": {
+          "type": "object",
+          "required": ["has_stats"],
+          "additionalProperties": {"$ref": "#/$defs/stat"}
+        },
+        "unique_id": {"type": "string"}
+      }
+    },
+    "column": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "index", "name", "comment"],
+      "properties": {
+        "type": {"type": "string"},
+        "index": {"type": "integer"},
+        "name": {"type": "string"},
+        "comment": {"type": ["string", "null"]}
+      }
+    },
+    "stat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "value", "description", "include"],
+      "properties": {
+        "id": {"type": "string"},
+        "label": {"type": "string"},
+        "value": {},
+        "description": {"type": ["string", "null"]},
+        "include": {"type": "boolean"}
+      }
     }
   }
 }

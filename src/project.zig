@@ -161,8 +161,18 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
 
+    var catalog_entries: std.ArrayList(catalog.CatalogEntry) = .empty;
+    defer catalog.deinitEntries(runtime.allocator, &catalog_entries);
+    if (duckdb.databasePath(runtime.allocator, target_dir, &graph)) |db_path| {
+        defer runtime.allocator.free(db_path);
+        catalog_entries = try duckdb.collectCatalogEntries(runtime, db_path, &graph, selected);
+    } else |err| switch (err) {
+        error.UnsupportedDuckDbPath => {},
+        else => return err,
+    }
+
     const catalog_path = try pathJoin(runtime.allocator, &.{ target_dir, "catalog.json" });
-    const catalog_json = try catalog.renderCatalog(runtime.allocator);
+    const catalog_json = try catalog.renderCatalog(runtime.allocator, catalog_entries.items);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = catalog_path, .data = catalog_json });
 
     try stdout.print("Generated docs artifacts for {d} compiled model(s) into {s}\n", .{
