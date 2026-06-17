@@ -13,6 +13,8 @@ compatibility.
   matrix, architecture diagrams, release process, and changelog.
 - GitHub Actions release workflow for tagged native Zig binary artifacts and
   checksums.
+- Source-grounded upstream reference-map refresh with the next five small
+  dbt Core/Fusion-backed compatibility slices.
 
 ## 0.0.0-pre-alpha
 
