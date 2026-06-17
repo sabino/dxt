@@ -77,6 +77,61 @@ pub fn parseLiteralArgs(allocator: std.mem.Allocator, args: []const u8, unsuppor
     return strings;
 }
 
+pub fn parseLiteralOrVarArgs(allocator: std.mem.Allocator, args: []const u8, graph: ?*const Graph, unsupported_error: anyerror) !std.ArrayList([]const u8) {
+    var strings: std.ArrayList([]const u8) = .empty;
+    errdefer strings.deinit(allocator);
+
+    var i: usize = 0;
+    var saw_arg = false;
+    while (i < args.len) {
+        i = skipWs(args, i);
+        if (i >= args.len) break;
+        if (args[i] == ',') {
+            i += 1;
+            continue;
+        }
+
+        if (args[i] == '"' or args[i] == '\'') {
+            const parsed = try parseQuoted(allocator, args, i);
+            try strings.append(allocator, parsed.value);
+            saw_arg = true;
+            i = skipWs(args, parsed.next);
+        } else if (std.mem.startsWith(u8, args[i..], "var")) {
+            const call = (readJinjaCall(args, "var", i + "var".len) catch return unsupported_error) orelse return unsupported_error;
+            if (call.package_name != null or !std.mem.eql(u8, call.name, "var")) return unsupported_error;
+            var var_name_args = try parseLiteralArgs(allocator, args[call.open + 1 .. call.close], unsupported_error);
+            defer var_name_args.deinit(allocator);
+            if (!(var_name_args.items.len == 1 or var_name_args.items.len == 2)) return unsupported_error;
+            const value = if (graph) |known_graph|
+                findVarValue(known_graph, var_name_args.items[0])
+            else
+                null;
+            if (value) |resolved_value| {
+                try strings.append(allocator, resolved_value);
+            } else if (var_name_args.items.len == 2) {
+                try strings.append(allocator, var_name_args.items[1]);
+            } else {
+                return error.UnresolvedVar;
+            }
+            saw_arg = true;
+            i = skipWs(args, call.close + 1);
+        } else {
+            return unsupported_error;
+        }
+
+        if (i < args.len and args[i] != ',') return unsupported_error;
+    }
+    if (!saw_arg) return unsupported_error;
+    return strings;
+}
+
+fn findVarValue(graph: *const Graph, name: []const u8) ?[]const u8 {
+    for (graph.vars.items) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry.value;
+    }
+    return null;
+}
+
 pub fn parseQuoted(allocator: std.mem.Allocator, text: []const u8, start: usize) !ParsedString {
     const quote = text[start];
     var out: std.ArrayList(u8) = .empty;
@@ -225,7 +280,7 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
             }
             return error.UnsupportedJinja;
         } else if (std.mem.eql(u8, call.name, "ref")) {
-            var strings = try parseLiteralArgs(allocator, args, error.UnsupportedDynamicRef);
+            var strings = try parseLiteralOrVarArgs(allocator, args, graph, error.UnsupportedDynamicRef);
             defer strings.deinit(allocator);
             if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedDynamicRef;
             try node.refs.append(allocator, .{
@@ -233,7 +288,7 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
                 .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
             });
         } else if (std.mem.eql(u8, call.name, "source")) {
-            var strings = try parseLiteralArgs(allocator, args, error.UnsupportedDynamicSource);
+            var strings = try parseLiteralOrVarArgs(allocator, args, graph, error.UnsupportedDynamicSource);
             defer strings.deinit(allocator);
             if (strings.items.len != 2) return error.UnsupportedDynamicSource;
             try node.source_refs.append(allocator, .{
@@ -398,6 +453,29 @@ test "parseLiteralArgs accepts quoted args and preserves caller error" {
     try std.testing.expectError(error.UnsupportedDynamicSource, parseLiteralArgs(allocator, "var('source')", error.UnsupportedDynamicSource));
 }
 
+test "parseLiteralOrVarArgs resolves scalar vars from graph context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.vars.append(allocator, .{ .name = "model_name", .value = "customers" });
+
+    var strings = try parseLiteralOrVarArgs(allocator, "'pkg', var('model_name')", &graph, error.UnsupportedDynamicRef);
+    defer strings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), strings.items.len);
+    try std.testing.expectEqualStrings("pkg", strings.items[0]);
+    try std.testing.expectEqualStrings("customers", strings.items[1]);
+
+    try std.testing.expectError(error.UnresolvedVar, parseLiteralOrVarArgs(allocator, "var('missing')", &graph, error.UnsupportedDynamicRef));
+    var defaulted = try parseLiteralOrVarArgs(allocator, "var('missing', 'fallback')", &graph, error.UnsupportedDynamicRef);
+    defer defaulted.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), defaulted.items.len);
+    try std.testing.expectEqualStrings("fallback", defaulted.items[0]);
+    try std.testing.expectError(error.UnsupportedDynamicRef, parseLiteralOrVarArgs(allocator, "var('model_name', 'fallback', 'extra')", &graph, error.UnsupportedDynamicRef));
+}
+
 test "readJinjaCall parses unqualified and package-qualified calls" {
     const ref_span = "ref('customers')";
     const ref_call = (try readJinjaCall(ref_span, "ref", 3)) orelse return error.TestExpectedEqual;
@@ -510,6 +588,38 @@ test "sql scanner records known unqualified and package macro calls" {
     try std.testing.expectEqualStrings("customers", node.refs.items[0].name);
     try std.testing.expectEqual(@as(usize, 1), node.tags.items.len);
     try std.testing.expectEqualStrings("nightly", node.tags.items[0]);
+}
+
+test "sql scanner resolves vars inside ref and source calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.vars.append(allocator, .{ .name = "orders_model", .value = "orders" });
+    try graph.vars.append(allocator, .{ .name = "raw_table", .value = "payments" });
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator,
+        \\select * from {{ ref(var('orders_model')) }}
+        \\union all select * from {{ source('raw', var('raw_table')) }}
+    , &node, &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), node.refs.items.len);
+    try std.testing.expectEqualStrings("orders", node.refs.items[0].name);
+    try std.testing.expectEqual(@as(usize, 1), node.source_refs.items.len);
+    try std.testing.expectEqualStrings("raw", node.source_refs.items[0].source_name);
+    try std.testing.expectEqualStrings("payments", node.source_refs.items[0].table_name);
 }
 
 test "macro scanner records known dependencies skips self and rejects missing known package macros" {

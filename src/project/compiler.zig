@@ -69,7 +69,7 @@ fn renderExpression(allocator: std.mem.Allocator, graph: *const Graph, node: *co
         return try allocator.dupe(u8, "");
     }
     if (std.mem.eql(u8, call.name, "ref")) {
-        var strings = try jinja.parseLiteralArgs(allocator, args, error.UnsupportedDynamicRef);
+        var strings = try jinja.parseLiteralOrVarArgs(allocator, args, graph, error.UnsupportedDynamicRef);
         defer strings.deinit(allocator);
         if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedDynamicRef;
         const dep = RefDep{
@@ -81,7 +81,7 @@ fn renderExpression(allocator: std.mem.Allocator, graph: *const Graph, node: *co
         return try relationNameForNode(allocator, target);
     }
     if (std.mem.eql(u8, call.name, "source")) {
-        var strings = try jinja.parseLiteralArgs(allocator, args, error.UnsupportedDynamicSource);
+        var strings = try jinja.parseLiteralOrVarArgs(allocator, args, graph, error.UnsupportedDynamicSource);
         defer strings.deinit(allocator);
         if (strings.items.len != 2) return error.UnsupportedDynamicSource;
         const dep = SourceDep{ .source_name = strings.items[0], .table_name = strings.items[1] };
@@ -193,7 +193,45 @@ test "compileModel rejects dynamic ref" {
         .original_file_path = "models/orders.sql",
         .raw_code = "select * from {{ ref(var('model_name')) }}",
     });
-    try std.testing.expectError(error.UnsupportedDynamicRef, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    try std.testing.expectError(error.UnresolvedVar, compileModel(allocator, &graph, &graph.nodes.items[0]));
+}
+
+test "compileModel resolves vars inside refs and sources" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.vars.append(allocator, .{ .name = "model_name", .value = "customers" });
+    try graph.vars.append(allocator, .{ .name = "source_table", .value = "payments" });
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select * from {{ ref(var('model_name')) }} union all select * from {{ source('raw', var('source_table')) }}",
+    });
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.payments",
+        .source_name = "raw",
+        .table_name = "payments",
+        .original_file_path = "models/schema.yml",
+    });
+
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[1]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select * from \"main\".\"customers\" union all select * from \"raw\".\"payments\"", compiled);
 }
 
 test "relationNameForNode quotes identifiers" {

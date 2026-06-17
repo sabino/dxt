@@ -7,6 +7,7 @@ const ProjectConfig = types.ProjectConfig;
 const ModelPathConfig = types.ModelPathConfig;
 const DocsConfig = types.DocsConfig;
 const Graph = types.Graph;
+const VarEntry = types.VarEntry;
 const deinitProjectConfig = types.deinitProjectConfig;
 const KeyValue = util.KeyValue;
 const appendUnique = util.appendUnique;
@@ -70,6 +71,55 @@ pub fn applyProjectSeedDocs(graph: *Graph, package_name: []const u8, docs: DocsC
         if (!std.mem.eql(u8, node.resource_type, "seed")) continue;
         node.docs = docs;
     }
+}
+
+pub fn appendOrReplaceVar(allocator: std.mem.Allocator, vars: *std.ArrayList(VarEntry), raw_name: []const u8, raw_value: []const u8) !void {
+    const trimmed_name = std.mem.trim(u8, raw_name, " \t\r");
+    const trimmed_value = std.mem.trim(u8, raw_value, " \t\r");
+    if (trimmed_name.len == 0 or trimmed_value.len == 0) return error.UnsupportedYaml;
+    if (trimmed_value[0] == '[' or trimmed_value[0] == '{') return error.UnsupportedYaml;
+
+    const name = try dupTrimmedScalar(allocator, trimmed_name);
+    const value = try dupTrimmedScalar(allocator, trimmed_value);
+    if (name.len == 0 or value.len == 0) return error.UnsupportedYaml;
+    for (vars.items) |*entry| {
+        if (std.mem.eql(u8, entry.name, name)) {
+            entry.value = value;
+            return;
+        }
+    }
+    try vars.append(allocator, .{ .name = name, .value = value });
+}
+
+pub fn parseVarsText(allocator: std.mem.Allocator, text: []const u8, vars: *std.ArrayList(VarEntry)) !void {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "{}")) return;
+    if (trimmed[0] == '[') return error.UnsupportedYaml;
+    if (trimmed[0] == '{') {
+        if (trimmed[trimmed.len - 1] != '}') return error.UnsupportedYaml;
+        var pieces = std.mem.splitScalar(u8, trimmed[1 .. trimmed.len - 1], ',');
+        while (pieces.next()) |piece| {
+            const item = std.mem.trim(u8, piece, " \t\r\n");
+            if (item.len == 0) continue;
+            const kv = splitKeyValue(item) orelse return error.UnsupportedYaml;
+            try appendOrReplaceVar(allocator, vars, kv.key, kv.value);
+        }
+        sortVars(vars.items);
+        return;
+    }
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var saw_var = false;
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const line_trimmed = std.mem.trim(u8, line, " \t\r");
+        if (line_trimmed.len == 0) continue;
+        const kv = splitKeyValue(line_trimmed) orelse return error.UnsupportedYaml;
+        try appendOrReplaceVar(allocator, vars, kv.key, kv.value);
+        saw_var = true;
+    }
+    if (!saw_var) return error.UnsupportedYaml;
+    sortVars(vars.items);
 }
 
 fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !ProjectConfig {
@@ -138,6 +188,7 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
     }
 
     if (config.name.len == 0) return error.InvalidProjectName;
+    try parseProjectVars(allocator, text, &config.vars);
     try parseProjectModelPathConfigs(allocator, text, &config.model_path_configs);
     try parseProjectSeedDocs(allocator, text, &config.seed_docs);
     if (config.model_paths.items.len == 0) {
@@ -150,6 +201,66 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
         try config.macro_paths.append(allocator, "macros");
     }
     return config;
+}
+
+fn parseProjectVars(allocator: std.mem.Allocator, text: []const u8, vars: *std.ArrayList(VarEntry)) !void {
+    var in_vars = false;
+    var vars_indent: usize = 0;
+    var direct_child_indent: ?usize = null;
+    var skip_nested_indent: ?usize = null;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (in_vars and indent <= vars_indent and !std.mem.eql(u8, trimmed, "vars:")) {
+            in_vars = false;
+            direct_child_indent = null;
+            skip_nested_indent = null;
+        }
+        if (!in_vars) {
+            const kv = splitKeyValue(trimmed) orelse continue;
+            if (!std.mem.eql(u8, kv.key, "vars")) continue;
+            const value = std.mem.trim(u8, kv.value, " \t\r");
+            if (value.len == 0) {
+                in_vars = true;
+                vars_indent = indent;
+                direct_child_indent = null;
+                skip_nested_indent = null;
+            } else {
+                try parseVarsText(allocator, value, vars);
+            }
+            continue;
+        }
+
+        if (indent <= vars_indent) continue;
+        if (skip_nested_indent) |skip_indent| {
+            if (indent > skip_indent) continue;
+            skip_nested_indent = null;
+        }
+        if (direct_child_indent == null) direct_child_indent = indent;
+        if (indent != direct_child_indent.?) continue;
+
+        const kv = splitKeyValue(trimmed) orelse continue;
+        const value = std.mem.trim(u8, kv.value, " \t\r");
+        if (value.len == 0) {
+            skip_nested_indent = indent;
+            continue;
+        }
+        try appendOrReplaceVar(allocator, vars, kv.key, value);
+    }
+    sortVars(vars.items);
+}
+
+fn sortVars(vars: []VarEntry) void {
+    std.mem.sort(VarEntry, vars, {}, struct {
+        fn lessThan(_: void, a: VarEntry, b: VarEntry) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
 }
 
 const PathStackEntry = struct {
@@ -395,6 +506,10 @@ test "project config parser reads paths and nested docs configs" {
         \\  - data
         \\macro-paths:
         \\  - custom_macros
+        \\vars:
+        \\  orders_model: customers
+        \\  package_scope:
+        \\    ignored_nested: value
         \\models:
         \\  demo:
         \\    marts:
@@ -420,6 +535,9 @@ test "project config parser reads paths and nested docs configs" {
     try std.testing.expectEqual(@as(usize, 1), config.macro_paths.items.len);
     try std.testing.expectEqualStrings("custom_macros", config.macro_paths.items[0]);
     try std.testing.expect(config.macro_paths_set);
+    try std.testing.expectEqual(@as(usize, 1), config.vars.items.len);
+    try std.testing.expectEqualStrings("orders_model", config.vars.items[0].name);
+    try std.testing.expectEqualStrings("customers", config.vars.items[0].value);
 
     try std.testing.expectEqual(@as(usize, 1), config.model_path_configs.items.len);
     const model_config = config.model_path_configs.items[0];
@@ -433,6 +551,40 @@ test "project config parser reads paths and nested docs configs" {
     try std.testing.expectEqualStrings("#336699", model_config.docs.node_color.?);
     try std.testing.expect(config.seed_docs.configured);
     try std.testing.expect(!config.seed_docs.show);
+}
+
+test "vars parser accepts inline and multiline scalar maps with later override" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var vars: std.ArrayList(VarEntry) = .empty;
+    defer vars.deinit(allocator);
+
+    try parseVarsText(allocator, "{orders_model: customers, raw_table: payments}", &vars);
+    try parseVarsText(allocator,
+        \\orders_model: alt_customers
+        \\source_name: raw
+    , &vars);
+
+    try std.testing.expectEqual(@as(usize, 3), vars.items.len);
+    try std.testing.expectEqualStrings("orders_model", vars.items[0].name);
+    try std.testing.expectEqualStrings("alt_customers", vars.items[0].value);
+    try std.testing.expectEqualStrings("raw_table", vars.items[1].name);
+    try std.testing.expectEqualStrings("payments", vars.items[1].value);
+    try std.testing.expectEqualStrings("source_name", vars.items[2].name);
+    try std.testing.expectEqualStrings("raw", vars.items[2].value);
+}
+
+test "vars parser rejects nested CLI values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var vars: std.ArrayList(VarEntry) = .empty;
+    defer vars.deinit(allocator);
+
+    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "{orders_model: [customers]}", &vars));
 }
 
 test "model path config matching preserves dbt path prefix semantics" {

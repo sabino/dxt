@@ -25,12 +25,18 @@ pub const Output = enum {
     json,
 };
 
+pub const VarEntry = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
 pub const ProjectConfig = struct {
     name: []const u8,
     model_paths: std.ArrayList([]const u8) = .empty,
     seed_paths: std.ArrayList([]const u8) = .empty,
     macro_paths: std.ArrayList([]const u8) = .empty,
     model_path_configs: std.ArrayList(ModelPathConfig) = .empty,
+    vars: std.ArrayList(VarEntry) = .empty,
     seed_docs: DocsConfig = .{},
     macro_paths_set: bool = false,
     target_path: []const u8 = "target",
@@ -234,6 +240,7 @@ pub const GenericTestNode = struct {
 pub const Graph = struct {
     allocator: std.mem.Allocator,
     project_name: []const u8,
+    vars: std.ArrayList(VarEntry) = .empty,
     nodes: std.ArrayList(Node) = .empty,
     tests: std.ArrayList(GenericTestNode) = .empty,
     sources: std.ArrayList(SourceDef) = .empty,
@@ -274,6 +281,7 @@ pub const Graph = struct {
         self.macro_properties.deinit(self.allocator);
         self.unmatched_model_properties.deinit(self.allocator);
         self.unmatched_macro_properties.deinit(self.allocator);
+        self.vars.deinit(self.allocator);
     }
 };
 
@@ -285,6 +293,7 @@ pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig)
     config.seed_paths.deinit(allocator);
     config.macro_paths.deinit(allocator);
     config.model_path_configs.deinit(allocator);
+    config.vars.deinit(allocator);
 }
 
 pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {

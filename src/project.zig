@@ -71,7 +71,7 @@ const loader_callbacks = project_loader.Callbacks{
 };
 
 pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
-    var graph = try project_loader.loadGraph(runtime, options.project_dir, loader_callbacks);
+    var graph = try project_loader.loadGraph(runtime, options.project_dir, options.vars, loader_callbacks);
     defer graph.deinit();
 
     try resolveDependencies(&graph);
@@ -98,7 +98,7 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
 }
 
 pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
-    var graph = try project_loader.loadGraph(runtime, options.project_dir, loader_callbacks);
+    var graph = try project_loader.loadGraph(runtime, options.project_dir, options.vars, loader_callbacks);
     defer graph.deinit();
 
     try resolveDependencies(&graph);
@@ -116,7 +116,7 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
 }
 
 pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
-    var graph = try project_loader.loadGraph(runtime, options.project_dir, loader_callbacks);
+    var graph = try project_loader.loadGraph(runtime, options.project_dir, options.vars, loader_callbacks);
     defer graph.deinit();
 
     try resolveDependencies(&graph);
@@ -141,7 +141,7 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
 }
 
 pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
-    var graph = try project_loader.loadGraph(runtime, options.project_dir, loader_callbacks);
+    var graph = try project_loader.loadGraph(runtime, options.project_dir, options.vars, loader_callbacks);
     defer graph.deinit();
 
     try resolveDependencies(&graph);
@@ -170,7 +170,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 }
 
 pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
-    var graph = try project_loader.loadGraph(runtime, options.project_dir, loader_callbacks);
+    var graph = try project_loader.loadGraph(runtime, options.project_dir, options.vars, loader_callbacks);
     defer graph.deinit();
 
     try resolveDependencies(&graph);
@@ -196,7 +196,7 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 }
 
 pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
-    var graph = try project_loader.loadGraph(runtime, options.project_dir, loader_callbacks);
+    var graph = try project_loader.loadGraph(runtime, options.project_dir, options.vars, loader_callbacks);
     defer graph.deinit();
 
     try resolveDependencies(&graph);

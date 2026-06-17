@@ -18,7 +18,7 @@ observable in published artifacts or dbt Core-compatible outputs.
 - dbt Core v1 Python implementation: `dbt-labs/dbt-core` branch `1.latest`,
   commit `566b75d`.
 - dbt Core v2 / Fusion foundation: `dbt-labs/dbt-core` branch `main`, commit
-  `9141939`.
+  `0529e06`.
 
 Do not copy upstream code. Use these paths to identify behavior, artifact fields,
 validation cases, and ownership boundaries.
@@ -58,8 +58,11 @@ Every compatibility slice should record:
 ## Current dxt Baseline
 
 - Product runtime is Zig and remains so.
-- Current implemented command surface is `parse`, `ls`, `version`, and help;
-  `compile`, `build`, and `docs generate` are placeholders.
+- Current implemented command surface is `parse`, `ls`, `compile`, `docs
+  generate`, `run`, `build`, `version`, and help. `compile` and `docs generate`
+  are render-only artifact boundaries for the supported parser graph. `run` and
+  `build` are truthful preflight boundaries that parse, select, compile, write
+  artifacts, and then fail before adapter execution.
 - `src/project/loader.zig` now owns graph loading order, installed-package
   traversal, target-path lookup, project/package resource traversal,
   macro/property application sequencing, duplicate checks, and graph sorting.
@@ -75,7 +78,8 @@ Every compatibility slice should record:
   validation, macro `docs`/`meta` fields, and namespace precedence remain
   behavior slices.
 - Existing extracted modules are `types`, `util`, `config`, `fs`, `jinja`,
-  `loader`, `resolve`, `parse`, `selector`, and `manifest`.
+  `loader`, `resolve`, `parse`, `selector`, `manifest`, `compiler`, and
+  `catalog`.
 - The test base includes native Zig tests for module-level helpers and pytest
   integration tests for CLI/artifact fixtures plus a pinned local Manifest v12
   schema slice.
@@ -84,10 +88,10 @@ Every compatibility slice should record:
   closed until the known installed-package exposure ref gap is either fixed or
   explicitly re-scoped, and schema-slice expansion rules are applied to each new
   emitted artifact field.
-- M2 implementation should wait until M1/M1A gates above are either complete or
-  explicitly re-scoped. A source-grounded M2 preplan can proceed first because
-  it will clarify parse-time Jinja, macro namespace, adapter dispatch, and
-  compiled artifact boundaries without changing product behavior.
+- M2 implementation has started with narrow render-only compile/docs boundaries
+  and scalar var-backed dependency arguments. Broader parse-time Jinja context,
+  macro namespace, adapter dispatch, materialization execution, catalog
+  introspection, and run-results behavior remain future source-grounded slices.
 
 ## Next Source-Grounded Slices
 

@@ -156,6 +156,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnresolvedSource => stderr.writeAll("error: unresolved source in supported M1 parser subset\n") catch {},
         error.UnresolvedDoc => stderr.writeAll("error: unresolved doc reference in supported M1 parser subset\n") catch {},
         error.UnresolvedMacro => stderr.writeAll("error: unresolved macro reference in supported M1 parser subset\n") catch {},
+        error.UnresolvedVar => stderr.writeAll("error: unresolved var in supported M1 parser subset\n") catch {},
         error.InvalidOutput => stderr.writeAll("error: --output must be text or json\n") catch {},
         error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, or test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
@@ -225,7 +226,6 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
                 if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
                 options.target = value;
             } else if (equals(arg, "--vars")) {
-                if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
                 options.vars = value;
             } else if (equals(arg, "--threads")) {
                 if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
@@ -395,6 +395,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         try writer.writeAll("Options:\n");
         try writer.writeAll(
             \\  --project-dir <path>
+            \\  --vars <yaml>
             \\
         );
         if (equals(command, "parse") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate")) {
@@ -408,7 +409,6 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\  --profiles-dir <path>
                 \\  --profile <name>
                 \\  --target <name>
-                \\  --vars <yaml>
                 \\  --threads <count>
                 \\
             );
