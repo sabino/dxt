@@ -724,7 +724,8 @@ def test_build_prepare_compiles_model_then_stops_before_execution(tmp_path: Path
     assert manifest["nodes"]["model.compile_basic.orders"]["compiled"] is True
 
 
-def test_build_prepare_reports_seed_execution_boundary(tmp_path: Path):
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed build execution slice")
+def test_build_executes_selected_duckdb_seed_and_writes_run_results(tmp_path: Path):
     project = copy_fixture(tmp_path, "seed_ref")
     target = tmp_path / "build-target"
     result = subprocess.run(
@@ -733,15 +734,78 @@ def test_build_prepare_reports_seed_execution_boundary(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "Prepared 1 selected resource(s), including 0 compiled model(s)" in result.stdout
-    assert "seed execution requires a DuckDB adapter and seed runner" in result.stderr
-    assert not (target / "run_results.json").exists()
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 seed(s)" in result.stdout
+    assert result.stderr == ""
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == ["seed.seed_ref.raw_customers"]
+    assert run_results["results"][0]["compiled"] is None
+    assert run_results["results"][0]["compiled_code"] is None
+    assert run_results["results"][0]["relation_name"] is None
     manifest = json.loads((target / "manifest.json").read_text())
     assert sorted(manifest["nodes"]) == [
         "model.seed_ref.stg_customers",
         "seed.seed_ref.raw_customers",
     ]
+    assert "compiled" not in manifest["nodes"]["seed.seed_ref.raw_customers"]
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select id, name from "main"."raw_customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "1,Ada"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed build execution slice")
+def test_build_replaces_existing_view_with_seed_table(tmp_path: Path):
+    project = copy_fixture(tmp_path, "seed_ref")
+    target = tmp_path / "build-target"
+    target.mkdir()
+    prepare = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-batch", "-bail", "-c", 'create view "main"."raw_customers" as select 0 as id'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert prepare.returncode == 0, prepare.stderr
+
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select id, name from "main"."raw_customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "1,Ada"
+
+
+def test_build_rejects_mixed_seed_model_selection_before_execution(tmp_path: Path):
+    project = copy_fixture(tmp_path, "seed_ref")
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "+stg_customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "Prepared 2 selected resource(s), including 1 compiled model(s)" in result.stdout
+    assert "build currently executes only seed-only selections" in result.stderr
+    assert not (target / "run_results.json").exists()
+    assert not (target / "dxt.duckdb").exists()
+    assert (target / "compiled" / "seed_ref" / "models" / "stg_customers.sql").exists()
 
 
 def test_build_prepare_reports_test_execution_boundary(tmp_path: Path):

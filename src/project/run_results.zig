@@ -4,11 +4,11 @@ const types = @import("types.zig");
 
 const Node = types.Node;
 
-pub const ModelResult = struct {
+pub const NodeResult = struct {
     node: *const Node,
 };
 
-pub fn renderRunResults(allocator: std.mem.Allocator, results: []const ModelResult) ![]const u8 {
+pub fn renderRunResults(allocator: std.mem.Allocator, results: []const NodeResult) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
@@ -36,20 +36,30 @@ fn writeResult(writer: *Io.Writer, node: *const Node) !void {
     try writer.writeAll("], \"thread_id\": \"Thread-1\", \"execution_time\": 0.0, \"adapter_response\": {}, \"message\": null, \"failures\": null, \"unique_id\": ");
     try writeJsonString(writer, node.unique_id);
     try writer.writeAll(", \"compiled\": ");
-    try writer.writeAll(if (node.compiled) "true" else "false");
+    if (isCompiledResultNode(node)) {
+        try writer.writeAll(if (node.compiled) "true" else "false");
+    } else {
+        try writer.writeAll("null");
+    }
     try writer.writeAll(", \"compiled_code\": ");
-    if (node.compiled_code) |compiled_code| {
+    if (isCompiledResultNode(node) and node.compiled_code != null) {
+        const compiled_code = node.compiled_code.?;
         try writeJsonString(writer, compiled_code);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(", \"relation_name\": ");
-    if (node.relation_name) |relation_name| {
+    if (isCompiledResultNode(node) and node.relation_name != null) {
+        const relation_name = node.relation_name.?;
         try writeJsonString(writer, relation_name);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll("}");
+}
+
+fn isCompiledResultNode(node: *const Node) bool {
+    return std.mem.eql(u8, node.resource_type, "model");
 }
 
 fn writeJsonString(writer: *Io.Writer, value: []const u8) !void {
@@ -87,4 +97,33 @@ test "run-results writer emits dbt v6 success shape" {
     try std.testing.expectEqual(true, result.get("compiled").?.bool);
     try std.testing.expectEqualStrings("select 1 as id", result.get("compiled_code").?.string);
     try std.testing.expectEqualStrings("\"main\".\"customers\"", result.get("relation_name").?.string);
+}
+
+test "run-results writer emits seed result with dbt Core null compiled fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.raw_customers",
+        .name = "raw_customers",
+        .path = "raw_customers.csv",
+        .original_file_path = "seeds/raw_customers.csv",
+        .raw_code = "",
+        .materialized = "seed",
+    });
+
+    const rendered = try renderRunResults(allocator, &.{.{ .node = &graph.nodes.items[0] }});
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const result = parsed.value.object.get("results").?.array.items[0].object;
+    try std.testing.expectEqualStrings("seed.demo.raw_customers", result.get("unique_id").?.string);
+    try std.testing.expectEqual(.null, result.get("compiled").?);
+    try std.testing.expectEqual(.null, result.get("compiled_code").?);
+    try std.testing.expectEqual(.null, result.get("relation_name").?);
 }
