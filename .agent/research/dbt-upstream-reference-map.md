@@ -387,19 +387,21 @@ touched.
   selectors, or broad Jinja in source schema beyond the explicit target-schema
   expression.
 
-### 3. M2 Selector Parity For `@`, Depth-Limited `+`, `file:`, And `ls`
+### 3. M2 Selector Parity For `@`, Depth-Limited `+`, Remaining `file:`, And `ls`
 
 - Upstream references: v1 `core/dbt/graph/selector_spec.py::RAW_SELECTOR_PATTERN`,
   `SelectionCriteria`, `core/dbt/graph/selector.py::collect_specified_neighbors`,
+  `core/dbt/graph/selector_methods.py::FileSelectorMethod`,
   `core/dbt/graph/graph.py::select_childrens_parents`,
   `core/dbt/task/list.py::ListTask`; Fusion command and selector loading in
   `crates/dbt-clap-core/src/commands.rs` and
-  `crates/dbt-parser/src/resolver.rs`.
+  `crates/dbt-parser/src/resolver.rs`, plus path/selector centralization in
+  `crates/dbt-scheduler/src/node_selector.rs`.
 - dxt files: selector validation in `src/root.zig`, matching/expansion in
   `src/project/selector.zig`, and selected JSON output helpers where relevant.
 - Native tests: parse and match `@model`, `1+model`, `model+1`, reject invalid
-  combinations, support `file:orders.sql`, and preserve current union,
-  intersection, wildcard, and exclude behavior.
+  combinations, continue expanding `file:` after the basename/stem slice, and
+  preserve current union, intersection, wildcard, and exclude behavior.
 - Python/dbt oracle: `dxt ls` vs `dbt ls` on selector fixtures and
   Jaffle-style projects for `@stg_orders`, `+orders`, `orders+`, and
   `file:orders.sql`; reuse selectors through `compile`, `docs generate`, and

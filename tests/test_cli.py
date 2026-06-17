@@ -2220,6 +2220,15 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         },
     ]
 
+    ls_tests_by_file = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "file:schema.yml", "--resource-type", "test", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_tests_by_file.returncode == 0, ls_tests_by_file.stderr
+    assert json.loads(ls_tests_by_file.stdout) == json.loads(ls_tests.stdout)
+
     ls_resource_type_tests = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:test", "--output", "json"],
         cwd=ROOT,
@@ -3331,6 +3340,15 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
         {"unique_id": "seed.seed_ref.raw_customers", "resource_type": "seed", "name": "raw_customers"}
     ]
 
+    ls_file_seed = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "file:raw_customers.csv", "--resource-type", "seed", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_file_seed.returncode == 0, ls_file_seed.stderr
+    assert json.loads(ls_file_seed.stdout) == json.loads(ls_result.stdout)
+
 
 def test_parse_docs_blocks_and_literal_doc_descriptions(tmp_path: Path):
     project = copy_fixture(tmp_path, "docs_blocks")
@@ -3573,6 +3591,13 @@ def test_ls_multi_argv_and_repeated_selector_flags(tmp_path: Path):
         "model.selector_graph.stg_customers",
     ]
     assert ls_json("--select", "model.selector_graph.*customers") == []
+    assert ls_json("--select", "file:orders.sql") == ["model.selector_graph.orders"]
+    assert ls_json("--select", "file:orders") == ["model.selector_graph.orders"]
+    assert ls_json("--select", "file:*customers.sql") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "file:models/orders.sql") == []
     assert ls_json("--select", "path:models/stg_*") == ["model.selector_graph.stg_customers"]
     assert ls_json("--select", "path:*orders.sql") == []
     assert ls_json("--select", "path:models?orders.sql") == []
@@ -3809,6 +3834,17 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
+    source_file = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "file:schema.yml", "--resource-type", "source", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_file.returncode == 0, source_file.stderr
+    assert [item["unique_id"] for item in json.loads(source_file.stdout)] == [
+        "source.source_ref.raw.customers",
+        "source.source_ref.raw.orders",
+    ]
     source_package = subprocess.run(
         [
             DXT,
@@ -3902,6 +3938,16 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     assert [item["unique_id"] for item in json.loads(exposure_path.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis",
         "source.exposure_artifacts.raw.customers",
+    ]
+    exposure_file = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "file:schema.yml", "--resource-type", "exposure", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_file.returncode == 0, exposure_file.stderr
+    assert [item["unique_id"] for item in json.loads(exposure_file.stdout)] == [
+        "exposure.exposure_artifacts.weekly_kpis"
     ]
     exposure_package = subprocess.run(
         [
@@ -4910,6 +4956,39 @@ def test_docs_generate_applies_select_and_exclude_to_compiled_models(tmp_path: P
             "orders",
             "--exclude",
             "from_source",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Generated docs artifacts for 1 compiled model(s)" in result.stdout
+    compiled_root = target / "compiled" / "compile_basic" / "models"
+    assert not (compiled_root / "customers.sql").exists()
+    assert (compiled_root / "orders.sql").exists()
+    assert not (compiled_root / "from_source.sql").exists()
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["nodes"]["model.compile_basic.orders"]["compiled"] is True
+    assert "compiled" not in manifest["nodes"]["model.compile_basic.customers"]
+    assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
+
+
+def test_docs_generate_reuses_file_selectors(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    target = tmp_path / "docs-file-target"
+    result = subprocess.run(
+        [
+            DXT,
+            "docs",
+            "generate",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "file:orders.sql",
+            "--exclude",
+            "file:from_source.sql",
         ],
         cwd=ROOT,
         text=True,

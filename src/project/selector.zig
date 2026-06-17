@@ -108,6 +108,10 @@ fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []cons
         const path = value["path:".len..];
         return matchesNodePathSelector(path, node);
     }
+    if (std.mem.startsWith(u8, value, "file:")) {
+        const file = value["file:".len..];
+        return matchesFileSelector(file, node.original_file_path);
+    }
     if (std.mem.startsWith(u8, value, "source:")) {
         return false;
     }
@@ -161,6 +165,10 @@ fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNod
     if (std.mem.startsWith(u8, value, "path:")) {
         const path = value["path:".len..];
         return matchesPathSelector(path, test_node.original_file_path);
+    }
+    if (std.mem.startsWith(u8, value, "file:")) {
+        const file = value["file:".len..];
+        return matchesFileSelector(file, test_node.original_file_path);
     }
     return false;
 }
@@ -235,6 +243,10 @@ fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, valu
         const path = value["path:".len..];
         return matchesPathSelector(path, source.original_file_path);
     }
+    if (std.mem.startsWith(u8, value, "file:")) {
+        const file = value["file:".len..];
+        return matchesFileSelector(file, source.original_file_path);
+    }
     return false;
 }
 
@@ -290,6 +302,10 @@ fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef
         const path = value["path:".len..];
         return matchesPathSelector(path, exposure.original_file_path);
     }
+    if (std.mem.startsWith(u8, value, "file:")) {
+        const file = value["file:".len..];
+        return matchesFileSelector(file, exposure.original_file_path);
+    }
     return false;
 }
 
@@ -305,6 +321,22 @@ fn matchesNodePathSelector(pattern: []const u8, node: *const Node) bool {
     if (matchesPathSelector(pattern, node.original_file_path)) return true;
     if (node.patch_path) |patch_path| return matchesPathSelector(pattern, patch_path);
     return false;
+}
+
+fn matchesFileSelector(pattern: []const u8, path: []const u8) bool {
+    const file_name = pathBasename(path);
+    if (matchesSelectorPattern(pattern, file_name)) return true;
+    return matchesSelectorPattern(pattern, fileStem(file_name));
+}
+
+fn pathBasename(path: []const u8) []const u8 {
+    if (std.mem.lastIndexOfAny(u8, path, "/\\")) |slash| return path[slash + 1 ..];
+    return path;
+}
+
+fn fileStem(file_name: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, file_name, '.')) |dot| return file_name[0..dot];
+    return file_name;
 }
 
 fn wildcardMatchesPathParent(pattern: []const u8, path: []const u8) bool {
@@ -537,4 +569,16 @@ test "path selectors keep substring behavior unless wildcarded" {
     try std.testing.expect(!matchesPathSelector("*orders.sql", "models/orders.sql"));
     try std.testing.expect(!matchesPathSelector("models/stg_*", "models/marts/stg_customers.sql"));
     try std.testing.expect(!matchesPathSelector("models?stg_customers.sql", "models/stg_customers.sql"));
+}
+
+test "file selectors match only basename or stem" {
+    try std.testing.expect(matchesFileSelector("orders.sql", "models/marts/orders.sql"));
+    try std.testing.expect(matchesFileSelector("orders", "models/marts/orders.sql"));
+    try std.testing.expect(matchesFileSelector("*orders.sql", "models/marts/orders.sql"));
+    try std.testing.expect(matchesFileSelector("*orders", "models/marts/orders.sql"));
+    try std.testing.expect(matchesFileSelector("schema.yml", "models/schema.yml"));
+    try std.testing.expect(matchesFileSelector("schema", "models/schema.yml"));
+    try std.testing.expect(!matchesFileSelector("models/marts/orders.sql", "models/marts/orders.sql"));
+    try std.testing.expect(!matchesFileSelector("marts/orders.sql", "models/marts/orders.sql"));
+    try std.testing.expect(!matchesFileSelector("customers.sql", "models/marts/orders.sql"));
 }
