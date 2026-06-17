@@ -263,33 +263,10 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
         var executed: std.ArrayList(run_results.NodeResult) = .empty;
         defer {
-            for (executed.items) |result| {
-                if (result.owns_compiled_code) {
-                    if (result.compiled_code) |compiled_code| runtime.allocator.free(compiled_code);
-                }
-                if (result.message) |message| runtime.allocator.free(message);
-            }
+            deinitRunResults(runtime.allocator, executed.items);
             executed.deinit(runtime.allocator);
         }
-        var failed_tests: usize = 0;
-        var total_failures: u64 = 0;
-        for (test_nodes) |test_node| {
-            const execution = try duckdb.executeGenericTest(runtime, db_path, &graph, test_node);
-            const failed = execution.failures != 0;
-            if (failed) {
-                failed_tests += 1;
-                total_failures += execution.failures;
-            }
-            const message = if (failed) try formatTestFailureMessage(runtime.allocator, execution.failures) else null;
-            try executed.append(runtime.allocator, .{
-                .test_node = test_node,
-                .status = if (failed) "fail" else "pass",
-                .message = message,
-                .failures = execution.failures,
-                .compiled_code = execution.compiled_code,
-                .owns_compiled_code = true,
-            });
-        }
+        const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
 
         const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
         const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
@@ -299,8 +276,46 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             util.normalizeForDisplay(db_path),
             util.normalizeForDisplay(manifest_path),
         });
-        if (failed_tests != 0) {
-            try stdout.print("{d} generic test(s) failed with {d} failure row(s)\n", .{ failed_tests, total_failures });
+        if (test_summary.failed_tests != 0) {
+            try stdout.print("{d} generic test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
+            return error.TestFailure;
+        }
+        return;
+    }
+    if (selected_kinds.model != 0 and selected_kinds.seed == 0 and selected_kinds.model + selected_kinds.test_resource == selected_kinds.total) {
+        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedBuildAdapterExecution;
+        const execution_order = try selectedModelExecutionOrder(runtime, &graph, selected);
+        defer runtime.allocator.free(execution_order);
+        if (execution_order.len == 0) return error.UnsupportedBuildSelection;
+        try validateBuildMaterializations(execution_order);
+
+        const test_nodes = try selectedGenericTestExecutionOrder(runtime, &graph, selected);
+        defer runtime.allocator.free(test_nodes);
+        try validateGenericTestExecution(test_nodes);
+
+        const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+        var executed: std.ArrayList(run_results.NodeResult) = .empty;
+        defer {
+            deinitRunResults(runtime.allocator, executed.items);
+            executed.deinit(runtime.allocator);
+        }
+        for (execution_order) |node| {
+            try duckdb.executeModel(runtime, db_path, &graph, node);
+            try executed.append(runtime.allocator, .{ .node = node });
+        }
+        const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
+
+        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
+        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
+        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try stdout.print("Built {d} model(s) and {d} generic test(s) into {s}; wrote artifacts into {s}\n", .{
+            execution_order.len,
+            test_nodes.len,
+            util.normalizeForDisplay(db_path),
+            util.normalizeForDisplay(manifest_path),
+        });
+        if (test_summary.failed_tests != 0) {
+            try stdout.print("{d} generic test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
             return error.TestFailure;
         }
         return;
@@ -375,6 +390,12 @@ fn validateRunMaterializations(nodes: []const *Node) !void {
     }
 }
 
+fn validateBuildMaterializations(nodes: []const *Node) !void {
+    for (nodes) |node| {
+        if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedBuildModelMaterialization;
+    }
+}
+
 fn selectedSeedExecutionOrder(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource) ![]*Node {
     const selected_count = countSelectedGraphSeeds(graph, selected);
     var ordered = try runtime.allocator.alloc(*Node, selected_count);
@@ -413,6 +434,42 @@ fn validateGenericTestExecution(nodes: []const *GenericTestNode) !void {
         if (!std.mem.eql(u8, test_node.test_name, "not_null") and !std.mem.eql(u8, test_node.test_name, "unique")) {
             return error.UnsupportedTestExecution;
         }
+    }
+}
+
+const GenericTestExecutionSummary = struct {
+    failed_tests: usize = 0,
+    total_failures: u64 = 0,
+};
+
+fn appendGenericTestResults(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_nodes: []const *GenericTestNode, executed: *std.ArrayList(run_results.NodeResult)) !GenericTestExecutionSummary {
+    var summary: GenericTestExecutionSummary = .{};
+    for (test_nodes) |test_node| {
+        const execution = try duckdb.executeGenericTest(runtime, db_path, graph, test_node);
+        const failed = execution.failures != 0;
+        if (failed) {
+            summary.failed_tests += 1;
+            summary.total_failures += execution.failures;
+        }
+        const message = if (failed) try formatTestFailureMessage(runtime.allocator, execution.failures) else null;
+        try executed.append(runtime.allocator, .{
+            .test_node = test_node,
+            .status = if (failed) "fail" else "pass",
+            .message = message,
+            .failures = execution.failures,
+            .compiled_code = execution.compiled_code,
+            .owns_compiled_code = true,
+        });
+    }
+    return summary;
+}
+
+fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.NodeResult) void {
+    for (results) |result| {
+        if (result.owns_compiled_code) {
+            if (result.compiled_code) |compiled_code| allocator.free(compiled_code);
+        }
+        if (result.message) |message| allocator.free(message);
     }
 }
 
