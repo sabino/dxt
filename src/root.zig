@@ -157,6 +157,12 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnresolvedDoc => stderr.writeAll("error: unresolved doc reference in supported M1 parser subset\n") catch {},
         error.UnresolvedMacro => stderr.writeAll("error: unresolved macro reference in supported M1 parser subset\n") catch {},
         error.UnresolvedVar => stderr.writeAll("error: unresolved var in supported M1 parser subset\n") catch {},
+        error.MissingProfileFile => stderr.writeAll("error: missing profiles.yml for selected profile target\n") catch {},
+        error.MissingProfileName => stderr.writeAll("error: no profile was specified for profile-aware parsing\n") catch {},
+        error.MissingProfile => stderr.writeAll("error: selected profile was not found in profiles.yml\n") catch {},
+        error.MissingProfileOutputs => stderr.writeAll("error: selected profile must define outputs in profiles.yml\n") catch {},
+        error.MissingProfileTarget => stderr.writeAll("error: selected target was not found in profiles.yml\n") catch {},
+        error.MissingProfileType => stderr.writeAll("error: selected profile target must define adapter type\n") catch {},
         error.InvalidOutput => stderr.writeAll("error: --output must be text or json\n") catch {},
         error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, or test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
@@ -217,18 +223,18 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             if (equals(arg, "--project-dir")) {
                 options.project_dir = value;
             } else if (equals(arg, "--profiles-dir")) {
-                if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
+                if (mode == .common_only) return error.UnsupportedCommandOption;
                 options.profiles_dir = value;
             } else if (equals(arg, "--profile")) {
-                if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
+                if (mode == .common_only) return error.UnsupportedCommandOption;
                 options.profile = value;
             } else if (equals(arg, "--target")) {
-                if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
+                if (mode == .common_only) return error.UnsupportedCommandOption;
                 options.target = value;
             } else if (equals(arg, "--vars")) {
                 options.vars = value;
             } else if (equals(arg, "--threads")) {
-                if (mode != .compile and mode != .docs_generate and mode != .build) return error.UnsupportedCommandOption;
+                if (mode == .common_only) return error.UnsupportedCommandOption;
                 options.threads = value;
             } else if (equals(arg, "--target-path")) {
                 if (mode == .list) return error.UnsupportedCommandOption;
@@ -404,7 +410,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\
             );
         }
-        if (equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate")) {
+        if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate")) {
             try writer.writeAll(
                 \\  --profiles-dir <path>
                 \\  --profile <name>

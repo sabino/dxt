@@ -2,11 +2,13 @@ const std = @import("std");
 const project_config = @import("config.zig");
 const project_fs = @import("fs.zig");
 const project_parse = @import("parse.zig");
+const project_profile = @import("profile.zig");
 const project_resolve = @import("resolve.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 
 const Runtime = types.Runtime;
+const Options = types.Options;
 const Graph = types.Graph;
 const loadProjectConfig = project_config.loadProjectConfig;
 const deinitProjectConfig = types.deinitProjectConfig;
@@ -27,6 +29,7 @@ const rejectDuplicateMacroProperties = project_resolve.rejectDuplicateMacroPrope
 const rejectDuplicateMacros = project_resolve.rejectDuplicateMacros;
 const rejectDuplicateModels = project_resolve.rejectDuplicateModels;
 const rejectDuplicateSeeds = project_resolve.rejectDuplicateSeeds;
+const loadAdapterIdentity = project_profile.loadAdapterIdentity;
 
 pub const Callbacks = struct {
     parse_doc_blocks: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
@@ -45,8 +48,8 @@ pub fn graphDefaultTarget(runtime: Runtime, project_dir: []const u8) ![]const u8
     return config.target_path;
 }
 
-pub fn loadGraph(runtime: Runtime, project_dir: []const u8, cli_vars: ?[]const u8, callbacks: Callbacks) !Graph {
-    var config = try loadProjectConfig(runtime, project_dir);
+pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Graph {
+    var config = try loadProjectConfig(runtime, options.project_dir);
     defer deinitProjectConfig(runtime.allocator, &config);
 
     var graph = Graph{
@@ -55,14 +58,19 @@ pub fn loadGraph(runtime: Runtime, project_dir: []const u8, cli_vars: ?[]const u
         .validate_macro_args = config.validate_macro_args,
     };
     errdefer graph.deinit();
+    if (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) |identity| {
+        graph.adapter_type = identity.adapter_type;
+        graph.profile_name = identity.profile_name;
+        graph.target_name = identity.target_name;
+    }
     try graph.vars.appendSlice(runtime.allocator, config.vars.items);
-    if (cli_vars) |vars_text| {
+    if (options.vars) |vars_text| {
         try parseVarsText(runtime.allocator, vars_text, &graph.vars);
     }
 
-    try loadProjectMacros(runtime, project_dir, config.name, config.macro_paths.items, true, callbacks, &graph);
-    try loadInstalledPackageMacros(runtime, project_dir, callbacks, &graph);
-    try loadInstalledPackageResources(runtime, project_dir, callbacks, &graph);
+    try loadProjectMacros(runtime, options.project_dir, config.name, config.macro_paths.items, true, callbacks, &graph);
+    try loadInstalledPackageMacros(runtime, options.project_dir, callbacks, &graph);
+    try loadInstalledPackageResources(runtime, options.project_dir, callbacks, &graph);
 
     for (config.model_paths.items) |model_path| {
         var sql_files: std.ArrayList([]const u8) = .empty;
@@ -72,7 +80,7 @@ pub fn loadGraph(runtime: Runtime, project_dir: []const u8, cli_vars: ?[]const u
         var md_files: std.ArrayList([]const u8) = .empty;
         defer md_files.deinit(runtime.allocator);
 
-        const root = try pathJoin(runtime.allocator, &.{ project_dir, model_path });
+        const root = try pathJoin(runtime.allocator, &.{ options.project_dir, model_path });
         discoverProjectFiles(runtime, root, model_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
@@ -82,13 +90,13 @@ pub fn loadGraph(runtime: Runtime, project_dir: []const u8, cli_vars: ?[]const u
         sortStrings(md_files.items);
 
         for (md_files.items) |md_path| {
-            try callbacks.parse_doc_blocks(runtime, project_dir, model_path, md_path, config.name, &graph);
+            try callbacks.parse_doc_blocks(runtime, options.project_dir, model_path, md_path, config.name, &graph);
         }
         for (yaml_files.items) |yaml_path| {
-            try callbacks.parse_yaml_properties(runtime, project_dir, model_path, yaml_path, config.name, &graph);
+            try callbacks.parse_yaml_properties(runtime, options.project_dir, model_path, yaml_path, config.name, &graph);
         }
         for (sql_files.items) |sql_path| {
-            try callbacks.parse_model(runtime, project_dir, model_path, sql_path, config.name, &graph);
+            try callbacks.parse_model(runtime, options.project_dir, model_path, sql_path, config.name, &graph);
         }
     }
 
@@ -98,7 +106,7 @@ pub fn loadGraph(runtime: Runtime, project_dir: []const u8, cli_vars: ?[]const u
         var seed_files: std.ArrayList([]const u8) = .empty;
         defer seed_files.deinit(runtime.allocator);
 
-        const root = try pathJoin(runtime.allocator, &.{ project_dir, seed_path });
+        const root = try pathJoin(runtime.allocator, &.{ options.project_dir, seed_path });
         discoverSeedFiles(runtime, root, seed_path, &seed_files) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,

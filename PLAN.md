@@ -304,10 +304,19 @@ Current static adapter dispatch dependency source note:
 `.agent/research/m2-static-adapter-dispatch-deps.md` maps upstream dbt Core v1
 `BaseDatabaseWrapper.dispatch` and Fusion `DispatchObject` behavior to dxt's
 static `depends_on.macros` extraction for literal `adapter.dispatch(...)` calls.
-This slice records dispatch macro dependencies only, using a temporary
-`duckdb`, `default` prefix list until profile-derived adapter identity exists.
-It does not execute dispatched macros, implement project `dispatch:` config,
-parse profiles, or run adapters.
+This slice records dispatch macro dependencies only. It does not execute
+dispatched macros, implement project `dispatch:` config, or run adapters.
+
+Current profile-derived adapter identity source note:
+`.agent/research/m2-profile-adapter-dispatch-identity.md` maps upstream dbt Core
+v1 profile/target selection, manifest `adapter_type`, and dispatch prefix
+behavior plus Fusion `AdapterType` and `get_adapter_prefixes` behavior to dxt's
+narrow scalar `profiles.yml` parser. This slice lets parse-time static
+`adapter.dispatch(...)` dependency extraction use the selected profile output
+`type`, including `redshift -> postgres -> default` and
+`databricks -> spark -> default` parent fallbacks. It does not render Jinja in
+profiles, validate credentials, read host-global profile locations, implement
+project `dispatch:` config, execute macros, or open adapter connections.
 
 The next source-grounded M1/M2 slices after macro block variant support are:
 
@@ -341,9 +350,9 @@ The next source-grounded M1/M2 slices after macro block variant support are:
 5. Grow artifact schema coverage only alongside emitted fields, using v1 JSON
    schemas and v2 manifest builder behavior while keeping dxt-specific metadata
    out of dbt schemas.
-6. Add adapter relation identity and profile-derived target values after the
-   render-only compile boundary is stable, using v1 compile runner/compiler
-   behavior plus v2 adapter core/SQL identity references.
+6. Add adapter relation identity and target context values after the render-only
+   compile boundary is stable, using v1 compile runner/compiler behavior plus
+   v2 adapter core/SQL identity references.
 
 ## Fixture Ladder
 
@@ -675,4 +684,4 @@ Exit criteria:
 - Selector wildcard behavior is currently pinned to observed dbt Core 1.10 behavior. dbt Fusion preview currently differs for resource-type-prefixed wildcard selectors such as `model.<package>.*` and filename-suffix path selectors such as `path:*orders.sql`; a future Fusion-compatibility slice must decide whether to support a selector dialect switch or a compatible superset.
 - Compatibility planning now uses a source-grounded reference map under `.agent/research/dbt-upstream-reference-map.md`; future feature slices should name upstream dbt v1/v2 source references, dxt Zig owners, affected artifact fields, validation gates, and stop conditions before implementation.
 - The committed dbt Core M1 oracle harness lives in `scripts/check_dbt_core_m1_oracle.py`. It is optional developer-side Python tooling that requires `dbt-core` and `dbt-duckdb`, invokes dbt Core through its Python runner, runs `dxt parse` through the Zig binary, and compares stable manifest slices for the supported synthetic M1 fixture ladder. It ignores dbt internal package docs/macros that are outside the current dxt artifact scope, records a known allowed gap for installed-package exposure refs that dbt Core resolves to a root same-name model while dxt currently resolves package-local, and leaves full source-map parity, full artifact schemas, and execution parity for later slices.
-- Before broadening M2 product implementation, close or explicitly re-scope the remaining M1 macro-compatibility behavior gaps. Macro `docs`/`meta` patch fields are covered for the current scalar artifact subset. Macro argument extraction under dbt Core v1 `flags.validate_macro_args` semantics and YAML patch argument validation/replacement are implemented for the manifest artifact surface. Static macro dependency lookup now uses the supported dbt order of current package, root project, other-package fallback for macro bodies, graph-present internal `dbt` macros, and literal `adapter.dispatch(...)` dependency extraction with a temporary `duckdb`, `default` prefix list. Macro execution, bundled dbt internal macros, project `dispatch:` config, profile-derived adapter identity, and materialization runtime lookup remain planned. `{% data_test %}` has native source-grounded parser coverage, but the local dbt Core 1.10 oracle rejects that tag before writing artifacts, so dbt-oracle coverage currently pins `{% test %}` and `{% materialization %}` block parity.
+- Before broadening M2 product implementation, close or explicitly re-scope the remaining M1 macro-compatibility behavior gaps. Macro `docs`/`meta` patch fields are covered for the current scalar artifact subset. Macro argument extraction under dbt Core v1 `flags.validate_macro_args` semantics and YAML patch argument validation/replacement are implemented for the manifest artifact surface. Static macro dependency lookup now uses the supported dbt order of current package, root project, other-package fallback for macro bodies, graph-present internal `dbt` macros, and literal `adapter.dispatch(...)` dependency extraction. Parse-time dispatch prefixes now come from a narrow source-grounded `profiles.yml` adapter identity parser and emit manifest `metadata.adapter_type`, with default DuckDB behavior preserved when no profile file is loaded. Macro execution, bundled dbt internal macros, project `dispatch:` config, full target context, credential validation, and materialization runtime lookup remain planned. `{% data_test %}` has native source-grounded parser coverage, but the local dbt Core 1.10 oracle rejects that tag before writing artifacts, so dbt-oracle coverage currently pins `{% test %}` and `{% materialization %}` block parity.
