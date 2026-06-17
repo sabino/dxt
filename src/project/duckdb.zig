@@ -123,7 +123,7 @@ pub fn renderModelSql(allocator: std.mem.Allocator, graph: *const Graph, node: *
     if (!isSupportedMaterialization(node.materialized)) {
         return error.UnsupportedModelMaterialization;
     }
-    const compiled_code = node.compiled_code orelse return error.UnsupportedModelExecution;
+    const compiled_code = trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution);
     const schema_name = try compiler.relationSchemaForNode(allocator, graph, node);
     defer allocator.free(schema_name);
     const quoted_schema = try compiler.quoteIdentifier(allocator, schema_name);
@@ -152,6 +152,20 @@ fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     return try out.toOwnedSlice(allocator);
 }
 
+fn trimTrailingSqlTerminator(sql: []const u8) []const u8 {
+    const trimmed = trimSqlRight(sql);
+    if (std.mem.endsWith(u8, trimmed, ";")) return trimSqlRight(trimmed[0 .. trimmed.len - 1]);
+    return trimmed;
+}
+
+fn trimSqlRight(value: []const u8) []const u8 {
+    var end = value.len;
+    while (end > 0 and (value[end - 1] == ' ' or value[end - 1] == '\t' or value[end - 1] == '\r' or value[end - 1] == '\n')) {
+        end -= 1;
+    }
+    return value[0..end];
+}
+
 test "renderModelSql creates table materialization SQL" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -177,6 +191,38 @@ test "renderModelSql creates table materialization SQL" {
         "create schema if not exists \"analytics\";\ncreate or replace table \"analytics\".\"customers\" as (\nselect 1 as id\n);\n",
         sql,
     );
+}
+
+test "renderModelSql strips a trailing SQL terminator before wrapping" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1 as id;",
+        .materialized = "view",
+        .compiled = true,
+        .compiled_code = "select 1 as id;\n",
+        .relation_name = "\"analytics\".\"customers\"",
+    });
+
+    const sql = try renderModelSql(allocator, &graph, &graph.nodes.items[0]);
+    try std.testing.expectEqualStrings(
+        "create schema if not exists \"analytics\";\ncreate or replace view \"analytics\".\"customers\" as (\nselect 1 as id\n);\n",
+        sql,
+    );
+}
+
+test "trimTrailingSqlTerminator preserves inner semicolons" {
+    try std.testing.expectEqualStrings("select ';' as value", trimTrailingSqlTerminator("select ';' as value;\n"));
+    try std.testing.expectEqualStrings("select ';' as value", trimTrailingSqlTerminator("select ';' as value"));
 }
 
 test "renderModelSql rejects unsupported materialization" {

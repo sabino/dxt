@@ -74,15 +74,15 @@ dbt Core v2 / Fusion:
 ## Validation
 
 - Native Zig tests cover DuckDB materialization SQL rendering, conflicting
-  table/view drop SQL, unsupported materialization rejection, DuckDB profile
-  `path` capture, `is_incremental()` config scanning, and run-results JSON
-  shape.
+  table/view drop SQL, trailing SQL terminator trimming for wrapped model SQL,
+  unsupported materialization rejection, DuckDB profile `path` capture,
+  `is_incremental()` config scanning, and run-results JSON shape.
 - Pytest black-box coverage executes `dxt run` against copied and generated
   fixtures, verifies dependency-order execution where lexical order conflicts
   with graph order, checks table-to-view replacement on rerun, checks
-  profile-relative DuckDB paths, queries the resulting DuckDB database through
-  the DuckDB CLI, validates `run_results.json` against the pinned schema slice,
-  and keeps non-model, non-DuckDB,
+  trailing-semicolon SQL model execution, checks profile-relative DuckDB paths,
+  queries the resulting DuckDB database through the DuckDB CLI, validates
+  `run_results.json` against the pinned schema slice, and keeps non-model, non-DuckDB,
   unsupported-materialization, and `build` boundaries explicit.
 
 ## Stop Conditions

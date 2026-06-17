@@ -482,6 +482,36 @@ target-path: target
     assert query.stdout.strip() == "2"
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
+def test_run_executes_model_with_trailing_sql_semicolon(tmp_path: Path):
+    project = tmp_path / "run_trailing_semicolon"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: run_trailing_semicolon
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text("select 3 as customer_id;\n")
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "main"."customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "3"
+
+
 def test_run_prepare_rejects_non_model_selection(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     target = tmp_path / "run-target"
