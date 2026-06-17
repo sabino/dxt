@@ -2,12 +2,14 @@ const std = @import("std");
 const Io = std.Io;
 const catalog = @import("project/catalog.zig");
 const compiler = @import("project/compiler.zig");
+const duckdb = @import("project/duckdb.zig");
 const project_fs = @import("project/fs.zig");
 const project_jinja = @import("project/jinja.zig");
 const project_loader = @import("project/loader.zig");
 const project_parse = @import("project/parse.zig");
 const project_resolve = @import("project/resolve.zig");
 const manifest = @import("project/manifest.zig");
+const run_results = @import("project/run_results.zig");
 const selector = @import("project/selector.zig");
 const types = @import("project/types.zig");
 const util = @import("project/util.zig");
@@ -184,15 +186,32 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
         if (selected_any.len != 0) return error.UnsupportedRunSelection;
     }
 
+    const execution_order = try selectedModelExecutionOrder(runtime, &graph, selected_models);
+    defer runtime.allocator.free(execution_order);
+    if (execution_order.len == 0) return error.UnsupportedRunSelection;
+    try validateRunMaterializations(execution_order);
+
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected_models, target_dir);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
-    try stdout.print("Prepared {d} model(s) for execution into {s}\n", .{
-        compile_result.count,
+    if (compile_result.count == 0) return error.UnsupportedRunSelection;
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
+    const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+    var executed: std.ArrayList(run_results.ModelResult) = .empty;
+    defer executed.deinit(runtime.allocator);
+    for (execution_order) |node| {
+        try duckdb.executeModel(runtime, db_path, &graph, node);
+        try executed.append(runtime.allocator, .{ .node = node });
+    }
+
+    const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
+    const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+    try stdout.print("Ran {d} model(s) into {s}; wrote artifacts into {s}\n", .{
+        executed.items.len,
+        util.normalizeForDisplay(db_path),
         util.normalizeForDisplay(manifest_path),
     });
-    if (compile_result.count == 0) return error.UnsupportedRunSelection;
-    return error.UnsupportedModelExecution;
 }
 
 pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
@@ -245,6 +264,62 @@ fn firstExecutionKind(selected: []const selector.SelectedResource) ?ExecutionKin
         if (std.mem.eql(u8, item.resource_type, "test")) return .test_resource;
     }
     return null;
+}
+
+fn selectedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource) ![]*Node {
+    const selected_count = countSelectedGraphModels(graph, selected);
+    var remaining = try runtime.allocator.alloc(bool, graph.nodes.items.len);
+    defer runtime.allocator.free(remaining);
+    @memset(remaining, false);
+    for (graph.nodes.items, 0..) |*node, index| {
+        remaining[index] = node.enabled and std.mem.eql(u8, node.resource_type, "model") and selectionContains(selected, node.unique_id);
+    }
+
+    var ordered: std.ArrayList(*Node) = .empty;
+    errdefer ordered.deinit(runtime.allocator);
+    while (ordered.items.len < selected_count) {
+        var progressed = false;
+        for (graph.nodes.items, 0..) |*node, index| {
+            if (!remaining[index]) continue;
+            if (!selectedModelDependenciesExecuted(selected, ordered.items, node)) continue;
+            try ordered.append(runtime.allocator, node);
+            remaining[index] = false;
+            progressed = true;
+        }
+        if (!progressed) return error.CyclicModelDependency;
+    }
+    return try ordered.toOwnedSlice(runtime.allocator);
+}
+
+fn validateRunMaterializations(nodes: []const *Node) !void {
+    for (nodes) |node| {
+        if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedModelMaterialization;
+    }
+}
+
+fn countSelectedGraphModels(graph: *const Graph, selected: []const selector.SelectedResource) usize {
+    var count: usize = 0;
+    for (graph.nodes.items) |node| {
+        if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
+        if (selectionContains(selected, node.unique_id)) count += 1;
+    }
+    return count;
+}
+
+fn selectedModelDependenciesExecuted(selected: []const selector.SelectedResource, executed: []const *Node, node: *const Node) bool {
+    for (node.depends_on.items) |dependency| {
+        if (!std.mem.startsWith(u8, dependency, "model.")) continue;
+        if (!selectionContains(selected, dependency)) continue;
+        if (!executedContains(executed, dependency)) return false;
+    }
+    return true;
+}
+
+fn executedContains(executed: []const *Node, unique_id: []const u8) bool {
+    for (executed) |node| {
+        if (std.mem.eql(u8, node.unique_id, unique_id)) return true;
+    }
+    return false;
 }
 
 fn targetDir(runtime: Runtime, options: Options) ![]const u8 {

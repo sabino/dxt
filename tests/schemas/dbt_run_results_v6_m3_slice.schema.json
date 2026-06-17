@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.getdbt.com/dbt/run-results/v6.json#dxt-m3-slice",
+  "title": "dxt dbt Run Results v6 M3 compatibility slice",
+  "$comment": "Pinned local compatibility slice for dbt Run Results v6. Source reference: https://schemas.getdbt.com/dbt/run-results/v6.json, checked 2026-06-17. This validates the first DuckDB SQL-model execution surface only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["metadata", "results", "elapsed_time"],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dbt_schema_version",
+        "dbt_version",
+        "generated_at",
+        "invocation_id",
+        "invocation_started_at",
+        "env"
+      ],
+      "properties": {
+        "dbt_schema_version": {"const": "https://schemas.getdbt.com/dbt/run-results/v6.json"},
+        "dbt_version": {"type": "string"},
+        "generated_at": {"type": "string"},
+        "invocation_id": {"type": ["string", "null"]},
+        "invocation_started_at": {"type": ["string", "null"]},
+        "env": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "timing",
+          "thread_id",
+          "execution_time",
+          "adapter_response",
+          "message",
+          "failures",
+          "unique_id",
+          "compiled",
+          "compiled_code",
+          "relation_name"
+        ],
+        "properties": {
+          "status": {"enum": ["success", "error", "skipped", "partial success", "no-op", "reused", "pass", "fail", "warn", "runtime error"]},
+          "timing": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name"],
+              "properties": {
+                "name": {"type": "string"},
+                "started_at": {"type": ["string", "null"]},
+                "completed_at": {"type": ["string", "null"]}
+              }
+            }
+          },
+          "thread_id": {"type": "string"},
+          "execution_time": {"type": "number"},
+          "adapter_response": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "message": {"type": ["string", "null"]},
+          "failures": {"type": ["integer", "null"]},
+          "unique_id": {"type": "string"},
+          "compiled": {"type": ["boolean", "null"]},
+          "compiled_code": {"type": ["string", "null"]},
+          "relation_name": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "elapsed_time": {"type": "number"}
+  }
+}

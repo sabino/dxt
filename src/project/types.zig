@@ -253,6 +253,8 @@ pub const Graph = struct {
     project_name: []const u8,
     adapter_type: []const u8 = "duckdb",
     target_schema: []const u8 = "main",
+    database_path: ?[]const u8 = null,
+    database_path_base: ?[]const u8 = null,
     profile_name: ?[]const u8 = null,
     target_name: ?[]const u8 = null,
     vars: std.ArrayList(VarEntry) = .empty,
@@ -310,6 +312,8 @@ pub const AdapterIdentity = struct {
     target_name: []const u8,
     adapter_type: []const u8,
     target_schema: []const u8,
+    database_path: ?[]const u8 = null,
+    database_path_base: ?[]const u8 = null,
 };
 
 pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig) void {

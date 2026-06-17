@@ -355,6 +355,20 @@ project/YAML `schema` or `alias` precedence, custom schema/alias macros,
 database/include policy, arbitrary Jinja, live adapter connections,
 materialization execution, catalog introspection, or run-results artifacts.
 
+Current DuckDB SQL model run source note:
+`.agent/research/m3-duckdb-run-sql-models.md` maps dbt Core v1 Run Results v6
+schema and run-result processing plus Fusion run-results structs, task stats,
+DuckDB profile `path`, DuckDB table/view SQL primitives, and dbt/Fusion DAG
+queue ordering to dxt's first execution slice. This slice lets `dxt run`
+execute selected enabled DuckDB SQL models with `table` and `view`
+materializations through a Zig-owned external DuckDB CLI backend, write compiled
+SQL, `manifest.json`, and a minimal success-only `run_results.json`, and reject
+non-model selections, non-DuckDB adapters, and unsupported materializations
+explicitly. It does not implement `build` execution, seeds, tests, snapshots,
+incremental, ephemeral, hooks, grants, docs persistence, catalog introspection,
+failed or partial run-results artifacts, relation staging/backup rename parity,
+threaded scheduling, or embedded `libduckdb`.
+
 The next source-grounded M1/M2 slices after macro block variant support are:
 
 1. Extend the render-only artifact boundary to adapter-free docs generation:
@@ -367,13 +381,12 @@ The next source-grounded M1/M2 slices after macro block variant support are:
    `catalog.json` until adapter introspection exists. Stop before macro
    execution, materializations, tests, DuckDB connections, non-empty catalog
    introspection, `run_results.json`, or docs serving.
-2. Add a truthful `run`/`build` command preflight boundary before full adapter
-   execution: route both commands through the Zig parser graph, honor the same
-   supported selector/exclude surface as `compile`, compile selected model SQL
-   where applicable, write `manifest.json`, and then fail before execution with
-   explicit model/seed/test runner boundary errors. Stop before opening a
-   database connection, materializing relations, running tests, writing
-   `run_results.json`, or implying execution success.
+2. Continue M3 execution from the narrow `dxt run` DuckDB SQL-model slice:
+   replace the external CLI backend with an embedded adapter ABI or keep the CLI
+   isolated behind that ABI, add proper task timing/adapter responses, and then
+   extend execution to `build` DAG ordering only after seeds/tests have their own
+   source-grounded slices. Stop before mixing adapter packaging, seed loading,
+   generic test execution, and DAG scheduling into one PR.
 3. Finish macro patch and namespace parity beyond the current macro artifact
    surface: parser-controlled macro argument extraction when the dbt
    `validate_macro_args` behavior is exposed, macro patch validation, macro
@@ -719,7 +732,8 @@ Exit criteria:
 - `dxt ls` now lists dbt-selectable resources from the same parser graph, including scalar project/CLI var-resolved dependency edges, with stable text/JSON output and basic name/FQN wildcards, tag wildcards, slash-aware `path:` wildcards, exact `package:`/`package:this`, `source:` wildcards including package-qualified source selectors, `exposure:` wildcards, `resource_type:`, `test_type:generic`, config materialization, comma intersection, whitespace union, multi-argument selector lists, repeated selector flags, leading/trailing `+` graph expansion, and exact exclude filters; macros are emitted in artifacts but not exposed as `ls` resources.
 - `dxt compile` has started as a render-only M2 boundary for the current graph subset. It loads and resolves the same Zig parser graph, applies `--select` and `--exclude`, compiles selected enabled SQL model nodes, writes compiled SQL under `target/compiled/<package>/...`, and emits `compiled`, `compiled_code`, `compiled_path`, `relation_name`, `extra_ctes`, and `extra_ctes_injected` only for compiled model nodes. The current compiler renders `config` to empty text, literal or narrow scalar var-backed `ref`/`source` calls to deterministic quoted relation names, profile-derived `target.*`, current-model `this`, and quoted literal inline `config(schema=..., alias=...)` as default dbt relation schema/identifier components without opening a database connection.
 - `dxt docs generate` has started as an adapter-free docs artifact boundary. It loads and resolves the same Zig parser graph, applies `--select` and `--exclude` to compiled model output, writes compiled SQL, writes `manifest.json`, and writes an empty dbt-shaped `catalog.json` because adapter relation introspection is not implemented yet. Macro execution, materializations, tests, profiles-derived relation identity, adapters, `run_results.json`, non-empty `catalog.json`, and `docs serve` remain out of scope.
-- `dxt run` and `dxt build` have started as truthful execution preflight boundaries. They load and resolve the same Zig parser graph, apply supported selectors/excludes, compile selected SQL models where applicable, write `manifest.json`, and then fail before execution with explicit model/seed/test runner boundary errors. They do not open a database connection, materialize relations, run tests, or write `run_results.json`.
+- `dxt run` has started the M3 DuckDB execution path for selected enabled SQL models. It loads and resolves the same Zig parser graph, applies supported selectors/excludes, compiles selected SQL models, validates that selected models use only `table` or `view` materializations before opening DuckDB, executes selected models in dependency order through a Zig-owned external DuckDB CLI backend, writes compiled SQL, writes `manifest.json`, and writes a minimal dbt-shaped success-only `run_results.json` v6 slice after completed runs. It supports default `target/dxt.duckdb` output plus scalar DuckDB profile `path` resolved relative to the loaded `profiles.yml` directory as a deterministic dxt-local path-base choice for this first CLI-backed slice. It does not execute seeds, tests, snapshots, incremental, ephemeral, hooks, grants, docs persistence, catalog introspection, failure/partial run-results artifacts, relation staging/backup rename parity, threaded scheduling, `:memory:`, MotherDuck, or embedded `libduckdb`.
+- `dxt build` remains a truthful execution preflight boundary. It loads and resolves the same Zig parser graph, applies supported selectors/excludes, compiles selected SQL models where applicable, writes `manifest.json`, and then fails before seed/model/test execution with explicit runner boundary errors.
 - Synthetic fixtures cover one model, model refs, seed refs, source refs, narrow scalar var-backed model/source refs with CLI overrides and positional string defaults, exposure refs to models and sources, combined source/model YAML, inline config/tag selection, config materialization selection, comma-intersection selection, YAML model properties and columns, emitted `unique`, `not_null`, `accepted_values`, and `relationships` generic test nodes, project macro artifacts, macro block variants, macro materialization `supported_languages`, and macro properties including patched `docs` and `meta`, configured `macro-paths` replacing the default macro directory, installed package macros with package-qualified calls and package-local macro calls, installed package models, seeds, sources, docs, exposures, package YAML model properties, root package config overrides, and package-qualified/package-local refs/sources, macro calls recorded in model and macro `depends_on.macros`, docs blocks with literal `doc` descriptions, disabled models, disabled ref diagnostics, unmatched model-property warnings, duplicate model and docs diagnostics, unsupported dynamic doc diagnostics, unresolved var diagnostics for var-backed refs without scalar/default values, missing doc diagnostics, malformed docs block diagnostics, unresolved package macro diagnostics, and unsupported unknown macro-call diagnostics.
 - The committed M1 public Jaffle gate lives in `scripts/check_jaffle_shop_duckdb_parse.py`. It clones a pinned public Jaffle Shop DuckDB ref into a temporary directory by default, runs the Zig `dxt` binary, validates the current M1 manifest schema slice, asserts the supported partial manifest shape with five SQL models, three CSV seeds, two docs blocks, twenty supported generic test nodes, model/test `refs` artifact fields, dependency maps, materialization/docs config, and checks representative `dxt ls` selector behavior for resource types, materialization config, wildcards, path selectors, and graph expansion. It is a developer-side Python compatibility harness only; product parse/list behavior remains implemented in Zig. Remaining M1 work includes package-provided generic tests/macros beyond the current narrow macro call surface and deeper Jaffle artifact parity.
 - Selector wildcard behavior is currently pinned to observed dbt Core 1.10 behavior. dbt Fusion preview currently differs for resource-type-prefixed wildcard selectors such as `model.<package>.*` and filename-suffix path selectors such as `path:*orders.sql`; a future Fusion-compatibility slice must decide whether to support a selector dialect switch or a compatible superset.

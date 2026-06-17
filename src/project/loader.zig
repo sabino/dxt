@@ -62,6 +62,8 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     if (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) |identity| {
         graph.adapter_type = identity.adapter_type;
         graph.target_schema = identity.target_schema;
+        graph.database_path = identity.database_path;
+        graph.database_path_base = identity.database_path_base;
         graph.profile_name = identity.profile_name;
         graph.target_name = identity.target_name;
     }

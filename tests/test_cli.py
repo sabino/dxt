@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DXT = ROOT / "zig-out" / "bin" / "dxt"
 SCHEMA_VALIDATOR_PATH = ROOT / "scripts" / "validate_manifest_schema.py"
 CATALOG_SCHEMA = ROOT / "tests" / "schemas" / "dbt_catalog_v1_docs_slice.schema.json"
+RUN_RESULTS_SCHEMA = ROOT / "tests" / "schemas" / "dbt_run_results_v6_m3_slice.schema.json"
+DUCKDB = shutil.which("duckdb")
 SCHEMA_SPEC = importlib.util.spec_from_file_location("validate_manifest_schema", SCHEMA_VALIDATOR_PATH)
 assert SCHEMA_SPEC is not None
 assert SCHEMA_SPEC.loader is not None
@@ -306,7 +308,7 @@ def test_compile_docs_run_and_build_resolve_cli_vars(tmp_path: Path):
             "--target-path",
             str(run_target),
             "--select",
-            "orders",
+            "+orders",
             "--vars",
             "{customer_model: alt_customers}",
         ],
@@ -314,8 +316,21 @@ def test_compile_docs_run_and_build_resolve_cli_vars(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert run_result.returncode == 2
-    assert "model execution requires a DuckDB adapter" in run_result.stderr
+    if DUCKDB is None:
+        assert run_result.returncode == 2
+        assert "DuckDB execution requires the duckdb CLI" in run_result.stderr
+    else:
+        assert run_result.returncode == 0, run_result.stderr
+        assert "Ran 2 model(s)" in run_result.stdout
+        assert_run_results_schema_slice(run_target / "run_results.json")
+        query = subprocess.run(
+            [DUCKDB, str(run_target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "main"."orders"'],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert query.returncode == 0, query.stderr
+        assert query.stdout.strip() == "2"
     assert 'from "main"."alt_customers"' in (
         run_target / "compiled" / "dynamic_var_ref" / "models" / "orders.sql"
     ).read_text()
@@ -384,27 +399,117 @@ def test_compile_uses_selected_node_package_for_compiled_path(tmp_path: Path):
     assert "compiled" not in manifest["nodes"]["model.package_ref_selector.pkg_customers"]
 
 
-def test_run_prepare_compiles_selected_model_but_does_not_execute(tmp_path: Path):
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
+def test_run_executes_selected_duckdb_models_and_writes_run_results(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     target = tmp_path / "run-target"
     result = subprocess.run(
-        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "orders", "--threads", "4"],
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "+orders", "--threads", "4"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "Prepared 1 model(s) for execution" in result.stdout
-    assert "model execution requires a DuckDB adapter and materialization runner" in result.stderr
-    assert not (target / "run_results.json").exists()
+    assert result.returncode == 0, result.stderr
+    assert "Ran 2 model(s)" in result.stdout
+    assert result.stderr == ""
 
     compiled_root = target / "compiled" / "compile_basic" / "models"
-    assert not (compiled_root / "customers.sql").exists()
+    assert (compiled_root / "customers.sql").exists()
     assert (compiled_root / "orders.sql").exists()
     assert not (compiled_root / "from_source.sql").exists()
     manifest = json.loads((target / "manifest.json").read_text())
     assert manifest["nodes"]["model.compile_basic.orders"]["compiled"] is True
-    assert "compiled" not in manifest["nodes"]["model.compile_basic.customers"]
+    assert manifest["nodes"]["model.compile_basic.customers"]["compiled"] is True
+
+    run_results_path = target / "run_results.json"
+    assert_run_results_schema_slice(run_results_path)
+    run_results = json.loads(run_results_path.read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "model.compile_basic.customers",
+        "model.compile_basic.orders",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["success", "success"]
+    assert run_results["results"][1]["relation_name"] == '"main"."orders"'
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id, order_count from "main"."orders"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "1,1"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
+def test_run_replaces_existing_relation_when_materialization_type_changes(tmp_path: Path):
+    project = tmp_path / "run_replace_materialization"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: run_replace_materialization
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    model_path = project / "models" / "customers.sql"
+    model_path.write_text("{{ config(materialized='table') }}\nselect 1 as customer_id\n")
+    target = tmp_path / "run-target"
+    first = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert first.returncode == 0, first.stderr
+
+    model_path.write_text("{{ config(materialized='view') }}\nselect 2 as customer_id\n")
+    second = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert second.returncode == 0, second.stderr
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "main"."customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "2"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
+def test_run_executes_model_with_trailing_sql_semicolon(tmp_path: Path):
+    project = tmp_path / "run_trailing_semicolon"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: run_trailing_semicolon
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text("select 3 as customer_id; -- trailing note\n")
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "main"."customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "3"
 
 
 def test_run_prepare_rejects_non_model_selection(tmp_path: Path):
@@ -417,7 +522,187 @@ def test_run_prepare_rejects_non_model_selection(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "run currently supports only selected SQL model resources before execution" in result.stderr
+    assert "run currently supports only selected SQL model resources" in result.stderr
+    assert not (target / "run_results.json").exists()
+
+
+def test_run_rejects_unsupported_model_materialization_before_duckdb(tmp_path: Path):
+    project = tmp_path / "unsupported_run_materialization"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: unsupported_run_materialization
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "events.sql").write_text(
+        """{{ config(materialized='incremental') }}
+select 1 as id
+{% if is_incremental() %}
+where id > 0
+{% endif %}
+"""
+    )
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "events"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "run currently supports only table and view model materializations" in result.stderr
+    assert not (target / "run_results.json").exists()
+
+
+def test_run_rejects_mixed_unsupported_materialization_without_database_side_effect(tmp_path: Path):
+    project = tmp_path / "mixed_run_materialization"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: mixed_run_materialization
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "a_table.sql").write_text("{{ config(materialized='table') }}\nselect 1 as id\n")
+    (project / "models" / "z_incremental.sql").write_text("{{ config(materialized='incremental') }}\nselect 2 as id\n")
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "run currently supports only table and view model materializations" in result.stderr
+    assert not (target / "dxt.duckdb").exists()
+    assert not (target / "run_results.json").exists()
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
+def test_run_executes_selected_models_in_dependency_order(tmp_path: Path):
+    project = tmp_path / "run_dependency_order"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: run_dependency_order
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "a_orders.sql").write_text("select * from {{ ref('z_customers') }}\n")
+    (project / "models" / "z_customers.sql").write_text("select 7 as customer_id\n")
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "+a_orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "model.run_dependency_order.z_customers",
+        "model.run_dependency_order.a_orders",
+    ]
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "main"."a_orders"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "7"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
+def test_run_resolves_duckdb_profile_path_relative_to_profiles_dir(tmp_path: Path):
+    project = tmp_path / "profile_path_project"
+    profiles_dir = tmp_path / "profiles"
+    (project / "models").mkdir(parents=True)
+    profiles_dir.mkdir()
+    (project / "dbt_project.yml").write_text(
+        """name: profile_path_project
+version: "1.0"
+profile: profile_path_project
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (profiles_dir / "profiles.yml").write_text(
+        """profile_path_project:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      schema: analytics
+      path: profile-relative.duckdb
+"""
+    )
+    (project / "models" / "customers.sql").write_text("select 11 as customer_id\n")
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [
+            DXT,
+            "run",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(profiles_dir),
+            "--target-path",
+            str(target),
+            "--select",
+            "customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (profiles_dir / "profile-relative.duckdb").exists()
+    assert not (project / "profile-relative.duckdb").exists()
+    query = subprocess.run(
+        [DUCKDB, str(profiles_dir / "profile-relative.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "analytics"."customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "11"
+
+
+def test_run_rejects_non_duckdb_profile_before_execution(tmp_path: Path):
+    project = tmp_path / "postgres_run_profile"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: postgres_run_profile
+version: "1.0"
+profile: postgres_run_profile
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "profiles.yml").write_text(
+        """postgres_run_profile:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      schema: analytics
+"""
+    )
+    (project / "models" / "customers.sql").write_text("select 1 as id\n")
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "run currently executes only DuckDB SQL models" in result.stderr
     assert not (target / "run_results.json").exists()
 
 
@@ -606,6 +891,13 @@ def assert_catalog_schema_slice(catalog_path: Path) -> None:
     catalog = json.loads(catalog_path.read_text())
     schema = schema_validator.load_json(CATALOG_SCHEMA)
     errors = schema_validator.validate_manifest(catalog, schema)
+    assert errors == []
+
+
+def assert_run_results_schema_slice(run_results_path: Path) -> None:
+    run_results = json.loads(run_results_path.read_text())
+    schema = schema_validator.load_json(RUN_RESULTS_SCHEMA)
+    errors = schema_validator.validate_manifest(run_results, schema)
     assert errors == []
 
 
