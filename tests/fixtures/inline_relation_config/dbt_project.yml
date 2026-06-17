@@ -1,0 +1,4 @@
+name: inline_relation_config
+version: 1.0.0
+profile: inline_relation_config
+model-paths: ["models"]

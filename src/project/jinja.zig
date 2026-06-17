@@ -222,13 +222,19 @@ pub fn isIdentChar(ch: u8) bool {
 }
 
 pub fn findKeyword(text: []const u8, keyword: []const u8) ?usize {
-    var search_start: usize = 0;
-    while (std.mem.indexOfPos(u8, text, search_start, keyword)) |pos| {
-        const before_ok = pos == 0 or !isIdentChar(text[pos - 1]);
-        const after = pos + keyword.len;
-        const after_ok = after >= text.len or !isIdentChar(text[after]);
-        if (before_ok and after_ok) return pos;
-        search_start = pos + keyword.len;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '"' or text[i] == '\'') {
+            i = skipQuotedSpan(text, i) orelse return null;
+            continue;
+        }
+        if (i + keyword.len <= text.len and std.mem.eql(u8, text[i .. i + keyword.len], keyword)) {
+            const before_ok = i == 0 or !isIdentChar(text[i - 1]);
+            const after = i + keyword.len;
+            const after_ok = after >= text.len or !isIdentChar(text[after]);
+            if (before_ok and after_ok) return i;
+        }
+        i += 1;
     }
     return null;
 }
@@ -493,13 +499,9 @@ fn parseAdapterDispatchArgs(allocator: std.mem.Allocator, args: []const u8) !Ada
 }
 
 fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !void {
-    if (findKeyword(args, "materialized")) |pos| {
-        if (findValueStart(args, pos + "materialized".len)) |value_pos| {
-            if (args[value_pos] != '"' and args[value_pos] != '\'') return error.UnsupportedJinja;
-            const parsed = try parseQuoted(allocator, args, value_pos);
-            node.materialized = parsed.value;
-            node.inline_materialized = true;
-        }
+    if (try parseConfigQuotedValue(allocator, args, "materialized")) |value| {
+        node.materialized = value;
+        node.inline_materialized = true;
     }
     if (findKeyword(args, "tags")) |pos| {
         if (findValueStart(args, pos + "tags".len)) |value_pos| {
@@ -508,6 +510,23 @@ fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !voi
             sortStrings(node.tags.items);
         }
     }
+    if (try parseConfigQuotedValue(allocator, args, "schema")) |value| {
+        node.config_schema = value;
+    }
+    if (try parseConfigQuotedValue(allocator, args, "alias")) |value| {
+        node.config_alias = value;
+    }
+}
+
+fn parseConfigQuotedValue(allocator: std.mem.Allocator, args: []const u8, key: []const u8) !?[]const u8 {
+    if (findKeyword(args, key)) |pos| {
+        if (findValueStart(args, pos + key.len)) |value_pos| {
+            if (args[value_pos] != '"' and args[value_pos] != '\'') return error.UnsupportedJinja;
+            const parsed = try parseQuoted(allocator, args, value_pos);
+            return parsed.value;
+        }
+    }
+    return null;
 }
 
 fn parseTagList(allocator: std.mem.Allocator, text: []const u8, tags: *std.ArrayList([]const u8)) !void {
@@ -621,6 +640,9 @@ test "skipQuotedSpan and findKeyword keep lexical boundaries" {
     try std.testing.expect(findKeyword("not_materialized='table'", "materialized") == null);
     try std.testing.expectEqual(@as(?usize, 0), findKeyword("tags=['nightly']", "tags"));
     try std.testing.expect(findKeyword("tagspace=['nightly']", "tags") == null);
+    try std.testing.expectEqual(@as(?usize, 16), findKeyword("alias='schema', schema='mart'", "schema"));
+    try std.testing.expectEqual(@as(?usize, 16), findKeyword("schema='alias', alias='orders'", "alias"));
+    try std.testing.expect(findKeyword("note='schema", "schema") == null);
 }
 
 fn deinitTestNode(allocator: std.mem.Allocator, node: *Node) void {
@@ -670,7 +692,7 @@ test "sql scanner extracts refs sources and config tags from jinja spans" {
     defer deinitTestNode(allocator, &node);
 
     try scanSql(allocator,
-        \\{{ config(materialized="table", tags=["nightly", 'core']) }}
+        \\{{ config(materialized="table", tags=["nightly", 'core'], schema="mart", alias='customer_orders') }}
         \\select * from {{ ref("stg_customers") }}
         \\union all select * from {{ source('raw', "customers") }}
         \\select {{ "ref('not_a_dependency')" }} as literal_ref
@@ -683,6 +705,8 @@ test "sql scanner extracts refs sources and config tags from jinja spans" {
     try std.testing.expectEqualStrings("raw", node.source_refs.items[0].source_name);
     try std.testing.expectEqualStrings("customers", node.source_refs.items[0].table_name);
     try std.testing.expectEqualStrings("table", node.materialized);
+    try std.testing.expectEqualStrings("mart", node.config_schema.?);
+    try std.testing.expectEqualStrings("customer_orders", node.config_alias.?);
     try std.testing.expectEqual(@as(usize, 2), node.tags.items.len);
 }
 

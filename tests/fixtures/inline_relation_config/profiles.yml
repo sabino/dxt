@@ -1,0 +1,7 @@
+inline_relation_config:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      schema: analytics
+      threads: 2

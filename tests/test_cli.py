@@ -188,6 +188,60 @@ def test_compile_docs_run_and_build_render_profile_target_and_this_context(tmp_p
         assert_profile_target_context_outputs(target, command_name)
 
 
+def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
+    compiled_root = target / "compiled" / "inline_relation_config" / "models"
+    orders_sql = (compiled_root / "orders.sql").read_text()
+    assert "'analytics_mart' as this_schema" in orders_sql
+    assert "'order_facts' as this_name" in orders_sql
+    assert "'order_facts' as this_identifier" in orders_sql
+    assert 'from "analytics_mart"."order_facts"' in orders_sql
+    assert 'from "analytics"."base_orders"' in orders_sql
+    assert (compiled_root / "uses_orders.sql").read_text().strip() == 'select *\nfrom "analytics_mart"."order_facts"'
+
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
+    orders = manifest["nodes"]["model.inline_relation_config.orders"]
+    uses_orders = manifest["nodes"]["model.inline_relation_config.uses_orders"]
+    assert orders["relation_name"] == '"analytics_mart"."order_facts"'
+    assert uses_orders["compiled_code"].strip() == 'select *\nfrom "analytics_mart"."order_facts"'
+    if command_name == "docs generate":
+        assert (target / "catalog.json").exists()
+    else:
+        assert not (target / "run_results.json").exists()
+
+
+def test_compile_docs_run_and_build_apply_inline_schema_and_alias_to_relations(tmp_path: Path):
+    project = copy_fixture(tmp_path, "inline_relation_config")
+    commands = [
+        ("compile", [DXT, "compile"], 0),
+        ("docs generate", [DXT, "docs", "generate"], 0),
+        ("run", [DXT, "run"], 2),
+        ("build", [DXT, "build"], 2),
+    ]
+    for index, (command_name, command, expected_returncode) in enumerate(commands):
+        target = tmp_path / f"inline-relation-{index}"
+        result = subprocess.run(
+            [
+                *command,
+                "--project-dir",
+                str(project),
+                "--profiles-dir",
+                str(project),
+                "--target-path",
+                str(target),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == expected_returncode, result.stderr
+        if expected_returncode == 0:
+            assert result.stderr == ""
+        assert_inline_relation_outputs(target, command_name)
+
+
 def test_compile_docs_run_and_build_resolve_cli_vars(tmp_path: Path):
     project = copy_fixture(tmp_path, "dynamic_var_ref")
 
