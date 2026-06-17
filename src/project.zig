@@ -254,6 +254,57 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         });
         return;
     }
+    if (selected_kinds.test_resource == selected_kinds.total) {
+        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedTestExecution;
+        const test_nodes = try selectedGenericTestExecutionOrder(runtime, &graph, selected);
+        defer runtime.allocator.free(test_nodes);
+        try validateGenericTestExecution(test_nodes);
+
+        const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+        var executed: std.ArrayList(run_results.NodeResult) = .empty;
+        defer {
+            for (executed.items) |result| {
+                if (result.owns_compiled_code) {
+                    if (result.compiled_code) |compiled_code| runtime.allocator.free(compiled_code);
+                }
+                if (result.message) |message| runtime.allocator.free(message);
+            }
+            executed.deinit(runtime.allocator);
+        }
+        var failed_tests: usize = 0;
+        var total_failures: u64 = 0;
+        for (test_nodes) |test_node| {
+            const execution = try duckdb.executeGenericTest(runtime, db_path, &graph, test_node);
+            const failed = execution.failures != 0;
+            if (failed) {
+                failed_tests += 1;
+                total_failures += execution.failures;
+            }
+            const message = if (failed) try formatTestFailureMessage(runtime.allocator, execution.failures) else null;
+            try executed.append(runtime.allocator, .{
+                .test_node = test_node,
+                .status = if (failed) "fail" else "pass",
+                .message = message,
+                .failures = execution.failures,
+                .compiled_code = execution.compiled_code,
+                .owns_compiled_code = true,
+            });
+        }
+
+        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
+        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
+        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try stdout.print("Built {d} generic test(s) against {s}; wrote artifacts into {s}\n", .{
+            executed.items.len,
+            util.normalizeForDisplay(db_path),
+            util.normalizeForDisplay(manifest_path),
+        });
+        if (failed_tests != 0) {
+            try stdout.print("{d} generic test(s) failed with {d} failure row(s)\n", .{ failed_tests, total_failures });
+            return error.TestFailure;
+        }
+        return;
+    }
 
     try stdout.print("Prepared {d} selected resource(s), including {d} compiled model(s), into {s}\n", .{
         selected.len,
@@ -344,6 +395,27 @@ fn validateSeedExecution(graph: *const Graph, nodes: []const *Node) !void {
     }
 }
 
+fn selectedGenericTestExecutionOrder(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource) ![]*GenericTestNode {
+    const selected_count = countSelectedGenericTests(graph, selected);
+    var ordered = try runtime.allocator.alloc(*GenericTestNode, selected_count);
+    var index: usize = 0;
+    for (graph.tests.items) |*test_node| {
+        if (!selectionContains(selected, test_node.unique_id)) continue;
+        ordered[index] = test_node;
+        index += 1;
+    }
+    return ordered;
+}
+
+fn validateGenericTestExecution(nodes: []const *GenericTestNode) !void {
+    for (nodes) |test_node| {
+        if (test_node.column_name == null) return error.UnsupportedTestExecution;
+        if (!std.mem.eql(u8, test_node.test_name, "not_null") and !std.mem.eql(u8, test_node.test_name, "unique")) {
+            return error.UnsupportedTestExecution;
+        }
+    }
+}
+
 fn countSelectedGraphModels(graph: *const Graph, selected: []const selector.SelectedResource) usize {
     var count: usize = 0;
     for (graph.nodes.items) |node| {
@@ -362,6 +434,14 @@ fn countSelectedGraphSeeds(graph: *const Graph, selected: []const selector.Selec
     return count;
 }
 
+fn countSelectedGenericTests(graph: *const Graph, selected: []const selector.SelectedResource) usize {
+    var count: usize = 0;
+    for (graph.tests.items) |test_node| {
+        if (selectionContains(selected, test_node.unique_id)) count += 1;
+    }
+    return count;
+}
+
 fn selectedModelDependenciesExecuted(selected: []const selector.SelectedResource, executed: []const *Node, node: *const Node) bool {
     for (node.depends_on.items) |dependency| {
         if (!std.mem.startsWith(u8, dependency, "model.")) continue;
@@ -376,6 +456,14 @@ fn executedContains(executed: []const *Node, unique_id: []const u8) bool {
         if (std.mem.eql(u8, node.unique_id, unique_id)) return true;
     }
     return false;
+}
+
+fn formatTestFailureMessage(allocator: std.mem.Allocator, failures: u64) ![]const u8 {
+    return try std.fmt.allocPrint(
+        allocator,
+        "Got {d} {s}, configured to fail if != 0",
+        .{ failures, if (failures == 1) "result" else "results" },
+    );
 }
 
 fn targetDir(runtime: Runtime, options: Options) ![]const u8 {

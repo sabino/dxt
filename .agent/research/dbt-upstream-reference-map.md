@@ -55,6 +55,7 @@ Every compatibility slice should record:
 | Adapter capability and SQL identity | v1 adapter behavior is distributed across adapters and context providers | `crates/dbt-adapter-core/src/lib.rs::AdapterType`, `quote_char`, static-analysis support matrix, microbatch capability; `crates/dbt-adapter-sql/src/ident.rs`, `statements.rs`, `types/*` | Future `src/project/adapter.zig`, `src/project/sql.zig`, and cross-database planner modules |
 | DuckDB SQL model execution and run results | `schemas/dbt/run-results/v6.json`; `core/dbt/artifacts/schemas/run/v5/run.py::RunResultOutput`, `process_run_result`, `RunResultsArtifact.from_execution_results`; `core/dbt/compilation.py::Compiler.compile_node`, `write_graph_file` | `crates/dbt-auth/src/duckdb/mod.rs::DuckDbAuth.configure`; `crates/dbt-loader/src/dbt_macro_assets/dbt-duckdb/macros/adapters.sql::duckdb__create_table_as`, `duckdb__create_view_as`; `crates/dbt-loader/src/dbt_macro_assets/dbt-duckdb/macros/materializations/table.sql`; `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/materializations/models/view.sql`; `crates/dbt-schemas/src/schemas/run_results.rs::RunResultOutput`, `RunResultsArtifact`; `crates/dbt-tasks-core/src/stats_to_results.rs`, `utils.rs::build_run_results_artifact` | `src/project/duckdb.zig` owns the first CLI-backed DuckDB execution slice, local-file path guardrails, and table/view SQL rendering; `src/project.zig` currently owns selected-model dependency ordering until a runner module exists; `src/project/run_results.zig` owns the minimal v6 run-results writer; future adapter ABI should replace the CLI backend with embedded DuckDB/linking and add task timing, adapter responses, relation staging, DAG scheduling, seeds, and tests |
 | DuckDB seed build execution and run results | `core/dbt/parser/seeds.py::SeedParser`; `core/dbt/artifacts/resources/v1/seed.py::SeedConfig`, `Seed`; `core/dbt/context/providers.py::load_agate_table`; `core/dbt/task/seed.py::SeedRunner`, `SeedTask`; `core/dbt/task/build.py::BuildTask.RUNNER_MAP`; `core/dbt/artifacts/schemas/run/v5/run.py::process_run_result`; `schemas/dbt/run-results/v6.json` | `crates/dbt-parser/src/resolve/resolve_seeds.rs`; `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/materializations/seeds/seed.sql`; `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/materializations/seeds/helpers.sql`; `crates/dbt-loader/src/dbt_macro_assets/dbt-duckdb/macros/seed.sql`; `crates/dbt-adapter/src/adapter/mod.rs::get_seed_file_path`; `crates/dbt-schemas/src/schemas/run_results.rs::RunResultOutput` | `src/project/duckdb.zig` owns the first root-project CSV seed load SQL and file-path rendering; `src/project.zig` owns the seed-only `build` boundary until a runner module exists; `src/project/run_results.zig` owns null compiled fields for seed results; future work must add package seed roots, seed configs, `dxt seed`, mixed build DAG scheduling, and full materialization semantics |
+| DuckDB generic test execution and run results | `core/dbt/task/build.py::BuildTask.RUNNER_MAP`; `core/dbt/task/test.py::TestRunner.execute_data_test`, `build_test_run_result`; `core/dbt/artifacts/resources/v1/generic_test.py::GenericTest`; `core/dbt/artifacts/schemas/run/v5/run.py::process_run_result`; `schemas/dbt/run-results/v6.json` | `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/tests/generic/builtin.sql`; `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/generic_test_sql/not_null.sql`; `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/generic_test_sql/unique.sql`; `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/materializations/tests/test.sql`; `crates/dbt-loader/src/dbt_macro_assets/dbt-adapters/macros/materializations/tests/helpers.sql`; `crates/dbt-schemas/src/schemas/run_results.rs::ContextRunResult`; `crates/dbt-tasks-core/src/test_aggregation.rs` | `src/project/duckdb.zig` owns the first direct DuckDB rendering/execution for `not_null` and `unique` column generic tests; `src/project.zig` owns the test-only `build` branch until a runner module exists; `src/project/run_results.zig` owns `pass`/`fail` generic-test result serialization; future work must add mixed build DAG scheduling, macro-backed test execution, wider generic/singular/unit/source tests, configs, and store-failures semantics |
 | Fusion-style scalable artifacts | v1 JSON artifacts remain the base compatibility contract | README v2 notes JSON compatibility plus Parquet artifacts; `crates/dbt-index-core/src/ingest/ingest_state.rs`, `crates/dbt-index-core/src/db.rs` define metadata parquet directories and DuckDB views under `dbt.*` and `dbt_rt.*` | Future parse cache/state store, not M1 product behavior |
 | Semantic layer and metrics | `schema_yaml_readers.py::MetricParser`, `SemanticModelParser`, `SavedQueryParser`; `manifest.py::process_metrics`, semantic manifest validation and writer | `crates/dbt-schemas/src/schemas/semantic_layer/*`, `crates/dbt-schemas/src/schemas/manifest/semantic_model.rs`, `crates/dbt-parser/src/resolve/resolve_semantic_models.rs`, `crates/dbt-parser/src/resolve/validate_semantic_models.rs`, `crates/dbt-metricflow/*` | Future `src/project/semantic.zig`, semantic manifest writer, metric planner; M1 should keep empty maps schema-valid until implemented |
 
@@ -64,13 +65,15 @@ Every compatibility slice should record:
 - Current implemented command surface is `parse`, `ls`, `compile`, `docs
   generate`, `run`, `build`, `version`, and help. `compile` and `docs generate`
   are render-only artifact boundaries for the supported parser graph. `run`
-  now executes selected enabled DuckDB SQL models with `table` and `view`
+  executes selected enabled DuckDB SQL models with `table` and `view`
   materializations through a Zig-owned external CLI backend, validates
   supported materializations before opening DuckDB, executes selected models in
   dependency order, writes `manifest.json`, compiled SQL, and a minimal v6
-  `run_results.json`. `build` remains a truthful preflight boundary that parses,
-  selects, compiles, writes artifacts, and then fails before seed/model/test
-  execution.
+  `run_results.json`. `build` executes root-project CSV seed-only selections and
+  test-only selected DuckDB column `not_null`/`unique` generic tests against
+  already-existing attached relations. Mixed seed/model/test scheduling,
+  model-build execution, wider generic/singular/unit tests, and full
+  materialization semantics remain future work.
 - `src/project/loader.zig` now owns graph loading order, installed-package
   traversal, target-path lookup, project/package resource traversal,
   macro/property application sequencing, duplicate checks, and graph sorting.
@@ -113,6 +116,15 @@ Every compatibility slice should record:
   execution, package seeds, seed configs, `dxt seed`, and full materialization
   semantics remain future work. This is documented in
   `.agent/research/m3-duckdb-build-seeds.md`.
+- Test-only `dxt build` execution now supports selected DuckDB column-level
+  `not_null` and `unique` generic tests. It renders the dbt built-in failing-row
+  query shape directly in Zig, wraps it in the standard `failures`,
+  `should_warn`, and `should_error` projection, writes `pass`/`fail` run-results
+  entries, and returns exit code `1` on failed tests. Mixed build scheduling,
+  macro-backed generic tests, `accepted_values`, `relationships`, singular
+  tests, unit tests, source tests, custom test configs, and store-failures remain
+  future work. This is documented in
+  `.agent/research/m3-duckdb-generic-tests.md`.
 - Literal inline model `config(schema=..., alias=...)` is scanned in
   `src/project/jinja.zig`, stored on `src/project/types.zig` nodes, and consumed
   by `src/project/compiler.zig` for default render-only relation names, refs to

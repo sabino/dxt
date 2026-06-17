@@ -3,9 +3,16 @@ const Io = std.Io;
 const types = @import("types.zig");
 
 const Node = types.Node;
+const GenericTestNode = types.GenericTestNode;
 
 pub const NodeResult = struct {
-    node: *const Node,
+    node: ?*const Node = null,
+    test_node: ?*const GenericTestNode = null,
+    status: []const u8 = "success",
+    message: ?[]const u8 = null,
+    failures: ?u64 = null,
+    compiled_code: ?[]const u8 = null,
+    owns_compiled_code: bool = false,
 };
 
 pub fn renderRunResults(allocator: std.mem.Allocator, results: []const NodeResult) ![]const u8 {
@@ -23,39 +30,63 @@ pub fn renderRunResults(allocator: std.mem.Allocator, results: []const NodeResul
     try writer.writeAll("  \"results\": [");
     for (results, 0..) |result, index| {
         if (index != 0) try writer.writeAll(",");
-        try writeResult(writer, result.node);
+        try writeResult(writer, result);
     }
     try writer.writeAll("\n  ],\n  \"elapsed_time\": 0.0\n}\n");
     return try out.toOwnedSlice();
 }
 
-fn writeResult(writer: *Io.Writer, node: *const Node) !void {
-    try writer.writeAll("\n    {\"status\": \"success\", \"timing\": [");
+fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
+    try writer.writeAll("\n    {\"status\": ");
+    try writeJsonString(writer, result.status);
+    try writer.writeAll(", \"timing\": [");
     try writer.writeAll("{\"name\": \"compile\", \"started_at\": null, \"completed_at\": null}, ");
     try writer.writeAll("{\"name\": \"execute\", \"started_at\": null, \"completed_at\": null}");
-    try writer.writeAll("], \"thread_id\": \"Thread-1\", \"execution_time\": 0.0, \"adapter_response\": {}, \"message\": null, \"failures\": null, \"unique_id\": ");
-    try writeJsonString(writer, node.unique_id);
-    try writer.writeAll(", \"compiled\": ");
-    if (isCompiledResultNode(node)) {
-        try writer.writeAll(if (node.compiled) "true" else "false");
+    try writer.writeAll("], \"thread_id\": \"Thread-1\", \"execution_time\": 0.0, \"adapter_response\": {}, \"message\": ");
+    if (result.message) |message| {
+        try writeJsonString(writer, message);
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(", \"failures\": ");
+    if (result.failures) |failures| {
+        try writer.print("{d}", .{failures});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(", \"unique_id\": ");
+    try writeJsonString(writer, resultUniqueId(result));
+    try writer.writeAll(", \"compiled\": ");
+    if (result.test_node != null or result.compiled_code != null) {
+        try writer.writeAll("true");
+    } else if (result.node) |node| if (isCompiledResultNode(node)) {
+        try writer.writeAll(if (node.compiled) "true" else "false");
+    } else {
+        try writer.writeAll("null");
+    } else try writer.writeAll("null");
     try writer.writeAll(", \"compiled_code\": ");
-    if (isCompiledResultNode(node) and node.compiled_code != null) {
+    if (result.compiled_code) |compiled_code| {
+        try writeJsonString(writer, compiled_code);
+    } else if (result.node) |node| if (isCompiledResultNode(node) and node.compiled_code != null) {
         const compiled_code = node.compiled_code.?;
         try writeJsonString(writer, compiled_code);
     } else {
         try writer.writeAll("null");
-    }
+    } else try writer.writeAll("null");
     try writer.writeAll(", \"relation_name\": ");
-    if (isCompiledResultNode(node) and node.relation_name != null) {
+    if (result.node) |node| if (isCompiledResultNode(node) and node.relation_name != null) {
         const relation_name = node.relation_name.?;
         try writeJsonString(writer, relation_name);
     } else {
         try writer.writeAll("null");
-    }
+    } else try writer.writeAll("null");
     try writer.writeAll("}");
+}
+
+fn resultUniqueId(result: NodeResult) []const u8 {
+    if (result.node) |node| return node.unique_id;
+    if (result.test_node) |test_node| return test_node.unique_id;
+    return "";
 }
 
 fn isCompiledResultNode(node: *const Node) bool {
@@ -125,5 +156,46 @@ test "run-results writer emits seed result with dbt Core null compiled fields" {
     try std.testing.expectEqualStrings("seed.demo.raw_customers", result.get("unique_id").?.string);
     try std.testing.expectEqual(.null, result.get("compiled").?);
     try std.testing.expectEqual(.null, result.get("compiled_code").?);
+    try std.testing.expectEqual(.null, result.get("relation_name").?);
+}
+
+test "run-results writer emits generic test pass and fail statuses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_customers_customer_id.abc",
+        .name = "not_null_customers_customer_id",
+        .alias = "not_null_customers_customer_id",
+        .path = "not_null_customers_customer_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "customer_id",
+        .attached_node = "model.demo.customers",
+    });
+
+    const rendered = try renderRunResults(allocator, &.{
+        .{
+            .test_node = &graph.tests.items[0],
+            .status = "fail",
+            .message = "Got 1 result, configured to fail if != 0",
+            .failures = 1,
+            .compiled_code = "select 1 as failures",
+        },
+    });
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const result = parsed.value.object.get("results").?.array.items[0].object;
+    try std.testing.expectEqualStrings("fail", result.get("status").?.string);
+    try std.testing.expectEqualStrings("test.demo.not_null_customers_customer_id.abc", result.get("unique_id").?.string);
+    try std.testing.expectEqual(@as(i64, 1), result.get("failures").?.integer);
+    try std.testing.expectEqual(true, result.get("compiled").?.bool);
+    try std.testing.expectEqualStrings("select 1 as failures", result.get("compiled_code").?.string);
     try std.testing.expectEqual(.null, result.get("relation_name").?);
 }

@@ -6,8 +6,14 @@ const types = @import("types.zig");
 const Runtime = types.Runtime;
 const Graph = types.Graph;
 const Node = types.Node;
+const GenericTestNode = types.GenericTestNode;
 
 const DuckDbObjectKind = enum { table, view };
+
+pub const GenericTestExecutionResult = struct {
+    compiled_code: []const u8,
+    failures: u64,
+};
 
 pub fn databasePath(allocator: std.mem.Allocator, target_dir: []const u8, graph: *const Graph) ![]const u8 {
     if (graph.database_path) |configured_path| {
@@ -47,6 +53,15 @@ pub fn executeSeed(runtime: Runtime, db_path: []const u8, project_dir: []const u
     try executeSql(runtime, db_path, sql);
 }
 
+pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const GenericTestNode) !GenericTestExecutionResult {
+    const compiled_sql = try renderGenericTestSql(runtime.allocator, graph, test_node);
+    errdefer runtime.allocator.free(compiled_sql);
+    const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
+    defer runtime.allocator.free(execution_sql);
+    const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
+    return .{ .compiled_code = compiled_sql, .failures = failures };
+}
+
 fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-batch", "-bail", "-c", sql },
@@ -64,6 +79,35 @@ fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
         else => {},
     }
     return error.DuckDbExecutionFailed;
+}
+
+fn queryGenericTestFailures(runtime: Runtime, db_path: []const u8, sql: []const u8) !u64 {
+    const result = std.process.run(runtime.allocator, runtime.io, .{
+        .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", sql },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch |err| switch (err) {
+        error.FileNotFound => return error.DuckDbCliNotFound,
+        else => return err,
+    };
+    defer runtime.allocator.free(result.stdout);
+    defer runtime.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code == 0) {
+            const field = firstCsvField(result.stdout) orelse return error.DuckDbExecutionFailed;
+            return std.fmt.parseUnsigned(u64, field, 10) catch error.DuckDbExecutionFailed;
+        },
+        else => {},
+    }
+    return error.DuckDbExecutionFailed;
+}
+
+fn firstCsvField(stdout: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, stdout, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    const end = std.mem.indexOfAny(u8, trimmed, ",\r\n") orelse trimmed.len;
+    return std.mem.trim(u8, trimmed[0..end], " \t");
 }
 
 fn relationObjectExists(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, object_kind: DuckDbObjectKind) !bool {
@@ -178,6 +222,48 @@ pub fn renderSeedSql(allocator: std.mem.Allocator, project_dir: []const u8, grap
         "create schema if not exists {s};\ncreate or replace table {s} as select * from read_csv_auto({s}, header = true);\n",
         .{ quoted_schema, relation_name, seed_file_literal },
     );
+}
+
+pub fn renderGenericTestSql(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
+    const column_name = test_node.column_name orelse return error.UnsupportedTestExecution;
+    if (!std.mem.eql(u8, test_node.test_name, "not_null") and !std.mem.eql(u8, test_node.test_name, "unique")) {
+        return error.UnsupportedTestExecution;
+    }
+
+    const attached_node = findNodeByUniqueId(graph, test_node.attached_node) orelse return error.UnsupportedTestExecution;
+    const relation_name = attached_node.relation_name orelse try compiler.relationNameForNode(allocator, graph, attached_node);
+    const should_free_relation = attached_node.relation_name == null;
+    defer if (should_free_relation) allocator.free(relation_name);
+    const quoted_column = try compiler.quoteIdentifier(allocator, column_name);
+    defer allocator.free(quoted_column);
+
+    if (std.mem.eql(u8, test_node.test_name, "not_null")) {
+        return try std.fmt.allocPrint(
+            allocator,
+            "select {s}\nfrom {s}\nwhere {s} is null",
+            .{ quoted_column, relation_name, quoted_column },
+        );
+    }
+    return try std.fmt.allocPrint(
+        allocator,
+        "select\n    {s} as unique_field,\n    count(*) as n_records\nfrom {s}\nwhere {s} is not null\ngroup by {s}\nhaving count(*) > 1",
+        .{ quoted_column, relation_name, quoted_column, quoted_column },
+    );
+}
+
+pub fn renderGenericTestExecutionSql(allocator: std.mem.Allocator, compiled_sql: []const u8) ![]const u8 {
+    return try std.fmt.allocPrint(
+        allocator,
+        "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\n{s}\n) dbt_internal_test;\n",
+        .{compiled_sql},
+    );
+}
+
+fn findNodeByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Node {
+    for (graph.nodes.items) |*node| {
+        if (std.mem.eql(u8, node.unique_id, unique_id)) return node;
+    }
+    return null;
 }
 
 fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
@@ -377,6 +463,89 @@ test "quoteSqlString escapes embedded quotes" {
     defer arena.deinit();
     const rendered = try quoteSqlString(arena.allocator(), "a'b");
     try std.testing.expectEqualStrings("'a''b'", rendered);
+}
+
+test "renderGenericTestSql renders not_null failure row query and wrapper" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1 as id",
+        .relation_name = "\"analytics\".\"customers\"",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_customers_customer_id.abc",
+        .name = "not_null_customers_customer_id",
+        .alias = "not_null_customers_customer_id",
+        .path = "not_null_customers_customer_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "customer_id",
+        .attached_node = "model.demo.customers",
+    });
+
+    const sql = try renderGenericTestSql(allocator, &graph, &graph.tests.items[0]);
+    try std.testing.expectEqualStrings(
+        "select \"customer_id\"\nfrom \"analytics\".\"customers\"\nwhere \"customer_id\" is null",
+        sql,
+    );
+    const execution_sql = try renderGenericTestExecutionSql(allocator, sql);
+    try std.testing.expectEqualStrings(
+        "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\nselect \"customer_id\"\nfrom \"analytics\".\"customers\"\nwhere \"customer_id\" is null\n) dbt_internal_test;\n",
+        execution_sql,
+    );
+}
+
+test "renderGenericTestSql renders unique failure row query" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1 as id",
+        .relation_name = "\"analytics\".\"customers\"",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.unique_customers_customer_id.abc",
+        .name = "unique_customers_customer_id",
+        .alias = "unique_customers_customer_id",
+        .path = "unique_customers_customer_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_unique(**_dbt_generic_test_kwargs) }}",
+        .test_name = "unique",
+        .column_name = "customer_id",
+        .attached_node = "model.demo.customers",
+    });
+
+    const sql = try renderGenericTestSql(allocator, &graph, &graph.tests.items[0]);
+    try std.testing.expectEqualStrings(
+        "select\n    \"customer_id\" as unique_field,\n    count(*) as n_records\nfrom \"analytics\".\"customers\"\nwhere \"customer_id\" is not null\ngroup by \"customer_id\"\nhaving count(*) > 1",
+        sql,
+    );
+}
+
+test "firstCsvField reads the leading failures value" {
+    try std.testing.expectEqualStrings("12", firstCsvField("12,true,true\n").?);
+    try std.testing.expectEqualStrings("0", firstCsvField(" 0 \n").?);
+    try std.testing.expect(firstCsvField("\n") == null);
 }
 
 test "databasePath resolves configured relative path from profile base" {
