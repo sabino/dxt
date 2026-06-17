@@ -153,17 +153,75 @@ fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
 }
 
 fn trimTrailingSqlTerminator(sql: []const u8) []const u8 {
-    const trimmed = trimSqlRight(sql);
-    if (std.mem.endsWith(u8, trimmed, ";")) return trimSqlRight(trimmed[0 .. trimmed.len - 1]);
-    return trimmed;
+    const trimmed_end = trimSqlRightEnd(sql, sql.len);
+    var end = trimmed_end;
+    while (stripOneTrailingSqlComment(sql[0..end])) |comment_start| {
+        end = trimSqlRightEnd(sql, comment_start);
+    }
+    if (end > 0 and sql[end - 1] == ';') return sql[0..trimSqlRightEnd(sql, end - 1)];
+    return sql[0..trimmed_end];
 }
 
-fn trimSqlRight(value: []const u8) []const u8 {
-    var end = value.len;
-    while (end > 0 and (value[end - 1] == ' ' or value[end - 1] == '\t' or value[end - 1] == '\r' or value[end - 1] == '\n')) {
+fn trimSqlRightEnd(value: []const u8, initial_end: usize) usize {
+    var end = initial_end;
+    while (end > 0 and isSqlTrailingWhitespace(value[end - 1])) {
         end -= 1;
     }
-    return value[0..end];
+    return end;
+}
+
+fn isSqlTrailingWhitespace(byte: u8) bool {
+    return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
+}
+
+fn stripOneTrailingSqlComment(value: []const u8) ?usize {
+    if (std.mem.endsWith(u8, value, "*/")) {
+        return lastIndexOf(value, "/*");
+    }
+    const line_start = lastLineStart(value);
+    const first = skipSqlInlineWhitespace(value, line_start);
+    if (first + 1 < value.len and value[first] == '-' and value[first + 1] == '-') return line_start;
+    const dash = lastIndexOf(value, "--") orelse return null;
+    if (dash < line_start) return null;
+    const semi = lastByteBefore(value, ';', dash) orelse return null;
+    if (skipSqlInlineWhitespace(value, semi + 1) == dash) return dash;
+    return null;
+}
+
+fn lastLineStart(value: []const u8) usize {
+    var index = value.len;
+    while (index > 0) {
+        index -= 1;
+        if (value[index] == '\n') return index + 1;
+    }
+    return 0;
+}
+
+fn skipSqlInlineWhitespace(value: []const u8, start: usize) usize {
+    var index = start;
+    while (index < value.len and (value[index] == ' ' or value[index] == '\t' or value[index] == '\r')) {
+        index += 1;
+    }
+    return index;
+}
+
+fn lastByteBefore(value: []const u8, needle: u8, before: usize) ?usize {
+    var index = @min(before, value.len);
+    while (index > 0) {
+        index -= 1;
+        if (value[index] == needle) return index;
+    }
+    return null;
+}
+
+fn lastIndexOf(value: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0 or needle.len > value.len) return null;
+    var index = value.len - needle.len + 1;
+    while (index > 0) {
+        index -= 1;
+        if (std.mem.eql(u8, value[index .. index + needle.len], needle)) return index;
+    }
+    return null;
 }
 
 test "renderModelSql creates table materialization SQL" {
@@ -223,6 +281,11 @@ test "renderModelSql strips a trailing SQL terminator before wrapping" {
 test "trimTrailingSqlTerminator preserves inner semicolons" {
     try std.testing.expectEqualStrings("select ';' as value", trimTrailingSqlTerminator("select ';' as value;\n"));
     try std.testing.expectEqualStrings("select ';' as value", trimTrailingSqlTerminator("select ';' as value"));
+    try std.testing.expectEqualStrings("select 1", trimTrailingSqlTerminator("select 1;\n-- trailing note\n"));
+    try std.testing.expectEqualStrings("select 1", trimTrailingSqlTerminator("select 1; -- noqa\n"));
+    try std.testing.expectEqualStrings("select 1", trimTrailingSqlTerminator("select 1; /* trailing */\n"));
+    try std.testing.expectEqualStrings("select 1 -- trailing note", trimTrailingSqlTerminator("select 1 -- trailing note\n"));
+    try std.testing.expectEqualStrings("select 1 /* trailing */", trimTrailingSqlTerminator("select 1 /* trailing */\n"));
 }
 
 test "renderModelSql rejects unsupported materialization" {

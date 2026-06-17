@@ -35,6 +35,10 @@ dbt Core v1:
   `core/dbt/parser/unit_tests.py` references to `macro.dbt.is_incremental`:
   incremental models commonly include `is_incremental()` in parseable SQL even
   when this slice still rejects incremental materialization before execution.
+- `core/dbt/graph/selector.py::get_graph_queue`,
+  `core/dbt/graph/queue.py::GraphQueue`, and
+  `core/dbt/task/runnable.py::{get_graph_queue, run_queue}`: selected runnable
+  nodes execute through a dependency-aware graph queue.
 
 dbt Core v2 / Fusion:
 
@@ -58,14 +62,21 @@ dbt Core v2 / Fusion:
   Fusion carries `is_incremental()` as a dbt macro. dxt parses the zero-argument
   call narrowly so run can report the unsupported incremental boundary before
   compile-time Jinja rendering.
+- `crates/dbt-dag/src/schedule.rs::Schedule` and
+  `crates/dbt-dag/src/deps_mgmt.rs::topological_sort`: Fusion represents DAG
+  scheduling and topological ordering explicitly.
 
 ## dxt Ownership
 
 - `src/project/duckdb.zig`: DuckDB CLI-backed database path resolution,
   local-file path guardrails, table/view materialization SQL rendering, and
-  execution.
+  execution. Relative DuckDB profile paths resolve from the loaded
+  `profiles.yml` directory as a deterministic dxt-local choice for this
+  CLI-backed slice; the cited Fusion auth code grounds `path` as the DuckDB
+  database option, not that relative-path base.
 - `src/project/run_results.zig`: minimal v6 `run_results.json` rendering for
-  successful SQL model runs.
+  successful SQL model runs. Failed and partial run-results artifacts are
+  planned but not implemented in this first success-only execution slice.
 - `src/project/profile.zig`: narrow scalar DuckDB `path` capture.
 - `src/project.zig`: current command facade orchestration for `run`.
 - `tests/schemas/dbt_run_results_v6_m3_slice.schema.json`: pinned schema slice
@@ -75,15 +86,17 @@ dbt Core v2 / Fusion:
 
 - Native Zig tests cover DuckDB materialization SQL rendering, conflicting
   table/view drop SQL, trailing SQL terminator trimming for wrapped model SQL,
-  unsupported materialization rejection, DuckDB profile `path` capture,
-  `is_incremental()` config scanning, and run-results JSON shape.
+  preserving non-terminated SQL trailing comments, unsupported materialization
+  rejection, DuckDB profile `path` capture, `is_incremental()` config scanning,
+  and run-results JSON shape.
 - Pytest black-box coverage executes `dxt run` against copied and generated
   fixtures, verifies dependency-order execution where lexical order conflicts
   with graph order, checks table-to-view replacement on rerun, checks
-  trailing-semicolon SQL model execution, checks profile-relative DuckDB paths,
-  queries the resulting DuckDB database through the DuckDB CLI, validates
-  `run_results.json` against the pinned schema slice, and keeps non-model, non-DuckDB,
-  unsupported-materialization, and `build` boundaries explicit.
+  trailing-semicolon SQL model execution including trailing SQL comments, checks
+  profile-relative DuckDB paths, queries the resulting DuckDB database through
+  the DuckDB CLI, validates `run_results.json` against the pinned schema slice,
+  and keeps non-model, non-DuckDB, unsupported-materialization, and `build`
+  boundaries explicit.
 
 ## Stop Conditions
 
@@ -91,6 +104,11 @@ dbt Core v2 / Fusion:
 - Do not implement seeds, tests, snapshots, incremental, ephemeral, Python
   models, hooks, grants, docs persistence, catalog introspection, relation
   staging/backup rename semantics, adapter caching, or threaded scheduling.
+- Do not treat direct `create or replace` as full dbt materialization parity.
+  It is a temporary shortcut for the M3 table/view success path; full parity
+  needs intermediate/backup relation handling and cleanup semantics.
+- Do not emit failed or partial `run_results.json` in this success-only slice.
+  Failure artifacts belong in the follow-up runner/task-result slice.
 - Do not call DuckDB from Python product code. Python remains a black-box test
   harness only.
 - Do not treat the external CLI backend as the long-term adapter ABI; replace it

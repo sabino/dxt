@@ -493,7 +493,7 @@ model-paths: ["models"]
 target-path: target
 """
     )
-    (project / "models" / "customers.sql").write_text("select 3 as customer_id;\n")
+    (project / "models" / "customers.sql").write_text("select 3 as customer_id; -- trailing note\n")
     target = tmp_path / "run-target"
     result = subprocess.run(
         [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
