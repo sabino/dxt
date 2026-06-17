@@ -1,0 +1,59 @@
+version: 2
+
+sources:
+  - name: raw
+    tables:
+      - name: customers
+        loaded_at_field: loaded_at
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 1
+            period: day
+      - name: orders
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 1
+            period: day
+      - name: expression_customers
+        loaded_at_field: cast(loaded_at as timestamp)
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 1
+            period: day
+      - name: empty_customers
+        loaded_at_field: loaded_at
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 1
+            period: day
+      - name: filtered_customers
+        loaded_at_field: loaded_at
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 1
+            period: day
+          filter: customer_id > 0
+      - name: query_customers
+        loaded_at_query: select max(loaded_at) from raw.query_customers
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 1
+            period: day
