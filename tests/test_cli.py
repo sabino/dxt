@@ -189,6 +189,77 @@ def test_compile_expands_static_jinja_set_for_loop(tmp_path: Path):
     assert "{%" not in compiled
 
 
+def test_compile_and_docs_generate_render_jaffle_style_macro_dispatch(tmp_path: Path):
+    project = copy_fixture(tmp_path, "macro_dispatch_compile")
+
+    compile_target = tmp_path / "compile-target"
+    compile_result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(compile_target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    compiled_path = compile_target / "compiled" / "macro_dispatch_compile" / "models" / "orders.sql"
+    compiled = compiled_path.read_text()
+    assert "(subtotal / 100)::numeric(16, 2)" in compiled
+    assert "{{" not in compiled
+    assert "{%" not in compiled
+
+    manifest_path = compile_target / "manifest.json"
+    assert_manifest_schema_slice(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["nodes"]["model.macro_dispatch_compile.orders"]["depends_on"]["macros"] == [
+        "macro.macro_dispatch_compile.cents_to_dollars"
+    ]
+    assert manifest["macros"]["macro.macro_dispatch_compile.cents_to_dollars"]["depends_on"]["macros"] == [
+        "macro.macro_dispatch_compile.default__cents_to_dollars"
+    ]
+    assert manifest["nodes"]["model.macro_dispatch_compile.orders"]["compiled_code"] == compiled
+
+    docs_target = tmp_path / "docs-target"
+    docs_result = subprocess.run(
+        [DXT, "docs", "generate", "--project-dir", str(project), "--target-path", str(docs_target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert docs_result.returncode == 0, docs_result.stderr
+    docs_compiled = docs_target / "compiled" / "macro_dispatch_compile" / "models" / "orders.sql"
+    assert "(subtotal / 100)::numeric(16, 2)" in docs_compiled.read_text()
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for macro-dispatch run/build execution coverage")
+def test_run_and_build_execute_jaffle_style_macro_dispatch(tmp_path: Path):
+    project = copy_fixture(tmp_path, "macro_dispatch_compile")
+    for command in ("run", "build"):
+        target = tmp_path / f"{command}-target"
+        result = subprocess.run(
+            [DXT, command, "--project-dir", str(project), "--target-path", str(target)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert_run_results_schema_slice(target / "run_results.json")
+
+        query = subprocess.run(
+            [
+                DUCKDB,
+                str(target / "dxt.duckdb"),
+                "-csv",
+                "-noheader",
+                "-c",
+                'select order_id, subtotal from "main"."orders"',
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert query.returncode == 0, query.stderr
+        assert query.stdout.strip() == "1,12.50"
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M2 static loop build execution coverage")
 def test_build_executes_model_with_static_jinja_set_for_loop(tmp_path: Path):
     project = tmp_path / "static_loop_compile"

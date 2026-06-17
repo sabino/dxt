@@ -15,6 +15,10 @@ compatibility.
   checksums.
 - Source-grounded upstream reference-map refresh with the next five small
   dbt Core/Fusion-backed compatibility slices.
+- Narrow Zig compile/runtime rendering for Jaffle-style macro dispatch wrappers
+  such as `cents_to_dollars`, including adapter/default implementation
+  selection, manifest macro dependency coverage, and DuckDB run/build
+  integration coverage.
 
 ## 0.0.0-pre-alpha
 
