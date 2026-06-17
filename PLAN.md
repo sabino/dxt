@@ -298,6 +298,21 @@ Every compatibility slice must record:
 - Stop conditions that keep mechanical extractions separate from behavior
   changes and prevent Python from crossing into product runtime behavior.
 
+Immediate source-grounded queue, refreshed on 2026-06-17 in
+`.agent/research/dbt-upstream-reference-map.md`:
+
+1. Minimal macro dispatch rendering for the Jaffle-style `cents_to_dollars`
+   pattern.
+2. Source `config:` parsing and freshness inheritance.
+3. Selector parity for `@`, depth-limited `+`, `file:`, and richer `ls`
+   outputs.
+4. Parse/compile `execute` boundary and static `{% if %}` handling.
+5. Read-only unit-test artifact parsing for newer Jaffle-style projects.
+
+Each item must remain a Zig product-runtime slice with native tests first and
+Python/dbt oracle coverage only for CLI, filesystem, fixture, or artifact
+parity.
+
 Current vars-backed dependency slice source note:
 `.agent/research/m2-vars-ref-source-slice.md` maps upstream dbt Core v1 and
 Fusion var/ref/source behavior to the narrow dxt implementation. This slice is

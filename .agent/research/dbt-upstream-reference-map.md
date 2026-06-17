@@ -329,3 +329,118 @@ Every compatibility slice should record:
   materialization macro execution, adapter cache mutation, transactions,
   cross-database movement, Parquet dependency, or Python product behavior in
   this slice.
+
+## 2026-06-17 Refresh: Next Five Small Slices
+
+This refresh used three read-only GPT-5.5/Azure passes over dbt Core v1,
+dbt Core v2/Fusion, and the current dxt Zig modules. The conclusion is to keep
+dbt Core v1 as the behavior/artifact oracle, use Fusion as an architecture
+reference, and land the next work as small Zig-owned slices with native tests
+plus Python/dbt oracle checks where CLI, files, fixtures, or artifacts are
+touched.
+
+### 1. M2 Minimal Macro Dispatch Rendering For Jaffle `cents_to_dollars`
+
+- Upstream references: v1 `core/dbt/context/macros.py::MacroNamespace`,
+  `core/dbt/context/providers.py::RuntimeProvider`,
+  `core/dbt/clients/jinja.py::get_rendered`; Fusion
+  `crates/dbt-jinja-utils/src/phases/compile/compile_node_context.rs` and
+  `crates/dbt-init/assets/jaffle_shop/macros/cents_to_dollars.sql`.
+- dxt files: `src/project/parse.zig`, `src/project/jinja.zig`,
+  `src/project/resolve.zig`, `src/project/compiler.zig`; introduce
+  `src/project/macro.zig` only if lookup/rendering would otherwise spread
+  across parser code.
+- Native tests: macro namespace lookup for root/package wrapper macros,
+  dispatch to `default__cents_to_dollars`, one literal string argument
+  substitution, and loud rejection for arbitrary or multi-statement macros.
+- Python/dbt oracle: synthetic Jaffle-style fixture with
+  `{{ cents_to_dollars('subtotal') }}` through `compile`, `docs generate`,
+  `run`, and `build`; compare normalized compiled SQL and artifact slices.
+- Artifact validation: Manifest v12 `compiled_code` and
+  `depends_on.macros`; Run Results v6 for `run`/`build`; Catalog v1 after docs
+  generation when a relation exists.
+- Stop conditions: no general Jinja interpreter, materialization macro
+  execution, arbitrary macro return values, or Python product runtime.
+
+### 2. M1/M2 Source `config:` And Freshness Inheritance
+
+- Upstream references: v1 `core/dbt/parser/sources.py`
+  `calculate_freshness_from_raw_target`,
+  `calculate_loaded_at_field_query_from_raw_target`, and
+  `merge_source_freshness`; source artifact models in
+  `core/dbt/artifacts/resources/v1/source_definition.py`; Fusion
+  `crates/dbt-parser/src/resolve/resolve_sources.rs`.
+- dxt files: `src/project/types.zig`, `src/project/parse.zig`,
+  `src/project/compiler.zig` or a source relation helper,
+  `src/project/duckdb.zig`, `src/project/source_freshness.zig`,
+  `src/project/manifest.zig`.
+- Native tests: source-level/table-level `config.loaded_at_field`,
+  `config.loaded_at_query`, freshness merge/override/null behavior, and narrow
+  source schema rendering for `{{ target.schema }}_raw`.
+- Python/dbt oracle: fixture with inherited source freshness, table override,
+  table null override, and DuckDB `dxt source freshness --select source:...`.
+- Artifact validation: Manifest v12 source fields after schema-slice expansion,
+  Sources v3 `sources.json`, and Catalog v1 selected source entries.
+- Stop conditions: no metadata freshness, adapter metadata APIs, source-status
+  selectors, or broad Jinja in source schema beyond the explicit target-schema
+  expression.
+
+### 3. M2 Selector Parity For `@`, Depth-Limited `+`, `file:`, And `ls`
+
+- Upstream references: v1 `core/dbt/graph/selector_spec.py::RAW_SELECTOR_PATTERN`,
+  `SelectionCriteria`, `core/dbt/graph/selector.py::collect_specified_neighbors`,
+  `core/dbt/graph/graph.py::select_childrens_parents`,
+  `core/dbt/task/list.py::ListTask`; Fusion command and selector loading in
+  `crates/dbt-clap-core/src/commands.rs` and
+  `crates/dbt-parser/src/resolver.rs`.
+- dxt files: selector validation in `src/root.zig`, matching/expansion in
+  `src/project/selector.zig`, and selected JSON output helpers where relevant.
+- Native tests: parse and match `@model`, `1+model`, `model+1`, reject invalid
+  combinations, support `file:orders.sql`, and preserve current union,
+  intersection, wildcard, and exclude behavior.
+- Python/dbt oracle: `dxt ls` vs `dbt ls` on selector fixtures and
+  Jaffle-style projects for `@stg_orders`, `+orders`, `orders+`, and
+  `file:orders.sql`; reuse selectors through `compile`, `docs generate`, and
+  `build` smoke fixtures.
+- Artifact validation: `ls` writes no artifacts; commands that reuse selectors
+  must validate Manifest v12, Catalog v1, or Run Results v6 as applicable.
+- Stop conditions: no YAML selectors, state/result/source-status selectors, or
+  broad indirect-selection flags in this slice.
+
+### 4. M2 Parse/Compile `execute` Boundary And Static `{% if %}`
+
+- Upstream references: v1 `core/dbt/context/providers.py::ProviderContext.execute`,
+  `ParseProvider`, `RuntimeProvider`, `generate_parser_model_context`; Fusion
+  `crates/dbt-parser/src/renderer.rs` and
+  `crates/dbt-parser/src/dbt_namespace.rs`.
+- dxt files: `src/project/jinja.zig` for dependency scanning,
+  `src/project/compiler.zig` for render-only compile, and possibly
+  `src/project/context.zig` for parse/compile mode constants.
+- Native tests: parse phase treats `execute` as false; compile/run/build/docs
+  render phase supports `{% if execute %}`, `{% if not execute %}`, `{% else %}`;
+  unsupported conditions reject clearly.
+- Python/dbt oracle: fixture with `run_query` guarded by `{% if execute %}` and
+  static fallback in `{% else %}`; compare manifest dependencies and compiled
+  SQL.
+- Artifact validation: Manifest v12 `refs`, `sources`, `depends_on`, and
+  `compiled_code`; Run Results v6 only when executed through DuckDB.
+- Stop conditions: no database calls from Jinja, general expression evaluator,
+  filters/tests, loop metadata, or Python-backed product rendering.
+
+### 5. M1 Read-Only Unit Test Artifact Surface
+
+- Upstream references: v1 `core/dbt/parser/schema_yaml_readers.py` unit-test
+  parsing path, `core/dbt/artifacts/resources/v1/unit_test_definition.py`,
+  `core/dbt/graph/selector_methods.py::UnitTestSelectorMethod`; Fusion
+  `crates/dbt-parser/src/resolve/resolve_tests/resolve_unit_tests.rs`.
+- dxt files: `src/project/types.zig`, `src/project/parse.zig`,
+  `src/project/manifest.zig`, `src/project/selector.zig`, `src/root.zig`.
+- Native tests: parse `unit_tests:` with model input refs, given rows, expected
+  rows, dependency refs, and selector handling for `resource_type:unit_test`.
+- Python/dbt oracle: newer Jaffle-style YAML with unit tests; compare
+  `manifest.unit_tests`, parent/child maps, and `dxt ls` behavior against dbt.
+- Artifact validation: expand the Manifest v12 slice for `unit_tests`; assert
+  `run_results.json` is not produced for read-only unit-test parsing.
+- Stop conditions: no unit-test execution in `build`, fixture materialization,
+  or SQL comparison engine. If selected for `build`, return a clear unsupported
+  execution error after writing a valid manifest.
