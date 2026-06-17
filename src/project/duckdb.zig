@@ -1,6 +1,8 @@
 const std = @import("std");
+const catalog = @import("catalog.zig");
 const compiler = @import("compiler.zig");
 const project_fs = @import("fs.zig");
+const selector = @import("selector.zig");
 const types = @import("types.zig");
 
 const Runtime = types.Runtime;
@@ -60,6 +62,142 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
     defer runtime.allocator.free(execution_sql);
     const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
     return .{ .compiled_code = compiled_sql, .failures = failures };
+}
+
+pub fn collectCatalogEntries(runtime: Runtime, db_path: []const u8, graph: *const Graph, selected: []const selector.SelectedResource) !std.ArrayList(catalog.CatalogEntry) {
+    var entries: std.ArrayList(catalog.CatalogEntry) = .empty;
+    errdefer catalog.deinitEntries(runtime.allocator, &entries);
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return entries;
+    if (!databaseFileExists(runtime, db_path)) return entries;
+
+    const rows_json = try queryCatalogColumnsJson(runtime, db_path);
+    defer runtime.allocator.free(rows_json);
+    var parsed_rows = try std.json.parseFromSlice(std.json.Value, runtime.allocator, rows_json, .{});
+    defer parsed_rows.deinit();
+    if (parsed_rows.value != .array) return error.DuckDbExecutionFailed;
+    const rows = parsed_rows.value.array.items;
+
+    for (graph.nodes.items) |*node| {
+        if (!selectionContains(selected, node.unique_id)) continue;
+        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed")) continue;
+        const entry = try catalogEntryForNode(runtime.allocator, graph, node, rows) orelse continue;
+        try entries.append(runtime.allocator, entry);
+    }
+
+    return entries;
+}
+
+fn databaseFileExists(runtime: Runtime, db_path: []const u8) bool {
+    const file = std.Io.Dir.cwd().openFile(runtime.io, db_path, .{}) catch return false;
+    file.close(runtime.io);
+    return true;
+}
+
+fn queryCatalogColumnsJson(runtime: Runtime, db_path: []const u8) ![]const u8 {
+    const sql =
+        \\select
+        \\    c.table_schema,
+        \\    c.table_name,
+        \\    t.table_type,
+        \\    c.column_name,
+        \\    c.ordinal_position,
+        \\    c.data_type
+        \\from information_schema.columns c
+        \\join information_schema.tables t
+        \\    on c.table_schema = t.table_schema
+        \\    and c.table_name = t.table_name
+        \\where c.table_schema not in ('information_schema', 'pg_catalog')
+        \\order by c.table_schema, c.table_name, c.ordinal_position;
+    ;
+    const result = std.process.run(runtime.allocator, runtime.io, .{
+        .argv = &.{ "duckdb", "-readonly", db_path, "-json", "-batch", "-bail", "-c", sql },
+        .stdout_limit = .limited(4 * 1024 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch |err| switch (err) {
+        error.FileNotFound => return error.DuckDbCliNotFound,
+        else => return err,
+    };
+    errdefer runtime.allocator.free(result.stdout);
+    defer runtime.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code == 0) return result.stdout,
+        else => {},
+    }
+    return error.DuckDbExecutionFailed;
+}
+
+fn catalogEntryForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, rows: []const std.json.Value) !?catalog.CatalogEntry {
+    const schema_name = try compiler.relationSchemaForNode(allocator, graph, node);
+    defer allocator.free(schema_name);
+    const identifier = compiler.relationIdentifierForNode(node);
+
+    var entry = catalog.CatalogEntry{
+        .unique_id = try allocator.dupe(u8, node.unique_id),
+        .schema = try allocator.dupe(u8, schema_name),
+        .name = try allocator.dupe(u8, identifier),
+        .relation_type = try allocator.dupe(u8, ""),
+    };
+    errdefer deinitCatalogEntry(allocator, &entry);
+
+    for (rows) |row| {
+        const object = if (row == .object) row.object else return error.DuckDbExecutionFailed;
+        const row_schema = jsonObjectString(object, "table_schema") orelse return error.DuckDbExecutionFailed;
+        const row_table = jsonObjectString(object, "table_name") orelse return error.DuckDbExecutionFailed;
+        const row_type = jsonObjectString(object, "table_type") orelse return error.DuckDbExecutionFailed;
+        const row_column = jsonObjectString(object, "column_name") orelse return error.DuckDbExecutionFailed;
+        const row_index = jsonObjectUnsigned(object, "ordinal_position") orelse return error.DuckDbExecutionFailed;
+        const row_data_type = jsonObjectString(object, "data_type") orelse return error.DuckDbExecutionFailed;
+        if (!std.mem.eql(u8, row_schema, schema_name) or !std.mem.eql(u8, row_table, identifier)) continue;
+        if (entry.columns.items.len == 0) {
+            allocator.free(entry.relation_type);
+            entry.relation_type = try allocator.dupe(u8, row_type);
+        }
+        try entry.columns.append(allocator, .{
+            .name = try allocator.dupe(u8, row_column),
+            .data_type = try allocator.dupe(u8, row_data_type),
+            .index = row_index,
+        });
+    }
+
+    if (entry.columns.items.len == 0) {
+        deinitCatalogEntry(allocator, &entry);
+        return null;
+    }
+    return entry;
+}
+
+fn jsonObjectString(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = object.get(key) orelse return null;
+    if (value != .string) return null;
+    return value.string;
+}
+
+fn jsonObjectUnsigned(object: std.json.ObjectMap, key: []const u8) ?u64 {
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .integer => |integer| if (integer < 0) null else @intCast(integer),
+        else => null,
+    };
+}
+
+fn deinitCatalogEntry(allocator: std.mem.Allocator, entry: *catalog.CatalogEntry) void {
+    allocator.free(entry.unique_id);
+    allocator.free(entry.schema);
+    allocator.free(entry.name);
+    allocator.free(entry.relation_type);
+    for (entry.columns.items) |column| {
+        allocator.free(column.name);
+        allocator.free(column.data_type);
+    }
+    entry.columns.deinit(allocator);
+}
+
+fn selectionContains(selected: []const selector.SelectedResource, unique_id: []const u8) bool {
+    for (selected) |item| {
+        if (std.mem.eql(u8, item.unique_id, unique_id)) return true;
+    }
+    return false;
 }
 
 fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
@@ -786,6 +924,48 @@ test "databasePath rejects unsupported connection strings for CLI backend" {
     defer graph.deinit();
 
     try std.testing.expectError(error.UnsupportedDuckDbPath, databasePath(allocator, "target", &graph));
+}
+
+test "catalogEntryForNode maps DuckDB JSON rows to catalog metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "main" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select 1",
+        .materialized = "table",
+    });
+
+    const rows_json =
+        \\[
+        \\  {"table_schema":"main","table_name":"customers","table_type":"VIEW","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"},
+        \\  {"table_schema":"main","table_name":"orders","table_type":"BASE TABLE","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"},
+        \\  {"table_schema":"main","table_name":"orders","table_type":"BASE TABLE","column_name":"order_count","ordinal_position":2,"data_type":"BIGINT"}
+        \\]
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rows_json, .{});
+    defer parsed.deinit();
+    const entry = (try catalogEntryForNode(allocator, &graph, &graph.nodes.items[0], parsed.value.array.items)).?;
+    defer {
+        var owned = entry;
+        deinitCatalogEntry(allocator, &owned);
+    }
+
+    try std.testing.expectEqualStrings("model.demo.orders", entry.unique_id);
+    try std.testing.expectEqualStrings("main", entry.schema);
+    try std.testing.expectEqualStrings("orders", entry.name);
+    try std.testing.expectEqualStrings("BASE TABLE", entry.relation_type);
+    try std.testing.expectEqual(@as(usize, 2), entry.columns.items.len);
+    try std.testing.expectEqualStrings("customer_id", entry.columns.items[0].name);
+    try std.testing.expectEqualStrings("INTEGER", entry.columns.items[0].data_type);
+    try std.testing.expectEqual(@as(u64, 2), entry.columns.items[1].index);
+    try std.testing.expectEqualStrings("BIGINT", entry.columns.items[1].data_type);
 }
 
 test "renderSeedSql creates table from root project seed CSV" {

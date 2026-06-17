@@ -4094,6 +4094,80 @@ def test_docs_generate_writes_manifest_catalog_and_compiled_sql(tmp_path: Path):
     assert str(project) not in catalog_path.read_text()
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 docs catalog execution coverage")
+def test_docs_generate_catalogs_existing_duckdb_relations(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    target = tmp_path / "docs-target"
+    build_result = subprocess.run(
+        [
+            DXT,
+            "build",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "+orders",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build_result.returncode == 0, build_result.stderr
+
+    docs_result = subprocess.run(
+        [
+            DXT,
+            "docs",
+            "generate",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "+orders",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert docs_result.returncode == 0, docs_result.stderr
+    assert "Generated docs artifacts for 2 compiled model(s)" in docs_result.stdout
+
+    catalog_path = target / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    assert_catalog_schema_slice(catalog_path)
+    assert sorted(catalog["nodes"]) == [
+        "model.compile_basic.customers",
+        "model.compile_basic.orders",
+    ]
+    customers = catalog["nodes"]["model.compile_basic.customers"]
+    orders = catalog["nodes"]["model.compile_basic.orders"]
+    assert customers["metadata"] == {
+        "type": "VIEW",
+        "schema": "main",
+        "name": "customers",
+        "database": None,
+        "comment": None,
+        "owner": None,
+    }
+    assert list(customers["columns"]) == ["customer_id"]
+    assert customers["columns"]["customer_id"] == {
+        "type": "INTEGER",
+        "index": 1,
+        "name": "customer_id",
+        "comment": None,
+    }
+    assert orders["metadata"]["type"] == "BASE TABLE"
+    assert orders["columns"]["customer_id"]["type"] == "INTEGER"
+    assert orders["columns"]["order_count"]["type"] == "BIGINT"
+    assert orders["stats"]["has_stats"]["include"] is False
+    assert orders["unique_id"] == "model.compile_basic.orders"
+    assert catalog["sources"] == {}
+    assert catalog["errors"] is None
+    assert str(project) not in catalog_path.read_text()
+
+
 def test_docs_generate_applies_select_and_exclude_to_compiled_models(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     target = tmp_path / "docs-target"
