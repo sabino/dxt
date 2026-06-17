@@ -4,10 +4,13 @@ const resolve = @import("resolve.zig");
 const types = @import("types.zig");
 
 const Graph = types.Graph;
+const MacroDef = types.MacroDef;
 const Node = types.Node;
 const RefDep = types.RefDep;
 const SourceDep = types.SourceDep;
 const SourceDef = types.SourceDef;
+
+const max_macro_render_depth = 8;
 
 const Relation = struct {
     schema: []const u8,
@@ -40,6 +43,8 @@ const CompileContext = struct {
     lists: std.ArrayList(StaticList) = .empty,
     vars: std.ArrayList(StaticVar) = .empty,
     scope_depth: usize = 0,
+    current_macro_package: ?[]const u8 = null,
+    macro_render_depth: usize = 0,
 
     fn init(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) CompileContext {
         return .{ .allocator = allocator, .graph = graph, .node = node };
@@ -153,6 +158,7 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
             defer context.allocator.free(rendered);
             try out.appendSlice(context.allocator, rendered);
         } else {
+            if (context.macro_render_depth > 0) return error.UnsupportedJinja;
             if (isEndForStatement(span)) return error.UnsupportedJinja;
             if (isForStatement(span)) {
                 const block = try parseForBlock(sql, close + 2, span);
@@ -207,6 +213,11 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
     const graph = context.graph;
     const node = context.node;
     if (context.getVar(span)) |value| return try allocator.dupe(u8, value);
+    if (context.macro_render_depth > 0 and
+        (std.mem.eql(u8, span, "this") or std.mem.startsWith(u8, span, "this.") or std.mem.startsWith(u8, span, "target.")))
+    {
+        return error.UnsupportedJinja;
+    }
     if (std.mem.eql(u8, span, "this")) {
         return try relationNameForNode(allocator, graph, node);
     }
@@ -216,13 +227,28 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
     if (std.mem.startsWith(u8, span, "target.")) {
         return try renderTargetAttribute(allocator, graph, span["target.".len..]);
     }
+    if (std.mem.startsWith(u8, span, "adapter.dispatch")) {
+        return try renderAdapterDispatchExpression(context, span);
+    }
 
     const call = try parseSingleCall(span);
     const args = span[call.open + 1 .. call.close];
-    if (call.package_name != null) return error.UnsupportedJinja;
+    if (call.package_name) |package_name| {
+        if (context.macro_render_depth > 0) return error.UnsupportedJinja;
+        if (resolve.findMacroIdByPackageAndName(graph, package_name, call.name)) |macro_id| {
+            const macro = findMacroByUniqueId(graph, macro_id) orelse return error.UnresolvedMacro;
+            return try renderMacroCall(context, macro, args);
+        }
+        return error.UnsupportedJinja;
+    }
     if (std.mem.eql(u8, call.name, "config")) {
         return try allocator.dupe(u8, "");
     }
+    if (std.mem.eql(u8, call.name, "return")) {
+        const inner = std.mem.trim(u8, args, " \t\r\n");
+        return try renderExpression(context, inner);
+    }
+    if (context.macro_render_depth > 0) return error.UnsupportedJinja;
     if (std.mem.eql(u8, call.name, "ref")) {
         var strings = try jinja.parseLiteralOrVarArgs(allocator, args, graph, error.UnsupportedDynamicRef);
         defer strings.deinit(allocator);
@@ -244,7 +270,215 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
         const source = findSourceByUniqueId(graph, unique_id) orelse return error.UnresolvedSource;
         return try renderRelation(allocator, .{ .schema = source.source_name, .identifier = source.table_name });
     }
+    const current_package = context.current_macro_package orelse node.package_name;
+    if (resolve.findMacroIdForUnqualifiedNamespaceCall(graph, current_package, call.name)) |macro_id| {
+        const macro = findMacroByUniqueId(graph, macro_id) orelse return error.UnresolvedMacro;
+        return try renderMacroCall(context, macro, args);
+    }
     return error.UnsupportedJinja;
+}
+
+fn renderAdapterDispatchExpression(context: *CompileContext, span: []const u8) ![]const u8 {
+    const allocator = context.allocator;
+    const call = (try jinja.readJinjaCall(span, "adapter", "adapter".len)) orelse return error.UnsupportedJinja;
+    if (call.package_name == null or !std.mem.eql(u8, call.package_name.?, "adapter") or !std.mem.eql(u8, call.name, "dispatch")) {
+        return error.UnsupportedJinja;
+    }
+
+    const arg_open = jinja.skipWs(span, call.close + 1);
+    if (arg_open >= span.len or span[arg_open] != '(') return error.UnsupportedJinja;
+    const arg_close = findMatchingParen(span, arg_open) orelse return error.UnsupportedJinja;
+    if (std.mem.trim(u8, span[arg_close + 1 ..], " \t\r\n").len != 0) return error.UnsupportedJinja;
+
+    const dispatch_raw_args = span[call.open + 1 .. call.close];
+    const dispatch_args = try jinja.parseAdapterDispatchArgs(allocator, dispatch_raw_args);
+    defer jinja.deinitAdapterDispatchArgs(allocator, dispatch_args);
+
+    const dispatch_prefixes = jinja.dispatchPrefixesForAdapter(context.graph.adapter_type);
+    const current_package = context.current_macro_package orelse context.node.package_name;
+    const macro_id = resolve.findMacroIdForAdapterDispatch(
+        context.graph,
+        current_package,
+        dispatch_args.macro_name,
+        dispatch_args.macro_namespace,
+        dispatch_prefixes.slice(),
+    ) orelse return error.UnresolvedMacro;
+    const macro = findMacroByUniqueId(context.graph, macro_id) orelse return error.UnresolvedMacro;
+    return try renderMacroCall(context, macro, span[arg_open + 1 .. arg_close]);
+}
+
+fn renderMacroCall(context: *CompileContext, macro: *const MacroDef, raw_args: []const u8) ![]const u8 {
+    if (context.macro_render_depth >= max_macro_render_depth) return error.UnsupportedJinja;
+
+    var block = try parseMacroBlock(context.allocator, macro);
+    defer block.params.deinit(context.allocator);
+
+    var values = try parseMacroArgumentValues(context.allocator, context, raw_args);
+    defer {
+        for (values.items) |value| context.allocator.free(value);
+        values.deinit(context.allocator);
+    }
+    if (values.items.len != block.params.items.len) return error.UnsupportedJinja;
+
+    const previous_package = context.current_macro_package;
+    context.current_macro_package = macro.package_name;
+    context.macro_render_depth += 1;
+    context.pushScope();
+    var pushed_vars: usize = 0;
+    errdefer {
+        var index = pushed_vars;
+        while (index > 0) : (index -= 1) context.popVar();
+        context.popScope();
+        context.macro_render_depth -= 1;
+        context.current_macro_package = previous_package;
+    }
+
+    for (block.params.items, values.items) |name, value| {
+        try context.pushVar(name, value);
+        pushed_vars += 1;
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(context.allocator);
+    try renderRange(context, macro.macro_sql, block.body.start, block.body.end, &out);
+
+    var index = pushed_vars;
+    while (index > 0) : (index -= 1) context.popVar();
+    context.popScope();
+    context.macro_render_depth -= 1;
+    context.current_macro_package = previous_package;
+
+    return try out.toOwnedSlice(context.allocator);
+}
+
+const MacroBodyRange = struct {
+    start: usize,
+    end: usize,
+};
+
+const ParsedMacroBlock = struct {
+    body: MacroBodyRange,
+    params: std.ArrayList([]const u8),
+};
+
+fn parseMacroBlock(allocator: std.mem.Allocator, macro: *const MacroDef) !ParsedMacroBlock {
+    const open_start = std.mem.indexOf(u8, macro.macro_sql, "{%") orelse return error.UnsupportedJinja;
+    const open_close = std.mem.indexOfPos(u8, macro.macro_sql, open_start + 2, "%}") orelse return error.UnsupportedJinja;
+    const open_span = std.mem.trim(u8, macro.macro_sql[open_start + 2 .. open_close], " \t\r\n-");
+    var params = try parseMacroParameters(allocator, open_span, macro.name);
+    errdefer params.deinit(allocator);
+
+    const body_start = open_close + 2;
+    const body_end = findEndMacroTag(macro.macro_sql, body_start) orelse return error.UnsupportedJinja;
+    return .{ .body = .{ .start = body_start, .end = body_end }, .params = params };
+}
+
+fn parseMacroParameters(allocator: std.mem.Allocator, span: []const u8, expected_name: []const u8) !std.ArrayList([]const u8) {
+    if (!std.mem.startsWith(u8, span, "macro")) return error.UnsupportedJinja;
+    var index: usize = "macro".len;
+    if (index < span.len and jinja.isIdentChar(span[index])) return error.UnsupportedJinja;
+    index = jinja.skipWs(span, index);
+
+    const name_start = index;
+    if (index >= span.len or !jinja.isIdentStart(span[index])) return error.UnsupportedJinja;
+    index += 1;
+    while (index < span.len and jinja.isIdentChar(span[index])) index += 1;
+    const name = span[name_start..index];
+    if (!std.mem.eql(u8, name, expected_name)) return error.UnsupportedJinja;
+
+    index = jinja.skipWs(span, index);
+    if (index >= span.len or span[index] != '(') return error.UnsupportedJinja;
+    const close = findMatchingParen(span, index) orelse return error.UnsupportedJinja;
+    if (std.mem.trim(u8, span[close + 1 ..], " \t\r\n").len != 0) return error.UnsupportedJinja;
+
+    var params: std.ArrayList([]const u8) = .empty;
+    errdefer params.deinit(allocator);
+    var arg_index: usize = index + 1;
+    while (true) {
+        arg_index = jinja.skipWs(span, arg_index);
+        if (arg_index >= close) break;
+        if (span[arg_index] == ',') return error.UnsupportedJinja;
+        const param_start = arg_index;
+        if (!jinja.isIdentStart(span[arg_index])) return error.UnsupportedJinja;
+        arg_index += 1;
+        while (arg_index < close and jinja.isIdentChar(span[arg_index])) arg_index += 1;
+        try params.append(allocator, span[param_start..arg_index]);
+        arg_index = jinja.skipWs(span, arg_index);
+        if (arg_index >= close) break;
+        if (span[arg_index] != ',') return error.UnsupportedJinja;
+        arg_index += 1;
+    }
+    return params;
+}
+
+fn parseMacroArgumentValues(allocator: std.mem.Allocator, context: *CompileContext, args: []const u8) !std.ArrayList([]const u8) {
+    var values: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (values.items) |value| allocator.free(value);
+        values.deinit(allocator);
+    }
+
+    var index: usize = 0;
+    while (true) {
+        index = jinja.skipWs(args, index);
+        if (index >= args.len) break;
+        if (args[index] == ',') return error.UnsupportedJinja;
+
+        if (args[index] == '"' or args[index] == '\'') {
+            const parsed = try jinja.parseQuoted(allocator, args, index);
+            try values.append(allocator, parsed.value);
+            index = jinja.skipWs(args, parsed.next);
+        } else {
+            const name_start = index;
+            if (!jinja.isIdentStart(args[index])) return error.UnsupportedJinja;
+            index += 1;
+            while (index < args.len and jinja.isIdentChar(args[index])) index += 1;
+            const name = args[name_start..index];
+            const value = context.getVar(name) orelse return error.UnsupportedJinja;
+            try values.append(allocator, try allocator.dupe(u8, value));
+            index = jinja.skipWs(args, index);
+        }
+
+        if (index >= args.len) break;
+        if (args[index] != ',') return error.UnsupportedJinja;
+        index += 1;
+    }
+    return values;
+}
+
+fn findEndMacroTag(sql: []const u8, start: usize) ?usize {
+    var index = start;
+    while (index + 1 < sql.len) {
+        if (sql[index] != '{' or sql[index + 1] != '%') {
+            index += 1;
+            continue;
+        }
+        const close = std.mem.indexOfPos(u8, sql, index + 2, "%}") orelse return null;
+        const span = std.mem.trim(u8, sql[index + 2 .. close], " \t\r\n-");
+        if (std.mem.eql(u8, span, "endmacro")) return index;
+        index = close + 2;
+    }
+    return null;
+}
+
+fn findMatchingParen(text: []const u8, open: usize) ?usize {
+    if (open >= text.len or text[open] != '(') return null;
+    var depth: usize = 1;
+    var index = open + 1;
+    while (index < text.len) {
+        if (text[index] == '"' or text[index] == '\'') {
+            index = jinja.skipQuotedSpan(text, index) orelse return null;
+            continue;
+        }
+        if (text[index] == '(') {
+            depth += 1;
+        } else if (text[index] == ')') {
+            depth -= 1;
+            if (depth == 0) return index;
+        }
+        index += 1;
+    }
+    return null;
 }
 
 fn renderThisAttribute(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, attribute: []const u8) ![]const u8 {
@@ -435,6 +669,13 @@ fn findSourceByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Sour
     return null;
 }
 
+fn findMacroByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const MacroDef {
+    for (graph.macros.items) |*macro| {
+        if (std.mem.eql(u8, macro.unique_id, unique_id)) return macro;
+    }
+    return null;
+}
+
 pub fn relationSchemaForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
     if (node.config_schema) |custom_schema| {
         const trimmed = std.mem.trim(u8, custom_schema, " \t\r\n");
@@ -607,6 +848,112 @@ test "compileModel expands static string-list for loops" {
     try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"main\".\"payments\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "{{") == null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "{%") == null);
+}
+
+test "compileModel renders Jaffle-style adapter-dispatched macro" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .adapter_type = "duckdb" };
+    defer graph.deinit();
+    try graph.macros.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.cents_to_dollars",
+        .name = "cents_to_dollars",
+        .path = "macros/cents_to_dollars.sql",
+        .original_file_path = "macros/cents_to_dollars.sql",
+        .macro_sql = "{% macro cents_to_dollars(column_name) %}{{ return(adapter.dispatch('cents_to_dollars')(column_name)) }}{% endmacro %}",
+    });
+    try graph.macros.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.default__cents_to_dollars",
+        .name = "default__cents_to_dollars",
+        .path = "macros/cents_to_dollars.sql",
+        .original_file_path = "macros/cents_to_dollars.sql",
+        .macro_sql = "{% macro default__cents_to_dollars(column_name) %}({{ column_name }} / 100)::numeric(16, 2){% endmacro %}",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select {{ cents_to_dollars('subtotal') }} as subtotal",
+    });
+
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select (subtotal / 100)::numeric(16, 2) as subtotal", compiled);
+}
+
+test "compileModel prefers adapter-specific dispatched macro implementation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .adapter_type = "duckdb" };
+    defer graph.deinit();
+    try graph.macros.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.cents_to_dollars",
+        .name = "cents_to_dollars",
+        .path = "macros/cents_to_dollars.sql",
+        .original_file_path = "macros/cents_to_dollars.sql",
+        .macro_sql = "{% macro cents_to_dollars(column_name) %}{{ return(adapter.dispatch('cents_to_dollars')(column_name)) }}{% endmacro %}",
+    });
+    try graph.macros.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.default__cents_to_dollars",
+        .name = "default__cents_to_dollars",
+        .path = "macros/cents_to_dollars.sql",
+        .original_file_path = "macros/cents_to_dollars.sql",
+        .macro_sql = "{% macro default__cents_to_dollars(column_name) %}default({{ column_name }}){% endmacro %}",
+    });
+    try graph.macros.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.duckdb__cents_to_dollars",
+        .name = "duckdb__cents_to_dollars",
+        .path = "macros/cents_to_dollars.sql",
+        .original_file_path = "macros/cents_to_dollars.sql",
+        .macro_sql = "{% macro duckdb__cents_to_dollars(column_name) %}duck({{ column_name }}){% endmacro %}",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select {{ cents_to_dollars(\"subtotal\") }} as subtotal",
+    });
+
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select duck(subtotal) as subtotal", compiled);
+}
+
+test "compileModel rejects unsupported statements inside macros" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.macros.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.render_value",
+        .name = "render_value",
+        .path = "macros/render_value.sql",
+        .original_file_path = "macros/render_value.sql",
+        .macro_sql = "{% macro render_value(column_name) %}{% if true %}{{ column_name }}{% endif %}{% endmacro %}",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select {{ render_value('subtotal') }} as subtotal",
+    });
+
+    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
 }
 
 test "compileModel expands empty static string-list for loops" {

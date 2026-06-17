@@ -27,16 +27,16 @@ pub const ParsedString = struct {
     next: usize,
 };
 
-const AdapterDispatchArgs = struct {
+pub const AdapterDispatchArgs = struct {
     macro_name: []const u8,
     macro_namespace: ?[]const u8 = null,
 };
 
-const DispatchPrefixes = struct {
+pub const DispatchPrefixes = struct {
     values: [3][]const u8 = undefined,
     len: usize = 0,
 
-    fn slice(self: *const DispatchPrefixes) []const []const u8 {
+    pub fn slice(self: *const DispatchPrefixes) []const []const u8 {
         return self.values[0..self.len];
     }
 };
@@ -295,6 +295,7 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
             if (graph) |known_graph| {
                 if (std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "dispatch")) {
                     const dispatch_args = try parseAdapterDispatchArgs(allocator, args);
+                    defer deinitAdapterDispatchArgs(allocator, dispatch_args);
                     const dispatch_prefixes = dispatchPrefixesForAdapter(known_graph.adapter_type);
                     if (findMacroIdForAdapterDispatch(known_graph, node.package_name, dispatch_args.macro_name, dispatch_args.macro_namespace, dispatch_prefixes.slice())) |macro_id| {
                         try appendUnique(allocator, &node.macro_depends_on, macro_id);
@@ -389,6 +390,11 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
         while (i < span.len and isIdentChar(span[i])) i += 1;
         const ident = span[start..i];
         const call = (readJinjaCall(span, ident, i) catch break) orelse continue;
+        if (call.package_name == null and std.mem.eql(u8, call.name, "return")) {
+            try scanMacroSpanForKnownMacroCalls(allocator, span[call.open + 1 .. call.close], graph, current_macro_id, macro_depends_on);
+            i = call.close + 1;
+            continue;
+        }
         const macro_id = if (call.package_name) |package_name| blk: {
             if (std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "dispatch")) {
                 const args = span[call.open + 1 .. call.close];
@@ -396,6 +402,7 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
                     i = call.close + 1;
                     continue;
                 };
+                defer deinitAdapterDispatchArgs(allocator, dispatch_args);
                 const dispatch_prefixes = dispatchPrefixesForAdapter(graph.adapter_type);
                 const resolved = findMacroIdForAdapterDispatch(graph, current_package, dispatch_args.macro_name, dispatch_args.macro_namespace, dispatch_prefixes.slice());
                 if (resolved == null) return error.UnresolvedMacro;
@@ -416,7 +423,7 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
     }
 }
 
-fn dispatchPrefixesForAdapter(adapter_type: []const u8) DispatchPrefixes {
+pub fn dispatchPrefixesForAdapter(adapter_type: []const u8) DispatchPrefixes {
     var prefixes = DispatchPrefixes{};
     if (std.mem.eql(u8, adapter_type, "redshift")) {
         prefixes.values = .{ "redshift", "postgres", "default" };
@@ -434,8 +441,9 @@ fn dispatchPrefixesForAdapter(adapter_type: []const u8) DispatchPrefixes {
     return prefixes;
 }
 
-fn parseAdapterDispatchArgs(allocator: std.mem.Allocator, args: []const u8) !AdapterDispatchArgs {
+pub fn parseAdapterDispatchArgs(allocator: std.mem.Allocator, args: []const u8) !AdapterDispatchArgs {
     var result = AdapterDispatchArgs{ .macro_name = "" };
+    errdefer deinitAdapterDispatchArgs(allocator, result);
     var positional_count: usize = 0;
     var saw_keyword = false;
     var i: usize = 0;
@@ -462,6 +470,8 @@ fn parseAdapterDispatchArgs(allocator: std.mem.Allocator, args: []const u8) !Ada
 
         if (i >= args.len or (args[i] != '"' and args[i] != '\'')) return error.UnsupportedJinja;
         const parsed = try parseQuoted(allocator, args, i);
+        var parsed_owned = true;
+        errdefer if (parsed_owned) allocator.free(parsed.value);
         i = skipWs(args, parsed.next);
 
         if (key) |name| {
@@ -469,9 +479,11 @@ fn parseAdapterDispatchArgs(allocator: std.mem.Allocator, args: []const u8) !Ada
             if (std.mem.eql(u8, name, "macro_name")) {
                 if (result.macro_name.len != 0) return error.UnsupportedJinja;
                 result.macro_name = parsed.value;
+                parsed_owned = false;
             } else if (std.mem.eql(u8, name, "macro_namespace")) {
                 if (result.macro_namespace != null) return error.UnsupportedJinja;
                 result.macro_namespace = parsed.value;
+                parsed_owned = false;
             } else if (std.mem.eql(u8, name, "packages")) {
                 return error.UnsupportedJinja;
             } else {
@@ -481,8 +493,10 @@ fn parseAdapterDispatchArgs(allocator: std.mem.Allocator, args: []const u8) !Ada
             if (saw_keyword) return error.UnsupportedJinja;
             if (positional_count == 0) {
                 result.macro_name = parsed.value;
+                parsed_owned = false;
             } else if (positional_count == 1) {
                 result.macro_namespace = parsed.value;
+                parsed_owned = false;
             } else {
                 return error.UnsupportedJinja;
             }
@@ -498,6 +512,11 @@ fn parseAdapterDispatchArgs(allocator: std.mem.Allocator, args: []const u8) !Ada
     if (result.macro_name.len == 0) return error.UnsupportedJinja;
     if (std.mem.indexOfScalar(u8, result.macro_name, '.') != null) return error.UnsupportedJinja;
     return result;
+}
+
+pub fn deinitAdapterDispatchArgs(allocator: std.mem.Allocator, args: AdapterDispatchArgs) void {
+    if (args.macro_name.len != 0) allocator.free(args.macro_name);
+    if (args.macro_namespace) |namespace| allocator.free(namespace);
 }
 
 fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !void {
@@ -925,6 +944,14 @@ test "adapter dispatch prefixes come from graph adapter type" {
     try std.testing.expectEqualStrings("spark", databricks_prefixes.slice()[1]);
 }
 
+test "adapter dispatch argument parser cleans up owned values on errors" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.UnsupportedJinja, parseAdapterDispatchArgs(allocator, "'render_value', packages='pkg'"));
+    try std.testing.expectError(error.UnsupportedJinja, parseAdapterDispatchArgs(allocator, "'render_value', 'pkg', 'extra'"));
+    try std.testing.expectError(error.UnsupportedJinja, parseAdapterDispatchArgs(allocator, "macro_name='render_value', macro_name='other'"));
+    try std.testing.expectError(error.UnsupportedJinja, parseAdapterDispatchArgs(allocator, "'package.macro'"));
+}
+
 test "sql scanner resolves vars inside ref and source calls" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1046,4 +1073,27 @@ test "macro scanner records literal adapter dispatch dependencies" {
     try std.testing.expectEqualStrings("macro.pkg.default__package_value", macro_depends_on.items[1]);
 
     try std.testing.expectError(error.UnresolvedMacro, scanMacroSqlForKnownMacroCalls(allocator, "{{ adapter.dispatch('missing')() }}", &graph, current_macro, &macro_depends_on));
+}
+
+test "macro scanner records adapter dispatch dependencies inside return wrappers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    const current_macro = try appendTestMacro(&graph, "demo", "cents_to_dollars");
+    _ = try appendTestMacro(&graph, "demo", "default__cents_to_dollars");
+
+    var macro_depends_on: std.ArrayList([]const u8) = .empty;
+    defer macro_depends_on.deinit(allocator);
+
+    try scanMacroSqlForKnownMacroCalls(allocator,
+        \\{% macro cents_to_dollars(column_name) %}
+        \\  {{ return(adapter.dispatch('cents_to_dollars')(column_name)) }}
+        \\{% endmacro %}
+    , &graph, current_macro, &macro_depends_on);
+
+    try std.testing.expectEqual(@as(usize, 1), macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.demo.default__cents_to_dollars", macro_depends_on.items[0]);
 }
