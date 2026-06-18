@@ -13,6 +13,7 @@ pub const SelectedResource = struct {
     name: []const u8,
     resource_type: []const u8,
     search_name: []const u8 = "",
+    path: []const u8 = "",
     original_file_path: []const u8 = "",
     selector: []const u8 = "",
 };
@@ -41,6 +42,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .name = node.name,
                 .resource_type = node.resource_type,
                 .search_name = node.name,
+                .path = node.path,
                 .original_file_path = node.original_file_path,
                 .selector = try pathBackedOutputSelector(allocator, node.package_name, node.path),
             });
@@ -53,6 +55,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .name = test_node.name,
                 .resource_type = "test",
                 .search_name = test_node.name,
+                .path = test_node.path,
                 .original_file_path = test_node.original_file_path,
                 .selector = try pathBackedOutputSelector(allocator, test_node.package_name, test_node.path),
             });
@@ -65,6 +68,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .name = source.table_name,
                 .resource_type = "source",
                 .search_name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ source.source_name, source.table_name }),
+                .path = source.original_file_path,
                 .original_file_path = source.original_file_path,
                 .selector = try std.fmt.allocPrint(allocator, "source:{s}.{s}.{s}", .{ source.package_name, source.source_name, source.table_name }),
             });
@@ -78,6 +82,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .name = exposure.name,
                 .resource_type = "exposure",
                 .search_name = exposure.name,
+                .path = exposure.path,
                 .original_file_path = exposure.original_file_path,
                 .selector = try std.fmt.allocPrint(allocator, "exposure:{s}.{s}", .{ exposure.package_name, exposure.name }),
             });
@@ -91,6 +96,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .name = unit_test.name,
                 .resource_type = "unit_test",
                 .search_name = unit_test.name,
+                .path = unit_test.path,
                 .original_file_path = unit_test.original_file_path,
                 .selector = try std.fmt.allocPrint(allocator, "unit_test:{s}.{s}", .{ unit_test.package_name, unit_test.name }),
             });

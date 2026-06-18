@@ -92,7 +92,7 @@ embedded DuckDB or another native adapter boundary, not Python runtime calls.
 | Artifacts | `manifest.json`, `run_results.json`, `catalog.json`, `sources.json` slices | fuller dbt schemas, `semantic_manifest.json`, parse cache/state artifacts |
 | dbt resources | models, seeds, sources with schema/freshness/identifier slices, exposures, docs, macros, generic tests in the supported subset, read-only unit-test manifest/list artifacts | snapshots, analyses, singular tests, unit-test execution, semantic models, metrics, saved queries |
 | Jinja | literal, narrow scalar var-backed, and static loop-var `ref`/`source`, `doc`, inline `config`, static list `set` + simple `for`, narrow static `if`, selected `target`/`this` context | full parse/runtime context, macro execution, dispatch, filters, database-backed `execute`, adapter introspection |
-| Selectors and listing | names/FQN, tags, paths/files, packages, resource types, sources, exposures, unit tests, config materialization, wildcards, `+` and `@` graph expansion, excludes, `ls` `json`/`name`/`path`/`selector` output formats, and narrow compact-JSON `--output-keys` in the supported subset | YAML selectors, state/defer/result/source-status selectors, full dbt JSON and nested `--output-keys` |
+| Selectors and listing | names/FQN, tags, paths/files, packages, resource types, sources, exposures, unit tests, config materialization, wildcards, `+` and `@` graph expansion, excludes, `ls` `json`/`name`/`path`/`selector` output formats, and narrow compact-JSON resource `--output-keys` in the supported subset | YAML selectors, state/defer/result/source-status selectors, full dbt JSON and nested `--output-keys` |
 
 See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the detailed matrix.
 

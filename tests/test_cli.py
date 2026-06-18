@@ -4945,6 +4945,9 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
             "model",
             "--output-keys",
             "name",
+            "path",
+            "original_file_path",
+            "selector",
             "unique_id",
             "missing",
         ],
@@ -4953,7 +4956,15 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert keyed_json.returncode == 0, keyed_json.stderr
-    assert json.loads(keyed_json.stdout) == [{"name": "orders", "unique_id": "model.inline_config.orders"}]
+    assert json.loads(keyed_json.stdout) == [
+        {
+            "name": "orders",
+            "path": "orders.sql",
+            "original_file_path": "models/orders.sql",
+            "selector": "inline_config.orders",
+            "unique_id": "model.inline_config.orders",
+        }
+    ]
 
     repeated_keyed_json = subprocess.run(
         [
@@ -5370,6 +5381,33 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "models/schema.yml",
         "models/schema.yml",
     ]
+    source_keyed_json = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(source_project),
+            "--select",
+            "source:raw.customers",
+            "--output",
+            "json",
+            "--output-keys",
+            "original_file_path",
+            "path",
+            "selector",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_keyed_json.returncode == 0, source_keyed_json.stderr
+    assert json.loads(source_keyed_json.stdout) == [
+        {
+            "original_file_path": "models/schema.yml",
+            "path": "models/schema.yml",
+            "selector": "source:source_ref.raw.customers",
+        }
+    ]
 
     exposure_project = copy_fixture(tmp_path, "exposure_artifacts")
     exposure_result = subprocess.run(
@@ -5478,6 +5516,33 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     )
     assert exposure_path_output.returncode == 0, exposure_path_output.stderr
     assert exposure_path_output.stdout.splitlines() == ["models/schema.yml"]
+    exposure_keyed_json = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(exposure_project),
+            "--select",
+            "resource_type:exposure",
+            "--output",
+            "json",
+            "--output-keys",
+            "original_file_path",
+            "path",
+            "selector",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_keyed_json.returncode == 0, exposure_keyed_json.stderr
+    assert json.loads(exposure_keyed_json.stdout) == [
+        {
+            "original_file_path": "models/schema.yml",
+            "path": "schema.yml",
+            "selector": "exposure:exposure_artifacts.weekly_kpis",
+        }
+    ]
     exposure_package = subprocess.run(
         [
             DXT,

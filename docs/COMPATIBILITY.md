@@ -29,7 +29,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `--vars` | Partial | Scalar CLI vars for narrow `ref()` / `source()` argument resolution. |
 | `--select`, `--exclude` | Partial | Supported selector subset with graph expansion. |
 | `--threads`, `--full-refresh` | Accepted/planned | Product semantics are not complete yet. |
-| `--output`, `--output-keys` | Partial | `ls` supports legacy `text`, compact `json`, dbt-style `name`, `path`, and `selector` formats. `--output-keys` filters compact JSON to `unique_id`, `resource_type`, and `name`; full dbt node JSON and nested keys are not implemented. |
+| `--output`, `--output-keys` | Partial | `ls` supports legacy `text`, compact `json`, dbt-style `name`, `path`, and `selector` formats. `--output-keys` filters compact JSON to `unique_id`, `resource_type`, `name`, `path`, `original_file_path`, and dxt's compact `selector` extension; full dbt node JSON and nested keys are not implemented. |
 | `--host`, `--port`, `--no-browser`, `--browser`, `--no-open` | Partial | `docs serve` parses these dbt Core/Fusion-shaped flags. Browser opening is intentionally unsupported in this slice; use `--no-browser`. |
 | `--clean-project-files-only`, `--no-clean-project-files-only` | Partial | `clean` accepts the default safe `--clean-project-files-only` mode. `--no-clean-project-files-only` is rejected in this first destructive-command slice. |
 
