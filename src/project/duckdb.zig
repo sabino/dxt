@@ -499,7 +499,7 @@ pub fn renderGenericTestSql(allocator: std.mem.Allocator, graph: *const Graph, t
         );
     }
     if (is_accepted_values) {
-        const accepted_values = try renderAcceptedValuesList(allocator, test_node.accepted_values.items);
+        const accepted_values = try renderAcceptedValuesList(allocator, test_node.accepted_values.items, test_node.accepted_values_quote orelse true);
         defer allocator.free(accepted_values);
         return try std.fmt.allocPrint(
             allocator,
@@ -587,15 +587,19 @@ fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     return try out.toOwnedSlice(allocator);
 }
 
-fn renderAcceptedValuesList(allocator: std.mem.Allocator, values: []const []const u8) ![]const u8 {
+fn renderAcceptedValuesList(allocator: std.mem.Allocator, values: []const []const u8, quote_values: bool) ![]const u8 {
     if (values.len == 0) return error.UnsupportedTestExecution;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     for (values, 0..) |value, index| {
         if (index != 0) try out.appendSlice(allocator, ", ");
-        const quoted = try quoteSqlString(allocator, value);
-        defer allocator.free(quoted);
-        try out.appendSlice(allocator, quoted);
+        if (quote_values) {
+            const quoted = try quoteSqlString(allocator, value);
+            defer allocator.free(quoted);
+            try out.appendSlice(allocator, quoted);
+        } else {
+            try out.appendSlice(allocator, value);
+        }
     }
     return try out.toOwnedSlice(allocator);
 }
@@ -898,6 +902,45 @@ test "renderGenericTestSql renders accepted_values failure row query" {
     const sql = try renderGenericTestSql(allocator, &graph, &graph.tests.items[0]);
     try std.testing.expectEqualStrings(
         "with all_values as (\n    select\n        \"customer_type\" as value_field,\n        count(*) as n_records\n    from \"analytics\".\"customers\"\n    group by \"customer_type\"\n)\nselect *\nfrom all_values\nwhere value_field not in ('new', 'Bob''s')",
+        sql,
+    );
+}
+
+test "renderGenericTestSql renders accepted_values quote false raw values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1 as id",
+        .relation_name = "\"analytics\".\"customers\"",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.accepted_values_customers_customer_id__False__1__2.abc",
+        .name = "accepted_values_customers_customer_id__False__1__2",
+        .alias = "accepted_values_customers_customer_id__False__1__2",
+        .path = "accepted_values_customers_customer_id__False__1__2.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_accepted_values(**_dbt_generic_test_kwargs) }}",
+        .test_name = "accepted_values",
+        .column_name = "customer_id",
+        .accepted_values_quote = false,
+        .attached_node = "model.demo.customers",
+    });
+    try graph.tests.items[0].accepted_values.append(allocator, "1");
+    try graph.tests.items[0].accepted_values.append(allocator, "2");
+
+    const sql = try renderGenericTestSql(allocator, &graph, &graph.tests.items[0]);
+    try std.testing.expectEqualStrings(
+        "with all_values as (\n    select\n        \"customer_id\" as value_field,\n        count(*) as n_records\n    from \"analytics\".\"customers\"\n    group by \"customer_id\"\n)\nselect *\nfrom all_values\nwhere value_field not in (1, 2)",
         sql,
     );
 }

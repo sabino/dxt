@@ -18,6 +18,9 @@ compatibility.
 - Future SQLMesh reference-map note for later state, plan/apply,
   environment, audit, incremental, multi-engine gateway, and adapter capability
   design once the dbt Core baseline is mature enough.
+- Explicit `accepted_values` `quote: false` support for model and source column
+  DuckDB generic tests, including dbt-style synthetic names, hash metadata,
+  Manifest kwargs, raw SQL rendering, and pass/fail execution.
 - Narrow Zig compile/runtime rendering for Jaffle-style macro dispatch wrappers
   such as `cents_to_dollars`, including adapter/default implementation
   selection, manifest macro dependency coverage, and DuckDB run/build
@@ -76,10 +79,11 @@ compatibility.
 - DuckDB `build` execution for root-project CSV seeds, selected model DAG
   subsets, selected seed/model/test subsets, and supported built-in column
   generic tests.
-- DuckDB generic test execution for model/seed column `not_null`, `unique`,
-  default-quoted `accepted_values`, and ref-backed `relationships`.
+- DuckDB generic test execution for model column `not_null`, `unique`,
+  default-quoted and explicit `quote: false` `accepted_values`, and ref-backed
+  `relationships`.
 - DuckDB source column generic test execution for source column `not_null`,
-  `unique`, and default-quoted `accepted_values`.
+  `unique`, and default-quoted or explicit `quote: false` `accepted_values`.
 - DuckDB docs catalog generation for selected existing model, seed, and source
   relations.
 - DuckDB source freshness execution with table-level `loaded_at_field`,

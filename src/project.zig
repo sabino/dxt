@@ -891,6 +891,40 @@ test "selected seed-model build order waits for selected seed dependencies" {
     try std.testing.expectEqualStrings("model.demo.stg_customers", ordered[1].unique_id);
 }
 
+test "parseModelPropertiesFromText records accepted_values quote false" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\models:
+        \\  - name: customers
+        \\    columns:
+        \\      - name: customer_id
+        \\        tests:
+        \\          - accepted_values:
+        \\              arguments:
+        \\                values: [1, 2]
+        \\                quote: false
+    ;
+
+    try parseModelPropertiesFromText(allocator, yaml, "models/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.model_properties.items.len);
+    const column = graph.model_properties.items[0].columns.items[0];
+    try std.testing.expectEqualStrings("customer_id", column.name);
+    try std.testing.expectEqual(@as(usize, 1), column.tests.items.len);
+    const accepted = column.tests.items[0];
+    try std.testing.expectEqualStrings("accepted_values", accepted.name);
+    try std.testing.expectEqual(@as(usize, 2), accepted.accepted_values.items.len);
+    try std.testing.expectEqualStrings("1", accepted.accepted_values.items[0]);
+    try std.testing.expectEqualStrings("2", accepted.accepted_values.items[1]);
+    try std.testing.expectEqual(false, accepted.accepted_values_quote.?);
+}
+
 fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
@@ -1085,6 +1119,11 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                         try parseInlineStringList(allocator, kv.value, &test_def.accepted_values);
                     }
                     continue;
+                } else if (std.mem.eql(u8, kv.key, "quote")) {
+                    if (std.mem.eql(u8, test_def.name, "accepted_values")) {
+                        test_def.accepted_values_quote = try parseBool(kv.value);
+                    }
+                    continue;
                 } else if (std.mem.eql(u8, kv.key, "to")) {
                     test_def.relationship_to = try dupTrimmedScalar(allocator, kv.value);
                     continue;
@@ -1267,6 +1306,7 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
         .raw_code = raw_code,
         .test_name = test_def.name,
         .column_name = column_name,
+        .accepted_values_quote = test_def.accepted_values_quote,
         .relationship_to = test_def.relationship_to,
         .relationship_field = test_def.relationship_field,
         .attached_node = node.unique_id,
@@ -1301,6 +1341,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
     const source_test_def = GenericTestDef{
         .name = source_test_name,
         .accepted_values = test_def.accepted_values,
+        .accepted_values_quote = test_def.accepted_values_quote,
         .relationship_to = test_def.relationship_to,
         .relationship_field = test_def.relationship_field,
     };
@@ -1324,6 +1365,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .raw_code = raw_code,
         .test_name = test_def.name,
         .column_name = column_name,
+        .accepted_values_quote = test_def.accepted_values_quote,
         .relationship_to = test_def.relationship_to,
         .relationship_field = test_def.relationship_field,
         .attached_node = null,

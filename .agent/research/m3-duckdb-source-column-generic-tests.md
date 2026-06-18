@@ -9,7 +9,7 @@ This slice adds the first source-backed generic-test execution path for
   `data_tests` entries.
 - Materialize dbt-shaped generic test nodes for supported source column tests.
 - Support DuckDB direct SQL execution for source column `not_null`, `unique`,
-  and default-quoted `accepted_values` tests.
+  and default-quoted or explicit `quote: false` `accepted_values` tests.
 - Let selected source+test build selections, such as
   `--select source:raw.customers+`, execute source column tests against
   already-existing DuckDB source tables.
@@ -115,5 +115,5 @@ Python integration coverage:
 - Do not execute arbitrary test macros or adapter dispatch.
 - Do not add singular tests, unit tests, custom generic tests, custom configs,
   `where`, `limit`, `severity`, `warn_if`, `error_if`, `store_failures`, or
-  `accepted_values quote: false`.
+  native typed accepted-value manifest scalars.
 - Do not add Python product runtime behavior.

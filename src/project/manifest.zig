@@ -654,6 +654,10 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
         try writer.writeAll(",\"values\":");
         try writeStringArray(writer, test_node.accepted_values.items);
     }
+    if (test_node.accepted_values_quote) |quote| {
+        try writer.writeAll(",\"quote\":");
+        try writer.writeAll(if (quote) "true" else "false");
+    }
     if (test_node.relationship_to.len != 0) {
         try writer.writeAll(",\"to\":");
         try writeJsonString(writer, test_node.relationship_to);
