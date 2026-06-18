@@ -15,6 +15,9 @@ compatibility.
   checksums.
 - Source-grounded upstream reference-map refresh with the next five small
   dbt Core/Fusion-backed compatibility slices.
+- Future SQLMesh reference-map note for later state, plan/apply,
+  environment, audit, incremental, multi-engine gateway, and adapter capability
+  design once the dbt Core baseline is mature enough.
 - Narrow Zig compile/runtime rendering for Jaffle-style macro dispatch wrappers
   such as `cents_to_dollars`, including adapter/default implementation
   selection, manifest macro dependency coverage, and DuckDB run/build

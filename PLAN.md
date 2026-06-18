@@ -314,6 +314,36 @@ Each item must remain a Zig product-runtime slice with native tests first and
 Python/dbt oracle coverage only for CLI, filesystem, fixture, or artifact
 parity.
 
+## Future SQLMesh Reference Track
+
+After the dbt Core M1/M2/M3 baseline is materially stronger, evaluate SQLMesh
+as an architecture reference for dxt's state store, environment model,
+plan/apply explanations, interval-aware incremental execution, audits,
+multi-engine gateways, adapter capability matrix, and cross-database planner.
+The public planning note lives in
+`.agent/research/sqlmesh-future-reference-map.md`.
+
+This is not an active compatibility target and must not replace dbt Core/Fusion
+source-grounded work. SQLMesh is useful as a design reference once dxt needs
+stateful planning and multi-engine efficiency, but any adopted behavior must be
+reimplemented in Zig, validated through dxt-owned tests, and namespaced unless
+it is part of dbt compatibility. Avoid using SQLMesh-style "snapshot"
+terminology for dxt model-version state in a way that can be confused with dbt
+snapshot resources.
+
+Future SQLMesh-inspired slices must record:
+
+- SQLMesh upstream source/doc references and inspected commit.
+- The owning dxt Zig module or planned module.
+- Whether the behavior affects dbt artifacts, dxt namespaced artifacts, or only
+  planner internals.
+- Native Zig tests for state, planner, adapter capability, interval, audit, or
+  graph logic.
+- Python integration/oracle tests only for CLI, filesystem, fixture, artifact,
+  or safety validation.
+- Stop conditions that prevent SQLMesh-style planning from changing current dbt
+  command semantics prematurely.
+
 Current vars-backed dependency slice source note:
 `.agent/research/m2-vars-ref-source-slice.md` maps upstream dbt Core v1 and
 Fusion var/ref/source behavior to the narrow dxt implementation. This slice is
@@ -889,6 +919,9 @@ Deliverables:
 - Staging metadata.
 - Destination-hosted staged joins.
 - Cost report and movement policies.
+- SQLMesh-inspired gateway and virtual-layer design review, after dbt-compatible
+  adapter ABI and manifest/run artifact behavior are stable enough to avoid
+  changing the active dbt contract.
 
 Exit criteria:
 
@@ -956,6 +989,8 @@ Exit criteria:
 - Partial parsing invalidation.
 - dbt version drift.
 - Fusion feature ambiguity.
+- Premature SQLMesh-style planning that changes dbt command semantics before
+  dbt Core parity is strong enough.
 - Test ID and selector edge cases.
 - Catalog differences by adapter and permissions.
 - Cross-engine semantic differences for nulls, timestamps, collations, decimals, JSON, and nondeterministic functions.
