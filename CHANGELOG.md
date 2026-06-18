@@ -27,6 +27,8 @@ compatibility.
   resources, with selector reuse covered through `ls` and `docs generate`.
 - Depth-limited dbt-style `+` graph selectors for parent and child expansion,
   including `1+model`, `model+1`, and combined `1+model+1` forms.
+- `@` graph selector support for selecting descendants and the parents needed
+  to build those descendants in the supported graph subset.
 
 ## 0.0.0-pre-alpha
 

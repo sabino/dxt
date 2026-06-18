@@ -335,6 +335,7 @@ fn validateSelectorExpression(value: []const u8) !void {
         if (part.len == 0) return error.UnsupportedSelector;
         if (std.mem.indexOfAny(u8, part, " \t\r")) |_| return error.UnsupportedSelector;
         if (std.mem.indexOfScalar(u8, part, '+')) |_| return error.UnsupportedSelector;
+        if (std.mem.indexOfScalar(u8, part, '@')) |_| return error.UnsupportedSelector;
         if (std.mem.indexOfScalar(u8, part, ':')) |_| try validateSelectorMethod(part);
         matched_any = true;
     }
@@ -344,6 +345,14 @@ fn validateSelectorExpression(value: []const u8) !void {
 fn selectorTermValueForValidation(raw_term: []const u8) ![]const u8 {
     var start: usize = 0;
     var end: usize = raw_term.len;
+    var has_childrens_parents = false;
+
+    if (start < end and raw_term[start] == '@') {
+        has_childrens_parents = true;
+        start += 1;
+    }
+
+    if (has_childrens_parents and std.mem.indexOfScalar(u8, raw_term[start..], '+') != null) return error.UnsupportedSelector;
 
     if (start < end) {
         if (raw_term[start] == '+') {
@@ -357,7 +366,7 @@ fn selectorTermValueForValidation(raw_term: []const u8) ![]const u8 {
             }
         }
     }
-    if (start >= end or raw_term[start] == '+') return error.UnsupportedSelector;
+    if (start >= end or raw_term[start] == '+' or raw_term[start] == '@') return error.UnsupportedSelector;
 
     if (raw_term[end - 1] == '+') {
         end -= 1;

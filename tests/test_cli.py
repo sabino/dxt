@@ -4027,6 +4027,24 @@ def test_ls_graph_plus_selectors(tmp_path: Path):
     assert ls_json("--select", "1+orders,config.materialized:view") == [
         "model.selector_graph.customers"
     ]
+    assert ls_json("--select", "@customers") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "@orders") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "@stg_customers") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "@customers,config.materialized:table") == [
+        "model.selector_graph.orders"
+    ]
     assert ls_json("--select", "+customers+", "--exclude", "customers+") == [
         "model.selector_graph.stg_customers"
     ]
@@ -4092,6 +4110,13 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         "customers++",
         "customers+1+",
         "++customers++",
+        "@",
+        "@@customers",
+        "customers@",
+        "@customers+",
+        "@customers+1",
+        "@+customers",
+        "@1+customers",
     ]:
         unsupported_selector = subprocess.run(
             [DXT, "ls", "--project-dir", str(project), "--select", selector],
@@ -4119,6 +4144,32 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     )
     assert unsupported_in_list.returncode == 2
     assert "selector syntax is not supported" in unsupported_in_list.stderr
+
+
+def test_ls_at_selector_includes_descendant_parents(tmp_path: Path):
+    project = copy_fixture(tmp_path, "selector_at_graph")
+
+    def ls_json(*args: str) -> list[str]:
+        result = subprocess.run(
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return [item["unique_id"] for item in json.loads(result.stdout)]
+
+    assert ls_json("--select", "+customers+") == [
+        "model.selector_at_graph.customers",
+        "model.selector_at_graph.orders",
+        "model.selector_at_graph.stg_customers",
+    ]
+    assert ls_json("--select", "@customers") == [
+        "model.selector_at_graph.customers",
+        "model.selector_at_graph.orders",
+        "model.selector_at_graph.stg_customers",
+        "model.selector_at_graph.stg_products",
+    ]
 
 
 def test_parse_accepts_selector_argv_lists_without_filtering_manifest(tmp_path: Path):
