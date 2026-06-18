@@ -31,6 +31,8 @@ compatibility.
   to build those descendants in the supported graph subset.
 - `dxt ls --output name`, `--output path`, and `--output selector` formats,
   while preserving the legacy text and JSON outputs.
+- Narrow `dxt ls --output json --output-keys ...` filtering for compact
+  selected-resource JSON fields.
 
 ## 0.0.0-pre-alpha
 

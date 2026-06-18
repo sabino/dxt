@@ -234,11 +234,28 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
     defer select_values.deinit(allocator);
     var exclude_values: std.ArrayList([]const u8) = .empty;
     defer exclude_values.deinit(allocator);
+    var output_key_values: std.ArrayList([]const u8) = .empty;
+    defer output_key_values.deinit(allocator);
 
     var i: usize = 0;
     while (i < args.len) {
         const arg = args[i];
         if (equals(arg, "-h") or equals(arg, "--help")) return options;
+        if (equals(arg, "--output-keys")) {
+            if (mode != .list) return error.UnsupportedCommandOption;
+            i += 1;
+            var consumed = false;
+            while (i < args.len and !isOptionLike(args[i])) : (i += 1) {
+                if (args[i].len == 0) return error.InvalidOption;
+                try output_key_values.append(allocator, args[i]);
+                consumed = true;
+            }
+            if (!consumed) {
+                try stderr.print("error: option `{s}` requires a value\n", .{arg});
+                return error.InvalidOption;
+            }
+            continue;
+        }
         if (isSelectorOption(arg, mode)) {
             i += 1;
             var consumed = false;
@@ -314,6 +331,7 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
     }
     if (select_values.items.len != 0) options.select = try joinSelectorValues(allocator, select_values.items);
     if (exclude_values.items.len != 0) options.exclude = try joinSelectorValues(allocator, exclude_values.items);
+    if (output_key_values.items.len != 0) options.output_keys = try allocator.dupe([]const u8, output_key_values.items);
     return options;
 }
 
@@ -519,6 +537,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
             try writer.writeAll(
                 \\  --resource-type <type>
                 \\  --output <text|json|name|path|selector>
+                \\  --output-keys <keys...>
                 \\
             );
         }
@@ -556,6 +575,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
             try writer.writeAll(
                 \\  --resource-type <type>
                 \\  --output <text|json|name|path|selector>
+                \\  --output-keys <keys...>
                 \\
             );
         },
@@ -682,4 +702,38 @@ test "source freshness command is recognized" {
     try std.testing.expectEqual(ExitCode.usage, code);
     try std.testing.expectEqualStrings("", stdout.written());
     try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for source freshness") != null);
+}
+
+test "list command parses repeated output keys with selector lists" {
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const options = try parseOptions(
+        std.testing.allocator,
+        &.{ "--select", "orders", "tag:nightly", "--output", "json", "--output-keys", "name", "resource_type", "--output-keys", "unique_id" },
+        &stderr.writer,
+        .list,
+    );
+    defer {
+        if (options.select) |value| std.testing.allocator.free(value);
+        if (options.output_keys) |values| std.testing.allocator.free(values);
+    }
+
+    try std.testing.expectEqual(project.Output.json, options.output);
+    try std.testing.expectEqualStrings("orders tag:nightly", options.select.?);
+    try std.testing.expectEqual(@as(usize, 3), options.output_keys.?.len);
+    try std.testing.expectEqualStrings("name", options.output_keys.?[0]);
+    try std.testing.expectEqualStrings("resource_type", options.output_keys.?[1]);
+    try std.testing.expectEqualStrings("unique_id", options.output_keys.?[2]);
+    try std.testing.expectEqualStrings("", stderr.written());
+}
+
+test "list command requires output keys value" {
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const result = parseOptions(std.testing.allocator, &.{"--output-keys"}, &stderr.writer, .list);
+
+    try std.testing.expectError(error.InvalidOption, result);
+    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "option `--output-keys` requires a value") != null);
 }

@@ -3607,6 +3607,80 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         {"unique_id": "model.inline_config.orders", "resource_type": "model", "name": "orders"}
     ]
 
+    keyed_json = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--output",
+            "json",
+            "--resource-type",
+            "model",
+            "--output-keys",
+            "name",
+            "unique_id",
+            "missing",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert keyed_json.returncode == 0, keyed_json.stderr
+    assert json.loads(keyed_json.stdout) == [{"name": "orders", "unique_id": "model.inline_config.orders"}]
+
+    repeated_keyed_json = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--output",
+            "json",
+            "--resource-type",
+            "model",
+            "--output-keys",
+            "name",
+            "--output-keys",
+            "unique_id",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert repeated_keyed_json.returncode == 0, repeated_keyed_json.stderr
+    assert json.loads(repeated_keyed_json.stdout) == [{"name": "orders", "unique_id": "model.inline_config.orders"}]
+
+    unsupported_keyed_json = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--output",
+            "json",
+            "--resource-type",
+            "model",
+            "--output-keys",
+            "config.materialized",
+            "non_existent_key",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert unsupported_keyed_json.returncode == 0, unsupported_keyed_json.stderr
+    assert json.loads(unsupported_keyed_json.stdout) == [{}]
+
+    missing_output_key = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--output", "json", "--output-keys"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert missing_output_key.returncode == 2
+    assert "requires a value" in missing_output_key.stderr
+
     excluded = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "orders", "--exclude", "orders"],
         cwd=ROOT,

@@ -20,18 +20,61 @@ const RefDep = types.RefDep;
 const SourceDep = types.SourceDep;
 
 pub fn writeSelectedJson(writer: *Io.Writer, selected: []selector.SelectedResource) !void {
+    try writeSelectedJsonWithKeys(writer, selected, null);
+}
+
+pub fn writeSelectedJsonWithKeys(writer: *Io.Writer, selected: []selector.SelectedResource, output_keys: ?[]const []const u8) !void {
     try writer.writeAll("[");
     for (selected, 0..) |item, index| {
         if (index != 0) try writer.writeAll(",");
-        try writer.writeAll("{\"unique_id\":");
-        try writeJsonString(writer, item.unique_id);
-        try writer.writeAll(",\"resource_type\":");
-        try writeJsonString(writer, item.resource_type);
-        try writer.writeAll(",\"name\":");
-        try writeJsonString(writer, item.name);
-        try writer.writeAll("}");
+        if (output_keys) |keys| {
+            try writeSelectedJsonObjectWithKeys(writer, item, keys);
+        } else {
+            try writeSelectedJsonObject(writer, item);
+        }
     }
     try writer.writeAll("]\n");
+}
+
+fn writeSelectedJsonObject(writer: *Io.Writer, item: selector.SelectedResource) !void {
+    try writer.writeAll("{\"unique_id\":");
+    try writeJsonString(writer, item.unique_id);
+    try writer.writeAll(",\"resource_type\":");
+    try writeJsonString(writer, item.resource_type);
+    try writer.writeAll(",\"name\":");
+    try writeJsonString(writer, item.name);
+    try writer.writeAll("}");
+}
+
+fn writeSelectedJsonObjectWithKeys(writer: *Io.Writer, item: selector.SelectedResource, keys: []const []const u8) !void {
+    try writer.writeAll("{");
+    var wrote = false;
+    for (keys, 0..) |key, index| {
+        if (hasPriorKey(keys[0..index], key)) continue;
+        if (std.mem.eql(u8, key, "unique_id")) {
+            try writeSelectedJsonStringField(writer, "unique_id", item.unique_id, &wrote);
+        } else if (std.mem.eql(u8, key, "resource_type")) {
+            try writeSelectedJsonStringField(writer, "resource_type", item.resource_type, &wrote);
+        } else if (std.mem.eql(u8, key, "name")) {
+            try writeSelectedJsonStringField(writer, "name", item.name, &wrote);
+        }
+    }
+    try writer.writeAll("}");
+}
+
+fn writeSelectedJsonStringField(writer: *Io.Writer, key: []const u8, value: []const u8, wrote: *bool) !void {
+    if (wrote.*) try writer.writeAll(",");
+    wrote.* = true;
+    try writeJsonString(writer, key);
+    try writer.writeAll(":");
+    try writeJsonString(writer, value);
+}
+
+fn hasPriorKey(keys: []const []const u8, key: []const u8) bool {
+    for (keys) |prior| {
+        if (std.mem.eql(u8, prior, key)) return true;
+    }
+    return false;
 }
 
 pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]const u8 {
@@ -664,6 +707,13 @@ fn renderSelectedJsonForTest(allocator: std.mem.Allocator, selected: []selector.
     return try out.toOwnedSlice();
 }
 
+fn renderSelectedJsonWithKeysForTest(allocator: std.mem.Allocator, selected: []selector.SelectedResource, keys: []const []const u8) ![]u8 {
+    var out: Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try writeSelectedJsonWithKeys(&out.writer, selected, keys);
+    return try out.toOwnedSlice();
+}
+
 fn renderJsonStringForTest(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
@@ -689,6 +739,22 @@ test "selected resource JSON writer preserves order and shape" {
 
     try std.testing.expectEqualStrings(
         "[{\"unique_id\":\"model.demo.customers\",\"resource_type\":\"model\",\"name\":\"customers\"},{\"unique_id\":\"source.demo.raw.customers\",\"resource_type\":\"source\",\"name\":\"customers\"}]\n",
+        rendered,
+    );
+}
+
+test "selected resource JSON writer filters output keys in requested order" {
+    var selected = [_]selector.SelectedResource{
+        .{ .unique_id = "model.demo.customers", .resource_type = "model", .name = "customers" },
+        .{ .unique_id = "source.demo.raw.customers", .resource_type = "source", .name = "customers" },
+    };
+    const keys = [_][]const u8{ "name", "missing", "unique_id", "name" };
+
+    const rendered = try renderSelectedJsonWithKeysForTest(std.testing.allocator, selected[0..], keys[0..]);
+    defer std.testing.allocator.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        "[{\"name\":\"customers\",\"unique_id\":\"model.demo.customers\"},{\"name\":\"customers\",\"unique_id\":\"source.demo.raw.customers\"}]\n",
         rendered,
     );
 }

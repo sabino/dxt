@@ -112,7 +112,7 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
     const resource_type = if (options.resource_type) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected = try selector.selectResources(runtime.allocator, &graph, resource_type, select, exclude);
     switch (options.output) {
-        .json => try manifest.writeSelectedJson(stdout, selected),
+        .json => try manifest.writeSelectedJsonWithKeys(stdout, selected, options.output_keys),
         .name => {
             for (selected) |item| {
                 try stdout.print("{s}\n", .{item.search_name});

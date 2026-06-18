@@ -410,7 +410,8 @@ touched.
 - Artifact validation: `ls` writes no artifacts; commands that reuse selectors
   must validate Manifest v12, Catalog v1, or Run Results v6 as applicable.
 - Stop conditions: no YAML selectors, state/result/source-status selectors,
-  broad indirect-selection flags, or `--output-keys` in this slice.
+  broad indirect-selection flags, full dbt list JSON parity, or nested
+  `--output-keys` in this slice.
 
 ### 4. M2 Parse/Compile `execute` Boundary And Static `{% if %}`
 
