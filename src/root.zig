@@ -96,6 +96,19 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
         project.runPreflight(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
+    if (equals(command, "test")) {
+        if (hasHelp(args[2..])) {
+            try printCommandHelp(command, stdout, .test_command);
+            return .ok;
+        }
+        const rt = runtime orelse {
+            try stderr.writeAll("error: runtime I/O is required for test\n");
+            return .usage;
+        };
+        const options = parseOptions(rt.allocator, args[2..], stderr, .test_command) catch |err| return commandError(err, stderr);
+        project.testPreflight(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        return .ok;
+    }
     if (equals(command, "build")) {
         if (hasHelp(args[2..])) {
             try printCommandHelp(command, stdout, .build);
@@ -170,6 +183,7 @@ const OptionMode = enum {
     docs_generate,
     docs_serve,
     list,
+    test_command,
     build,
     source_freshness,
 };
@@ -178,6 +192,7 @@ const HelpMode = enum {
     project_selection,
     clean,
     list,
+    test_command,
     build,
     docs_generate,
     docs_serve,
@@ -225,6 +240,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
         error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model resources\n") catch {},
         error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources\n") catch {},
+        error.UnsupportedTestSelection => stderr.writeAll("error: test currently supports only supported DuckDB generic test resources\n") catch {},
         error.UnsupportedBuildSelection => stderr.writeAll("error: build currently supports only selected model, seed, source, and generic test resources; unit test execution is not supported yet\n") catch {},
         error.UnsupportedMixedBuildExecution => stderr.writeAll("error: build currently executes only seed-only, model-only, seed+model, seed+model+supported-generic-test, model+supported-generic-test, source+supported-generic-test, or supported-generic-test-only selections\n") catch {},
         error.UnsupportedAdapterExecution => stderr.writeAll("error: run currently executes only DuckDB SQL models\n") catch {},
@@ -249,7 +265,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         },
         error.UnsupportedModelExecution => stderr.writeAll("error: model execution requires a DuckDB adapter and materialization runner; not implemented yet\n") catch {},
         error.UnsupportedSeedExecution => stderr.writeAll("error: build currently executes only root-project DuckDB seeds with default CSV settings\n") catch {},
-        error.UnsupportedTestExecution => stderr.writeAll("error: build currently executes only selected DuckDB model/seed/source not_null/unique/accepted_values/relationships column generic tests\n") catch {},
+        error.UnsupportedTestExecution => stderr.writeAll("error: test/build currently executes only selected DuckDB model/seed/source not_null/unique/accepted_values/relationships column generic tests; unit test and singular test execution are not supported yet\n") catch {},
         error.UnsupportedDocsBrowserOpen => stderr.writeAll("error: docs serve browser opening is not implemented yet; use --no-browser\n") catch {},
         error.InvalidDocsServePort => stderr.writeAll("error: --port must be an integer between 1 and 65535\n") catch {},
         error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by the implemented M1 parser command\n") catch {},
@@ -516,7 +532,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
     }
 
     switch (mode) {
-        .common_and_select, .compile, .docs_generate, .list, .build, .source_freshness => {
+        .common_and_select, .compile, .docs_generate, .list, .test_command, .build, .source_freshness => {
             if (equals(arg, "--select") or equals(arg, "--exclude")) return true;
         },
         .common_only, .clean, .docs_serve => {},
@@ -560,6 +576,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  clean            Delete configured generated project artifacts.
         \\  compile          Compile supported dbt SQL/Jinja without executing.
         \\  run              Execute supported selected DuckDB SQL models.
+        \\  test             Execute supported selected DuckDB generic tests.
         \\  build            Execute supported selected DuckDB seeds, models, and tests.
         \\  source freshness Check freshness for supported DuckDB sources.
         \\  docs generate    Generate supported docs artifacts.
@@ -570,7 +587,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
 
 fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !void {
     try writer.print("Usage: dxt {s} [options]\n\n", .{command});
-    if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
+    if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
         if (equals(command, "docs serve")) {
             try writer.writeAll("`dxt docs serve` serves generated docs artifacts from the target directory.\n\n");
         } else if (equals(command, "clean")) {
@@ -584,13 +601,13 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
             \\  --vars <yaml>
             \\
         );
-        if (equals(command, "parse") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
+        if (equals(command, "parse") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
             try writer.writeAll(
                 \\  --target-path <path>
                 \\
             );
         }
-        if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
+        if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
             try writer.writeAll(
                 \\  --profiles-dir <path>
                 \\
@@ -662,7 +679,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         \\
     );
     switch (mode) {
-        .project_selection, .list, .build, .docs_generate, .source_freshness => {
+        .project_selection, .list, .test_command, .build, .docs_generate, .source_freshness => {
             try writer.writeAll(
                 \\  --select <selector> [selector ...]
                 \\  --exclude <selector> [selector ...]
@@ -690,6 +707,12 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
             try writer.writeAll(
                 \\  --threads <count>
                 \\  --full-refresh
+                \\
+            );
+        },
+        .test_command => {
+            try writer.writeAll(
+                \\  --threads <count>
                 \\
             );
         },
@@ -745,6 +768,45 @@ test "compile command requires runtime I/O" {
     try std.testing.expectEqual(ExitCode.usage, code);
     try std.testing.expectEqualStrings("", stdout.written());
     try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for compile") != null);
+}
+
+test "test command requires runtime I/O and accepts selectors" {
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const code = try run(&.{ "dxt", "test", "--project-dir", "fixture", "--select", "customers", "--exclude", "tag:slow" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expectEqual(ExitCode.usage, code);
+    try std.testing.expectEqualStrings("", stdout.written());
+    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for test") != null);
+}
+
+test "test command rejects build-only full refresh flag" {
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const runtime = Runtime{ .allocator = std.testing.allocator, .io = undefined };
+    const code = try run(&.{ "dxt", "test", "--project-dir", "fixture", "--full-refresh" }, &stdout.writer, &stderr.writer, runtime);
+    try std.testing.expectEqual(ExitCode.usage, code);
+    try std.testing.expectEqualStrings("", stdout.written());
+    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "unsupported option `--full-refresh`") != null);
+}
+
+test "test command help describes generic test options" {
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const code = try run(&.{ "dxt", "test", "--help" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expectEqual(ExitCode.ok, code);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "Usage: dxt test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "--select <selector>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "--full-refresh") == null);
+    try std.testing.expectEqualStrings("", stderr.written());
 }
 
 test "clean command requires runtime I/O and accepts clean flags" {

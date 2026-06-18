@@ -18,6 +18,10 @@ compatibility.
 - Future SQLMesh reference-map note for later state, plan/apply,
   environment, audit, incremental, multi-engine gateway, and adapter capability
   design once the dbt Core baseline is mature enough.
+- `dxt test` command for the existing DuckDB generic-test execution subset,
+  writing `manifest.json` and Run Results v6-shaped `run_results.json` for
+  supported `not_null`, `unique`, `accepted_values`, and `relationships` tests
+  against already-existing target relations.
 - Table-level model, seed, and source built-in generic tests with explicit
   `arguments.column_name`, including Manifest kwargs and DuckDB `build`
   execution for the existing supported test types while preserving dbt's
