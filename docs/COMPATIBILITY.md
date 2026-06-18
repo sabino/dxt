@@ -27,7 +27,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `--vars` | Partial | Scalar CLI vars for narrow `ref()` / `source()` argument resolution. |
 | `--select`, `--exclude` | Partial | Supported selector subset with graph expansion. |
 | `--threads`, `--full-refresh` | Accepted/planned | Product semantics are not complete yet. |
-| `--output json` | Partial | Supported by `ls`. |
+| `--output` | Partial | `ls` supports legacy `text`, compact `json`, and dbt-style `name`, `path`, and `selector` formats. `--output-keys` is not implemented. |
 
 ## dbt Resources
 

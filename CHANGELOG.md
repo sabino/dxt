@@ -29,6 +29,8 @@ compatibility.
   including `1+model`, `model+1`, and combined `1+model+1` forms.
 - `@` graph selector support for selecting descendants and the parents needed
   to build those descendants in the supported graph subset.
+- `dxt ls --output name`, `--output path`, and `--output selector` formats,
+  while preserving the legacy text and JSON outputs.
 
 ## 0.0.0-pre-alpha
 

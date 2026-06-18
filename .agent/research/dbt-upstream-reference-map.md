@@ -400,16 +400,17 @@ touched.
 - dxt files: selector validation in `src/root.zig`, matching/expansion in
   `src/project/selector.zig`, and selected JSON output helpers where relevant.
 - Native tests: reject invalid combinations, continue expanding `file:` after
-  the basename/stem, depth-limited `+`, and `@` slices, and preserve current
-  union, intersection, wildcard, and exclude behavior.
+  the basename/stem, depth-limited `+`, and `@` slices, preserve current union,
+  intersection, wildcard, and exclude behavior, and keep `ls` output helpers
+  deterministic.
 - Python/dbt oracle: `dxt ls` vs `dbt ls` on selector fixtures and
   Jaffle-style projects for `@stg_orders`, `+orders`, `orders+`, and
   `file:orders.sql`; reuse selectors through `compile`, `docs generate`, and
   `build` smoke fixtures.
 - Artifact validation: `ls` writes no artifacts; commands that reuse selectors
   must validate Manifest v12, Catalog v1, or Run Results v6 as applicable.
-- Stop conditions: no YAML selectors, state/result/source-status selectors, or
-  broad indirect-selection flags in this slice.
+- Stop conditions: no YAML selectors, state/result/source-status selectors,
+  broad indirect-selection flags, or `--output-keys` in this slice.
 
 ### 4. M2 Parse/Compile `execute` Boundary And Static `{% if %}`
 

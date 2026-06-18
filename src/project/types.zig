@@ -23,6 +23,9 @@ pub const Options = struct {
 pub const Output = enum {
     text,
     json,
+    name,
+    path,
+    selector,
 };
 
 pub const VarEntry = struct {

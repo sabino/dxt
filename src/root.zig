@@ -185,7 +185,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingProfileType => stderr.writeAll("error: selected profile target must define adapter type\n") catch {},
         error.MissingProfileSchema => stderr.writeAll("error: selected profile target must define a non-empty schema when schema is present\n") catch {},
         error.MissingProfileDatabasePath => stderr.writeAll("error: selected DuckDB profile target must define a non-empty path when path is present\n") catch {},
-        error.InvalidOutput => stderr.writeAll("error: --output must be text or json\n") catch {},
+        error.InvalidOutput => stderr.writeAll("error: --output must be text, json, name, path, or selector\n") catch {},
         error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, or test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
         error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model resources\n") catch {},
@@ -290,6 +290,12 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
                     options.output = .text;
                 } else if (equals(value, "json")) {
                     options.output = .json;
+                } else if (equals(value, "name")) {
+                    options.output = .name;
+                } else if (equals(value, "path")) {
+                    options.output = .path;
+                } else if (equals(value, "selector")) {
+                    options.output = .selector;
                 } else {
                     return error.InvalidOutput;
                 }
@@ -512,7 +518,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         if (equals(command, "ls")) {
             try writer.writeAll(
                 \\  --resource-type <type>
-                \\  --output <text|json>
+                \\  --output <text|json|name|path|selector>
                 \\
             );
         }
@@ -549,7 +555,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         .list => {
             try writer.writeAll(
                 \\  --resource-type <type>
-                \\  --output <text|json>
+                \\  --output <text|json|name|path|selector>
                 \\
             );
         },

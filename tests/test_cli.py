@@ -2130,6 +2130,42 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         "model.model_properties.customers",
         *expected_tests,
     ]
+    ls_test_name = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:test", "--output", "name"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_test_name.returncode == 0, ls_test_name.stderr
+    assert ls_test_name.stdout.splitlines() == [
+        "not_null_customers_customer_id",
+        "unique_customers_",
+        "unique_customers_customer_id",
+    ]
+    ls_test_path = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:test", "--output", "path"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_test_path.returncode == 0, ls_test_path.stderr
+    assert ls_test_path.stdout.splitlines() == [
+        "models/schema.yml",
+        "models/schema.yml",
+        "models/schema.yml",
+    ]
+    ls_test_selector = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:test", "--output", "selector"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_test_selector.returncode == 0, ls_test_selector.stderr
+    assert ls_test_selector.stdout.splitlines() == [
+        "model_properties.not_null_customers_customer_id",
+        "model_properties.unique_customers_",
+        "model_properties.unique_customers_customer_id",
+    ]
 
     model_test = manifest["nodes"]["test.model_properties.unique_customers_.ccc5343706"]
     assert model_test["resource_type"] == "test"
@@ -3533,6 +3569,33 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     assert text_result.stdout.splitlines() == ["model.inline_config.orders"]
     assert not (project / "target").exists()
 
+    name_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:nightly", "--output", "name"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert name_result.returncode == 0, name_result.stderr
+    assert name_result.stdout.splitlines() == ["orders"]
+
+    path_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:nightly", "--output", "path"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert path_result.returncode == 0, path_result.stderr
+    assert path_result.stdout.splitlines() == ["models/orders.sql"]
+
+    selector_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:nightly", "--output", "selector"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert selector_result.returncode == 0, selector_result.stderr
+    assert selector_result.stdout.splitlines() == ["inline_config.orders"]
+
     json_result = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--output", "json", "--resource-type", "model"],
         cwd=ROOT,
@@ -3552,6 +3615,15 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     )
     assert excluded.returncode == 0, excluded.stderr
     assert excluded.stdout == ""
+
+    invalid_output = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--output", "wide"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert invalid_output.returncode == 2
+    assert "--output must be text, json, name, path, or selector" in invalid_output.stderr
 
 
 def test_ls_multi_argv_and_repeated_selector_flags(tmp_path: Path):
@@ -3865,6 +3937,39 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
+    source_selector_output = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "resource_type:source", "--output", "selector"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_selector_output.returncode == 0, source_selector_output.stderr
+    assert source_selector_output.stdout.splitlines() == [
+        "source:source_ref.raw.customers",
+        "source:source_ref.raw.orders",
+    ]
+    source_name_output = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "resource_type:source", "--output", "name"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_name_output.returncode == 0, source_name_output.stderr
+    assert source_name_output.stdout.splitlines() == [
+        "raw.customers",
+        "raw.orders",
+    ]
+    source_path_output = subprocess.run(
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "resource_type:source", "--output", "path"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_path_output.returncode == 0, source_path_output.stderr
+    assert source_path_output.stdout.splitlines() == [
+        "models/schema.yml",
+        "models/schema.yml",
+    ]
 
     exposure_project = copy_fixture(tmp_path, "exposure_artifacts")
     exposure_result = subprocess.run(
@@ -3949,6 +4054,30 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     assert [item["unique_id"] for item in json.loads(exposure_file.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis"
     ]
+    exposure_selector_output = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "resource_type:exposure", "--output", "selector"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_selector_output.returncode == 0, exposure_selector_output.stderr
+    assert exposure_selector_output.stdout.splitlines() == ["exposure:exposure_artifacts.weekly_kpis"]
+    exposure_name_output = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "resource_type:exposure", "--output", "name"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_name_output.returncode == 0, exposure_name_output.stderr
+    assert exposure_name_output.stdout.splitlines() == ["weekly_kpis"]
+    exposure_path_output = subprocess.run(
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "resource_type:exposure", "--output", "path"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert exposure_path_output.returncode == 0, exposure_path_output.stderr
+    assert exposure_path_output.stdout.splitlines() == ["models/schema.yml"]
     exposure_package = subprocess.run(
         [
             DXT,
