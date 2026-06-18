@@ -312,7 +312,7 @@ fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: Sou
     try writer.writeAll(",\"database\":null,\"schema\":");
     try writeJsonString(writer, schema_name);
     try writer.writeAll(",\"identifier\":");
-    try writeJsonString(writer, source.table_name);
+    try writeJsonString(writer, compiler.sourceIdentifier(&source));
     try writer.writeAll(",\"relation_name\":");
     try writeJsonString(writer, relation_name);
     try writer.writeAll(",\"path\":");
@@ -795,6 +795,7 @@ test "manifest writer emits source generic tests with null attached node" {
         .unique_id = "source.demo.raw.customers",
         .source_name = "raw",
         .table_name = "customers",
+        .identifier = "raw_customers",
         .original_file_path = "models/schema.yml",
         .schema_name = "analytics_raw",
         .loaded_at_field = "loaded_at",
@@ -831,8 +832,8 @@ test "manifest writer emits source generic tests with null attached node" {
     const root = parsed.value.object;
     const source_node = root.get("sources").?.object.get("source.demo.raw.customers").?.object;
     try std.testing.expectEqualStrings("analytics_raw", source_node.get("schema").?.string);
-    try std.testing.expectEqualStrings("customers", source_node.get("identifier").?.string);
-    try std.testing.expectEqualStrings("\"analytics_raw\".\"customers\"", source_node.get("relation_name").?.string);
+    try std.testing.expectEqualStrings("raw_customers", source_node.get("identifier").?.string);
+    try std.testing.expectEqualStrings("\"analytics_raw\".\"raw_customers\"", source_node.get("relation_name").?.string);
     try std.testing.expectEqualStrings("loaded_at", source_node.get("loaded_at_field").?.string);
     try std.testing.expect(source_node.get("loaded_at_query").? == .null);
     const freshness = source_node.get("freshness").?.object;

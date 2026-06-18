@@ -35,7 +35,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | --- | --- | --- | --- |
 | Models | Partial | SQL discovery, refs/sources/docs/macros, YAML properties, columns, tags, materialized config, compile/run/build subset. | Full config precedence, contracts, versions, groups, access, incremental/ephemeral/snapshots, hooks/grants. |
 | Seeds | Partial | CSV discovery and root-project DuckDB seed build execution. | Package seeds, seed configs, `dxt seed`, full materialization semantics. |
-| Sources | Partial | YAML source tables, source/table freshness config inheritance, narrow source schema rendering, source refs, source columns, source column tests, catalog/source freshness subset. | Table-level tests, source relationships, richer relation config, metadata freshness. |
+| Sources | Partial | YAML source tables, source/table freshness config inheritance, narrow source schema rendering, table `identifier` physical-name overrides, source refs, source columns, source column tests, catalog/source freshness subset. | Table-level tests, source relationships, richer relation config such as database/quoting/project-level source config, metadata freshness. |
 | Exposures | Partial | YAML exposure parsing with refs/sources, tags, metadata, owner fields. | Full validation and richer artifact parity. |
 | Macros | Partial | Macro/test/data_test/materialization block extraction, macro properties, static macro dependency lookup. | Macro execution, namespace execution, adapter dispatch execution, bundled dbt internals. |
 | Docs blocks | Partial | Markdown docs block parsing and literal `doc()` descriptions. | Dynamic doc expressions and docs serve. |

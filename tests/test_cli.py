@@ -253,6 +253,152 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
     assert events["sources"] == [["raw", "events"]]
 
 
+def write_source_identifier_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: source_identifier
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: customers
+        identifier: raw_customers
+        loaded_at_field: loaded_at
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 1
+            period: day
+        columns:
+          - name: customer_id
+"""
+    )
+    (project / "models" / "stg_customers.sql").write_text(
+        """select *
+from {{ source('raw', 'customers') }}
+"""
+    )
+
+
+def test_source_identifier_compiles_physical_relation_and_preserves_logical_source_key(tmp_path: Path):
+    project = tmp_path / "source_identifier"
+    write_source_identifier_project(project)
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    compiled = (target / "compiled" / "source_identifier" / "models" / "stg_customers.sql").read_text()
+    assert 'from "raw"."raw_customers"' in compiled
+    assert 'from "raw"."customers"' not in compiled
+
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_manifest_schema_slice(manifest_path)
+    source = manifest["sources"]["source.source_identifier.raw.customers"]
+    assert source["name"] == "customers"
+    assert source["identifier"] == "raw_customers"
+    assert source["relation_name"] == '"raw"."raw_customers"'
+    assert source["fqn"] == ["source_identifier", "raw", "customers"]
+    model = manifest["nodes"]["model.source_identifier.stg_customers"]
+    assert model["depends_on"]["nodes"] == ["source.source_identifier.raw.customers"]
+    assert model["sources"] == [["raw", "customers"]]
+
+    listed = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "source:raw.customers", "--output", "name"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert listed.returncode == 0, listed.stderr
+    assert listed.stdout.splitlines() == ["raw.customers"]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for source identifier execution coverage")
+def test_source_identifier_drives_duckdb_catalog_and_freshness_relations(tmp_path: Path):
+    project = tmp_path / "source_identifier"
+    write_source_identifier_project(project)
+    target = tmp_path / "target"
+    target.mkdir()
+    db_path = target / "dxt.duckdb"
+    subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            "create schema raw; create table raw.raw_customers as select 1 as customer_id, current_timestamp as loaded_at;",
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    docs_result = subprocess.run(
+        [
+            DXT,
+            "docs",
+            "generate",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert docs_result.returncode == 0, docs_result.stderr
+    catalog_path = target / "catalog.json"
+    assert_catalog_schema_slice(catalog_path)
+    catalog = json.loads(catalog_path.read_text())
+    source_catalog = catalog["sources"]["source.source_identifier.raw.customers"]
+    assert source_catalog["metadata"]["schema"] == "raw"
+    assert source_catalog["metadata"]["name"] == "raw_customers"
+    assert list(source_catalog["columns"]) == ["customer_id", "loaded_at"]
+
+    freshness_result = subprocess.run(
+        [
+            DXT,
+            "source",
+            "freshness",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert freshness_result.returncode == 0, freshness_result.stderr
+    sources_path = target / "sources.json"
+    assert_sources_schema_slice(sources_path)
+    sources = json.loads(sources_path.read_text())
+    assert [row["unique_id"] for row in sources["results"]] == ["source.source_identifier.raw.customers"]
+    assert sources["results"][0]["status"] == "pass"
+
+
 def test_compile_and_docs_generate_render_jaffle_style_macro_dispatch(tmp_path: Path):
     project = copy_fixture(tmp_path, "macro_dispatch_compile")
 
@@ -1207,6 +1353,7 @@ sources:
   - name: raw
     tables:
       - name: customers
+        identifier: raw_customers
         columns:
           - name: customer_id
             tests: [not_null, unique]
@@ -1430,7 +1577,7 @@ def test_build_executes_selected_duckdb_source_column_generic_tests(tmp_path: Pa
             "-c",
             (
                 'create schema raw; '
-                'create table raw.customers as '
+                'create table raw.raw_customers as '
                 "select 1 as customer_id, 'new' as customer_type union all "
                 "select 2 as customer_id, 'returning' as customer_type"
             ),
@@ -1455,7 +1602,7 @@ def test_build_executes_selected_duckdb_source_column_generic_tests(tmp_path: Pa
     assert [item["status"] for item in run_results["results"]] == ["pass", "pass", "pass"]
     assert [item["failures"] for item in run_results["results"]] == [0, 0, 0]
     assert all(item["relation_name"] is None for item in run_results["results"])
-    assert all('"raw"."customers"' in item["compiled_code"] for item in run_results["results"])
+    assert all('"raw"."raw_customers"' in item["compiled_code"] for item in run_results["results"])
     assert run_results["results"][0]["unique_id"].startswith(
         "test.source_column_tests.source_accepted_values_raw_customers_customer_type__new__returning."
     )
@@ -1468,6 +1615,8 @@ def test_build_executes_selected_duckdb_source_column_generic_tests(tmp_path: Pa
 
     manifest = json.loads((target / "manifest.json").read_text())
     source_node = manifest["sources"]["source.source_column_tests.raw.customers"]
+    assert source_node["name"] == "customers"
+    assert source_node["identifier"] == "raw_customers"
     assert sorted(source_node["columns"]) == ["customer_id", "customer_type"]
     assert source_node["columns"]["customer_id"]["name"] == "customer_id"
     assert source_node["columns"]["customer_type"]["name"] == "customer_type"
