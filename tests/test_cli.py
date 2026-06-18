@@ -4638,6 +4638,30 @@ def test_parse_and_ls_resolve_static_loop_ref_and_source_dependencies(tmp_path: 
     ]
 
 
+def test_compile_resolves_static_loop_ref_and_source_relations(tmp_path: Path):
+    project = copy_fixture(tmp_path, "static_loop_deps")
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "looped"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    compiled = (target / "compiled" / "static_loop_deps" / "models" / "looped.sql").read_text()
+    assert 'from "main"."customers"' in compiled
+    assert 'from "main"."orders"' in compiled
+    assert 'from "raw"."events"' in compiled
+    assert 'from "raw"."payments"' in compiled
+    assert "{{" not in compiled
+    assert "{%" not in compiled
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    looped = manifest["nodes"]["model.static_loop_deps.looped"]
+    assert looped["compiled"] is True
+    assert looped["compiled_code"] == compiled
+
+
 def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     project = copy_fixture(tmp_path, "seed_ref")
     command = [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"]

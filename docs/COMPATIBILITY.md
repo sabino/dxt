@@ -51,13 +51,13 @@ behavior, with DuckDB as the first deterministic execution adapter.
 
 | Surface | Status | Notes |
 | --- | --- | --- |
-| `ref()` | Partial | Literal, narrow scalar var-backed, and parse/list-only static loop-var refs. |
-| `source()` | Partial | Literal, narrow scalar var-backed, and parse/list-only static loop-var sources. |
+| `ref()` | Partial | Literal, narrow scalar var-backed, and static loop-var refs in parse/list and compile-time relation rendering. |
+| `source()` | Partial | Literal, narrow scalar var-backed, and static loop-var sources in parse/list and compile-time relation rendering. |
 | `config()` | Partial | Inline tags, materialized, schema, alias in supported literal forms. |
 | `var()` | Partial | Scalar CLI vars for selected dependency arguments. |
 | `doc()` | Partial | Literal doc references. |
 | `target`, `this` | Partial | Narrow compile context for selected fields. |
-| `{% set %}` / `{% for %}` / `{% if %}` | Partial | Static string-list assignments, simple loops, parse/list dependency recovery for loop vars, and narrow static conditionals only. |
+| `{% set %}` / `{% for %}` / `{% if %}` | Partial | Static string-list assignments, simple loops, loop-var dependency recovery and relation rendering, and narrow static conditionals only. |
 | `execute`, `run_query`, `statement`, adapter introspection | Partial/planned | Compile/run-style rendering treats `execute` as true for static `if`; database-backed Jinja behavior remains planned. |
 | Macro execution and dispatch | Partial | Static discovery/dependency extraction plus a narrow Jaffle-style adapter dispatch wrapper rendering subset. |
 
