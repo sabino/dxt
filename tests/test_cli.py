@@ -4001,6 +4001,32 @@ def test_ls_graph_plus_selectors(tmp_path: Path):
         "model.selector_graph.orders",
         "model.selector_graph.stg_customers",
     ]
+    assert ls_json("--select", "1+orders") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+    ]
+    assert ls_json("--select", "2+orders") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "stg_customers+1") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "stg_customers+2") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "1+customers+1") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+    assert ls_json("--select", "1+orders,config.materialized:view") == [
+        "model.selector_graph.customers"
+    ]
     assert ls_json("--select", "+customers+", "--exclude", "customers+") == [
         "model.selector_graph.stg_customers"
     ]
@@ -4062,7 +4088,9 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         "package:",
         "tag:nightly, config.materialized:view",
         "++customers",
+        "1++customers",
         "customers++",
+        "customers+1+",
         "++customers++",
     ]:
         unsupported_selector = subprocess.run(

@@ -15,9 +15,12 @@ pub const SelectedResource = struct {
 
 const SelectorSpec = struct {
     active: bool = false,
+    valid: bool = true,
     value: []const u8 = "",
     include_parents: bool = false,
     include_children: bool = false,
+    parents_depth: ?usize = null,
+    children_depth: ?usize = null,
 };
 
 pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8) ![]SelectedResource {
@@ -79,6 +82,7 @@ fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
+        if (!term.valid) return false;
         if (term.value.len == 0) return false;
         if (!matchesNodeSelectorTerm(graph, node, term.value) and !matchesGraphExpansion(graph, node.unique_id, term)) return false;
         matched_any = true;
@@ -141,6 +145,7 @@ fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const Generi
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
+        if (!term.valid) return false;
         if (term.value.len == 0) return false;
         if (!matchesTestSelectorTerm(graph, test_node, term.value) and !matchesGraphExpansion(graph, test_node.unique_id, term)) return false;
         matched_any = true;
@@ -208,6 +213,7 @@ fn matchesSourceSelectorIntersection(graph: *const Graph, source: *const SourceD
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
+        if (!term.valid) return false;
         if (term.value.len == 0) return false;
         if (!matchesSourceSelectorTerm(graph, source, term.value) and !matchesGraphExpansion(graph, source.unique_id, term)) return false;
         matched_any = true;
@@ -269,6 +275,7 @@ fn matchesExposureSelectorIntersection(graph: *const Graph, exposure: *const Exp
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
+        if (!term.valid) return false;
         if (term.value.len == 0) return false;
         if (!matchesExposureSelectorTerm(graph, exposure, term.value) and !matchesGraphExpansion(graph, exposure.unique_id, term)) return false;
         matched_any = true;
@@ -473,45 +480,98 @@ fn parseSelectorSpec(selector: ?[]const u8) SelectorSpec {
 
 fn parseSelectorTerm(raw: []const u8) SelectorSpec {
     const trimmed = std.mem.trim(u8, raw, " \t\r");
+    var start: usize = 0;
+    var end: usize = trimmed.len;
+    var include_parents = false;
+    var include_children = false;
+    var parents_depth: ?usize = null;
+    var children_depth: ?usize = null;
+
+    if (start < end) {
+        if (trimmed[start] == '+') {
+            include_parents = true;
+            start += 1;
+        } else {
+            var digit_end = start;
+            while (digit_end < end and isSelectorDigit(trimmed[digit_end])) digit_end += 1;
+            if (digit_end > start and digit_end < end and trimmed[digit_end] == '+') {
+                include_parents = true;
+                parents_depth = parseSelectorDepth(trimmed[start..digit_end]) catch return .{ .active = true, .valid = false };
+                start = digit_end + 1;
+            }
+        }
+    }
+
+    if (start < end) {
+        if (trimmed[end - 1] == '+') {
+            include_children = true;
+            end -= 1;
+        } else {
+            var digit_start = end;
+            while (digit_start > start and isSelectorDigit(trimmed[digit_start - 1])) digit_start -= 1;
+            if (digit_start < end and digit_start > start and trimmed[digit_start - 1] == '+') {
+                include_children = true;
+                children_depth = parseSelectorDepth(trimmed[digit_start..end]) catch return .{ .active = true, .valid = false };
+                end = digit_start - 1;
+            }
+        }
+    }
+
     return .{
         .active = true,
-        .value = trimPlus(trimmed),
-        .include_parents = std.mem.startsWith(u8, trimmed, "+"),
-        .include_children = std.mem.endsWith(u8, trimmed, "+"),
+        .value = if (start <= end) trimmed[start..end] else "",
+        .include_parents = include_parents,
+        .include_children = include_children,
+        .parents_depth = parents_depth,
+        .children_depth = children_depth,
     };
 }
 
-fn trimPlus(value: []const u8) []const u8 {
-    return std.mem.trim(u8, value, "+");
+fn parseSelectorDepth(value: []const u8) !?usize {
+    if (value.len == 0) return null;
+    return try std.fmt.parseInt(usize, value, 10);
+}
+
+fn isSelectorDigit(byte: u8) bool {
+    return byte >= '0' and byte <= '9';
 }
 
 fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, spec: SelectorSpec) bool {
     if (!spec.include_parents and !spec.include_children) return false;
     for (graph.nodes.items) |*target| {
         if (!target.enabled or !matchesNodeSelectorTerm(graph, target, spec.value)) continue;
-        if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
-        if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
+        if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
+        if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     for (graph.tests.items) |*target| {
         if (!matchesTestSelectorTerm(graph, target, spec.value)) continue;
-        if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
-        if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
+        if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
+        if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     for (graph.sources.items) |*target| {
         if (!matchesSourceSelectorTerm(graph, target, spec.value)) continue;
-        if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
+        if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     for (graph.exposures.items) |*target| {
         if (!target.enabled) continue;
         if (!matchesExposureSelectorTerm(graph, target, spec.value)) continue;
-        if (spec.include_parents and resourceDependsOn(graph, target.unique_id, candidate_unique_id)) return true;
-        if (spec.include_children and resourceDependsOn(graph, candidate_unique_id, target.unique_id)) return true;
+        if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
+        if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     return false;
 }
 
 fn resourceDependsOn(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8) bool {
-    return resourceDependsOnWithin(graph, resource_unique_id, dependency_unique_id, graph.nodes.items.len + graph.tests.items.len + graph.sources.items.len + graph.exposures.items.len + 1);
+    return resourceDependsOnDepth(graph, resource_unique_id, dependency_unique_id, null);
+}
+
+fn resourceDependsOnDepth(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8, max_depth: ?usize) bool {
+    const depth = max_depth orelse graphDepthLimit(graph);
+    return resourceDependsOnWithin(graph, resource_unique_id, dependency_unique_id, depth);
+}
+
+fn graphDepthLimit(graph: *const Graph) usize {
+    return graph.nodes.items.len + graph.tests.items.len + graph.sources.items.len + graph.exposures.items.len + 1;
 }
 
 fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8, remaining_depth: usize) bool {
@@ -581,4 +641,41 @@ test "file selectors match only basename or stem" {
     try std.testing.expect(!matchesFileSelector("models/marts/orders.sql", "models/marts/orders.sql"));
     try std.testing.expect(!matchesFileSelector("marts/orders.sql", "models/marts/orders.sql"));
     try std.testing.expect(!matchesFileSelector("customers.sql", "models/marts/orders.sql"));
+}
+
+test "selector terms parse dbt plus depth operators" {
+    const parent_limited = parseSelectorTerm("1+orders");
+    try std.testing.expect(parent_limited.valid);
+    try std.testing.expect(parent_limited.include_parents);
+    try std.testing.expect(!parent_limited.include_children);
+    try std.testing.expectEqual(@as(?usize, 1), parent_limited.parents_depth);
+    try std.testing.expectEqual(@as(?usize, null), parent_limited.children_depth);
+    try std.testing.expectEqualStrings("orders", parent_limited.value);
+
+    const child_limited = parseSelectorTerm("orders+2");
+    try std.testing.expect(child_limited.valid);
+    try std.testing.expect(!child_limited.include_parents);
+    try std.testing.expect(child_limited.include_children);
+    try std.testing.expectEqual(@as(?usize, null), child_limited.parents_depth);
+    try std.testing.expectEqual(@as(?usize, 2), child_limited.children_depth);
+    try std.testing.expectEqualStrings("orders", child_limited.value);
+
+    const both_limited = parseSelectorTerm("1+orders+2");
+    try std.testing.expect(both_limited.valid);
+    try std.testing.expect(both_limited.include_parents);
+    try std.testing.expect(both_limited.include_children);
+    try std.testing.expectEqual(@as(?usize, 1), both_limited.parents_depth);
+    try std.testing.expectEqual(@as(?usize, 2), both_limited.children_depth);
+    try std.testing.expectEqualStrings("orders", both_limited.value);
+
+    const unlimited = parseSelectorTerm("+orders+");
+    try std.testing.expect(unlimited.valid);
+    try std.testing.expect(unlimited.include_parents);
+    try std.testing.expect(unlimited.include_children);
+    try std.testing.expectEqual(@as(?usize, null), unlimited.parents_depth);
+    try std.testing.expectEqual(@as(?usize, null), unlimited.children_depth);
+    try std.testing.expectEqualStrings("orders", unlimited.value);
+
+    const invalid_depth = parseSelectorTerm("999999999999999999999999999999+orders");
+    try std.testing.expect(!invalid_depth.valid);
 }

@@ -387,7 +387,7 @@ touched.
   selectors, or broad Jinja in source schema beyond the explicit target-schema
   expression.
 
-### 3. M2 Selector Parity For `@`, Depth-Limited `+`, Remaining `file:`, And `ls`
+### 3. M2 Selector Parity For `@`, Remaining `file:`, And `ls`
 
 - Upstream references: v1 `core/dbt/graph/selector_spec.py::RAW_SELECTOR_PATTERN`,
   `SelectionCriteria`, `core/dbt/graph/selector.py::collect_specified_neighbors`,
@@ -399,8 +399,8 @@ touched.
   `crates/dbt-scheduler/src/node_selector.rs`.
 - dxt files: selector validation in `src/root.zig`, matching/expansion in
   `src/project/selector.zig`, and selected JSON output helpers where relevant.
-- Native tests: parse and match `@model`, `1+model`, `model+1`, reject invalid
-  combinations, continue expanding `file:` after the basename/stem slice, and
+- Native tests: parse and match `@model`, reject invalid combinations, continue
+  expanding `file:` after the basename/stem and depth-limited `+` slices, and
   preserve current union, intersection, wildcard, and exclude behavior.
 - Python/dbt oracle: `dxt ls` vs `dbt ls` on selector fixtures and
   Jaffle-style projects for `@stg_orders`, `+orders`, `orders+`, and

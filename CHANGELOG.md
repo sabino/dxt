@@ -25,6 +25,8 @@ compatibility.
   freshness execution against resolved inherited source settings.
 - `file:` selector support for basename/stem matching across selectable graph
   resources, with selector reuse covered through `ls` and `docs generate`.
+- Depth-limited dbt-style `+` graph selectors for parent and child expansion,
+  including `1+model`, `model+1`, and combined `1+model+1` forms.
 
 ## 0.0.0-pre-alpha
 

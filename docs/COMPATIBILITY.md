@@ -61,12 +61,12 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | Selector surface | Status |
 | --- | --- |
 | Names/FQN subset | Partial |
-| `+` graph expansion | Partial |
+| `+` graph expansion | Partial; includes dbt-style unlimited and depth-limited parent/child forms such as `+model`, `model+`, `1+model`, `model+1`, and `1+model+1`. |
 | `--exclude` | Partial |
 | `tag:`, `path:`, `file:`, `package:`, `resource_type:`, `test_type:`, `config.materialized:` | Partial |
 | `source:`, `exposure:`, selected generic test names | Partial |
 | Wildcards | Partial; pinned to observed dbt Core behavior where tested. |
-| YAML selectors, `@`, depth-limited `+`, state/result/source-status/access/group/version selectors | Planned |
+| YAML selectors, `@`, state/result/source-status/access/group/version selectors | Planned |
 
 ## Artifacts
 
