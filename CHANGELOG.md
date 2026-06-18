@@ -35,6 +35,10 @@ compatibility.
 - Parse/list dependency recovery for static Jinja string-list loops, so
   `ref(loop_var)` and `source('raw', loop_var)` inside supported `{% for %}`
   loops populate manifest dependencies and selector graph expansion.
+- Compile-time relation rendering for static Jinja string-list loop variables,
+  so supported `ref(loop_var)`, `ref('package', loop_var)`, and
+  `source('raw', loop_var)` calls render through `compile`, `docs generate`,
+  `run`, and `build`.
 - Root-project seed column generic-test parsing and DuckDB execution for
   `not_null`, `unique`, explicit `accepted_values` `quote: false`, and
   ref-backed `relationships`, including seed-path schema YAML discovery,

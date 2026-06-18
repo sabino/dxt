@@ -54,6 +54,7 @@ const CompileContext = struct {
     scope_depth: usize = 0,
     current_macro_package: ?[]const u8 = null,
     macro_render_depth: usize = 0,
+    validating_skipped_loop_body: bool = false,
 
     fn init(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) CompileContext {
         return .{ .allocator = allocator, .graph = graph, .node = node };
@@ -210,13 +211,17 @@ fn validateSkippedLoopBody(context: *CompileContext, sql: []const u8, block: For
         context.popScope();
         return err;
     };
+    const previous_validation_mode = context.validating_skipped_loop_body;
+    context.validating_skipped_loop_body = true;
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(context.allocator);
     renderRange(context, sql, block.body_start, block.body_end, &scratch) catch |err| {
+        context.validating_skipped_loop_body = previous_validation_mode;
         context.popVar();
         context.popScope();
         return err;
     };
+    context.validating_skipped_loop_body = previous_validation_mode;
     context.popVar();
     context.popScope();
 }
@@ -270,22 +275,24 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
     }
     if (context.macro_render_depth > 0) return error.UnsupportedJinja;
     if (std.mem.eql(u8, call.name, "ref")) {
-        var strings = try jinja.parseLiteralOrVarArgs(allocator, args, graph, error.UnsupportedDynamicRef);
+        var strings = try parseCompileStringArgs(context, args, error.UnsupportedDynamicRef);
         defer strings.deinit(allocator);
-        if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedDynamicRef;
+        if (!(strings.items.items.len == 1 or strings.items.items.len == 2)) return error.UnsupportedDynamicRef;
+        if (context.validating_skipped_loop_body and strings.used_local_binding) return try allocator.dupe(u8, "");
         const dep = RefDep{
-            .package = if (strings.items.len == 2) strings.items[0] else null,
-            .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
+            .package = if (strings.items.items.len == 2) strings.items.items[0] else null,
+            .name = if (strings.items.items.len == 2) strings.items.items[1] else strings.items.items[0],
         };
         const unique_id = try resolve.resolveRefDependency(graph, node.package_name, dep);
         const target = findNodeByUniqueId(graph, unique_id) orelse return error.UnresolvedRef;
         return try relationNameForNode(allocator, graph, target);
     }
     if (std.mem.eql(u8, call.name, "source")) {
-        var strings = try jinja.parseLiteralOrVarArgs(allocator, args, graph, error.UnsupportedDynamicSource);
+        var strings = try parseCompileStringArgs(context, args, error.UnsupportedDynamicSource);
         defer strings.deinit(allocator);
-        if (strings.items.len != 2) return error.UnsupportedDynamicSource;
-        const dep = SourceDep{ .source_name = strings.items[0], .table_name = strings.items[1] };
+        if (strings.items.items.len != 2) return error.UnsupportedDynamicSource;
+        if (context.validating_skipped_loop_body and strings.used_local_binding) return try allocator.dupe(u8, "");
+        const dep = SourceDep{ .source_name = strings.items.items[0], .table_name = strings.items.items[1] };
         const unique_id = try resolve.resolveSourceDependency(graph, node.package_name, dep);
         const source = findSourceByUniqueId(graph, unique_id) orelse return error.UnresolvedSource;
         return try relationNameForSource(allocator, source);
@@ -296,6 +303,117 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
         return try renderMacroCall(context, macro, args);
     }
     return error.UnsupportedJinja;
+}
+
+const CompileStringArgs = struct {
+    items: std.ArrayList([]const u8) = .empty,
+    used_local_binding: bool = false,
+
+    fn deinit(self: *CompileStringArgs, allocator: std.mem.Allocator) void {
+        self.items.deinit(allocator);
+    }
+};
+
+fn parseCompileStringArgs(context: *CompileContext, args: []const u8, unsupported_error: anyerror) !CompileStringArgs {
+    const allocator = context.allocator;
+    var strings = CompileStringArgs{};
+    errdefer strings.deinit(allocator);
+
+    var index: usize = 0;
+    var saw_arg = false;
+    while (index < args.len) {
+        index = jinja.skipWs(args, index);
+        if (index >= args.len) break;
+        if (args[index] == ',') {
+            index += 1;
+            continue;
+        }
+
+        if (args[index] == '"' or args[index] == '\'') {
+            const parsed = try jinja.parseQuoted(allocator, args, index);
+            try strings.items.append(allocator, parsed.value);
+            saw_arg = true;
+            index = jinja.skipWs(args, parsed.next);
+        } else if (std.mem.startsWith(u8, args[index..], "var")) {
+            if (readCompileVarCall(context, args, index, unsupported_error)) |parsed| {
+                try strings.items.append(allocator, parsed.value);
+                saw_arg = true;
+                index = jinja.skipWs(args, parsed.next);
+            } else |err| switch (err) {
+                error.NotCompileVarCall => {
+                    const parsed = try readCompileLocalArg(context, args, index, unsupported_error);
+                    try strings.items.append(allocator, parsed.value);
+                    strings.used_local_binding = true;
+                    saw_arg = true;
+                    index = jinja.skipWs(args, parsed.next);
+                },
+                else => return err,
+            }
+        } else if (jinja.isIdentStart(args[index])) {
+            const parsed = try readCompileLocalArg(context, args, index, unsupported_error);
+            try strings.items.append(allocator, parsed.value);
+            strings.used_local_binding = true;
+            saw_arg = true;
+            index = jinja.skipWs(args, parsed.next);
+        } else {
+            return unsupported_error;
+        }
+
+        if (index < args.len and args[index] != ',') return unsupported_error;
+    }
+    if (!saw_arg) return unsupported_error;
+    return strings;
+}
+
+const CompileStringArg = struct {
+    value: []const u8,
+    next: usize,
+};
+
+const NotCompileVarCall = error{NotCompileVarCall};
+
+fn readCompileVarCall(
+    context: *CompileContext,
+    args: []const u8,
+    start: usize,
+    unsupported_error: anyerror,
+) (NotCompileVarCall || anyerror)!CompileStringArg {
+    const call = (jinja.readJinjaCall(args, "var", start + "var".len) catch return unsupported_error) orelse return error.NotCompileVarCall;
+    if (call.package_name != null or !std.mem.eql(u8, call.name, "var")) return unsupported_error;
+
+    var var_name_args = try jinja.parseLiteralArgs(context.allocator, args[call.open + 1 .. call.close], unsupported_error);
+    defer var_name_args.deinit(context.allocator);
+    if (!(var_name_args.items.len == 1 or var_name_args.items.len == 2)) return unsupported_error;
+
+    if (findGraphVarValue(context.graph, var_name_args.items[0])) |resolved_value| {
+        return .{ .value = resolved_value, .next = call.close + 1 };
+    }
+    if (var_name_args.items.len == 2) {
+        return .{ .value = var_name_args.items[1], .next = call.close + 1 };
+    }
+    return error.UnresolvedVar;
+}
+
+fn readCompileLocalArg(
+    context: *CompileContext,
+    args: []const u8,
+    start: usize,
+    unsupported_error: anyerror,
+) !CompileStringArg {
+    var end = start;
+    if (end >= args.len or !jinja.isIdentStart(args[end])) return unsupported_error;
+    end += 1;
+    while (end < args.len and jinja.isIdentChar(args[end])) end += 1;
+    const name = args[start..end];
+    const value = context.getVar(name) orelse return unsupported_error;
+    return .{ .value = value, .next = end };
+}
+
+fn findGraphVarValue(graph: *const Graph, name: []const u8) ?[]const u8 {
+    for (graph.vars.items) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry.value;
+    }
+    return null;
 }
 
 fn renderAdapterDispatchExpression(context: *CompileContext, span: []const u8) ![]const u8 {
@@ -981,6 +1099,112 @@ test "compileModel expands static string-list for loops" {
     try std.testing.expect(std.mem.indexOf(u8, compiled, "{%") == null);
 }
 
+test "compileModel resolves static loop vars inside refs and sources" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select 1",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.looped",
+        .name = "looped",
+        .path = "looped.sql",
+        .original_file_path = "models/looped.sql",
+        .raw_code =
+        \\{% set model_names = ['customers', 'orders'] %}
+        \\{% for model_name in model_names %}
+        \\select * from {{ ref(model_name) }}
+        \\{% endfor %}
+        \\{% set table_names = ['events', 'payments'] %}
+        \\{% for table_name in table_names %}
+        \\union all select * from {{ source('raw', table_name) }}
+        \\{% endfor %}
+        ,
+    });
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.events",
+        .source_name = "raw",
+        .table_name = "events",
+        .original_file_path = "models/schema.yml",
+    });
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.payments",
+        .source_name = "raw",
+        .table_name = "payments",
+        .original_file_path = "models/schema.yml",
+    });
+
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[2]);
+    defer allocator.free(compiled);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"analytics\".\"customers\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"analytics\".\"orders\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"raw\".\"events\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"raw\".\"payments\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "{{") == null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "{%") == null);
+}
+
+test "compileModel resolves package refs with static loop vars" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "pkg",
+        .unique_id = "model.pkg.pkg_customers",
+        .name = "pkg_customers",
+        .path = "pkg_customers.sql",
+        .original_file_path = "models/pkg_customers.sql",
+        .raw_code = "select 1",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "pkg",
+        .unique_id = "model.pkg.pkg_orders",
+        .name = "pkg_orders",
+        .path = "pkg_orders.sql",
+        .original_file_path = "models/pkg_orders.sql",
+        .raw_code = "select 1",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.looped",
+        .name = "looped",
+        .path = "looped.sql",
+        .original_file_path = "models/looped.sql",
+        .raw_code =
+        \\{% set model_names = ['pkg_customers', 'pkg_orders'] %}
+        \\{% for model_name in model_names %}
+        \\select * from {{ ref('pkg', model_name) }}
+        \\{% endfor %}
+        ,
+    });
+
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[2]);
+    defer allocator.free(compiled);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"analytics\".\"pkg_customers\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"analytics\".\"pkg_orders\"") != null);
+}
+
 test "compileModel renders Jaffle-style adapter-dispatched macro" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1105,6 +1329,39 @@ test "compileModel expands empty static string-list for loops" {
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
     defer allocator.free(compiled);
     try std.testing.expectEqualStrings("select 1 as marker", compiled);
+}
+
+test "compileModel skips loop-var refs and sources inside empty static loops" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.looped",
+        .name = "looped",
+        .path = "looped.sql",
+        .original_file_path = "models/looped.sql",
+        .raw_code =
+        \\{% set model_names = [] %}
+        \\select 1 as marker
+        \\{% for model_name in model_names %}
+        \\union all select * from {{ ref(model_name) }}
+        \\{% endfor %}
+        \\{% set table_names = [] %}
+        \\{% for table_name in table_names %}
+        \\union all select * from {{ source('raw', table_name) }}
+        \\{% endfor %}
+        ,
+    });
+
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "select 1 as marker") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "union all") == null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "{{") == null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "{%") == null);
 }
 
 test "compileModel rejects static for loops over unknown lists" {
