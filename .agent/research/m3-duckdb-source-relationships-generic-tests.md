@@ -1,7 +1,9 @@
 # M3 DuckDB Source Relationships Generic Test Slice
 
-This slice extends the existing source-backed generic-test execution path to
+This slice extended the existing source-backed generic-test execution path to
 ref-backed `relationships` tests while keeping product runtime behavior in Zig.
+The later source-target extension is documented in
+`.agent/research/m3-duckdb-source-target-relationships.md`.
 
 ## Scope
 
@@ -79,11 +81,11 @@ Fusion references:
 
 ## Stop Conditions
 
-- Source relationship `to` must be a simple `ref(...)` target.
+- Source relationship `to` may be a simple `ref(...)` target in this slice.
+  Literal `source(...)` targets are covered by the follow-up source-target
+  relationship slice.
 - The source relation and referenced target relation must already exist or be
   selected/built by a prior command in the supported workflow.
-- Do not implement source-to-source relationship targets.
-- Do not implement table-level source tests.
 - Do not execute arbitrary test macros or adapter dispatch.
 - Do not add singular tests, unit tests, custom generic tests, custom configs,
   `where`, `limit`, `severity`, `warn_if`, `error_if`, `store_failures`, or

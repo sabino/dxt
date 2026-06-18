@@ -22,6 +22,9 @@ compatibility.
   `arguments.column_name`, including Manifest kwargs and DuckDB `build`
   execution for the existing supported test types while preserving dbt's
   table-level `column_name: null` artifact attachment semantics.
+- Literal `source('source', 'table')` targets for built-in `relationships`
+  generic tests on models, seeds, and sources, including dbt-shaped Manifest
+  source dependency ordering and DuckDB source-to-source execution.
 - Root-project seed column generic-test parsing and DuckDB execution for
   `not_null`, `unique`, explicit `accepted_values` `quote: false`, and
   ref-backed `relationships`, including seed-path schema YAML discovery,

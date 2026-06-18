@@ -658,7 +658,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
         const model_name = modelNameFromUniqueId(attached_node);
         break :blk try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
     } else blk: {
-        const source_ref = if (test_node.source_refs.items.len == 1) test_node.source_refs.items[0] else return error.UnsupportedManifest;
+        const source_ref = test_node.attached_source orelse if (test_node.source_refs.items.len == 1) test_node.source_refs.items[0] else return error.UnsupportedManifest;
         break :blk try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(source('{s}', '{s}')) }}}}", .{ source_ref.source_name, source_ref.table_name });
     };
     defer allocator.free(model_kwarg);
@@ -1080,6 +1080,77 @@ test "manifest writer emits source relationship tests with source and ref deps" 
     try std.testing.expectEqualStrings("{{ get_where_subquery(source('raw', 'orders')) }}", kwargs.get("model").?.string);
     try std.testing.expectEqualStrings("customer_id", kwargs.get("column_name").?.string);
     try std.testing.expectEqualStrings("ref('customers')", kwargs.get("to").?.string);
+    try std.testing.expectEqualStrings("customer_id", kwargs.get("field").?.string);
+}
+
+test "manifest writer emits source relationship tests with source target deps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.orders",
+        .source_name = "raw",
+        .table_name = "orders",
+        .identifier = "raw_orders",
+        .original_file_path = "models/schema.yml",
+    });
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.customers",
+        .source_name = "raw",
+        .table_name = "customers",
+        .identifier = "raw_customers",
+        .original_file_path = "models/schema.yml",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.source_relationships_raw_orders_customer_id__customer_id__source_raw_customers_.abc",
+        .name = "source_relationships_raw_orders_customer_id__customer_id__source_raw_customers_",
+        .alias = "source_relationships_raw_orders_customer_id__customer_id__source_raw_customers_",
+        .path = "source_relationships_raw_orders_customer_id__customer_id__source_raw_customers_.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_relationships(**_dbt_generic_test_kwargs) }}",
+        .test_name = "relationships",
+        .column_name = "customer_id",
+        .relationship_to = "source('raw', 'customers')",
+        .relationship_field = "customer_id",
+        .attached_source = .{ .source_name = "raw", .table_name = "orders" },
+        .relationship_source_to = .{ .source_name = "raw", .table_name = "customers" },
+    });
+    try graph.tests.items[0].source_refs.append(allocator, .{ .source_name = "raw", .table_name = "customers" });
+    try graph.tests.items[0].source_refs.append(allocator, .{ .source_name = "raw", .table_name = "orders" });
+    try graph.tests.items[0].depends_on.append(allocator, "source.demo.raw.customers");
+    try graph.tests.items[0].depends_on.append(allocator, "source.demo.raw.orders");
+    try graph.tests.items[0].macro_depends_on.append(allocator, "macro.dbt.test_relationships");
+    try graph.tests.items[0].macro_depends_on.append(allocator, "macro.dbt.get_where_subquery");
+
+    const rendered = try renderManifest(std.testing.allocator, &graph);
+    defer std.testing.allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    const test_node = root.get("nodes").?.object.get("test.demo.source_relationships_raw_orders_customer_id__customer_id__source_raw_customers_.abc").?.object;
+    try std.testing.expect(test_node.get("attached_node").? == .null);
+    try std.testing.expectEqual(@as(usize, 0), test_node.get("refs").?.array.items.len);
+    const sources = test_node.get("sources").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), sources.len);
+    try std.testing.expectEqualStrings("raw", sources[0].array.items[0].string);
+    try std.testing.expectEqualStrings("customers", sources[0].array.items[1].string);
+    try std.testing.expectEqualStrings("raw", sources[1].array.items[0].string);
+    try std.testing.expectEqualStrings("orders", sources[1].array.items[1].string);
+    const depends_on_nodes = test_node.get("depends_on").?.object.get("nodes").?.array.items;
+    try std.testing.expectEqualStrings("source.demo.raw.customers", depends_on_nodes[0].string);
+    try std.testing.expectEqualStrings("source.demo.raw.orders", depends_on_nodes[1].string);
+    const kwargs = test_node.get("test_metadata").?.object.get("kwargs").?.object;
+    try std.testing.expectEqualStrings("{{ get_where_subquery(source('raw', 'orders')) }}", kwargs.get("model").?.string);
+    try std.testing.expectEqualStrings("customer_id", kwargs.get("column_name").?.string);
+    try std.testing.expectEqualStrings("source('raw', 'customers')", kwargs.get("to").?.string);
     try std.testing.expectEqualStrings("customer_id", kwargs.get("field").?.string);
 }
 

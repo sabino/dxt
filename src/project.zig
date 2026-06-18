@@ -26,6 +26,7 @@ const ModelProperty = types.ModelProperty;
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
 const SourceDef = types.SourceDef;
+const SourceDep = types.SourceDep;
 const Graph = types.Graph;
 const deinitNode = types.deinitNode;
 const deinitGenericTestNode = types.deinitGenericTestNode;
@@ -50,6 +51,7 @@ const parseMacros = project_parse.parseMacros;
 const parseSourcesFromText = project_parse.parseSourcesFromText;
 const parseUnitTestsFromText = project_parse.parseUnitTestsFromText;
 const refDepFromValue = project_parse.refDepFromValue;
+const sourceDepFromValue = project_parse.sourceDepFromValue;
 const synthesizeGenericTestNames = project_parse.synthesizeGenericTestNames;
 const testNameFromYamlItem = project_parse.testNameFromYamlItem;
 const findMatchingParen = project_jinja.findMatchingParen;
@@ -64,6 +66,7 @@ const findDoc = project_resolve.findDoc;
 const findNodeIndexByResourceTypeAndName = project_resolve.findNodeIndexByResourceTypeAndName;
 const resolveDependencies = project_resolve.resolveDependencies;
 const resolveRefDependency = project_resolve.resolveRefDependency;
+const resolveSourceDependency = project_resolve.resolveSourceDependency;
 
 const loader_callbacks = project_loader.Callbacks{
     .parse_doc_blocks = parseDocBlocks,
@@ -1455,13 +1458,22 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
         try test_node.accepted_values.append(graph.allocator, value);
     }
     if (std.mem.eql(u8, test_def.name, "relationships")) {
-        const target_ref = try refDepFromValue(graph.allocator, test_def.relationship_to);
-        try test_node.refs.append(graph.allocator, target_ref);
-        const target_unique_id = try resolveRefDependency(graph, node.package_name, target_ref);
-        try test_node.depends_on.append(graph.allocator, target_unique_id);
+        if (isSourceRelationshipTarget(test_def.relationship_to)) {
+            const target_source = try sourceDepFromValue(graph.allocator, test_def.relationship_to);
+            test_node.relationship_source_to = target_source;
+            try appendSourceDepUnique(graph.allocator, &test_node.source_refs, target_source);
+            const target_unique_id = try resolveSourceDependency(graph, node.package_name, target_source);
+            test_node.relationship_source_to_unique_id = target_unique_id;
+            try appendUnique(graph.allocator, &test_node.depends_on, target_unique_id);
+        } else {
+            const target_ref = try refDepFromValue(graph.allocator, test_def.relationship_to);
+            try test_node.refs.append(graph.allocator, target_ref);
+            const target_unique_id = try resolveRefDependency(graph, node.package_name, target_ref);
+            try appendUnique(graph.allocator, &test_node.depends_on, target_unique_id);
+        }
     }
     try test_node.refs.append(graph.allocator, .{ .package = null, .name = node.name });
-    try test_node.depends_on.append(graph.allocator, node.unique_id);
+    try appendUnique(graph.allocator, &test_node.depends_on, node.unique_id);
     try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
     if (!std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
         try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
@@ -1510,19 +1522,36 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .relationship_to = test_def.relationship_to,
         .relationship_field = test_def.relationship_field,
         .attached_node = null,
+        .attached_source = .{ .source_name = source.source_name, .table_name = source.table_name },
+        .attached_source_unique_id = source.unique_id,
     };
     errdefer deinitGenericTestNode(graph.allocator, &test_node);
 
     for (test_def.accepted_values.items) |value| {
         try test_node.accepted_values.append(graph.allocator, value);
     }
-    try test_node.source_refs.append(graph.allocator, .{ .source_name = source.source_name, .table_name = source.table_name });
-    try test_node.depends_on.append(graph.allocator, source.unique_id);
+    const attached_source_dep = SourceDep{ .source_name = source.source_name, .table_name = source.table_name };
     if (std.mem.eql(u8, test_def.name, "relationships")) {
-        const target_ref = try refDepFromValue(graph.allocator, test_def.relationship_to);
-        try test_node.refs.append(graph.allocator, target_ref);
-        const target_unique_id = try resolveRefDependency(graph, source.package_name, target_ref);
-        try test_node.depends_on.append(graph.allocator, target_unique_id);
+        if (isSourceRelationshipTarget(test_def.relationship_to)) {
+            const target_source = try sourceDepFromValue(graph.allocator, test_def.relationship_to);
+            test_node.relationship_source_to = target_source;
+            try appendSourceDepUnique(graph.allocator, &test_node.source_refs, target_source);
+            const target_unique_id = try resolveSourceDependency(graph, source.package_name, target_source);
+            test_node.relationship_source_to_unique_id = target_unique_id;
+            try appendUnique(graph.allocator, &test_node.depends_on, target_unique_id);
+            try appendSourceDepUnique(graph.allocator, &test_node.source_refs, attached_source_dep);
+            try appendUnique(graph.allocator, &test_node.depends_on, source.unique_id);
+        } else {
+            try appendSourceDepUnique(graph.allocator, &test_node.source_refs, attached_source_dep);
+            try appendUnique(graph.allocator, &test_node.depends_on, source.unique_id);
+            const target_ref = try refDepFromValue(graph.allocator, test_def.relationship_to);
+            try test_node.refs.append(graph.allocator, target_ref);
+            const target_unique_id = try resolveRefDependency(graph, source.package_name, target_ref);
+            try appendUnique(graph.allocator, &test_node.depends_on, target_unique_id);
+        }
+    } else {
+        try appendSourceDepUnique(graph.allocator, &test_node.source_refs, attached_source_dep);
+        try appendUnique(graph.allocator, &test_node.depends_on, source.unique_id);
     }
     try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
     if (!std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
@@ -1537,6 +1566,17 @@ fn genericTestColumnName(test_def: GenericTestDef, fallback: ?[]const u8) ?[]con
 
 fn genericTestNodeColumnName(test_node: *const GenericTestNode) ?[]const u8 {
     return test_node.argument_column_name orelse test_node.column_name;
+}
+
+fn isSourceRelationshipTarget(value: []const u8) bool {
+    return std.mem.startsWith(u8, std.mem.trim(u8, value, " \t\r"), "source(");
+}
+
+fn appendSourceDepUnique(allocator: std.mem.Allocator, values: *std.ArrayList(SourceDep), source_dep: SourceDep) !void {
+    for (values.items) |existing| {
+        if (std.mem.eql(u8, existing.source_name, source_dep.source_name) and std.mem.eql(u8, existing.table_name, source_dep.table_name)) return;
+    }
+    try values.append(allocator, source_dep);
 }
 
 fn isSupportedGenericTest(test_def: GenericTestDef, column_name: ?[]const u8) bool {
