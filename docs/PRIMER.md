@@ -28,6 +28,7 @@ commands are:
 - `dxt run`
 - `dxt build`
 - `dxt docs generate`
+- `dxt docs serve`
 - `dxt source freshness`
 - `dxt version`
 

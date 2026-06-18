@@ -86,7 +86,7 @@ embedded DuckDB or another native adapter boundary, not Python runtime calls.
 
 | Area | Supported Now | Planned |
 | --- | --- | --- |
-| Commands | `parse`, `ls`, `compile`, `run`, `build`, `docs generate`, `source freshness`, `version`, help | `debug`, `clean`, `deps`, `init`, `run-operation`, `snapshot`, `retry`, `clone`, `docs serve` |
+| Commands | `parse`, `ls`, `compile`, `run`, `build`, `docs generate`, `docs serve`, `source freshness`, `version`, help | `debug`, `clean`, `deps`, `init`, `run-operation`, `snapshot`, `retry`, `clone` |
 | Runtime | Zig product runtime | Broader native adapter ABI and runner |
 | Adapter | DuckDB through a Zig-owned external CLI backend | Embedded DuckDB, Postgres, cloud adapters, cross-database planner |
 | Artifacts | `manifest.json`, `run_results.json`, `catalog.json`, `sources.json` slices | fuller dbt schemas, `semantic_manifest.json`, parse cache/state artifacts |

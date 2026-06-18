@@ -6,6 +6,10 @@ import json
 import shutil
 import importlib.util
 import copy
+import socket
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -5833,6 +5837,97 @@ def test_docs_generate_writes_manifest_catalog_and_compiled_sql(tmp_path: Path):
     assert catalog["sources"] == {}
     assert catalog["errors"] is None
     assert str(project) not in catalog_path.read_text()
+
+
+def test_docs_serve_serves_generated_artifacts_without_mutating_them(tmp_path: Path):
+    project = copy_fixture(tmp_path, "docs_blocks")
+    target = tmp_path / "docs-target"
+    generate_result = subprocess.run(
+        [
+            DXT,
+            "docs",
+            "generate",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert generate_result.returncode == 0, generate_result.stderr
+
+    manifest_path = target / "manifest.json"
+    catalog_path = target / "catalog.json"
+    manifest_before = manifest_path.read_bytes()
+    catalog_before = catalog_path.read_bytes()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    server = subprocess.Popen(
+        [
+            DXT,
+            "docs",
+            "serve",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--no-browser",
+        ],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        base_url = f"http://127.0.0.1:{port}"
+        deadline = time.monotonic() + 10
+        while True:
+            if server.poll() is not None:
+                stdout, stderr = server.communicate()
+                raise AssertionError(f"docs serve exited early: stdout={stdout!r} stderr={stderr!r}")
+            try:
+                with urllib.request.urlopen(f"{base_url}/manifest.json", timeout=0.5) as response:
+                    assert response.status == 200
+                    served_manifest = response.read()
+                break
+            except (OSError, urllib.error.URLError):
+                if time.monotonic() >= deadline:
+                    raise AssertionError("docs serve did not start before timeout")
+                time.sleep(0.05)
+
+        assert served_manifest == manifest_before
+        with urllib.request.urlopen(f"{base_url}/catalog.json", timeout=2) as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"].startswith("application/json")
+            assert response.read() == catalog_before
+        with urllib.request.urlopen(f"{base_url}/", timeout=2) as response:
+            assert response.status == 200
+            assert "dxt docs" in response.read().decode()
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(f"{base_url}/../manifest.json", timeout=2)
+        assert exc_info.value.code == 400
+    finally:
+        server.terminate()
+        try:
+            stdout, stderr = server.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            stdout, stderr = server.communicate(timeout=5)
+
+    assert "Serving docs at" in stdout
+    assert "Press Ctrl+C to exit." in stdout
+    assert stderr == ""
+    assert manifest_path.read_bytes() == manifest_before
+    assert catalog_path.read_bytes() == catalog_before
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 docs catalog execution coverage")

@@ -25,6 +25,10 @@ compatibility.
 - Literal `source('source', 'table')` targets for built-in `relationships`
   generic tests on models, seeds, and sources, including dbt-shaped Manifest
   source dependency ordering and DuckDB source-to-source execution.
+- Static `dxt docs serve` command in the Zig runtime, serving generated
+  target-directory docs artifacts over localhost HTTP with dbt-style host,
+  port, no-browser/browser flag parsing, traversal protection, and integration
+  coverage that verifies `manifest.json` and `catalog.json` are not mutated.
 - Root-project seed column generic-test parsing and DuckDB execution for
   `not_null`, `unique`, explicit `accepted_values` `quote: false`, and
   ref-backed `relationships`, including seed-path schema YAML discovery,

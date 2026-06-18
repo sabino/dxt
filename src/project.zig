@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const catalog = @import("project/catalog.zig");
 const compiler = @import("project/compiler.zig");
+const docs_serve = @import("project/docs_serve.zig");
 const duckdb = @import("project/duckdb.zig");
 const project_fs = @import("project/fs.zig");
 const project_jinja = @import("project/jinja.zig");
@@ -203,6 +204,12 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
         compile_result.count,
         util.normalizeForDisplay(target_dir),
     });
+}
+
+pub fn docsServe(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    _ = stderr;
+    const target_dir = try targetDir(runtime, options);
+    try docs_serve.serve(runtime, options, target_dir, stdout);
 }
 
 pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
