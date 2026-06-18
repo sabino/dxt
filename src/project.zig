@@ -1464,6 +1464,12 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
     }
     try test_node.source_refs.append(graph.allocator, .{ .source_name = source.source_name, .table_name = source.table_name });
     try test_node.depends_on.append(graph.allocator, source.unique_id);
+    if (std.mem.eql(u8, test_def.name, "relationships")) {
+        const target_ref = try refDepFromValue(graph.allocator, test_def.relationship_to);
+        try test_node.refs.append(graph.allocator, target_ref);
+        const target_unique_id = try resolveRefDependency(graph, source.package_name, target_ref);
+        try test_node.depends_on.append(graph.allocator, target_unique_id);
+    }
     try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
     if (!std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
         try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
@@ -1481,7 +1487,8 @@ fn isSupportedGenericTest(test_def: GenericTestDef) bool {
 fn isSupportedSourceGenericTest(test_def: GenericTestDef) bool {
     return std.mem.eql(u8, test_def.name, "not_null") or
         std.mem.eql(u8, test_def.name, "unique") or
-        (std.mem.eql(u8, test_def.name, "accepted_values") and test_def.accepted_values.items.len != 0);
+        (std.mem.eql(u8, test_def.name, "accepted_values") and test_def.accepted_values.items.len != 0) or
+        (std.mem.eql(u8, test_def.name, "relationships") and test_def.relationship_to.len != 0 and test_def.relationship_field.len != 0);
 }
 
 fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {

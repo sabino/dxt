@@ -566,11 +566,15 @@ fn genericTestRelationName(allocator: std.mem.Allocator, graph: *const Graph, te
 
 fn findRelationshipTargetNode(graph: *const Graph, test_node: *const GenericTestNode) ?*const Node {
     var attached: ?*const Node = null;
-    const attached_unique_id = test_node.attached_node orelse return null;
     for (test_node.depends_on.items) |unique_id| {
         const node = findNodeByUniqueId(graph, unique_id) orelse continue;
-        if (!std.mem.eql(u8, unique_id, attached_unique_id)) return node;
-        attached = node;
+        if (test_node.attached_node) |attached_unique_id| {
+            if (std.mem.eql(u8, unique_id, attached_unique_id)) {
+                attached = node;
+                continue;
+            }
+        }
+        return node;
     }
     return attached;
 }
@@ -979,6 +983,57 @@ test "renderGenericTestSql renders source generic tests against source relation"
         "select \"customer_id\"\nfrom \"raw\".\"raw_customers\"\nwhere \"customer_id\" is null",
         sql,
     );
+}
+
+test "renderGenericTestSql renders source relationships against ref target" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.orders",
+        .source_name = "raw",
+        .table_name = "orders",
+        .identifier = "raw_orders",
+        .schema_name = "raw",
+        .original_file_path = "models/schema.yml",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1 as customer_id",
+        .materialized = "table",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.source_relationships_raw_orders_customer_id__customer_id__ref_customers_.abc",
+        .name = "source_relationships_raw_orders_customer_id__customer_id__ref_customers_",
+        .alias = "source_relationships_raw_orders_customer_id__customer_id__ref_customers_",
+        .path = "source_relationships_raw_orders_customer_id__customer_id__ref_customers_.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_relationships(**_dbt_generic_test_kwargs) }}",
+        .test_name = "relationships",
+        .column_name = "customer_id",
+        .relationship_to = "ref('customers')",
+        .relationship_field = "customer_id",
+    });
+    try graph.tests.items[0].refs.append(allocator, .{ .package = null, .name = "customers" });
+    try graph.tests.items[0].source_refs.append(allocator, .{ .source_name = "raw", .table_name = "orders" });
+    try graph.tests.items[0].depends_on.append(allocator, "model.demo.customers");
+    try graph.tests.items[0].depends_on.append(allocator, "source.demo.raw.orders");
+
+    const sql = try renderGenericTestSql(allocator, &graph, &graph.tests.items[0]);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "from \"raw\".\"raw_orders\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "from \"main\".\"customers\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "left join parent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "where parent.to_field is null") != null);
 }
 
 test "renderGenericTestSql renders relationships failure row query" {

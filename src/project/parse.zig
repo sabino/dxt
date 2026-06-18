@@ -3071,13 +3071,19 @@ test "parseSourcesFromText records source column generic tests" {
         \\                    - new
         \\                    - returning
         \\                  quote: false
+        \\          - name: parent_customer_id
+        \\            tests:
+        \\              - relationships:
+        \\                  arguments:
+        \\                    to: ref('customers')
+        \\                    field: customer_id
     ;
 
     try parseSourcesFromText(allocator, yaml, "models/schema.yml", "demo", &graph);
 
     try std.testing.expectEqual(@as(usize, 1), graph.sources.items.len);
     const source = graph.sources.items[0];
-    try std.testing.expectEqual(@as(usize, 2), source.columns.items.len);
+    try std.testing.expectEqual(@as(usize, 3), source.columns.items.len);
     try std.testing.expectEqualStrings("customer_id", source.columns.items[0].name);
     try std.testing.expectEqual(@as(usize, 2), source.columns.items[0].tests.items.len);
     try std.testing.expectEqualStrings("not_null", source.columns.items[0].tests.items[0].name);
@@ -3090,6 +3096,12 @@ test "parseSourcesFromText records source column generic tests" {
     try std.testing.expectEqualStrings("new", accepted.accepted_values.items[0]);
     try std.testing.expectEqualStrings("returning", accepted.accepted_values.items[1]);
     try std.testing.expectEqual(false, accepted.accepted_values_quote.?);
+    try std.testing.expectEqualStrings("parent_customer_id", source.columns.items[2].name);
+    try std.testing.expectEqual(@as(usize, 1), source.columns.items[2].tests.items.len);
+    const relationships = source.columns.items[2].tests.items[0];
+    try std.testing.expectEqualStrings("relationships", relationships.name);
+    try std.testing.expectEqualStrings("ref('customers')", relationships.relationship_to);
+    try std.testing.expectEqualStrings("customer_id", relationships.relationship_field);
 }
 
 test "parseUnitTestsFromText records dict fixtures and config" {

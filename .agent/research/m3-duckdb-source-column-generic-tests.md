@@ -9,7 +9,9 @@ This slice adds the first source-backed generic-test execution path for
   `data_tests` entries.
 - Materialize dbt-shaped generic test nodes for supported source column tests.
 - Support DuckDB direct SQL execution for source column `not_null`, `unique`,
-  and default-quoted or explicit `quote: false` `accepted_values` tests.
+  default-quoted or explicit `quote: false` `accepted_values`, and ref-backed
+  `relationships` tests. Source relationships were added by the follow-up slice
+  documented in `.agent/research/m3-duckdb-source-relationships-generic-tests.md`.
 - Let selected source+test build selections, such as
   `--select source:raw.customers+`, execute source column tests against
   already-existing DuckDB source tables.
@@ -54,8 +56,8 @@ dbt Core v2 / Fusion:
   source/resource naming.
 - `crates/dbt-parser/src/resolve/resolve_tests/resolve_data_tests.rs` matches
   dbt Core by leaving `attached_node` unset for source tests.
-- Fusion built-in generic-test SQL macro assets for `not_null`, `unique`, and
-  `accepted_values` remain the SQL behavior reference.
+- Fusion built-in generic-test SQL macro assets for `not_null`, `unique`,
+  `accepted_values`, and `relationships` remain the SQL behavior reference.
 
 ## dxt Ownership
 
@@ -83,10 +85,12 @@ This slice affects `manifest.json` node entries for source generic tests:
 - `test_metadata.kwargs.model` using `source(...)`
 - `test_metadata.kwargs.column_name`
 - optional `test_metadata.kwargs.values`
+- optional `test_metadata.kwargs.to` and `test_metadata.kwargs.field` for
+  relationships
 - `depends_on.nodes` including the source unique id
 - `depends_on.macros` including `macro.dbt.test_<name>` and
-  `macro.dbt.get_where_subquery` for `accepted_values`
-- `refs: []`
+  `macro.dbt.get_where_subquery` for `accepted_values` and `relationships`
+- `refs` containing the target ref for source relationships
 - `sources: [[source_name, table_name]]`
 
 It also writes existing Run Results v6-shaped test rows for executed tests.
@@ -99,7 +103,7 @@ Native Zig coverage:
 - Manifest writer emits source generic tests with `attached_node: null` and
   `source(...)` model kwargs.
 - DuckDB SQL renderer targets the quoted source relation for source column
-  `not_null`, `unique`, and `accepted_values`.
+  `not_null`, `unique`, `accepted_values`, and `relationships`.
 
 Python integration coverage:
 
@@ -111,7 +115,7 @@ Python integration coverage:
 ## Stop Conditions
 
 - Do not implement table-level source tests in this slice.
-- Do not implement source relationship tests in this slice.
+- Do not implement source-to-source relationship targets in this slice.
 - Do not execute arbitrary test macros or adapter dispatch.
 - Do not add singular tests, unit tests, custom generic tests, custom configs,
   `where`, `limit`, `severity`, `warn_if`, `error_if`, `store_failures`, or
