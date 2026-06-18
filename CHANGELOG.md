@@ -18,6 +18,10 @@ compatibility.
 - Future SQLMesh reference-map note for later state, plan/apply,
   environment, audit, incremental, multi-engine gateway, and adapter capability
   design once the dbt Core baseline is mature enough.
+- Table-level model, seed, and source built-in generic tests with explicit
+  `arguments.column_name`, including Manifest kwargs and DuckDB `build`
+  execution for the existing supported test types while preserving dbt's
+  table-level `column_name: null` artifact attachment semantics.
 - Root-project seed column generic-test parsing and DuckDB execution for
   `not_null`, `unique`, explicit `accepted_values` `quote: false`, and
   ref-backed `relationships`, including seed-path schema YAML discovery,

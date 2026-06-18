@@ -1315,6 +1315,61 @@ seeds:
     )
 
 
+def write_table_level_generic_test_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "seeds").mkdir()
+    (project / "dbt_project.yml").write_text(
+        """name: table_level_generic_tests
+version: "1.0"
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: target
+"""
+    )
+    (project / "seeds" / "raw_customers.csv").write_text(
+        "customer_id,customer_name\n1,Ada\n2,Bob\n"
+    )
+    (project / "models" / "customers.sql").write_text(
+        """{{ config(materialized='table') }}
+select try_cast(customer_id as integer) as customer_id, customer_name
+from {{ ref("raw_customers") }}
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: customers
+    config:
+      materialized: table
+    data_tests:
+      - not_null:
+          arguments:
+            column_name: customer_id
+sources:
+  - name: raw
+    tables:
+      - name: orders
+        identifier: raw_orders
+        data_tests:
+          - accepted_values:
+              arguments:
+                column_name: customer_id
+                values: [1, 2]
+                quote: false
+"""
+    )
+    (project / "seeds" / "schema.yml").write_text(
+        """version: 2
+seeds:
+  - name: raw_customers
+    data_tests:
+      - unique:
+          arguments:
+            column_name: customer_id
+"""
+    )
+
+
 def write_supported_model_test_project(project: Path, customers_sql: str) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -2147,6 +2202,151 @@ def test_build_executes_selected_duckdb_seed_model_and_supported_generic_tests(t
     )
     assert query.returncode == 0, query.stderr
     assert query.stdout.strip() == "1,Ada\n2,Bob"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 table-level generic-test build slice")
+def test_build_executes_table_level_model_and_seed_generic_tests(tmp_path: Path):
+    project = tmp_path / "table_level_generic_tests"
+    write_table_level_generic_test_project(project)
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [
+            DXT,
+            "build",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "raw_customers+ +customers+",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 seed(s), 1 model(s), and 2 generic test(s)" in result.stdout
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "seed.table_level_generic_tests.raw_customers",
+        "model.table_level_generic_tests.customers",
+        "test.table_level_generic_tests.not_null_customers_customer_id.5c9bf9911d",
+        "test.table_level_generic_tests.unique_raw_customers_customer_id.4be8a71a17",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["success", "success", "pass", "pass"]
+    manifest = json.loads((target / "manifest.json").read_text())
+    model_test = manifest["nodes"]["test.table_level_generic_tests.not_null_customers_customer_id.5c9bf9911d"]
+    seed_test = manifest["nodes"]["test.table_level_generic_tests.unique_raw_customers_customer_id.4be8a71a17"]
+    assert model_test["column_name"] is None
+    assert model_test["test_metadata"]["kwargs"]["column_name"] == "customer_id"
+    assert seed_test["column_name"] is None
+    assert seed_test["test_metadata"]["kwargs"]["column_name"] == "customer_id"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source table-level generic-test build slice")
+def test_build_executes_table_level_source_generic_test(tmp_path: Path):
+    project = tmp_path / "table_level_generic_tests"
+    write_table_level_generic_test_project(project)
+    target = tmp_path / "build-target"
+    target.mkdir()
+    setup = subprocess.run(
+        [
+            DUCKDB,
+            str(target / "dxt.duckdb"),
+            "-batch",
+            "-bail",
+            "-c",
+            (
+                'create schema raw; '
+                'create table raw.raw_orders as '
+                "select 1 as customer_id union all select 2 as customer_id"
+            ),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    result = subprocess.run(
+        [
+            DXT,
+            "build",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "source:raw.orders+",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 source generic test(s)" in result.stdout
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["pass"]
+    assert "value_field not in (1, 2)" in run_results["results"][0]["compiled_code"]
+    manifest = json.loads((target / "manifest.json").read_text())
+    test_nodes = [
+        node
+        for node in manifest["nodes"].values()
+        if node["resource_type"] == "test" and node["sources"] == [["raw", "orders"]]
+    ]
+    assert len(test_nodes) == 1
+    source_test = test_nodes[0]
+    assert source_test["unique_id"] == (
+        "test.table_level_generic_tests."
+        "source_accepted_values_raw_orders_customer_id__False__1__2.8cc42f6023"
+    )
+    assert source_test["attached_node"] is None
+    assert source_test["column_name"] is None
+    assert source_test["sources"] == [["raw", "orders"]]
+    assert source_test["test_metadata"]["kwargs"] == {
+        "model": "{{ get_where_subquery(source('raw', 'orders')) }}",
+        "column_name": "customer_id",
+        "values": ["1", "2"],
+        "quote": False,
+    }
+
+
+def test_parse_ignores_unsupported_source_table_generic_test_without_column_name(tmp_path: Path):
+    project = tmp_path / "source_table_without_column"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: source_table_without_column
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+sources:
+  - name: raw
+    tables:
+      - name: orders
+        data_tests:
+          - not_null
+"""
+    )
+    target = tmp_path / "parse-target"
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert [node for node in manifest["nodes"].values() if node["resource_type"] == "test"] == []
+    assert manifest["child_map"]["source.source_table_without_column.raw.orders"] == []
 
 
 def test_parse_seed_column_properties_and_tests(tmp_path: Path):

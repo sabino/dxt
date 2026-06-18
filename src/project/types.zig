@@ -177,6 +177,7 @@ pub const ColumnDef = struct {
 
 pub const GenericTestDef = struct {
     name: []const u8,
+    column_name: ?[]const u8 = null,
     accepted_values: std.ArrayList([]const u8) = .empty,
     accepted_values_quote: ?bool = null,
     relationship_to: []const u8 = "",
@@ -292,6 +293,7 @@ pub const GenericTestNode = struct {
     raw_code: []const u8,
     test_name: []const u8,
     column_name: ?[]const u8 = null,
+    argument_column_name: ?[]const u8 = null,
     accepted_values: std.ArrayList([]const u8) = .empty,
     accepted_values_quote: ?bool = null,
     relationship_to: []const u8 = "",

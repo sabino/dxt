@@ -36,7 +36,7 @@ const findMacroIndexByPackageAndName = resolve.findMacroIndexByPackageAndName;
 const FreshnessTimeKey = enum { warn_after, error_after };
 const SourceConfigScope = enum { none, source, table };
 const FreshnessScope = enum { none, source, table };
-const SourceTestTarget = enum { none, column };
+const SourceTestTarget = enum { none, table, column };
 const UnitTestSection = enum { none, given, expect, config };
 const UnitTestRowsTarget = enum { none, given, expect };
 
@@ -127,6 +127,7 @@ pub fn appendGenericTestDef(allocator: std.mem.Allocator, tests: *std.ArrayList(
 pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTestDef), source: GenericTestDef) !void {
     var cloned = GenericTestDef{
         .name = source.name,
+        .column_name = source.column_name,
         .accepted_values_quote = source.accepted_values_quote,
         .relationship_to = source.relationship_to,
         .relationship_field = source.relationship_field,
@@ -998,16 +999,19 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
         if (std.mem.startsWith(u8, trimmed, "- ")) {
             if (active_values_index != null and indent > active_values_indent) {
                 const source = &graph.sources.items[current_table_index orelse return error.UnsupportedYaml];
-                const column_index = current_column orelse return error.UnsupportedYaml;
-                const test_def = try currentSourceGenericTestDef(source, column_index, active_values_target, active_values_index.?);
+                const test_def = try currentSourceGenericTestDef(source, current_column, active_values_target, active_values_index.?);
                 try test_def.accepted_values.append(allocator, try dupTrimmedScalar(allocator, trimmed[2..]));
                 continue;
             }
             if (test_target != .none and indent > tests_indent) {
                 const source = &graph.sources.items[current_table_index orelse return error.UnsupportedYaml];
-                const column_index = current_column orelse return error.UnsupportedYaml;
                 const test_name = try testNameFromYamlItem(allocator, trimmed[2..]);
-                active_test_index = try appendGenericTestDef(allocator, &source.columns.items[column_index].tests, test_name);
+                if (test_target == .table) {
+                    active_test_index = try appendGenericTestDef(allocator, &source.tests, test_name);
+                } else {
+                    const column_index = current_column orelse return error.UnsupportedYaml;
+                    active_test_index = try appendGenericTestDef(allocator, &source.columns.items[column_index].tests, test_name);
+                }
                 active_test_target = test_target;
                 active_test_indent = indent;
                 if (std.mem.indexOfScalar(u8, std.mem.trim(u8, trimmed[2..], " \t\r"), ':') == null) {
@@ -1101,8 +1105,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                     if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
                     continue;
                 }
-                const column_index = current_column orelse return error.UnsupportedYaml;
-                const test_def = try currentSourceGenericTestDef(source, column_index, active_test_target, active_test_index.?);
+                const test_def = try currentSourceGenericTestDef(source, current_column, active_test_target, active_test_index.?);
                 if (std.mem.eql(u8, kv.key, "values")) {
                     if (std.mem.trim(u8, kv.value, " \t").len == 0) {
                         active_values_target = active_test_target;
@@ -1116,6 +1119,9 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                     if (std.mem.eql(u8, test_def.name, "accepted_values")) {
                         test_def.accepted_values_quote = try parseBool(kv.value);
                     }
+                    continue;
+                } else if (std.mem.eql(u8, kv.key, "column_name")) {
+                    test_def.column_name = try dupTrimmedScalar(allocator, kv.value);
                     continue;
                 } else if (std.mem.eql(u8, kv.key, "to")) {
                     test_def.relationship_to = try dupTrimmedScalar(allocator, kv.value);
@@ -1202,6 +1208,17 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 source.identifier = try dupTrimmedScalar(allocator, kv.value);
                 freshness_scope = .none;
                 freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "tests") or std.mem.eql(u8, kv.key, "data_tests")) {
+                if (std.mem.trim(u8, kv.value, " \t").len != 0) {
+                    try parseInlineGenericTestList(allocator, kv.value, &source.tests);
+                } else {
+                    test_target = .table;
+                    tests_indent = indent;
+                    active_test_target = .none;
+                    active_values_target = .none;
+                    active_test_index = null;
+                    active_values_index = null;
+                }
             } else if (std.mem.eql(u8, kv.key, "columns")) {
                 if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
                 in_columns = true;
@@ -1605,8 +1622,12 @@ fn appendUnitTestRowEntry(allocator: std.mem.Allocator, row: *UnitTestRow, raw_e
     try row.entries.append(allocator, .{ .key = try dupTrimmedScalar(allocator, kv.key), .value = try parseJsonScalar(allocator, value) });
 }
 
-fn currentSourceGenericTestDef(source: *types.SourceDef, column_index: usize, target: SourceTestTarget, test_index: usize) !*GenericTestDef {
-    if (target == .column) return &source.columns.items[column_index].tests.items[test_index];
+fn currentSourceGenericTestDef(source: *types.SourceDef, current_column: ?usize, target: SourceTestTarget, test_index: usize) !*GenericTestDef {
+    if (target == .table) return &source.tests.items[test_index];
+    if (target == .column) {
+        const column_index = current_column orelse return error.UnsupportedYaml;
+        return &source.columns.items[column_index].tests.items[test_index];
+    }
     return error.UnsupportedYaml;
 }
 
@@ -3102,6 +3123,50 @@ test "parseSourcesFromText records source column generic tests" {
     try std.testing.expectEqualStrings("relationships", relationships.name);
     try std.testing.expectEqualStrings("ref('customers')", relationships.relationship_to);
     try std.testing.expectEqualStrings("customer_id", relationships.relationship_field);
+}
+
+test "parseSourcesFromText records table-level source generic test column_name arguments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    tables:
+        \\      - name: customers
+        \\        tests:
+        \\          - not_null:
+        \\              arguments:
+        \\                column_name: customer_id
+        \\          - accepted_values:
+        \\              arguments:
+        \\                column_name: customer_type
+        \\                values:
+        \\                  - new
+        \\                  - returning
+        \\                quote: false
+        \\        columns:
+        \\          - name: customer_id
+        \\            description: customer id
+    ;
+
+    try parseSourcesFromText(allocator, yaml, "models/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.sources.items.len);
+    const source = graph.sources.items[0];
+    try std.testing.expectEqual(@as(usize, 2), source.tests.items.len);
+    try std.testing.expectEqualStrings("not_null", source.tests.items[0].name);
+    try std.testing.expectEqualStrings("customer_id", source.tests.items[0].column_name.?);
+    try std.testing.expectEqualStrings("accepted_values", source.tests.items[1].name);
+    try std.testing.expectEqualStrings("customer_type", source.tests.items[1].column_name.?);
+    try std.testing.expectEqual(@as(usize, 2), source.tests.items[1].accepted_values.items.len);
+    try std.testing.expectEqual(false, source.tests.items[1].accepted_values_quote.?);
+    try std.testing.expectEqual(@as(usize, 1), source.columns.items.len);
 }
 
 test "parseUnitTestsFromText records dict fixtures and config" {

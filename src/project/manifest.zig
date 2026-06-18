@@ -624,6 +624,7 @@ fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
 }
 
 fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_node: GenericTestNode) !void {
+    const argument_column_name = genericTestNodeColumnName(&test_node);
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, test_node.unique_id);
     try writer.writeAll(",\"resource_type\":\"test\",\"package_name\":");
@@ -662,7 +663,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     };
     defer allocator.free(model_kwarg);
     try writeJsonString(writer, model_kwarg);
-    if (test_node.column_name) |column_name| {
+    if (argument_column_name) |column_name| {
         try writer.writeAll(",\"column_name\":");
         try writeJsonString(writer, column_name);
     }
@@ -691,6 +692,10 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     try writer.writeAll(",\"sources\":");
     try writeSourceDeps(writer, test_node.source_refs.items);
     try writer.writeAll("}");
+}
+
+fn genericTestNodeColumnName(test_node: *const GenericTestNode) ?[]const u8 {
+    return test_node.argument_column_name orelse test_node.column_name;
 }
 
 fn writeStringArray(writer: *Io.Writer, values: []const []const u8) !void {
@@ -1076,6 +1081,49 @@ test "manifest writer emits source relationship tests with source and ref deps" 
     try std.testing.expectEqualStrings("customer_id", kwargs.get("column_name").?.string);
     try std.testing.expectEqualStrings("ref('customers')", kwargs.get("to").?.string);
     try std.testing.expectEqualStrings("customer_id", kwargs.get("field").?.string);
+}
+
+test "manifest writer keeps table-level explicit column tests detached from top-level column" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1 as customer_id",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_customers_customer_id.abc",
+        .name = "not_null_customers_customer_id",
+        .alias = "not_null_customers_customer_id",
+        .path = "not_null_customers_customer_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .argument_column_name = "customer_id",
+        .attached_node = "model.demo.customers",
+    });
+    try graph.tests.items[0].refs.append(allocator, .{ .package = null, .name = "customers" });
+    try graph.tests.items[0].depends_on.append(allocator, "model.demo.customers");
+    try graph.tests.items[0].macro_depends_on.append(allocator, "macro.dbt.test_not_null");
+
+    const rendered = try renderManifest(std.testing.allocator, &graph);
+    defer std.testing.allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const test_node = parsed.value.object.get("nodes").?.object.get("test.demo.not_null_customers_customer_id.abc").?.object;
+    try std.testing.expect(test_node.get("column_name").? == .null);
+    const kwargs = test_node.get("test_metadata").?.object.get("kwargs").?.object;
+    try std.testing.expectEqualStrings("customer_id", kwargs.get("column_name").?.string);
 }
 
 test "manifest writer filters disabled resources and writes graph maps" {
