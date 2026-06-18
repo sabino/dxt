@@ -52,8 +52,8 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `var()` | Partial | Scalar CLI vars for selected dependency arguments. |
 | `doc()` | Partial | Literal doc references. |
 | `target`, `this` | Partial | Narrow compile context for selected fields. |
-| `{% set %}` / `{% for %}` | Partial | Static string-list assignments and simple loops only. |
-| `execute`, `run_query`, `statement`, adapter introspection | Planned | Parse-time/runtime boundary work remains. |
+| `{% set %}` / `{% for %}` / `{% if %}` | Partial | Static string-list assignments, simple loops, and narrow static conditionals only. |
+| `execute`, `run_query`, `statement`, adapter introspection | Partial/planned | Compile/run-style rendering treats `execute` as true for static `if`; database-backed Jinja behavior remains planned. |
 | Macro execution and dispatch | Partial | Static discovery/dependency extraction plus a narrow Jaffle-style adapter dispatch wrapper rendering subset. |
 
 ## Selectors

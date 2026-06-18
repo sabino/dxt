@@ -33,6 +33,9 @@ compatibility.
   while preserving the legacy text and JSON outputs.
 - Narrow `dxt ls --output json --output-keys ...` filtering for compact
   selected-resource JSON fields.
+- Narrow compile rendering for static `{% if %}` branches, including
+  compile-phase `execute` and static dependency recovery for guarded refs and
+  sources.
 
 ## 0.0.0-pre-alpha
 

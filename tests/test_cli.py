@@ -189,6 +189,70 @@ def test_compile_expands_static_jinja_set_for_loop(tmp_path: Path):
     assert "{%" not in compiled
 
 
+def write_static_if_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+
+sources:
+  - name: raw
+    tables:
+      - name: events
+"""
+    )
+    (project / "dbt_project.yml").write_text(
+        """name: static_if_compile
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text("select 1 as id\n")
+    (project / "models" / "events.sql").write_text(
+        """select 1 as id
+{% if execute %}
+union all select * from {{ ref('customers') }}
+union all select * from {{ source('raw', 'events') }}
+{% else %}
+union all select 0 as id
+{% endif %}
+{% if not is_incremental() %}
+where id >= 0
+{% endif %}
+"""
+    )
+
+
+def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: Path):
+    project = tmp_path / "static_if_compile"
+    write_static_if_project(project)
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "events"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    compiled = (target / "compiled" / "static_if_compile" / "models" / "events.sql").read_text()
+    assert 'union all select * from "main"."customers"' in compiled
+    assert 'union all select * from "raw"."events"' in compiled
+    assert "where id >= 0" in compiled
+    assert "union all select 0 as id" not in compiled
+    assert "{{" not in compiled
+    assert "{%" not in compiled
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    events = manifest["nodes"]["model.static_if_compile.events"]
+    assert events["depends_on"]["nodes"] == [
+        "model.static_if_compile.customers",
+        "source.static_if_compile.raw.events",
+    ]
+    assert events["refs"] == [{"name": "customers", "package": None, "version": None}]
+    assert events["sources"] == [["raw", "events"]]
+
+
 def test_compile_and_docs_generate_render_jaffle_style_macro_dispatch(tmp_path: Path):
     project = copy_fixture(tmp_path, "macro_dispatch_compile")
 
