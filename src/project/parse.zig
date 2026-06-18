@@ -14,6 +14,7 @@ const MacroArgument = types.MacroArgument;
 const MacroProperty = types.MacroProperty;
 const MetaEntry = types.MetaEntry;
 const RefDep = types.RefDep;
+const SourceDep = types.SourceDep;
 const UnitTestFixture = types.UnitTestFixture;
 const UnitTestRow = types.UnitTestRow;
 const KeyValue = util.KeyValue;
@@ -811,6 +812,19 @@ pub fn refDepFromValue(allocator: std.mem.Allocator, value: []const u8) !RefDep 
         };
     }
     return .{ .package = null, .name = try dupTrimmedScalar(allocator, trimmed) };
+}
+
+pub fn sourceDepFromValue(allocator: std.mem.Allocator, value: []const u8) !SourceDep {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    if (!std.mem.startsWith(u8, trimmed, "source(")) return error.UnsupportedSource;
+    const open = std.mem.indexOfScalar(u8, trimmed, '(') orelse return error.UnsupportedSource;
+    const close = findMatchingParen(trimmed, open) orelse return error.UnsupportedSource;
+    if (std.mem.trim(u8, trimmed[close + 1 ..], " \t\r").len != 0) return error.UnsupportedSource;
+    const args = std.mem.trim(u8, trimmed[open + 1 .. close], " \t\r");
+    var strings = try parseLiteralArgs(allocator, args, error.UnsupportedSource);
+    defer strings.deinit(allocator);
+    if (strings.items.len != 2) return error.UnsupportedSource;
+    return .{ .source_name = strings.items[0], .table_name = strings.items[1] };
 }
 
 pub fn parseExposureDependency(allocator: std.mem.Allocator, raw_value: []const u8, exposure: *ExposureDef) !void {
@@ -2772,6 +2786,28 @@ test "refDepFromValue rejects unsupported dynamic or malformed refs" {
     try std.testing.expectError(error.UnsupportedRef, refDepFromValue(allocator, "ref(var('model'))"));
     try std.testing.expectError(error.UnsupportedRef, refDepFromValue(allocator, "ref('pkg', 'orders', 'extra')"));
     try std.testing.expectError(error.UnsupportedRef, refDepFromValue(allocator, "ref('orders'"));
+}
+
+test "sourceDepFromValue parses literal source relationship targets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source_dep = try sourceDepFromValue(allocator, " source('raw', \"customers\") ");
+    try std.testing.expectEqualStrings("raw", source_dep.source_name);
+    try std.testing.expectEqualStrings("customers", source_dep.table_name);
+}
+
+test "sourceDepFromValue rejects non-source and malformed source targets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(error.UnsupportedSource, sourceDepFromValue(allocator, "ref('customers')"));
+    try std.testing.expectError(error.UnsupportedSource, sourceDepFromValue(allocator, "source('raw')"));
+    try std.testing.expectError(error.UnsupportedSource, sourceDepFromValue(allocator, "source(var('raw'), 'customers')"));
+    try std.testing.expectError(error.UnsupportedSource, sourceDepFromValue(allocator, "source('raw', 'customers'"));
+    try std.testing.expectError(error.UnsupportedSource, sourceDepFromValue(allocator, "source('raw', 'customers') ~ '_suffix'"));
 }
 
 test "parseExposureDependency records ref and source dependencies" {

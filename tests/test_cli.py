@@ -1541,6 +1541,95 @@ sources:
     )
 
 
+def write_source_to_source_relationships_test_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: source_to_source_relationship_tests
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: orders
+        identifier: raw_orders
+        columns:
+          - name: customer_id
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('raw', 'customers')
+                    field: customer_id
+      - name: customers
+        identifier: raw_customers
+        columns:
+          - name: customer_id
+"""
+    )
+
+
+def write_source_target_relationships_manifest_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "seeds").mkdir()
+    (project / "dbt_project.yml").write_text(
+        """name: source_target_relationship_tests
+version: "1.0"
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: target
+"""
+    )
+    (project / "models" / "orders_model.sql").write_text("select 1 as customer_id\n")
+    (project / "seeds" / "orders_seed.csv").write_text("customer_id\n1\n")
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: orders_model
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              arguments:
+                to: source('raw', 'customers')
+                field: customer_id
+sources:
+  - name: raw
+    tables:
+      - name: orders
+        identifier: raw_orders
+        columns:
+          - name: customer_id
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('raw', 'customers')
+                    field: customer_id
+      - name: customers
+        identifier: raw_customers
+        columns:
+          - name: customer_id
+"""
+    )
+    (project / "seeds" / "schema.yml").write_text(
+        """version: 2
+seeds:
+  - name: orders_seed
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              arguments:
+                to: source('raw', 'customers')
+                field: customer_id
+"""
+    )
+
+
 def write_relationships_model_test_project(project: Path, customers_sql: str, orders_sql: str) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -2033,6 +2122,137 @@ def test_build_reports_failing_duckdb_source_relationships_generic_test(tmp_path
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["fail"]
     assert [item["failures"] for item in run_results["results"]] == [1]
+
+
+def test_parse_records_source_target_relationship_generic_tests(tmp_path: Path):
+    project = tmp_path / "source_target_relationship_tests"
+    write_source_target_relationships_manifest_project(project)
+    target = tmp_path / "parse-target"
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+    manifest = json.loads((target / "manifest.json").read_text())
+    tests = {
+        node["name"]: node
+        for node in manifest["nodes"].values()
+        if node["resource_type"] == "test"
+    }
+    assert sorted(tests) == [
+        "relationships_orders_model_customer_id__customer_id__source_raw_customers_",
+        "relationships_orders_seed_customer_id__customer_id__source_raw_customers_",
+        "source_relationships_raw_orders_customer_id__customer_id__source_raw_customers_",
+    ]
+
+    model_test = tests["relationships_orders_model_customer_id__customer_id__source_raw_customers_"]
+    assert model_test["attached_node"] == "model.source_target_relationship_tests.orders_model"
+    assert model_test["refs"] == [{"name": "orders_model", "package": None, "version": None}]
+    assert model_test["sources"] == [["raw", "customers"]]
+    assert model_test["depends_on"]["nodes"] == [
+        "source.source_target_relationship_tests.raw.customers",
+        "model.source_target_relationship_tests.orders_model",
+    ]
+    assert model_test["test_metadata"]["kwargs"] == {
+        "model": "{{ get_where_subquery(ref('orders_model')) }}",
+        "column_name": "customer_id",
+        "to": "source('raw', 'customers')",
+        "field": "customer_id",
+    }
+
+    seed_test = tests["relationships_orders_seed_customer_id__customer_id__source_raw_customers_"]
+    assert seed_test["attached_node"] == "seed.source_target_relationship_tests.orders_seed"
+    assert seed_test["refs"] == [{"name": "orders_seed", "package": None, "version": None}]
+    assert seed_test["sources"] == [["raw", "customers"]]
+    assert seed_test["depends_on"]["nodes"] == [
+        "source.source_target_relationship_tests.raw.customers",
+        "seed.source_target_relationship_tests.orders_seed",
+    ]
+    assert seed_test["test_metadata"]["kwargs"]["model"] == "{{ get_where_subquery(ref('orders_seed')) }}"
+    assert seed_test["test_metadata"]["kwargs"]["to"] == "source('raw', 'customers')"
+
+    source_test = tests["source_relationships_raw_orders_customer_id__customer_id__source_raw_customers_"]
+    assert source_test["attached_node"] is None
+    assert source_test["refs"] == []
+    assert source_test["sources"] == [["raw", "customers"], ["raw", "orders"]]
+    assert source_test["depends_on"]["nodes"] == [
+        "source.source_target_relationship_tests.raw.customers",
+        "source.source_target_relationship_tests.raw.orders",
+    ]
+    assert source_test["test_metadata"]["kwargs"] == {
+        "model": "{{ get_where_subquery(source('raw', 'orders')) }}",
+        "column_name": "customer_id",
+        "to": "source('raw', 'customers')",
+        "field": "customer_id",
+    }
+    assert source_test["unique_id"] in manifest["child_map"]["source.source_target_relationship_tests.raw.orders"]
+    assert source_test["unique_id"] in manifest["child_map"]["source.source_target_relationship_tests.raw.customers"]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source-target relationships build execution slice")
+def test_build_executes_selected_duckdb_source_to_source_relationships_generic_test(tmp_path: Path):
+    project = tmp_path / "source_to_source_relationship_tests"
+    write_source_to_source_relationships_test_project(project)
+    target = tmp_path / "build-target"
+    target.mkdir()
+    setup = subprocess.run(
+        [
+            DUCKDB,
+            str(target / "dxt.duckdb"),
+            "-batch",
+            "-bail",
+            "-c",
+            (
+                "create schema raw; "
+                "create table raw.raw_customers as select 1 as customer_id union all select 2 as customer_id; "
+                "create table raw.raw_orders as "
+                "select 10 as order_id, 1 as customer_id union all "
+                "select 11 as order_id, null as customer_id"
+            ),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "source:raw.orders+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 source generic test(s)" in result.stdout
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["pass"]
+    assert [item["failures"] for item in run_results["results"]] == [0]
+    assert '"raw"."raw_orders"' in run_results["results"][0]["compiled_code"]
+    assert '"raw"."raw_customers"' in run_results["results"][0]["compiled_code"]
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    test_nodes = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
+    assert len(test_nodes) == 1
+    source_test = test_nodes[0]
+    assert source_test["name"] == "source_relationships_raw_orders_customer_id__customer_id__source_raw_customers_"
+    assert source_test["attached_node"] is None
+    assert source_test["refs"] == []
+    assert source_test["sources"] == [["raw", "customers"], ["raw", "orders"]]
+    assert source_test["depends_on"]["nodes"] == [
+        "source.source_to_source_relationship_tests.raw.customers",
+        "source.source_to_source_relationship_tests.raw.orders",
+    ]
+    assert source_test["test_metadata"]["kwargs"] == {
+        "model": "{{ get_where_subquery(source('raw', 'orders')) }}",
+        "column_name": "customer_id",
+        "to": "source('raw', 'customers')",
+        "field": "customer_id",
+    }
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 relationships build execution slice")
