@@ -36,6 +36,15 @@ const ForBlock = struct {
     end_tag_close: usize,
 };
 
+const IfBlock = struct {
+    condition_value: bool,
+    body_start: usize,
+    body_end: usize,
+    else_body_start: ?usize = null,
+    else_body_end: ?usize = null,
+    end_tag_close: usize,
+};
+
 const CompileContext = struct {
     allocator: std.mem.Allocator,
     graph: *const Graph,
@@ -160,6 +169,7 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
         } else {
             if (context.macro_render_depth > 0) return error.UnsupportedJinja;
             if (isEndForStatement(span)) return error.UnsupportedJinja;
+            if (isEndIfStatement(span) or isElseStatement(span) or isElifStatement(span)) return error.UnsupportedJinja;
             if (isForStatement(span)) {
                 const block = try parseForBlock(sql, close + 2, span);
                 const values = context.getList(block.list_name) orelse return error.UnsupportedJinja;
@@ -174,6 +184,16 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                     };
                     context.popVar();
                     context.popScope();
+                }
+                index = block.end_tag_close;
+                continue;
+            }
+            if (isIfStatement(span)) {
+                const block = try parseIfBlock(sql, close + 2, span);
+                if (block.condition_value) {
+                    try renderRange(context, sql, block.body_start, block.body_end, out);
+                } else if (block.else_body_start) |else_start| {
+                    try renderRange(context, sql, else_start, block.else_body_end.?, out);
                 }
                 index = block.end_tag_close;
                 continue;
@@ -577,6 +597,43 @@ fn isElseStatement(span: []const u8) bool {
     return std.mem.eql(u8, span, "else");
 }
 
+fn isIfStatement(span: []const u8) bool {
+    return std.mem.startsWith(u8, span, "if ") or std.mem.eql(u8, span, "if");
+}
+
+fn isEndIfStatement(span: []const u8) bool {
+    return std.mem.eql(u8, span, "endif");
+}
+
+fn isElifStatement(span: []const u8) bool {
+    return std.mem.startsWith(u8, span, "elif ") or std.mem.eql(u8, span, "elif");
+}
+
+fn parseIfBlock(sql: []const u8, body_start: usize, span: []const u8) !IfBlock {
+    const condition_value = try parseStaticIfCondition(span);
+    const endif = try findMatchingEndIf(sql, body_start);
+    return .{
+        .condition_value = condition_value,
+        .body_start = body_start,
+        .body_end = endif.body_end,
+        .else_body_start = endif.else_body_start,
+        .else_body_end = endif.else_body_end,
+        .end_tag_close = endif.end_tag_close,
+    };
+}
+
+fn parseStaticIfCondition(span: []const u8) !bool {
+    if (!isIfStatement(span)) return error.UnsupportedJinja;
+    const condition = std.mem.trim(u8, span["if".len..], " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(condition, "true")) return true;
+    if (std.ascii.eqlIgnoreCase(condition, "false")) return false;
+    if (std.mem.eql(u8, condition, "execute")) return true;
+    if (std.mem.eql(u8, condition, "not execute")) return false;
+    if (std.mem.eql(u8, condition, "is_incremental()")) return false;
+    if (std.mem.eql(u8, condition, "not is_incremental()")) return true;
+    return error.UnsupportedJinja;
+}
+
 fn parseForBlock(sql: []const u8, body_start: usize, span: []const u8) !ForBlock {
     var index: usize = "for".len;
     index = jinja.skipWs(span, index);
@@ -607,6 +664,58 @@ fn parseForBlock(sql: []const u8, body_start: usize, span: []const u8) !ForBlock
         .body_end = endfor.start,
         .end_tag_close = endfor.close,
     };
+}
+
+const EndIfTag = struct {
+    body_end: usize,
+    else_body_start: ?usize = null,
+    else_body_end: ?usize = null,
+    end_tag_close: usize,
+};
+
+fn findMatchingEndIf(sql: []const u8, start: usize) !EndIfTag {
+    var index = start;
+    var depth: usize = 1;
+    var else_start: ?usize = null;
+    var else_close: ?usize = null;
+    while (index + 1 < sql.len) {
+        if (sql[index] != '{') {
+            index += 1;
+            continue;
+        }
+        if (sql[index + 1] == '#') {
+            const close = std.mem.indexOfPos(u8, sql, index + 2, "#}") orelse return error.UnsupportedJinja;
+            index = close + 2;
+            continue;
+        }
+        if (sql[index + 1] != '%') {
+            index += 1;
+            continue;
+        }
+        const close = std.mem.indexOfPos(u8, sql, index + 2, "%}") orelse return error.UnsupportedJinja;
+        const span = std.mem.trim(u8, sql[index + 2 .. close], " \t\r\n-");
+        if (isIfStatement(span)) {
+            depth += 1;
+        } else if (isEndIfStatement(span)) {
+            depth -= 1;
+            if (depth == 0) {
+                return .{
+                    .body_end = else_start orelse index,
+                    .else_body_start = else_close,
+                    .else_body_end = if (else_start != null) index else null,
+                    .end_tag_close = close + 2,
+                };
+            }
+        } else if (depth == 1 and isElifStatement(span)) {
+            return error.UnsupportedJinja;
+        } else if (depth == 1 and isElseStatement(span)) {
+            if (else_start != null) return error.UnsupportedJinja;
+            else_start = index;
+            else_close = close + 2;
+        }
+        index = close + 2;
+    }
+    return error.UnsupportedJinja;
 }
 
 const EndForTag = struct {
@@ -1099,6 +1208,53 @@ test "compileModel rejects unsupported for else blocks" {
     try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
 }
 
+test "compileModel renders static if branches for render-only context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select {% if false %}0{% else %}1{% endif %} as value, {% if execute %}'compile'{% else %}'parse'{% endif %} as mode, {% if not execute %}0{% else %}1{% endif %} as executes, {% if is_incremental() %}1{% else %}0{% endif %} as incremental",
+    });
+
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select 1 as value, 'compile' as mode, 1 as executes, 0 as incremental", compiled);
+}
+
+test "compileModel rejects unsupported if conditions and elif branches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.dynamic_if",
+        .name = "dynamic_if",
+        .path = "dynamic_if.sql",
+        .original_file_path = "models/dynamic_if.sql",
+        .raw_code = "{% if var('enabled') %}select 1{% endif %}",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.elif",
+        .name = "elif",
+        .path = "elif.sql",
+        .original_file_path = "models/elif.sql",
+        .raw_code = "{% if false %}select 1{% elif true %}select 2{% endif %}",
+    });
+
+    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[1]));
+}
+
 test "compileModel validates unsupported syntax inside empty static loops" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1111,7 +1267,7 @@ test "compileModel validates unsupported syntax inside empty static loops" {
         .name = "orders",
         .path = "orders.sql",
         .original_file_path = "models/orders.sql",
-        .raw_code = "{% set xs = [] %}{% for x in xs %}{% if true %}{{ x }}{% endif %}{% endfor %}select 1",
+        .raw_code = "{% set xs = [] %}{% for x in xs %}{% if var('enabled') %}{{ x }}{% endif %}{% endfor %}select 1",
     });
 
     try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));

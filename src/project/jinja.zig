@@ -757,6 +757,36 @@ test "sql scanner tolerates is_incremental while extracting config" {
     try std.testing.expect(node.inline_materialized);
 }
 
+test "sql scanner records refs and sources inside false jinja branches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.events",
+        .name = "events",
+        .path = "events.sql",
+        .original_file_path = "models/events.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator,
+        \\select 1
+        \\{% if execute %}
+        \\union all select * from {{ ref('orders') }}
+        \\union all select * from {{ source('raw', 'events') }}
+        \\{% endif %}
+    , &node, null);
+
+    try std.testing.expectEqual(@as(usize, 1), node.refs.items.len);
+    try std.testing.expectEqualStrings("orders", node.refs.items[0].name);
+    try std.testing.expectEqual(@as(usize, 1), node.source_refs.items.len);
+    try std.testing.expectEqualStrings("raw", node.source_refs.items[0].source_name);
+    try std.testing.expectEqualStrings("events", node.source_refs.items[0].table_name);
+}
+
 test "sql scanner records known unqualified and package macro calls" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
