@@ -24,8 +24,12 @@ pub fn findDoc(graph: *const Graph, unique_id: []const u8) ?DocBlock {
 }
 
 pub fn findModelIndexByName(graph: *const Graph, package_name: []const u8, name: []const u8) ?usize {
+    return findNodeIndexByResourceTypeAndName(graph, package_name, "model", name);
+}
+
+pub fn findNodeIndexByResourceTypeAndName(graph: *const Graph, package_name: []const u8, resource_type: []const u8, name: []const u8) ?usize {
     for (graph.nodes.items, 0..) |node, index| {
-        if (std.mem.eql(u8, node.package_name, package_name) and std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, node.name, name)) return index;
+        if (std.mem.eql(u8, node.package_name, package_name) and std.mem.eql(u8, node.resource_type, resource_type) and std.mem.eql(u8, node.name, name)) return index;
     }
     return null;
 }

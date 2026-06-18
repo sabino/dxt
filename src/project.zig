@@ -61,7 +61,7 @@ const countActiveExposures = project_resolve.countActiveExposures;
 const countActiveNodes = project_resolve.countActiveNodes;
 const countActiveSeeds = project_resolve.countActiveSeeds;
 const findDoc = project_resolve.findDoc;
-const findModelIndexByName = project_resolve.findModelIndexByName;
+const findNodeIndexByResourceTypeAndName = project_resolve.findNodeIndexByResourceTypeAndName;
 const resolveDependencies = project_resolve.resolveDependencies;
 const resolveRefDependency = project_resolve.resolveRefDependency;
 
@@ -374,6 +374,44 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         });
         return;
     }
+    if (selected_kinds.seed != 0 and selected_kinds.model == 0 and selected_kinds.seed + selected_kinds.test_resource == selected_kinds.total) {
+        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedBuildAdapterExecution;
+        const seed_nodes = try selectedSeedExecutionOrder(runtime, &graph, selected);
+        defer runtime.allocator.free(seed_nodes);
+        try validateSeedExecution(&graph, seed_nodes);
+
+        const test_nodes = try selectedGenericTestExecutionOrder(runtime, &graph, selected);
+        defer runtime.allocator.free(test_nodes);
+        try validateGenericTestExecution(test_nodes);
+        try validateGenericTestsAttachToSelectedNodes(test_nodes, selected);
+
+        const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+        var executed: std.ArrayList(run_results.NodeResult) = .empty;
+        defer {
+            deinitRunResults(runtime.allocator, executed.items);
+            executed.deinit(runtime.allocator);
+        }
+        for (seed_nodes) |node| {
+            try duckdb.executeSeed(runtime, db_path, options.project_dir, &graph, node);
+            try executed.append(runtime.allocator, .{ .node = node });
+        }
+        const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
+
+        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
+        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
+        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try stdout.print("Built {d} seed(s) and {d} generic test(s) into {s}; wrote artifacts into {s}\n", .{
+            seed_nodes.len,
+            test_nodes.len,
+            util.normalizeForDisplay(db_path),
+            util.normalizeForDisplay(manifest_path),
+        });
+        if (test_summary.failed_tests != 0) {
+            try stdout.print("{d} generic test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
+            return error.TestFailure;
+        }
+        return;
+    }
     if (selected_kinds.test_resource == selected_kinds.total) {
         if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedTestExecution;
         const test_nodes = try selectedGenericTestExecutionOrder(runtime, &graph, selected);
@@ -477,7 +515,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         const test_nodes = try selectedGenericTestExecutionOrder(runtime, &graph, selected);
         defer runtime.allocator.free(test_nodes);
         try validateGenericTestExecution(test_nodes);
-        try validateGenericTestsAttachToSelectedModels(test_nodes, selected);
+        try validateGenericTestsAttachToSelectedNodes(test_nodes, selected);
 
         const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
         var executed: std.ArrayList(run_results.NodeResult) = .empty;
@@ -683,7 +721,7 @@ fn validateGenericTestExecution(nodes: []const *GenericTestNode) !void {
     }
 }
 
-fn validateGenericTestsAttachToSelectedModels(nodes: []const *GenericTestNode, selected: []const selector.SelectedResource) !void {
+fn validateGenericTestsAttachToSelectedNodes(nodes: []const *GenericTestNode, selected: []const selector.SelectedResource) !void {
     for (nodes) |test_node| {
         const attached_node = test_node.attached_node orelse return error.UnsupportedTestExecution;
         if (!selectionContains(selected, attached_node)) return error.UnsupportedTestExecution;
@@ -925,6 +963,41 @@ test "parseModelPropertiesFromText records accepted_values quote false" {
     try std.testing.expectEqual(false, accepted.accepted_values_quote.?);
 }
 
+test "parseModelPropertiesFromText records seed column generic tests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\seeds:
+        \\  - name: raw_customers
+        \\    columns:
+        \\      - name: customer_id
+        \\        tests:
+        \\          - not_null
+        \\          - accepted_values:
+        \\              arguments:
+        \\                values: [1, 2]
+        \\                quote: false
+    ;
+
+    try parseModelPropertiesFromText(allocator, yaml, "models/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.model_properties.items.len);
+    const property = graph.model_properties.items[0];
+    try std.testing.expectEqualStrings("seed", property.resource_type);
+    try std.testing.expectEqualStrings("raw_customers", property.name);
+    const column = property.columns.items[0];
+    try std.testing.expectEqualStrings("customer_id", column.name);
+    try std.testing.expectEqual(@as(usize, 2), column.tests.items.len);
+    try std.testing.expectEqualStrings("not_null", column.tests.items[0].name);
+    try std.testing.expectEqualStrings("accepted_values", column.tests.items[1].name);
+    try std.testing.expectEqual(false, column.tests.items[1].accepted_values_quote.?);
+}
+
 fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
@@ -980,6 +1053,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
     var in_models = false;
     var in_columns = false;
     var in_config = false;
+    var active_resource_type: []const u8 = "model";
     var test_target: TestTarget = .none;
     var active_test_target: TestTarget = .none;
     var active_values_target: TestTarget = .none;
@@ -1002,10 +1076,11 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
         if (trimmed.len == 0) continue;
         const indent = leadingSpaces(line);
 
-        if (std.mem.eql(u8, trimmed, "models:")) {
+        if (std.mem.eql(u8, trimmed, "models:") or std.mem.eql(u8, trimmed, "seeds:")) {
             in_models = true;
             in_columns = false;
             in_config = false;
+            active_resource_type = if (std.mem.eql(u8, trimmed, "seeds:")) "seed" else "model";
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -1019,7 +1094,19 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             continue;
         }
         if (!in_models) continue;
-        if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:")) break;
+        if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:") and !std.mem.eql(u8, trimmed, "seeds:")) {
+            in_models = false;
+            in_columns = false;
+            in_config = false;
+            test_target = .none;
+            active_test_target = .none;
+            active_values_target = .none;
+            current_model = null;
+            current_column = null;
+            active_test_index = null;
+            active_values_index = null;
+            continue;
+        }
 
         if (test_target != .none and indent <= tests_indent and !std.mem.startsWith(u8, trimmed, "- ")) {
             test_target = .none;
@@ -1084,7 +1171,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                     active_values_index = null;
                     in_config = false;
                 } else {
-                    try graph.model_properties.append(allocator, .{ .package_name = package_name, .name = name, .patch_path = relative_path });
+                    try graph.model_properties.append(allocator, .{ .package_name = package_name, .resource_type = active_resource_type, .name = name, .patch_path = relative_path });
                     current_model = graph.model_properties.items.len - 1;
                     current_column = null;
                     model_item_indent = indent;
@@ -1234,14 +1321,14 @@ fn parseSeed(runtime: Runtime, seed_root: []const u8, relative_path: []const u8,
 fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
     for (graph.model_properties.items) |property| {
         if (!std.mem.eql(u8, property.package_name, package_name)) continue;
-        const node_index = findModelIndexByName(graph, property.package_name, property.name) orelse {
-            try graph.unmatched_model_properties.append(graph.allocator, .{ .name = property.name, .patch_path = property.patch_path });
+        const node_index = findNodeIndexByResourceTypeAndName(graph, property.package_name, property.resource_type, property.name) orelse {
+            try graph.unmatched_model_properties.append(graph.allocator, .{ .resource_type = property.resource_type, .name = property.name, .patch_path = property.patch_path });
             continue;
         };
         var node = &graph.nodes.items[node_index];
         node.patch_path = property.patch_path;
         if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.package_name, property.description, &node.doc_blocks);
-        if (property.materialized.len != 0 and !node.inline_materialized) node.materialized = property.materialized;
+        if (std.mem.eql(u8, node.resource_type, "model") and property.materialized.len != 0 and !node.inline_materialized) node.materialized = property.materialized;
         if (property.enabled) |enabled| node.enabled = enabled;
         for (property.tags.items) |tag| {
             try appendUnique(graph.allocator, &node.tags, tag);
@@ -1260,7 +1347,7 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
 
 fn materializeGenericTests(graph: *Graph) !void {
     for (graph.nodes.items) |*node| {
-        if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
+        if (!node.enabled or (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed"))) continue;
         for (node.tests.items) |test_def| {
             if (isSupportedGenericTest(test_def)) {
                 try appendGenericTestNode(graph, node, test_def, null);
@@ -1399,7 +1486,7 @@ fn isSupportedSourceGenericTest(test_def: GenericTestDef) bool {
 
 fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
     for (graph.unmatched_model_properties.items) |property| {
-        try stderr.print("warning: did not find matching node for model property `{s}` in {s}\n", .{ property.name, util.normalizeForDisplay(property.patch_path) });
+        try stderr.print("warning: did not find matching {s} node for property `{s}` in {s}\n", .{ property.resource_type, property.name, util.normalizeForDisplay(property.patch_path) });
     }
     for (graph.unmatched_macro_properties.items) |property| {
         try stderr.print("warning: did not find matching macro for macro property `{s}` in {s}\n", .{ property.name, util.normalizeForDisplay(property.patch_path) });

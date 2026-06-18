@@ -111,14 +111,28 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     for (config.seed_paths.items) |seed_path| {
         var seed_files: std.ArrayList([]const u8) = .empty;
         defer seed_files.deinit(runtime.allocator);
+        var yaml_files: std.ArrayList([]const u8) = .empty;
+        defer yaml_files.deinit(runtime.allocator);
 
         const root = try pathJoin(runtime.allocator, &.{ options.project_dir, seed_path });
         discoverSeedFiles(runtime, root, seed_path, &seed_files) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
+        var sql_files: std.ArrayList([]const u8) = .empty;
+        defer sql_files.deinit(runtime.allocator);
+        var md_files: std.ArrayList([]const u8) = .empty;
+        defer md_files.deinit(runtime.allocator);
+        discoverProjectFiles(runtime, root, seed_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
         sortStrings(seed_files.items);
+        sortStrings(yaml_files.items);
 
+        for (yaml_files.items) |yaml_path| {
+            try callbacks.parse_yaml_properties(runtime, options.project_dir, seed_path, yaml_path, config.name, &graph);
+        }
         for (seed_files.items) |relative_path| {
             try callbacks.parse_seed(runtime, seed_path, relative_path, config.name, &graph);
         }
@@ -250,14 +264,28 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
         for (package_config.seed_paths.items) |seed_path| {
             var seed_files: std.ArrayList([]const u8) = .empty;
             defer seed_files.deinit(runtime.allocator);
+            var yaml_files: std.ArrayList([]const u8) = .empty;
+            defer yaml_files.deinit(runtime.allocator);
 
             const root = try pathJoin(runtime.allocator, &.{ package_dir, seed_path });
             discoverSeedFiles(runtime, root, seed_path, &seed_files) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => return err,
             };
+            var sql_files: std.ArrayList([]const u8) = .empty;
+            defer sql_files.deinit(runtime.allocator);
+            var md_files: std.ArrayList([]const u8) = .empty;
+            defer md_files.deinit(runtime.allocator);
+            discoverProjectFiles(runtime, root, seed_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
             sortStrings(seed_files.items);
+            sortStrings(yaml_files.items);
 
+            for (yaml_files.items) |yaml_path| {
+                try callbacks.parse_yaml_properties(runtime, package_dir, seed_path, yaml_path, package_config.name, graph);
+            }
             for (seed_files.items) |relative_path| {
                 try callbacks.parse_seed(runtime, seed_path, relative_path, package_config.name, graph);
             }
