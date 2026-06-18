@@ -119,7 +119,7 @@ pub fn renderSourceFreshnessSql(allocator: std.mem.Allocator, source: *const Sou
     if (loaded_at_expression.len == 0) return error.UnsupportedSourceFreshness;
     const quoted_schema = try compiler.quoteIdentifier(allocator, compiler.sourceSchemaName(source));
     defer allocator.free(quoted_schema);
-    const quoted_table = try compiler.quoteIdentifier(allocator, source.table_name);
+    const quoted_table = try compiler.quoteIdentifier(allocator, compiler.sourceIdentifier(source));
     defer allocator.free(quoted_table);
     const filter = if (source.freshness) |threshold| threshold.filter else null;
     const filter_expression = if (filter) |value| std.mem.trim(u8, value, " \t\r\n") else "";
@@ -214,7 +214,7 @@ fn catalogEntryForNode(allocator: std.mem.Allocator, graph: *const Graph, node: 
 }
 
 fn catalogEntryForSource(allocator: std.mem.Allocator, source: *const SourceDef, rows: []const std.json.Value) !?catalog.CatalogEntry {
-    return try catalogEntryForRelation(allocator, source.unique_id, compiler.sourceSchemaName(source), source.table_name, rows);
+    return try catalogEntryForRelation(allocator, source.unique_id, compiler.sourceSchemaName(source), compiler.sourceIdentifier(source), rows);
 }
 
 fn catalogEntryForRelation(allocator: std.mem.Allocator, unique_id: []const u8, schema_name: []const u8, identifier: []const u8, rows: []const std.json.Value) !?catalog.CatalogEntry {
@@ -559,7 +559,7 @@ fn genericTestRelationName(allocator: std.mem.Allocator, graph: *const Graph, te
     const source = findSourceByRef(graph, test_node.source_refs.items[0]) orelse return error.UnsupportedTestExecution;
     const quoted_schema = try compiler.quoteIdentifier(allocator, compiler.sourceSchemaName(source));
     defer allocator.free(quoted_schema);
-    const quoted_table = try compiler.quoteIdentifier(allocator, source.table_name);
+    const quoted_table = try compiler.quoteIdentifier(allocator, compiler.sourceIdentifier(source));
     defer allocator.free(quoted_table);
     return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ quoted_schema, quoted_table });
 }
@@ -914,6 +914,7 @@ test "renderGenericTestSql renders source generic tests against source relation"
         .unique_id = "source.demo.raw.customers",
         .source_name = "raw",
         .table_name = "customers",
+        .identifier = "raw_customers",
         .original_file_path = "models/schema.yml",
     });
     try graph.tests.append(allocator, .{
@@ -932,7 +933,7 @@ test "renderGenericTestSql renders source generic tests against source relation"
 
     const sql = try renderGenericTestSql(allocator, &graph, &graph.tests.items[0]);
     try std.testing.expectEqualStrings(
-        "select \"customer_id\"\nfrom \"raw\".\"customers\"\nwhere \"customer_id\" is null",
+        "select \"customer_id\"\nfrom \"raw\".\"raw_customers\"\nwhere \"customer_id\" is null",
         sql,
     );
 }
@@ -1145,13 +1146,14 @@ test "catalogEntryForSource maps DuckDB JSON rows to catalog source metadata" {
         .unique_id = "source.demo.raw.customers",
         .source_name = "raw",
         .table_name = "customers",
+        .identifier = "raw_customers",
         .original_file_path = "models/schema.yml",
         .schema_name = "analytics_raw",
     };
 
     const rows_json =
         \\[
-        \\  {"table_schema":"analytics_raw","table_name":"customers","table_type":"BASE TABLE","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"}
+        \\  {"table_schema":"analytics_raw","table_name":"raw_customers","table_type":"BASE TABLE","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"}
         \\]
     ;
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rows_json, .{});
@@ -1164,7 +1166,7 @@ test "catalogEntryForSource maps DuckDB JSON rows to catalog source metadata" {
 
     try std.testing.expectEqualStrings("source.demo.raw.customers", entry.unique_id);
     try std.testing.expectEqualStrings("analytics_raw", entry.schema);
-    try std.testing.expectEqualStrings("customers", entry.name);
+    try std.testing.expectEqualStrings("raw_customers", entry.name);
     try std.testing.expectEqualStrings("BASE TABLE", entry.relation_type);
     try std.testing.expectEqualStrings("customer_id", entry.columns.items[0].name);
     try std.testing.expectEqualStrings("INTEGER", entry.columns.items[0].data_type);
@@ -1179,6 +1181,7 @@ test "renderSourceFreshnessSql quotes source relation and renders loaded_at_fiel
         .unique_id = "source.demo.raw.orders",
         .source_name = "raw",
         .table_name = "orders",
+        .identifier = "raw_orders",
         .original_file_path = "models/schema.yml",
         .schema_name = "analytics_raw",
         .loaded_at_field = "loaded_at",
@@ -1187,7 +1190,7 @@ test "renderSourceFreshnessSql quotes source relation and renders loaded_at_fiel
 
     const sql = try renderSourceFreshnessSql(allocator, &source);
     try std.testing.expectEqualStrings(
-        "select coalesce(strftime(max(loaded_at), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max(loaded_at)), 9.223372036854776e18) as age_seconds from \"analytics_raw\".\"orders\" where order_id > 0;",
+        "select coalesce(strftime(max(loaded_at), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max(loaded_at)), 9.223372036854776e18) as age_seconds from \"analytics_raw\".\"raw_orders\" where order_id > 0;",
         sql,
     );
 

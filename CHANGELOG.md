@@ -23,6 +23,10 @@ compatibility.
   freshness inheritance, narrow source `schema: "{{ target.schema }}_raw"`
   rendering, expanded Manifest v12-shaped source fields, and DuckDB source
   freshness execution against resolved inherited source settings.
+- Source table `identifier` parsing as a physical relation-name override for
+  `source()` compilation, manifest source fields, DuckDB docs catalog lookup,
+  source freshness SQL, and source generic-test relation rendering while
+  preserving logical source selectors and unique IDs.
 - `file:` selector support for basename/stem matching across selectable graph
   resources, with selector reuse covered through `ls` and `docs generate`.
 - Depth-limited dbt-style `+` graph selectors for parent and child expansion,

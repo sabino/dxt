@@ -1188,6 +1188,10 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 try setLoadedAtQuery(allocator, &source.loaded_at_field, &source.loaded_at_query, kv.value);
                 freshness_scope = .none;
                 freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "identifier")) {
+                source.identifier = try dupTrimmedScalar(allocator, kv.value);
+                freshness_scope = .none;
+                freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "columns")) {
                 if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
                 in_columns = true;
@@ -2511,9 +2515,35 @@ test "parseSourcesFromText records source tables with package IDs" {
     try std.testing.expectEqualStrings("source.pkg.raw.orders", graph.sources.items[0].unique_id);
     try std.testing.expectEqualStrings("raw", graph.sources.items[0].source_name);
     try std.testing.expectEqualStrings("orders", graph.sources.items[0].table_name);
+    try std.testing.expect(graph.sources.items[0].identifier == null);
     try std.testing.expectEqualStrings("source.pkg.raw.payments", graph.sources.items[1].unique_id);
     try std.testing.expectEqualStrings("source.pkg.app.users", graph.sources.items[2].unique_id);
     try std.testing.expectEqualStrings("models/schema.yml", graph.sources.items[2].original_file_path);
+}
+
+test "parseSourcesFromText records source table identifier without changing logical name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    tables:
+        \\      - name: customers
+        \\        identifier: raw_customers
+    ;
+
+    try parseSourcesFromText(allocator, yaml, "models/schema.yml", "pkg", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.sources.items.len);
+    try std.testing.expectEqualStrings("source.pkg.raw.customers", graph.sources.items[0].unique_id);
+    try std.testing.expectEqualStrings("customers", graph.sources.items[0].table_name);
+    try std.testing.expectEqualStrings("raw_customers", graph.sources.items[0].identifier.?);
 }
 
 test "parseSourcesFromText records table-level source freshness" {

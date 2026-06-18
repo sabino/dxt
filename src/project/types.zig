@@ -73,6 +73,7 @@ pub const SourceDef = struct {
     unique_id: []const u8,
     source_name: []const u8,
     table_name: []const u8,
+    identifier: ?[]const u8 = null,
     original_file_path: []const u8,
     schema_name: ?[]const u8 = null,
     loaded_at_field: ?[]const u8 = null,

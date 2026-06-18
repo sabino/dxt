@@ -90,7 +90,7 @@ embedded DuckDB or another native adapter boundary, not Python runtime calls.
 | Runtime | Zig product runtime | Broader native adapter ABI and runner |
 | Adapter | DuckDB through a Zig-owned external CLI backend | Embedded DuckDB, Postgres, cloud adapters, cross-database planner |
 | Artifacts | `manifest.json`, `run_results.json`, `catalog.json`, `sources.json` slices | fuller dbt schemas, `semantic_manifest.json`, parse cache/state artifacts |
-| dbt resources | models, seeds, sources, exposures, docs, macros, generic tests in the supported subset | snapshots, analyses, singular tests, unit tests, semantic models, metrics, saved queries |
+| dbt resources | models, seeds, sources with schema/freshness/identifier slices, exposures, docs, macros, generic tests in the supported subset | snapshots, analyses, singular tests, unit tests, semantic models, metrics, saved queries |
 | Jinja | literal and narrow scalar var-backed `ref`/`source`, `doc`, inline `config`, static list `set` + simple `for`, narrow static `if`, selected `target`/`this` context | full parse/runtime context, macro execution, dispatch, filters, database-backed `execute`, adapter introspection |
 | Selectors and listing | names/FQN, tags, paths/files, packages, resource types, sources, exposures, config materialization, wildcards, `+` and `@` graph expansion, excludes, `ls` `json`/`name`/`path`/`selector` output formats, and narrow compact-JSON `--output-keys` in the supported subset | YAML selectors, state/defer/result/source-status selectors, full dbt JSON and nested `--output-keys` |
 

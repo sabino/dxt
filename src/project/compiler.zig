@@ -802,7 +802,7 @@ pub fn relationIdentifierForNode(node: *const Node) []const u8 {
 }
 
 pub fn relationNameForSource(allocator: std.mem.Allocator, source: *const SourceDef) ![]const u8 {
-    return renderRelation(allocator, .{ .schema = sourceSchemaName(source), .identifier = source.table_name });
+    return renderRelation(allocator, .{ .schema = sourceSchemaName(source), .identifier = sourceIdentifier(source) });
 }
 
 pub fn sourceSchemaName(source: *const SourceDef) []const u8 {
@@ -811,6 +811,14 @@ pub fn sourceSchemaName(source: *const SourceDef) []const u8 {
         if (trimmed.len != 0) return trimmed;
     }
     return source.source_name;
+}
+
+pub fn sourceIdentifier(source: *const SourceDef) []const u8 {
+    if (source.identifier) |identifier| {
+        const trimmed = std.mem.trim(u8, identifier, " \t\r\n");
+        if (trimmed.len != 0) return trimmed;
+    }
+    return source.table_name;
 }
 
 fn renderRelation(allocator: std.mem.Allocator, relation: Relation) ![]const u8 {
@@ -861,13 +869,14 @@ test "compileModel renders config refs and sources" {
         .unique_id = "source.demo.raw.payments",
         .source_name = "raw",
         .table_name = "payments",
+        .identifier = "raw_payments",
         .original_file_path = "models/schema.yml",
         .schema_name = "raw_source",
     });
 
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[1]);
     defer allocator.free(compiled);
-    try std.testing.expectEqualStrings("select * from \"main\".\"customers\" union all select * from \"raw_source\".\"payments\" ", compiled);
+    try std.testing.expectEqualStrings("select * from \"main\".\"customers\" union all select * from \"raw_source\".\"raw_payments\" ", compiled);
 }
 
 test "compileModel rejects dynamic ref" {
