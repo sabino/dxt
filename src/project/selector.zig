@@ -11,6 +11,9 @@ pub const SelectedResource = struct {
     unique_id: []const u8,
     name: []const u8,
     resource_type: []const u8,
+    search_name: []const u8 = "",
+    original_file_path: []const u8 = "",
+    selector: []const u8 = "",
 };
 
 const SelectorSpec = struct {
@@ -32,23 +35,51 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
     for (graph.nodes.items) |*node| {
         if (!node.enabled) continue;
         if (matchesResourceType(resource_type, node.resource_type) and matchesSelector(graph, node, select_spec) and (!exclude_spec.active or !matchesSelector(graph, node, exclude_spec))) {
-            try selected.append(allocator, .{ .unique_id = node.unique_id, .name = node.name, .resource_type = node.resource_type });
+            try selected.append(allocator, .{
+                .unique_id = node.unique_id,
+                .name = node.name,
+                .resource_type = node.resource_type,
+                .search_name = node.name,
+                .original_file_path = node.original_file_path,
+                .selector = try pathBackedOutputSelector(allocator, node.package_name, node.path),
+            });
         }
     }
     for (graph.tests.items) |*test_node| {
         if (matchesResourceType(resource_type, "test") and matchesTestSelector(graph, test_node, select_spec) and (!exclude_spec.active or !matchesTestSelector(graph, test_node, exclude_spec))) {
-            try selected.append(allocator, .{ .unique_id = test_node.unique_id, .name = test_node.name, .resource_type = "test" });
+            try selected.append(allocator, .{
+                .unique_id = test_node.unique_id,
+                .name = test_node.name,
+                .resource_type = "test",
+                .search_name = test_node.name,
+                .original_file_path = test_node.original_file_path,
+                .selector = try pathBackedOutputSelector(allocator, test_node.package_name, test_node.path),
+            });
         }
     }
     for (graph.sources.items) |*source| {
         if (matchesResourceType(resource_type, "source") and matchesSourceSelector(graph, source, select_spec) and (!exclude_spec.active or !matchesSourceSelector(graph, source, exclude_spec))) {
-            try selected.append(allocator, .{ .unique_id = source.unique_id, .name = source.table_name, .resource_type = "source" });
+            try selected.append(allocator, .{
+                .unique_id = source.unique_id,
+                .name = source.table_name,
+                .resource_type = "source",
+                .search_name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ source.source_name, source.table_name }),
+                .original_file_path = source.original_file_path,
+                .selector = try std.fmt.allocPrint(allocator, "source:{s}.{s}.{s}", .{ source.package_name, source.source_name, source.table_name }),
+            });
         }
     }
     for (graph.exposures.items) |*exposure| {
         if (!exposure.enabled) continue;
         if (matchesResourceType(resource_type, "exposure") and matchesExposureSelector(graph, exposure, select_spec) and (!exclude_spec.active or !matchesExposureSelector(graph, exposure, exclude_spec))) {
-            try selected.append(allocator, .{ .unique_id = exposure.unique_id, .name = exposure.name, .resource_type = "exposure" });
+            try selected.append(allocator, .{
+                .unique_id = exposure.unique_id,
+                .name = exposure.name,
+                .resource_type = "exposure",
+                .search_name = exposure.name,
+                .original_file_path = exposure.original_file_path,
+                .selector = try std.fmt.allocPrint(allocator, "exposure:{s}.{s}", .{ exposure.package_name, exposure.name }),
+            });
         }
     }
     std.mem.sort(SelectedResource, selected.items, {}, struct {
@@ -57,6 +88,21 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
         }
     }.lessThan);
     return try selected.toOwnedSlice(allocator);
+}
+
+fn pathBackedOutputSelector(allocator: std.mem.Allocator, package_name: []const u8, path: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, package_name);
+    try out.append(allocator, '.');
+    const end = if (std.mem.endsWith(u8, path, ".sql") or std.mem.endsWith(u8, path, ".csv"))
+        path.len - 4
+    else
+        path.len;
+    for (path[0..end]) |byte| {
+        try out.append(allocator, if (byte == '/' or byte == '\\') '.' else byte);
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
 fn matchesResourceType(requested: ?[]const u8, actual: []const u8) bool {

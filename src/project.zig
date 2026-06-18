@@ -111,12 +111,28 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
     const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
     const resource_type = if (options.resource_type) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected = try selector.selectResources(runtime.allocator, &graph, resource_type, select, exclude);
-    if (options.output == .json) {
-        try manifest.writeSelectedJson(stdout, selected);
-    } else {
-        for (selected) |item| {
-            try stdout.print("{s}\n", .{item.unique_id});
-        }
+    switch (options.output) {
+        .json => try manifest.writeSelectedJson(stdout, selected),
+        .name => {
+            for (selected) |item| {
+                try stdout.print("{s}\n", .{item.search_name});
+            }
+        },
+        .path => {
+            for (selected) |item| {
+                try stdout.print("{s}\n", .{item.original_file_path});
+            }
+        },
+        .selector => {
+            for (selected) |item| {
+                try stdout.print("{s}\n", .{item.selector});
+            }
+        },
+        .text => {
+            for (selected) |item| {
+                try stdout.print("{s}\n", .{item.unique_id});
+            }
+        },
     }
 }
 
