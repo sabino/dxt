@@ -706,7 +706,7 @@ fn selectedGenericTestExecutionOrder(runtime: Runtime, graph: *Graph, selected: 
 
 fn validateGenericTestExecution(nodes: []const *GenericTestNode) !void {
     for (nodes) |test_node| {
-        if (test_node.column_name == null) return error.UnsupportedTestExecution;
+        if (genericTestNodeColumnName(test_node) == null) return error.UnsupportedTestExecution;
         if (std.mem.eql(u8, test_node.test_name, "accepted_values")) {
             if (test_node.accepted_values.items.len == 0) return error.UnsupportedTestExecution;
             continue;
@@ -998,6 +998,47 @@ test "parseModelPropertiesFromText records seed column generic tests" {
     try std.testing.expectEqual(false, column.tests.items[1].accepted_values_quote.?);
 }
 
+test "parseModelPropertiesFromText records table-level generic test column_name arguments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\models:
+        \\  - name: customers
+        \\    data_tests:
+        \\      - not_null:
+        \\          arguments:
+        \\            column_name: customer_id
+        \\seeds:
+        \\  - name: raw_customers
+        \\    tests:
+        \\      - accepted_values:
+        \\          arguments:
+        \\            column_name: customer_id
+        \\            values: [1, 2]
+        \\            quote: false
+    ;
+
+    try parseModelPropertiesFromText(allocator, yaml, "models/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 2), graph.model_properties.items.len);
+    try std.testing.expectEqualStrings("model", graph.model_properties.items[0].resource_type);
+    try std.testing.expectEqualStrings("customers", graph.model_properties.items[0].name);
+    try std.testing.expectEqual(@as(usize, 1), graph.model_properties.items[0].tests.items.len);
+    try std.testing.expectEqualStrings("not_null", graph.model_properties.items[0].tests.items[0].name);
+    try std.testing.expectEqualStrings("customer_id", graph.model_properties.items[0].tests.items[0].column_name.?);
+    try std.testing.expectEqualStrings("seed", graph.model_properties.items[1].resource_type);
+    const seed_test = graph.model_properties.items[1].tests.items[0];
+    try std.testing.expectEqualStrings("accepted_values", seed_test.name);
+    try std.testing.expectEqualStrings("customer_id", seed_test.column_name.?);
+    try std.testing.expectEqual(@as(usize, 2), seed_test.accepted_values.items.len);
+    try std.testing.expectEqual(false, seed_test.accepted_values_quote.?);
+}
+
 fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
@@ -1211,6 +1252,9 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                         test_def.accepted_values_quote = try parseBool(kv.value);
                     }
                     continue;
+                } else if (std.mem.eql(u8, kv.key, "column_name")) {
+                    test_def.column_name = try dupTrimmedScalar(allocator, kv.value);
+                    continue;
                 } else if (std.mem.eql(u8, kv.key, "to")) {
                     test_def.relationship_to = try dupTrimmedScalar(allocator, kv.value);
                     continue;
@@ -1349,22 +1393,27 @@ fn materializeGenericTests(graph: *Graph) !void {
     for (graph.nodes.items) |*node| {
         if (!node.enabled or (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed"))) continue;
         for (node.tests.items) |test_def| {
-            if (isSupportedGenericTest(test_def)) {
+            if (isSupportedGenericTest(test_def, null)) {
                 try appendGenericTestNode(graph, node, test_def, null);
             }
         }
         for (node.columns.items) |column| {
             for (column.tests.items) |test_def| {
-                if (isSupportedGenericTest(test_def)) {
+                if (isSupportedGenericTest(test_def, column.name)) {
                     try appendGenericTestNode(graph, node, test_def, column.name);
                 }
             }
         }
     }
     for (graph.sources.items) |*source| {
+        for (source.tests.items) |test_def| {
+            if (isSupportedSourceGenericTest(test_def, null) and genericTestColumnName(test_def, null) != null) {
+                try appendSourceGenericTestNode(graph, source, test_def, null);
+            }
+        }
         for (source.columns.items) |column| {
             for (column.tests.items) |test_def| {
-                if (isSupportedSourceGenericTest(test_def)) {
+                if (isSupportedSourceGenericTest(test_def, column.name)) {
                     try appendSourceGenericTestNode(graph, source, test_def, column.name);
                 }
             }
@@ -1373,8 +1422,9 @@ fn materializeGenericTests(graph: *Graph) !void {
 }
 
 fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTestDef, column_name: ?[]const u8) !void {
-    const names = try synthesizeGenericTestNames(graph.allocator, test_def, node.name, column_name);
-    const unique_id = try genericTestUniqueId(graph.allocator, node.package_name, names.full, test_def, node.name, column_name);
+    const effective_column_name = genericTestColumnName(test_def, column_name);
+    const names = try synthesizeGenericTestNames(graph.allocator, test_def, node.name, effective_column_name);
+    const unique_id = try genericTestUniqueId(graph.allocator, node.package_name, names.full, test_def, node.name, effective_column_name);
     for (graph.tests.items) |existing| {
         if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
     }
@@ -1393,6 +1443,7 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
         .raw_code = raw_code,
         .test_name = test_def.name,
         .column_name = column_name,
+        .argument_column_name = effective_column_name,
         .accepted_values_quote = test_def.accepted_values_quote,
         .relationship_to = test_def.relationship_to,
         .relationship_field = test_def.relationship_field,
@@ -1418,7 +1469,8 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
     try graph.tests.append(graph.allocator, test_node);
 }
 
-fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def: GenericTestDef, column_name: []const u8) !void {
+fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def: GenericTestDef, column_name: ?[]const u8) !void {
+    const effective_column_name = genericTestColumnName(test_def, column_name);
     const source_target_name = try std.fmt.allocPrint(graph.allocator, "{s}_{s}", .{ source.source_name, source.table_name });
     defer graph.allocator.free(source_target_name);
     const source_test_name = try std.fmt.allocPrint(graph.allocator, "source_{s}", .{test_def.name});
@@ -1427,13 +1479,14 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
     defer graph.allocator.free(source_model_kwarg);
     const source_test_def = GenericTestDef{
         .name = source_test_name,
+        .column_name = test_def.column_name,
         .accepted_values = test_def.accepted_values,
         .accepted_values_quote = test_def.accepted_values_quote,
         .relationship_to = test_def.relationship_to,
         .relationship_field = test_def.relationship_field,
     };
-    const names = try synthesizeGenericTestNames(graph.allocator, source_test_def, source_target_name, column_name);
-    const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, source.package_name, names.full, test_def, source_model_kwarg, column_name);
+    const names = try synthesizeGenericTestNames(graph.allocator, source_test_def, source_target_name, effective_column_name);
+    const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, source.package_name, names.full, test_def, source_model_kwarg, effective_column_name);
     for (graph.tests.items) |existing| {
         if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
     }
@@ -1452,6 +1505,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .raw_code = raw_code,
         .test_name = test_def.name,
         .column_name = column_name,
+        .argument_column_name = effective_column_name,
         .accepted_values_quote = test_def.accepted_values_quote,
         .relationship_to = test_def.relationship_to,
         .relationship_field = test_def.relationship_field,
@@ -1477,14 +1531,24 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
     try graph.tests.append(graph.allocator, test_node);
 }
 
-fn isSupportedGenericTest(test_def: GenericTestDef) bool {
+fn genericTestColumnName(test_def: GenericTestDef, fallback: ?[]const u8) ?[]const u8 {
+    return fallback orelse test_def.column_name;
+}
+
+fn genericTestNodeColumnName(test_node: *const GenericTestNode) ?[]const u8 {
+    return test_node.argument_column_name orelse test_node.column_name;
+}
+
+fn isSupportedGenericTest(test_def: GenericTestDef, column_name: ?[]const u8) bool {
+    _ = column_name;
     return std.mem.eql(u8, test_def.name, "not_null") or
         std.mem.eql(u8, test_def.name, "unique") or
         (std.mem.eql(u8, test_def.name, "accepted_values") and test_def.accepted_values.items.len != 0) or
         (std.mem.eql(u8, test_def.name, "relationships") and test_def.relationship_to.len != 0 and test_def.relationship_field.len != 0);
 }
 
-fn isSupportedSourceGenericTest(test_def: GenericTestDef) bool {
+fn isSupportedSourceGenericTest(test_def: GenericTestDef, column_name: ?[]const u8) bool {
+    _ = column_name;
     return std.mem.eql(u8, test_def.name, "not_null") or
         std.mem.eql(u8, test_def.name, "unique") or
         (std.mem.eql(u8, test_def.name, "accepted_values") and test_def.accepted_values.items.len != 0) or

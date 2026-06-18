@@ -475,7 +475,7 @@ pub fn renderSeedSql(allocator: std.mem.Allocator, project_dir: []const u8, grap
 }
 
 pub fn renderGenericTestSql(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
-    const column_name = test_node.column_name orelse return error.UnsupportedTestExecution;
+    const column_name = genericTestNodeColumnName(test_node) orelse return error.UnsupportedTestExecution;
     const is_not_null = std.mem.eql(u8, test_node.test_name, "not_null");
     const is_unique = std.mem.eql(u8, test_node.test_name, "unique");
     const is_accepted_values = std.mem.eql(u8, test_node.test_name, "accepted_values");
@@ -525,6 +525,10 @@ pub fn renderGenericTestSql(allocator: std.mem.Allocator, graph: *const Graph, t
         "select\n    {s} as unique_field,\n    count(*) as n_records\nfrom {s}\nwhere {s} is not null\ngroup by {s}\nhaving count(*) > 1",
         .{ quoted_column, relation_name, quoted_column, quoted_column },
     );
+}
+
+fn genericTestNodeColumnName(test_node: *const GenericTestNode) ?[]const u8 {
+    return test_node.argument_column_name orelse test_node.column_name;
 }
 
 pub fn renderGenericTestExecutionSql(allocator: std.mem.Allocator, compiled_sql: []const u8) ![]const u8 {
