@@ -4579,6 +4579,65 @@ def test_parse_and_ls_resolve_vars_inside_ref_and_source(tmp_path: Path):
     ]
 
 
+def test_parse_and_ls_resolve_static_loop_ref_and_source_dependencies(tmp_path: Path):
+    project = copy_fixture(tmp_path, "static_loop_deps")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    looped = manifest["nodes"]["model.static_loop_deps.looped"]
+    assert looped["refs"] == [
+        {"name": "customers", "package": None, "version": None},
+        {"name": "orders", "package": None, "version": None},
+    ]
+    assert looped["sources"] == [["raw", "events"], ["raw", "payments"]]
+    assert looped["depends_on"]["nodes"] == [
+        "model.static_loop_deps.customers",
+        "model.static_loop_deps.orders",
+        "source.static_loop_deps.raw.events",
+        "source.static_loop_deps.raw.payments",
+    ]
+    assert manifest["parent_map"]["model.static_loop_deps.looped"] == [
+        "model.static_loop_deps.customers",
+        "model.static_loop_deps.orders",
+        "source.static_loop_deps.raw.events",
+        "source.static_loop_deps.raw.payments",
+    ]
+    assert "model.static_loop_deps.looped" in manifest["child_map"]["model.static_loop_deps.customers"]
+    assert "model.static_loop_deps.looped" in manifest["child_map"]["source.static_loop_deps.raw.events"]
+
+    upstream_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "+looped", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert upstream_result.returncode == 0, upstream_result.stderr
+    assert [item["unique_id"] for item in json.loads(upstream_result.stdout)] == [
+        "model.static_loop_deps.customers",
+        "model.static_loop_deps.looped",
+        "model.static_loop_deps.orders",
+        "source.static_loop_deps.raw.events",
+        "source.static_loop_deps.raw.payments",
+    ]
+
+    source_descendant_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "source:raw.events+", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_descendant_result.returncode == 0, source_descendant_result.stderr
+    assert [item["unique_id"] for item in json.loads(source_descendant_result.stdout)] == [
+        "model.static_loop_deps.looped",
+        "source.static_loop_deps.raw.events",
+    ]
+
+
 def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     project = copy_fixture(tmp_path, "seed_ref")
     command = [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"]

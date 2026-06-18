@@ -1,0 +1,4 @@
+name: static_loop_deps
+version: 1.0
+profile: static_loop_deps
+model-paths: ["models"]
