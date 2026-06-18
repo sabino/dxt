@@ -17,6 +17,7 @@ const SelectorSpec = struct {
     active: bool = false,
     valid: bool = true,
     value: []const u8 = "",
+    include_childrens_parents: bool = false,
     include_parents: bool = false,
     include_children: bool = false,
     parents_depth: ?usize = null,
@@ -482,10 +483,16 @@ fn parseSelectorTerm(raw: []const u8) SelectorSpec {
     const trimmed = std.mem.trim(u8, raw, " \t\r");
     var start: usize = 0;
     var end: usize = trimmed.len;
+    var include_childrens_parents = false;
     var include_parents = false;
     var include_children = false;
     var parents_depth: ?usize = null;
     var children_depth: ?usize = null;
+
+    if (start < end and trimmed[start] == '@') {
+        include_childrens_parents = true;
+        start += 1;
+    }
 
     if (start < end) {
         if (trimmed[start] == '+') {
@@ -517,9 +524,12 @@ fn parseSelectorTerm(raw: []const u8) SelectorSpec {
         }
     }
 
+    if (include_childrens_parents and (include_parents or include_children)) return .{ .active = true, .valid = false };
+
     return .{
         .active = true,
         .value = if (start <= end) trimmed[start..end] else "",
+        .include_childrens_parents = include_childrens_parents,
         .include_parents = include_parents,
         .include_children = include_children,
         .parents_depth = parents_depth,
@@ -537,26 +547,49 @@ fn isSelectorDigit(byte: u8) bool {
 }
 
 fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, spec: SelectorSpec) bool {
-    if (!spec.include_parents and !spec.include_children) return false;
+    if (!spec.include_childrens_parents and !spec.include_parents and !spec.include_children) return false;
     for (graph.nodes.items) |*target| {
         if (!target.enabled or !matchesNodeSelectorTerm(graph, target, spec.value)) continue;
+        if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     for (graph.tests.items) |*target| {
         if (!matchesTestSelectorTerm(graph, target, spec.value)) continue;
+        if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     for (graph.sources.items) |*target| {
         if (!matchesSourceSelectorTerm(graph, target, spec.value)) continue;
+        if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     for (graph.exposures.items) |*target| {
         if (!target.enabled) continue;
         if (!matchesExposureSelectorTerm(graph, target, spec.value)) continue;
+        if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
+    }
+    return false;
+}
+
+fn resourceInChildrensParentsSelection(graph: *const Graph, selected_unique_id: []const u8, candidate_unique_id: []const u8) bool {
+    if (std.mem.eql(u8, selected_unique_id, candidate_unique_id)) return true;
+    if (resourceDependsOn(graph, candidate_unique_id, selected_unique_id)) return true;
+    if (resourceDependsOn(graph, selected_unique_id, candidate_unique_id)) return true;
+
+    for (graph.nodes.items) |*resource| {
+        if (!resource.enabled) continue;
+        if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
+    }
+    for (graph.tests.items) |*resource| {
+        if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
+    }
+    for (graph.exposures.items) |*resource| {
+        if (!resource.enabled) continue;
+        if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
     }
     return false;
 }
@@ -646,6 +679,7 @@ test "file selectors match only basename or stem" {
 test "selector terms parse dbt plus depth operators" {
     const parent_limited = parseSelectorTerm("1+orders");
     try std.testing.expect(parent_limited.valid);
+    try std.testing.expect(!parent_limited.include_childrens_parents);
     try std.testing.expect(parent_limited.include_parents);
     try std.testing.expect(!parent_limited.include_children);
     try std.testing.expectEqual(@as(?usize, 1), parent_limited.parents_depth);
@@ -675,6 +709,18 @@ test "selector terms parse dbt plus depth operators" {
     try std.testing.expectEqual(@as(?usize, null), unlimited.parents_depth);
     try std.testing.expectEqual(@as(?usize, null), unlimited.children_depth);
     try std.testing.expectEqualStrings("orders", unlimited.value);
+
+    const childrens_parents = parseSelectorTerm("@orders");
+    try std.testing.expect(childrens_parents.valid);
+    try std.testing.expect(childrens_parents.include_childrens_parents);
+    try std.testing.expect(!childrens_parents.include_parents);
+    try std.testing.expect(!childrens_parents.include_children);
+    try std.testing.expectEqualStrings("orders", childrens_parents.value);
+
+    try std.testing.expect(!parseSelectorTerm("@orders+").valid);
+    try std.testing.expect(!parseSelectorTerm("@orders+1").valid);
+    try std.testing.expect(!parseSelectorTerm("@+orders").valid);
+    try std.testing.expect(!parseSelectorTerm("@1+orders").valid);
 
     const invalid_depth = parseSelectorTerm("999999999999999999999999999999+orders");
     try std.testing.expect(!invalid_depth.valid);
