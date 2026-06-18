@@ -70,6 +70,19 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
         project.list(rt, options, stdout) catch |err| return commandError(err, stderr);
         return .ok;
     }
+    if (equals(command, "clean")) {
+        if (hasHelp(args[2..])) {
+            try printCommandHelp(command, stdout, .clean);
+            return .ok;
+        }
+        const rt = runtime orelse {
+            try stderr.writeAll("error: runtime I/O is required for clean\n");
+            return .usage;
+        };
+        const options = parseOptions(rt.allocator, args[2..], stderr, .clean) catch |err| return commandError(err, stderr);
+        project.cleanProject(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        return .ok;
+    }
     if (equals(command, "run")) {
         if (hasHelp(args[2..])) {
             try printCommandHelp(command, stdout, .build);
@@ -152,6 +165,7 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
 const OptionMode = enum {
     common_only,
     common_and_select,
+    clean,
     compile,
     docs_generate,
     docs_serve,
@@ -162,6 +176,7 @@ const OptionMode = enum {
 
 const HelpMode = enum {
     project_selection,
+    clean,
     list,
     build,
     docs_generate,
@@ -203,6 +218,9 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingProfileSchema => stderr.writeAll("error: selected profile target must define a non-empty schema when schema is present\n") catch {},
         error.MissingProfileDatabasePath => stderr.writeAll("error: selected DuckDB profile target must define a non-empty path when path is present\n") catch {},
         error.InvalidOutput => stderr.writeAll("error: --output must be text, json, name, path, or selector\n") catch {},
+        error.UnsupportedCleanPath => stderr.writeAll("error: clean-targets must contain non-empty project-relative paths\n") catch {},
+        error.UnsupportedCleanOutsideProject => stderr.writeAll("error: clean refuses absolute paths or paths outside the project\n") catch {},
+        error.UnsupportedCleanSourcePath => stderr.writeAll("error: clean refuses to remove model, seed, or macro source paths\n") catch {},
         error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, test, or unit_test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
         error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model resources\n") catch {},
@@ -313,7 +331,7 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             } else if (equals(arg, "--vars")) {
                 options.vars = value;
             } else if (equals(arg, "--threads")) {
-                if (mode == .common_only) return error.UnsupportedCommandOption;
+                if (mode == .common_only or mode == .clean) return error.UnsupportedCommandOption;
                 options.threads = value;
             } else if (equals(arg, "--target-path")) {
                 if (mode == .list) return error.UnsupportedCommandOption;
@@ -355,6 +373,10 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
                 options.docs_open_browser = true;
             } else if (equals(arg, "--no-browser") or equals(arg, "--no-open")) {
                 options.docs_open_browser = false;
+            } else if (equals(arg, "--clean-project-files-only")) {
+                // This is the only clean mode implemented for dxt's first safe clean slice.
+            } else if (equals(arg, "--no-clean-project-files-only")) {
+                return error.UnsupportedCleanOutsideProject;
             }
             i += 1;
             continue;
@@ -497,7 +519,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
         .common_and_select, .compile, .docs_generate, .list, .build, .source_freshness => {
             if (equals(arg, "--select") or equals(arg, "--exclude")) return true;
         },
-        .common_only, .docs_serve => {},
+        .common_only, .clean, .docs_serve => {},
     }
 
     if (mode == .list and (equals(arg, "--resource-type") or equals(arg, "--output"))) {
@@ -511,7 +533,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
 }
 
 fn isSelectorOption(arg: []const u8, mode: OptionMode) bool {
-    return mode != .common_only and mode != .docs_serve and (equals(arg, "--select") or equals(arg, "--exclude"));
+    return mode != .common_only and mode != .clean and mode != .docs_serve and (equals(arg, "--select") or equals(arg, "--exclude"));
 }
 
 fn isOptionLike(arg: []const u8) bool {
@@ -521,6 +543,7 @@ fn isOptionLike(arg: []const u8) bool {
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
     if (mode == .build and equals(arg, "--full-refresh")) return true;
     if (mode == .docs_serve and (equals(arg, "--browser") or equals(arg, "--no-browser") or equals(arg, "--no-open"))) return true;
+    if (mode == .clean and (equals(arg, "--clean-project-files-only") or equals(arg, "--no-clean-project-files-only"))) return true;
     return false;
 }
 
@@ -534,6 +557,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  version          Print the dxt version.
         \\  parse            Parse a supported dbt project subset and emit manifest artifacts.
         \\  ls               List resources from the supported parser graph.
+        \\  clean            Delete configured generated project artifacts.
         \\  compile          Compile supported dbt SQL/Jinja without executing.
         \\  run              Execute supported selected DuckDB SQL models.
         \\  build            Execute supported selected DuckDB seeds, models, and tests.
@@ -546,9 +570,11 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
 
 fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !void {
     try writer.print("Usage: dxt {s} [options]\n\n", .{command});
-    if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
+    if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
         if (equals(command, "docs serve")) {
             try writer.writeAll("`dxt docs serve` serves generated docs artifacts from the target directory.\n\n");
+        } else if (equals(command, "clean")) {
+            try writer.writeAll("`dxt clean` removes configured generated project artifact directories.\n\n");
         } else {
             try writer.print("`dxt {s}` supports the M1 parser subset documented in PLAN.md.\n\n", .{command});
         }
@@ -558,22 +584,33 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
             \\  --vars <yaml>
             \\
         );
-        if (equals(command, "parse") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
+        if (equals(command, "parse") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
             try writer.writeAll(
                 \\  --target-path <path>
                 \\
             );
         }
-        if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
+        if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
             try writer.writeAll(
                 \\  --profiles-dir <path>
-                \\  --profile <name>
-                \\  --target <name>
-                \\  --threads <count>
                 \\
             );
+            if (!equals(command, "clean")) {
+                try writer.writeAll(
+                    \\  --profile <name>
+                    \\  --target <name>
+                    \\  --threads <count>
+                    \\
+                );
+            } else {
+                try writer.writeAll(
+                    \\  --profile <name>
+                    \\  --target <name>
+                    \\
+                );
+            }
         }
-        if (!equals(command, "docs serve")) {
+        if (!equals(command, "docs serve") and !equals(command, "clean")) {
             try writer.writeAll(
                 \\  --select <selector> [selector ...]
                 \\  --exclude <selector> [selector ...]
@@ -591,6 +628,12 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         if (equals(command, "build")) {
             try writer.writeAll(
                 \\  --full-refresh
+                \\
+            );
+        }
+        if (equals(command, "clean")) {
+            try writer.writeAll(
+                \\  --clean-project-files-only
                 \\
             );
         }
@@ -626,7 +669,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\
             );
         },
-        .docs_serve => {},
+        .clean, .docs_serve => {},
     }
     switch (mode) {
         .list => {
@@ -634,6 +677,12 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\  --resource-type <type>
                 \\  --output <text|json|name|path|selector>
                 \\  --output-keys <keys...>
+                \\
+            );
+        },
+        .clean => {
+            try writer.writeAll(
+                \\  --clean-project-files-only
                 \\
             );
         },
@@ -696,6 +745,34 @@ test "compile command requires runtime I/O" {
     try std.testing.expectEqual(ExitCode.usage, code);
     try std.testing.expectEqualStrings("", stdout.written());
     try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for compile") != null);
+}
+
+test "clean command requires runtime I/O and accepts clean flags" {
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const code = try run(&.{ "dxt", "clean", "--project-dir", "fixture", "--target-path", "target-dxt", "--profiles-dir", "profiles", "--profile", "default", "--target", "dev", "--clean-project-files-only" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expectEqual(ExitCode.usage, code);
+    try std.testing.expectEqualStrings("", stdout.written());
+    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for clean") != null);
+}
+
+test "clean command help describes safe clean options" {
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const code = try run(&.{ "dxt", "clean", "--help" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expectEqual(ExitCode.ok, code);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "Usage: dxt clean") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "--clean-project-files-only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "--profile <name>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "--target <name>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "--select") == null);
+    try std.testing.expectEqualStrings("", stderr.written());
 }
 
 test "run command requires runtime I/O and accepts selector lists" {

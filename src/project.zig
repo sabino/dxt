@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const catalog = @import("project/catalog.zig");
+const clean = @import("project/clean.zig");
 const compiler = @import("project/compiler.zig");
 const docs_serve = @import("project/docs_serve.zig");
 const duckdb = @import("project/duckdb.zig");
@@ -140,6 +141,11 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
             }
         },
     }
+}
+
+pub fn cleanProject(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    _ = stderr;
+    try clean.run(runtime, options, stdout);
 }
 
 pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {

@@ -9,6 +9,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | --- | --- | --- | --- |
 | `dxt parse` | Partial | Loads supported project files and writes a deterministic Manifest v12-shaped slice. | Full dbt parser parity, disabled resource maps, saved queries, semantic resources, full package behavior. |
 | `dxt ls` | Partial | Lists selected graph resources in text or JSON for supported selector syntax. | YAML selectors, state/result/source-status selectors, full indirect-selection parity. |
+| `dxt clean` | Partial | Deletes configured project-relative `clean-targets`, defaulting to the effective target path; protects source directories, rejects outside-project deletion, skips missing paths and plain files, and does not require a profile. | `--no-clean-project-files-only`, Fusion positional file args, symlink/canonical-path parity, richer dbt event output. |
 | `dxt compile` | Partial | Compiles selected enabled SQL models through the supported render-only Jinja subset and writes compiled SQL plus manifest fields. | Full Jinja, macro execution, adapter dispatch execution, arbitrary expressions, filters, hooks. |
 | `dxt run` | Partial | Executes selected enabled DuckDB SQL models with `table` and `view` materializations. | Seeds, tests, snapshots, incremental, ephemeral, hooks, grants, failure/partial run-results, full materialization macros. |
 | `dxt build` | Partial | Executes root-project CSV seeds, selected DuckDB models, supported model/source/seed column generic tests, explicit table-level `column_name` built-in tests, source-target `relationships`, and mixed selected seed/model/test subsets. | Full dbt queue semantics, package seeds, seed configs, wider tests, singular/unit tests, skip/fail-fast, store failures. |
@@ -16,7 +17,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `dxt docs serve` | Partial | Serves generated target-directory docs artifacts over localhost HTTP with `--host`, `--port`, `--no-browser`, `--browser`, and `--no-open` parsing; writes a small dxt-owned `index.html`; does not mutate `manifest.json` or `catalog.json`. | Browser opening, dbt's bundled docs SPA, Fusion docs v2/index API server, live reload, richer static asset handling. |
 | `dxt source freshness` | Partial | Queries selected DuckDB source tables with resolved source/table `loaded_at_field`, `loaded_at_query`, and freshness settings, then writes Sources v3-shaped results. | Metadata freshness, Jinja in freshness queries beyond narrow source schema rendering, source-status selectors, concurrency, non-DuckDB adapters. |
 | `version`, help | Supported | Basic CLI metadata and help. | Release version stamping beyond current build metadata. |
-| `debug`, `clean`, `deps`, `init`, `run-operation`, `snapshot`, `retry`, `clone` | Planned | Not implemented. | Command-specific dbt parity. |
+| `debug`, `deps`, `init`, `run-operation`, `snapshot`, `retry`, `clone` | Planned | Not implemented. | Command-specific dbt parity. |
 
 ## Flags
 
@@ -30,6 +31,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `--threads`, `--full-refresh` | Accepted/planned | Product semantics are not complete yet. |
 | `--output`, `--output-keys` | Partial | `ls` supports legacy `text`, compact `json`, dbt-style `name`, `path`, and `selector` formats. `--output-keys` filters compact JSON to `unique_id`, `resource_type`, and `name`; full dbt node JSON and nested keys are not implemented. |
 | `--host`, `--port`, `--no-browser`, `--browser`, `--no-open` | Partial | `docs serve` parses these dbt Core/Fusion-shaped flags. Browser opening is intentionally unsupported in this slice; use `--no-browser`. |
+| `--clean-project-files-only`, `--no-clean-project-files-only` | Partial | `clean` accepts the default safe `--clean-project-files-only` mode. `--no-clean-project-files-only` is rejected in this first destructive-command slice. |
 
 ## dbt Resources
 

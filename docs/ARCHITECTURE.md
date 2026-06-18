@@ -45,6 +45,7 @@ flowchart LR
 | `src/project.zig` | Public facade and orchestration while extraction continues. |
 | `src/project/types.zig` | Core graph, node, source, test, macro, config, and runtime data model. |
 | `src/project/config.zig` | `dbt_project.yml` and project config parsing. |
+| `src/project/clean.zig` | Safe project-relative clean-target deletion. |
 | `src/project/profile.zig` | Narrow profile/target/adapter identity parsing. |
 | `src/project/fs.zig` | Deterministic file discovery. |
 | `src/project/loader.zig` | Project/package loading order and graph construction callbacks. |
