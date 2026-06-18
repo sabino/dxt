@@ -75,6 +75,8 @@ compatibility.
   while preserving the legacy text and JSON outputs.
 - Narrow `dxt ls --output json --output-keys ...` filtering for compact
   selected-resource JSON fields.
+- `dxt ls --output json --output-keys ...` support for compact resource
+  locator fields `path`, `original_file_path`, and `selector`.
 - Narrow compile rendering for static `{% if %}` branches, including
   compile-phase `execute` and static dependency recovery for guarded refs and
   sources.
