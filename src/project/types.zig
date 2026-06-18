@@ -114,6 +114,35 @@ pub const ExposureDef = struct {
     depends_on: std.ArrayList([]const u8) = .empty,
 };
 
+pub const UnitTestRow = struct {
+    entries: std.ArrayList(MetaEntry) = .empty,
+};
+
+pub const UnitTestFixture = struct {
+    input: ?[]const u8 = null,
+    rows_set: bool = false,
+    rows_string: ?[]const u8 = null,
+    rows: std.ArrayList(UnitTestRow) = .empty,
+    format: []const u8 = "dict",
+    fixture: ?[]const u8 = null,
+};
+
+pub const UnitTestDef = struct {
+    package_name: []const u8,
+    unique_id: []const u8 = "",
+    name: []const u8,
+    model: []const u8 = "",
+    path: []const u8,
+    original_file_path: []const u8,
+    description: []const u8 = "",
+    enabled: bool = true,
+    given: std.ArrayList(UnitTestFixture) = .empty,
+    expect: UnitTestFixture = .{},
+    tags: std.ArrayList([]const u8) = .empty,
+    meta: std.ArrayList(MetaEntry) = .empty,
+    depends_on: std.ArrayList([]const u8) = .empty,
+};
+
 pub const MetaEntry = struct {
     key: []const u8,
     value: JsonScalar,
@@ -284,6 +313,7 @@ pub const Graph = struct {
     tests: std.ArrayList(GenericTestNode) = .empty,
     sources: std.ArrayList(SourceDef) = .empty,
     exposures: std.ArrayList(ExposureDef) = .empty,
+    unit_tests: std.ArrayList(UnitTestDef) = .empty,
     docs: std.ArrayList(DocBlock) = .empty,
     macros: std.ArrayList(MacroDef) = .empty,
     model_properties: std.ArrayList(ModelProperty) = .empty,
@@ -307,6 +337,9 @@ pub const Graph = struct {
         for (self.exposures.items) |*exposure| {
             deinitExposureDef(self.allocator, exposure);
         }
+        for (self.unit_tests.items) |*unit_test| {
+            deinitUnitTestDef(self.allocator, unit_test);
+        }
         for (self.model_properties.items) |*property| {
             deinitModelProperty(self.allocator, property);
         }
@@ -320,6 +353,7 @@ pub const Graph = struct {
         self.tests.deinit(self.allocator);
         self.sources.deinit(self.allocator);
         self.exposures.deinit(self.allocator);
+        self.unit_tests.deinit(self.allocator);
         self.docs.deinit(self.allocator);
         self.macros.deinit(self.allocator);
         self.model_properties.deinit(self.allocator);
@@ -398,6 +432,24 @@ fn deinitExposureDef(allocator: std.mem.Allocator, exposure: *ExposureDef) void 
     exposure.refs.deinit(allocator);
     exposure.source_refs.deinit(allocator);
     exposure.depends_on.deinit(allocator);
+}
+
+pub fn deinitUnitTestDef(allocator: std.mem.Allocator, unit_test: *UnitTestDef) void {
+    for (unit_test.given.items) |*fixture| {
+        deinitUnitTestFixture(allocator, fixture);
+    }
+    unit_test.given.deinit(allocator);
+    deinitUnitTestFixture(allocator, &unit_test.expect);
+    unit_test.tags.deinit(allocator);
+    unit_test.meta.deinit(allocator);
+    unit_test.depends_on.deinit(allocator);
+}
+
+fn deinitUnitTestFixture(allocator: std.mem.Allocator, fixture: *UnitTestFixture) void {
+    for (fixture.rows.items) |*row| {
+        row.entries.deinit(allocator);
+    }
+    fixture.rows.deinit(allocator);
 }
 
 fn deinitMacro(allocator: std.mem.Allocator, macro: *MacroDef) void {

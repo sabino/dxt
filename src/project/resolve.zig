@@ -11,6 +11,7 @@ const Node = types.Node;
 const RefDep = types.RefDep;
 const SourceDep = types.SourceDep;
 const SourceDef = types.SourceDef;
+const UnitTestDef = types.UnitTestDef;
 
 const appendUnique = util.appendUnique;
 const sortStrings = util.sortStrings;
@@ -197,6 +198,14 @@ pub fn resolveDependencies(graph: *Graph) !void {
         }
         sortStrings(exposure.depends_on.items);
     }
+    for (graph.unit_tests.items) |*unit_test| {
+        if (!unit_test.enabled) continue;
+        const model_unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ unit_test.package_name, unit_test.model });
+        if (hasDisabledNode(graph, model_unique_id)) return error.DisabledRef;
+        if (!hasNode(graph, model_unique_id)) return error.UnresolvedUnitTestModel;
+        try appendUnique(graph.allocator, &unit_test.depends_on, model_unique_id);
+        sortStrings(unit_test.depends_on.items);
+    }
 }
 
 pub fn sortGraphResources(graph: *Graph) void {
@@ -204,6 +213,7 @@ pub fn sortGraphResources(graph: *Graph) void {
     sortTests(graph.tests.items);
     sortSources(graph.sources.items);
     sortExposures(graph.exposures.items);
+    sortUnitTests(graph.unit_tests.items);
     sortDocs(graph.docs.items);
     sortMacros(graph.macros.items);
 }
@@ -257,6 +267,18 @@ pub fn rejectDuplicateExposures(graph: *const Graph) !void {
         while (j < graph.exposures.items.len) : (j += 1) {
             if (std.mem.eql(u8, graph.exposures.items[i].unique_id, graph.exposures.items[j].unique_id)) {
                 return error.DuplicateExposureName;
+            }
+        }
+    }
+}
+
+pub fn rejectDuplicateUnitTests(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.unit_tests.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.unit_tests.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.unit_tests.items[i].unique_id, graph.unit_tests.items[j].unique_id)) {
+                return error.DuplicateUnitTestName;
             }
         }
     }
@@ -347,6 +369,14 @@ fn sortSources(sources: []SourceDef) void {
 fn sortExposures(exposures: []ExposureDef) void {
     std.mem.sort(ExposureDef, exposures, {}, struct {
         fn lessThan(_: void, a: ExposureDef, b: ExposureDef) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
+fn sortUnitTests(unit_tests: []UnitTestDef) void {
+    std.mem.sort(UnitTestDef, unit_tests, {}, struct {
+        fn lessThan(_: void, a: UnitTestDef, b: UnitTestDef) bool {
             return std.mem.lessThan(u8, a.unique_id, b.unique_id);
         }
     }.lessThan);
@@ -672,7 +702,7 @@ test "duplicate validation rejects duplicate model and seed unique ids" {
     try std.testing.expectError(error.DuplicateSeedName, rejectDuplicateSeeds(&graph));
 }
 
-test "duplicate validation rejects docs exposures macros and macro properties" {
+test "duplicate validation rejects docs exposures unit tests macros and macro properties" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
@@ -682,6 +712,8 @@ test "duplicate validation rejects docs exposures macros and macro properties" {
     try graph.docs.append(graph.allocator, .{ .package_name = "demo", .unique_id = "doc.demo.orders", .name = "orders", .path = "", .original_file_path = "", .block_contents = "" });
     try graph.exposures.append(graph.allocator, .{ .package_name = "demo", .unique_id = "exposure.demo.weekly_kpis", .name = "weekly_kpis", .path = "", .original_file_path = "" });
     try graph.exposures.append(graph.allocator, .{ .package_name = "demo", .unique_id = "exposure.demo.weekly_kpis", .name = "weekly_kpis", .path = "", .original_file_path = "" });
+    try graph.unit_tests.append(graph.allocator, .{ .package_name = "demo", .unique_id = "unit_test.demo.orders.assert_orders", .name = "assert_orders", .model = "orders", .path = "", .original_file_path = "" });
+    try graph.unit_tests.append(graph.allocator, .{ .package_name = "demo", .unique_id = "unit_test.demo.orders.assert_orders", .name = "assert_orders", .model = "orders", .path = "", .original_file_path = "" });
     try appendMacro(&graph, "demo", "format_id");
     try appendMacro(&graph, "demo", "format_id");
     try graph.macro_properties.append(graph.allocator, .{ .package_name = "demo", .name = "format_id", .patch_path = "macros/schema.yml" });
@@ -689,11 +721,12 @@ test "duplicate validation rejects docs exposures macros and macro properties" {
 
     try std.testing.expectError(error.DuplicateDocName, rejectDuplicateDocs(&graph));
     try std.testing.expectError(error.DuplicateExposureName, rejectDuplicateExposures(&graph));
+    try std.testing.expectError(error.DuplicateUnitTestName, rejectDuplicateUnitTests(&graph));
     try std.testing.expectError(error.DuplicateMacroName, rejectDuplicateMacros(&graph));
     try std.testing.expectError(error.DuplicateMacroProperty, rejectDuplicateMacroProperties(&graph));
 }
 
-test "dependency resolution populates sorted unique node and exposure dependencies" {
+test "dependency resolution populates sorted unique node exposure and unit test dependencies" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
@@ -719,6 +752,14 @@ test "dependency resolution populates sorted unique node and exposure dependenci
     });
     try graph.exposures.items[0].refs.append(graph.allocator, .{ .package = null, .name = "orders" });
     try graph.exposures.items[0].source_refs.append(graph.allocator, .{ .source_name = "raw", .table_name = "customers" });
+    try graph.unit_tests.append(graph.allocator, .{
+        .package_name = "demo",
+        .unique_id = "unit_test.demo.orders.assert_orders",
+        .name = "assert_orders",
+        .model = "orders",
+        .path = "",
+        .original_file_path = "",
+    });
 
     try resolveDependencies(&graph);
 
@@ -730,6 +771,8 @@ test "dependency resolution populates sorted unique node and exposure dependenci
     try std.testing.expectEqual(@as(usize, 2), graph.exposures.items[0].depends_on.items.len);
     try std.testing.expectEqualStrings("model.demo.orders", graph.exposures.items[0].depends_on.items[0]);
     try std.testing.expectEqualStrings("source.demo.raw.customers", graph.exposures.items[0].depends_on.items[1]);
+    try std.testing.expectEqual(@as(usize, 1), graph.unit_tests.items[0].depends_on.items.len);
+    try std.testing.expectEqualStrings("model.demo.orders", graph.unit_tests.items[0].depends_on.items[0]);
 }
 
 test "dependency resolution rejects unresolved macro dependencies" {
@@ -742,6 +785,24 @@ test "dependency resolution rejects unresolved macro dependencies" {
     try graph.nodes.items[0].macro_depends_on.append(graph.allocator, "macro.demo.missing");
 
     try std.testing.expectError(error.UnresolvedMacro, resolveDependencies(&graph));
+}
+
+test "dependency resolution rejects unit tests for missing models" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.unit_tests.append(graph.allocator, .{
+        .package_name = "demo",
+        .unique_id = "unit_test.demo.missing.assert_missing",
+        .name = "assert_missing",
+        .model = "missing",
+        .path = "",
+        .original_file_path = "",
+    });
+
+    try std.testing.expectError(error.UnresolvedUnitTestModel, resolveDependencies(&graph));
 }
 
 test "graph resource sorting preserves deterministic unique id order" {
@@ -778,6 +839,8 @@ test "graph resource sorting preserves deterministic unique id order" {
     try appendSource(&graph, "demo", "raw", "a_customers");
     try graph.exposures.append(graph.allocator, .{ .package_name = "demo", .unique_id = "exposure.demo.z_dashboard", .name = "z_dashboard", .path = "", .original_file_path = "" });
     try graph.exposures.append(graph.allocator, .{ .package_name = "demo", .unique_id = "exposure.demo.a_dashboard", .name = "a_dashboard", .path = "", .original_file_path = "" });
+    try graph.unit_tests.append(graph.allocator, .{ .package_name = "demo", .unique_id = "unit_test.demo.z_orders.z_assert", .name = "z_assert", .model = "z_orders", .path = "", .original_file_path = "" });
+    try graph.unit_tests.append(graph.allocator, .{ .package_name = "demo", .unique_id = "unit_test.demo.a_customers.a_assert", .name = "a_assert", .model = "a_customers", .path = "", .original_file_path = "" });
     try graph.docs.append(graph.allocator, .{ .package_name = "demo", .unique_id = "doc.demo.z_doc", .name = "z_doc", .path = "", .original_file_path = "", .block_contents = "" });
     try graph.docs.append(graph.allocator, .{ .package_name = "demo", .unique_id = "doc.demo.a_doc", .name = "a_doc", .path = "", .original_file_path = "", .block_contents = "" });
     try appendMacro(&graph, "demo", "z_macro");
@@ -793,6 +856,8 @@ test "graph resource sorting preserves deterministic unique id order" {
     try std.testing.expectEqualStrings("source.demo.raw.z_orders", graph.sources.items[1].unique_id);
     try std.testing.expectEqualStrings("exposure.demo.a_dashboard", graph.exposures.items[0].unique_id);
     try std.testing.expectEqualStrings("exposure.demo.z_dashboard", graph.exposures.items[1].unique_id);
+    try std.testing.expectEqualStrings("unit_test.demo.a_customers.a_assert", graph.unit_tests.items[0].unique_id);
+    try std.testing.expectEqualStrings("unit_test.demo.z_orders.z_assert", graph.unit_tests.items[1].unique_id);
     try std.testing.expectEqualStrings("doc.demo.a_doc", graph.docs.items[0].unique_id);
     try std.testing.expectEqualStrings("doc.demo.z_doc", graph.docs.items[1].unique_id);
     try std.testing.expectEqualStrings("macro.demo.a_macro", graph.macros.items[0].unique_id);

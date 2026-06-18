@@ -72,7 +72,10 @@
     "group_map": {"type": "object", "additionalProperties": false},
     "saved_queries": {"type": "object", "additionalProperties": false},
     "semantic_models": {"type": "object", "additionalProperties": false},
-    "unit_tests": {"type": "object", "additionalProperties": false},
+    "unit_tests": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/unit_test"}
+    },
     "disabled": {
       "type": "object",
       "additionalProperties": {
@@ -258,6 +261,55 @@
         "enabled": {"type": "boolean"},
         "tags": {"$ref": "#/$defs/unique_id_array"},
         "meta": {"type": "object"}
+      }
+    },
+    "json_scalar": {
+      "type": ["string", "number", "boolean", "null"]
+    },
+    "unit_test_row": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/json_scalar"}
+    },
+    "unit_test_rows": {
+      "anyOf": [
+        {"type": "string"},
+        {
+          "type": "array",
+          "items": {"$ref": "#/$defs/unit_test_row"}
+        },
+        {"type": "null"}
+      ]
+    },
+    "unit_test_input_fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "rows", "format", "fixture"],
+      "properties": {
+        "input": {"type": "string"},
+        "rows": {"$ref": "#/$defs/unit_test_rows"},
+        "format": {"enum": ["dict", "csv", "sql"]},
+        "fixture": {"type": ["string", "null"]}
+      }
+    },
+    "unit_test_output_fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rows", "format", "fixture"],
+      "properties": {
+        "rows": {"$ref": "#/$defs/unit_test_rows"},
+        "format": {"enum": ["dict", "csv", "sql"]},
+        "fixture": {"type": ["string", "null"]}
+      }
+    },
+    "unit_test_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tags", "meta", "enabled", "static_analysis"],
+      "properties": {
+        "tags": {"$ref": "#/$defs/unique_id_array"},
+        "meta": {"type": "object"},
+        "enabled": {"type": "boolean"},
+        "static_analysis": {"type": ["string", "null"]}
       }
     },
     "macro_depends_on": {
@@ -575,6 +627,55 @@
         "config": {"$ref": "#/$defs/exposure_config"},
         "unrendered_config": {"type": "object"},
         "created_at": {"type": "number"}
+      }
+    },
+    "unit_test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "given",
+        "expect",
+        "name",
+        "resource_type",
+        "package_name",
+        "path",
+        "original_file_path",
+        "unique_id",
+        "fqn",
+        "description",
+        "overrides",
+        "depends_on",
+        "config",
+        "checksum",
+        "schema",
+        "created_at",
+        "versions",
+        "version"
+      ],
+      "properties": {
+        "model": {"type": "string"},
+        "given": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/unit_test_input_fixture"}
+        },
+        "expect": {"$ref": "#/$defs/unit_test_output_fixture"},
+        "name": {"type": "string"},
+        "resource_type": {"const": "unit_test"},
+        "package_name": {"type": "string"},
+        "path": {"type": "string"},
+        "original_file_path": {"type": "string"},
+        "unique_id": {"type": "string"},
+        "fqn": {"$ref": "#/$defs/unique_id_array"},
+        "description": {"type": "string"},
+        "overrides": {"type": ["object", "null"]},
+        "depends_on": {"$ref": "#/$defs/depends_on"},
+        "config": {"$ref": "#/$defs/unit_test_config"},
+        "checksum": {"type": ["string", "null"]},
+        "schema": {"type": ["string", "null"]},
+        "created_at": {"type": "number"},
+        "versions": {"type": ["object", "null"]},
+        "version": {"type": ["string", "number", "integer", "null"]}
       }
     }
   }

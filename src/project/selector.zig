@@ -6,6 +6,7 @@ const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
 const SourceDef = types.SourceDef;
 const ExposureDef = types.ExposureDef;
+const UnitTestDef = types.UnitTestDef;
 
 pub const SelectedResource = struct {
     unique_id: []const u8,
@@ -79,6 +80,19 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .search_name = exposure.name,
                 .original_file_path = exposure.original_file_path,
                 .selector = try std.fmt.allocPrint(allocator, "exposure:{s}.{s}", .{ exposure.package_name, exposure.name }),
+            });
+        }
+    }
+    for (graph.unit_tests.items) |*unit_test| {
+        if (!unit_test.enabled) continue;
+        if (matchesResourceType(resource_type, "unit_test") and matchesUnitTestSelector(graph, unit_test, select_spec) and (!exclude_spec.active or !matchesUnitTestSelector(graph, unit_test, exclude_spec))) {
+            try selected.append(allocator, .{
+                .unique_id = unit_test.unique_id,
+                .name = unit_test.name,
+                .resource_type = "unit_test",
+                .search_name = unit_test.name,
+                .original_file_path = unit_test.original_file_path,
+                .selector = try std.fmt.allocPrint(allocator, "unit_test:{s}.{s}", .{ unit_test.package_name, unit_test.name }),
             });
         }
     }
@@ -363,6 +377,84 @@ fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef
     return false;
 }
 
+fn matchesUnitTestSelector(graph: *const Graph, unit_test: *const UnitTestDef, spec: SelectorSpec) bool {
+    if (!spec.active) return true;
+    if (spec.value.len == 0) return true;
+    return matchesUnitTestSelectorExpression(graph, unit_test, spec.value);
+}
+
+fn matchesUnitTestSelectorExpression(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8) bool {
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (expressions.next()) |expression| {
+        if (matchesUnitTestSelectorIntersection(graph, unit_test, expression)) return true;
+    }
+    return false;
+}
+
+fn matchesUnitTestSelectorIntersection(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8) bool {
+    var raw_terms = std.mem.splitScalar(u8, value, ',');
+    var matched_any = false;
+    while (raw_terms.next()) |raw_term| {
+        const term = parseSelectorTerm(raw_term);
+        if (!term.valid) return false;
+        if (term.value.len == 0) return false;
+        if (!matchesUnitTestSelectorTerm(graph, unit_test, term.value) and !matchesGraphExpansion(graph, unit_test.unique_id, term)) return false;
+        matched_any = true;
+    }
+    return matched_any;
+}
+
+fn matchesUnitTestSelectorTerm(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8) bool {
+    if (matchesSelectorPattern(value, unit_test.name) or
+        std.mem.eql(u8, value, unit_test.unique_id) or
+        matchesUnitTestFqnPattern(value, unit_test))
+    {
+        return true;
+    }
+    if (std.mem.startsWith(u8, value, "resource_type:")) {
+        const resource_type = value["resource_type:".len..];
+        return std.mem.eql(u8, resource_type, "unit_test");
+    }
+    if (std.mem.startsWith(u8, value, "test_type:")) {
+        const test_type = value["test_type:".len..];
+        return std.mem.eql(u8, test_type, "unit");
+    }
+    if (std.mem.startsWith(u8, value, "package:")) {
+        return matchesUniqueIdPackage(graph, unit_test.unique_id, value["package:".len..]);
+    }
+    if (std.mem.startsWith(u8, value, "unit_test:")) {
+        const unit_value = value["unit_test:".len..];
+        if (matchesSelectorPattern(unit_value, unit_test.name)) return true;
+        if (std.mem.indexOfScalar(u8, unit_value, '.')) |first_dot| {
+            if (std.mem.indexOfScalar(u8, unit_value[first_dot + 1 ..], '.')) |relative_second_dot| {
+                const second_dot = first_dot + 1 + relative_second_dot;
+                return matchesSelectorPattern(unit_value[0..first_dot], unit_test.package_name) and
+                    matchesSelectorPattern(unit_value[first_dot + 1 .. second_dot], unit_test.model) and
+                    matchesSelectorPattern(unit_value[second_dot + 1 ..], unit_test.name);
+            }
+            return (matchesSelectorPattern(unit_value[0..first_dot], unit_test.package_name) or
+                matchesSelectorPattern(unit_value[0..first_dot], unit_test.model)) and
+                matchesSelectorPattern(unit_value[first_dot + 1 ..], unit_test.name);
+        }
+        return false;
+    }
+    if (std.mem.startsWith(u8, value, "tag:")) {
+        const tag = value["tag:".len..];
+        for (unit_test.tags.items) |unit_tag| {
+            if (matchesSelectorPattern(tag, unit_tag)) return true;
+        }
+    }
+    if (std.mem.startsWith(u8, value, "path:")) {
+        const path = value["path:".len..];
+        return matchesPathSelector(path, unit_test.original_file_path);
+    }
+    if (std.mem.startsWith(u8, value, "file:")) {
+        const file = value["file:".len..];
+        return matchesFileSelector(file, unit_test.original_file_path);
+    }
+    return false;
+}
+
 fn matchesPathSelector(pattern: []const u8, path: []const u8) bool {
     if (selectorPatternHasWildcard(pattern)) {
         if (wildcardMatchesPath(pattern, path)) return true;
@@ -418,6 +510,20 @@ fn matchesNodeFqnPattern(pattern: []const u8, node: *const Node) bool {
 
 fn matchesGenericTestFqnPattern(pattern: []const u8, test_node: *const GenericTestNode) bool {
     return matchesPathBackedFqnPattern(pattern, test_node.package_name, test_node.path);
+}
+
+fn matchesUnitTestFqnPattern(pattern: []const u8, unit_test: *const UnitTestDef) bool {
+    var buffer: [4096]u8 = undefined;
+    var len: usize = 0;
+    if (!appendFqnSlice(&buffer, &len, unit_test.package_name)) return false;
+    if (!appendFqnByte(&buffer, &len, '.')) return false;
+    const model_start = len;
+    if (!appendFqnSlice(&buffer, &len, unit_test.model)) return false;
+    if (!appendFqnByte(&buffer, &len, '.')) return false;
+    if (!appendFqnSlice(&buffer, &len, unit_test.name)) return false;
+    const scoped = buffer[0..len];
+    const model_scoped = buffer[model_start..len];
+    return matchesFqnCandidate(pattern, scoped) or matchesFqnCandidate(pattern, model_scoped);
 }
 
 fn matchesPathBackedFqnPattern(pattern: []const u8, package_name: []const u8, path: []const u8) bool {
@@ -618,6 +724,13 @@ fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, s
         if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
+    for (graph.unit_tests.items) |*target| {
+        if (!target.enabled) continue;
+        if (!matchesUnitTestSelectorTerm(graph, target, spec.value)) continue;
+        if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
+        if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
+        if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
+    }
     return false;
 }
 
@@ -637,6 +750,10 @@ fn resourceInChildrensParentsSelection(graph: *const Graph, selected_unique_id: 
         if (!resource.enabled) continue;
         if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
     }
+    for (graph.unit_tests.items) |*resource| {
+        if (!resource.enabled) continue;
+        if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
+    }
     return false;
 }
 
@@ -650,7 +767,7 @@ fn resourceDependsOnDepth(graph: *const Graph, resource_unique_id: []const u8, d
 }
 
 fn graphDepthLimit(graph: *const Graph) usize {
-    return graph.nodes.items.len + graph.tests.items.len + graph.sources.items.len + graph.exposures.items.len + 1;
+    return graph.nodes.items.len + graph.tests.items.len + graph.sources.items.len + graph.exposures.items.len + graph.unit_tests.items.len + 1;
 }
 
 fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8, remaining_depth: usize) bool {
@@ -668,6 +785,11 @@ fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, 
         if (!exposure.enabled) continue;
         if (!std.mem.eql(u8, exposure.unique_id, resource_unique_id)) continue;
         return dependencyListContainsTransitive(graph, exposure.depends_on.items, dependency_unique_id, remaining_depth - 1);
+    }
+    for (graph.unit_tests.items) |unit_test| {
+        if (!unit_test.enabled) continue;
+        if (!std.mem.eql(u8, unit_test.unique_id, resource_unique_id)) continue;
+        return dependencyListContainsTransitive(graph, unit_test.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
     return false;
 }
@@ -720,6 +842,50 @@ test "file selectors match only basename or stem" {
     try std.testing.expect(!matchesFileSelector("models/marts/orders.sql", "models/marts/orders.sql"));
     try std.testing.expect(!matchesFileSelector("marts/orders.sql", "models/marts/orders.sql"));
     try std.testing.expect(!matchesFileSelector("customers.sql", "models/marts/orders.sql"));
+}
+
+test "unit test selectors match resource type name package and graph expansion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "marts/orders.sql",
+        .original_file_path = "models/marts/orders.sql",
+        .raw_code = "",
+    });
+    try graph.unit_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "unit_test.demo.orders.assert_order_flags",
+        .name = "assert_order_flags",
+        .model = "orders",
+        .path = "marts/orders.yml",
+        .original_file_path = "models/marts/orders.yml",
+    });
+    try graph.unit_tests.items[0].depends_on.append(allocator, "model.demo.orders");
+
+    const by_resource_type = try selectResources(allocator, &graph, "unit_test", null, null);
+    try std.testing.expectEqual(@as(usize, 1), by_resource_type.len);
+    try std.testing.expectEqualStrings("unit_test.demo.orders.assert_order_flags", by_resource_type[0].unique_id);
+    try std.testing.expectEqualStrings("unit_test:demo.assert_order_flags", by_resource_type[0].selector);
+
+    const by_selector = try selectResources(allocator, &graph, null, "resource_type:unit_test", null);
+    try std.testing.expectEqual(@as(usize, 1), by_selector.len);
+
+    const by_unit_selector = try selectResources(allocator, &graph, null, "unit_test:demo.orders.assert_order_flags", null);
+    try std.testing.expectEqual(@as(usize, 1), by_unit_selector.len);
+
+    const by_test_type = try selectResources(allocator, &graph, null, "test_type:unit", null);
+    try std.testing.expectEqual(@as(usize, 1), by_test_type.len);
+
+    const by_child_expansion = try selectResources(allocator, &graph, "unit_test", "orders+", null);
+    try std.testing.expectEqual(@as(usize, 1), by_child_expansion.len);
 }
 
 test "selector terms parse dbt plus depth operators" {

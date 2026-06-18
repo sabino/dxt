@@ -39,8 +39,9 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | Exposures | Partial | YAML exposure parsing with refs/sources, tags, metadata, owner fields. | Full validation and richer artifact parity. |
 | Macros | Partial | Macro/test/data_test/materialization block extraction, macro properties, static macro dependency lookup. | Macro execution, namespace execution, adapter dispatch execution, bundled dbt internals. |
 | Docs blocks | Partial | Markdown docs block parsing and literal `doc()` descriptions. | Dynamic doc expressions and docs serve. |
-| Generic tests | Partial | Manifest nodes and DuckDB execution for supported built-ins. | Custom macro-backed tests, singular tests, unit tests, configs, store failures. |
-| Analyses, snapshots, semantic models, metrics, saved queries, functions, groups, unit tests | Planned | Not first-class yet or only empty artifact maps where needed. | Full parser, graph, artifact, and execution semantics. |
+| Generic tests | Partial | Manifest nodes and DuckDB execution for supported built-ins. | Custom macro-backed tests, singular tests, configs, store failures. |
+| Unit tests | Partial | Read-only YAML parsing for dict-style `given`/`expect` row fixtures, Manifest v12-shaped `unit_tests`, parent/child maps, `resource_type:unit_test`, `unit_test:`, and `test_type:unit` listing. | Execution, fixture materialization, CSV/SQL fixtures, overrides, version expansion, disabled-unit-test placement, SQL comparison, and run-results. |
+| Analyses, snapshots, semantic models, metrics, saved queries, functions, groups | Planned | Not first-class yet or only empty artifact maps where needed. | Full parser, graph, artifact, and execution semantics. |
 
 ## Jinja And Macros
 

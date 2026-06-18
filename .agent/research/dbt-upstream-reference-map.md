@@ -438,6 +438,12 @@ touched.
 
 ### 5. M1 Read-Only Unit Test Artifact Surface
 
+Initial dxt status: the first read-only slice is implemented for root-project
+dict-style row fixtures, Manifest v12-shaped `unit_tests`, tested-model
+parent/child maps, and `ls` selectors. Execution, CSV/SQL fixtures, overrides,
+version expansion, disabled-unit-test placement, and SQL comparison remain
+future slices.
+
 - Upstream references: v1 `core/dbt/parser/schema_yaml_readers.py` unit-test
   parsing path, `core/dbt/artifacts/resources/v1/unit_test_definition.py`,
   `core/dbt/graph/selector_methods.py::UnitTestSelectorMethod`; Fusion

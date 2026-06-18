@@ -2108,6 +2108,99 @@ def test_parse_writes_minimal_manifest(tmp_path: Path):
     assert str(project) not in manifest_path.read_text()
 
 
+def test_parse_and_ls_include_read_only_unit_tests(tmp_path: Path):
+    project = tmp_path / "unit_test_project"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: unit_test_project
+version: '1.0'
+profile: unit_test_project
+model-paths: ['models']
+"""
+    )
+    (project / "models" / "orders.sql").write_text("select 1 as order_id, true as has_food\n")
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+unit_tests:
+  - name: assert_order_flags
+    description: Orders preserve food flags.
+    model: orders
+    given:
+      - input: ref('orders')
+        rows:
+          - {order_id: 1, has_food: true}
+          - {
+              order_id: 2,
+              has_food: false,
+            }
+    expect:
+      rows:
+        - {order_id: 1, has_food: true}
+"""
+    )
+
+    target = tmp_path / "unit-test-target"
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
+    assert not (target / "run_results.json").exists()
+
+    unit_id = "unit_test.unit_test_project.orders.assert_order_flags"
+    unit_test = manifest["unit_tests"][unit_id]
+    assert unit_test["resource_type"] == "unit_test"
+    assert unit_test["model"] == "orders"
+    assert unit_test["path"] == "schema.yml"
+    assert unit_test["original_file_path"] == "models/schema.yml"
+    assert unit_test["description"] == "Orders preserve food flags."
+    assert unit_test["given"][0]["input"] == "ref('orders')"
+    assert unit_test["given"][0]["rows"][0] == {"order_id": 1, "has_food": True}
+    assert unit_test["given"][0]["rows"][1] == {"order_id": 2, "has_food": False}
+    assert unit_test["expect"]["rows"][0] == {"order_id": 1, "has_food": True}
+    assert manifest["parent_map"][unit_id] == ["model.unit_test_project.orders"]
+    assert unit_id in manifest["child_map"]["model.unit_test_project.orders"]
+
+    list_json = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "unit_test", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert list_json.returncode == 0, list_json.stderr
+    listed = json.loads(list_json.stdout)
+    assert listed == [{"unique_id": unit_id, "resource_type": "unit_test", "name": "assert_order_flags"}]
+
+    list_selector = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:unit_test", "--output", "selector"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert list_selector.returncode == 0, list_selector.stderr
+    assert list_selector.stdout.strip() == "unit_test:unit_test_project.assert_order_flags"
+
+    build_target = tmp_path / "unit-test-build-target"
+    build = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(build_target), "--select", "resource_type:unit_test"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build.returncode != 0
+    assert "unit test execution is not supported yet" in build.stderr
+    assert (build_target / "manifest.json").exists()
+    assert not (build_target / "run_results.json").exists()
+
+
 def assert_partial_manifest_schema(manifest: dict) -> None:
     assert set(manifest) >= {
         "metadata",
@@ -2134,7 +2227,15 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
     assert manifest["group_map"] == {}
     assert manifest["saved_queries"] == {}
     assert manifest["semantic_models"] == {}
-    assert manifest["unit_tests"] == {}
+    assert isinstance(manifest["unit_tests"], dict)
+    for unique_id, unit_test in manifest["unit_tests"].items():
+        assert unique_id == unit_test["unique_id"]
+        assert unit_test["resource_type"] == "unit_test"
+        assert unit_test["package_name"]
+        assert unit_test["model"]
+        assert isinstance(unit_test["given"], list)
+        assert isinstance(unit_test["expect"], dict)
+        assert isinstance(unit_test["depends_on"]["nodes"], list)
     for unique_id, node in manifest["nodes"].items():
         assert unique_id == node["unique_id"]
         assert node["resource_type"] in {"model", "seed", "test"}
@@ -4510,13 +4611,12 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         capture_output=True,
     )
     assert unsupported_type.returncode == 2
-    assert "--resource-type supports only model, seed, source, exposure, or test" in unsupported_type.stderr
+    assert "--resource-type supports only model, seed, source, exposure, test, or unit_test" in unsupported_type.stderr
 
     for selector in [
         "state:modified",
         "config.schema:audit",
         "resource_type:snapshot",
-        "test_type:unit",
         "tag:nightly,",
         "config.materialized:",
         "package:",

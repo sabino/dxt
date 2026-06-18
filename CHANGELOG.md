@@ -27,6 +27,10 @@ compatibility.
   `source()` compilation, manifest source fields, DuckDB docs catalog lookup,
   source freshness SQL, and source generic-test relation rendering while
   preserving logical source selectors and unique IDs.
+- Read-only unit-test artifact support for dict-style YAML `unit_tests:`
+  entries, Manifest v12-shaped `unit_tests`, tested-model dependency maps,
+  `ls` resource-type/unit-test/test-type selectors, and explicit unsupported
+  `build` behavior without unit-test `run_results.json`.
 - `file:` selector support for basename/stem matching across selectable graph
   resources, with selector reuse covered through `ls` and `docs generate`.
 - Depth-limited dbt-style `+` graph selectors for parent and child expansion,
