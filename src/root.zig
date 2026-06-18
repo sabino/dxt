@@ -127,7 +127,20 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             project.docsGenerate(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
             return .ok;
         }
-        try stderr.print("error: expected `dxt docs generate`\n", .{});
+        if (args.len >= 3 and equals(args[2], "serve")) {
+            if (hasHelp(args[3..])) {
+                try printCommandHelp("docs serve", stdout, .docs_serve);
+                return .ok;
+            }
+            const rt = runtime orelse {
+                try stderr.writeAll("error: runtime I/O is required for docs serve\n");
+                return .usage;
+            };
+            const options = parseOptions(rt.allocator, args[3..], stderr, .docs_serve) catch |err| return commandError(err, stderr);
+            project.docsServe(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+            return .ok;
+        }
+        try stderr.print("error: expected `dxt docs generate` or `dxt docs serve`\n", .{});
         return .usage;
     }
 
@@ -141,6 +154,7 @@ const OptionMode = enum {
     common_and_select,
     compile,
     docs_generate,
+    docs_serve,
     list,
     build,
     source_freshness,
@@ -151,6 +165,7 @@ const HelpMode = enum {
     list,
     build,
     docs_generate,
+    docs_serve,
     source_freshness,
 };
 
@@ -217,6 +232,8 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedModelExecution => stderr.writeAll("error: model execution requires a DuckDB adapter and materialization runner; not implemented yet\n") catch {},
         error.UnsupportedSeedExecution => stderr.writeAll("error: build currently executes only root-project DuckDB seeds with default CSV settings\n") catch {},
         error.UnsupportedTestExecution => stderr.writeAll("error: build currently executes only selected DuckDB model/seed/source not_null/unique/accepted_values/relationships column generic tests\n") catch {},
+        error.UnsupportedDocsBrowserOpen => stderr.writeAll("error: docs serve browser opening is not implemented yet; use --no-browser\n") catch {},
+        error.InvalidDocsServePort => stderr.writeAll("error: --port must be an integer between 1 and 65535\n") catch {},
         error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by the implemented M1 parser command\n") catch {},
         else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},
     }
@@ -301,6 +318,15 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             } else if (equals(arg, "--target-path")) {
                 if (mode == .list) return error.UnsupportedCommandOption;
                 options.target_path = value;
+            } else if (equals(arg, "--host")) {
+                if (mode != .docs_serve) return error.UnsupportedCommandOption;
+                if (value.len == 0) return error.InvalidOption;
+                options.docs_host = value;
+            } else if (equals(arg, "--port")) {
+                if (mode != .docs_serve) return error.UnsupportedCommandOption;
+                const port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidDocsServePort;
+                if (port == 0) return error.InvalidDocsServePort;
+                options.docs_port = port;
             } else if (equals(arg, "--resource-type")) {
                 if (!equals(value, "model") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "exposure") and !equals(value, "test") and !equals(value, "unit_test")) return error.UnsupportedResourceType;
                 options.resource_type = value;
@@ -325,6 +351,11 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             continue;
         }
         if (isFlag(arg, mode)) {
+            if (equals(arg, "--browser")) {
+                options.docs_open_browser = true;
+            } else if (equals(arg, "--no-browser") or equals(arg, "--no-open")) {
+                options.docs_open_browser = false;
+            }
             i += 1;
             continue;
         }
@@ -466,10 +497,13 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
         .common_and_select, .compile, .docs_generate, .list, .build, .source_freshness => {
             if (equals(arg, "--select") or equals(arg, "--exclude")) return true;
         },
-        .common_only => {},
+        .common_only, .docs_serve => {},
     }
 
     if (mode == .list and (equals(arg, "--resource-type") or equals(arg, "--output"))) {
+        return true;
+    }
+    if (mode == .docs_serve and (equals(arg, "--host") or equals(arg, "--port"))) {
         return true;
     }
 
@@ -477,7 +511,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
 }
 
 fn isSelectorOption(arg: []const u8, mode: OptionMode) bool {
-    return mode != .common_only and (equals(arg, "--select") or equals(arg, "--exclude"));
+    return mode != .common_only and mode != .docs_serve and (equals(arg, "--select") or equals(arg, "--exclude"));
 }
 
 fn isOptionLike(arg: []const u8) bool {
@@ -485,7 +519,9 @@ fn isOptionLike(arg: []const u8) bool {
 }
 
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
-    return mode == .build and equals(arg, "--full-refresh");
+    if (mode == .build and equals(arg, "--full-refresh")) return true;
+    if (mode == .docs_serve and (equals(arg, "--browser") or equals(arg, "--no-browser") or equals(arg, "--no-open"))) return true;
+    return false;
 }
 
 pub fn printRootHelp(writer: *Io.Writer) !void {
@@ -503,27 +539,32 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  build            Execute supported selected DuckDB seeds, models, and tests.
         \\  source freshness Check freshness for supported DuckDB sources.
         \\  docs generate    Generate supported docs artifacts.
+        \\  docs serve       Serve generated docs artifacts from the target directory.
         \\
     );
 }
 
 fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !void {
     try writer.print("Usage: dxt {s} [options]\n\n", .{command});
-    if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "source freshness")) {
-        try writer.print("`dxt {s}` supports the M1 parser subset documented in PLAN.md.\n\n", .{command});
+    if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
+        if (equals(command, "docs serve")) {
+            try writer.writeAll("`dxt docs serve` serves generated docs artifacts from the target directory.\n\n");
+        } else {
+            try writer.print("`dxt {s}` supports the M1 parser subset documented in PLAN.md.\n\n", .{command});
+        }
         try writer.writeAll("Options:\n");
         try writer.writeAll(
             \\  --project-dir <path>
             \\  --vars <yaml>
             \\
         );
-        if (equals(command, "parse") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "source freshness")) {
+        if (equals(command, "parse") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
             try writer.writeAll(
                 \\  --target-path <path>
                 \\
             );
         }
-        if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "source freshness")) {
+        if (equals(command, "parse") or equals(command, "ls") or equals(command, "compile") or equals(command, "run") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
             try writer.writeAll(
                 \\  --profiles-dir <path>
                 \\  --profile <name>
@@ -532,11 +573,13 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\
             );
         }
-        try writer.writeAll(
-            \\  --select <selector> [selector ...]
-            \\  --exclude <selector> [selector ...]
-            \\
-        );
+        if (!equals(command, "docs serve")) {
+            try writer.writeAll(
+                \\  --select <selector> [selector ...]
+                \\  --exclude <selector> [selector ...]
+                \\
+            );
+        }
         if (equals(command, "ls")) {
             try writer.writeAll(
                 \\  --resource-type <type>
@@ -548,6 +591,16 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         if (equals(command, "build")) {
             try writer.writeAll(
                 \\  --full-refresh
+                \\
+            );
+        }
+        if (equals(command, "docs serve")) {
+            try writer.writeAll(
+                \\  --host <host>
+                \\  --port <port>
+                \\  --no-browser
+                \\  --browser
+                \\  --no-open
                 \\
             );
         }
@@ -573,6 +626,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\
             );
         },
+        .docs_serve => {},
     }
     switch (mode) {
         .list => {
@@ -593,6 +647,16 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         .docs_generate => {
             try writer.writeAll(
                 \\  --threads <count>
+                \\
+            );
+        },
+        .docs_serve => {
+            try writer.writeAll(
+                \\  --host <host>
+                \\  --port <port>
+                \\  --no-browser
+                \\  --browser
+                \\  --no-open
                 \\
             );
         },
@@ -696,6 +760,33 @@ test "docs generate command is recognized" {
     try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for docs generate") != null);
 }
 
+test "docs serve command is recognized" {
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const code = try run(&.{ "dxt", "docs", "serve", "--target-path", "target-dxt", "--host", "127.0.0.1", "--port", "8081", "--no-browser" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expectEqual(ExitCode.usage, code);
+    try std.testing.expectEqualStrings("", stdout.written());
+    try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "runtime I/O is required for docs serve") != null);
+}
+
+test "docs serve command help describes serve options" {
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const code = try run(&.{ "dxt", "docs", "serve", "--help" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expectEqual(ExitCode.ok, code);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "Usage: dxt docs serve") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "--host <host>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "--port <port>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.written(), "--no-browser") != null);
+    try std.testing.expectEqualStrings("", stderr.written());
+}
+
 test "source freshness command is recognized" {
     var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stdout.deinit();
@@ -730,6 +821,33 @@ test "list command parses repeated output keys with selector lists" {
     try std.testing.expectEqualStrings("resource_type", options.output_keys.?[1]);
     try std.testing.expectEqualStrings("unique_id", options.output_keys.?[2]);
     try std.testing.expectEqualStrings("", stderr.written());
+}
+
+test "docs serve parses host port and browser flags" {
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const options = try parseOptions(
+        std.testing.allocator,
+        &.{ "--target-path", "target-dxt", "--host", "127.0.0.1", "--port", "8082", "--browser", "--no-browser", "--no-open" },
+        &stderr.writer,
+        .docs_serve,
+    );
+
+    try std.testing.expectEqualStrings("target-dxt", options.target_path.?);
+    try std.testing.expectEqualStrings("127.0.0.1", options.docs_host);
+    try std.testing.expectEqual(@as(u16, 8082), options.docs_port);
+    try std.testing.expect(!options.docs_open_browser);
+    try std.testing.expectEqualStrings("", stderr.written());
+}
+
+test "docs serve rejects invalid port" {
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const result = parseOptions(std.testing.allocator, &.{ "--port", "0" }, &stderr.writer, .docs_serve);
+
+    try std.testing.expectError(error.InvalidDocsServePort, result);
 }
 
 test "list command requires output keys value" {
