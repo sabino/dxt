@@ -301,8 +301,7 @@ Every compatibility slice must record:
 Immediate source-grounded queue, refreshed on 2026-06-17 in
 `.agent/research/dbt-upstream-reference-map.md`:
 
-1. Selector parity for `@`, depth-limited `+`, remaining `file:` edge cases,
-   and richer `ls`
+1. Selector parity for `@`, remaining `file:` edge cases, and richer `ls`
    outputs.
 2. Parse/compile `execute` boundary and static `{% if %}` handling.
 3. Read-only unit-test artifact parsing for newer Jaffle-style projects.
@@ -340,6 +339,16 @@ Current file selector source note:
 the common selector engine. It does not implement `@`, depth-limited `+`, YAML
 selectors, state/result/source-status selectors, path normalization, bracket
 fnmatch classes, or richer `ls` output formats.
+
+Current depth-limited plus selector source note:
+`.agent/research/m2-depth-limited-plus-selectors.md` maps dbt Core v1
+selector regex and graph-neighbor depth handling plus Fusion selector depth
+serialization to dxt's first bounded parent/child selector expansion slice.
+This slice supports CLI validation and selector matching for `1+model`,
+`model+1`, and `1+model+1` while preserving existing unlimited `+model`,
+`model+`, and `+model+` behavior. It does not implement `@`, YAML selectors,
+state/result/source-status selectors, indirect-selection flags, or richer `ls`
+output formats.
 
 Current macro argument validation source note:
 `.agent/research/m1-macro-arg-validation-slice.md` maps upstream dbt Core v1

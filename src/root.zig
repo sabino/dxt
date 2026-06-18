@@ -331,12 +331,7 @@ fn validateSelectorExpression(value: []const u8) !void {
     var matched_any = false;
     while (terms.next()) |raw_term| {
         if (raw_term.len == 0) return error.UnsupportedSelector;
-        const leading_plus = raw_term[0] == '+';
-        const trailing_plus = raw_term[raw_term.len - 1] == '+';
-        const start: usize = if (leading_plus) 1 else 0;
-        const end: usize = if (trailing_plus) raw_term.len - 1 else raw_term.len;
-        if (start >= end) return error.UnsupportedSelector;
-        const part = raw_term[start..end];
+        const part = try selectorTermValueForValidation(raw_term);
         if (part.len == 0) return error.UnsupportedSelector;
         if (std.mem.indexOfAny(u8, part, " \t\r")) |_| return error.UnsupportedSelector;
         if (std.mem.indexOfScalar(u8, part, '+')) |_| return error.UnsupportedSelector;
@@ -344,6 +339,42 @@ fn validateSelectorExpression(value: []const u8) !void {
         matched_any = true;
     }
     if (!matched_any) return error.UnsupportedSelector;
+}
+
+fn selectorTermValueForValidation(raw_term: []const u8) ![]const u8 {
+    var start: usize = 0;
+    var end: usize = raw_term.len;
+
+    if (start < end) {
+        if (raw_term[start] == '+') {
+            start += 1;
+        } else {
+            var digit_end = start;
+            while (digit_end < end and isSelectorDigit(raw_term[digit_end])) digit_end += 1;
+            if (digit_end > start and digit_end < end and raw_term[digit_end] == '+') {
+                _ = std.fmt.parseInt(usize, raw_term[start..digit_end], 10) catch return error.UnsupportedSelector;
+                start = digit_end + 1;
+            }
+        }
+    }
+    if (start >= end or raw_term[start] == '+') return error.UnsupportedSelector;
+
+    if (raw_term[end - 1] == '+') {
+        end -= 1;
+    } else {
+        var digit_start = end;
+        while (digit_start > start and isSelectorDigit(raw_term[digit_start - 1])) digit_start -= 1;
+        if (digit_start < end and digit_start > start and raw_term[digit_start - 1] == '+') {
+            _ = std.fmt.parseInt(usize, raw_term[digit_start..end], 10) catch return error.UnsupportedSelector;
+            end = digit_start - 1;
+        }
+    }
+    if (start >= end or raw_term[end - 1] == '+') return error.UnsupportedSelector;
+    return raw_term[start..end];
+}
+
+fn isSelectorDigit(byte: u8) bool {
+    return byte >= '0' and byte <= '9';
 }
 
 fn validateSelectorMethod(part: []const u8) !void {
