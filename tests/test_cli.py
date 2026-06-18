@@ -5785,6 +5785,249 @@ def test_missing_project_file_fails(tmp_path: Path):
     assert "missing dbt_project.yml" in result.stderr
 
 
+def write_clean_project(project: Path, clean_targets: list[str] | None = None) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "models" / "customers.sql").write_text("select 1 as customer_id")
+    lines = [
+        "name: clean_fixture",
+        "target-path: target",
+        "model-paths: [models]",
+    ]
+    if clean_targets is not None:
+        if clean_targets:
+            lines.append("clean-targets:")
+            lines.extend(f"  - {target}" for target in clean_targets)
+        else:
+            lines.append("clean-targets: []")
+    (project / "dbt_project.yml").write_text("\n".join(lines) + "\n")
+
+
+def test_clean_removes_configured_project_relative_targets(tmp_path: Path):
+    project = tmp_path / "clean_project"
+    write_clean_project(project, ["target", "dbt_packages"])
+    (project / "target" / "nested").mkdir(parents=True)
+    (project / "target" / "nested" / "manifest.json").write_text("{}")
+    (project / "dbt_packages").mkdir()
+    (project / "dbt_packages" / "package.txt").write_text("installed")
+
+    result = subprocess.run(
+        [DXT, "clean", "--project-dir", str(project), "--profiles-dir", str(tmp_path / "empty-profiles")],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert "Finished cleaning 2 path(s)" in result.stdout
+    assert not (project / "target").exists()
+    assert not (project / "dbt_packages").exists()
+    assert (project / "models" / "customers.sql").exists()
+
+    project_again = tmp_path / "clean_project_again"
+    write_clean_project(project_again, ["target"])
+    (project_again / "target").mkdir()
+    profiled_result = subprocess.run(
+        [
+            DXT,
+            "clean",
+            "--project-dir",
+            str(project_again),
+            "--profile",
+            "default",
+            "--target",
+            "dev",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert profiled_result.returncode == 0, profiled_result.stderr
+    assert not (project_again / "target").exists()
+
+
+def test_clean_defaults_to_effective_target_path_and_ignores_missing_targets(tmp_path: Path):
+    project = tmp_path / "clean_project"
+    write_clean_project(project)
+    (project / "custom-target").mkdir()
+    (project / "target").mkdir()
+    (project / "target" / "kept.txt").write_text("keep")
+
+    result = subprocess.run(
+        [
+            DXT,
+            "clean",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            "custom-target",
+            "--clean-project-files-only",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (project / "custom-target").exists()
+    assert (project / "target" / "kept.txt").exists()
+
+    second_result = subprocess.run(
+        [DXT, "clean", "--project-dir", str(project), "--target-path", "missing-target"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert second_result.returncode == 0, second_result.stderr
+    assert "Finished cleaning 1 path(s)" in second_result.stdout
+
+
+@pytest.mark.parametrize(
+    ("clean_target", "expected_error"),
+    [
+        ("models", "source paths"),
+        ("tests", "source paths"),
+        ("..", "outside the project"),
+        (".", "outside the project"),
+        ("/tmp/dxt-clean-outside", "outside the project"),
+    ],
+)
+def test_clean_rejects_unsafe_targets_without_deleting(tmp_path: Path, clean_target: str, expected_error: str):
+    project = tmp_path / "clean_project"
+    write_clean_project(project, [clean_target])
+    (project / "target").mkdir()
+    (project / "target" / "kept.txt").write_text("keep")
+
+    result = subprocess.run(
+        [DXT, "clean", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert expected_error in result.stderr
+    assert (project / "target" / "kept.txt").exists()
+    assert (project / "models" / "customers.sql").exists()
+
+
+def test_clean_validates_all_targets_before_deleting_anything(tmp_path: Path):
+    project = tmp_path / "clean_project"
+    write_clean_project(project, ["target", "models"])
+    (project / "target").mkdir()
+    (project / "target" / "must_survive.txt").write_text("keep")
+
+    result = subprocess.run(
+        [DXT, "clean", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "source paths" in result.stderr
+    assert (project / "target" / "must_survive.txt").exists()
+    assert (project / "models" / "customers.sql").exists()
+
+
+def test_clean_rejects_custom_source_paths_without_deleting(tmp_path: Path):
+    project = tmp_path / "clean_project"
+    (project / "models").mkdir(parents=True)
+    (project / "models" / "customers.sql").write_text("select 1 as customer_id")
+    (project / "data_tests").mkdir()
+    (project / "data_tests" / "assert_customers.sql").write_text("select 1")
+    (project / "marts").mkdir()
+    (project / "marts" / "orders.sql").write_text("select 1")
+    (project / "target").mkdir()
+    (project / "target" / "must_survive.txt").write_text("keep")
+    (project / "dbt_project.yml").write_text(
+        "\n".join(
+            [
+                "name: clean_fixture",
+                "target-path: target",
+                "model-paths: [./marts]",
+                "test-paths: [data_tests]",
+                "clean-targets:",
+                "  - target",
+                "  - data_tests",
+            ]
+        )
+        + "\n"
+    )
+
+    result = subprocess.run(
+        [DXT, "clean", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "source paths" in result.stderr
+    assert (project / "target" / "must_survive.txt").exists()
+    assert (project / "data_tests" / "assert_customers.sql").exists()
+
+    (project / "dbt_project.yml").write_text(
+        "\n".join(
+            [
+                "name: clean_fixture",
+                "target-path: target",
+                "model-paths: [./marts]",
+                "clean-targets: [marts]",
+            ]
+        )
+        + "\n"
+    )
+    model_result = subprocess.run(
+        [DXT, "clean", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert model_result.returncode == 2
+    assert "source paths" in model_result.stderr
+    assert (project / "marts" / "orders.sql").exists()
+
+    (project / "marts" / "generated").mkdir()
+    (project / "marts" / "generated" / "must_survive.sql").write_text("select 1")
+    (project / "dbt_project.yml").write_text(
+        "\n".join(
+            [
+                "name: clean_fixture",
+                "target-path: target",
+                "model-paths: [marts/]",
+                "clean-targets: [marts/generated]",
+            ]
+        )
+        + "\n"
+    )
+    trailing_slash_result = subprocess.run(
+        [DXT, "clean", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert trailing_slash_result.returncode == 2
+    assert "source paths" in trailing_slash_result.stderr
+    assert (project / "marts" / "generated" / "must_survive.sql").exists()
+
+
+def test_clean_skips_plain_files(tmp_path: Path):
+    project = tmp_path / "clean_project"
+    write_clean_project(project, ["target-file"])
+    (project / "target-file").write_text("not a directory")
+
+    result = subprocess.run(
+        [DXT, "clean", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (project / "target-file").read_text() == "not a directory"
+
+
 def test_docs_generate_writes_manifest_catalog_and_compiled_sql(tmp_path: Path):
     project = copy_fixture(tmp_path, "docs_blocks")
     target = tmp_path / "docs-target"

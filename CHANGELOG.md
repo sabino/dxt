@@ -29,6 +29,9 @@ compatibility.
   target-directory docs artifacts over localhost HTTP with dbt-style host,
   port, no-browser/browser flag parsing, traversal protection, and integration
   coverage that verifies `manifest.json` and `catalog.json` are not mutated.
+- Safe `dxt clean` command in the Zig runtime, including `clean-targets`
+  parsing, effective `target-path` fallback, project-relative deletion guards,
+  source-directory protection, profile-free execution, and CLI safety tests.
 - Root-project seed column generic-test parsing and DuckDB execution for
   `not_null`, `unique`, explicit `accepted_values` `quote: false`, and
   ref-backed `relationships`, including seed-path schema YAML discovery,

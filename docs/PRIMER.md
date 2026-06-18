@@ -24,6 +24,7 @@ commands are:
 
 - `dxt parse`
 - `dxt ls`
+- `dxt clean`
 - `dxt compile`
 - `dxt run`
 - `dxt build`

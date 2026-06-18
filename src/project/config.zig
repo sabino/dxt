@@ -133,6 +133,11 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
     var read_model_path_block = false;
     var read_seed_path_block = false;
     var read_macro_path_block = false;
+    var read_test_path_block = false;
+    var read_analysis_path_block = false;
+    var read_snapshot_path_block = false;
+    var read_function_path_block = false;
+    var read_clean_targets_block = false;
     while (lines.next()) |raw_line| {
         const line = stripYamlComment(raw_line);
         const trimmed = std.mem.trim(u8, line, " \t\r");
@@ -158,6 +163,41 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
                 continue;
             }
             read_macro_path_block = false;
+        }
+        if (read_test_path_block) {
+            if (std.mem.startsWith(u8, trimmed, "- ")) {
+                try config.test_paths.append(allocator, try dupTrimmedScalar(allocator, trimmed[2..]));
+                continue;
+            }
+            read_test_path_block = false;
+        }
+        if (read_analysis_path_block) {
+            if (std.mem.startsWith(u8, trimmed, "- ")) {
+                try config.analysis_paths.append(allocator, try dupTrimmedScalar(allocator, trimmed[2..]));
+                continue;
+            }
+            read_analysis_path_block = false;
+        }
+        if (read_snapshot_path_block) {
+            if (std.mem.startsWith(u8, trimmed, "- ")) {
+                try config.snapshot_paths.append(allocator, try dupTrimmedScalar(allocator, trimmed[2..]));
+                continue;
+            }
+            read_snapshot_path_block = false;
+        }
+        if (read_function_path_block) {
+            if (std.mem.startsWith(u8, trimmed, "- ")) {
+                try config.function_paths.append(allocator, try dupTrimmedScalar(allocator, trimmed[2..]));
+                continue;
+            }
+            read_function_path_block = false;
+        }
+        if (read_clean_targets_block) {
+            if (std.mem.startsWith(u8, trimmed, "- ")) {
+                try config.clean_targets.append(allocator, try dupTrimmedScalar(allocator, trimmed[2..]));
+                continue;
+            }
+            read_clean_targets_block = false;
         }
 
         if (splitKeyValue(trimmed)) |kv| {
@@ -185,6 +225,37 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
                     read_macro_path_block = true;
                 } else {
                     try parseInlineStringList(allocator, kv.value, &config.macro_paths);
+                }
+            } else if (std.mem.eql(u8, kv.key, "test-paths")) {
+                if (std.mem.trim(u8, kv.value, " \t").len == 0) {
+                    read_test_path_block = true;
+                } else {
+                    try parseInlineStringList(allocator, kv.value, &config.test_paths);
+                }
+            } else if (std.mem.eql(u8, kv.key, "analysis-paths")) {
+                if (std.mem.trim(u8, kv.value, " \t").len == 0) {
+                    read_analysis_path_block = true;
+                } else {
+                    try parseInlineStringList(allocator, kv.value, &config.analysis_paths);
+                }
+            } else if (std.mem.eql(u8, kv.key, "snapshot-paths")) {
+                if (std.mem.trim(u8, kv.value, " \t").len == 0) {
+                    read_snapshot_path_block = true;
+                } else {
+                    try parseInlineStringList(allocator, kv.value, &config.snapshot_paths);
+                }
+            } else if (std.mem.eql(u8, kv.key, "function-paths")) {
+                if (std.mem.trim(u8, kv.value, " \t").len == 0) {
+                    read_function_path_block = true;
+                } else {
+                    try parseInlineStringList(allocator, kv.value, &config.function_paths);
+                }
+            } else if (std.mem.eql(u8, kv.key, "clean-targets")) {
+                config.clean_targets_set = true;
+                if (std.mem.trim(u8, kv.value, " \t").len == 0) {
+                    read_clean_targets_block = true;
+                } else {
+                    try parseInlineStringList(allocator, kv.value, &config.clean_targets);
                 }
             }
         }
@@ -649,6 +720,12 @@ test "project config parser applies defaults for omitted paths" {
     try std.testing.expectEqualStrings("seeds", config.seed_paths.items[0]);
     try std.testing.expectEqual(@as(usize, 1), config.macro_paths.items.len);
     try std.testing.expectEqualStrings("macros", config.macro_paths.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), config.test_paths.items.len);
+    try std.testing.expectEqual(@as(usize, 0), config.analysis_paths.items.len);
+    try std.testing.expectEqual(@as(usize, 0), config.snapshot_paths.items.len);
+    try std.testing.expectEqual(@as(usize, 0), config.function_paths.items.len);
+    try std.testing.expect(!config.clean_targets_set);
+    try std.testing.expectEqual(@as(usize, 0), config.clean_targets.items.len);
     try std.testing.expect(!config.validate_macro_args);
 }
 
@@ -674,6 +751,14 @@ test "project config parser reads paths and nested docs configs" {
         \\  - data
         \\macro-paths:
         \\  - custom_macros
+        \\test-paths: ["data_tests"]
+        \\analysis-paths:
+        \\  - analysis
+        \\snapshot-paths: [snapshots]
+        \\function-paths: [functions]
+        \\clean-targets:
+        \\  - target-dxt
+        \\  - dbt_packages
         \\flags:
         \\  validate_macro_args: true
         \\vars:
@@ -706,6 +791,18 @@ test "project config parser reads paths and nested docs configs" {
     try std.testing.expectEqual(@as(usize, 1), config.macro_paths.items.len);
     try std.testing.expectEqualStrings("custom_macros", config.macro_paths.items[0]);
     try std.testing.expect(config.macro_paths_set);
+    try std.testing.expectEqual(@as(usize, 1), config.test_paths.items.len);
+    try std.testing.expectEqualStrings("data_tests", config.test_paths.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), config.analysis_paths.items.len);
+    try std.testing.expectEqualStrings("analysis", config.analysis_paths.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), config.snapshot_paths.items.len);
+    try std.testing.expectEqualStrings("snapshots", config.snapshot_paths.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), config.function_paths.items.len);
+    try std.testing.expectEqualStrings("functions", config.function_paths.items[0]);
+    try std.testing.expect(config.clean_targets_set);
+    try std.testing.expectEqual(@as(usize, 2), config.clean_targets.items.len);
+    try std.testing.expectEqualStrings("target-dxt", config.clean_targets.items[0]);
+    try std.testing.expectEqualStrings("dbt_packages", config.clean_targets.items[1]);
     try std.testing.expect(config.validate_macro_args);
     try std.testing.expectEqual(@as(usize, 1), config.vars.items.len);
     try std.testing.expectEqualStrings("orders_model", config.vars.items[0].name);
@@ -754,6 +851,24 @@ test "project config parser reads dispatch search order entries" {
     try std.testing.expectEqual(@as(usize, 2), config.dispatch_configs.items[1].search_order.items.len);
     try std.testing.expectEqualStrings("demo", config.dispatch_configs.items[1].search_order.items[0]);
     try std.testing.expectEqualStrings("dbt", config.dispatch_configs.items[1].search_order.items[1]);
+}
+
+test "project config parser reads inline clean targets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var config = try parseProjectConfigText(allocator,
+        \\name: demo
+        \\target-path: target-dxt
+        \\clean-targets: [target-dxt, dbt_packages]
+    );
+    defer deinitProjectConfig(allocator, &config);
+
+    try std.testing.expect(config.clean_targets_set);
+    try std.testing.expectEqual(@as(usize, 2), config.clean_targets.items.len);
+    try std.testing.expectEqualStrings("target-dxt", config.clean_targets.items[0]);
+    try std.testing.expectEqualStrings("dbt_packages", config.clean_targets.items[1]);
 }
 
 test "project config parser rejects malformed dispatch entries" {

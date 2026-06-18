@@ -43,11 +43,17 @@ pub const ProjectConfig = struct {
     model_paths: std.ArrayList([]const u8) = .empty,
     seed_paths: std.ArrayList([]const u8) = .empty,
     macro_paths: std.ArrayList([]const u8) = .empty,
+    test_paths: std.ArrayList([]const u8) = .empty,
+    analysis_paths: std.ArrayList([]const u8) = .empty,
+    snapshot_paths: std.ArrayList([]const u8) = .empty,
+    function_paths: std.ArrayList([]const u8) = .empty,
     model_path_configs: std.ArrayList(ModelPathConfig) = .empty,
     dispatch_configs: std.ArrayList(DispatchConfig) = .empty,
     vars: std.ArrayList(VarEntry) = .empty,
+    clean_targets: std.ArrayList([]const u8) = .empty,
     seed_docs: DocsConfig = .{},
     macro_paths_set: bool = false,
+    clean_targets_set: bool = false,
     validate_macro_args: bool = false,
     target_path: []const u8 = "target",
 };
@@ -395,9 +401,14 @@ pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig)
     config.model_paths.deinit(allocator);
     config.seed_paths.deinit(allocator);
     config.macro_paths.deinit(allocator);
+    config.test_paths.deinit(allocator);
+    config.analysis_paths.deinit(allocator);
+    config.snapshot_paths.deinit(allocator);
+    config.function_paths.deinit(allocator);
     config.model_path_configs.deinit(allocator);
     deinitDispatchConfigs(allocator, &config.dispatch_configs);
     config.vars.deinit(allocator);
+    config.clean_targets.deinit(allocator);
 }
 
 pub fn deinitDispatchConfigs(allocator: std.mem.Allocator, configs: *std.ArrayList(DispatchConfig)) void {
