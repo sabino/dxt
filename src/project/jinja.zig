@@ -94,6 +94,16 @@ pub fn parseLiteralArgs(allocator: std.mem.Allocator, args: []const u8, unsuppor
 }
 
 pub fn parseLiteralOrVarArgs(allocator: std.mem.Allocator, args: []const u8, graph: ?*const Graph, unsupported_error: anyerror) !std.ArrayList([]const u8) {
+    return parseLiteralOrVarArgsWithBindings(allocator, args, graph, &.{}, unsupported_error);
+}
+
+fn parseLiteralOrVarArgsWithBindings(
+    allocator: std.mem.Allocator,
+    args: []const u8,
+    graph: ?*const Graph,
+    bindings: []const LocalBinding,
+    unsupported_error: anyerror,
+) !std.ArrayList([]const u8) {
     var strings: std.ArrayList([]const u8) = .empty;
     errdefer strings.deinit(allocator);
 
@@ -113,24 +123,37 @@ pub fn parseLiteralOrVarArgs(allocator: std.mem.Allocator, args: []const u8, gra
             saw_arg = true;
             i = skipWs(args, parsed.next);
         } else if (std.mem.startsWith(u8, args[i..], "var")) {
-            const call = (readJinjaCall(args, "var", i + "var".len) catch return unsupported_error) orelse return unsupported_error;
-            if (call.package_name != null or !std.mem.eql(u8, call.name, "var")) return unsupported_error;
-            var var_name_args = try parseLiteralArgs(allocator, args[call.open + 1 .. call.close], unsupported_error);
-            defer var_name_args.deinit(allocator);
-            if (!(var_name_args.items.len == 1 or var_name_args.items.len == 2)) return unsupported_error;
-            const value = if (graph) |known_graph|
-                findVarValue(known_graph, var_name_args.items[0])
-            else
-                null;
-            if (value) |resolved_value| {
-                try strings.append(allocator, resolved_value);
-            } else if (var_name_args.items.len == 2) {
-                try strings.append(allocator, var_name_args.items[1]);
+            if (readJinjaCall(args, "var", i + "var".len) catch return unsupported_error) |call| {
+                if (call.package_name != null or !std.mem.eql(u8, call.name, "var")) return unsupported_error;
+                var var_name_args = try parseLiteralArgs(allocator, args[call.open + 1 .. call.close], unsupported_error);
+                defer var_name_args.deinit(allocator);
+                if (!(var_name_args.items.len == 1 or var_name_args.items.len == 2)) return unsupported_error;
+                const value = if (graph) |known_graph|
+                    findVarValue(known_graph, var_name_args.items[0])
+                else
+                    null;
+                if (value) |resolved_value| {
+                    try strings.append(allocator, resolved_value);
+                } else if (var_name_args.items.len == 2) {
+                    try strings.append(allocator, var_name_args.items[1]);
+                } else {
+                    return error.UnresolvedVar;
+                }
+                saw_arg = true;
+                i = skipWs(args, call.close + 1);
             } else {
-                return error.UnresolvedVar;
+                const parsed = parseLocalBindingArg(args, i, bindings) orelse return unsupported_error;
+                if (parsed.blocked) return unsupported_error;
+                try strings.append(allocator, try allocator.dupe(u8, parsed.value));
+                saw_arg = true;
+                i = skipWs(args, parsed.next);
             }
+        } else if (isIdentStart(args[i])) {
+            const parsed = parseLocalBindingArg(args, i, bindings) orelse return unsupported_error;
+            if (parsed.blocked) return unsupported_error;
+            try strings.append(allocator, try allocator.dupe(u8, parsed.value));
             saw_arg = true;
-            i = skipWs(args, call.close + 1);
+            i = skipWs(args, parsed.next);
         } else {
             return unsupported_error;
         }
@@ -139,6 +162,35 @@ pub fn parseLiteralOrVarArgs(allocator: std.mem.Allocator, args: []const u8, gra
     }
     if (!saw_arg) return unsupported_error;
     return strings;
+}
+
+const LocalBinding = struct {
+    name: []const u8,
+    value: ?[]const u8,
+};
+
+const LocalBindingArg = struct {
+    value: []const u8 = "",
+    next: usize,
+    blocked: bool = false,
+};
+
+fn parseLocalBindingArg(args: []const u8, start: usize, bindings: []const LocalBinding) ?LocalBindingArg {
+    var end = start;
+    if (end >= args.len or !isIdentStart(args[end])) return null;
+    end += 1;
+    while (end < args.len and isIdentChar(args[end])) end += 1;
+    const name = args[start..end];
+    for (0..bindings.len) |offset| {
+        const index = bindings.len - 1 - offset;
+        if (std.mem.eql(u8, bindings[index].name, name)) {
+            return if (bindings[index].value) |value|
+                .{ .value = value, .next = end }
+            else
+                .{ .next = end, .blocked = true };
+        }
+    }
+    return null;
 }
 
 fn findVarValue(graph: *const Graph, name: []const u8) ?[]const u8 {
@@ -247,8 +299,14 @@ pub fn findValueStart(text: []const u8, start: usize) ?usize {
 }
 
 pub fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
-    var index: usize = 0;
-    while (index + 1 < sql.len) {
+    var context = ScanContext{ .allocator = allocator };
+    defer context.deinit();
+    try scanRange(allocator, sql, 0, sql.len, node, graph, &context);
+}
+
+fn scanRange(allocator: std.mem.Allocator, sql: []const u8, start: usize, range_end: usize, node: *Node, graph: ?*const Graph, context: *ScanContext) !void {
+    var index: usize = start;
+    while (index + 1 < range_end) {
         if (sql[index] != '{') {
             index += 1;
             continue;
@@ -258,22 +316,377 @@ pub fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph
             index = end + 2;
             continue;
         }
-        const close = if (sql[index + 1] == '{')
+        const tag_kind = sql[index + 1];
+        const close = if (tag_kind == '{')
             std.mem.indexOfPos(u8, sql, index + 2, "}}")
-        else if (sql[index + 1] == '%')
+        else if (tag_kind == '%')
             std.mem.indexOfPos(u8, sql, index + 2, "%}")
         else
             null;
-        if (close) |end| {
-            try scanJinjaSpan(allocator, sql[index + 2 .. end], node, graph);
-            index = end + 2;
+        if (close) |tag_end| {
+            if (tag_end + 2 > range_end) return error.UnsupportedJinja;
+            const span = std.mem.trim(u8, sql[index + 2 .. tag_end], " \t\r\n-");
+            if (tag_kind == '%') {
+                if (std.mem.startsWith(u8, span, "set ")) {
+                    if (parseSetListStatement(allocator, span)) |assignment| {
+                        try context.setList(assignment.name, assignment.values);
+                        index = tag_end + 2;
+                        continue;
+                    } else |err| switch (err) {
+                        error.UnsupportedJinja => {},
+                        else => return err,
+                    }
+                }
+                if (isForStatement(span)) {
+                    if (parseForBlockOrNull(sql, tag_end + 2, span) catch null) |block| {
+                        if (block.end_tag_close > range_end) return error.UnsupportedJinja;
+                        if (context.getList(block.list_name)) |values| {
+                            for (values) |value| {
+                                try context.enterScope();
+                                try context.pushBinding(block.variable_name, value);
+                                scanRange(allocator, sql, block.body_start, block.body_end, node, graph, context) catch |err| {
+                                    context.exitScope();
+                                    return err;
+                                };
+                                context.exitScope();
+                            }
+                            index = block.end_tag_close;
+                            continue;
+                        }
+                    }
+                    if (parseForShadowBlockOrNull(sql, tag_end + 2, span)) |block| {
+                        if (block.end_tag_close > range_end) return error.UnsupportedJinja;
+                        try scanJinjaSpan(allocator, span, node, graph, context);
+                        try context.enterScope();
+                        for (block.variable_names[0..block.variable_names_len]) |variable_name| {
+                            try context.pushBlockedBinding(variable_name);
+                        }
+                        scanRange(allocator, sql, block.body_start, block.body_end, node, graph, context) catch |err| {
+                            context.exitScope();
+                            return err;
+                        };
+                        context.exitScope();
+                        index = block.end_tag_close;
+                        continue;
+                    }
+                }
+            }
+            try scanJinjaSpan(allocator, span, node, graph, context);
+            index = tag_end + 2;
             continue;
         }
         index += 1;
     }
 }
 
-fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, graph: ?*const Graph) !void {
+const ScanList = struct {
+    name: []const u8,
+    values: std.ArrayList([]const u8),
+};
+
+const ScanContext = struct {
+    allocator: std.mem.Allocator,
+    lists: std.ArrayList(ScanList) = .empty,
+    bindings: std.ArrayList(LocalBinding) = .empty,
+    scopes: std.ArrayList(ScanScope) = .empty,
+
+    fn deinit(self: *ScanContext) void {
+        for (self.lists.items) |*list| {
+            for (list.values.items) |value| self.allocator.free(value);
+            list.values.deinit(self.allocator);
+        }
+        self.lists.deinit(self.allocator);
+        self.bindings.deinit(self.allocator);
+        self.scopes.deinit(self.allocator);
+    }
+
+    fn setList(self: *ScanContext, name: []const u8, values: std.ArrayList([]const u8)) !void {
+        const current_scope_start = self.currentListScopeStart();
+        for (self.lists.items[current_scope_start..]) |*list| {
+            if (std.mem.eql(u8, list.name, name)) {
+                for (list.values.items) |value| self.allocator.free(value);
+                list.values.deinit(self.allocator);
+                list.values = values;
+                return;
+            }
+        }
+        try self.lists.append(self.allocator, .{ .name = name, .values = values });
+    }
+
+    fn getList(self: *const ScanContext, name: []const u8) ?[]const []const u8 {
+        for (0..self.lists.items.len) |offset| {
+            const index = self.lists.items.len - 1 - offset;
+            const list = &self.lists.items[index];
+            if (std.mem.eql(u8, list.name, name)) return list.values.items;
+        }
+        return null;
+    }
+
+    fn pushBinding(self: *ScanContext, name: []const u8, value: []const u8) !void {
+        try self.bindings.append(self.allocator, .{ .name = name, .value = value });
+    }
+
+    fn pushBlockedBinding(self: *ScanContext, name: []const u8) !void {
+        try self.bindings.append(self.allocator, .{ .name = name, .value = null });
+    }
+
+    fn enterScope(self: *ScanContext) !void {
+        try self.scopes.append(self.allocator, .{
+            .lists_len = self.lists.items.len,
+            .bindings_len = self.bindings.items.len,
+        });
+    }
+
+    fn exitScope(self: *ScanContext) void {
+        const scope = self.scopes.pop().?;
+        while (self.lists.items.len > scope.lists_len) {
+            var list = self.lists.pop().?;
+            for (list.values.items) |value| self.allocator.free(value);
+            list.values.deinit(self.allocator);
+        }
+        while (self.bindings.items.len > scope.bindings_len) {
+            _ = self.bindings.pop();
+        }
+    }
+
+    fn currentListScopeStart(self: *const ScanContext) usize {
+        if (self.scopes.items.len == 0) return 0;
+        return self.scopes.items[self.scopes.items.len - 1].lists_len;
+    }
+};
+
+const ScanScope = struct {
+    lists_len: usize,
+    bindings_len: usize,
+};
+
+const SetListAssignment = struct {
+    name: []const u8,
+    values: std.ArrayList([]const u8),
+};
+
+fn parseSetListStatement(allocator: std.mem.Allocator, span: []const u8) !SetListAssignment {
+    var index: usize = "set ".len;
+    index = skipWs(span, index);
+    const name_start = index;
+    if (index >= span.len or !isIdentStart(span[index])) return error.UnsupportedJinja;
+    index += 1;
+    while (index < span.len and isIdentChar(span[index])) index += 1;
+    const name = span[name_start..index];
+    index = skipWs(span, index);
+    if (index >= span.len or span[index] != '=') return error.UnsupportedJinja;
+    index = skipWs(span, index + 1);
+    if (index >= span.len) return error.UnsupportedJinja;
+    var values: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (values.items) |value| allocator.free(value);
+        values.deinit(allocator);
+    }
+    try parseJinjaStringListLiteral(allocator, span[index..], &values);
+    return .{ .name = name, .values = values };
+}
+
+fn parseJinjaStringListLiteral(allocator: std.mem.Allocator, value: []const u8, out: *std.ArrayList([]const u8)) !void {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return error.UnsupportedJinja;
+    var index: usize = 1;
+    const end = trimmed.len - 1;
+    while (true) {
+        index = skipWs(trimmed, index);
+        if (index >= end) return;
+        const quote = trimmed[index];
+        if (quote != '\'' and quote != '"') return error.UnsupportedJinja;
+        index += 1;
+        var item: std.ArrayList(u8) = .empty;
+        errdefer item.deinit(allocator);
+        while (index < end and trimmed[index] != quote) {
+            if (trimmed[index] == '\\') return error.UnsupportedJinja;
+            try item.append(allocator, trimmed[index]);
+            index += 1;
+        }
+        if (index >= end or trimmed[index] != quote) return error.UnsupportedJinja;
+        index += 1;
+        try out.append(allocator, try item.toOwnedSlice(allocator));
+        index = skipWs(trimmed, index);
+        if (index >= end) return;
+        if (trimmed[index] != ',') return error.UnsupportedJinja;
+        index += 1;
+    }
+}
+
+const ForBlock = struct {
+    variable_name: []const u8,
+    list_name: []const u8,
+    body_start: usize,
+    body_end: usize,
+    end_tag_close: usize,
+};
+
+const ForShadowBlock = struct {
+    variable_names: [16][]const u8 = undefined,
+    variable_names_len: usize = 0,
+    body_start: usize = 0,
+    body_end: usize = 0,
+    end_tag_close: usize = 0,
+};
+
+fn isForStatement(span: []const u8) bool {
+    return std.mem.startsWith(u8, span, "for ") or std.mem.eql(u8, span, "for");
+}
+
+fn isEndForStatement(span: []const u8) bool {
+    return std.mem.eql(u8, span, "endfor");
+}
+
+fn isElseStatement(span: []const u8) bool {
+    return std.mem.eql(u8, span, "else");
+}
+
+fn parseForBlock(sql: []const u8, body_start: usize, span: []const u8) !ForBlock {
+    return (try parseForBlockOrNull(sql, body_start, span)) orelse return error.UnsupportedJinja;
+}
+
+fn parseForBlockOrNull(sql: []const u8, body_start: usize, span: []const u8) !?ForBlock {
+    var index: usize = "for".len;
+    index = skipWs(span, index);
+    const variable_start = index;
+    if (index >= span.len or !isIdentStart(span[index])) return error.UnsupportedJinja;
+    index += 1;
+    while (index < span.len and isIdentChar(span[index])) index += 1;
+    const variable_name = span[variable_start..index];
+    index = skipWs(span, index);
+    if (index + "in".len > span.len or !std.mem.eql(u8, span[index .. index + "in".len], "in")) return error.UnsupportedJinja;
+    const before_ok = index == 0 or !isIdentChar(span[index - 1]);
+    const after = index + "in".len;
+    const after_ok = after >= span.len or !isIdentChar(span[after]);
+    if (!before_ok or !after_ok) return error.UnsupportedJinja;
+    index = skipWs(span, after);
+    const list_start = index;
+    if (index >= span.len or !isIdentStart(span[index])) return error.UnsupportedJinja;
+    index += 1;
+    while (index < span.len and isIdentChar(span[index])) index += 1;
+    const list_name = span[list_start..index];
+    if (std.mem.trim(u8, span[index..], " \t\r\n").len != 0) return null;
+
+    const endfor = findMatchingEndFor(sql, body_start) orelse return error.UnsupportedJinja;
+    return .{
+        .variable_name = variable_name,
+        .list_name = list_name,
+        .body_start = body_start,
+        .body_end = endfor.start,
+        .end_tag_close = endfor.close,
+    };
+}
+
+fn parseForShadowBlockOrNull(sql: []const u8, body_start: usize, span: []const u8) ?ForShadowBlock {
+    var index: usize = "for".len;
+    var block = ForShadowBlock{};
+    var after: usize = 0;
+    while (index < span.len) {
+        index = skipWs(span, index);
+        if (index >= span.len) return null;
+        if (isKeywordAt(span, index, "in")) {
+            if (block.variable_names_len == 0) return null;
+            after = index + "in".len;
+            break;
+        }
+        if (isIdentStart(span[index])) {
+            const variable_start = index;
+            index += 1;
+            while (index < span.len and isIdentChar(span[index])) index += 1;
+            if (block.variable_names_len >= block.variable_names.len) return null;
+            block.variable_names[block.variable_names_len] = span[variable_start..index];
+            block.variable_names_len += 1;
+            continue;
+        }
+        index += 1;
+    }
+    if (after == 0) return null;
+    if (std.mem.trim(u8, span[after..], " \t\r\n").len == 0) return null;
+    const endfor = findMatchingEndForPermissive(sql, body_start) orelse return null;
+    block.body_start = body_start;
+    block.body_end = endfor.start;
+    block.end_tag_close = endfor.close;
+    return block;
+}
+
+fn isKeywordAt(text: []const u8, index: usize, keyword: []const u8) bool {
+    if (index + keyword.len > text.len) return false;
+    if (!std.mem.eql(u8, text[index .. index + keyword.len], keyword)) return false;
+    const before_ok = index == 0 or !isIdentChar(text[index - 1]);
+    const after = index + keyword.len;
+    const after_ok = after >= text.len or !isIdentChar(text[after]);
+    return before_ok and after_ok;
+}
+
+const EndForTag = struct {
+    start: usize,
+    close: usize,
+};
+
+fn findMatchingEndFor(sql: []const u8, start: usize) ?EndForTag {
+    var index = start;
+    var depth: usize = 1;
+    while (index + 1 < sql.len) {
+        if (sql[index] != '{') {
+            index += 1;
+            continue;
+        }
+        if (sql[index + 1] == '#') {
+            const close = std.mem.indexOfPos(u8, sql, index + 2, "#}") orelse return null;
+            index = close + 2;
+            continue;
+        }
+        if (sql[index + 1] != '%') {
+            index += 1;
+            continue;
+        }
+        const close = std.mem.indexOfPos(u8, sql, index + 2, "%}") orelse return null;
+        const span = std.mem.trim(u8, sql[index + 2 .. close], " \t\r\n-");
+        if (isForStatement(span)) {
+            depth += 1;
+        } else if (isEndForStatement(span)) {
+            depth -= 1;
+            if (depth == 0) return .{ .start = index, .close = close + 2 };
+        } else if (depth == 1 and isElseStatement(span)) {
+            return null;
+        }
+        index = close + 2;
+    }
+    return null;
+}
+
+fn findMatchingEndForPermissive(sql: []const u8, start: usize) ?EndForTag {
+    var index = start;
+    var depth: usize = 1;
+    while (index + 1 < sql.len) {
+        if (sql[index] != '{') {
+            index += 1;
+            continue;
+        }
+        if (sql[index + 1] == '#') {
+            const close = std.mem.indexOfPos(u8, sql, index + 2, "#}") orelse return null;
+            index = close + 2;
+            continue;
+        }
+        if (sql[index + 1] != '%') {
+            index += 1;
+            continue;
+        }
+        const close = std.mem.indexOfPos(u8, sql, index + 2, "%}") orelse return null;
+        const span = std.mem.trim(u8, sql[index + 2 .. close], " \t\r\n-");
+        if (isForStatement(span)) {
+            depth += 1;
+        } else if (isEndForStatement(span)) {
+            depth -= 1;
+            if (depth == 0) return .{ .start = index, .close = close + 2 };
+        }
+        index = close + 2;
+    }
+    return null;
+}
+
+fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, graph: ?*const Graph, context: *const ScanContext) !void {
     var i: usize = 0;
     while (i < span.len) {
         if (span[i] == '"' or span[i] == '\'') {
@@ -313,7 +726,7 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
             }
             return error.UnsupportedJinja;
         } else if (std.mem.eql(u8, call.name, "ref")) {
-            var strings = try parseLiteralOrVarArgs(allocator, args, graph, error.UnsupportedDynamicRef);
+            var strings = try parseLiteralOrVarArgsWithBindings(allocator, args, graph, context.bindings.items, error.UnsupportedDynamicRef);
             defer strings.deinit(allocator);
             if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedDynamicRef;
             try node.refs.append(allocator, .{
@@ -321,7 +734,7 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
                 .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
             });
         } else if (std.mem.eql(u8, call.name, "source")) {
-            var strings = try parseLiteralOrVarArgs(allocator, args, graph, error.UnsupportedDynamicSource);
+            var strings = try parseLiteralOrVarArgsWithBindings(allocator, args, graph, context.bindings.items, error.UnsupportedDynamicSource);
             defer strings.deinit(allocator);
             if (strings.items.len != 2) return error.UnsupportedDynamicSource;
             try node.source_refs.append(allocator, .{
@@ -785,6 +1198,265 @@ test "sql scanner records refs and sources inside false jinja branches" {
     try std.testing.expectEqual(@as(usize, 1), node.source_refs.items.len);
     try std.testing.expectEqualStrings("raw", node.source_refs.items[0].source_name);
     try std.testing.expectEqualStrings("events", node.source_refs.items[0].table_name);
+}
+
+test "sql scanner records refs and sources from static list loops" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.looped",
+        .name = "looped",
+        .path = "looped.sql",
+        .original_file_path = "models/looped.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator,
+        \\{% set model_names = ['customers', "orders"] %}
+        \\{% for model_name in model_names %}
+        \\select * from {{ ref(model_name) }}
+        \\{% endfor %}
+        \\{% set table_names = ['events', 'payments'] %}
+        \\{% for table_name in table_names %}
+        \\union all select * from {{ source('raw', table_name) }}
+        \\{% endfor %}
+    , &node, null);
+
+    try std.testing.expectEqual(@as(usize, 2), node.refs.items.len);
+    try std.testing.expectEqualStrings("customers", node.refs.items[0].name);
+    try std.testing.expectEqualStrings("orders", node.refs.items[1].name);
+    try std.testing.expectEqual(@as(usize, 2), node.source_refs.items.len);
+    try std.testing.expectEqualStrings("raw", node.source_refs.items[0].source_name);
+    try std.testing.expectEqualStrings("events", node.source_refs.items[0].table_name);
+    try std.testing.expectEqualStrings("raw", node.source_refs.items[1].source_name);
+    try std.testing.expectEqualStrings("payments", node.source_refs.items[1].table_name);
+}
+
+test "sql scanner preserves literal refs in unknown loops without resolving loop vars" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.looped",
+        .name = "looped",
+        .path = "looped.sql",
+        .original_file_path = "models/looped.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator,
+        \\{% for model_name in model_names %}
+        \\select * from {{ ref('customers') }}
+        \\{% endfor %}
+    , &node, null);
+
+    try std.testing.expectEqual(@as(usize, 1), node.refs.items.len);
+    try std.testing.expectEqualStrings("customers", node.refs.items[0].name);
+    try std.testing.expectError(error.UnsupportedDynamicRef, scanSql(allocator,
+        \\{% for model_name in model_names %}
+        \\select * from {{ ref(model_name) }}
+        \\{% endfor %}
+    , &node, null));
+}
+
+test "sql scanner preserves literal refs after unsupported scalar set statements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.scalar_set",
+        .name = "scalar_set",
+        .path = "scalar_set.sql",
+        .original_file_path = "models/scalar_set.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator,
+        \\{% set limit = 10 %}
+        \\select * from {{ ref('customers') }}
+    , &node, null);
+
+    try std.testing.expectEqual(@as(usize, 1), node.refs.items.len);
+    try std.testing.expectEqualStrings("customers", node.refs.items[0].name);
+}
+
+test "sql scanner loop scopes do not mutate static lists" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.scoped_loop",
+        .name = "scoped_loop",
+        .path = "scoped_loop.sql",
+        .original_file_path = "models/scoped_loop.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator,
+        \\{% set models = ['customers'] %}
+        \\{% for model_name in models %}
+        \\select * from {{ ref(model_name) }}
+        \\{% set models = ['orders'] %}
+        \\{% endfor %}
+        \\union all select * from {{ ref('after_loop') }}
+        \\{% for model_name in models %}
+        \\union all select * from {{ ref(model_name) }}
+        \\{% endfor %}
+    , &node, null);
+
+    try std.testing.expectEqual(@as(usize, 3), node.refs.items.len);
+    try std.testing.expectEqualStrings("customers", node.refs.items[0].name);
+    try std.testing.expectEqualStrings("after_loop", node.refs.items[1].name);
+    try std.testing.expectEqualStrings("customers", node.refs.items[2].name);
+}
+
+test "sql scanner resolves loop-local list shadows before outer lists" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.shadowed_loop",
+        .name = "shadowed_loop",
+        .path = "shadowed_loop.sql",
+        .original_file_path = "models/shadowed_loop.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator,
+        \\{% set models = ['customers'] %}
+        \\{% for model_name in models %}
+        \\select * from {{ ref(model_name) }}
+        \\{% set models = ['orders'] %}
+        \\{% for model_name in models %}
+        \\union all select * from {{ ref(model_name) }}
+        \\{% endfor %}
+        \\{% endfor %}
+    , &node, null);
+
+    try std.testing.expectEqual(@as(usize, 2), node.refs.items.len);
+    try std.testing.expectEqualStrings("customers", node.refs.items[0].name);
+    try std.testing.expectEqualStrings("orders", node.refs.items[1].name);
+}
+
+test "sql scanner loop scopes do not leak static lists" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.scoped_loop",
+        .name = "scoped_loop",
+        .path = "scoped_loop.sql",
+        .original_file_path = "models/scoped_loop.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try std.testing.expectError(error.UnsupportedDynamicRef, scanSql(allocator,
+        \\{% set models = ['customers'] %}
+        \\{% for model_name in models %}
+        \\select * from {{ ref(model_name) }}
+        \\{% set inner_models = ['payments'] %}
+        \\{% endfor %}
+        \\{% for inner_model in inner_models %}
+        \\union all select * from {{ ref(inner_model) }}
+        \\{% endfor %}
+    , &node, null));
+}
+
+test "sql scanner unsupported nested loops shadow outer loop variables" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.unsupported_nested_loop",
+        .name = "unsupported_nested_loop",
+        .path = "unsupported_nested_loop.sql",
+        .original_file_path = "models/unsupported_nested_loop.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try std.testing.expectError(error.UnsupportedDynamicRef, scanSql(allocator,
+        \\{% set models = ['customers'] %}
+        \\{% for model_name in models %}
+        \\select * from {{ ref(model_name) }}
+        \\{% for model_name in unknown_models %}
+        \\union all select * from {{ ref(model_name) }}
+        \\{% endfor %}
+        \\{% endfor %}
+    , &node, null));
+}
+
+test "sql scanner unsupported destructuring loops shadow outer loop variables" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.unsupported_destructuring_loop",
+        .name = "unsupported_destructuring_loop",
+        .path = "unsupported_destructuring_loop.sql",
+        .original_file_path = "models/unsupported_destructuring_loop.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try std.testing.expectError(error.UnsupportedDynamicRef, scanSql(allocator,
+        \\{% set models = ['customers'] %}
+        \\{% for model_name in models %}
+        \\select * from {{ ref(model_name) }}
+        \\{% for model_name, other_name in pairs %}
+        \\union all select * from {{ ref(model_name) }}
+        \\union all select * from {{ ref(other_name) }}
+        \\{% endfor %}
+        \\{% endfor %}
+    , &node, null));
+}
+
+test "sql scanner unsupported loop fallback scans the for tag span" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.unsupported_loop_expression",
+        .name = "unsupported_loop_expression",
+        .path = "unsupported_loop_expression.sql",
+        .original_file_path = "models/unsupported_loop_expression.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator,
+        \\{% for relation in [ref('customers')] %}
+        \\select 1
+        \\{% endfor %}
+    , &node, null);
+
+    try std.testing.expectEqual(@as(usize, 1), node.refs.items.len);
+    try std.testing.expectEqualStrings("customers", node.refs.items[0].name);
 }
 
 test "sql scanner records known unqualified and package macro calls" {

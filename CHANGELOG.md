@@ -32,6 +32,9 @@ compatibility.
 - Safe `dxt clean` command in the Zig runtime, including `clean-targets`
   parsing, effective `target-path` fallback, project-relative deletion guards,
   source-directory protection, profile-free execution, and CLI safety tests.
+- Parse/list dependency recovery for static Jinja string-list loops, so
+  `ref(loop_var)` and `source('raw', loop_var)` inside supported `{% for %}`
+  loops populate manifest dependencies and selector graph expansion.
 - Root-project seed column generic-test parsing and DuckDB execution for
   `not_null`, `unique`, explicit `accepted_values` `quote: false`, and
   ref-backed `relationships`, including seed-path schema YAML discovery,
