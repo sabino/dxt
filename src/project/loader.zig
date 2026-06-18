@@ -30,6 +30,7 @@ const rejectDuplicateMacroProperties = project_resolve.rejectDuplicateMacroPrope
 const rejectDuplicateMacros = project_resolve.rejectDuplicateMacros;
 const rejectDuplicateModels = project_resolve.rejectDuplicateModels;
 const rejectDuplicateSeeds = project_resolve.rejectDuplicateSeeds;
+const rejectDuplicateUnitTests = project_resolve.rejectDuplicateUnitTests;
 const loadAdapterIdentity = project_profile.loadAdapterIdentity;
 
 pub const Callbacks = struct {
@@ -133,6 +134,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     try rejectDuplicateSeeds(&graph);
     try rejectDuplicateDocs(&graph);
     try rejectDuplicateExposures(&graph);
+    try rejectDuplicateUnitTests(&graph);
     try rejectDuplicateMacros(&graph);
     try callbacks.resolve_macro_dependencies(&graph);
     return graph;

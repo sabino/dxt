@@ -10,6 +10,7 @@ const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
 const SourceDef = types.SourceDef;
 const ExposureDef = types.ExposureDef;
+const UnitTestDef = types.UnitTestDef;
 const MacroDef = types.MacroDef;
 const MacroArgument = types.MacroArgument;
 const DocBlock = types.DocBlock;
@@ -151,7 +152,18 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll(": ");
         try writeExposureNode(writer, exposure);
     }
-    try writer.writeAll("\n  },\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"group_map\": {},\n  \"saved_queries\": {},\n  \"semantic_models\": {},\n  \"unit_tests\": {},\n  \"disabled\": {");
+    try writer.writeAll("\n  },\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"group_map\": {},\n  \"saved_queries\": {},\n  \"semantic_models\": {},\n  \"unit_tests\": {");
+    var unit_test_index: usize = 0;
+    for (graph.unit_tests.items) |unit_test| {
+        if (!unit_test.enabled) continue;
+        if (unit_test_index != 0) try writer.writeAll(",");
+        unit_test_index += 1;
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, unit_test.unique_id);
+        try writer.writeAll(": ");
+        try writeUnitTestNode(writer, unit_test);
+    }
+    try writer.writeAll("\n  },\n  \"disabled\": {");
     var disabled_index: usize = 0;
     for (graph.nodes.items) |node| {
         if (node.enabled) continue;
@@ -191,6 +203,15 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll(": ");
         try writeStringArray(writer, exposure.depends_on.items);
     }
+    for (graph.unit_tests.items) |unit_test| {
+        if (!unit_test.enabled) continue;
+        if (parent_index != 0) try writer.writeAll(",");
+        parent_index += 1;
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, unit_test.unique_id);
+        try writer.writeAll(": ");
+        try writeStringArray(writer, unit_test.depends_on.items);
+    }
     try writer.writeAll("\n  },\n  \"child_map\": {");
     try writeChildMap(writer, graph);
     try writer.writeAll("\n  }\n}\n");
@@ -210,6 +231,10 @@ fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
     for (graph.exposures.items) |candidate| {
+        if (!candidate.enabled) continue;
+        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+    }
+    for (graph.unit_tests.items) |candidate| {
         if (!candidate.enabled) continue;
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
@@ -243,6 +268,14 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
             if (!child_first) try writer.writeAll(",");
             child_first = false;
             try writeJsonString(writer, exposure.unique_id);
+        }
+    }
+    for (graph.unit_tests.items) |unit_test| {
+        if (!unit_test.enabled) continue;
+        if (util.containsString(unit_test.depends_on.items, unique_id)) {
+            if (!child_first) try writer.writeAll(",");
+            child_first = false;
+            try writeJsonString(writer, unit_test.unique_id);
         }
     }
     try writer.writeAll("]");
@@ -390,6 +423,93 @@ fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {
     try writer.writeAll(",\"meta\":");
     try writeMetaObject(writer, exposure.meta.items);
     try writer.writeAll("},\"unrendered_config\":{},\"created_at\":0.0}");
+}
+
+fn writeUnitTestNode(writer: *Io.Writer, unit_test: UnitTestDef) !void {
+    try writer.writeAll("{\"model\":");
+    try writeJsonString(writer, unit_test.model);
+    try writer.writeAll(",\"given\":");
+    try writeUnitTestGivenFixtures(writer, unit_test.given.items);
+    try writer.writeAll(",\"expect\":");
+    try writeUnitTestOutputFixture(writer, unit_test.expect);
+    try writer.writeAll(",\"name\":");
+    try writeJsonString(writer, unit_test.name);
+    try writer.writeAll(",\"resource_type\":\"unit_test\",\"package_name\":");
+    try writeJsonString(writer, unit_test.package_name);
+    try writer.writeAll(",\"path\":");
+    try writeJsonString(writer, util.normalizeForDisplay(unit_test.path));
+    try writer.writeAll(",\"original_file_path\":");
+    try writeJsonString(writer, util.normalizeForDisplay(unit_test.original_file_path));
+    try writer.writeAll(",\"unique_id\":");
+    try writeJsonString(writer, unit_test.unique_id);
+    try writer.writeAll(",\"fqn\":[");
+    try writeJsonString(writer, unit_test.package_name);
+    try writer.writeAll(",");
+    try writeJsonString(writer, unit_test.model);
+    try writer.writeAll(",");
+    try writeJsonString(writer, unit_test.name);
+    try writer.writeAll("],\"description\":");
+    try writeJsonString(writer, unit_test.description);
+    try writer.writeAll(",\"overrides\":null,\"depends_on\":{\"macros\":[],\"nodes\":");
+    try writeStringArray(writer, unit_test.depends_on.items);
+    try writer.writeAll("},\"config\":{\"tags\":");
+    try writeStringArray(writer, unit_test.tags.items);
+    try writer.writeAll(",\"meta\":");
+    try writeMetaObject(writer, unit_test.meta.items);
+    try writer.writeAll(",\"enabled\":");
+    try writer.writeAll(if (unit_test.enabled) "true" else "false");
+    try writer.writeAll(",\"static_analysis\":null},\"checksum\":null,\"schema\":null,\"created_at\":0.0,\"versions\":null,\"version\":null}");
+}
+
+fn writeUnitTestGivenFixtures(writer: *Io.Writer, fixtures: []const types.UnitTestFixture) !void {
+    try writer.writeAll("[");
+    for (fixtures, 0..) |fixture, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("{\"input\":");
+        try writeJsonString(writer, fixture.input orelse "");
+        try writer.writeAll(",\"rows\":");
+        try writeUnitTestRows(writer, fixture);
+        try writer.writeAll(",\"format\":");
+        try writeJsonString(writer, fixture.format);
+        try writer.writeAll(",\"fixture\":");
+        try writeNullableString(writer, fixture.fixture);
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("]");
+}
+
+fn writeUnitTestOutputFixture(writer: *Io.Writer, fixture: types.UnitTestFixture) !void {
+    try writer.writeAll("{\"rows\":");
+    try writeUnitTestRows(writer, fixture);
+    try writer.writeAll(",\"format\":");
+    try writeJsonString(writer, fixture.format);
+    try writer.writeAll(",\"fixture\":");
+    try writeNullableString(writer, fixture.fixture);
+    try writer.writeAll("}");
+}
+
+fn writeUnitTestRows(writer: *Io.Writer, fixture: types.UnitTestFixture) !void {
+    if (!fixture.rows_set) {
+        try writer.writeAll("null");
+        return;
+    }
+    if (fixture.rows_string) |rows_string| {
+        try writeJsonString(writer, rows_string);
+        return;
+    }
+    try writer.writeAll("[");
+    for (fixture.rows.items, 0..) |row, row_index| {
+        if (row_index != 0) try writer.writeAll(",");
+        try writer.writeAll("{");
+        for (row.entries.items, 0..) |entry, entry_index| {
+            if (entry_index != 0) try writer.writeAll(",");
+            try writeJsonString(writer, entry.key);
+            try writer.writeAll(":");
+            try writeJsonScalar(writer, entry.value);
+        }
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("]");
 }
 
 fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
@@ -917,6 +1037,19 @@ test "manifest writer filters disabled resources and writes graph maps" {
     });
     try graph.exposures.items[0].depends_on.append(allocator, "model.demo.customers");
     try graph.exposures.items[0].depends_on.append(allocator, "source.demo.raw.customers");
+    try graph.unit_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "unit_test.demo.customers.assert_customers",
+        .name = "assert_customers",
+        .model = "customers",
+        .path = "schema.yml",
+        .original_file_path = "models/schema.yml",
+        .description = "Customer unit test",
+    });
+    try graph.unit_tests.items[0].given.append(allocator, .{ .input = "ref('customers')" });
+    try graph.unit_tests.items[0].expect.rows.append(allocator, .{});
+    graph.unit_tests.items[0].expect.rows_set = true;
+    try graph.unit_tests.items[0].depends_on.append(allocator, "model.demo.customers");
     try graph.exposures.append(allocator, .{
         .package_name = "demo",
         .unique_id = "exposure.demo.hidden",
@@ -951,6 +1084,12 @@ test "manifest writer filters disabled resources and writes graph maps" {
     try std.testing.expectEqual(@as(usize, 2), exposure_depends_on_nodes.len);
     try std.testing.expectEqualStrings("source.demo.raw.customers", exposure_depends_on_nodes[0].string);
     try std.testing.expectEqualStrings("model.demo.customers", exposure_depends_on_nodes[1].string);
+    const unit_tests = root.get("unit_tests").?.object;
+    const unit_test = unit_tests.get("unit_test.demo.customers.assert_customers").?.object;
+    try std.testing.expectEqualStrings("unit_test", unit_test.get("resource_type").?.string);
+    try std.testing.expectEqualStrings("customers", unit_test.get("model").?.string);
+    try std.testing.expectEqualStrings("Customer unit test", unit_test.get("description").?.string);
+    try std.testing.expectEqualStrings("ref('customers')", unit_test.get("given").?.array.items[0].object.get("input").?.string);
 
     const parent_map = root.get("parent_map").?.object;
     const model_parents = parent_map.get("model.demo.customers").?.array.items;
@@ -960,6 +1099,9 @@ test "manifest writer filters disabled resources and writes graph maps" {
     try std.testing.expectEqual(@as(usize, 2), exposure_parents.len);
     try std.testing.expectEqualStrings("model.demo.customers", exposure_parents[0].string);
     try std.testing.expectEqualStrings("source.demo.raw.customers", exposure_parents[1].string);
+    const unit_test_parents = parent_map.get("unit_test.demo.customers.assert_customers").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), unit_test_parents.len);
+    try std.testing.expectEqualStrings("model.demo.customers", unit_test_parents[0].string);
     try std.testing.expect(parent_map.get("exposure.demo.hidden") == null);
 
     const child_map = root.get("child_map").?.object;
@@ -968,8 +1110,9 @@ test "manifest writer filters disabled resources and writes graph maps" {
     try std.testing.expectEqualStrings("model.demo.customers", source_children[0].string);
     try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", source_children[1].string);
     const model_children = child_map.get("model.demo.customers").?.array.items;
-    try std.testing.expectEqual(@as(usize, 1), model_children.len);
+    try std.testing.expectEqual(@as(usize, 2), model_children.len);
     try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", model_children[0].string);
+    try std.testing.expectEqualStrings("unit_test.demo.customers.assert_customers", model_children[1].string);
     try std.testing.expect(child_map.get("model.demo.disabled") == null);
     try std.testing.expect(child_map.get("exposure.demo.hidden") == null);
 }

@@ -48,6 +48,7 @@ const parseInlineGenericTestList = project_parse.parseInlineGenericTestList;
 const parseMacroPropertiesFromText = project_parse.parseMacroPropertiesFromText;
 const parseMacros = project_parse.parseMacros;
 const parseSourcesFromText = project_parse.parseSourcesFromText;
+const parseUnitTestsFromText = project_parse.parseUnitTestsFromText;
 const refDepFromValue = project_parse.refDepFromValue;
 const synthesizeGenericTestNames = project_parse.synthesizeGenericTestNames;
 const testNameFromYamlItem = project_parse.testNameFromYamlItem;
@@ -93,11 +94,12 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
-    try stdout.print("Parsed {d} model(s), {d} seed(s), {d} source(s), and {d} exposure(s) into {s}\n", .{
+    try stdout.print("Parsed {d} model(s), {d} seed(s), {d} source(s), {d} exposure(s), and {d} unit test(s) into {s}\n", .{
         active_models,
         active_seeds,
         graph.sources.items.len,
         countActiveExposures(&graph),
+        graph.unit_tests.items.len,
         util.normalizeForDisplay(manifest_path),
     });
 }
@@ -929,6 +931,7 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
 
     try parseSourcesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
+    try parseUnitTestsFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseModelPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseMacroPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
 }

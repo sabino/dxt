@@ -14,6 +14,8 @@ const MacroArgument = types.MacroArgument;
 const MacroProperty = types.MacroProperty;
 const MetaEntry = types.MetaEntry;
 const RefDep = types.RefDep;
+const UnitTestFixture = types.UnitTestFixture;
+const UnitTestRow = types.UnitTestRow;
 const KeyValue = util.KeyValue;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 const isIdentChar = jinja.isIdentChar;
@@ -35,6 +37,8 @@ const FreshnessTimeKey = enum { warn_after, error_after };
 const SourceConfigScope = enum { none, source, table };
 const FreshnessScope = enum { none, source, table };
 const SourceTestTarget = enum { none, column };
+const UnitTestSection = enum { none, given, expect, config };
+const UnitTestRowsTarget = enum { none, given, expect };
 
 const SourceDefaults = struct {
     schema_name: ?[]const u8 = null,
@@ -1291,6 +1295,308 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             freshness_time_update,
         );
     }
+}
+
+pub fn parseUnitTestsFromText(allocator: std.mem.Allocator, text: []const u8, resource_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    var in_unit_tests = false;
+    var section: UnitTestSection = .none;
+    var rows_target: UnitTestRowsTarget = .none;
+    var unit_tests_indent: usize = 0;
+    var unit_test_item_indent: ?usize = null;
+    var section_indent: usize = 0;
+    var given_item_indent: usize = 0;
+    var rows_indent: usize = 0;
+    var active_row_indent: usize = 0;
+    var current_unit_test: ?usize = null;
+    var current_given: ?usize = null;
+    var active_row: ?usize = null;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (std.mem.eql(u8, trimmed, "unit_tests:")) {
+            in_unit_tests = true;
+            section = .none;
+            rows_target = .none;
+            unit_tests_indent = indent;
+            unit_test_item_indent = null;
+            current_unit_test = null;
+            current_given = null;
+            active_row = null;
+            continue;
+        }
+        if (!in_unit_tests) continue;
+        if (indent <= unit_tests_indent and !std.mem.eql(u8, trimmed, "unit_tests:")) {
+            in_unit_tests = false;
+            section = .none;
+            rows_target = .none;
+            current_unit_test = null;
+            current_given = null;
+            active_row = null;
+            continue;
+        }
+
+        if (rows_target != .none) {
+            if (indent <= rows_indent and !std.mem.startsWith(u8, trimmed, "- ")) {
+                rows_target = .none;
+                active_row = null;
+            } else if (indent > rows_indent) {
+                var fixture = try currentUnitTestRowsFixture(graph, current_unit_test, current_given, rows_target);
+                if (std.mem.startsWith(u8, trimmed, "- ")) {
+                    active_row = try appendUnitTestRow(allocator, fixture, trimmed[2..], indent);
+                    active_row_indent = indent;
+                    continue;
+                }
+                if (active_row) |row_index| {
+                    if (indent > active_row_indent) {
+                        if (std.mem.eql(u8, trimmed, "}")) {
+                            active_row = null;
+                            continue;
+                        }
+                        const closes = std.mem.endsWith(u8, trimmed, "}");
+                        const row_line = if (closes) std.mem.trim(u8, trimmed[0 .. trimmed.len - 1], " \t\r,") else trimmed;
+                        try appendUnitTestRowEntry(allocator, &fixture.rows.items[row_index], row_line);
+                        if (closes) active_row = null;
+                        continue;
+                    }
+                    active_row = null;
+                }
+            }
+        }
+
+        if (section != .none and indent <= section_indent and !isUnitTestSectionKey(trimmed)) {
+            section = .none;
+            current_given = null;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "- name:")) {
+            if (unit_test_item_indent == null or indent == unit_test_item_indent.?) {
+                unit_test_item_indent = indent;
+                section = .none;
+                rows_target = .none;
+                current_given = null;
+                active_row = null;
+                const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
+                try graph.unit_tests.append(allocator, .{
+                    .package_name = package_name,
+                    .name = name,
+                    .path = relativeUnderResourcePath(relative_path, resource_root),
+                    .original_file_path = relative_path,
+                });
+                current_unit_test = graph.unit_tests.items.len - 1;
+                continue;
+            }
+        }
+
+        const unit_test_index = current_unit_test orelse continue;
+        if (unit_test_item_indent) |item_indent| {
+            if (indent <= item_indent and !std.mem.startsWith(u8, trimmed, "- name:")) {
+                section = .none;
+                rows_target = .none;
+                current_given = null;
+                active_row = null;
+            }
+        }
+
+        if (section == .given and std.mem.startsWith(u8, trimmed, "- input:") and indent > section_indent) {
+            const input = try dupTrimmedScalar(allocator, trimmed["- input:".len..]);
+            try graph.unit_tests.items[unit_test_index].given.append(allocator, .{ .input = input });
+            current_given = graph.unit_tests.items[unit_test_index].given.items.len - 1;
+            given_item_indent = indent;
+            rows_target = .none;
+            active_row = null;
+            continue;
+        }
+
+        const kv = splitKeyValue(trimmed) orelse continue;
+        if (section == .given and current_given != null and indent > given_item_indent) {
+            const fixture = &graph.unit_tests.items[unit_test_index].given.items[current_given.?];
+            try applyUnitTestFixtureKeyValue(allocator, fixture, kv, &rows_target, &rows_indent, .given, indent);
+            active_row = null;
+            continue;
+        }
+        if (section == .expect and indent > section_indent) {
+            const fixture = &graph.unit_tests.items[unit_test_index].expect;
+            try applyUnitTestFixtureKeyValue(allocator, fixture, kv, &rows_target, &rows_indent, .expect, indent);
+            active_row = null;
+            continue;
+        }
+        if (section == .config and indent > section_indent) {
+            if (std.mem.eql(u8, kv.key, "enabled")) {
+                graph.unit_tests.items[unit_test_index].enabled = try parseBool(kv.value);
+            } else if (std.mem.eql(u8, kv.key, "tags")) {
+                try parseInlineStringList(allocator, kv.value, &graph.unit_tests.items[unit_test_index].tags);
+                sortStrings(graph.unit_tests.items[unit_test_index].tags.items);
+            } else if (std.mem.eql(u8, kv.key, "meta")) {
+                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+            }
+            continue;
+        }
+
+        if (indent <= (unit_test_item_indent orelse 0)) continue;
+        if (std.mem.eql(u8, kv.key, "model")) {
+            graph.unit_tests.items[unit_test_index].model = try dupTrimmedScalar(allocator, kv.value);
+            try ensureUnitTestUniqueId(allocator, &graph.unit_tests.items[unit_test_index]);
+        } else if (std.mem.eql(u8, kv.key, "description")) {
+            graph.unit_tests.items[unit_test_index].description = try dupTrimmedScalar(allocator, kv.value);
+        } else if (std.mem.eql(u8, kv.key, "given")) {
+            if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+            section = .given;
+            section_indent = indent;
+            rows_target = .none;
+            current_given = null;
+        } else if (std.mem.eql(u8, kv.key, "expect")) {
+            if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+            section = .expect;
+            section_indent = indent;
+            rows_target = .none;
+            current_given = null;
+        } else if (std.mem.eql(u8, kv.key, "config")) {
+            if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+            section = .config;
+            section_indent = indent;
+            rows_target = .none;
+            current_given = null;
+        } else if (std.mem.eql(u8, kv.key, "overrides") or std.mem.eql(u8, kv.key, "versions")) {
+            return error.UnsupportedYaml;
+        }
+    }
+
+    for (graph.unit_tests.items) |*unit_test| {
+        try ensureUnitTestUniqueId(allocator, unit_test);
+        if (unit_test.model.len == 0 or unit_test.given.items.len == 0) return error.UnsupportedYaml;
+        for (unit_test.given.items) |given| {
+            if (given.input == null) return error.UnsupportedYaml;
+        }
+        if (!unit_test.expect.rows_set and unit_test.expect.fixture == null) return error.UnsupportedYaml;
+    }
+}
+
+fn isUnitTestSectionKey(trimmed: []const u8) bool {
+    return std.mem.eql(u8, trimmed, "given:") or std.mem.eql(u8, trimmed, "expect:") or std.mem.eql(u8, trimmed, "config:");
+}
+
+fn ensureUnitTestUniqueId(allocator: std.mem.Allocator, unit_test: *types.UnitTestDef) !void {
+    if (unit_test.unique_id.len != 0 or unit_test.model.len == 0) return;
+    unit_test.unique_id = try std.fmt.allocPrint(allocator, "unit_test.{s}.{s}.{s}", .{ unit_test.package_name, unit_test.model, unit_test.name });
+}
+
+fn currentUnitTestRowsFixture(graph: *Graph, current_unit_test: ?usize, current_given: ?usize, target: UnitTestRowsTarget) !*UnitTestFixture {
+    const unit_test_index = current_unit_test orelse return error.UnsupportedYaml;
+    if (target == .expect) return &graph.unit_tests.items[unit_test_index].expect;
+    const given_index = current_given orelse return error.UnsupportedYaml;
+    return &graph.unit_tests.items[unit_test_index].given.items[given_index];
+}
+
+fn applyUnitTestFixtureKeyValue(
+    allocator: std.mem.Allocator,
+    fixture: *UnitTestFixture,
+    kv: KeyValue,
+    rows_target: *UnitTestRowsTarget,
+    rows_indent: *usize,
+    target: UnitTestRowsTarget,
+    indent: usize,
+) !void {
+    if (std.mem.eql(u8, kv.key, "rows")) {
+        try beginUnitTestRows(allocator, fixture, kv.value, rows_target, rows_indent, target, indent);
+    } else if (std.mem.eql(u8, kv.key, "format")) {
+        const format = try dupTrimmedScalar(allocator, kv.value);
+        if (!std.mem.eql(u8, format, "dict") and !std.mem.eql(u8, format, "csv") and !std.mem.eql(u8, format, "sql")) return error.UnsupportedYaml;
+        fixture.format = format;
+        rows_target.* = .none;
+    } else if (std.mem.eql(u8, kv.key, "fixture")) {
+        fixture.fixture = if (isYamlNull(kv.value)) null else try dupTrimmedScalar(allocator, kv.value);
+        rows_target.* = .none;
+    }
+}
+
+fn beginUnitTestRows(
+    allocator: std.mem.Allocator,
+    fixture: *UnitTestFixture,
+    raw_value: []const u8,
+    rows_target: *UnitTestRowsTarget,
+    rows_indent: *usize,
+    target: UnitTestRowsTarget,
+    indent: usize,
+) !void {
+    const value = std.mem.trim(u8, raw_value, " \t\r");
+    fixture.rows_set = true;
+    if (value.len == 0) {
+        rows_target.* = target;
+        rows_indent.* = indent;
+        return;
+    }
+    rows_target.* = .none;
+    if (std.mem.eql(u8, value, "[]")) return;
+    if (std.mem.eql(u8, value, "|") or std.mem.eql(u8, value, ">")) return error.UnsupportedYaml;
+    if (std.mem.startsWith(u8, value, "{")) {
+        _ = try appendUnitTestRow(allocator, fixture, value, indent);
+        return;
+    }
+    return error.UnsupportedYaml;
+}
+
+fn appendUnitTestRow(allocator: std.mem.Allocator, fixture: *UnitTestFixture, raw_value: []const u8, indent: usize) !usize {
+    _ = indent;
+    var row = UnitTestRow{};
+    errdefer row.entries.deinit(allocator);
+    const value = std.mem.trim(u8, raw_value, " \t\r");
+    if (value.len != 0 and !std.mem.eql(u8, value, "{")) {
+        if (std.mem.startsWith(u8, value, "{")) {
+            try parseInlineUnitTestRow(allocator, &row, value);
+        } else {
+            try appendUnitTestRowEntry(allocator, &row, value);
+        }
+    }
+    try fixture.rows.append(allocator, row);
+    return fixture.rows.items.len - 1;
+}
+
+fn parseInlineUnitTestRow(allocator: std.mem.Allocator, row: *UnitTestRow, raw_value: []const u8) !void {
+    var value = std.mem.trim(u8, raw_value, " \t\r");
+    if (value.len < 2 or value[0] != '{' or value[value.len - 1] != '}') return error.UnsupportedYaml;
+    value = std.mem.trim(u8, value[1 .. value.len - 1], " \t\r");
+    var start: usize = 0;
+    while (start < value.len) {
+        const comma = findUnitTestRowComma(value, start) orelse value.len;
+        const piece = std.mem.trim(u8, value[start..comma], " \t\r");
+        if (piece.len != 0) try appendUnitTestRowEntry(allocator, row, piece);
+        start = comma + 1;
+    }
+}
+
+fn findUnitTestRowComma(value: []const u8, start: usize) ?usize {
+    var index = start;
+    var quote: ?u8 = null;
+    while (index < value.len) : (index += 1) {
+        const byte = value[index];
+        if (quote) |q| {
+            if (byte == '\\') {
+                index += 1;
+                continue;
+            }
+            if (byte == q) quote = null;
+            continue;
+        }
+        if (byte == '"' or byte == '\'') {
+            quote = byte;
+        } else if (byte == ',') {
+            return index;
+        }
+    }
+    return null;
+}
+
+fn appendUnitTestRowEntry(allocator: std.mem.Allocator, row: *UnitTestRow, raw_entry: []const u8) !void {
+    const trimmed = std.mem.trim(u8, raw_entry, " \t\r,");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "}")) return;
+    const kv = splitKeyValue(trimmed) orelse return error.UnsupportedYaml;
+    const value = std.mem.trim(u8, kv.value, " \t\r,");
+    try row.entries.append(allocator, .{ .key = try dupTrimmedScalar(allocator, kv.key), .value = try parseJsonScalar(allocator, value) });
 }
 
 fn currentSourceGenericTestDef(source: *types.SourceDef, column_index: usize, target: SourceTestTarget, test_index: usize) !*GenericTestDef {
@@ -2770,6 +3076,59 @@ test "parseSourcesFromText records source column generic tests" {
     try std.testing.expectEqual(@as(usize, 2), accepted.accepted_values.items.len);
     try std.testing.expectEqualStrings("new", accepted.accepted_values.items[0]);
     try std.testing.expectEqualStrings("returning", accepted.accepted_values.items[1]);
+}
+
+test "parseUnitTestsFromText records dict fixtures and config" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\unit_tests:
+        \\  - name: assert_order_flags
+        \\    description: verifies item flags
+        \\    model: orders
+        \\    config:
+        \\      tags: [unit, marts]
+        \\    given:
+        \\      - input: ref('order_items')
+        \\        rows:
+        \\          - {order_id: 1, is_food_item: true, item_count: 2}
+        \\          - {
+        \\              order_id: 2,
+        \\              is_food_item: false,
+        \\              item_count: 0,
+        \\            }
+        \\    expect:
+        \\      rows:
+        \\        - {order_id: 1, has_food: true}
+        \\        - {order_id: 2, has_food: false}
+        \\
+    ;
+
+    try parseUnitTestsFromText(allocator, yaml, "models", "models/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.unit_tests.items.len);
+    const unit_test = graph.unit_tests.items[0];
+    try std.testing.expectEqualStrings("unit_test.demo.orders.assert_order_flags", unit_test.unique_id);
+    try std.testing.expectEqualStrings("orders", unit_test.model);
+    try std.testing.expectEqualStrings("schema.yml", unit_test.path);
+    try std.testing.expectEqualStrings("verifies item flags", unit_test.description);
+    try std.testing.expectEqual(@as(usize, 2), unit_test.tags.items.len);
+    try std.testing.expectEqualStrings("marts", unit_test.tags.items[0]);
+    try std.testing.expectEqualStrings("unit", unit_test.tags.items[1]);
+    try std.testing.expectEqual(@as(usize, 1), unit_test.given.items.len);
+    try std.testing.expectEqualStrings("ref('order_items')", unit_test.given.items[0].input.?);
+    try std.testing.expectEqual(@as(usize, 2), unit_test.given.items[0].rows.items.len);
+    try std.testing.expectEqualStrings("order_id", unit_test.given.items[0].rows.items[0].entries.items[0].key);
+    try std.testing.expectEqualStrings("1", unit_test.given.items[0].rows.items[0].entries.items[0].value.text);
+    try std.testing.expectEqual(.number, unit_test.given.items[0].rows.items[0].entries.items[0].value.kind);
+    try std.testing.expectEqualStrings("false", unit_test.given.items[0].rows.items[1].entries.items[1].value.text);
+    try std.testing.expectEqual(.bool, unit_test.given.items[0].rows.items[1].entries.items[1].value.kind);
+    try std.testing.expectEqual(@as(usize, 2), unit_test.expect.rows.items.len);
 }
 
 test "parseExposuresFromText records exposure metadata and dependencies" {

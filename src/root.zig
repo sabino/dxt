@@ -164,6 +164,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.DuplicateExposureName => stderr.writeAll("error: duplicate exposure name in supported M1 parser subset\n") catch {},
         error.DuplicateMacroName => stderr.writeAll("error: duplicate macro name in supported M1 parser subset\n") catch {},
         error.DuplicateMacroProperty => stderr.writeAll("error: duplicate macro property patch in supported M1 parser subset\n") catch {},
+        error.DuplicateUnitTestName => stderr.writeAll("error: duplicate unit test name for a model in supported M1 parser subset\n") catch {},
         error.UnsupportedDynamicRef => stderr.writeAll("error: unsupported dynamic ref; M1 parser only supports literal ref calls\n") catch {},
         error.UnsupportedDynamicSource => stderr.writeAll("error: unsupported dynamic source; M1 parser only supports literal source calls\n") catch {},
         error.UnsupportedDynamicDoc => stderr.writeAll("error: unsupported dynamic doc; M1 parser only supports literal doc calls in descriptions\n") catch {},
@@ -176,6 +177,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnresolvedSource => stderr.writeAll("error: unresolved source in supported M1 parser subset\n") catch {},
         error.UnresolvedDoc => stderr.writeAll("error: unresolved doc reference in supported M1 parser subset\n") catch {},
         error.UnresolvedMacro => stderr.writeAll("error: unresolved macro reference in supported M1 parser subset\n") catch {},
+        error.UnresolvedUnitTestModel => stderr.writeAll("error: unit test references a missing model in supported M1 parser subset\n") catch {},
         error.UnresolvedVar => stderr.writeAll("error: unresolved var in supported M1 parser subset\n") catch {},
         error.MissingProfileFile => stderr.writeAll("error: missing profiles.yml for selected profile target\n") catch {},
         error.MissingProfileName => stderr.writeAll("error: no profile was specified for profile-aware parsing\n") catch {},
@@ -186,11 +188,11 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingProfileSchema => stderr.writeAll("error: selected profile target must define a non-empty schema when schema is present\n") catch {},
         error.MissingProfileDatabasePath => stderr.writeAll("error: selected DuckDB profile target must define a non-empty path when path is present\n") catch {},
         error.InvalidOutput => stderr.writeAll("error: --output must be text, json, name, path, or selector\n") catch {},
-        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, or test in the M1 parser subset\n") catch {},
+        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, test, or unit_test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
         error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model resources\n") catch {},
         error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources\n") catch {},
-        error.UnsupportedBuildSelection => stderr.writeAll("error: build currently supports only selected model, seed, source, and test resources before execution\n") catch {},
+        error.UnsupportedBuildSelection => stderr.writeAll("error: build currently supports only selected model, seed, source, and generic test resources; unit test execution is not supported yet\n") catch {},
         error.UnsupportedMixedBuildExecution => stderr.writeAll("error: build currently executes only seed-only, model-only, seed+model, seed+model+supported-generic-test, model+supported-generic-test, source+supported-generic-test, or supported-generic-test-only selections\n") catch {},
         error.UnsupportedAdapterExecution => stderr.writeAll("error: run currently executes only DuckDB SQL models\n") catch {},
         error.UnsupportedBuildAdapterExecution => stderr.writeAll("error: build currently executes only DuckDB models, seeds, and supported generic tests\n") catch {},
@@ -300,7 +302,7 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
                 if (mode == .list) return error.UnsupportedCommandOption;
                 options.target_path = value;
             } else if (equals(arg, "--resource-type")) {
-                if (!equals(value, "model") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "exposure") and !equals(value, "test")) return error.UnsupportedResourceType;
+                if (!equals(value, "model") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "exposure") and !equals(value, "test") and !equals(value, "unit_test")) return error.UnsupportedResourceType;
                 options.resource_type = value;
             } else if (equals(arg, "--output")) {
                 if (equals(value, "text")) {
@@ -417,6 +419,7 @@ fn validateSelectorMethod(part: []const u8) !void {
         "file:",
         "source:",
         "exposure:",
+        "unit_test:",
         "package:",
         "resource_type:",
         "test_type:",
@@ -439,11 +442,12 @@ fn isSupportedResourceType(value: []const u8) bool {
         equals(value, "seed") or
         equals(value, "source") or
         equals(value, "exposure") or
-        equals(value, "test");
+        equals(value, "test") or
+        equals(value, "unit_test");
 }
 
 fn isSupportedTestType(value: []const u8) bool {
-    return equals(value, "generic") or equals(value, "singular");
+    return equals(value, "generic") or equals(value, "singular") or equals(value, "unit");
 }
 
 fn requiresValue(arg: []const u8, mode: OptionMode) bool {
