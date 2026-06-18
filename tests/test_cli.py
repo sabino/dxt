@@ -1338,6 +1338,33 @@ models:
     )
 
 
+def write_accepted_values_quote_false_model_test_project(project: Path, customers_sql: str) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: accepted_values_quote_false_tests
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text(customers_sql)
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: customers
+    config:
+      materialized: table
+    columns:
+      - name: customer_id
+        tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2]
+                quote: false
+"""
+    )
+
+
 def write_source_column_test_project(project: Path) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -1362,6 +1389,33 @@ sources:
               - accepted_values:
                   arguments:
                     values: ['new', 'returning']
+"""
+    )
+
+
+def write_source_column_quote_false_test_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: source_column_quote_false_tests
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+sources:
+  - name: raw
+    tables:
+      - name: customers
+        identifier: raw_customers
+        columns:
+          - name: customer_id
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: [1, 2]
+                    quote: false
 """
     )
 
@@ -1488,6 +1542,45 @@ def test_build_executes_selected_duckdb_accepted_values_generic_test(tmp_path: P
     assert result["relation_name"] is None
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 accepted_values quote false build execution slice")
+def test_build_executes_selected_duckdb_accepted_values_quote_false_generic_test(tmp_path: Path):
+    project = tmp_path / "accepted_values_quote_false_tests"
+    write_accepted_values_quote_false_model_test_project(
+        project,
+        "{{ config(materialized='table') }}\n"
+        "select 1 as customer_id, 'Ada' as customer_name\n"
+        "union all\n"
+        "select 2 as customer_id, 'Bob' as customer_name\n",
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 model(s) and 1 generic test(s)" in result.stdout
+    assert_manifest_schema_slice(target / "manifest.json")
+    manifest = json.loads((target / "manifest.json").read_text())
+    test_nodes = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
+    assert len(test_nodes) == 1
+    test_node = test_nodes[0]
+    assert test_node["name"] == "accepted_values_customers_customer_id__False__1__2"
+    assert (
+        test_node["unique_id"]
+        == "test.accepted_values_quote_false_tests.accepted_values_customers_customer_id__False__1__2.d3fda7ba1b"
+    )
+    assert test_node["test_metadata"]["kwargs"]["values"] == ["1", "2"]
+    assert test_node["test_metadata"]["kwargs"]["quote"] is False
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["success", "pass"]
+    compiled_code = run_results["results"][1]["compiled_code"]
+    assert "value_field not in (1, 2)" in compiled_code
+    assert "value_field not in ('1', '2')" not in compiled_code
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 accepted_values build execution slice")
 def test_build_reports_failing_duckdb_accepted_values_generic_test(tmp_path: Path):
     project = tmp_path / "accepted_values_tests"
@@ -1532,6 +1625,33 @@ def test_build_reports_failing_duckdb_accepted_values_generic_test(tmp_path: Pat
     assert [item["status"] for item in run_results["results"]] == ["fail"]
     assert [item["failures"] for item in run_results["results"]] == [1]
     assert run_results["results"][0]["message"] == "Got 1 result, configured to fail if != 0"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 accepted_values quote false build execution slice")
+def test_build_reports_failing_duckdb_accepted_values_quote_false_generic_test(tmp_path: Path):
+    project = tmp_path / "accepted_values_quote_false_tests"
+    write_accepted_values_quote_false_model_test_project(
+        project,
+        "{{ config(materialized='table') }}\n"
+        "select 1 as customer_id, 'Ada' as customer_name\n"
+        "union all\n"
+        "select 3 as customer_id, 'Cara' as customer_name\n",
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "1 generic test(s) failed with 1 failure row(s)" in result.stdout
+    assert "one or more generic tests failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["success", "fail"]
+    assert [item["failures"] for item in run_results["results"]] == [None, 1]
+    assert "value_field not in (1, 2)" in run_results["results"][1]["compiled_code"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 accepted_values model+test build execution slice")
@@ -1629,6 +1749,47 @@ def test_build_executes_selected_duckdb_source_column_generic_tests(tmp_path: Pa
     assert source_test["test_metadata"]["kwargs"]["model"] == "{{ get_where_subquery(source('raw', 'customers')) }}"
     assert "source.source_column_tests.raw.customers" in manifest["parent_map"][source_test["unique_id"]]
     assert source_test["unique_id"] in manifest["child_map"]["source.source_column_tests.raw.customers"]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source accepted_values quote false build execution slice")
+def test_build_executes_selected_duckdb_source_accepted_values_quote_false_generic_test(tmp_path: Path):
+    project = tmp_path / "source_column_quote_false_tests"
+    write_source_column_quote_false_test_project(project)
+    target = tmp_path / "build-target"
+    target.mkdir()
+    setup = subprocess.run(
+        [
+            DUCKDB,
+            str(target / "dxt.duckdb"),
+            "-batch",
+            "-bail",
+            "-c",
+            "create schema raw; create table raw.raw_customers as select 1 as customer_id union all select 2 as customer_id",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "source:raw.customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 source generic test(s)" in result.stdout
+    assert_manifest_schema_slice(target / "manifest.json")
+    manifest = json.loads((target / "manifest.json").read_text())
+    test_nodes = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
+    assert len(test_nodes) == 1
+    assert test_nodes[0]["name"] == "source_accepted_values_raw_customers_customer_id__False__1__2"
+    assert test_nodes[0]["test_metadata"]["kwargs"]["quote"] is False
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["pass"]
+    assert "value_field not in (1, 2)" in run_results["results"][0]["compiled_code"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 relationships build execution slice")

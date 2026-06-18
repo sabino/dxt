@@ -74,5 +74,6 @@ dbt Core v2 / Fusion:
 - Do not change selector semantics, indirect selection, queue interleaving,
   skip/fail-fast behavior, threading, or partial failure artifacts.
 - Do not add Python product runtime behavior.
-- Treat `quote: false` as future parser/model metadata work; this slice covers
-  the default quoted values used by the current parsed fixture shape.
+- Explicit `quote: false` parser, artifact, and execution behavior is covered
+  by `.agent/research/m3-duckdb-accepted-values-quote-false.md`; this original
+  slice established the default quoted values path.

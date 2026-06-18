@@ -127,6 +127,7 @@ pub fn appendGenericTestDef(allocator: std.mem.Allocator, tests: *std.ArrayList(
 pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTestDef), source: GenericTestDef) !void {
     var cloned = GenericTestDef{
         .name = source.name,
+        .accepted_values_quote = source.accepted_values_quote,
         .relationship_to = source.relationship_to,
         .relationship_field = source.relationship_field,
     };
@@ -1111,6 +1112,11 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                         try parseInlineStringList(allocator, kv.value, &test_def.accepted_values);
                     }
                     continue;
+                } else if (std.mem.eql(u8, kv.key, "quote")) {
+                    if (std.mem.eql(u8, test_def.name, "accepted_values")) {
+                        test_def.accepted_values_quote = try parseBool(kv.value);
+                    }
+                    continue;
                 } else if (std.mem.eql(u8, kv.key, "to")) {
                     test_def.relationship_to = try dupTrimmedScalar(allocator, kv.value);
                     continue;
@@ -1871,6 +1877,9 @@ pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: Generi
         try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_field));
         try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_to));
     } else if (std.mem.eql(u8, argument_name, "accepted_values")) {
+        if (test_def.accepted_values_quote) |quote| {
+            try clean_args.append(allocator, try cleanTestNamePart(allocator, if (quote) "True" else "False"));
+        }
         for (test_def.accepted_values.items) |value| {
             try clean_args.append(allocator, try cleanTestNamePart(allocator, value));
         }
@@ -1913,6 +1922,9 @@ fn genericTestMetadataRepr(allocator: std.mem.Allocator, test_def: GenericTestDe
         const values = try pythonReprStringList(allocator, test_def.accepted_values.items);
         defer allocator.free(values);
         if (column_name) |column| {
+            if (test_def.accepted_values_quote) |quote| {
+                return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\", 'quote': '{s}', 'values': {s}}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, model_kwarg, if (quote) "True" else "False", values, test_def.name });
+            }
             return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\", 'values': {s}}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, model_kwarg, values, test_def.name });
         }
     }
@@ -3058,6 +3070,7 @@ test "parseSourcesFromText records source column generic tests" {
         \\                  values:
         \\                    - new
         \\                    - returning
+        \\                  quote: false
     ;
 
     try parseSourcesFromText(allocator, yaml, "models/schema.yml", "demo", &graph);
@@ -3076,6 +3089,7 @@ test "parseSourcesFromText records source column generic tests" {
     try std.testing.expectEqual(@as(usize, 2), accepted.accepted_values.items.len);
     try std.testing.expectEqualStrings("new", accepted.accepted_values.items[0]);
     try std.testing.expectEqualStrings("returning", accepted.accepted_values.items[1]);
+    try std.testing.expectEqual(false, accepted.accepted_values_quote.?);
 }
 
 test "parseUnitTestsFromText records dict fixtures and config" {
@@ -3220,6 +3234,21 @@ test "synthesizeGenericTestNames normalizes accepted value arguments" {
     try std.testing.expectEqualStrings("accepted_values_orders_status__placed__shipped_late", names.compiled);
 }
 
+test "synthesizeGenericTestNames includes explicit accepted_values quote flag" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var values: std.ArrayList([]const u8) = .empty;
+    defer values.deinit(allocator);
+    try values.append(allocator, "1");
+    try values.append(allocator, "2");
+
+    const names = try synthesizeGenericTestNames(allocator, .{ .name = "accepted_values", .accepted_values = values, .accepted_values_quote = false }, "customers", "customer_id");
+    try std.testing.expectEqualStrings("accepted_values_customers_customer_id__False__1__2", names.full);
+    try std.testing.expectEqualStrings("accepted_values_customers_customer_id__False__1__2", names.compiled);
+}
+
 test "genericTestUniqueId keeps dbt-style hash suffix stable" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3228,4 +3257,19 @@ test "genericTestUniqueId keeps dbt-style hash suffix stable" {
     const test_def = GenericTestDef{ .name = "not_null" };
     const unique_id = try genericTestUniqueId(allocator, "demo", "not_null_customers_id", test_def, "customers", "id");
     try std.testing.expectEqualStrings("test.demo.not_null_customers_id.422908bfae", unique_id);
+}
+
+test "genericTestUniqueId hashes explicit accepted_values quote flag like dbt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var values: std.ArrayList([]const u8) = .empty;
+    defer values.deinit(allocator);
+    try values.append(allocator, "1");
+    try values.append(allocator, "2");
+
+    const test_def = GenericTestDef{ .name = "accepted_values", .accepted_values = values, .accepted_values_quote = false };
+    const unique_id = try genericTestUniqueId(allocator, "demo", "accepted_values_customers_customer_id__False__1__2", test_def, "customers", "customer_id");
+    try std.testing.expectEqualStrings("test.demo.accepted_values_customers_customer_id__False__1__2.d3fda7ba1b", unique_id);
 }

@@ -223,6 +223,7 @@
             "model": {"type": "string"},
             "column_name": {"type": "string"},
             "values": {"$ref": "#/$defs/unique_id_array"},
+            "quote": {"type": "boolean"},
             "to": {"type": "string"},
             "field": {"type": "string"}
           }
