@@ -51,6 +51,7 @@ Run a small parse/list/compile flow:
 ```sh
 ./zig-out/bin/dxt parse --project-dir tests/fixtures/model_ref --target-path target-dxt
 ./zig-out/bin/dxt ls --project-dir tests/fixtures/model_ref --output json
+./zig-out/bin/dxt ls --project-dir tests/fixtures/model_ref --output json --output-keys unique_id name
 ./zig-out/bin/dxt compile --project-dir tests/fixtures/compile_basic --target-path target-dxt
 ```
 
@@ -91,7 +92,7 @@ embedded DuckDB or another native adapter boundary, not Python runtime calls.
 | Artifacts | `manifest.json`, `run_results.json`, `catalog.json`, `sources.json` slices | fuller dbt schemas, `semantic_manifest.json`, parse cache/state artifacts |
 | dbt resources | models, seeds, sources, exposures, docs, macros, generic tests in the supported subset | snapshots, analyses, singular tests, unit tests, semantic models, metrics, saved queries |
 | Jinja | literal and narrow scalar var-backed `ref`/`source`, `doc`, inline `config`, static list `set` + simple `for`, selected `target`/`this` context | full parse/runtime context, macro execution, dispatch, filters, `execute`, adapter introspection |
-| Selectors and listing | names/FQN, tags, paths/files, packages, resource types, sources, exposures, config materialization, wildcards, `+` and `@` graph expansion, excludes, and `ls` `json`/`name`/`path`/`selector` output formats in the supported subset | YAML selectors, state/defer/result/source-status selectors, `--output-keys` |
+| Selectors and listing | names/FQN, tags, paths/files, packages, resource types, sources, exposures, config materialization, wildcards, `+` and `@` graph expansion, excludes, `ls` `json`/`name`/`path`/`selector` output formats, and narrow compact-JSON `--output-keys` in the supported subset | YAML selectors, state/defer/result/source-status selectors, full dbt JSON and nested `--output-keys` |
 
 See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the detailed matrix.
 

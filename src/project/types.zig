@@ -18,6 +18,7 @@ pub const Options = struct {
     exclude: ?[]const u8 = null,
     resource_type: ?[]const u8 = null,
     output: Output = .text,
+    output_keys: ?[]const []const u8 = null,
 };
 
 pub const Output = enum {
