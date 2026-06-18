@@ -283,7 +283,7 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
 
 fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
     if (std.mem.eql(u8, node.resource_type, "seed")) {
-        try writeSeedNode(writer, node);
+        try writeSeedNode(allocator, writer, node);
     } else {
         try writeModelNode(allocator, writer, node);
     }
@@ -569,7 +569,7 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) 
     try writer.writeAll("}");
 }
 
-fn writeSeedNode(writer: *Io.Writer, node: Node) !void {
+fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
     try writer.writeAll("{\"unique_id\":");
     try writeJsonString(writer, node.unique_id);
     try writer.writeAll(",\"resource_type\":\"seed\",\"package_name\":");
@@ -580,9 +580,25 @@ fn writeSeedNode(writer: *Io.Writer, node: Node) !void {
     try writeJsonString(writer, util.normalizeForDisplay(node.path));
     try writer.writeAll(",\"original_file_path\":");
     try writeJsonString(writer, util.normalizeForDisplay(node.original_file_path));
+    try writer.writeAll(",\"patch_path\":");
+    if (node.patch_path) |patch_path| {
+        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ node.package_name, util.normalizeForDisplay(patch_path) });
+        defer allocator.free(dbt_patch_path);
+        try writeJsonString(writer, dbt_patch_path);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"description\":");
+    try writeJsonString(writer, node.description);
+    try writer.writeAll(",\"doc_blocks\":");
+    try writeStringArray(writer, node.doc_blocks.items);
+    try writer.writeAll(",\"columns\":");
+    try writeColumns(writer, node.columns.items);
     try writer.writeAll(",\"config\":{\"enabled\":");
     try writer.writeAll(if (node.enabled) "true" else "false");
-    try writer.writeAll(",\"materialized\":\"seed\",\"docs\":");
+    try writer.writeAll(",\"materialized\":\"seed\",\"tags\":");
+    try writeStringArray(writer, node.tags.items);
+    try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
     try writer.writeAll("},\"docs\":");
     try writeDocsConfig(writer, node.docs);

@@ -135,10 +135,11 @@
     "seed_config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "materialized", "docs"],
+      "required": ["enabled", "materialized", "tags", "docs"],
       "properties": {
         "enabled": {"type": "boolean"},
         "materialized": {"type": "string"},
+        "tags": {"$ref": "#/$defs/unique_id_array"},
         "docs": {"$ref": "#/$defs/docs_config"}
       }
     },
@@ -398,6 +399,10 @@
         "name",
         "path",
         "original_file_path",
+        "patch_path",
+        "description",
+        "doc_blocks",
+        "columns",
         "docs",
         "config",
         "depends_on"
@@ -409,6 +414,13 @@
         "name": {"type": "string"},
         "path": {"type": "string"},
         "original_file_path": {"type": "string"},
+        "patch_path": {"type": ["string", "null"]},
+        "description": {"type": "string"},
+        "doc_blocks": {"$ref": "#/$defs/unique_id_array"},
+        "columns": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/column"}
+        },
         "docs": {"$ref": "#/$defs/docs_config"},
         "config": {"$ref": "#/$defs/seed_config"},
         "depends_on": {"$ref": "#/$defs/depends_on"}

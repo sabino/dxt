@@ -218,6 +218,7 @@ pub const MacroArgument = struct {
 
 pub const ModelProperty = struct {
     package_name: []const u8,
+    resource_type: []const u8 = "model",
     name: []const u8,
     patch_path: []const u8,
     description: []const u8 = "",
@@ -230,6 +231,7 @@ pub const ModelProperty = struct {
 };
 
 pub const UnmatchedModelProperty = struct {
+    resource_type: []const u8 = "model",
     name: []const u8,
     patch_path: []const u8,
 };

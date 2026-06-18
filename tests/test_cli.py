@@ -1287,6 +1287,34 @@ models:
     )
 
 
+def write_seed_column_test_project(project: Path, seed_csv: str, schema_tests: str | None = None) -> None:
+    (project / "seeds").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: seed_column_tests
+version: "1.0"
+seed-paths: ["seeds"]
+target-path: target
+"""
+    )
+    (project / "seeds" / "raw_customers.csv").write_text(seed_csv)
+    tests = schema_tests or """          - not_null
+          - unique
+          - accepted_values:
+              arguments:
+                values: [1, 2]
+                quote: false
+"""
+    (project / "seeds" / "schema.yml").write_text(
+        f"""version: 2
+seeds:
+  - name: raw_customers
+    columns:
+      - name: customer_id
+        tests:
+{tests}"""
+    )
+
+
 def write_supported_model_test_project(project: Path, customers_sql: str) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -1959,6 +1987,162 @@ def test_build_executes_selected_duckdb_seed_model_and_supported_generic_tests(t
     )
     assert query.returncode == 0, query.stderr
     assert query.stdout.strip() == "1,Ada\n2,Bob"
+
+
+def test_parse_seed_column_properties_and_tests(tmp_path: Path):
+    project = tmp_path / "seed_column_tests"
+    write_seed_column_test_project(project, "customer_id,customer_name\n1,Ada\n2,Bob\n")
+    target = tmp_path / "parse-target"
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+    manifest = json.loads((target / "manifest.json").read_text())
+
+    seed = manifest["nodes"]["seed.seed_column_tests.raw_customers"]
+    assert seed["patch_path"] == "seed_column_tests://seeds/schema.yml"
+    assert sorted(seed["columns"]) == ["customer_id"]
+    assert seed["columns"]["customer_id"]["name"] == "customer_id"
+
+    test_nodes = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
+    assert [node["name"] for node in test_nodes] == [
+        "accepted_values_raw_customers_customer_id__False__1__2",
+        "not_null_raw_customers_customer_id",
+        "unique_raw_customers_customer_id",
+    ]
+    accepted = test_nodes[0]
+    assert accepted["attached_node"] == "seed.seed_column_tests.raw_customers"
+    assert accepted["original_file_path"] == "seeds/schema.yml"
+    assert accepted["refs"] == [{"name": "raw_customers", "package": None, "version": None}]
+    assert accepted["test_metadata"]["kwargs"] == {
+        "model": "{{ get_where_subquery(ref('raw_customers')) }}",
+        "column_name": "customer_id",
+        "values": ["1", "2"],
+        "quote": False,
+    }
+    assert accepted["depends_on"]["nodes"] == ["seed.seed_column_tests.raw_customers"]
+    assert manifest["child_map"]["seed.seed_column_tests.raw_customers"] == [node["unique_id"] for node in test_nodes]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed column generic-test build slice")
+def test_build_executes_selected_duckdb_seed_column_generic_tests(tmp_path: Path):
+    project = tmp_path / "seed_column_tests"
+    write_seed_column_test_project(project, "customer_id,customer_name\n1,Ada\n2,Bob\n")
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 seed(s) and 3 generic test(s)" in result.stdout
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert run_results["results"][0]["unique_id"] == "seed.seed_column_tests.raw_customers"
+    assert all(item["unique_id"].startswith("test.seed_column_tests.") for item in run_results["results"][1:])
+    assert [item["status"] for item in run_results["results"]] == ["success", "pass", "pass", "pass"]
+    assert [item["failures"] for item in run_results["results"]] == [None, 0, 0, 0]
+    assert "value_field not in (1, 2)" in run_results["results"][1]["compiled_code"]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed column accepted_values build slice")
+def test_build_executes_selected_duckdb_seed_column_default_quoted_accepted_values(tmp_path: Path):
+    project = tmp_path / "seed_column_tests"
+    write_seed_column_test_project(
+        project,
+        "customer_id,customer_name\nA,Ada\nB,Bob\n",
+        """          - accepted_values:
+              arguments:
+                values: [A, B]
+""",
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 seed(s) and 1 generic test(s)" in result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["success", "pass"]
+    assert "value_field not in ('A', 'B')" in run_results["results"][1]["compiled_code"]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed column relationships generic-test build slice")
+def test_build_executes_selected_duckdb_seed_relationships_generic_test(tmp_path: Path):
+    project = tmp_path / "seed_relationship_tests"
+    (project / "seeds").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: seed_relationship_tests
+version: "1.0"
+seed-paths: ["seeds"]
+target-path: target
+"""
+    )
+    (project / "seeds" / "raw_customers.csv").write_text("customer_id,customer_name\n1,Ada\n")
+    (project / "seeds" / "raw_orders.csv").write_text("order_id,customer_id\n10,1\n")
+    (project / "seeds" / "schema.yml").write_text(
+        """version: 2
+seeds:
+  - name: raw_orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('raw_customers')
+                field: customer_id
+"""
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_customers raw_orders+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 2 seed(s) and 1 generic test(s)" in result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"][:2]] == [
+        "seed.seed_relationship_tests.raw_customers",
+        "seed.seed_relationship_tests.raw_orders",
+    ]
+    assert run_results["results"][2]["unique_id"].startswith(
+        "test.seed_relationship_tests.relationships_raw_orders_customer_id__customer_id__ref_raw_customers_."
+    )
+    assert [item["status"] for item in run_results["results"]] == ["success", "success", "pass"]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed column generic-test build slice")
+def test_build_reports_failing_seed_column_generic_tests(tmp_path: Path):
+    project = tmp_path / "seed_column_tests"
+    write_seed_column_test_project(project, "customer_id,customer_name\n,Ada\n1,Bob\n1,Bea\n")
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Built 1 seed(s) and 3 generic test(s)" in result.stdout
+    assert "2 generic test(s) failed with 2 failure row(s)" in result.stdout
+    assert "one or more generic tests failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["success", "pass", "fail", "fail"]
+    assert [item["failures"] for item in run_results["results"]] == [None, 0, 1, 1]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 accepted_values seed+model+test build execution slice")
@@ -3713,7 +3897,7 @@ def test_unmatched_model_property_warns_and_continues(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 0
-    assert "did not find matching node for model property" in result.stderr
+    assert "did not find matching model node for property" in result.stderr
     manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
     assert sorted(manifest["nodes"]) == ["model.unmatched_model_property.customers"]
 
