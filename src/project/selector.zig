@@ -20,6 +20,9 @@ pub const SelectedResource = struct {
     path: []const u8 = "",
     original_file_path: []const u8 = "",
     selector: []const u8 = "",
+    config_materialized: []const u8 = "",
+    config_tags: []const []const u8 = &.{},
+    has_config_tags: bool = false,
 };
 
 const SelectorSpec = struct {
@@ -50,6 +53,9 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .path = node.path,
                 .original_file_path = node.original_file_path,
                 .selector = try pathBackedOutputSelector(allocator, node.package_name, node.path),
+                .config_materialized = node.materialized,
+                .config_tags = node.tags.items,
+                .has_config_tags = true,
             });
         }
     }
@@ -64,6 +70,8 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .path = test_node.path,
                 .original_file_path = test_node.original_file_path,
                 .selector = try pathBackedOutputSelector(allocator, test_node.package_name, test_node.path),
+                .config_materialized = "test",
+                .has_config_tags = true,
             });
         }
     }
@@ -79,6 +87,8 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .path = test_node.path,
                 .original_file_path = test_node.original_file_path,
                 .selector = try pathBackedOutputSelector(allocator, test_node.package_name, test_node.path),
+                .config_materialized = "test",
+                .has_config_tags = true,
             });
         }
     }
@@ -124,6 +134,8 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .path = unit_test.path,
                 .original_file_path = unit_test.original_file_path,
                 .selector = try std.fmt.allocPrint(allocator, "unit_test:{s}.{s}", .{ unit_test.package_name, unit_test.name }),
+                .config_tags = unit_test.tags.items,
+                .has_config_tags = true,
             });
         }
     }

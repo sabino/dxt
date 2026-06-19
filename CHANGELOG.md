@@ -76,6 +76,9 @@ compatibility.
   map support for current fixtures.
 - `dxt ls --output json --output-keys` compact selected-resource expansion for
   `package_name` and source-only `source_name`.
+- `dxt ls --output json --output-keys` support for compact nested config keys
+  `config.materialized` and `config.tags` on selected resources that carry
+  those config values.
 - Table-level model, seed, and source built-in generic tests with explicit
   `arguments.column_name`, including Manifest kwargs and DuckDB `build`
   execution for the existing supported test types while preserving dbt's

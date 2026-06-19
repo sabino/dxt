@@ -5997,6 +5997,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
             "--output-keys",
             "package_name",
             "config.materialized",
+            "config.tags",
             "non_existent_key",
         ],
         cwd=ROOT,
@@ -6004,7 +6005,38 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert package_keyed_json.returncode == 0, package_keyed_json.stderr
-    assert json.loads(package_keyed_json.stdout) == [{"package_name": "inline_config"}]
+    assert json.loads(package_keyed_json.stdout) == [
+        {
+            "package_name": "inline_config",
+            "config.materialized": "table",
+            "config.tags": ["finance", "nightly"],
+        }
+    ]
+
+    untagged_project = copy_fixture(tmp_path, "model_ref")
+    untagged_keyed_json = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(untagged_project),
+            "--output",
+            "json",
+            "--select",
+            "stg_customers",
+            "--output-keys",
+            "name",
+            "config.materialized",
+            "config.tags",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert untagged_keyed_json.returncode == 0, untagged_keyed_json.stderr
+    assert json.loads(untagged_keyed_json.stdout) == [
+        {"name": "stg_customers", "config.materialized": "view", "config.tags": []}
+    ]
 
     missing_output_key = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--output", "json", "--output-keys"],
