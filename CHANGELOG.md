@@ -37,6 +37,11 @@ compatibility.
   and public Jaffle parse/build/run/docs gates with a pinned and
   checksum-verified DuckDB CLI, pytest JUnit reports, and focused local
   validation guidance.
+- GitHub CI stale-run cancellation, job timeouts, and a native Zig test coverage
+  map artifact workflow for Zig source/build changes, main pushes, and manual
+  coverage runs. The public Jaffle job now fetches the pinned fixture checkout
+  once and passes it to each public harness to reduce repeated network clone
+  work.
 - Shared Zig JSON writer helpers for artifact emission, replacing duplicated
   per-artifact string escaping helpers across manifest, run-results, catalog,
   and sources writers while keeping behavior stable.

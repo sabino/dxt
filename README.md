@@ -141,7 +141,17 @@ high-risk PR. Otherwise, let GitHub CI run the full integration matrix and
 publish pytest JUnit reports for review. GitHub CI also runs the public Jaffle
 parse, DuckDB build, DuckDB run, and docs-generate gates with a pinned,
 checksum-verified DuckDB CLI, so routine local work can stay focused on the
-touched layer.
+touched layer. CI cancels superseded runs for the same branch or PR and applies
+job timeouts so stale work does not consume runner time. The public fixture job
+checks out the pinned Jaffle repository once and passes that checkout to each
+gate to avoid repeated network clones.
+
+Native Zig coverage is collected on GitHub, not as a required local gate. The
+`Coverage` workflow runs on `src/` or build-file pull requests, pushes to
+`main`, and manual dispatch. It runs native Zig tests, compiles the standalone
+Zig test binary, and uploads a native test coverage map by source module for
+review. This is intentionally not Python coverage and does not claim line
+coverage for the Zig runtime.
 
 Optional compatibility gates:
 
