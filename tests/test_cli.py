@@ -2772,6 +2772,44 @@ def test_build_executes_selected_duckdb_seed_model_and_supported_generic_tests(t
     assert query.stdout.strip() == "1,Ada\n2,Bob"
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed execution-failure slice")
+def test_build_seed_execution_failure_skips_selected_model_and_generic_tests(tmp_path: Path):
+    project = tmp_path / "build_seed_model_tests"
+    write_seed_model_test_project(
+        project,
+        "customer_id,customer_name\n1,Ada\n2,Bob\n",
+    )
+    seed_path = project / "seeds" / "raw_customers.csv"
+    seed_path.chmod(0)
+    target = tmp_path / "build-target"
+    try:
+        result = subprocess.run(
+            [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "+customers"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+    finally:
+        seed_path.chmod(0o644)
+
+    assert result.returncode == 1
+    assert "Build failed after 4 result(s)" in result.stdout
+    assert "one or more selected resources failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "seed.build_seed_model_tests.raw_customers",
+        "model.build_seed_model_tests.customers",
+        "test.build_seed_model_tests.not_null_customers_customer_id.5c9bf9911d",
+        "test.build_seed_model_tests.unique_customers_customer_id.c5af1ff4b1",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["error", "skipped", "skipped", "skipped"]
+    assert run_results["results"][0]["message"] == "DuckDB execution failed"
+    assert [item["message"] for item in run_results["results"][1:]] == [None, None, None]
+    assert run_results["results"][1]["compiled"] is True
+    assert run_results["results"][1]["compiled_code"].strip().startswith("select")
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 table-level generic-test build slice")
 def test_build_executes_table_level_model_and_seed_generic_tests(tmp_path: Path):
     project = tmp_path / "table_level_generic_tests"
