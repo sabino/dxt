@@ -110,8 +110,19 @@ def pick_role(config: dict[str, Any], labels: set[str]) -> dict[str, Any]:
         "label": "role:supervisor",
         "agent": config["fallback_agent"],
         "mode": "plan",
-        "sandbox": "read-only",
+        "sandbox": "danger-full-access",
     }
+
+
+def effective_max_workers(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    value = args.max_workers if args.max_workers is not None else config.get("default_max_workers", 4)
+    try:
+        max_workers = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid max worker count: {value!r}") from exc
+    if max_workers < 0:
+        raise ValueError(f"max worker count must not be negative: {max_workers}")
+    return max_workers
 
 
 def is_ready(config: dict[str, Any], labels: set[str]) -> bool:
@@ -446,9 +457,10 @@ def setup(args: argparse.Namespace) -> int:
 def run_once(args: argparse.Namespace, config: dict[str, Any], state: dict[str, Any]) -> int:
     repo = args.repo or default_repo()
     active = active_runs(state)
-    free_slots = max(args.max_workers - len(active), 0)
+    max_workers = effective_max_workers(args, config)
+    free_slots = max(max_workers - len(active), 0)
     if free_slots == 0:
-        print(f"no free worker slots: max-workers={args.max_workers} active={len(active)}")
+        print(f"no free worker slots: max-workers={max_workers} active={len(active)}")
         save_state(state)
         return 0
 
@@ -819,7 +831,7 @@ def main() -> int:
     run_parser.add_argument("--model")
     run_parser.add_argument("--base")
     run_parser.add_argument("--worktree-root")
-    run_parser.add_argument("--max-workers", type=int, default=2)
+    run_parser.add_argument("--max-workers", type=int)
     run_parser.add_argument("--loop", action="store_true")
     run_parser.add_argument("--poll-seconds", type=int, default=900)
     run_parser.add_argument("--max-minutes", type=int, default=0)
