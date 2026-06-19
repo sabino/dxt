@@ -577,6 +577,15 @@ def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
     assert uses_orders["compiled_code"].strip() == 'select *\nfrom "analytics_mart"."order_facts"'
     if command_name == "docs generate":
         assert (target / "catalog.json").exists()
+    elif command_name in {"run", "build"} and DUCKDB is not None:
+        assert_run_results_schema_slice(target / "run_results.json")
+        run_results = json.loads((target / "run_results.json").read_text())
+        assert [item["unique_id"] for item in run_results["results"]] == [
+            "model.inline_relation_config.base_orders",
+            "model.inline_relation_config.orders",
+        ]
+        assert [item["status"] for item in run_results["results"]] == ["success", "error"]
+        assert run_results["results"][1]["message"] == "DuckDB execution failed"
     else:
         assert not (target / "run_results.json").exists()
 
@@ -586,8 +595,8 @@ def test_compile_docs_run_and_build_apply_inline_schema_and_alias_to_relations(t
     commands = [
         ("compile", [DXT, "compile"], 0),
         ("docs generate", [DXT, "docs", "generate"], 0),
-        ("run", [DXT, "run"], 2),
-        ("build", [DXT, "build"], 2),
+        ("run", [DXT, "run"], 1 if DUCKDB is not None else 2),
+        ("build", [DXT, "build"], 1 if DUCKDB is not None else 2),
     ]
     for index, (command_name, command, expected_returncode) in enumerate(commands):
         target = tmp_path / f"inline-relation-{index}"
@@ -811,6 +820,55 @@ def test_run_executes_selected_duckdb_models_and_writes_run_results(tmp_path: Pa
     )
     assert query.returncode == 0, query.stderr
     assert query.stdout.strip() == "1,1"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution failure slice")
+def test_run_writes_error_run_results_when_model_execution_fails(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    (project / "models" / "orders.sql").write_text(
+        "{{ config(materialized='table') }}\n"
+        "select customers.customer_id\n"
+        "from {{ ref('customers') }} as customers\n"
+        "join missing_relation on missing_relation.customer_id = customers.customer_id\n"
+    )
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "+orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Run failed after 2 result(s)" in result.stdout
+    assert "one or more selected resources failed" in result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "model.compile_basic.customers",
+        "model.compile_basic.orders",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["success", "error"]
+    assert run_results["results"][1]["message"] == "DuckDB execution failed"
+    assert run_results["results"][1]["compiled"] is True
+    assert "join missing_relation" in run_results["results"][1]["compiled_code"]
+    assert run_results["results"][1]["relation_name"] == '"main"."orders"'
+
+    query = subprocess.run(
+        [
+            DUCKDB,
+            str(target / "dxt.duckdb"),
+            "-csv",
+            "-noheader",
+            "-c",
+            "select table_name from information_schema.tables where table_schema = 'main' order by table_name",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip().splitlines() == ["customers"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
@@ -1109,6 +1167,35 @@ def test_build_executes_selected_duckdb_models_and_writes_run_results(tmp_path: 
     )
     assert query.returncode == 0, query.stderr
     assert query.stdout.strip() == "1,1"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 model build execution failure slice")
+def test_build_writes_error_run_results_when_model_execution_fails(tmp_path: Path):
+    project = copy_fixture(tmp_path, "compile_basic")
+    (project / "models" / "orders.sql").write_text(
+        "{{ config(materialized='table') }}\n"
+        "select customers.customer_id\n"
+        "from {{ ref('customers') }} as customers\n"
+        "join missing_relation on missing_relation.customer_id = customers.customer_id\n"
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "+orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Build failed after 2 result(s)" in result.stdout
+    assert "one or more selected resources failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "model.compile_basic.customers",
+        "model.compile_basic.orders",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["success", "error"]
+    assert run_results["results"][1]["message"] == "DuckDB execution failed"
 
 
 def test_build_rejects_unsupported_model_materialization_before_duckdb(tmp_path: Path):
@@ -1701,6 +1788,30 @@ def test_build_executes_selected_duckdb_model_and_supported_generic_tests(tmp_pa
     )
     assert query.returncode == 0, query.stderr
     assert query.stdout.strip() == "1,Ada"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 model+test build execution failure slice")
+def test_build_model_execution_failure_skips_selected_generic_tests(tmp_path: Path):
+    project = tmp_path / "build_model_tests"
+    write_supported_model_test_project(
+        project,
+        "select * from missing_relation\n",
+    )
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Build failed after 1 result(s)" in result.stdout
+    assert "one or more selected resources failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == ["model.build_model_tests.customers"]
+    assert [item["status"] for item in run_results["results"]] == ["error"]
+    assert run_results["results"][0]["message"] == "DuckDB execution failed"
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")

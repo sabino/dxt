@@ -255,6 +255,10 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.CyclicModelDependency => stderr.writeAll("error: selected model graph contains a cycle\n") catch {},
         error.DuckDbCliNotFound => stderr.writeAll("error: DuckDB execution requires the duckdb CLI on PATH for this M3 slice\n") catch {},
         error.DuckDbExecutionFailed => stderr.writeAll("error: DuckDB execution failed\n") catch {},
+        error.ExecutionFailure => {
+            stderr.writeAll("error: one or more selected resources failed\n") catch {};
+            return .failure;
+        },
         error.TestFailure => {
             stderr.writeAll("error: one or more generic tests failed\n") catch {};
             return .failure;

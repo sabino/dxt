@@ -22,6 +22,10 @@ compatibility.
   writing `manifest.json` and Run Results v6-shaped `run_results.json` for
   supported `not_null`, `unique`, `accepted_values`, and `relationships` tests
   against already-existing target relations.
+- Partial DuckDB execution-failure artifacts for `dxt run` and supported
+  `dxt build` model/seed branches, writing completed prior `run_results.json`
+  rows plus a sanitized `status: "error"` row for the failed resource and
+  returning exit code `1`.
 - Table-level model, seed, and source built-in generic tests with explicit
   `arguments.column_name`, including Manifest kwargs and DuckDB `build`
   execution for the existing supported test types while preserving dbt's

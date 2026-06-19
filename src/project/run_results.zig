@@ -159,6 +159,43 @@ test "run-results writer emits seed result with dbt Core null compiled fields" {
     try std.testing.expectEqual(.null, result.get("relation_name").?);
 }
 
+test "run-results writer emits compiled model error result" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select * from missing_relation",
+        .compiled = true,
+        .compiled_code = "select * from missing_relation",
+        .relation_name = "\"main\".\"orders\"",
+    });
+
+    const rendered = try renderRunResults(allocator, &.{.{
+        .node = &graph.nodes.items[0],
+        .status = "error",
+        .message = "DuckDB execution failed",
+    }});
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const result = parsed.value.object.get("results").?.array.items[0].object;
+    try std.testing.expectEqualStrings("error", result.get("status").?.string);
+    try std.testing.expectEqualStrings("DuckDB execution failed", result.get("message").?.string);
+    try std.testing.expectEqual(.null, result.get("failures").?);
+    try std.testing.expectEqualStrings("model.demo.orders", result.get("unique_id").?.string);
+    try std.testing.expectEqual(true, result.get("compiled").?.bool);
+    try std.testing.expectEqualStrings("select * from missing_relation", result.get("compiled_code").?.string);
+    try std.testing.expectEqualStrings("\"main\".\"orders\"", result.get("relation_name").?.string);
+}
+
 test "run-results writer emits generic test pass and fail statuses" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

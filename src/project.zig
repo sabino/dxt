@@ -17,6 +17,8 @@ const source_freshness = @import("project/source_freshness.zig");
 const types = @import("project/types.zig");
 const util = @import("project/util.zig");
 
+const execution_failure_message = "DuckDB execution failed";
+
 pub const Runtime = types.Runtime;
 pub const Options = types.Options;
 pub const Output = types.Output;
@@ -334,15 +336,17 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
     var executed: std.ArrayList(run_results.NodeResult) = .empty;
-    defer executed.deinit(runtime.allocator);
+    defer {
+        deinitRunResults(runtime.allocator, executed.items);
+        executed.deinit(runtime.allocator);
+    }
     for (execution_order) |node| {
-        try duckdb.executeModel(runtime, db_path, &graph, node);
-        try executed.append(runtime.allocator, .{ .node = node });
+        if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
+            return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Run");
+        }
     }
 
-    const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
-    const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
-    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+    try writeRunResults(runtime, target_dir, executed.items);
     try stdout.print("Ran {d} model(s) into {s}; wrote artifacts into {s}\n", .{
         executed.items.len,
         util.normalizeForDisplay(db_path),
@@ -383,9 +387,7 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     }
     const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
 
-    const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
-    const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
-    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+    try writeRunResults(runtime, target_dir, executed.items);
     try stdout.print("Tested {d} generic test(s) against {s}; wrote artifacts into {s}\n", .{
         executed.items.len,
         util.normalizeForDisplay(db_path),
@@ -421,15 +423,17 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
 
         const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
         var executed: std.ArrayList(run_results.NodeResult) = .empty;
-        defer executed.deinit(runtime.allocator);
+        defer {
+            deinitRunResults(runtime.allocator, executed.items);
+            executed.deinit(runtime.allocator);
+        }
         for (seed_nodes) |node| {
-            try duckdb.executeSeed(runtime, db_path, options.project_dir, &graph, node);
-            try executed.append(runtime.allocator, .{ .node = node });
+            if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
+                return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
+            }
         }
 
-        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
-        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
-        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try writeRunResults(runtime, target_dir, executed.items);
         try stdout.print("Built {d} seed(s) into {s}; wrote artifacts into {s}\n", .{
             executed.items.len,
             util.normalizeForDisplay(db_path),
@@ -455,14 +459,13 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             executed.deinit(runtime.allocator);
         }
         for (seed_nodes) |node| {
-            try duckdb.executeSeed(runtime, db_path, options.project_dir, &graph, node);
-            try executed.append(runtime.allocator, .{ .node = node });
+            if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
+                return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
+            }
         }
         const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
 
-        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
-        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
-        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try writeRunResults(runtime, target_dir, executed.items);
         try stdout.print("Built {d} seed(s) and {d} generic test(s) into {s}; wrote artifacts into {s}\n", .{
             seed_nodes.len,
             test_nodes.len,
@@ -489,9 +492,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         }
         const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
 
-        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
-        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
-        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try writeRunResults(runtime, target_dir, executed.items);
         try stdout.print("Built {d} generic test(s) against {s}; wrote artifacts into {s}\n", .{
             executed.items.len,
             util.normalizeForDisplay(db_path),
@@ -517,9 +518,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         }
         const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
 
-        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
-        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
-        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try writeRunResults(runtime, target_dir, executed.items);
         try stdout.print("Built {d} source generic test(s) against {s}; wrote artifacts into {s}\n", .{
             executed.items.len,
             util.normalizeForDisplay(db_path),
@@ -549,14 +548,13 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             executed.deinit(runtime.allocator);
         }
         for (execution_order) |node| {
-            try duckdb.executeModel(runtime, db_path, &graph, node);
-            try executed.append(runtime.allocator, .{ .node = node });
+            if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
+                return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
+            }
         }
         const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
 
-        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
-        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
-        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try writeRunResults(runtime, target_dir, executed.items);
         try stdout.print("Built {d} model(s) and {d} generic test(s) into {s}; wrote artifacts into {s}\n", .{
             execution_order.len,
             test_nodes.len,
@@ -590,19 +588,20 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         var model_count: usize = 0;
         for (execution_order) |node| {
             if (std.mem.eql(u8, node.resource_type, "seed")) {
-                try duckdb.executeSeed(runtime, db_path, options.project_dir, &graph, node);
+                if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
+                    return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
+                }
                 seed_count += 1;
             } else {
-                try duckdb.executeModel(runtime, db_path, &graph, node);
+                if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
+                    return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
+                }
                 model_count += 1;
             }
-            try executed.append(runtime.allocator, .{ .node = node });
         }
         const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
 
-        const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
-        const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
-        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+        try writeRunResults(runtime, target_dir, executed.items);
         try stdout.print("Built {d} seed(s), {d} model(s), and {d} generic test(s) into {s}; wrote artifacts into {s}\n", .{
             seed_count,
             model_count,
@@ -791,6 +790,51 @@ fn validateGenericTestsAttachToSelectedNodes(nodes: []const *GenericTestNode, se
     }
 }
 
+fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, executed: *std.ArrayList(run_results.NodeResult)) !bool {
+    duckdb.executeModel(runtime, db_path, graph, node) catch |err| switch (err) {
+        error.DuckDbExecutionFailed => {
+            try appendExecutionErrorResult(runtime.allocator, executed, node);
+            return false;
+        },
+        else => return err,
+    };
+    try executed.append(runtime.allocator, .{ .node = node });
+    return true;
+}
+
+fn executeSeedAppendingResult(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node, executed: *std.ArrayList(run_results.NodeResult)) !bool {
+    duckdb.executeSeed(runtime, db_path, project_dir, graph, node) catch |err| switch (err) {
+        error.DuckDbExecutionFailed => {
+            try appendExecutionErrorResult(runtime.allocator, executed, node);
+            return false;
+        },
+        else => return err,
+    };
+    try executed.append(runtime.allocator, .{ .node = node });
+    return true;
+}
+
+fn appendExecutionErrorResult(allocator: std.mem.Allocator, executed: *std.ArrayList(run_results.NodeResult), node: *const Node) !void {
+    const message = try allocator.dupe(u8, execution_failure_message);
+    errdefer allocator.free(message);
+    try executed.append(allocator, .{
+        .node = node,
+        .status = "error",
+        .message = message,
+    });
+}
+
+fn failExecution(runtime: Runtime, target_dir: []const u8, manifest_path: []const u8, db_path: []const u8, executed: []const run_results.NodeResult, stdout: *Io.Writer, verb: []const u8) !void {
+    try writeRunResults(runtime, target_dir, executed);
+    try stdout.print("{s} failed after {d} result(s) against {s}; wrote artifacts into {s}\n", .{
+        verb,
+        executed.len,
+        util.normalizeForDisplay(db_path),
+        util.normalizeForDisplay(manifest_path),
+    });
+    return error.ExecutionFailure;
+}
+
 const GenericTestExecutionSummary = struct {
     failed_tests: usize = 0,
     total_failures: u64 = 0,
@@ -816,6 +860,12 @@ fn appendGenericTestResults(runtime: Runtime, db_path: []const u8, graph: *const
         });
     }
     return summary;
+}
+
+fn writeRunResults(runtime: Runtime, target_dir: []const u8, results: []const run_results.NodeResult) !void {
+    const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
+    const run_results_json = try run_results.renderRunResults(runtime.allocator, results);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
 }
 
 fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.NodeResult) void {
