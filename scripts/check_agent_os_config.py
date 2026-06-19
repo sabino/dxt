@@ -36,6 +36,7 @@ EXPECTED_AGENTS = {
     "dxt_issue_triager",
     "dxt_jinja_macro_specialist",
     "dxt_network_coordinator",
+    "dxt_product_manager",
     "dxt_qa_fixture_engineer",
     "dxt_reflection_reviewer",
     "dxt_runtime_boundary_auditor",
@@ -164,7 +165,7 @@ def validate_orchestrator(label_names: set[str], findings: list[str]) -> None:
             findings.append(f"orchestrator role_map[{index}] references unknown label {label!r}")
         if not isinstance(agent, str) or not agent:
             findings.append(f"orchestrator role_map[{index}] missing agent")
-        if mode not in {"plan", "research", "map", "implement", "review", "reflect", "docs", "qa"}:
+        if mode not in {"plan", "product", "research", "map", "implement", "review", "reflect", "docs", "qa"}:
             findings.append(f"orchestrator role_map[{index}] has invalid mode {mode!r}")
         if sandbox not in {"read-only", "workspace-write"}:
             findings.append(f"orchestrator role_map[{index}] has invalid sandbox {sandbox!r}")

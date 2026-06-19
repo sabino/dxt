@@ -70,6 +70,13 @@ def default_repo() -> str:
     return json.loads(result.stdout)["nameWithOwner"]
 
 
+def repo_matches_owner(repo: str, owner: str) -> bool:
+    if "/" not in repo:
+        return True
+    repo_owner, _ = repo.split("/", 1)
+    return repo_owner == owner
+
+
 def load_orchestrator() -> dict[str, Any]:
     data = load_json(ORCHESTRATOR_PATH)
     if not isinstance(data, dict):
@@ -113,6 +120,51 @@ def is_ready(config: dict[str, Any], labels: set[str]) -> bool:
     return bool(labels.intersection(config["ready_labels"]))
 
 
+def priority_rank(labels: set[str]) -> int:
+    for rank, label in enumerate(("priority:p0", "priority:p1", "priority:p2", "priority:p3")):
+        if label in labels:
+            return rank
+    return 4
+
+
+def domain_rank(labels: set[str]) -> int:
+    if "type:compat" in labels:
+        return 0
+    if "type:artifact" in labels:
+        return 10
+    if "type:research" in labels and labels.intersection({"area:semantic", "area:cross-db", "area:adapter-abi"}):
+        return 40
+    if "type:research" in labels:
+        return 25
+    if "type:ci" in labels or "type:release" in labels:
+        return 70
+    if "type:safety" in labels:
+        return 80
+    return 50
+
+
+def readiness_rank(labels: set[str]) -> int:
+    if "status:ready" in labels:
+        return 0
+    if "ready-for-agent" in labels:
+        return 1
+    if "needs-slice-plan" in labels:
+        return 2
+    if "needs-reference-map" in labels:
+        return 3
+    return 4
+
+
+def issue_sort_key(issue: dict[str, Any]) -> tuple[int, int, int, int]:
+    labels = issue_labels(issue)
+    return (
+        priority_rank(labels),
+        domain_rank(labels),
+        readiness_rank(labels),
+        int(issue["number"]),
+    )
+
+
 def fetch_candidate_issues(repo: str, config: dict[str, Any], limit: int) -> list[dict[str, Any]]:
     result = gh(
         [
@@ -133,6 +185,7 @@ def fetch_candidate_issues(repo: str, config: dict[str, Any], limit: int) -> lis
         raise RuntimeError(result.stderr.strip())
     issues = json.loads(result.stdout)
     ready = [issue for issue in issues if is_ready(config, issue_labels(issue))]
+    ready.sort(key=issue_sort_key)
     return ready[:limit]
 
 
@@ -349,7 +402,7 @@ def setup(args: argparse.Namespace) -> int:
         print("\n".join(findings))
         return 1
     repo = args.repo or default_repo()
-    from github_agent_os import labels, seed_issues, project
+    from github_agent_os import labels, seed_issues, project, project_items
 
     if args.apply_labels:
         if labels(argparse.Namespace(repo=repo, dry_run=False, check=False, apply=True)) != 0:
@@ -368,6 +421,21 @@ def setup(args: argparse.Namespace) -> int:
             return 1
     else:
         print("project: skipped; use --apply-project after `gh auth refresh -s read:project -s project`")
+        print("read:project lists Projects; project creates/updates the board and fields")
+    if args.sync_project_items:
+        if project_items(
+            argparse.Namespace(
+                owner=args.owner,
+                repo=repo,
+                dry_run=False,
+                apply=True,
+                limit=args.item_limit,
+                project_item_limit=args.project_item_limit,
+            )
+        ) != 0:
+            return 1
+    else:
+        print("project items: skipped; use --sync-project-items after project --apply")
     return 0
 
 
@@ -456,6 +524,186 @@ def print_status(_: argparse.Namespace) -> int:
         if run.get("last_message"):
             print(f"  last: {run['last_message']}")
     return 0
+
+
+def fetch_board_snapshot(repo: str, limit: int) -> dict[str, Any]:
+    issues_result = gh(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,title,body,labels,url,assignees,comments,createdAt,updatedAt",
+        ],
+        check=False,
+    )
+    prs_result = gh(
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,title,isDraft,headRefName,url,labels,updatedAt",
+        ],
+        check=False,
+    )
+    snapshot: dict[str, Any] = {"repo": repo, "captured_at": utc_now()}
+    snapshot["issues"] = json.loads(issues_result.stdout) if issues_result.returncode == 0 else []
+    snapshot["pull_requests"] = json.loads(prs_result.stdout) if prs_result.returncode == 0 else []
+    if issues_result.returncode != 0:
+        snapshot["issue_error"] = issues_result.stderr.strip()
+    if prs_result.returncode != 0:
+        snapshot["pr_error"] = prs_result.stderr.strip()
+    return snapshot
+
+
+def product_manager_prompt(repo: str, snapshot: dict[str, Any], can_apply_project: bool) -> str:
+    project_note = (
+        "Project scopes appear available; you may inspect/update GitHub Project state if useful."
+        if can_apply_project
+        else "GitHub Project scopes may be missing; use issue labels/comments as the source of truth if Project commands fail."
+    )
+    return f"""You are dxt_product_manager for {repo}.
+
+Read AGENTS.md, PLAN.md, docs/AGENT_OS.md, docs/AGENT_PROTOCOLS.md, and .codex/agents/dxt_product_manager.toml.
+
+Mission:
+- Keep the GitHub issue board moving toward the dxt goal: a Zig dbt-core-compatible drop-in replacement.
+- Prioritize dbt Core compatibility slices over speculative expansion.
+- Identify ready work, blocked work, stale claims, broad issues that need splitting, missing labels, and missing validation gates.
+- Use concise public-safe GitHub issue comments and label changes when they clearly improve routing.
+- Do not edit local files and do not implement product behavior.
+
+{project_note}
+
+Board snapshot:
+```json
+{json.dumps(snapshot, indent=2, sort_keys=True)}
+```
+
+Expected output:
+- comment/nudge actions taken, if any
+- labels changed, if any
+- next 3 issues the worker loop should claim
+- blockers that need human attention
+- whether Project auth/scopes appear usable
+"""
+
+
+def project_scopes_available(owner: str) -> bool:
+    result = gh(["project", "list", "--owner", owner, "--format", "json"], check=False)
+    return result.returncode == 0
+
+
+def launch_product_manager(
+    *,
+    repo: str,
+    owner: str,
+    profile: str,
+    model: str,
+    dry_run: bool,
+    issue_limit: int,
+    state: dict[str, Any],
+) -> None:
+    for run in active_runs(state):
+        if run.get("role") == "dxt_product_manager":
+            print(f"product manager already running pid={run.get('pid')}")
+            return
+
+    snapshot = fetch_board_snapshot(repo, issue_limit)
+    can_apply_project = project_scopes_available(owner)
+    prompt = product_manager_prompt(repo, snapshot, can_apply_project)
+    timestamp = utc_now().replace(":", "").replace("-", "")
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = STATE_DIR / f"product-manager-{timestamp}.log"
+    last_path = STATE_DIR / f"product-manager-{timestamp}-last.md"
+    cmd = [
+        "codex",
+        "-p",
+        profile,
+        "-m",
+        model,
+        "-C",
+        str(ROOT),
+        "--ask-for-approval",
+        "never",
+        "--sandbox",
+        "read-only",
+        "exec",
+        "--output-last-message",
+        str(last_path),
+        prompt,
+    ]
+    if dry_run:
+        print(f"would launch product manager for {repo}")
+        print(f"project scopes usable: {can_apply_project}")
+        print("  " + " ".join(cmd[:13]) + " <prompt>")
+        return
+
+    log_handle = log_path.open("a", encoding="utf-8")
+    process = subprocess.Popen(
+        cmd,
+        cwd=ROOT,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        env=no_color_env(),
+    )
+    state.setdefault("runs", []).append(
+        {
+            "role": "dxt_product_manager",
+            "mode": "product",
+            "pid": process.pid,
+            "log": str(log_path),
+            "last_message": str(last_path),
+            "started_at": utc_now(),
+            "status": "running",
+        }
+    )
+    save_state(state)
+    print(f"launched product manager pid={process.pid}")
+
+
+def product_manager(args: argparse.Namespace) -> int:
+    config = load_orchestrator()
+    state = load_state()
+    repo = args.repo or default_repo()
+    if not repo_matches_owner(repo, args.owner):
+        print(f"--repo {repo!r} does not belong to --owner {args.owner!r}", file=sys.stderr)
+        return 2
+    profile = args.profile or config["default_profile"]
+    model = args.model or config["default_model"]
+    deadline = None
+    if args.max_minutes:
+        deadline = time.monotonic() + args.max_minutes * 60
+    while True:
+        launch_product_manager(
+            repo=repo,
+            owner=args.owner,
+            profile=profile,
+            model=model,
+            dry_run=args.dry_run,
+            issue_limit=args.issue_limit,
+            state=state,
+        )
+        save_state(state)
+        if not args.loop:
+            return 0
+        if deadline is not None and time.monotonic() >= deadline:
+            print("product manager loop deadline reached")
+            return 0
+        time.sleep(args.poll_seconds)
 
 
 def nudge(args: argparse.Namespace) -> int:
@@ -550,6 +798,9 @@ def main() -> int:
     setup_parser.add_argument("--apply-labels", action="store_true")
     setup_parser.add_argument("--seed-issues", action="store_true")
     setup_parser.add_argument("--apply-project", action="store_true")
+    setup_parser.add_argument("--sync-project-items", action="store_true")
+    setup_parser.add_argument("--item-limit", type=int, default=100)
+    setup_parser.add_argument("--project-item-limit", type=int, default=1000)
     setup_parser.set_defaults(func=setup)
 
     run_parser = sub.add_parser("run", help="Claim ready issues and launch Codex workers in isolated worktrees.")
@@ -568,6 +819,18 @@ def main() -> int:
     run_parser.add_argument("--no-pr", action="store_true")
     run_parser.add_argument("--merge-ready", action="store_true")
     run_parser.set_defaults(func=run_loop)
+
+    pm_parser = sub.add_parser("product-manager", help="Launch the dxt Product Manager board monitor agent.")
+    pm_parser.add_argument("--repo")
+    pm_parser.add_argument("--owner", default="sabino")
+    pm_parser.add_argument("--profile")
+    pm_parser.add_argument("--model")
+    pm_parser.add_argument("--issue-limit", type=int, default=30)
+    pm_parser.add_argument("--loop", action="store_true")
+    pm_parser.add_argument("--poll-seconds", type=int, default=900)
+    pm_parser.add_argument("--max-minutes", type=int, default=0)
+    pm_parser.add_argument("--dry-run", action="store_true")
+    pm_parser.set_defaults(func=product_manager)
 
     status_parser = sub.add_parser("status", help="Show local worker state and log paths.")
     status_parser.set_defaults(func=print_status)

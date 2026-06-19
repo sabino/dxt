@@ -18,6 +18,18 @@
   "fallback_agent": "dxt_supervisor_integrator",
   "role_map": [
     {
+      "label": "role:pm",
+      "agent": "dxt_product_manager",
+      "mode": "product",
+      "sandbox": "read-only"
+    },
+    {
+      "label": "role:supervisor",
+      "agent": "dxt_supervisor_integrator",
+      "mode": "plan",
+      "sandbox": "read-only"
+    },
+    {
       "label": "role:researcher",
       "agent": "dxt_dbt_reference_researcher",
       "mode": "research",

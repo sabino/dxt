@@ -171,6 +171,15 @@ For issue/project-backed coordination across multiple specialist roles, use
 To let development continue from ready GitHub issues into local Codex worker
 subprocesses, run `python scripts/agent_os_orchestrator.py run --profile azure
 --model gpt-5.5 --max-workers 3 --loop` from a clean supervisor checkout.
+Use `python scripts/agent_os_orchestrator.py product-manager --profile azure
+--model gpt-5.5 --dry-run` to preview the Product Manager launch command and
+GitHub Project scope check. Remove `--dry-run` only when you want the Product
+Manager agent to write repo-scoped GitHub issue, label, or Project updates
+before launching workers.
+When project-local Codex settings change, use the pull-plug helpers documented
+in [Agent OS](docs/AGENT_OS.md): detached relaunches use
+`scripts/codex_pull_plug.py`, while exact visible-terminal restarts require
+launching Codex through `scripts/codex_tmux_supervisor.py` first.
 
 Optional compatibility gates:
 

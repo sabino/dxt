@@ -16,6 +16,12 @@ are the public queue and status board. The local engine is
 can claim ready issues, create isolated worktrees, launch `codex exec` workers,
 record ignored run logs, and optionally merge green PRs.
 
+The product-manager agent is the board steward. Run it when you want queue
+health checks, priority/readiness nudges, stale-claim detection, and a concise
+next-issue recommendation before launching implementation workers. Its local
+filesystem sandbox is read-only, but it is GitHub-write automation: it may add
+public-safe issue comments, labels, and Project field updates for `sabino/dxt`.
+
 First bootstrap the public queue:
 
 ```sh
@@ -25,13 +31,16 @@ python scripts/agent_os_orchestrator.py setup \
   --seed-issues
 ```
 
-GitHub Projects need a token with project scopes:
+GitHub Projects need a token with project scopes. The `read:project` scope lets
+the scripts inspect Projects; the `project` scope is needed to create/update the
+board and fields.
 
 ```sh
 gh auth refresh -s read:project -s project
 python scripts/agent_os_orchestrator.py setup \
   --repo sabino/dxt \
-  --apply-project
+  --apply-project \
+  --sync-project-items
 ```
 
 Start one autonomous batch:
@@ -61,6 +70,8 @@ Useful control commands:
 
 ```sh
 python scripts/agent_os_orchestrator.py status
+python scripts/agent_os_orchestrator.py product-manager --repo sabino/dxt --profile azure --model gpt-5.5 --dry-run
+python scripts/agent_os_orchestrator.py product-manager --repo sabino/dxt --profile azure --model gpt-5.5
 python scripts/agent_os_orchestrator.py nudge 123 "Narrow this to manifest fields only."
 python scripts/agent_os_orchestrator.py merge-ready --repo sabino/dxt --apply --delete-branch
 python scripts/agent_os_orchestrator.py stop --issue 123
@@ -70,6 +81,109 @@ Run state and logs are written under ignored `.agent/runs/agent-os/`. Do not
 commit them. Nudges are issue comments; running workers are instructed to read
 recent issue comments before major decisions, and the supervisor loop will pick
 up new issue state on the next polling cycle.
+
+The Product Manager `--dry-run` previews the launch command and GitHub Project
+scope check. It does not ask the model for a no-write board plan; remove
+`--dry-run` only when repo-scoped issue, label, or Project writes are intended.
+
+## Codex Pull Plug
+
+Use the pull plug when this repo changes project-scoped Codex settings under
+`.codex/` and the current process needs a restart to pick them up. The detached
+helper writes an ignored request and handoff under
+`.agent/runs/agent-os/pull-plug/`; it does not terminate the active Codex
+process and does not reuse the visible terminal.
+
+Start a detached local guardian:
+
+```sh
+python scripts/codex_pull_plug.py start-guardian
+```
+
+Request a restart handoff:
+
+```sh
+python scripts/codex_pull_plug.py request \
+  --reason "reload project-scoped Codex agent settings" \
+  --resume-prompt "Resume Agent OS setup, inspect git status, and continue from PLAN.md."
+```
+
+Check or cancel the request:
+
+```sh
+python scripts/codex_pull_plug.py status
+python scripts/codex_pull_plug.py cancel
+python scripts/codex_pull_plug.py stop-guardian
+```
+
+Hermes, cron, or another host supervisor can use the detached contract by running
+`python scripts/codex_pull_plug.py watch --poll-seconds 30`. The guardrail is
+simple: only request a restart when the current agent is about to stop or has
+written a handoff, and do not use it to launch a competing worker for the same
+dirty branch or GitHub issue.
+
+### Exact Terminal Restart
+
+Restarting in the exact visible terminal tile requires Codex to be launched
+inside a supervisor that owns that terminal. Use tmux for future sessions. Copy
+the session id from `/status` or pass `--last`; the `CODEX_THREAD_ID`
+environment variable is only guaranteed inside Codex tool subprocesses, not in
+your normal login shell:
+
+```sh
+python scripts/codex_tmux_supervisor.py start \
+  --session dxt-codex \
+  --session-id <session-id> \
+  --profile azure \
+  --model gpt-5.5 \
+  --attach
+```
+
+Start the tmux watcher in another shell or through Hermes:
+
+```sh
+python scripts/codex_tmux_supervisor.py start-guardian
+```
+
+When a settings reload is needed, request it first:
+
+```sh
+python scripts/codex_tmux_supervisor.py request \
+  --reason "reload project-scoped Codex settings" \
+  --session-id <session-id> \
+  --resume-note "Continue Agent OS work after checking git status."
+```
+
+The watcher does nothing while the request is only `requested`. After the
+current Codex turn has finished all required work, written a handoff, and is
+safe to exit, mark it ready:
+
+```sh
+python scripts/codex_tmux_supervisor.py ready --note "handoff written and branch is coherent"
+```
+
+Only then may the watcher send `/goal pause`, send `/exit`, wait for Codex to
+leave the pane, and respawn `codex resume <session-id>` in that same tmux pane.
+If Codex does not exit before the timeout, the watcher marks the request failed
+instead of respawning over a live process. This avoids interrupting in-flight
+work.
+
+Hermes can provide the persistent observer layer. The repo-local tick command is
+safe for Hermes because it only acts on `ready_to_exit` requests:
+
+```sh
+python scripts/hermes_codex_watchdog.py --to telegram
+```
+
+To install an optional Hermes cron wrapper, run:
+
+```sh
+python scripts/install_hermes_codex_watchdog.py --install-cron --to telegram
+```
+
+That installer writes a small wrapper under Hermes' script directory because
+Hermes cron requires scripts there; the actual behavior remains in this
+repository. Use `--dry-run` first if you want to preview the host-side change.
 
 Autonomy stop conditions:
 
@@ -100,6 +214,9 @@ Autonomy stop conditions:
 ```mermaid
 flowchart TD
     User[User / Product Owner] --> Supervisor[Supervisor Integrator]
+    PM[Product Manager] --> Project[GitHub Project]
+    PM --> Issues[GitHub Issues]
+    PM --> Supervisor
     Supervisor --> Project[GitHub Project]
     Project --> Issues[GitHub Issues]
     Issues --> Mapper[Code Mapper]
@@ -123,6 +240,7 @@ flowchart TD
 
 | Role | Agent | Responsibility |
 | --- | --- | --- |
+| Product Manager | `dxt_product_manager` | Monitor board health, priorities, readiness, stale claims, blockers, and issue nudges. Filesystem read-only; may write repo-scoped GitHub issue/project state. |
 | Supervisor / Integrator | `dxt_supervisor_integrator` or the main Codex thread | Triage issues, allocate branches/worktrees, prevent overlap, update `PLAN.md`, merge after green CI. |
 | Issue Triager | `dxt_issue_triager` | Normalize issue fields, labels, project status, and readiness. |
 | Compatibility Curator | `dxt_compatibility_curator` | Turn roadmap gaps into small dbt-compatible issues and keep support docs honest. |

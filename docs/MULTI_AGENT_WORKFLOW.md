@@ -127,6 +127,7 @@ auth configuration out of tracked files.
 
 | Agent | Mode | Use for |
 | --- | --- | --- |
+| `dxt_product_manager` | GitHub-write, filesystem read-only | Monitor GitHub issue board health, priorities, stale claims, blockers, and readiness nudges. |
 | `dxt_code_mapper` | read-only | Map owning Zig modules, fixtures, artifacts, and validation before edits. |
 | `dxt_dbt_reference_researcher` | read-only | Name upstream dbt Core v1/Fusion source files, affected artifact fields, and stop conditions. |
 | `dxt_zig_slice_worker` | workspace-write | Implement one tightly scoped Zig product slice in one worktree. |

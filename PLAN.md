@@ -64,6 +64,13 @@ green PRs. Issues are the durable queue; the orchestrator is the local engine.
 Project-scoped Codex subagent configuration lives in `.codex/config.toml` and
 `.codex/agents/*.toml`; keep these repo-specific settings out of global Codex
 configuration.
+When project-scoped Codex settings change and a fresh process is required, use
+`scripts/codex_pull_plug.py` for detached/noninteractive handoffs, or
+`scripts/codex_tmux_supervisor.py` when Codex must be restarted in the same
+visible terminal pane. The tmux path is two-phase: request first, then mark the
+request ready only after the current agent finishes the coherent slice and is
+safe to exit. Neither path may create competing workers for the same dirty
+branch or issue.
 
 Local validation should stay focused while CI carries the broader matrix:
 native Zig tests for touched core logic, targeted pytest for changed
@@ -1282,11 +1289,15 @@ Exit criteria:
 - M0 is complete as the Zig `0.16.0` runtime scaffold.
 - GitHub-backed agent coordination now has repo-local issue forms, label/project
   manifests, seed issue definitions, project-scoped specialist roles,
-  developer-side bootstrap/validation scripts, and a local autonomous
+  including a product-manager board monitor role, developer-side
+  bootstrap/validation scripts, and a local autonomous
   orchestrator that can claim ready issues, spawn Codex worker subprocesses in
   isolated worktrees, record ignored state/logs, accept issue-comment nudges,
-  and merge green PRs when explicitly run with merge enabled. Creating/updating
-  the live GitHub Project requires GitHub CLI project scopes.
+  and merge green PRs when explicitly run with merge enabled. The local
+  supervision layer includes a detached `codex exec` pull-plug handoff and a
+  two-phase tmux/Hermes watchdog path for exact-terminal Codex restarts after
+  project-scoped `.codex/` changes. Creating/updating the live GitHub Project
+  requires GitHub CLI project scopes.
 - Multi-agent development now has a dedicated worktree workflow under
   `docs/MULTI_AGENT_WORKFLOW.md`, with project-scoped Codex agent roles under
   `.codex/agents/` and helper scripts for starting, finishing, and pruning

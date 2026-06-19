@@ -11,18 +11,26 @@ bootstrap script in dry-run mode first:
 python scripts/github_agent_os.py project --dry-run --owner sabino --repo sabino/dxt
 ```
 
-Applying the project requires GitHub CLI auth with project scopes:
+Applying the project requires GitHub CLI auth with project scopes. The
+`read:project` scope lets the script inspect Projects; the `project` scope is
+needed to create/update the board and fields.
 
 ```sh
 gh auth refresh -s read:project -s project
 python scripts/github_agent_os.py project --apply --owner sabino --repo sabino/dxt
+python scripts/github_agent_os.py project-items --apply --owner sabino --repo sabino/dxt
 ```
+
+The scripts are repo-scoped: `--owner` must match the owner in `--repo` for
+Project item sync. `project --apply` reconciles missing single-select options on
+existing fields, including the custom `Agent Status` field used instead of
+GitHub's built-in `Status` field.
 
 ## Fields
 
 | Field | Type | Purpose |
 | --- | --- | --- |
-| Status | single select | Intake through merged lifecycle. |
+| Agent Status | single select | Intake through merged lifecycle. |
 | Agent Role | single select | Current role expected to act. |
 | Track | single select | Product or operational track. |
 | Pattern | single select | Supervisor, hierarchical, network, or reflection. |
@@ -35,7 +43,7 @@ python scripts/github_agent_os.py project --apply --owner sabino --repo sabino/d
 
 Recommended Project views:
 
-- **Supervisor Queue:** grouped by Status.
+- **Supervisor Queue:** grouped by Agent Status.
 - **Active Worktrees:** filtered to Claimed/In Worktree/PR Open and grouped by Branch.
 - **Milestone Roadmap:** grouped by Track and sorted by priority.
 - **Artifact Parity:** filtered to artifact labels.
@@ -58,6 +66,7 @@ python scripts/github_agent_os.py labels --dry-run
 python scripts/github_agent_os.py labels --apply
 python scripts/github_agent_os.py seed-issues --dry-run
 python scripts/github_agent_os.py seed-issues --apply
+python scripts/github_agent_os.py project-items --dry-run --owner sabino --repo sabino/dxt
 ```
 
 Seed issues are starter backlog entries only. They exist so the autonomous

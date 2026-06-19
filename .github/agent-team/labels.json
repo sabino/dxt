@@ -36,6 +36,7 @@
   {"name": "command:build", "color": "c5def5", "description": "build command"},
   {"name": "command:docs", "color": "c5def5", "description": "docs commands"},
   {"name": "command:source-freshness", "color": "c5def5", "description": "source freshness command"},
+  {"name": "role:pm", "color": "fbca04", "description": "Needs product manager board action"},
   {"name": "role:supervisor", "color": "fbca04", "description": "Needs supervisor/integrator action"},
   {"name": "role:mapper", "color": "fbca04", "description": "Needs code ownership mapping"},
   {"name": "role:researcher", "color": "fbca04", "description": "Needs upstream reference research"},

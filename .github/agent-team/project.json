@@ -3,14 +3,14 @@
   "description": "Agent-coordinated dbt compatibility execution for dxt.",
   "fields": [
     {
-      "name": "Status",
+      "name": "Agent Status",
       "type": "SINGLE_SELECT",
       "options": ["Intake", "Needs Reference Map", "Needs Slice Plan", "Ready", "Claimed", "In Worktree", "Local Validation", "PR Open", "CI Running", "CI Red", "Needs Review", "Ready To Merge", "Merged", "Deferred", "Blocked"]
     },
     {
       "name": "Agent Role",
       "type": "SINGLE_SELECT",
-      "options": ["supervisor", "triager", "mapper", "researcher", "architect", "worker", "qa", "artifact reviewer", "auditor", "reflection", "docs release"]
+      "options": ["product manager", "supervisor", "triager", "mapper", "researcher", "architect", "worker", "qa", "artifact reviewer", "auditor", "reflection", "docs release"]
     },
     {
       "name": "Track",
