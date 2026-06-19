@@ -576,7 +576,7 @@ fn appendFqnByte(buffer: []u8, len: *usize, byte: u8) bool {
 }
 
 fn selectorPatternHasWildcard(pattern: []const u8) bool {
-    return std.mem.indexOfAny(u8, pattern, "*?") != null;
+    return std.mem.indexOfAny(u8, pattern, "*?[") != null;
 }
 
 fn wildcardMatches(pattern: []const u8, value: []const u8) bool {
@@ -594,18 +594,20 @@ fn wildcardMatchesWithSlashMode(pattern: []const u8, value: []const u8, star_mat
     var star_value_index: usize = 0;
 
     while (value_index < value.len) {
-        if (pattern_index < pattern.len and pattern[pattern_index] == '?') {
-            if (!star_matches_slash and value[value_index] == '/') return false;
-            pattern_index += 1;
-            value_index += 1;
-        } else if (pattern_index < pattern.len and pattern[pattern_index] == value[value_index]) {
-            pattern_index += 1;
-            value_index += 1;
-        } else if (pattern_index < pattern.len and pattern[pattern_index] == '*') {
+        if (pattern_index < pattern.len and pattern[pattern_index] == '*') {
             star_index = pattern_index;
             pattern_index += 1;
             star_value_index = value_index;
-        } else if (star_index) |index| {
+            continue;
+        }
+        if (pattern_index < pattern.len) {
+            if (matchWildcardToken(pattern, pattern_index, value[value_index], star_matches_slash)) |next_pattern_index| {
+                pattern_index = next_pattern_index;
+                value_index += 1;
+                continue;
+            }
+        }
+        if (star_index) |index| {
             if (!star_matches_slash and value[star_value_index] == '/') return false;
             pattern_index = index + 1;
             star_value_index += 1;
@@ -619,6 +621,56 @@ fn wildcardMatchesWithSlashMode(pattern: []const u8, value: []const u8, star_mat
         pattern_index += 1;
     }
     return pattern_index == pattern.len;
+}
+
+fn matchWildcardToken(pattern: []const u8, pattern_index: usize, value: u8, star_matches_slash: bool) ?usize {
+    const token = pattern[pattern_index];
+    if (token == '?') {
+        if (!star_matches_slash and value == '/') return null;
+        return pattern_index + 1;
+    }
+    if (token == '[') {
+        if (matchesCharacterClass(pattern, pattern_index, value)) |class| {
+            if (!star_matches_slash and value == '/') return null;
+            return if (class.matches) class.end + 1 else null;
+        }
+    }
+    return if (token == value) pattern_index + 1 else null;
+}
+
+const CharacterClassMatch = struct {
+    end: usize,
+    matches: bool,
+};
+
+fn matchesCharacterClass(pattern: []const u8, start: usize, value: u8) ?CharacterClassMatch {
+    var index = start + 1;
+    if (index >= pattern.len) return null;
+    const negated = pattern[index] == '!';
+    if (negated) index += 1;
+    if (index >= pattern.len) return null;
+    const class_start = index;
+    var close = index;
+    while (close < pattern.len and pattern[close] != ']') close += 1;
+    if (close >= pattern.len or close == class_start) return null;
+
+    var matched = false;
+    index = class_start;
+    while (index < close) {
+        if (index + 2 < close and pattern[index + 1] == '-') {
+            const first = pattern[index];
+            const last = pattern[index + 2];
+            if (first <= last and value >= first and value <= last) matched = true;
+            index += 3;
+        } else {
+            if (value == pattern[index]) matched = true;
+            index += 1;
+        }
+    }
+    return .{
+        .end = close,
+        .matches = if (negated) !matched else matched,
+    };
 }
 
 fn matchesUniqueIdPackage(graph: *const Graph, unique_id: []const u8, package_name: []const u8) bool {
@@ -827,6 +879,20 @@ test "selector wildcard patterns match full resource values" {
     try std.testing.expect(!matchesSelectorPattern("customers", "stg_customers"));
 }
 
+test "selector wildcard patterns support fnmatch character classes" {
+    try std.testing.expect(matchesSelectorPattern("ord[ea]rs", "orders"));
+    try std.testing.expect(matchesSelectorPattern("ord[a-z]rs", "orders"));
+    try std.testing.expect(!matchesSelectorPattern("ord[z-a]rs", "orders"));
+    try std.testing.expect(matchesSelectorPattern("ord[!a]rs", "orders"));
+    try std.testing.expect(!matchesSelectorPattern("ord[!e]rs", "orders"));
+    try std.testing.expect(matchesSelectorPattern("ord[!z-a]rs", "orders"));
+    try std.testing.expect(matchesSelectorPattern("ord[[]rs", "ord[rs"));
+    try std.testing.expect(matchesSelectorPattern("ord[rs", "ord[rs"));
+    try std.testing.expect(!matchesSelectorPattern("*a*a*a*a*a*a*a*a*a*a*b", "aaaaaaaaaa"));
+    try std.testing.expect(matchesPathSelector("models/[os]*.sql", "models/orders.sql"));
+    try std.testing.expect(!matchesPathSelector("models/[os]*.sql", "models/marts/orders.sql"));
+}
+
 test "path selectors keep substring behavior unless wildcarded" {
     try std.testing.expect(matchesPathSelector("models", "models/stg_customers.sql"));
     try std.testing.expect(matchesPathSelector("models/*", "models/marts/orders.sql"));
@@ -843,6 +909,9 @@ test "file selectors match only basename or stem" {
     try std.testing.expect(matchesFileSelector("orders", "models/marts/orders.sql"));
     try std.testing.expect(matchesFileSelector("*orders.sql", "models/marts/orders.sql"));
     try std.testing.expect(matchesFileSelector("*orders", "models/marts/orders.sql"));
+    try std.testing.expect(matchesFileSelector("ord[ea]rs.sql", "models/marts/orders.sql"));
+    try std.testing.expect(matchesFileSelector("ord[a-z]rs", "models/marts/orders.sql"));
+    try std.testing.expect(!matchesFileSelector("ord[!e]rs.sql", "models/marts/orders.sql"));
     try std.testing.expect(matchesFileSelector("schema.yml", "models/schema.yml"));
     try std.testing.expect(matchesFileSelector("schema", "models/schema.yml"));
     try std.testing.expect(!matchesFileSelector("models/marts/orders.sql", "models/marts/orders.sql"));

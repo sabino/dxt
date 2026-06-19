@@ -34,6 +34,9 @@
   `file:orders`.
 - `*` and `?` wildcards reuse dxt's existing selector wildcard semantics against
   the basename or stem, for example `file:*orders.sql`.
+- Bracket character classes and negated character classes follow the supported
+  Python `fnmatch` subset used by dbt Core v1, for example
+  `file:ord[ea]rs.sql`, `file:ord[a-z]rs.sql`, and `file:ord[!x]rs.sql`.
 - Path-bearing values such as `file:models/orders.sql` do not match, preserving
   the distinction between dbt's `file:` and `path:` methods.
 
@@ -45,13 +48,14 @@
 - No state/result/source-status selectors.
 - No richer `ls` output formats.
 - No path normalization, patch-path matching, or bracket-character `fnmatch`
-  classes in this slice.
+  escaping beyond literal `[` through `[[]`.
 - No Python product runtime.
 
 ## Validation
 
-- Native selector tests cover basename, stem, wildcard, and non-path matching.
+- Native selector tests cover basename, stem, wildcard, bracket class,
+  negated-class, range, literal `[`, and non-path matching.
 - CLI coverage exercises `dxt ls --select file:...` for model SQL files, seed
   CSV files, generic-test schema YAML, source schema YAML, and exposure schema
-  YAML, plus `dxt docs generate` selector reuse through the common Zig selector
-  engine.
+  YAML, model `file:`/`path:` bracket-class selectors, plus `dxt docs generate`
+  selector reuse through the common Zig selector engine.
