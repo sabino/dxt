@@ -1703,6 +1703,81 @@ def test_build_executes_selected_duckdb_model_and_supported_generic_tests(tmp_pa
     assert query.stdout.strip() == "1,Ada"
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")
+def test_test_command_executes_selected_duckdb_generic_tests(tmp_path: Path):
+    project = tmp_path / "test_command_model_tests"
+    write_supported_model_test_project(
+        project,
+        "select 1 as customer_id, 'Ada' as customer_name\n",
+    )
+    target = tmp_path / "test-target"
+    run_result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+
+    test_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test_result.returncode == 0, test_result.stderr
+    assert "Tested 2 generic test(s)" in test_result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    assert_manifest_schema_slice(target / "manifest.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "test.build_model_tests.not_null_customers_customer_id.5c9bf9911d",
+        "test.build_model_tests.unique_customers_customer_id.c5af1ff4b1",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["pass", "pass"]
+    assert [item["failures"] for item in run_results["results"]] == [0, 0]
+    assert all(item["compiled"] is True for item in run_results["results"])
+    assert all(item["relation_name"] is None for item in run_results["results"])
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")
+def test_test_command_does_not_build_missing_parent_relation(tmp_path: Path):
+    project = tmp_path / "test_command_missing_parent"
+    write_supported_model_test_project(
+        project,
+        "select 1 as customer_id, 'Ada' as customer_name\n",
+    )
+    target = tmp_path / "test-target"
+
+    result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "DuckDB execution failed" in result.stderr
+    assert (target / "manifest.json").exists()
+    assert not (target / "run_results.json").exists()
+
+    if (target / "dxt.duckdb").exists():
+        query = subprocess.run(
+            [
+                DUCKDB,
+                str(target / "dxt.duckdb"),
+                "-csv",
+                "-noheader",
+                "-c",
+                "select count(*) from information_schema.tables where table_schema = 'main' and table_name = 'customers'",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert query.returncode == 0, query.stderr
+        assert query.stdout.strip() == "0"
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 accepted_values build execution slice")
 def test_build_executes_selected_duckdb_accepted_values_generic_test(tmp_path: Path):
     project = tmp_path / "accepted_values_tests"
@@ -2355,6 +2430,52 @@ def test_build_reports_failing_duckdb_relationships_generic_test(tmp_path: Path)
     assert build_result.returncode == 1
     assert "1 generic test(s) failed with 1 failure row(s)" in build_result.stdout
     assert "one or more generic tests failed" in build_result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in run_results["results"]] == ["fail"]
+    assert [item["failures"] for item in run_results["results"]] == [1]
+    assert run_results["results"][0]["message"] == "Got 1 result, configured to fail if != 0"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command failure coverage")
+def test_test_command_reports_failing_duckdb_generic_test(tmp_path: Path):
+    project = tmp_path / "test_command_relationships"
+    write_relationships_model_test_project(
+        project,
+        "{{ config(materialized='table') }}\n"
+        "select 1 as customer_id, 'Ada' as customer_name\n",
+        "{{ config(materialized='table') }}\n"
+        "select 10 as order_id, 1 as customer_id\n"
+        "union all\n"
+        "select 11 as order_id, 999 as customer_id\n",
+    )
+    target = tmp_path / "test-target"
+    run_result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+
+    result = subprocess.run(
+        [
+            DXT,
+            "test",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "relationships_orders_customer_id__customer_id__ref_customers_",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "1 generic test(s) failed with 1 failure row(s)" in result.stdout
+    assert "one or more generic tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["fail"]
@@ -3128,6 +3249,17 @@ unit_tests:
     assert "unit test execution is not supported yet" in build.stderr
     assert (build_target / "manifest.json").exists()
     assert not (build_target / "run_results.json").exists()
+
+    test_target = tmp_path / "unit-test-command-target"
+    test = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(test_target), "--select", "resource_type:unit_test"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test.returncode != 0
+    assert "unit test and singular test execution are not supported yet" in test.stderr
+    assert not (test_target / "run_results.json").exists()
 
 
 def assert_partial_manifest_schema(manifest: dict) -> None:

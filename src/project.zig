@@ -350,6 +350,53 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     });
 }
 
+pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
+    defer graph.deinit();
+
+    try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+
+    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
+    const selected = try selector.selectResources(runtime.allocator, &graph, "test", select, exclude);
+    if (selected.len == 0) {
+        if (options.select != null) {
+            const selected_any = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
+            if (selected_any.len != 0) return error.UnsupportedTestExecution;
+        }
+        return error.UnsupportedTestSelection;
+    }
+
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedTestExecution;
+    const test_nodes = try selectedGenericTestExecutionOrder(runtime, &graph, selected);
+    defer runtime.allocator.free(test_nodes);
+    try validateGenericTestExecution(test_nodes);
+
+    const target_dir = try targetDir(runtime, options);
+    const manifest_path = try writeManifest(runtime, &graph, target_dir);
+    const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+    var executed: std.ArrayList(run_results.NodeResult) = .empty;
+    defer {
+        deinitRunResults(runtime.allocator, executed.items);
+        executed.deinit(runtime.allocator);
+    }
+    const test_summary = try appendGenericTestResults(runtime, db_path, &graph, test_nodes, &executed);
+
+    const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
+    const run_results_json = try run_results.renderRunResults(runtime.allocator, executed.items);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+    try stdout.print("Tested {d} generic test(s) against {s}; wrote artifacts into {s}\n", .{
+        executed.items.len,
+        util.normalizeForDisplay(db_path),
+        util.normalizeForDisplay(manifest_path),
+    });
+    if (test_summary.failed_tests != 0) {
+        try stdout.print("{d} generic test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
+        return error.TestFailure;
+    }
+}
+
 pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
     defer graph.deinit();

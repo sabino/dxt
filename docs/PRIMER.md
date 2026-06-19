@@ -27,6 +27,7 @@ commands are:
 - `dxt clean`
 - `dxt compile`
 - `dxt run`
+- `dxt test`
 - `dxt build`
 - `dxt docs generate`
 - `dxt docs serve`

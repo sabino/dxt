@@ -60,6 +60,8 @@ Run the current DuckDB execution slices:
 ```sh
 ./zig-out/bin/dxt run --project-dir tests/fixtures/compile_basic --target-path target-dxt --select orders
 ./zig-out/bin/dxt build --project-dir tests/fixtures/seed_ref --target-path target-dxt --select +stg_customers
+./zig-out/bin/dxt run --project-dir tests/fixtures/model_properties --target-path target-dxt-tests --select customers
+./zig-out/bin/dxt test --project-dir tests/fixtures/model_properties --target-path target-dxt-tests --select "not_null_customers_customer_id unique_customers_customer_id"
 ./zig-out/bin/dxt build --project-dir tests/fixtures/model_properties --target-path target-dxt --select "not_null_customers_customer_id unique_customers_customer_id"
 ./zig-out/bin/dxt build --project-dir tests/fixtures/source_column_tests --target-path target-dxt --select "source:raw.customers+"
 ./zig-out/bin/dxt docs generate --project-dir tests/fixtures/docs_blocks --target-path target-dxt
@@ -86,7 +88,7 @@ embedded DuckDB or another native adapter boundary, not Python runtime calls.
 
 | Area | Supported Now | Planned |
 | --- | --- | --- |
-| Commands | `parse`, `ls`, `clean`, `compile`, `run`, `build`, `docs generate`, `docs serve`, `source freshness`, `version`, help | `debug`, `deps`, `init`, `run-operation`, `snapshot`, `retry`, `clone` |
+| Commands | `parse`, `ls`, `clean`, `compile`, `run`, `test`, `build`, `docs generate`, `docs serve`, `source freshness`, `version`, help | `debug`, `deps`, `init`, `run-operation`, `snapshot`, `retry`, `clone` |
 | Runtime | Zig product runtime | Broader native adapter ABI and runner |
 | Adapter | DuckDB through a Zig-owned external CLI backend | Embedded DuckDB, Postgres, cloud adapters, cross-database planner |
 | Artifacts | `manifest.json`, `run_results.json`, `catalog.json`, `sources.json` slices | fuller dbt schemas, `semantic_manifest.json`, parse cache/state artifacts |
