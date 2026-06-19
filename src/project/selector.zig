@@ -68,6 +68,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
         }
     }
     for (graph.singular_tests.items) |*test_node| {
+        if (!test_node.enabled) continue;
         if (matchesResourceType(resource_type, "test") and matchesSingularTestSelector(graph, test_node, select_spec) and (!exclude_spec.active or !matchesSingularTestSelector(graph, test_node, exclude_spec))) {
             try selected.append(allocator, .{
                 .unique_id = test_node.unique_id,
@@ -866,6 +867,7 @@ fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, s
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     for (graph.singular_tests.items) |*target| {
+        if (!target.enabled) continue;
         if (!matchesSingularTestSelectorTerm(graph, target, spec.value)) continue;
         if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
@@ -906,6 +908,7 @@ fn resourceInChildrensParentsSelection(graph: *const Graph, selected_unique_id: 
         if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
     }
     for (graph.singular_tests.items) |*resource| {
+        if (!resource.enabled) continue;
         if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
     }
     for (graph.exposures.items) |*resource| {
@@ -944,7 +947,7 @@ fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, 
         return dependencyListContainsTransitive(graph, test_node.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
     for (graph.singular_tests.items) |test_node| {
-        if (!std.mem.eql(u8, test_node.unique_id, resource_unique_id)) continue;
+        if (!test_node.enabled or !std.mem.eql(u8, test_node.unique_id, resource_unique_id)) continue;
         return dependencyListContainsTransitive(graph, test_node.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
     for (graph.exposures.items) |exposure| {
@@ -1053,6 +1056,17 @@ test "singular test selectors match type path file and graph expansion" {
         .raw_code = "select * from {{ ref('customers') }} where customer_id is null",
     });
     try graph.singular_tests.items[0].depends_on.append(allocator, "model.demo.customers");
+    try graph.singular_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.disabled_assert_customers",
+        .name = "disabled_assert_customers",
+        .alias = "disabled_assert_customers",
+        .path = "disabled_assert_customers.sql",
+        .original_file_path = "tests/disabled_assert_customers.sql",
+        .raw_code = "{{ config(enabled=false) }} select 1",
+        .enabled = false,
+    });
+    try graph.singular_tests.items[1].depends_on.append(allocator, "model.demo.customers");
 
     const by_singular_type = try selectResources(allocator, &graph, "test", "test_type:singular", null);
     try std.testing.expectEqual(@as(usize, 1), by_singular_type.len);

@@ -7,7 +7,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 
 | Command | Status | Current support | Planned gaps |
 | --- | --- | --- | --- |
-| `dxt parse` | Partial | Loads supported project files and writes a deterministic Manifest v12-shaped slice, including disabled SQL models from YAML properties and literal inline `config(enabled=false)`. | Full dbt parser parity, saved queries, semantic resources, full package behavior. |
+| `dxt parse` | Partial | Loads supported project files and writes a deterministic Manifest v12-shaped slice, including disabled SQL models from YAML properties, literal inline model `config(enabled=false)`, and literal inline singular test `config(enabled=false)`. | Full dbt parser parity, saved queries, semantic resources, full package behavior. |
 | `dxt ls` | Partial | Lists selected graph resources in text or JSON for supported selector syntax. | YAML selectors, state/result/source-status selectors, full indirect-selection parity. |
 | `dxt clean` | Partial | Deletes configured project-relative `clean-targets`, defaulting to the effective target path; protects source directories, rejects outside-project deletion, skips missing paths and plain files, and does not require a profile. | `--no-clean-project-files-only`, Fusion positional file args, symlink/canonical-path parity, richer dbt event output. |
 | `dxt compile` | Partial | Compiles selected enabled SQL models, selected supported built-in generic tests, and selected singular SQL tests through the supported render-only Jinja subset and writes compiled SQL plus manifest fields without opening DuckDB. | Custom generic test macro compilation, full Jinja, macro execution, adapter dispatch execution, arbitrary expressions, filters, hooks. |
@@ -46,7 +46,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | Macros | Partial | Macro/test/data_test/materialization block extraction, macro properties, static macro dependency lookup. | Macro execution, namespace execution, adapter dispatch execution, bundled dbt internals. |
 | Docs blocks | Partial | Markdown docs block parsing and literal `doc()` descriptions. | Dynamic doc expressions and full dbt docs UI behavior. |
 | Generic tests | Partial | Manifest nodes, `compile` artifacts, and DuckDB execution for supported model, seed, and source column built-ins plus explicit table-level `column_name` built-ins, including explicit `accepted_values` `quote: false` and literal source-target `relationships`. | Custom macro-backed tests, configs, typed scalar value artifact parity, store failures. |
-| Singular tests | Partial | SQL files under configured `test-paths` are parsed as singular data tests, excluding `generic/` and `fixtures/`; manifest nodes omit generic-only fields, selectors support `test_type:singular` and `test_type:data`, `compile` writes selected compiled artifact paths, and DuckDB `build`/`test` executes them through failure-row counting. | YAML patches/configs, severity and threshold configs, `where`, `limit`, `store_failures`, indirect-selection parity, broader Jinja/macros. |
+| Singular tests | Partial | SQL files under configured `test-paths` are parsed as singular data tests, excluding `generic/` and `fixtures/`; literal inline `config(enabled=false)` disables singular tests into `manifest.disabled`; manifest nodes omit generic-only fields, selectors support `test_type:singular` and `test_type:data`, `compile` writes selected compiled artifact paths, and DuckDB `build`/`test` executes them through failure-row counting. | YAML patches/configs, dynamic enabled expressions, severity and threshold configs, `where`, `limit`, `store_failures`, indirect-selection parity, broader Jinja/macros. |
 | Unit tests | Partial | Read-only YAML parsing for dict-style `given`/`expect` row fixtures, Manifest v12-shaped `unit_tests`, parent/child maps, `resource_type:unit_test`, `unit_test:`, and `test_type:unit` listing. | Execution, fixture materialization, CSV/SQL fixtures, overrides, version expansion, disabled-unit-test placement, SQL comparison, and run-results. |
 | Analyses, snapshots, semantic models, metrics, saved queries, functions, groups | Planned | Not first-class yet or only empty artifact maps where needed. | Full parser, graph, artifact, and execution semantics. |
 
@@ -56,7 +56,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | --- | --- | --- |
 | `ref()` | Partial | Literal, narrow scalar var-backed, and static loop-var refs in parse/list and compile-time relation rendering. |
 | `source()` | Partial | Literal, narrow scalar var-backed, and static loop-var sources in parse/list and compile-time relation rendering. |
-| `config()` | Partial | Inline tags, materialized, schema, alias, and literal model `enabled` in supported forms. |
+| `config()` | Partial | Inline tags, materialized, schema, alias, literal model `enabled`, and literal singular-test `enabled` in supported forms. |
 | `var()` | Partial | Scalar CLI/project vars for selected dependency arguments; strict JSON object input is parsed through Zig `std.json` and scalar values are stringified for the current dependency-argument resolver, with loose inline YAML-style scalar maps still accepted. |
 | `doc()` | Partial | Literal doc references. |
 | `target`, `this` | Partial | Narrow compile context for selected fields. |

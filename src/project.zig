@@ -906,7 +906,7 @@ fn selectedDataTestExecutionOrder(runtime: Runtime, graph: *Graph, selected: []c
         index += 1;
     }
     for (graph.singular_tests.items) |*test_node| {
-        if (!selectionContains(selected, test_node.unique_id)) continue;
+        if (!test_node.enabled or !selectionContains(selected, test_node.unique_id)) continue;
         ordered[index] = .{ .singular = test_node };
         index += 1;
     }
@@ -1264,7 +1264,7 @@ fn countSelectedDataTests(graph: *const Graph, selected: []const selector.Select
         if (selectionContains(selected, test_node.unique_id)) count += 1;
     }
     for (graph.singular_tests.items) |test_node| {
-        if (selectionContains(selected, test_node.unique_id)) count += 1;
+        if (test_node.enabled and selectionContains(selected, test_node.unique_id)) count += 1;
     }
     return count;
 }
@@ -1375,7 +1375,7 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
             compiled_test_count += 1;
         }
         for (graph.singular_tests.items) |*test_node| {
-            if (!selectionContains(selected, test_node.unique_id)) continue;
+            if (!test_node.enabled or !selectionContains(selected, test_node.unique_id)) continue;
             saw_selected_singular_test = true;
 
             const compiled_code = try compiler.compileSingularTest(runtime.allocator, graph, test_node);
@@ -2113,6 +2113,7 @@ fn parseSingularTest(runtime: Runtime, project_dir: []const u8, test_root: []con
         .path = test_path,
         .original_file_path = relative_path,
         .raw_code = sql,
+        .enabled = scan_node.enabled,
         .refs = scan_node.refs,
         .source_refs = scan_node.source_refs,
         .macro_depends_on = scan_node.macro_depends_on,

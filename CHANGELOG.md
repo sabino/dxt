@@ -52,6 +52,9 @@ compatibility.
 - Literal inline SQL model `config(enabled=false)` / `config(enabled=true)`
   parsing in the Zig scanner, reusing the existing disabled-node manifest and
   selector behavior while rejecting dynamic enabled expressions for now.
+- Literal inline singular SQL test `config(enabled=false)` parsing, filtering
+  disabled singular tests from active manifest maps, selectors, compile, test,
+  and build while preserving them under `manifest.disabled`.
 - Selector wildcard parity for bracket character classes in the shared Zig
   selector engine, covering `file:` and slash-aware `path:` selectors used by
   `dxt ls` and other selector-backed commands.
