@@ -27,7 +27,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `--project-dir` | Supported | Used by all project commands. |
 | `--profiles-dir`, `--profile`, `--target` | Partial | Narrow scalar `profiles.yml` handling for adapter type, schema, target name, profile name, and DuckDB path. |
 | `--target-path` | Supported | Overrides project target path for artifacts and default DuckDB file. |
-| `--vars` | Partial | Scalar CLI vars for narrow `ref()` / `source()` argument resolution. |
+| `--vars` | Partial | Scalar CLI vars for narrow `ref()` / `source()` argument resolution, accepting strict JSON objects with stringified scalar values and the existing loose inline YAML-style scalar maps. |
 | `--select`, `--exclude` | Partial | Supported selector subset with graph expansion. |
 | `--threads`, `--full-refresh` | Accepted/planned | Product semantics are not complete yet. |
 | `--output`, `--output-keys` | Partial | `ls` supports legacy `text`, compact `json`, dbt-style `name`, `path`, and `selector` formats. `--output-keys` filters compact JSON to `unique_id`, `resource_type`, `name`, `path`, `original_file_path`, and dxt's compact `selector` extension; full dbt node JSON and nested keys are not implemented. |
@@ -55,7 +55,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `ref()` | Partial | Literal, narrow scalar var-backed, and static loop-var refs in parse/list and compile-time relation rendering. |
 | `source()` | Partial | Literal, narrow scalar var-backed, and static loop-var sources in parse/list and compile-time relation rendering. |
 | `config()` | Partial | Inline tags, materialized, schema, alias in supported literal forms. |
-| `var()` | Partial | Scalar CLI vars for selected dependency arguments. |
+| `var()` | Partial | Scalar CLI/project vars for selected dependency arguments; strict JSON object input is parsed through Zig `std.json` and scalar values are stringified for the current dependency-argument resolver, with loose inline YAML-style scalar maps still accepted. |
 | `doc()` | Partial | Literal doc references. |
 | `target`, `this` | Partial | Narrow compile context for selected fields. |
 | `{% set %}` / `{% for %}` / `{% if %}` | Partial | Static string-list assignments, simple loops, loop-var dependency recovery and relation rendering, and narrow static conditionals only. |

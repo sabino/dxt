@@ -602,7 +602,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         try writer.writeAll("Options:\n");
         try writer.writeAll(
             \\  --project-dir <path>
-            \\  --vars <yaml>
+            \\  --vars <yaml-or-json>
             \\
         );
         if (equals(command, "parse") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
@@ -679,7 +679,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         \\  --profile <name>
         \\  --target <name>
         \\  --target-path <path>
-        \\  --vars <yaml>
+        \\  --vars <yaml-or-json>
         \\
     );
     switch (mode) {

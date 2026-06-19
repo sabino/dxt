@@ -39,12 +39,16 @@ compatibility.
   validation guidance.
 - GitHub CI stale-run cancellation, job timeouts, and a native Zig test coverage
   map artifact workflow for Zig source/build changes, main pushes, and manual
-  coverage runs. The public Jaffle job now fetches the pinned fixture checkout
-  once and passes it to each public harness to reduce repeated network clone
-  work.
+  coverage runs. The coverage summary now renders as Markdown with real native
+  test declaration counts instead of escaped newline text. The public Jaffle job
+  now fetches the pinned fixture checkout once and passes it to each public
+  harness to reduce repeated network clone work.
 - Shared Zig JSON writer helpers for artifact emission, replacing duplicated
   per-artifact string escaping helpers across manifest, run-results, catalog,
   and sources writers while keeping behavior stable.
+- Strict JSON object parsing for stringified scalar `--vars` / project vars in
+  the Zig parser, while preserving the existing loose inline YAML-style scalar
+  map support for current fixtures.
 - Table-level model, seed, and source built-in generic tests with explicit
   `arguments.column_name`, including Manifest kwargs and DuckDB `build`
   execution for the existing supported test types while preserving dbt's

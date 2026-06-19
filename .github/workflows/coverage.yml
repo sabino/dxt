@@ -62,7 +62,7 @@ jobs:
           total_lines = 0
           for path in sorted(Path("src").rglob("*.zig")):
               text = path.read_text()
-              tests = len(re.findall(r'(?m)^\\s*test\\s+"', text))
+              tests = len(re.findall(r'(?m)^\s*test\s+"', text))
               lines = sum(
                   1
                   for line in text.splitlines()
@@ -86,7 +86,7 @@ jobs:
               },
               "files": rows,
           }
-          Path("reports/coverage/native-zig-test-map.json").write_text(json.dumps(report, indent=2) + "\\n")
+          Path("reports/coverage/native-zig-test-map.json").write_text(json.dumps(report, indent=2) + "\n")
 
           markdown = [
               "# Native Zig Test Coverage Map",
@@ -102,7 +102,7 @@ jobs:
           ]
           for row in rows:
               markdown.append(f"| `{row['path']}` | {row['native_tests']} | {row['non_comment_lines']} |")
-          Path("reports/coverage/native-zig-test-map.md").write_text("\\n".join(markdown) + "\\n")
+          Path("reports/coverage/native-zig-test-map.md").write_text("\n".join(markdown) + "\n")
           PY
 
       - name: Summarize coverage artifact

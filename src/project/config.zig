@@ -97,6 +97,10 @@ pub fn parseVarsText(allocator: std.mem.Allocator, text: []const u8, vars: *std.
     if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "{}")) return;
     if (trimmed[0] == '[') return error.UnsupportedYaml;
     if (trimmed[0] == '{') {
+        if (try parseJsonVarsText(allocator, trimmed, vars)) {
+            sortVars(vars.items);
+            return;
+        }
         if (trimmed[trimmed.len - 1] != '}') return error.UnsupportedYaml;
         var pieces = std.mem.splitScalar(u8, trimmed[1 .. trimmed.len - 1], ',');
         while (pieces.next()) |piece| {
@@ -121,6 +125,58 @@ pub fn parseVarsText(allocator: std.mem.Allocator, text: []const u8, vars: *std.
     }
     if (!saw_var) return error.UnsupportedYaml;
     sortVars(vars.items);
+}
+
+fn parseJsonVarsText(allocator: std.mem.Allocator, text: []const u8, vars: *std.ArrayList(VarEntry)) !bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, text, .{}) catch return false;
+    defer parsed.deinit();
+
+    const object = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.UnsupportedYaml,
+    };
+
+    var parsed_vars: std.ArrayList(VarEntry) = .empty;
+    errdefer deinitVarEntries(allocator, &parsed_vars);
+
+    var iterator = object.iterator();
+    while (iterator.next()) |entry| {
+        try appendJsonVarValue(allocator, &parsed_vars, entry.key_ptr.*, entry.value_ptr.*);
+    }
+
+    for (parsed_vars.items) |entry| {
+        try appendOrReplaceVar(allocator, vars, entry.name, entry.value);
+    }
+    deinitVarEntries(allocator, &parsed_vars);
+    return true;
+}
+
+fn deinitVarEntries(allocator: std.mem.Allocator, vars: *std.ArrayList(VarEntry)) void {
+    for (vars.items) |entry| {
+        allocator.free(entry.name);
+        allocator.free(entry.value);
+    }
+    vars.deinit(allocator);
+}
+
+fn appendJsonVarValue(allocator: std.mem.Allocator, vars: *std.ArrayList(VarEntry), name: []const u8, value: std.json.Value) !void {
+    switch (value) {
+        .string => |text| try appendOrReplaceVar(allocator, vars, name, text),
+        .integer => |integer| {
+            const rendered = try std.fmt.allocPrint(allocator, "{d}", .{integer});
+            defer allocator.free(rendered);
+            try appendOrReplaceVar(allocator, vars, name, rendered);
+        },
+        .float => |float| {
+            const rendered = try std.fmt.allocPrint(allocator, "{d}", .{float});
+            defer allocator.free(rendered);
+            try appendOrReplaceVar(allocator, vars, name, rendered);
+        },
+        .number_string => |number| try appendOrReplaceVar(allocator, vars, name, number),
+        .bool => |boolean| try appendOrReplaceVar(allocator, vars, name, if (boolean) "true" else "false"),
+        .null => try appendOrReplaceVar(allocator, vars, name, "null"),
+        .array, .object => return error.UnsupportedYaml,
+    }
 }
 
 fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !ProjectConfig {
@@ -941,6 +997,33 @@ test "vars parser accepts inline and multiline scalar maps with later override" 
     try std.testing.expectEqualStrings("raw", vars.items[2].value);
 }
 
+test "vars parser accepts strict JSON object scalars" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var vars: std.ArrayList(VarEntry) = .empty;
+    defer vars.deinit(allocator);
+
+    try parseVarsText(allocator,
+        \\{"orders_model": "alt_customers", "raw_table": "transactions", "enabled": true, "count": 2, "ratio": 1.5, "maybe": null}
+    , &vars);
+
+    try std.testing.expectEqual(@as(usize, 6), vars.items.len);
+    try std.testing.expectEqualStrings("count", vars.items[0].name);
+    try std.testing.expectEqualStrings("2", vars.items[0].value);
+    try std.testing.expectEqualStrings("enabled", vars.items[1].name);
+    try std.testing.expectEqualStrings("true", vars.items[1].value);
+    try std.testing.expectEqualStrings("maybe", vars.items[2].name);
+    try std.testing.expectEqualStrings("null", vars.items[2].value);
+    try std.testing.expectEqualStrings("orders_model", vars.items[3].name);
+    try std.testing.expectEqualStrings("alt_customers", vars.items[3].value);
+    try std.testing.expectEqualStrings("ratio", vars.items[4].name);
+    try std.testing.expectEqualStrings("1.5", vars.items[4].value);
+    try std.testing.expectEqualStrings("raw_table", vars.items[5].name);
+    try std.testing.expectEqualStrings("transactions", vars.items[5].value);
+}
+
 test "vars parser rejects nested CLI values" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -950,6 +1033,23 @@ test "vars parser rejects nested CLI values" {
     defer vars.deinit(allocator);
 
     try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "{orders_model: [customers]}", &vars));
+    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "{\"orders_model\": [\"customers\"]}", &vars));
+}
+
+test "vars parser leaves existing vars unchanged when strict JSON contains nested values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var vars: std.ArrayList(VarEntry) = .empty;
+    defer vars.deinit(allocator);
+
+    try parseVarsText(allocator, "{\"orders_model\": \"customers\"}", &vars);
+    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "{\"raw_table\": \"transactions\", \"bad\": [\"nested\"]}", &vars));
+
+    try std.testing.expectEqual(@as(usize, 1), vars.items.len);
+    try std.testing.expectEqualStrings("orders_model", vars.items[0].name);
+    try std.testing.expectEqualStrings("customers", vars.items[0].value);
 }
 
 test "model path config matching preserves dbt path prefix semantics" {
