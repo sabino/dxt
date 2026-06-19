@@ -1,0 +1,5 @@
+version: 2
+
+models:
+  - name: disabled_customers
+    description: Inline-disabled model should stay out of active graph

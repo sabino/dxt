@@ -9,6 +9,21 @@ compatibility.
 
 ### Added
 
+- `dxt seed` command for selected root-project DuckDB CSV seeds, reusing the
+  Zig seed execution boundary, writing `manifest.json` and seed-shaped Run
+  Results v6 rows, filtering mixed selections to seeds, and rejecting
+  selections that match no seeds before DuckDB side effects.
+- `dxt compile` support for selected singular SQL data tests, writing compiled
+  SQL under `target/compiled/<package>/tests/...` and emitting dbt-shaped
+  compiled Manifest fields without requiring DuckDB execution.
+- `dxt compile` support for selected supported built-in generic data tests,
+  writing compiled failure-row SQL under `target/compiled/<package>/...` and
+  emitting dbt-shaped compiled Manifest fields without requiring DuckDB
+  execution or writing run results.
+- Singular SQL data tests in the Zig runtime, including `test-paths`
+  discovery with `generic/` and `fixtures/` skipped, Manifest nodes without
+  generic-only fields, `test_type:singular` / `test_type:data` selection, and
+  DuckDB `build` / `test` execution through dbt-style failure-row counting.
 - Documentation baseline with a reader-focused README, primer, compatibility
   matrix, architecture diagrams, release process, and changelog.
 - GitHub Actions release workflow for tagged native Zig binary artifacts and
@@ -30,6 +45,16 @@ compatibility.
   model/seed execution failures, writing `status: "skipped"` rows for selected
   blocked descendants and selected blocked generic tests while preserving
   `--exclude`.
+- Partial `dxt build` data-test failure blocking for selected DuckDB model and
+  seed+model builds: ready selected data tests run before downstream selected
+  resources, and failing tests write `fail` plus downstream `skipped` Run
+  Results rows instead of creating blocked downstream relations.
+- Literal inline SQL model `config(enabled=false)` / `config(enabled=true)`
+  parsing in the Zig scanner, reusing the existing disabled-node manifest and
+  selector behavior while rejecting dynamic enabled expressions for now.
+- Literal inline singular SQL test `config(enabled=false)` parsing, filtering
+  disabled singular tests from active manifest maps, selectors, compile, test,
+  and build while preserving them under `manifest.disabled`.
 - Selector wildcard parity for bracket character classes in the shared Zig
   selector engine, covering `file:` and slash-aware `path:` selectors used by
   `dxt ls` and other selector-backed commands.

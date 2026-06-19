@@ -326,7 +326,8 @@
       "oneOf": [
         {"$ref": "#/$defs/model_node"},
         {"$ref": "#/$defs/seed_node"},
-        {"$ref": "#/$defs/test_node"}
+        {"$ref": "#/$defs/test_node"},
+        {"$ref": "#/$defs/singular_test_node"}
       ]
     },
     "model_node": {
@@ -471,7 +472,65 @@
         "sources": {
           "type": "array",
           "items": {"$ref": "#/$defs/source_dep"}
-        }
+        },
+        "compiled": {"type": "boolean"},
+        "compiled_code": {"type": "string"},
+        "compiled_path": {"type": "string"},
+        "extra_ctes": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "extra_ctes_injected": {"type": "boolean"}
+      }
+    },
+    "singular_test_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_id",
+        "resource_type",
+        "package_name",
+        "name",
+        "alias",
+        "path",
+        "original_file_path",
+        "patch_path",
+        "language",
+        "raw_code",
+        "config",
+        "depends_on",
+        "refs",
+        "sources"
+      ],
+      "properties": {
+        "unique_id": {"type": "string"},
+        "resource_type": {"const": "test"},
+        "package_name": {"type": "string"},
+        "name": {"type": "string"},
+        "alias": {"type": "string"},
+        "path": {"type": "string"},
+        "original_file_path": {"type": "string"},
+        "patch_path": {"type": ["string", "null"]},
+        "language": {"type": "string"},
+        "raw_code": {"type": "string"},
+        "config": {"$ref": "#/$defs/test_config"},
+        "depends_on": {"$ref": "#/$defs/depends_on"},
+        "refs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/ref_dep"}
+        },
+        "sources": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/source_dep"}
+        },
+        "compiled": {"type": "boolean"},
+        "compiled_code": {"type": "string"},
+        "compiled_path": {"type": "string"},
+        "extra_ctes": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "extra_ctes_injected": {"type": "boolean"}
       }
     },
     "source": {

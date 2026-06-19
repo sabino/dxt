@@ -30,6 +30,7 @@ const rejectDuplicateMacroProperties = project_resolve.rejectDuplicateMacroPrope
 const rejectDuplicateMacros = project_resolve.rejectDuplicateMacros;
 const rejectDuplicateModels = project_resolve.rejectDuplicateModels;
 const rejectDuplicateSeeds = project_resolve.rejectDuplicateSeeds;
+const rejectDuplicateSingularTests = project_resolve.rejectDuplicateSingularTests;
 const rejectDuplicateUnitTests = project_resolve.rejectDuplicateUnitTests;
 const loadAdapterIdentity = project_profile.loadAdapterIdentity;
 
@@ -38,6 +39,7 @@ pub const Callbacks = struct {
     parse_yaml_properties: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     parse_macros: *const fn (Runtime, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     parse_model: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
+    parse_singular_test: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     parse_seed: *const fn (Runtime, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     apply_model_properties: *const fn (*Graph, []const u8) anyerror!void,
     materialize_generic_tests: *const fn (*Graph) anyerror!void,
@@ -138,6 +140,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         }
     }
     applyProjectSeedDocs(&graph, config.name, config.seed_docs);
+    try loadSingularTests(runtime, options.project_dir, config.name, config.test_paths.items, callbacks, &graph);
 
     try rejectDuplicateMacroProperties(&graph);
     try applyMacroProperties(&graph);
@@ -146,6 +149,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     sortGraphResources(&graph);
     try rejectDuplicateModels(&graph);
     try rejectDuplicateSeeds(&graph);
+    try rejectDuplicateSingularTests(&graph);
     try rejectDuplicateDocs(&graph);
     try rejectDuplicateExposures(&graph);
     try rejectDuplicateUnitTests(&graph);
@@ -293,5 +297,37 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
         try applyProjectModelPathConfigs(graph, package_config.model_path_configs.items, false, package_config.name);
         try callbacks.apply_model_properties(graph, package_config.name);
         applyProjectSeedDocs(graph, package_config.name, package_config.seed_docs);
+        try loadSingularTests(runtime, package_dir, package_config.name, package_config.test_paths.items, callbacks, graph);
     }
+}
+
+fn loadSingularTests(runtime: Runtime, project_dir: []const u8, package_name: []const u8, test_paths: []const []const u8, callbacks: Callbacks, graph: *Graph) !void {
+    for (test_paths) |test_path| {
+        var sql_files: std.ArrayList([]const u8) = .empty;
+        defer sql_files.deinit(runtime.allocator);
+        var yaml_files: std.ArrayList([]const u8) = .empty;
+        defer yaml_files.deinit(runtime.allocator);
+        var md_files: std.ArrayList([]const u8) = .empty;
+        defer md_files.deinit(runtime.allocator);
+
+        const root = try pathJoin(runtime.allocator, &.{ project_dir, test_path });
+        discoverProjectFiles(runtime, root, test_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        sortStrings(sql_files.items);
+
+        for (sql_files.items) |sql_path| {
+            if (!isSingularTestSqlPath(test_path, sql_path)) continue;
+            try callbacks.parse_singular_test(runtime, project_dir, test_path, sql_path, package_name, graph);
+        }
+    }
+}
+
+fn isSingularTestSqlPath(test_root: []const u8, relative_path: []const u8) bool {
+    const path = project_fs.relativeUnderResourcePath(relative_path, test_root);
+    return !std.mem.startsWith(u8, path, "generic/") and
+        !std.mem.startsWith(u8, path, "generic\\") and
+        !std.mem.startsWith(u8, path, "fixtures/") and
+        !std.mem.startsWith(u8, path, "fixtures\\");
 }

@@ -937,6 +937,10 @@ fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !voi
         node.materialized = value;
         node.inline_materialized = true;
     }
+    if (try parseConfigBoolLiteral(args, "enabled")) |enabled| {
+        node.enabled = enabled;
+        node.inline_enabled = true;
+    }
     if (findKeyword(args, "tags")) |pos| {
         if (findValueStart(args, pos + "tags".len)) |value_pos| {
             try parseTagList(allocator, args[value_pos..], &node.tags);
@@ -961,6 +965,26 @@ fn parseConfigQuotedValue(allocator: std.mem.Allocator, args: []const u8, key: [
         }
     }
     return null;
+}
+
+fn parseConfigBoolLiteral(args: []const u8, key: []const u8) !?bool {
+    const pos = findKeyword(args, key) orelse return null;
+    const value_pos = findValueStart(args, pos + key.len) orelse return null;
+    if (std.mem.startsWith(u8, args[value_pos..], "true")) {
+        try validateConfigLiteralEnd(args, value_pos + "true".len);
+        return true;
+    }
+    if (std.mem.startsWith(u8, args[value_pos..], "false")) {
+        try validateConfigLiteralEnd(args, value_pos + "false".len);
+        return false;
+    }
+    return error.UnsupportedJinja;
+}
+
+fn validateConfigLiteralEnd(args: []const u8, start: usize) !void {
+    const i = skipWs(args, start);
+    if (i >= args.len or args[i] == ',') return;
+    return error.UnsupportedJinja;
 }
 
 fn parseTagList(allocator: std.mem.Allocator, text: []const u8, tags: *std.ArrayList([]const u8)) !void {
@@ -1126,7 +1150,7 @@ test "sql scanner extracts refs sources and config tags from jinja spans" {
     defer deinitTestNode(allocator, &node);
 
     try scanSql(allocator,
-        \\{{ config(materialized="table", tags=["nightly", 'core'], schema="mart", alias='customer_orders') }}
+        \\{{ config(materialized="table", enabled=false, tags=["nightly", 'core'], schema="mart", alias='customer_orders') }}
         \\select * from {{ ref("stg_customers") }}
         \\union all select * from {{ source('raw', "customers") }}
         \\select {{ "ref('not_a_dependency')" }} as literal_ref
@@ -1139,9 +1163,34 @@ test "sql scanner extracts refs sources and config tags from jinja spans" {
     try std.testing.expectEqualStrings("raw", node.source_refs.items[0].source_name);
     try std.testing.expectEqualStrings("customers", node.source_refs.items[0].table_name);
     try std.testing.expectEqualStrings("table", node.materialized);
+    try std.testing.expect(!node.enabled);
+    try std.testing.expect(node.inline_enabled);
     try std.testing.expectEqualStrings("mart", node.config_schema.?);
     try std.testing.expectEqualStrings("customer_orders", node.config_alias.?);
     try std.testing.expectEqual(@as(usize, 2), node.tags.items.len);
+}
+
+test "sql scanner accepts literal inline enabled config and rejects dynamic enabled" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.enabled_model",
+        .name = "enabled_model",
+        .path = "enabled_model.sql",
+        .original_file_path = "models/enabled_model.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    try scanSql(allocator, "{{ config(enabled=true) }}\nselect 1", &node, null);
+    try std.testing.expect(node.enabled);
+    try std.testing.expect(node.inline_enabled);
+
+    try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ config(enabled=var('enabled')) }}", &node, null));
+    try std.testing.expectError(error.UnsupportedJinja, scanSql(allocator, "{{ config(enabled=falsey) }}", &node, null));
 }
 
 test "sql scanner tolerates is_incremental while extracting config" {

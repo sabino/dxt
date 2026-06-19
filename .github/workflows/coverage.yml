@@ -10,6 +10,7 @@ on:
       - "build.zig"
       - "build.zig.zon"
       - "src/**"
+      - "scripts/native_zig_test_coverage_map.py"
       - ".github/workflows/coverage.yml"
 
 permissions:
@@ -51,59 +52,7 @@ jobs:
 
       - name: Generate native test coverage map
         run: |
-          mkdir -p reports/coverage
-          python - <<'PY'
-          from pathlib import Path
-          import json
-          import re
-
-          rows = []
-          total_tests = 0
-          total_lines = 0
-          for path in sorted(Path("src").rglob("*.zig")):
-              text = path.read_text()
-              tests = len(re.findall(r'(?m)^\s*test\s+"', text))
-              lines = sum(
-                  1
-                  for line in text.splitlines()
-                  if line.strip() and not line.lstrip().startswith("//")
-              )
-              total_tests += tests
-              total_lines += lines
-              rows.append({
-                  "path": path.as_posix(),
-                  "native_tests": tests,
-                  "non_comment_lines": lines,
-              })
-
-          report = {
-              "kind": "native_zig_test_coverage_map",
-              "description": "Static map of native Zig test declarations by source module. This is not line coverage.",
-              "totals": {
-                  "native_tests": total_tests,
-                  "non_comment_lines": total_lines,
-                  "source_files": len(rows),
-              },
-              "files": rows,
-          }
-          Path("reports/coverage/native-zig-test-map.json").write_text(json.dumps(report, indent=2) + "\n")
-
-          markdown = [
-              "# Native Zig Test Coverage Map",
-              "",
-              "Static map of native Zig `test` declarations by source module. This is not line coverage.",
-              "",
-              f"- Source files: {len(rows)}",
-              f"- Native test declarations: {total_tests}",
-              f"- Non-comment source lines: {total_lines}",
-              "",
-              "| Module | Native tests | Non-comment lines |",
-              "| --- | ---: | ---: |",
-          ]
-          for row in rows:
-              markdown.append(f"| `{row['path']}` | {row['native_tests']} | {row['non_comment_lines']} |")
-          Path("reports/coverage/native-zig-test-map.md").write_text("\n".join(markdown) + "\n")
-          PY
+          python scripts/native_zig_test_coverage_map.py --src src --out reports/coverage
 
       - name: Summarize coverage artifact
         if: always()

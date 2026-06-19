@@ -9,6 +9,7 @@ const Runtime = types.Runtime;
 const Graph = types.Graph;
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
+const SingularTestNode = types.SingularTestNode;
 const SourceDef = types.SourceDef;
 
 const DuckDbObjectKind = enum { table, view };
@@ -69,6 +70,15 @@ pub fn executeSeed(runtime: Runtime, db_path: []const u8, project_dir: []const u
 
 pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const GenericTestNode) !GenericTestExecutionResult {
     const compiled_sql = try renderGenericTestSql(runtime.allocator, graph, test_node);
+    errdefer runtime.allocator.free(compiled_sql);
+    const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
+    defer runtime.allocator.free(execution_sql);
+    const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
+    return .{ .compiled_code = compiled_sql, .failures = failures };
+}
+
+pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const SingularTestNode) !GenericTestExecutionResult {
+    const compiled_sql = try compiler.compileSingularTest(runtime.allocator, graph, test_node);
     errdefer runtime.allocator.free(compiled_sql);
     const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
     defer runtime.allocator.free(execution_sql);
@@ -475,142 +485,16 @@ pub fn renderSeedSql(allocator: std.mem.Allocator, project_dir: []const u8, grap
 }
 
 pub fn renderGenericTestSql(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
-    const column_name = genericTestNodeColumnName(test_node) orelse return error.UnsupportedTestExecution;
-    const is_not_null = std.mem.eql(u8, test_node.test_name, "not_null");
-    const is_unique = std.mem.eql(u8, test_node.test_name, "unique");
-    const is_accepted_values = std.mem.eql(u8, test_node.test_name, "accepted_values");
-    const is_relationships = std.mem.eql(u8, test_node.test_name, "relationships");
-    if (!is_not_null and !is_unique and !is_accepted_values and !is_relationships) {
-        return error.UnsupportedTestExecution;
-    }
-    if (is_accepted_values and test_node.accepted_values.items.len == 0) return error.UnsupportedTestExecution;
-    if (is_relationships and (test_node.relationship_to.len == 0 or test_node.relationship_field.len == 0)) return error.UnsupportedTestExecution;
-
-    const relation_name = try genericTestRelationName(allocator, graph, test_node);
-    defer allocator.free(relation_name);
-    const quoted_column = try compiler.quoteIdentifier(allocator, column_name);
-    defer allocator.free(quoted_column);
-
-    if (is_not_null) {
-        return try std.fmt.allocPrint(
-            allocator,
-            "select {s}\nfrom {s}\nwhere {s} is null",
-            .{ quoted_column, relation_name, quoted_column },
-        );
-    }
-    if (is_accepted_values) {
-        const accepted_values = try renderAcceptedValuesList(allocator, test_node.accepted_values.items, test_node.accepted_values_quote orelse true);
-        defer allocator.free(accepted_values);
-        return try std.fmt.allocPrint(
-            allocator,
-            "with all_values as (\n    select\n        {s} as value_field,\n        count(*) as n_records\n    from {s}\n    group by {s}\n)\nselect *\nfrom all_values\nwhere value_field not in ({s})",
-            .{ quoted_column, relation_name, quoted_column, accepted_values },
-        );
-    }
-    if (is_relationships) {
-        const parent_relation_name = try relationshipTargetRelationName(allocator, graph, test_node);
-        defer allocator.free(parent_relation_name);
-        const quoted_parent_field = try compiler.quoteIdentifier(allocator, test_node.relationship_field);
-        defer allocator.free(quoted_parent_field);
-        return try std.fmt.allocPrint(
-            allocator,
-            "with child as (\n    select {s} as from_field\n    from {s}\n    where {s} is not null\n),\nparent as (\n    select {s} as to_field\n    from {s}\n)\nselect\n    from_field\nfrom child\nleft join parent\n    on child.from_field = parent.to_field\nwhere parent.to_field is null",
-            .{ quoted_column, relation_name, quoted_column, quoted_parent_field, parent_relation_name },
-        );
-    }
-    return try std.fmt.allocPrint(
-        allocator,
-        "select\n    {s} as unique_field,\n    count(*) as n_records\nfrom {s}\nwhere {s} is not null\ngroup by {s}\nhaving count(*) > 1",
-        .{ quoted_column, relation_name, quoted_column, quoted_column },
-    );
-}
-
-fn genericTestNodeColumnName(test_node: *const GenericTestNode) ?[]const u8 {
-    return test_node.argument_column_name orelse test_node.column_name;
+    return try compiler.compileGenericTest(allocator, graph, test_node);
 }
 
 pub fn renderGenericTestExecutionSql(allocator: std.mem.Allocator, compiled_sql: []const u8) ![]const u8 {
+    const query_sql = trimTrailingSqlTerminator(compiled_sql);
     return try std.fmt.allocPrint(
         allocator,
         "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\n{s}\n) dbt_internal_test;\n",
-        .{compiled_sql},
+        .{query_sql},
     );
-}
-
-fn findNodeByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Node {
-    for (graph.nodes.items) |*node| {
-        if (std.mem.eql(u8, node.unique_id, unique_id)) return node;
-    }
-    return null;
-}
-
-fn findSourceByRef(graph: *const Graph, source_ref: types.SourceDep) ?*const SourceDef {
-    for (graph.sources.items) |*source| {
-        if (std.mem.eql(u8, source.source_name, source_ref.source_name) and std.mem.eql(u8, source.table_name, source_ref.table_name)) return source;
-    }
-    return null;
-}
-
-fn findSourceByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const SourceDef {
-    for (graph.sources.items) |*source| {
-        if (std.mem.eql(u8, source.unique_id, unique_id)) return source;
-    }
-    return null;
-}
-
-fn sourceRelationName(allocator: std.mem.Allocator, source: *const SourceDef) ![]const u8 {
-    const quoted_schema = try compiler.quoteIdentifier(allocator, compiler.sourceSchemaName(source));
-    defer allocator.free(quoted_schema);
-    const quoted_table = try compiler.quoteIdentifier(allocator, compiler.sourceIdentifier(source));
-    defer allocator.free(quoted_table);
-    return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ quoted_schema, quoted_table });
-}
-
-fn genericTestRelationName(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
-    if (test_node.attached_node) |attached_unique_id| {
-        const attached_node = findNodeByUniqueId(graph, attached_unique_id) orelse return error.UnsupportedTestExecution;
-        if (attached_node.relation_name) |relation_name| return try allocator.dupe(u8, relation_name);
-        return try compiler.relationNameForNode(allocator, graph, attached_node);
-    }
-    if (test_node.attached_source_unique_id) |unique_id| {
-        const source = findSourceByUniqueId(graph, unique_id) orelse return error.UnsupportedTestExecution;
-        return try sourceRelationName(allocator, source);
-    }
-    const source_ref = test_node.attached_source orelse blk: {
-        if (test_node.source_refs.items.len != 1) return error.UnsupportedTestExecution;
-        break :blk test_node.source_refs.items[0];
-    };
-    const source = findSourceByRef(graph, source_ref) orelse return error.UnsupportedTestExecution;
-    return try sourceRelationName(allocator, source);
-}
-
-fn relationshipTargetRelationName(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
-    if (test_node.relationship_source_to_unique_id) |unique_id| {
-        const source = findSourceByUniqueId(graph, unique_id) orelse return error.UnsupportedTestExecution;
-        return try sourceRelationName(allocator, source);
-    }
-    if (test_node.relationship_source_to) |source_ref| {
-        const source = findSourceByRef(graph, source_ref) orelse return error.UnsupportedTestExecution;
-        return try sourceRelationName(allocator, source);
-    }
-    const parent_node = findRelationshipTargetNode(graph, test_node) orelse return error.UnsupportedTestExecution;
-    if (parent_node.relation_name) |relation_name| return try allocator.dupe(u8, relation_name);
-    return try compiler.relationNameForNode(allocator, graph, parent_node);
-}
-
-fn findRelationshipTargetNode(graph: *const Graph, test_node: *const GenericTestNode) ?*const Node {
-    var attached: ?*const Node = null;
-    for (test_node.depends_on.items) |unique_id| {
-        const node = findNodeByUniqueId(graph, unique_id) orelse continue;
-        if (test_node.attached_node) |attached_unique_id| {
-            if (std.mem.eql(u8, unique_id, attached_unique_id)) {
-                attached = node;
-                continue;
-            }
-        }
-        return node;
-    }
-    return attached;
 }
 
 fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
@@ -622,23 +506,6 @@ fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
         try out.append(allocator, byte);
     }
     try out.append(allocator, '\'');
-    return try out.toOwnedSlice(allocator);
-}
-
-fn renderAcceptedValuesList(allocator: std.mem.Allocator, values: []const []const u8, quote_values: bool) ![]const u8 {
-    if (values.len == 0) return error.UnsupportedTestExecution;
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    for (values, 0..) |value, index| {
-        if (index != 0) try out.appendSlice(allocator, ", ");
-        if (quote_values) {
-            const quoted = try quoteSqlString(allocator, value);
-            defer allocator.free(quoted);
-            try out.appendSlice(allocator, quoted);
-        } else {
-            try out.appendSlice(allocator, value);
-        }
-    }
     return try out.toOwnedSlice(allocator);
 }
 
@@ -867,6 +734,11 @@ test "renderGenericTestSql renders not_null failure row query and wrapper" {
     try std.testing.expectEqualStrings(
         "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\nselect \"customer_id\"\nfrom \"analytics\".\"customers\"\nwhere \"customer_id\" is null\n) dbt_internal_test;\n",
         execution_sql,
+    );
+    const terminated_execution_sql = try renderGenericTestExecutionSql(allocator, "select 1 as failure_row; -- dbt singular test note\n");
+    try std.testing.expectEqualStrings(
+        "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\nselect 1 as failure_row\n) dbt_internal_test;\n",
+        terminated_execution_sql,
     );
 }
 
