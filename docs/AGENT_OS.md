@@ -16,6 +16,12 @@ are the public queue and status board. The local engine is
 can claim ready issues, create isolated worktrees, launch `codex exec` workers,
 record ignored run logs, and optionally merge green PRs.
 
+The visible tmux Codex session is the supervisor, not the default implementation
+worker. It should inspect state, choose issues, launch and monitor workers,
+publish or merge green PRs when policy allows, and repair orchestration bugs.
+Actual issue implementation and PR-boundary review should run in separate
+worktrees through worker subprocesses.
+
 The product-manager agent is the board steward. Run it when you want queue
 health checks, priority/readiness nudges, stale-claim detection, and a concise
 next-issue recommendation before launching implementation workers. Its local
@@ -50,7 +56,7 @@ python scripts/agent_os_orchestrator.py run \
   --repo sabino/dxt \
   --profile azure \
   --model gpt-5.5 \
-  --max-workers 3
+  --max-workers 4
 ```
 
 Run a long local supervisor loop:
@@ -60,7 +66,7 @@ python scripts/agent_os_orchestrator.py run \
   --repo sabino/dxt \
   --profile azure \
   --model gpt-5.5 \
-  --max-workers 3 \
+  --max-workers 4 \
   --loop \
   --poll-seconds 900 \
   --merge-ready
@@ -82,6 +88,11 @@ commit them. Nudges are issue comments; running workers are instructed to read
 recent issue comments before major decisions, and the supervisor loop will pick
 up new issue state on the next polling cycle.
 
+When `--max-workers` is omitted, the orchestrator uses
+`.github/agent-team/orchestrator.json` `default_max_workers`, currently `4`.
+Pass `--max-workers` to lower or raise the local batch size for the current
+machine.
+
 Detached Agent OS workers launch through `codex exec` with
 `danger-full-access` in this repository. That is intentional: these workers are
 expected to use the host GitHub CLI auth/keyring, push branches, open PRs, and
@@ -90,6 +101,10 @@ role files still define behavioral boundaries such as read-only review or
 single-slice implementation, but the filesystem sandbox is not the enforcement
 mechanism for autonomous GitHub-backed work. Run this orchestrator only for this
 trusted repository.
+
+If a future read-only reviewer is not allowed to use GitHub or write branches,
+route all comments, pushes, and PR updates through the supervisor instead of
+asking that reviewer subprocess to publish.
 
 The Product Manager `--dry-run` previews the launch command and GitHub Project
 scope check. It does not ask the model for a no-write board plan; remove

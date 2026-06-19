@@ -14,14 +14,16 @@ the main agent remains responsible for integration.
 
 For unattended local execution, use the Agent OS orchestrator. It consumes ready
 GitHub issues, creates one worktree per claimed issue, and launches separate
-Codex CLI workers:
+Codex CLI workers. The current default is four parallel workers, configured in
+`.github/agent-team/orchestrator.json`; use `--max-workers` when a machine needs
+a smaller or larger batch:
 
 ```sh
 python scripts/agent_os_orchestrator.py run \
   --repo sabino/dxt \
   --profile azure \
   --model gpt-5.5 \
-  --max-workers 3 \
+  --max-workers 4 \
   --loop
 ```
 
@@ -34,8 +36,9 @@ to communicate through GitHub issue comments.
 - One editing agent owns one branch and one git worktree.
 - Start new work from `origin/main` unless a stacked branch is explicitly
   planned.
-- Keep the main agent as integrator. Subagents return summaries and evidence,
-  not raw logs.
+- Keep the main tmux Codex session as supervisor/integrator. It should select
+  issues, launch and monitor worker subprocesses, converge PRs, and fix
+  orchestration, while issue implementation happens in worker worktrees.
 - Prefer read-only subagents for mapping, upstream dbt/Fusion research,
   artifact parity review, and safety checks.
 - Use write-capable agents only for one small implementation slice with a
@@ -89,9 +92,14 @@ separate Codex CLI process in the worktree.
 DXT_CODEX_PROFILE=<profile> scripts/worktree_start.sh compat/small-slice
 cd ../dxt-worktrees/compat/small-slice
 codex -p "$DXT_CODEX_PROFILE" -m gpt-5.5 -C "$PWD" \
-  --ask-for-approval never --sandbox workspace-write exec \
+  --ask-for-approval never --sandbox danger-full-access exec \
   "Read AGENTS.md and PLAN.md. Implement only the requested slice."
 ```
+
+Use `danger-full-access` for autonomous worker subprocesses that must use host
+GitHub auth, push branches, open or update PRs, and write shared Git metadata.
+If a fallback worker is intentionally read-only, do not ask it to publish;
+route GitHub writes through the supervisor.
 
 Do not commit provider credentials, session transcripts, or machine paths. This
 repo intentionally documents the non-secret `azure` profile selector for local

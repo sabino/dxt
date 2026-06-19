@@ -140,6 +140,10 @@ def validate_orchestrator(label_names: set[str], findings: list[str]) -> None:
         if not isinstance(config.get(key), str) or not config[key]:
             findings.append(f"orchestrator.json missing {key}")
 
+    default_max_workers = config.get("default_max_workers")
+    if not isinstance(default_max_workers, int) or default_max_workers < 1:
+        findings.append("orchestrator.json default_max_workers must be a positive integer")
+
     for key in ["ready_labels", "blocked_labels"]:
         values = config.get(key)
         if not isinstance(values, list) or not values:

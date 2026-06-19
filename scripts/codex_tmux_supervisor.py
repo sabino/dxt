@@ -135,9 +135,13 @@ def pane_has_codex_process(target: str) -> bool:
         processes[pid] = (command, args)
         children.setdefault(ppid, []).append(pid)
 
-    stack = list(children.get(pane_pid, []))
+    stack = [pane_pid]
+    seen: set[int] = set()
     while stack:
         pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
         command, args = processes.get(pid, ("", ""))
         lowered_args = args.lower()
         if command == "codex":
@@ -332,23 +336,18 @@ def respawn_codex(request_state: dict[str, Any]) -> None:
 
 def process_ready_request(request_state: dict[str, Any], *, exit_timeout: int) -> bool:
     target = str(request_state["pane"])
-    if tmux_pane_command(target) in SHELL_COMMANDS:
-        request_state["status"] = "failed"
-        request_state["failed_at"] = utc_now()
-        request_state["failure"] = f"pane {target} is already at a shell; not respawning without a live Codex process"
-        atomic_write_json(REQUEST_PATH, request_state)
-        return False
+    command = tmux_pane_command(target)
     if not pane_has_codex_process(target):
         request_state["status"] = "failed"
         request_state["failed_at"] = utc_now()
-        request_state["failure"] = f"pane {target} is not running a Codex process"
+        request_state["failure"] = f"pane {target} command={command or 'unknown'} has no live Codex process descendant"
         atomic_write_json(REQUEST_PATH, request_state)
         return False
     send_interactive_exit(target)
     deadline = time.monotonic() + exit_timeout
     while time.monotonic() < deadline:
         current = tmux_pane_command(target)
-        if current in SHELL_COMMANDS:
+        if current in SHELL_COMMANDS and not pane_has_codex_process(target):
             respawn_codex(request_state)
             return True
         time.sleep(1)
@@ -434,7 +433,12 @@ def status(_: argparse.Namespace) -> int:
     if state:
         session = str(state.get("session"))
         pane = str(state.get("pane"))
-        print(f"session={session} exists={tmux_has_session(session)} pane={pane} command={tmux_pane_command(pane)}")
+        pane_pid = tmux_pane_pid(pane)
+        codex_descendant = pane_has_codex_process(pane)
+        print(
+            f"session={session} exists={tmux_has_session(session)} pane={pane} "
+            f"pane_pid={pane_pid} command={tmux_pane_command(pane)} codex_descendant={codex_descendant}"
+        )
         guardian = state.get("guardian") if isinstance(state.get("guardian"), dict) else None
         if guardian:
             pid = int(guardian.get("pid", -1))
