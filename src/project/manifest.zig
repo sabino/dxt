@@ -70,6 +70,10 @@ fn writeSelectedJsonObjectWithKeys(writer: *Io.Writer, item: selector.SelectedRe
             try writeSelectedJsonStringField(writer, "original_file_path", util.normalizeForDisplay(item.original_file_path), &wrote);
         } else if (std.mem.eql(u8, key, "selector")) {
             try writeSelectedJsonStringField(writer, "selector", item.selector, &wrote);
+        } else if (std.mem.eql(u8, key, "config.materialized")) {
+            if (item.config_materialized.len != 0) try writeSelectedJsonStringField(writer, "config.materialized", item.config_materialized, &wrote);
+        } else if (std.mem.eql(u8, key, "config.tags")) {
+            if (item.has_config_tags) try writeSelectedJsonStringArrayField(writer, "config.tags", item.config_tags, &wrote);
         }
     }
     try writer.writeAll("}");
@@ -77,6 +81,10 @@ fn writeSelectedJsonObjectWithKeys(writer: *Io.Writer, item: selector.SelectedRe
 
 fn writeSelectedJsonStringField(writer: *Io.Writer, key: []const u8, value: []const u8, wrote: *bool) !void {
     try json.stringField(writer, key, value, wrote);
+}
+
+fn writeSelectedJsonStringArrayField(writer: *Io.Writer, key: []const u8, value: []const []const u8, wrote: *bool) !void {
+    try json.stringArrayField(writer, key, value, wrote);
 }
 
 fn hasPriorKey(keys: []const []const u8, key: []const u8) bool {
@@ -971,6 +979,9 @@ test "selected resource JSON writer filters output keys in requested order" {
             .path = "customers.sql",
             .original_file_path = "models/customers.sql",
             .selector = "demo.customers",
+            .config_materialized = "table",
+            .config_tags = &.{ "finance", "nightly" },
+            .has_config_tags = true,
         },
         .{
             .unique_id = "source.demo.raw.customers",
@@ -982,14 +993,25 @@ test "selected resource JSON writer filters output keys in requested order" {
             .original_file_path = "models/schema.yml",
             .selector = "source:demo.raw.customers",
         },
+        .{
+            .unique_id = "model.demo.orders",
+            .resource_type = "model",
+            .name = "orders",
+            .package_name = "demo",
+            .path = "orders.sql",
+            .original_file_path = "models/orders.sql",
+            .selector = "demo.orders",
+            .config_materialized = "view",
+            .has_config_tags = true,
+        },
     };
-    const keys = [_][]const u8{ "name", "package_name", "source_name", "config.materialized", "missing", "path", "original_file_path", "selector", "unique_id", "name" };
+    const keys = [_][]const u8{ "name", "package_name", "source_name", "config.materialized", "config.tags", "missing", "path", "original_file_path", "selector", "unique_id", "name" };
 
     const rendered = try renderSelectedJsonWithKeysForTest(std.testing.allocator, selected[0..], keys[0..]);
     defer std.testing.allocator.free(rendered);
 
     try std.testing.expectEqualStrings(
-        "[{\"name\":\"customers\",\"package_name\":\"demo\",\"path\":\"customers.sql\",\"original_file_path\":\"models/customers.sql\",\"selector\":\"demo.customers\",\"unique_id\":\"model.demo.customers\"},{\"name\":\"customers\",\"package_name\":\"demo\",\"source_name\":\"raw\",\"path\":\"models/schema.yml\",\"original_file_path\":\"models/schema.yml\",\"selector\":\"source:demo.raw.customers\",\"unique_id\":\"source.demo.raw.customers\"}]\n",
+        "[{\"name\":\"customers\",\"package_name\":\"demo\",\"config.materialized\":\"table\",\"config.tags\":[\"finance\",\"nightly\"],\"path\":\"customers.sql\",\"original_file_path\":\"models/customers.sql\",\"selector\":\"demo.customers\",\"unique_id\":\"model.demo.customers\"},{\"name\":\"customers\",\"package_name\":\"demo\",\"source_name\":\"raw\",\"path\":\"models/schema.yml\",\"original_file_path\":\"models/schema.yml\",\"selector\":\"source:demo.raw.customers\",\"unique_id\":\"source.demo.raw.customers\"},{\"name\":\"orders\",\"package_name\":\"demo\",\"config.materialized\":\"view\",\"config.tags\":[],\"path\":\"orders.sql\",\"original_file_path\":\"models/orders.sql\",\"selector\":\"demo.orders\",\"unique_id\":\"model.demo.orders\"}]\n",
         rendered,
     );
 }

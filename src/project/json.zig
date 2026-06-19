@@ -34,6 +34,14 @@ pub fn stringField(writer: *Io.Writer, key: []const u8, value: []const u8, wrote
     try string(writer, value);
 }
 
+pub fn stringArrayField(writer: *Io.Writer, key: []const u8, values: []const []const u8, wrote: *bool) !void {
+    if (wrote.*) try writer.writeAll(",");
+    wrote.* = true;
+    try string(writer, key);
+    try writer.writeAll(":");
+    try stringArray(writer, values);
+}
+
 fn renderStringForTest(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
@@ -84,4 +92,17 @@ test "stringField preserves compact object field formatting" {
     try out.writer.writeAll("}");
 
     try std.testing.expectEqualStrings("{\"name\":\"customers\",\"path\":\"models/customers.sql\"}", out.written());
+}
+
+test "stringArrayField preserves compact object field formatting" {
+    var out: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var wrote = false;
+
+    try out.writer.writeAll("{");
+    try stringField(&out.writer, "name", "orders", &wrote);
+    try stringArrayField(&out.writer, "config.tags", &.{ "finance", "nightly" }, &wrote);
+    try out.writer.writeAll("}");
+
+    try std.testing.expectEqualStrings("{\"name\":\"orders\",\"config.tags\":[\"finance\",\"nightly\"]}", out.written());
 }
