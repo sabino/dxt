@@ -254,7 +254,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedCleanSourcePath => stderr.writeAll("error: clean refuses to remove model, seed, or macro source paths\n") catch {},
         error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, test, or unit_test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
-        error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model or singular SQL test resources\n") catch {},
+        error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model or supported generic or singular SQL test resources\n") catch {},
         error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources\n") catch {},
         error.UnsupportedSeedSelection => stderr.writeAll("error: seed currently supports only selected seed resources\n") catch {},
         error.UnsupportedTestSelection => stderr.writeAll("error: test currently supports only supported DuckDB test resources\n") catch {},

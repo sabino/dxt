@@ -725,6 +725,13 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     try writeRefDeps(writer, test_node.refs.items);
     try writer.writeAll(",\"sources\":");
     try writeSourceDeps(writer, test_node.source_refs.items);
+    if (test_node.compiled) {
+        try writer.writeAll(",\"compiled\":true,\"compiled_code\":");
+        try json.string(writer, test_node.compiled_code orelse "");
+        try writer.writeAll(",\"compiled_path\":");
+        try json.string(writer, util.normalizeForDisplay(test_node.compiled_path orelse ""));
+        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":false");
+    }
     try writer.writeAll("}");
 }
 
@@ -1031,6 +1038,9 @@ test "manifest writer emits source generic tests with null attached node" {
         .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
         .test_name = "not_null",
         .column_name = "customer_id",
+        .compiled = true,
+        .compiled_code = "select \"customer_id\" from \"analytics_raw\".\"raw_customers\" where \"customer_id\" is null",
+        .compiled_path = "target/compiled/demo/source_not_null_raw_customers_customer_id.sql",
     });
     try graph.tests.items[0].source_refs.append(allocator, .{ .source_name = "raw", .table_name = "customers" });
     try graph.tests.items[0].depends_on.append(allocator, "source.demo.raw.customers");
@@ -1067,6 +1077,17 @@ test "manifest writer emits source generic tests with null attached node" {
     try std.testing.expectEqualStrings("not_null", test_metadata.get("name").?.string);
     try std.testing.expectEqualStrings("{{ get_where_subquery(source('raw', 'customers')) }}", kwargs.get("model").?.string);
     try std.testing.expectEqualStrings("customer_id", kwargs.get("column_name").?.string);
+    try std.testing.expect(test_node.get("compiled").?.bool);
+    try std.testing.expectEqualStrings(
+        "select \"customer_id\" from \"analytics_raw\".\"raw_customers\" where \"customer_id\" is null",
+        test_node.get("compiled_code").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "target/compiled/demo/source_not_null_raw_customers_customer_id.sql",
+        test_node.get("compiled_path").?.string,
+    );
+    try std.testing.expectEqual(@as(usize, 0), test_node.get("extra_ctes").?.array.items.len);
+    try std.testing.expect(!test_node.get("extra_ctes_injected").?.bool);
     const sources = test_node.get("sources").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), sources.len);
     try std.testing.expectEqualStrings("raw", sources[0].array.items[0].string);

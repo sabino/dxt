@@ -753,7 +753,7 @@ def test_compile_rejects_selection_without_models(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "compile currently supports only selected SQL model or singular SQL test resources" in result.stderr
+    assert "compile currently supports only selected SQL model or supported generic or singular SQL test resources" in result.stderr
 
 
 def test_compile_uses_selected_node_package_for_compiled_path(tmp_path: Path):
@@ -2252,6 +2252,56 @@ def test_compile_writes_selected_singular_sql_test_artifacts_without_duckdb(tmp_
     assert "column_name" not in test_node
     assert "attached_node" not in test_node
     assert "compiled" not in manifest["nodes"]["model.singular_tests.customers"]
+
+
+def test_compile_writes_selected_generic_test_artifacts_without_duckdb(tmp_path: Path):
+    project = copy_fixture(tmp_path, "generic_test_arguments")
+    schema_path = project / "models" / "schema.yml"
+    schema_path.write_text(schema_path.read_text().replace("          - unique\n", "          - unique\n          - not_null\n", 1))
+    target = tmp_path / "compile-target"
+
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Compiled 0 model(s) and 5 test(s)" in result.stdout
+    assert not (target / "dxt.duckdb").exists()
+    assert not (target / "run_results.json").exists()
+
+    manifest_path = target / "manifest.json"
+    assert_manifest_schema_slice(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    test_nodes = [
+        node
+        for node in manifest["nodes"].values()
+        if node["resource_type"] == "test" and node["test_metadata"]["name"] in {"not_null", "unique", "relationships", "accepted_values"}
+    ]
+    assert len(test_nodes) == 5
+    assert all(node["compiled"] is True for node in test_nodes)
+    assert all(node["extra_ctes"] == [] for node in test_nodes)
+    assert all(node["extra_ctes_injected"] is False for node in test_nodes)
+
+    accepted_values = next(node for node in test_nodes if node["name"].startswith("accepted_values_orders_status__"))
+    assert "with all_values as" in accepted_values["compiled_code"]
+    assert "\"status\" as value_field" in accepted_values["compiled_code"]
+    assert "value_field not in ('placed', 'shipped', 'completed', 'return_pending', 'returned')" in accepted_values["compiled_code"]
+    compiled_path = Path(accepted_values["compiled_path"])
+    assert compiled_path.exists()
+    assert compiled_path.read_text() == accepted_values["compiled_code"]
+    assert compiled_path.parent == target / "compiled" / "generic_test_arguments"
+    assert compiled_path.name.startswith("accepted_values_orders_")
+    assert compiled_path.suffix == ".sql"
+
+    relationship = next(node for node in test_nodes if node["test_metadata"]["name"] == "relationships")
+    assert "left join parent" in relationship["compiled_code"]
+    assert '"main"."customers"' in relationship["compiled_code"]
+
+    not_null = next(node for node in test_nodes if node["test_metadata"]["name"] == "not_null")
+    assert 'from "main"."customers"' in not_null["compiled_code"]
+    assert 'where "customer_id" is null' in not_null["compiled_code"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for singular SQL test execution coverage")

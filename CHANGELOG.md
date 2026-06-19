@@ -16,6 +16,10 @@ compatibility.
 - `dxt compile` support for selected singular SQL data tests, writing compiled
   SQL under `target/compiled/<package>/tests/...` and emitting dbt-shaped
   compiled Manifest fields without requiring DuckDB execution.
+- `dxt compile` support for selected supported built-in generic data tests,
+  writing compiled failure-row SQL under `target/compiled/<package>/...` and
+  emitting dbt-shaped compiled Manifest fields without requiring DuckDB
+  execution or writing run results.
 - Singular SQL data tests in the Zig runtime, including `test-paths`
   discovery with `generic/` and `fixtures/` skipped, Manifest nodes without
   generic-only fields, `test_type:singular` / `test_type:data` selection, and

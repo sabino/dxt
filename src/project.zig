@@ -166,7 +166,7 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
 
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, true);
-    if (selected.len != 0 and !compile_result.saw_model and !compile_result.saw_singular_test) return error.UnsupportedCompileSelection;
+    if (selected.len != 0 and !compile_result.saw_model and !compile_result.saw_generic_test and !compile_result.saw_singular_test) return error.UnsupportedCompileSelection;
 
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
@@ -687,6 +687,7 @@ const CompileResult = struct {
     count: usize,
     test_count: usize = 0,
     saw_model: bool,
+    saw_generic_test: bool = false,
     saw_singular_test: bool = false,
     compiled_base: []const u8,
 };
@@ -1148,6 +1149,7 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
     var compiled_count: usize = 0;
     var compiled_test_count: usize = 0;
     var saw_selected_model = false;
+    var saw_selected_generic_test = false;
     var saw_selected_singular_test = false;
     for (graph.nodes.items) |*node| {
         if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
@@ -1168,6 +1170,25 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
     }
 
     if (include_singular_tests) {
+        for (graph.tests.items) |*test_node| {
+            if (!selectionContains(selected, test_node.unique_id)) continue;
+            saw_selected_generic_test = true;
+            validateGenericTestExecution(test_node) catch return error.UnsupportedCompileSelection;
+
+            const compiled_code = compiler.compileGenericTest(runtime.allocator, graph, test_node) catch |err| switch (err) {
+                error.UnsupportedTestExecution => return error.UnsupportedCompileSelection,
+                else => return err,
+            };
+            const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, test_node.package_name, test_node.path });
+            if (std.fs.path.dirname(compiled_path)) |parent| {
+                try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
+            }
+            try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = compiled_code });
+            test_node.compiled = true;
+            test_node.compiled_code = compiled_code;
+            test_node.compiled_path = util.normalizeForDisplay(compiled_path);
+            compiled_test_count += 1;
+        }
         for (graph.singular_tests.items) |*test_node| {
             if (!selectionContains(selected, test_node.unique_id)) continue;
             saw_selected_singular_test = true;
@@ -1189,6 +1210,7 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         .count = compiled_count,
         .test_count = compiled_test_count,
         .saw_model = saw_selected_model,
+        .saw_generic_test = saw_selected_generic_test,
         .saw_singular_test = saw_selected_singular_test,
         .compiled_base = compiled_base,
     };
