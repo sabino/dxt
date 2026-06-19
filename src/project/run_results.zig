@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const json = @import("json.zig");
 const types = @import("types.zig");
 
 const Node = types.Node;
@@ -21,11 +22,11 @@ pub fn renderRunResults(allocator: std.mem.Allocator, results: []const NodeResul
     const writer = &out.writer;
 
     try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": ");
-    try writeJsonString(writer, "https://schemas.getdbt.com/dbt/run-results/v6.json");
+    try json.string(writer, "https://schemas.getdbt.com/dbt/run-results/v6.json");
     try writer.writeAll(", \"dbt_version\": ");
-    try writeJsonString(writer, "0.0.0");
+    try json.string(writer, "0.0.0");
     try writer.writeAll(", \"generated_at\": ");
-    try writeJsonString(writer, "1970-01-01T00:00:00Z");
+    try json.string(writer, "1970-01-01T00:00:00Z");
     try writer.writeAll(", \"invocation_id\": null, \"invocation_started_at\": null, \"env\": {}},\n");
     try writer.writeAll("  \"results\": [");
     for (results, 0..) |result, index| {
@@ -38,13 +39,13 @@ pub fn renderRunResults(allocator: std.mem.Allocator, results: []const NodeResul
 
 fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     try writer.writeAll("\n    {\"status\": ");
-    try writeJsonString(writer, result.status);
+    try json.string(writer, result.status);
     try writer.writeAll(", \"timing\": [");
     try writer.writeAll("{\"name\": \"compile\", \"started_at\": null, \"completed_at\": null}, ");
     try writer.writeAll("{\"name\": \"execute\", \"started_at\": null, \"completed_at\": null}");
     try writer.writeAll("], \"thread_id\": \"Thread-1\", \"execution_time\": 0.0, \"adapter_response\": {}, \"message\": ");
     if (result.message) |message| {
-        try writeJsonString(writer, message);
+        try json.string(writer, message);
     } else {
         try writer.writeAll("null");
     }
@@ -55,7 +56,7 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
         try writer.writeAll("null");
     }
     try writer.writeAll(", \"unique_id\": ");
-    try writeJsonString(writer, resultUniqueId(result));
+    try json.string(writer, resultUniqueId(result));
     try writer.writeAll(", \"compiled\": ");
     if (result.test_node != null or result.compiled_code != null) {
         try writer.writeAll("true");
@@ -66,17 +67,17 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     } else try writer.writeAll("null");
     try writer.writeAll(", \"compiled_code\": ");
     if (result.compiled_code) |compiled_code| {
-        try writeJsonString(writer, compiled_code);
+        try json.string(writer, compiled_code);
     } else if (result.node) |node| if (isCompiledResultNode(node) and node.compiled_code != null) {
         const compiled_code = node.compiled_code.?;
-        try writeJsonString(writer, compiled_code);
+        try json.string(writer, compiled_code);
     } else {
         try writer.writeAll("null");
     } else try writer.writeAll("null");
     try writer.writeAll(", \"relation_name\": ");
     if (result.node) |node| if (isCompiledResultNode(node) and node.relation_name != null) {
         const relation_name = node.relation_name.?;
-        try writeJsonString(writer, relation_name);
+        try json.string(writer, relation_name);
     } else {
         try writer.writeAll("null");
     } else try writer.writeAll("null");
@@ -91,10 +92,6 @@ fn resultUniqueId(result: NodeResult) []const u8 {
 
 fn isCompiledResultNode(node: *const Node) bool {
     return std.mem.eql(u8, node.resource_type, "model");
-}
-
-fn writeJsonString(writer: *Io.Writer, value: []const u8) !void {
-    try std.json.Stringify.value(value, .{}, writer);
 }
 
 test "run-results writer emits dbt v6 success shape" {

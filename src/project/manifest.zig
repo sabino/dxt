@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const compiler = @import("compiler.zig");
+const json = @import("json.zig");
 const selector = @import("selector.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
@@ -39,11 +40,11 @@ pub fn writeSelectedJsonWithKeys(writer: *Io.Writer, selected: []selector.Select
 
 fn writeSelectedJsonObject(writer: *Io.Writer, item: selector.SelectedResource) !void {
     try writer.writeAll("{\"unique_id\":");
-    try writeJsonString(writer, item.unique_id);
+    try json.string(writer, item.unique_id);
     try writer.writeAll(",\"resource_type\":");
-    try writeJsonString(writer, item.resource_type);
+    try json.string(writer, item.resource_type);
     try writer.writeAll(",\"name\":");
-    try writeJsonString(writer, item.name);
+    try json.string(writer, item.name);
     try writer.writeAll("}");
 }
 
@@ -70,11 +71,7 @@ fn writeSelectedJsonObjectWithKeys(writer: *Io.Writer, item: selector.SelectedRe
 }
 
 fn writeSelectedJsonStringField(writer: *Io.Writer, key: []const u8, value: []const u8, wrote: *bool) !void {
-    if (wrote.*) try writer.writeAll(",");
-    wrote.* = true;
-    try writeJsonString(writer, key);
-    try writer.writeAll(":");
-    try writeJsonString(writer, value);
+    try json.stringField(writer, key, value, wrote);
 }
 
 fn hasPriorKey(keys: []const []const u8, key: []const u8) bool {
@@ -90,9 +87,9 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
     const writer = &out.writer;
 
     try writer.writeAll("{\n  \"metadata\": {\"project_name\": ");
-    try writeJsonString(writer, graph.project_name);
+    try json.string(writer, graph.project_name);
     try writer.writeAll(",\"adapter_type\":");
-    try writeJsonString(writer, graph.adapter_type);
+    try json.string(writer, graph.adapter_type);
     try writer.writeAll("},\n  \"nodes\": {");
     var node_index: usize = 0;
     for (graph.nodes.items) |node| {
@@ -100,7 +97,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         if (node_index != 0) try writer.writeAll(",");
         node_index += 1;
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, node.unique_id);
+        try json.string(writer, node.unique_id);
         try writer.writeAll(": ");
         try writeNode(allocator, writer, node);
     }
@@ -108,7 +105,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         if (node_index != 0) try writer.writeAll(",");
         node_index += 1;
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, test_node.unique_id);
+        try json.string(writer, test_node.unique_id);
         try writer.writeAll(": ");
         try writeGenericTestNode(allocator, writer, test_node);
     }
@@ -116,7 +113,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
     for (graph.sources.items, 0..) |source, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, source.unique_id);
+        try json.string(writer, source.unique_id);
         try writer.writeAll(": ");
         try writeSourceNode(allocator, writer, source);
     }
@@ -124,7 +121,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
     for (graph.macros.items, 0..) |macro, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, macro.unique_id);
+        try json.string(writer, macro.unique_id);
         try writer.writeAll(": ");
         try writeMacroNode(allocator, writer, macro);
     }
@@ -132,19 +129,19 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
     for (graph.docs.items, 0..) |doc, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, doc.unique_id);
+        try json.string(writer, doc.unique_id);
         try writer.writeAll(": {\"unique_id\":");
-        try writeJsonString(writer, doc.unique_id);
+        try json.string(writer, doc.unique_id);
         try writer.writeAll(",\"resource_type\":\"doc\",\"package_name\":");
-        try writeJsonString(writer, doc.package_name);
+        try json.string(writer, doc.package_name);
         try writer.writeAll(",\"name\":");
-        try writeJsonString(writer, doc.name);
+        try json.string(writer, doc.name);
         try writer.writeAll(",\"path\":");
-        try writeJsonString(writer, util.normalizeForDisplay(doc.path));
+        try json.string(writer, util.normalizeForDisplay(doc.path));
         try writer.writeAll(",\"original_file_path\":");
-        try writeJsonString(writer, util.normalizeForDisplay(doc.original_file_path));
+        try json.string(writer, util.normalizeForDisplay(doc.original_file_path));
         try writer.writeAll(",\"block_contents\":");
-        try writeJsonString(writer, doc.block_contents);
+        try json.string(writer, doc.block_contents);
         try writer.writeAll("}");
     }
     try writer.writeAll("\n  },\n  \"exposures\": {");
@@ -154,7 +151,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         if (exposure_index != 0) try writer.writeAll(",");
         exposure_index += 1;
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, exposure.unique_id);
+        try json.string(writer, exposure.unique_id);
         try writer.writeAll(": ");
         try writeExposureNode(writer, exposure);
     }
@@ -165,7 +162,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         if (unit_test_index != 0) try writer.writeAll(",");
         unit_test_index += 1;
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, unit_test.unique_id);
+        try json.string(writer, unit_test.unique_id);
         try writer.writeAll(": ");
         try writeUnitTestNode(writer, unit_test);
     }
@@ -176,7 +173,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         if (disabled_index != 0) try writer.writeAll(",");
         disabled_index += 1;
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, node.unique_id);
+        try json.string(writer, node.unique_id);
         try writer.writeAll(": [");
         try writeNode(allocator, writer, node);
         try writer.writeAll("]");
@@ -188,35 +185,35 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         if (parent_index != 0) try writer.writeAll(",");
         parent_index += 1;
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, node.unique_id);
+        try json.string(writer, node.unique_id);
         try writer.writeAll(": ");
-        try writeStringArray(writer, node.depends_on.items);
+        try json.stringArray(writer, node.depends_on.items);
     }
     for (graph.tests.items) |test_node| {
         if (parent_index != 0) try writer.writeAll(",");
         parent_index += 1;
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, test_node.unique_id);
+        try json.string(writer, test_node.unique_id);
         try writer.writeAll(": ");
-        try writeStringArray(writer, test_node.depends_on.items);
+        try json.stringArray(writer, test_node.depends_on.items);
     }
     for (graph.exposures.items) |exposure| {
         if (!exposure.enabled) continue;
         if (parent_index != 0) try writer.writeAll(",");
         parent_index += 1;
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, exposure.unique_id);
+        try json.string(writer, exposure.unique_id);
         try writer.writeAll(": ");
-        try writeStringArray(writer, exposure.depends_on.items);
+        try json.stringArray(writer, exposure.depends_on.items);
     }
     for (graph.unit_tests.items) |unit_test| {
         if (!unit_test.enabled) continue;
         if (parent_index != 0) try writer.writeAll(",");
         parent_index += 1;
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, unit_test.unique_id);
+        try json.string(writer, unit_test.unique_id);
         try writer.writeAll(": ");
-        try writeStringArray(writer, unit_test.depends_on.items);
+        try json.stringArray(writer, unit_test.depends_on.items);
     }
     try writer.writeAll("\n  },\n  \"child_map\": {");
     try writeChildMap(writer, graph);
@@ -250,7 +247,7 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
     if (!first.*) try writer.writeAll(",");
     first.* = false;
     try writer.writeAll("\n    ");
-    try writeJsonString(writer, unique_id);
+    try json.string(writer, unique_id);
     try writer.writeAll(": [");
     var child_first = true;
     for (graph.nodes.items) |node| {
@@ -258,14 +255,14 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
         if (util.containsString(node.depends_on.items, unique_id)) {
             if (!child_first) try writer.writeAll(",");
             child_first = false;
-            try writeJsonString(writer, node.unique_id);
+            try json.string(writer, node.unique_id);
         }
     }
     for (graph.tests.items) |test_node| {
         if (util.containsString(test_node.depends_on.items, unique_id)) {
             if (!child_first) try writer.writeAll(",");
             child_first = false;
-            try writeJsonString(writer, test_node.unique_id);
+            try json.string(writer, test_node.unique_id);
         }
     }
     for (graph.exposures.items) |exposure| {
@@ -273,7 +270,7 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
         if (util.containsString(exposure.depends_on.items, unique_id)) {
             if (!child_first) try writer.writeAll(",");
             child_first = false;
-            try writeJsonString(writer, exposure.unique_id);
+            try json.string(writer, exposure.unique_id);
         }
     }
     for (graph.unit_tests.items) |unit_test| {
@@ -281,7 +278,7 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
         if (util.containsString(unit_test.depends_on.items, unique_id)) {
             if (!child_first) try writer.writeAll(",");
             child_first = false;
-            try writeJsonString(writer, unit_test.unique_id);
+            try json.string(writer, unit_test.unique_id);
         }
     }
     try writer.writeAll("]");
@@ -297,21 +294,21 @@ fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void
 
 fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: MacroDef) !void {
     try writer.writeAll("{\"unique_id\":");
-    try writeJsonString(writer, macro.unique_id);
+    try json.string(writer, macro.unique_id);
     try writer.writeAll(",\"resource_type\":\"macro\",\"package_name\":");
-    try writeJsonString(writer, macro.package_name);
+    try json.string(writer, macro.package_name);
     try writer.writeAll(",\"name\":");
-    try writeJsonString(writer, macro.name);
+    try json.string(writer, macro.name);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(macro.path));
+    try json.string(writer, util.normalizeForDisplay(macro.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(macro.original_file_path));
+    try json.string(writer, util.normalizeForDisplay(macro.original_file_path));
     try writer.writeAll(",\"macro_sql\":");
-    try writeJsonString(writer, macro.macro_sql);
+    try json.string(writer, macro.macro_sql);
     try writer.writeAll(",\"depends_on\":{\"macros\":");
-    try writeStringArray(writer, macro.macro_depends_on.items);
+    try json.stringArray(writer, macro.macro_depends_on.items);
     try writer.writeAll("},\"description\":");
-    try writeJsonString(writer, macro.description);
+    try json.string(writer, macro.description);
     try writer.writeAll(",\"meta\":");
     try writeMetaObject(writer, macro.meta.items);
     try writer.writeAll(",\"docs\":");
@@ -320,7 +317,7 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
     if (macro.patch_path) |patch_path| {
         const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ macro.package_name, util.normalizeForDisplay(patch_path) });
         defer allocator.free(dbt_patch_path);
-        try writeJsonString(writer, dbt_patch_path);
+        try json.string(writer, dbt_patch_path);
     } else {
         try writer.writeAll("null");
     }
@@ -328,7 +325,7 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
     try writeMacroArguments(writer, macro.arguments.items);
     try writer.writeAll(",\"supported_languages\":");
     if (macro.has_supported_languages) {
-        try writeStringArray(writer, macro.supported_languages.items);
+        try json.stringArray(writer, macro.supported_languages.items);
     } else {
         try writer.writeAll("null");
     }
@@ -341,29 +338,29 @@ fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: Sou
     defer allocator.free(relation_name);
 
     try writer.writeAll("{\"unique_id\":");
-    try writeJsonString(writer, source.unique_id);
+    try json.string(writer, source.unique_id);
     try writer.writeAll(",\"resource_type\":\"source\",\"package_name\":");
-    try writeJsonString(writer, source.package_name);
+    try json.string(writer, source.package_name);
     try writer.writeAll(",\"source_name\":");
-    try writeJsonString(writer, source.source_name);
+    try json.string(writer, source.source_name);
     try writer.writeAll(",\"name\":");
-    try writeJsonString(writer, source.table_name);
+    try json.string(writer, source.table_name);
     try writer.writeAll(",\"database\":null,\"schema\":");
-    try writeJsonString(writer, schema_name);
+    try json.string(writer, schema_name);
     try writer.writeAll(",\"identifier\":");
-    try writeJsonString(writer, compiler.sourceIdentifier(&source));
+    try json.string(writer, compiler.sourceIdentifier(&source));
     try writer.writeAll(",\"relation_name\":");
-    try writeJsonString(writer, relation_name);
+    try json.string(writer, relation_name);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(source.original_file_path));
+    try json.string(writer, util.normalizeForDisplay(source.original_file_path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(source.original_file_path));
+    try json.string(writer, util.normalizeForDisplay(source.original_file_path));
     try writer.writeAll(",\"fqn\":[");
-    try writeJsonString(writer, source.package_name);
+    try json.string(writer, source.package_name);
     try writer.writeAll(",");
-    try writeJsonString(writer, source.source_name);
+    try json.string(writer, source.source_name);
     try writer.writeAll(",");
-    try writeJsonString(writer, source.table_name);
+    try json.string(writer, source.table_name);
     try writer.writeAll("],\"source_description\":\"\",\"loader\":\"\",\"loaded_at_field\":");
     try writeNullableString(writer, source.loaded_at_field);
     try writer.writeAll(",\"loaded_at_query\":");
@@ -383,27 +380,27 @@ fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: Sou
 
 fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {
     try writer.writeAll("{\"unique_id\":");
-    try writeJsonString(writer, exposure.unique_id);
+    try json.string(writer, exposure.unique_id);
     try writer.writeAll(",\"resource_type\":\"exposure\",\"package_name\":");
-    try writeJsonString(writer, exposure.package_name);
+    try json.string(writer, exposure.package_name);
     try writer.writeAll(",\"name\":");
-    try writeJsonString(writer, exposure.name);
+    try json.string(writer, exposure.name);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(exposure.path));
+    try json.string(writer, util.normalizeForDisplay(exposure.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(exposure.original_file_path));
+    try json.string(writer, util.normalizeForDisplay(exposure.original_file_path));
     try writer.writeAll(",\"fqn\":[");
-    try writeJsonString(writer, exposure.package_name);
+    try json.string(writer, exposure.package_name);
     try writer.writeAll(",");
-    try writeJsonString(writer, exposure.name);
+    try json.string(writer, exposure.name);
     try writer.writeAll("],\"label\":null,\"type\":");
-    try writeJsonString(writer, exposure.exposure_type);
+    try json.string(writer, exposure.exposure_type);
     try writer.writeAll(",\"maturity\":");
     try writeNullableString(writer, exposure.maturity);
     try writer.writeAll(",\"url\":");
     try writeNullableString(writer, exposure.url);
     try writer.writeAll(",\"description\":");
-    try writeJsonString(writer, exposure.description);
+    try json.string(writer, exposure.description);
     try writer.writeAll(",\"depends_on\":{\"macros\":[],\"nodes\":");
     try writeExposureDependsOnNodes(writer, exposure.depends_on.items);
     try writer.writeAll("},\"refs\":");
@@ -416,16 +413,16 @@ fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {
     if (exposure.owner_name.len == 0) {
         try writer.writeAll("null");
     } else {
-        try writeJsonString(writer, exposure.owner_name);
+        try json.string(writer, exposure.owner_name);
     }
     try writer.writeAll("},\"tags\":");
-    try writeStringArray(writer, exposure.tags.items);
+    try json.stringArray(writer, exposure.tags.items);
     try writer.writeAll(",\"meta\":");
     try writeMetaObject(writer, exposure.meta.items);
     try writer.writeAll(",\"config\":{\"enabled\":");
     try writer.writeAll(if (exposure.enabled) "true" else "false");
     try writer.writeAll(",\"tags\":");
-    try writeStringArray(writer, exposure.tags.items);
+    try json.stringArray(writer, exposure.tags.items);
     try writer.writeAll(",\"meta\":");
     try writeMetaObject(writer, exposure.meta.items);
     try writer.writeAll("},\"unrendered_config\":{},\"created_at\":0.0}");
@@ -433,33 +430,33 @@ fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {
 
 fn writeUnitTestNode(writer: *Io.Writer, unit_test: UnitTestDef) !void {
     try writer.writeAll("{\"model\":");
-    try writeJsonString(writer, unit_test.model);
+    try json.string(writer, unit_test.model);
     try writer.writeAll(",\"given\":");
     try writeUnitTestGivenFixtures(writer, unit_test.given.items);
     try writer.writeAll(",\"expect\":");
     try writeUnitTestOutputFixture(writer, unit_test.expect);
     try writer.writeAll(",\"name\":");
-    try writeJsonString(writer, unit_test.name);
+    try json.string(writer, unit_test.name);
     try writer.writeAll(",\"resource_type\":\"unit_test\",\"package_name\":");
-    try writeJsonString(writer, unit_test.package_name);
+    try json.string(writer, unit_test.package_name);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(unit_test.path));
+    try json.string(writer, util.normalizeForDisplay(unit_test.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(unit_test.original_file_path));
+    try json.string(writer, util.normalizeForDisplay(unit_test.original_file_path));
     try writer.writeAll(",\"unique_id\":");
-    try writeJsonString(writer, unit_test.unique_id);
+    try json.string(writer, unit_test.unique_id);
     try writer.writeAll(",\"fqn\":[");
-    try writeJsonString(writer, unit_test.package_name);
+    try json.string(writer, unit_test.package_name);
     try writer.writeAll(",");
-    try writeJsonString(writer, unit_test.model);
+    try json.string(writer, unit_test.model);
     try writer.writeAll(",");
-    try writeJsonString(writer, unit_test.name);
+    try json.string(writer, unit_test.name);
     try writer.writeAll("],\"description\":");
-    try writeJsonString(writer, unit_test.description);
+    try json.string(writer, unit_test.description);
     try writer.writeAll(",\"overrides\":null,\"depends_on\":{\"macros\":[],\"nodes\":");
-    try writeStringArray(writer, unit_test.depends_on.items);
+    try json.stringArray(writer, unit_test.depends_on.items);
     try writer.writeAll("},\"config\":{\"tags\":");
-    try writeStringArray(writer, unit_test.tags.items);
+    try json.stringArray(writer, unit_test.tags.items);
     try writer.writeAll(",\"meta\":");
     try writeMetaObject(writer, unit_test.meta.items);
     try writer.writeAll(",\"enabled\":");
@@ -472,11 +469,11 @@ fn writeUnitTestGivenFixtures(writer: *Io.Writer, fixtures: []const types.UnitTe
     for (fixtures, 0..) |fixture, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("{\"input\":");
-        try writeJsonString(writer, fixture.input orelse "");
+        try json.string(writer, fixture.input orelse "");
         try writer.writeAll(",\"rows\":");
         try writeUnitTestRows(writer, fixture);
         try writer.writeAll(",\"format\":");
-        try writeJsonString(writer, fixture.format);
+        try json.string(writer, fixture.format);
         try writer.writeAll(",\"fixture\":");
         try writeNullableString(writer, fixture.fixture);
         try writer.writeAll("}");
@@ -488,7 +485,7 @@ fn writeUnitTestOutputFixture(writer: *Io.Writer, fixture: types.UnitTestFixture
     try writer.writeAll("{\"rows\":");
     try writeUnitTestRows(writer, fixture);
     try writer.writeAll(",\"format\":");
-    try writeJsonString(writer, fixture.format);
+    try json.string(writer, fixture.format);
     try writer.writeAll(",\"fixture\":");
     try writeNullableString(writer, fixture.fixture);
     try writer.writeAll("}");
@@ -500,7 +497,7 @@ fn writeUnitTestRows(writer: *Io.Writer, fixture: types.UnitTestFixture) !void {
         return;
     }
     if (fixture.rows_string) |rows_string| {
-        try writeJsonString(writer, rows_string);
+        try json.string(writer, rows_string);
         return;
     }
     try writer.writeAll("[");
@@ -509,7 +506,7 @@ fn writeUnitTestRows(writer: *Io.Writer, fixture: types.UnitTestFixture) !void {
         try writer.writeAll("{");
         for (row.entries.items, 0..) |entry, entry_index| {
             if (entry_index != 0) try writer.writeAll(",");
-            try writeJsonString(writer, entry.key);
+            try json.string(writer, entry.key);
             try writer.writeAll(":");
             try writeJsonScalar(writer, entry.value);
         }
@@ -520,29 +517,29 @@ fn writeUnitTestRows(writer: *Io.Writer, fixture: types.UnitTestFixture) !void {
 
 fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
     try writer.writeAll("{\"unique_id\":");
-    try writeJsonString(writer, node.unique_id);
+    try json.string(writer, node.unique_id);
     try writer.writeAll(",\"resource_type\":\"model\",\"package_name\":");
-    try writeJsonString(writer, node.package_name);
+    try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
-    try writeJsonString(writer, node.name);
+    try json.string(writer, node.name);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(node.path));
+    try json.string(writer, util.normalizeForDisplay(node.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(node.original_file_path));
+    try json.string(writer, util.normalizeForDisplay(node.original_file_path));
     try writer.writeAll(",\"patch_path\":");
     if (node.patch_path) |patch_path| {
         const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ node.package_name, util.normalizeForDisplay(patch_path) });
         defer allocator.free(dbt_patch_path);
-        try writeJsonString(writer, dbt_patch_path);
+        try json.string(writer, dbt_patch_path);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\"language\":\"sql\",\"raw_code\":");
-    try writeJsonString(writer, node.raw_code);
+    try json.string(writer, node.raw_code);
     try writer.writeAll(",\"description\":");
-    try writeJsonString(writer, node.description);
+    try json.string(writer, node.description);
     try writer.writeAll(",\"doc_blocks\":");
-    try writeStringArray(writer, node.doc_blocks.items);
+    try json.stringArray(writer, node.doc_blocks.items);
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
     try writer.writeAll(",\"columns\":");
@@ -550,26 +547,26 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) 
     try writer.writeAll(",\"config\":{\"enabled\":");
     try writer.writeAll(if (node.enabled) "true" else "false");
     try writer.writeAll(",\"materialized\":");
-    try writeJsonString(writer, node.materialized);
+    try json.string(writer, node.materialized);
     try writer.writeAll(",\"tags\":");
-    try writeStringArray(writer, node.tags.items);
+    try json.stringArray(writer, node.tags.items);
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
     try writer.writeAll("},\"depends_on\":{\"macros\":");
-    try writeStringArray(writer, node.macro_depends_on.items);
+    try json.stringArray(writer, node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
-    try writeStringArray(writer, node.depends_on.items);
+    try json.stringArray(writer, node.depends_on.items);
     try writer.writeAll("},\"refs\":");
     try writeRefDeps(writer, node.refs.items);
     try writer.writeAll(",\"sources\":");
     try writeSourceDeps(writer, node.source_refs.items);
     if (node.compiled) {
         try writer.writeAll(",\"compiled\":true,\"compiled_code\":");
-        try writeJsonString(writer, node.compiled_code orelse "");
+        try json.string(writer, node.compiled_code orelse "");
         try writer.writeAll(",\"compiled_path\":");
-        try writeJsonString(writer, util.normalizeForDisplay(node.compiled_path orelse ""));
+        try json.string(writer, util.normalizeForDisplay(node.compiled_path orelse ""));
         try writer.writeAll(",\"relation_name\":");
-        try writeJsonString(writer, node.relation_name orelse "");
+        try json.string(writer, node.relation_name orelse "");
         try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":false");
     }
     try writer.writeAll("}");
@@ -577,39 +574,39 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) 
 
 fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
     try writer.writeAll("{\"unique_id\":");
-    try writeJsonString(writer, node.unique_id);
+    try json.string(writer, node.unique_id);
     try writer.writeAll(",\"resource_type\":\"seed\",\"package_name\":");
-    try writeJsonString(writer, node.package_name);
+    try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
-    try writeJsonString(writer, node.name);
+    try json.string(writer, node.name);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(node.path));
+    try json.string(writer, util.normalizeForDisplay(node.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(node.original_file_path));
+    try json.string(writer, util.normalizeForDisplay(node.original_file_path));
     try writer.writeAll(",\"patch_path\":");
     if (node.patch_path) |patch_path| {
         const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ node.package_name, util.normalizeForDisplay(patch_path) });
         defer allocator.free(dbt_patch_path);
-        try writeJsonString(writer, dbt_patch_path);
+        try json.string(writer, dbt_patch_path);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\"description\":");
-    try writeJsonString(writer, node.description);
+    try json.string(writer, node.description);
     try writer.writeAll(",\"doc_blocks\":");
-    try writeStringArray(writer, node.doc_blocks.items);
+    try json.stringArray(writer, node.doc_blocks.items);
     try writer.writeAll(",\"columns\":");
     try writeColumns(writer, node.columns.items);
     try writer.writeAll(",\"config\":{\"enabled\":");
     try writer.writeAll(if (node.enabled) "true" else "false");
     try writer.writeAll(",\"materialized\":\"seed\",\"tags\":");
-    try writeStringArray(writer, node.tags.items);
+    try json.stringArray(writer, node.tags.items);
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
     try writer.writeAll("},\"docs\":");
     try writeDocsConfig(writer, node.docs);
     try writer.writeAll(",\"depends_on\":{\"macros\":[],\"nodes\":");
-    try writeStringArray(writer, node.depends_on.items);
+    try json.stringArray(writer, node.depends_on.items);
     try writer.writeAll("}}");
 }
 
@@ -617,13 +614,13 @@ fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
     try writer.writeAll("{");
     for (columns, 0..) |column, index| {
         if (index != 0) try writer.writeAll(",");
-        try writeJsonString(writer, column.name);
+        try json.string(writer, column.name);
         try writer.writeAll(":{\"name\":");
-        try writeJsonString(writer, column.name);
+        try json.string(writer, column.name);
         try writer.writeAll(",\"description\":");
-        try writeJsonString(writer, column.description);
+        try json.string(writer, column.description);
         try writer.writeAll(",\"meta\":{},\"data_type\":null,\"quote\":null,\"tags\":[],\"config\":{},\"doc_blocks\":");
-        try writeStringArray(writer, column.doc_blocks.items);
+        try json.stringArray(writer, column.doc_blocks.items);
         try writer.writeAll("}");
     }
     try writer.writeAll("}");
@@ -632,33 +629,33 @@ fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
 fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_node: GenericTestNode) !void {
     const argument_column_name = genericTestNodeColumnName(&test_node);
     try writer.writeAll("{\"unique_id\":");
-    try writeJsonString(writer, test_node.unique_id);
+    try json.string(writer, test_node.unique_id);
     try writer.writeAll(",\"resource_type\":\"test\",\"package_name\":");
-    try writeJsonString(writer, test_node.package_name);
+    try json.string(writer, test_node.package_name);
     try writer.writeAll(",\"name\":");
-    try writeJsonString(writer, test_node.name);
+    try json.string(writer, test_node.name);
     try writer.writeAll(",\"alias\":");
-    try writeJsonString(writer, test_node.alias);
+    try json.string(writer, test_node.alias);
     try writer.writeAll(",\"path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(test_node.path));
+    try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
-    try writeJsonString(writer, util.normalizeForDisplay(test_node.original_file_path));
+    try json.string(writer, util.normalizeForDisplay(test_node.original_file_path));
     try writer.writeAll(",\"patch_path\":null,\"language\":\"sql\",\"raw_code\":");
-    try writeJsonString(writer, test_node.raw_code);
+    try json.string(writer, test_node.raw_code);
     try writer.writeAll(",\"attached_node\":");
     if (test_node.attached_node) |attached_node| {
-        try writeJsonString(writer, attached_node);
+        try json.string(writer, attached_node);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\"column_name\":");
     if (test_node.column_name) |column_name| {
-        try writeJsonString(writer, column_name);
+        try json.string(writer, column_name);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\"test_metadata\":{\"name\":");
-    try writeJsonString(writer, test_node.test_name);
+    try json.string(writer, test_node.test_name);
     try writer.writeAll(",\"kwargs\":{\"model\":");
     const model_kwarg = if (test_node.attached_node) |attached_node| blk: {
         const model_name = modelNameFromUniqueId(attached_node);
@@ -668,14 +665,14 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
         break :blk try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(source('{s}', '{s}')) }}}}", .{ source_ref.source_name, source_ref.table_name });
     };
     defer allocator.free(model_kwarg);
-    try writeJsonString(writer, model_kwarg);
+    try json.string(writer, model_kwarg);
     if (argument_column_name) |column_name| {
         try writer.writeAll(",\"column_name\":");
-        try writeJsonString(writer, column_name);
+        try json.string(writer, column_name);
     }
     if (test_node.accepted_values.items.len != 0) {
         try writer.writeAll(",\"values\":");
-        try writeStringArray(writer, test_node.accepted_values.items);
+        try json.stringArray(writer, test_node.accepted_values.items);
     }
     if (test_node.accepted_values_quote) |quote| {
         try writer.writeAll(",\"quote\":");
@@ -683,16 +680,16 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     }
     if (test_node.relationship_to.len != 0) {
         try writer.writeAll(",\"to\":");
-        try writeJsonString(writer, test_node.relationship_to);
+        try json.string(writer, test_node.relationship_to);
     }
     if (test_node.relationship_field.len != 0) {
         try writer.writeAll(",\"field\":");
-        try writeJsonString(writer, test_node.relationship_field);
+        try json.string(writer, test_node.relationship_field);
     }
     try writer.writeAll("},\"namespace\":null},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
-    try writeStringArray(writer, test_node.macro_depends_on.items);
+    try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
-    try writeStringArray(writer, test_node.depends_on.items);
+    try json.stringArray(writer, test_node.depends_on.items);
     try writer.writeAll("},\"refs\":");
     try writeRefDeps(writer, test_node.refs.items);
     try writer.writeAll(",\"sources\":");
@@ -704,15 +701,6 @@ fn genericTestNodeColumnName(test_node: *const GenericTestNode) ?[]const u8 {
     return test_node.argument_column_name orelse test_node.column_name;
 }
 
-fn writeStringArray(writer: *Io.Writer, values: []const []const u8) !void {
-    try writer.writeAll("[");
-    for (values, 0..) |value, index| {
-        if (index != 0) try writer.writeAll(",");
-        try writeJsonString(writer, value);
-    }
-    try writer.writeAll("]");
-}
-
 fn writeExposureDependsOnNodes(writer: *Io.Writer, values: []const []const u8) !void {
     try writer.writeAll("[");
     var first = true;
@@ -720,23 +708,19 @@ fn writeExposureDependsOnNodes(writer: *Io.Writer, values: []const []const u8) !
         if (!std.mem.startsWith(u8, value, "source.")) continue;
         if (!first) try writer.writeAll(",");
         first = false;
-        try writeJsonString(writer, value);
+        try json.string(writer, value);
     }
     for (values) |value| {
         if (std.mem.startsWith(u8, value, "source.")) continue;
         if (!first) try writer.writeAll(",");
         first = false;
-        try writeJsonString(writer, value);
+        try json.string(writer, value);
     }
     try writer.writeAll("]");
 }
 
 fn writeNullableString(writer: *Io.Writer, value: ?[]const u8) !void {
-    if (value) |text| {
-        try writeJsonString(writer, text);
-    } else {
-        try writer.writeAll("null");
-    }
+    try json.nullableString(writer, value);
 }
 
 fn writeFreshnessThreshold(writer: *Io.Writer, value: ?types.FreshnessThreshold) !void {
@@ -773,7 +757,7 @@ fn writeMetaObject(writer: *Io.Writer, entries: []const MetaEntry) !void {
     try writer.writeAll("{");
     for (entries, 0..) |entry, index| {
         if (index != 0) try writer.writeAll(",");
-        try writeJsonString(writer, entry.key);
+        try json.string(writer, entry.key);
         try writer.writeAll(":");
         try writeJsonScalar(writer, entry.value);
     }
@@ -782,7 +766,7 @@ fn writeMetaObject(writer: *Io.Writer, entries: []const MetaEntry) !void {
 
 fn writeDocsConfig(writer: *Io.Writer, docs: DocsConfig) !void {
     try writer.writeAll("{\"show\":");
-    try writer.writeAll(if (docs.show) "true" else "false");
+    try json.boolValue(writer, docs.show);
     try writer.writeAll(",\"node_color\":");
     try writeNullableString(writer, docs.node_color);
     try writer.writeAll("}");
@@ -790,7 +774,7 @@ fn writeDocsConfig(writer: *Io.Writer, docs: DocsConfig) !void {
 
 fn writeJsonScalar(writer: *Io.Writer, value: JsonScalar) !void {
     switch (value.kind) {
-        .string => try writeJsonString(writer, value.text),
+        .string => try json.string(writer, value.text),
         .number, .bool, .null => try writer.writeAll(value.text),
     }
 }
@@ -800,7 +784,7 @@ fn writeRefDeps(writer: *Io.Writer, refs: []const RefDep) !void {
     for (refs, 0..) |ref_dep, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("{\"name\":");
-        try writeJsonString(writer, ref_dep.name);
+        try json.string(writer, ref_dep.name);
         try writer.writeAll(",\"package\":");
         try writeNullableString(writer, ref_dep.package);
         try writer.writeAll(",\"version\":null}");
@@ -813,9 +797,9 @@ fn writeSourceDeps(writer: *Io.Writer, sources: []const SourceDep) !void {
     for (sources, 0..) |source_dep, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("[");
-        try writeJsonString(writer, source_dep.source_name);
+        try json.string(writer, source_dep.source_name);
         try writer.writeAll(",");
-        try writeJsonString(writer, source_dep.table_name);
+        try json.string(writer, source_dep.table_name);
         try writer.writeAll("]");
     }
     try writer.writeAll("]");
@@ -826,22 +810,18 @@ fn writeMacroArguments(writer: *Io.Writer, arguments: []const MacroArgument) !vo
     for (arguments, 0..) |argument, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("{\"name\":");
-        try writeJsonString(writer, argument.name);
+        try json.string(writer, argument.name);
         try writer.writeAll(",\"type\":");
         if (argument.type.len == 0) {
             try writer.writeAll("null");
         } else {
-            try writeJsonString(writer, argument.type);
+            try json.string(writer, argument.type);
         }
         try writer.writeAll(",\"description\":");
-        try writeJsonString(writer, argument.description);
+        try json.string(writer, argument.description);
         try writer.writeAll("}");
     }
     try writer.writeAll("]");
-}
-
-fn writeJsonString(writer: *Io.Writer, value: []const u8) !void {
-    try std.json.Stringify.value(value, .{}, writer);
 }
 
 fn modelNameFromUniqueId(unique_id: []const u8) []const u8 {
@@ -868,7 +848,7 @@ fn renderSelectedJsonWithKeysForTest(allocator: std.mem.Allocator, selected: []s
 fn renderJsonStringForTest(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
-    try writeJsonString(&out.writer, value);
+    try json.string(&out.writer, value);
     return try out.toOwnedSlice();
 }
 
