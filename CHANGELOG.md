@@ -9,6 +9,9 @@ compatibility.
 
 ### Added
 
+- Release archive safety validation now checks packaged binary tarballs for the
+  expected archive shape, version/target naming, denylisted paths, binary/doc
+  string leaks, executable metadata, and checksum coverage before upload.
 - GitHub-backed Agent OS scaffolding for multidisciplinary agent coordination:
   issue forms, PR template, label/project/seed-issue manifests, project-scoped
   specialist agents including a product-manager board monitor, validation and
