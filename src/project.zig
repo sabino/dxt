@@ -357,12 +357,19 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
         deinitRunResults(runtime.allocator, executed.items);
         executed.deinit(runtime.allocator);
     }
-    for (execution_order, 0..) |node, index| {
+    var blocked: std.ArrayList([]const u8) = .empty;
+    defer blocked.deinit(runtime.allocator);
+    var had_failure = false;
+    for (execution_order) |node| {
+        if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &executed)) {
+            continue;
+        }
         if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
-            try appendSkippedAfterExecutionFailure(runtime.allocator, selected_models, execution_order[index + 1 ..], &.{}, node.unique_id, &executed);
-            return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Run");
+            try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
+            had_failure = true;
         }
     }
+    if (had_failure) return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Run");
 
     try writeRunResults(runtime, target_dir, executed.items);
     try stdout.print("Ran {d} model(s) into {s}; wrote artifacts into {s}\n", .{
@@ -1038,6 +1045,21 @@ fn appendSkippedAfterExecutionFailure(
     }
 }
 
+fn appendSkippedIfNodeDependsOnBlocked(
+    allocator: std.mem.Allocator,
+    blocked: *std.ArrayList([]const u8),
+    node: *const Node,
+    executed: *std.ArrayList(run_results.NodeResult),
+) !bool {
+    if (!dependsOnAnyBlocked(node.depends_on.items, blocked.items)) return false;
+    try executed.append(allocator, .{
+        .node = node,
+        .status = "skipped",
+    });
+    try appendUniqueString(allocator, blocked, node.unique_id);
+    return true;
+}
+
 fn appendSkippedAfterDataTestFailure(
     allocator: std.mem.Allocator,
     selected: []const selector.SelectedResource,
@@ -1605,6 +1627,52 @@ test "appendSkippedAfterExecutionFailure honors post-exclude selected set" {
     try appendSkippedAfterExecutionFailure(allocator, &selected, &remaining, &.{}, "model.demo.customers", &executed);
 
     try std.testing.expectEqual(@as(usize, 0), executed.items.len);
+}
+
+test "appendSkippedIfNodeDependsOnBlocked records one blocked model" {
+    const allocator = std.testing.allocator;
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select * from missing_relation",
+    });
+    var orders = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select * from {{ ref('customers') }}",
+    };
+    try orders.depends_on.append(allocator, "model.demo.customers");
+    try graph.nodes.append(allocator, orders);
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.independent",
+        .name = "independent",
+        .path = "independent.sql",
+        .original_file_path = "models/independent.sql",
+        .raw_code = "select 1",
+    });
+
+    var blocked: std.ArrayList([]const u8) = .empty;
+    defer blocked.deinit(allocator);
+    try blocked.append(allocator, "model.demo.customers");
+    var executed: std.ArrayList(run_results.NodeResult) = .empty;
+    defer executed.deinit(allocator);
+
+    try std.testing.expect(try appendSkippedIfNodeDependsOnBlocked(allocator, &blocked, &graph.nodes.items[1], &executed));
+    try std.testing.expect(!try appendSkippedIfNodeDependsOnBlocked(allocator, &blocked, &graph.nodes.items[2], &executed));
+    try std.testing.expectEqual(@as(usize, 1), executed.items.len);
+    try std.testing.expectEqualStrings("model.demo.orders", executed.items[0].node.?.unique_id);
+    try std.testing.expectEqualStrings("skipped", executed.items[0].status);
+    try std.testing.expect(containsUniqueId(blocked.items, "model.demo.orders"));
 }
 
 test "appendSkippedAfterDataTestFailure skips selected downstream nodes and unexecuted tests" {

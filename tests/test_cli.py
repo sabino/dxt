@@ -1775,6 +1775,32 @@ models:
     )
 
 
+def write_run_failure_continuation_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: run_failure_continue
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "bad_parent.sql").write_text(
+        """{{ config(materialized='table') }}
+select * from missing_relation
+"""
+    )
+    (project / "models" / "bad_child.sql").write_text(
+        """{{ config(materialized='table') }}
+select * from {{ ref("bad_parent") }}
+"""
+    )
+    (project / "models" / "independent.sql").write_text(
+        """{{ config(materialized='table') }}
+select 42 as answer
+"""
+    )
+
+
 def write_build_test_failure_downstream_project(project: Path) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -2225,6 +2251,39 @@ def test_build_model_execution_failure_skips_selected_generic_tests(tmp_path: Pa
     assert run_results["results"][0]["message"] == "DuckDB execution failed"
     assert run_results["results"][1]["message"] is None
     assert run_results["results"][2]["message"] is None
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run failure continuation slice")
+def test_run_continues_independent_model_after_execution_failure(tmp_path: Path):
+    project = tmp_path / "run_failure_continue"
+    write_run_failure_continuation_project(project)
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Run failed after 3 result(s)" in result.stdout
+    assert "one or more selected resources failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    results_by_id = {item["unique_id"]: item for item in run_results["results"]}
+    assert results_by_id["model.run_failure_continue.bad_parent"]["status"] == "error"
+    assert results_by_id["model.run_failure_continue.bad_parent"]["message"] == "DuckDB execution failed"
+    assert results_by_id["model.run_failure_continue.bad_child"]["status"] == "skipped"
+    assert results_by_id["model.run_failure_continue.bad_child"]["message"] is None
+    assert results_by_id["model.run_failure_continue.independent"]["status"] == "success"
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select answer from "main"."independent"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "42"
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")
