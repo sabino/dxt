@@ -108,7 +108,7 @@ in `.agent/runs/` and stay ignored.
 | Full integration matrix | GitHub CI `test py3.11/py3.12` | Full pytest fixture coverage with JUnit reports, without repeating native release builds in every Python job. |
 | Runtime boundary | `python scripts/check_runtime_boundary.py` | Prevent Python product-runtime drift. |
 | Public safety | `python scripts/check_public_safety.py` | Catch secrets, local paths, generated noise, and private artifacts. |
-| Public fixture gates | `scripts/check_jaffle_shop_duckdb_*.py` | Validate current public Jaffle-style parse/build/run subsets; CI runs the parse, DuckDB build, and DuckDB run gates with a pinned, checksum-verified DuckDB CLI, while local runs can target the relevant script. |
+| Public fixture gates | `scripts/check_jaffle_shop_duckdb_*.py` | Validate current public Jaffle-style parse/build/run/docs subsets; CI runs the parse, DuckDB build, DuckDB run, and docs-generate gates with a pinned, checksum-verified DuckDB CLI, while local runs can target the relevant script. |
 
 ## Where To Start
 
