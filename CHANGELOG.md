@@ -11,9 +11,14 @@ compatibility.
 
 - GitHub-backed Agent OS scaffolding for multidisciplinary agent coordination:
   issue forms, PR template, label/project/seed-issue manifests, project-scoped
-  specialist agents, validation/bootstrap scripts, a local autonomous Codex
-  worker orchestrator, project-local Codex subagent configuration, and docs for
-  supervisor, hierarchical, network, and reflection patterns.
+  specialist agents including a product-manager board monitor, validation and
+  bootstrap scripts, a local autonomous Codex worker orchestrator, project-local
+  Codex subagent configuration, and docs for supervisor, hierarchical, network,
+  and reflection patterns.
+- Codex pull-plug restart helpers for ignored local handoff state, optional
+  detached `codex exec` relaunches, and a two-phase tmux/Hermes watchdog path
+  that can resume Codex in the same visible terminal pane only after the active
+  agent marks the request safe to exit.
 - Multi-agent worktree workflow documentation, project-scoped Codex agent
   roles, and helper scripts for isolated concurrent development and PR
   convergence.

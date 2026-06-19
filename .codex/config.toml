@@ -18,6 +18,11 @@ description = "Read-only triager for labels, Project fields, readiness, and rout
 config_file = "agents/dxt_issue_triager.toml"
 nickname_candidates = ["Iris", "Nora", "Uma"]
 
+[agents.dxt_product_manager]
+description = "Product manager for roadmap hygiene, issue board monitoring, priorities, and nudges."
+config_file = "agents/dxt_product_manager.toml"
+nickname_candidates = ["Ari", "Morgan", "Riley"]
+
 [agents.dxt_code_mapper]
 description = "Read-only mapper for Zig owner modules, fixtures, artifacts, and validation."
 config_file = "agents/dxt_code_mapper.toml"

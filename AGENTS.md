@@ -25,6 +25,10 @@ Hard requirement: the `dxt` product runtime is Zig. Python may remain only for d
 - If interactive subagent spawning is unavailable or at the thread cap, use `codex exec` in a separate worktree and keep prompts scoped.
 - Use GitHub Issues and Projects for public coordination state when work spans multiple agents, branches, or review specialties.
 - Use `scripts/agent_os_orchestrator.py` when work should proceed autonomously from GitHub issues into local worktrees and Codex worker subprocesses.
+- Use `scripts/codex_pull_plug.py` only for detached/noninteractive restart handoffs after project-scoped `.codex/` changes. It writes ignored handoff state and lets a guardian launch a fresh `codex exec`; it does not kill the current process or reuse the visible terminal.
+- Use `scripts/codex_tmux_supervisor.py` for exact-terminal restarts. The session must have been launched inside its tmux pane first; restart requests are two-phase and the watcher may send `/goal pause` and `/exit` only after the current agent marks the request `ready_to_exit`.
+- `scripts/hermes_codex_watchdog.py` is a Hermes-friendly tick for the tmux supervisor. It may observe and notify, but it should only act on `ready_to_exit` requests from this repository.
+- Before requesting any pull-plug restart, write a concise reason and resume prompt. Do not use it to create competing workers for the same issue or dirty branch.
 - Keep raw local agent output in ignored `.agent/runs/`; put only concise public-safe summaries in issues, PRs, docs, or `.agent/research/`.
 - Converge through PRs into `main`; do not merge by copying files between worktrees.
 - Rebase each branch on `origin/main` before final validation.
