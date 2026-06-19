@@ -1,0 +1,7 @@
+selectors:
+  - name: customer_family
+    definition: "*customers"
+  - name: customer_and_descendants
+    definition: "customers+"
+  - name: staging_views
+    definition: "path:models/stg_*,config.materialized:view"

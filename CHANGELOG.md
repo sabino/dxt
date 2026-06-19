@@ -25,6 +25,9 @@ compatibility.
 - Multi-agent worktree workflow documentation, project-scoped Codex agent
   roles, and helper scripts for isolated concurrent development and PR
   convergence.
+- Root-project `selectors.yml` scalar string aliases for selector-backed
+  commands through `--selector <name>`, lowering supported alias definitions to
+  the existing Zig selector engine.
 
 ### Fixed
 

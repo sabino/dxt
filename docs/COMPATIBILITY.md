@@ -8,7 +8,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | Command | Status | Current support | Planned gaps |
 | --- | --- | --- | --- |
 | `dxt parse` | Partial | Loads supported project files and writes a deterministic Manifest v12-shaped slice, including analysis SQL resources, disabled SQL models from YAML properties, literal inline model `config(enabled=false)`, and literal inline singular test `config(enabled=false)`. | Full dbt parser parity, saved queries, semantic resources, full package behavior. |
-| `dxt ls` | Partial | Lists selected graph resources in text or JSON for supported selector syntax. | YAML selectors, state/result/source-status selectors, full indirect-selection parity. |
+| `dxt ls` | Partial | Lists selected graph resources in text or JSON for supported selector syntax, including root-project `selectors.yml` scalar string aliases through `--selector <name>`. | YAML selector composition, state/result/source-status selectors, full indirect-selection parity. |
 | `dxt clean` | Partial | Deletes configured project-relative `clean-targets`, defaulting to the effective target path; protects source directories, rejects outside-project deletion, skips missing paths and plain files, and does not require a profile. | `--no-clean-project-files-only`, Fusion positional file args, symlink/canonical-path parity, richer dbt event output. |
 | `dxt compile` | Partial | Compiles selected enabled SQL models, selected analyses, selected supported built-in generic tests, and selected singular SQL tests through the supported render-only Jinja subset and writes compiled SQL plus manifest fields without opening DuckDB. | Custom generic test macro compilation, full Jinja, macro execution, adapter dispatch execution, arbitrary expressions, filters, hooks. |
 | `dxt run` | Partial | Executes selected enabled DuckDB SQL models with `table` and `view` materializations; writes completed prior rows plus a sanitized `error` run-result row when a selected model fails during DuckDB execution, followed by `skipped` rows for selected blocked model descendants. | Seeds, tests, snapshots, incremental, ephemeral, hooks, grants, independent-resource continuation after failures, full materialization macros. |
@@ -29,7 +29,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `--profiles-dir`, `--profile`, `--target` | Partial | Narrow scalar `profiles.yml` handling for adapter type, schema, target name, profile name, and DuckDB path. |
 | `--target-path` | Supported | Overrides project target path for artifacts and default DuckDB file. |
 | `--vars` | Partial | Scalar CLI vars for narrow `ref()` / `source()` argument resolution, accepting strict JSON objects with stringified scalar values and the existing loose inline YAML-style scalar maps. |
-| `--select`, `--exclude` | Partial | Supported selector subset with graph expansion. |
+| `--select`, `--selector`, `--exclude` | Partial | Supported selector subset with graph expansion. `--selector <name>` reads root-project `selectors.yml` entries whose `definition` is a scalar string and lowers them to existing selector expressions. |
 | `--threads`, `--full-refresh` | Accepted/planned | Product semantics are not complete yet. |
 | `--output`, `--output-keys` | Partial | `ls` supports legacy `text`, compact `json`, dbt-style `name`, `path`, and `selector` formats. `--output-keys` filters compact JSON to `unique_id`, `resource_type`, `name`, `package_name`, `source_name`, `alias`, source-only `identifier`, `path`, `original_file_path`, `tags`, `config.materialized`, `config.tags`, `config.enabled`, `config.docs.show`, `depends_on.nodes`, `depends_on.macros`, and dxt's compact `selector` extension; full dbt node JSON and arbitrary nested-key traversal are not implemented. |
 | `--host`, `--port`, `--no-browser`, `--browser`, `--no-open` | Partial | `docs serve` parses these dbt Core/Fusion-shaped flags. Browser opening is intentionally unsupported in this slice; use `--no-browser`. |
@@ -76,7 +76,8 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `tag:`, `path:`, `file:`, `package:`, `resource_type:`, `test_type:`, `config.materialized:` | Partial; wildcard matching includes `*`, `?`, and fnmatch-style bracket character classes in the supported selector methods. |
 | `source:`, `exposure:`, selected generic test names | Partial |
 | Wildcards | Partial; pinned to observed dbt Core behavior where tested. |
-| YAML selectors, state/result/source-status/access/group/version selectors | Planned |
+| Root `selectors.yml` scalar string aliases | Partial; `--selector <name>` resolves root-project selector entries with scalar string `definition` values into existing selector expressions. |
+| YAML selector composition, state/result/source-status/access/group/version selectors | Planned |
 
 ## Artifacts
 

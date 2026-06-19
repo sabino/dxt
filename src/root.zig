@@ -307,6 +307,8 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
     var options = project.Options{};
     var select_values: std.ArrayList([]const u8) = .empty;
     defer select_values.deinit(allocator);
+    var selector_values: std.ArrayList([]const u8) = .empty;
+    defer selector_values.deinit(allocator);
     var exclude_values: std.ArrayList([]const u8) = .empty;
     defer exclude_values.deinit(allocator);
     var output_key_values: std.ArrayList([]const u8) = .empty;
@@ -335,10 +337,14 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             i += 1;
             var consumed = false;
             while (i < args.len and !isOptionLike(args[i])) : (i += 1) {
-                try validateSelector(args[i]);
                 if (equals(arg, "--select")) {
+                    try validateSelector(args[i]);
                     try select_values.append(allocator, args[i]);
+                } else if (equals(arg, "--selector")) {
+                    if (args[i].len == 0) return error.UnsupportedSelector;
+                    try selector_values.append(allocator, args[i]);
                 } else {
+                    try validateSelector(args[i]);
                     try exclude_values.append(allocator, args[i]);
                 }
                 consumed = true;
@@ -423,6 +429,7 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
         return error.InvalidOption;
     }
     if (select_values.items.len != 0) options.select = try joinSelectorValues(allocator, select_values.items);
+    if (selector_values.items.len != 0) options.selector = try joinSelectorValues(allocator, selector_values.items);
     if (exclude_values.items.len != 0) options.exclude = try joinSelectorValues(allocator, exclude_values.items);
     if (output_key_values.items.len != 0) options.output_keys = try allocator.dupe([]const u8, output_key_values.items);
     return options;
@@ -433,113 +440,7 @@ fn joinSelectorValues(allocator: std.mem.Allocator, values: []const []const u8) 
 }
 
 fn validateSelector(value: []const u8) !void {
-    if (value.len == 0) return error.UnsupportedSelector;
-    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
-    var matched_any = false;
-    while (expressions.next()) |expression| {
-        try validateSelectorExpression(expression);
-        matched_any = true;
-    }
-    if (!matched_any) return error.UnsupportedSelector;
-}
-
-fn validateSelectorExpression(value: []const u8) !void {
-    var terms = std.mem.splitScalar(u8, value, ',');
-    var matched_any = false;
-    while (terms.next()) |raw_term| {
-        if (raw_term.len == 0) return error.UnsupportedSelector;
-        const part = try selectorTermValueForValidation(raw_term);
-        if (part.len == 0) return error.UnsupportedSelector;
-        if (std.mem.indexOfAny(u8, part, " \t\r")) |_| return error.UnsupportedSelector;
-        if (std.mem.indexOfScalar(u8, part, '+')) |_| return error.UnsupportedSelector;
-        if (std.mem.indexOfScalar(u8, part, '@')) |_| return error.UnsupportedSelector;
-        if (std.mem.indexOfScalar(u8, part, ':')) |_| try validateSelectorMethod(part);
-        matched_any = true;
-    }
-    if (!matched_any) return error.UnsupportedSelector;
-}
-
-fn selectorTermValueForValidation(raw_term: []const u8) ![]const u8 {
-    var start: usize = 0;
-    var end: usize = raw_term.len;
-    var has_childrens_parents = false;
-
-    if (start < end and raw_term[start] == '@') {
-        has_childrens_parents = true;
-        start += 1;
-    }
-
-    if (has_childrens_parents and std.mem.indexOfScalar(u8, raw_term[start..], '+') != null) return error.UnsupportedSelector;
-
-    if (start < end) {
-        if (raw_term[start] == '+') {
-            start += 1;
-        } else {
-            var digit_end = start;
-            while (digit_end < end and isSelectorDigit(raw_term[digit_end])) digit_end += 1;
-            if (digit_end > start and digit_end < end and raw_term[digit_end] == '+') {
-                _ = std.fmt.parseInt(usize, raw_term[start..digit_end], 10) catch return error.UnsupportedSelector;
-                start = digit_end + 1;
-            }
-        }
-    }
-    if (start >= end or raw_term[start] == '+' or raw_term[start] == '@') return error.UnsupportedSelector;
-
-    if (raw_term[end - 1] == '+') {
-        end -= 1;
-    } else {
-        var digit_start = end;
-        while (digit_start > start and isSelectorDigit(raw_term[digit_start - 1])) digit_start -= 1;
-        if (digit_start < end and digit_start > start and raw_term[digit_start - 1] == '+') {
-            _ = std.fmt.parseInt(usize, raw_term[digit_start..end], 10) catch return error.UnsupportedSelector;
-            end = digit_start - 1;
-        }
-    }
-    if (start >= end or raw_term[end - 1] == '+') return error.UnsupportedSelector;
-    return raw_term[start..end];
-}
-
-fn isSelectorDigit(byte: u8) bool {
-    return byte >= '0' and byte <= '9';
-}
-
-fn validateSelectorMethod(part: []const u8) !void {
-    const prefixes = [_][]const u8{
-        "tag:",
-        "path:",
-        "file:",
-        "source:",
-        "exposure:",
-        "unit_test:",
-        "package:",
-        "resource_type:",
-        "test_type:",
-        "config.materialized:",
-    };
-    inline for (prefixes) |prefix| {
-        if (std.mem.startsWith(u8, part, prefix)) {
-            if (part.len == prefix.len) return error.UnsupportedSelector;
-            const value = part[prefix.len..];
-            if (std.mem.eql(u8, prefix, "resource_type:") and !isSupportedResourceType(value)) return error.UnsupportedSelector;
-            if (std.mem.eql(u8, prefix, "test_type:") and !isSupportedTestType(value)) return error.UnsupportedSelector;
-            return;
-        }
-    }
-    return error.UnsupportedSelector;
-}
-
-fn isSupportedResourceType(value: []const u8) bool {
-    return equals(value, "model") or
-        equals(value, "analysis") or
-        equals(value, "seed") or
-        equals(value, "source") or
-        equals(value, "exposure") or
-        equals(value, "test") or
-        equals(value, "unit_test");
-}
-
-fn isSupportedTestType(value: []const u8) bool {
-    return equals(value, "generic") or equals(value, "singular") or equals(value, "data") or equals(value, "unit");
+    try project.validateSelectorSyntax(value);
 }
 
 fn requiresValue(arg: []const u8, mode: OptionMode) bool {
@@ -556,7 +457,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
 
     switch (mode) {
         .common_and_select, .compile, .docs_generate, .list, .seed, .test_command, .build, .source_freshness => {
-            if (equals(arg, "--select") or equals(arg, "--exclude")) return true;
+            if (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude")) return true;
         },
         .common_only, .clean, .docs_serve => {},
     }
@@ -572,7 +473,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
 }
 
 fn isSelectorOption(arg: []const u8, mode: OptionMode) bool {
-    return mode != .common_only and mode != .clean and mode != .docs_serve and (equals(arg, "--select") or equals(arg, "--exclude"));
+    return mode != .common_only and mode != .clean and mode != .docs_serve and (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude"));
 }
 
 fn isOptionLike(arg: []const u8) bool {
@@ -654,6 +555,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         if (!equals(command, "docs serve") and !equals(command, "clean")) {
             try writer.writeAll(
                 \\  --select <selector> [selector ...]
+                \\  --selector <name> [name ...]
                 \\  --exclude <selector> [selector ...]
                 \\
             );
@@ -706,6 +608,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         .project_selection, .list, .seed, .test_command, .build, .docs_generate, .source_freshness => {
             try writer.writeAll(
                 \\  --select <selector> [selector ...]
+                \\  --selector <name> [name ...]
                 \\  --exclude <selector> [selector ...]
                 \\
             );
@@ -1025,6 +928,26 @@ test "list command parses repeated output keys with selector lists" {
     try std.testing.expectEqualStrings("name", options.output_keys.?[0]);
     try std.testing.expectEqualStrings("resource_type", options.output_keys.?[1]);
     try std.testing.expectEqualStrings("unique_id", options.output_keys.?[2]);
+    try std.testing.expectEqualStrings("", stderr.written());
+}
+
+test "list command parses repeated selector alias flags" {
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+
+    const options = try parseOptions(
+        std.testing.allocator,
+        &.{ "--selector", "customer_family", "--selector", "nightly", "--select", "orders" },
+        &stderr.writer,
+        .list,
+    );
+    defer {
+        if (options.select) |value| std.testing.allocator.free(value);
+        if (options.selector) |value| std.testing.allocator.free(value);
+    }
+
+    try std.testing.expectEqualStrings("orders", options.select.?);
+    try std.testing.expectEqualStrings("customer_family nightly", options.selector.?);
     try std.testing.expectEqualStrings("", stderr.written());
 }
 
