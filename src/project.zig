@@ -67,6 +67,7 @@ const appendUnique = util.appendUnique;
 const sortStrings = util.sortStrings;
 const countActiveExposures = project_resolve.countActiveExposures;
 const countActiveNodes = project_resolve.countActiveNodes;
+const countActiveAnalyses = project_resolve.countActiveAnalyses;
 const countActiveSeeds = project_resolve.countActiveSeeds;
 const findDoc = project_resolve.findDoc;
 const findNodeIndexByResourceTypeAndName = project_resolve.findNodeIndexByResourceTypeAndName;
@@ -79,6 +80,7 @@ const loader_callbacks = project_loader.Callbacks{
     .parse_yaml_properties = parseYamlProperties,
     .parse_macros = parseMacros,
     .parse_model = parseModel,
+    .parse_analysis = parseAnalysis,
     .parse_singular_test = parseSingularTest,
     .parse_seed = parseSeed,
     .apply_model_properties = applyModelProperties,
@@ -93,6 +95,7 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     try resolveDependencies(&graph);
     try writeWarnings(stderr, &graph);
     const active_models = countActiveNodes(&graph);
+    const active_analyses = countActiveAnalyses(&graph);
     const active_seeds = countActiveSeeds(&graph);
 
     const target_path = options.target_path orelse project_loader.graphDefaultTarget(runtime, options.project_dir) catch "target";
@@ -104,8 +107,9 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
-    try stdout.print("Parsed {d} model(s), {d} seed(s), {d} source(s), {d} exposure(s), and {d} unit test(s) into {s}\n", .{
+    try stdout.print("Parsed {d} model(s), {d} analysis(es), {d} seed(s), {d} source(s), {d} exposure(s), and {d} unit test(s) into {s}\n", .{
         active_models,
+        active_analyses,
         active_seeds,
         graph.sources.items.len,
         countActiveExposures(&graph),
@@ -165,18 +169,27 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
 
     const target_dir = try targetDir(runtime, options);
-    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, true);
-    if (selected.len != 0 and !compile_result.saw_model and !compile_result.saw_generic_test and !compile_result.saw_singular_test) return error.UnsupportedCompileSelection;
+    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, true, true);
+    if (selected.len != 0 and !compile_result.saw_model and !compile_result.saw_analysis and !compile_result.saw_generic_test and !compile_result.saw_singular_test) return error.UnsupportedCompileSelection;
 
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
-    try stdout.print("Compiled {d} model(s) and {d} test(s) into {s}\n", .{
-        compile_result.count,
-        compile_result.test_count,
-        util.normalizeForDisplay(compile_result.compiled_base),
-    });
+    if (compile_result.analysis_count == 0) {
+        try stdout.print("Compiled {d} model(s) and {d} test(s) into {s}\n", .{
+            compile_result.count,
+            compile_result.test_count,
+            util.normalizeForDisplay(compile_result.compiled_base),
+        });
+    } else {
+        try stdout.print("Compiled {d} model(s), {d} analysis(es), and {d} test(s) into {s}\n", .{
+            compile_result.count,
+            compile_result.analysis_count,
+            compile_result.test_count,
+            util.normalizeForDisplay(compile_result.compiled_base),
+        });
+    }
 }
 
 pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
@@ -191,7 +204,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
 
     const target_dir = try targetDir(runtime, options);
-    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false);
+    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
 
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
@@ -334,7 +347,7 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     try validateRunMaterializations(execution_order);
 
     const target_dir = try targetDir(runtime, options);
-    const compile_result = try compileSelectedModels(runtime, &graph, selected_models, target_dir, false);
+    const compile_result = try compileSelectedModels(runtime, &graph, selected_models, target_dir, false, false);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     if (compile_result.count == 0) return error.UnsupportedRunSelection;
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
@@ -462,7 +475,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
 
     const target_dir = try targetDir(runtime, options);
-    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false);
+    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     const selected_kinds = classifyBuildSelection(selected);
     if (selected_kinds.total == 0) return error.UnsupportedBuildSelection;
@@ -749,8 +762,10 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
 
 const CompileResult = struct {
     count: usize,
+    analysis_count: usize = 0,
     test_count: usize = 0,
     saw_model: bool,
+    saw_analysis: bool = false,
     saw_generic_test: bool = false,
     saw_singular_test: bool = false,
     compiled_base: []const u8,
@@ -1327,13 +1342,15 @@ fn targetDir(runtime: Runtime, options: Options) ![]const u8 {
     return try pathJoin(runtime.allocator, &.{ options.project_dir, target_path });
 }
 
-fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, include_singular_tests: bool) !CompileResult {
+fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, include_singular_tests: bool, include_analyses: bool) !CompileResult {
     const compiled_base = try pathJoin(runtime.allocator, &.{ target_dir, "compiled" });
     try std.Io.Dir.cwd().createDirPath(runtime.io, compiled_base);
 
     var compiled_count: usize = 0;
+    var compiled_analysis_count: usize = 0;
     var compiled_test_count: usize = 0;
     var saw_selected_model = false;
+    var saw_selected_analysis = false;
     var saw_selected_generic_test = false;
     var saw_selected_singular_test = false;
     for (graph.nodes.items) |*node| {
@@ -1352,6 +1369,25 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         node.compiled_path = util.normalizeForDisplay(compiled_path);
         node.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
         compiled_count += 1;
+    }
+
+    if (include_analyses) {
+        for (graph.nodes.items) |*node| {
+            if (!node.enabled or !std.mem.eql(u8, node.resource_type, "analysis")) continue;
+            if (!selectionContains(selected, node.unique_id)) continue;
+            saw_selected_analysis = true;
+
+            const compiled_code = try compiler.compileModel(runtime.allocator, graph, node);
+            const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, node.package_name, node.path });
+            if (std.fs.path.dirname(compiled_path)) |parent| {
+                try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
+            }
+            try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = compiled_code });
+            node.compiled = true;
+            node.compiled_code = compiled_code;
+            node.compiled_path = util.normalizeForDisplay(compiled_path);
+            compiled_analysis_count += 1;
+        }
     }
 
     if (include_singular_tests) {
@@ -1393,8 +1429,10 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
 
     return .{
         .count = compiled_count,
+        .analysis_count = compiled_analysis_count,
         .test_count = compiled_test_count,
         .saw_model = saw_selected_model,
+        .saw_analysis = saw_selected_analysis,
         .saw_generic_test = saw_selected_generic_test,
         .saw_singular_test = saw_selected_singular_test,
         .compiled_base = compiled_base,
@@ -1861,11 +1899,11 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
         if (trimmed.len == 0) continue;
         const indent = leadingSpaces(line);
 
-        if (std.mem.eql(u8, trimmed, "models:") or std.mem.eql(u8, trimmed, "seeds:")) {
+        if (std.mem.eql(u8, trimmed, "models:") or std.mem.eql(u8, trimmed, "seeds:") or std.mem.eql(u8, trimmed, "analyses:")) {
             in_models = true;
             in_columns = false;
             in_config = false;
-            active_resource_type = if (std.mem.eql(u8, trimmed, "seeds:")) "seed" else "model";
+            active_resource_type = if (std.mem.eql(u8, trimmed, "seeds:")) "seed" else if (std.mem.eql(u8, trimmed, "analyses:")) "analysis" else "model";
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -1879,7 +1917,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             continue;
         }
         if (!in_models) continue;
-        if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:") and !std.mem.eql(u8, trimmed, "seeds:")) {
+        if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:") and !std.mem.eql(u8, trimmed, "seeds:") and !std.mem.eql(u8, trimmed, "analyses:")) {
             in_models = false;
             in_columns = false;
             in_config = false;
@@ -2082,6 +2120,31 @@ fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8,
         deinitNode(runtime.allocator, &node);
     }
     try project_jinja.scanSql(runtime.allocator, sql, &node, graph);
+    try graph.nodes.append(runtime.allocator, node);
+}
+
+fn parseAnalysis(runtime: Runtime, project_dir: []const u8, analysis_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    const full_path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
+    const sql = try std.Io.Dir.cwd().readFileAlloc(runtime.io, full_path, runtime.allocator, .limited(16 * 1024 * 1024));
+    const analysis_name = try modelNameFromPath(runtime.allocator, relative_path);
+    const unique_id = try std.fmt.allocPrint(runtime.allocator, "analysis.{s}.{s}", .{ package_name, analysis_name });
+    const relative_analysis_path = relativeUnderResourcePath(relative_path, analysis_root);
+    const analysis_path = try pathJoin(runtime.allocator, &.{ "analysis", relative_analysis_path });
+
+    var node = Node{
+        .resource_type = "analysis",
+        .package_name = package_name,
+        .unique_id = unique_id,
+        .name = analysis_name,
+        .path = analysis_path,
+        .original_file_path = relative_path,
+        .raw_code = sql,
+        .materialized = "analysis",
+    };
+    errdefer deinitNode(runtime.allocator, &node);
+    try project_jinja.scanSql(runtime.allocator, sql, &node, graph);
+    node.materialized = "analysis";
+    node.inline_materialized = false;
     try graph.nodes.append(runtime.allocator, node);
 }
 

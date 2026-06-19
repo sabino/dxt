@@ -231,7 +231,7 @@ fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []cons
     }
     if (std.mem.startsWith(u8, value, "config.materialized:")) {
         const materialized = value["config.materialized:".len..];
-        return std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, materialized, node.materialized);
+        return (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "analysis")) and std.mem.eql(u8, materialized, node.materialized);
     }
     return false;
 }

@@ -9,6 +9,10 @@ compatibility.
 
 ### Added
 
+- First-class `analysis` resources in the Zig runtime for parse/list/compile:
+  default `analyses` discovery, Manifest nodes with refs/sources/macros,
+  YAML description/tag/column patches, `resource_type:analysis` selectors, and
+  selected compile output under `target/compiled/<package>/analysis/...`.
 - `dxt seed` command for selected root-project DuckDB CSV seeds, reusing the
   Zig seed execution boundary, writing `manifest.json` and seed-shaped Run
   Results v6 rows, filtering mixed selections to seeds, and rejecting

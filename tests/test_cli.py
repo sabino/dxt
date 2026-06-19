@@ -139,6 +139,101 @@ def test_compile_select_limits_compiled_models_but_keeps_graph_context(tmp_path:
     assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
 
 
+def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
+    project = copy_fixture(tmp_path, "analysis_basic")
+    parse_target = tmp_path / "parse-target"
+    parse_result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(parse_target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert parse_result.returncode == 0, parse_result.stderr
+    assert "1 analysis(es)" in parse_result.stdout
+
+    parse_manifest_path = parse_target / "manifest.json"
+    parse_manifest = json.loads(parse_manifest_path.read_text())
+    assert_partial_manifest_schema(parse_manifest)
+    assert_manifest_schema_slice(parse_manifest_path)
+    analysis_id = "analysis.analysis_basic.customer_report"
+    analysis = parse_manifest["nodes"][analysis_id]
+    assert analysis["resource_type"] == "analysis"
+    assert analysis["path"] == "analysis/customer_report.sql"
+    assert analysis["original_file_path"] == "analyses/customer_report.sql"
+    assert analysis["description"] == "Customer report analysis"
+    assert analysis["config"]["materialized"] == "analysis"
+    assert analysis["config"]["tags"] == ["reporting"]
+    assert analysis["columns"]["customer_id"]["description"] == "Customer identifier"
+    assert analysis["refs"] == [{"name": "customers", "package": None, "version": None}]
+    assert analysis["sources"] == [["raw", "payments"]]
+    assert analysis["depends_on"]["nodes"] == [
+        "model.analysis_basic.customers",
+        "source.analysis_basic.raw.payments",
+    ]
+
+    ls_result = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--resource-type",
+            "analysis",
+            "--output",
+            "json",
+            "--output-keys",
+            "unique_id",
+            "resource_type",
+            "name",
+            "path",
+            "config.materialized",
+            "config.tags",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_result.returncode == 0, ls_result.stderr
+    assert json.loads(ls_result.stdout) == [
+        {
+            "unique_id": analysis_id,
+            "resource_type": "analysis",
+            "name": "customer_report",
+            "path": "analysis/customer_report.sql",
+            "config.materialized": "analysis",
+            "config.tags": ["reporting"],
+        }
+    ]
+
+    compile_target = tmp_path / "compile-target"
+    compile_result = subprocess.run(
+        [
+            DXT,
+            "compile",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(compile_target),
+            "--select",
+            "resource_type:analysis",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    assert "Compiled 0 model(s), 1 analysis(es), and 0 test(s)" in compile_result.stdout
+    compiled_sql = (compile_target / "compiled" / "analysis_basic" / "analysis" / "customer_report.sql").read_text()
+    assert 'from "main"."customers"' in compiled_sql
+    assert 'from "raw"."payments"' in compiled_sql
+    compile_manifest = json.loads((compile_target / "manifest.json").read_text())
+    compiled_analysis = compile_manifest["nodes"][analysis_id]
+    assert compiled_analysis["compiled"] is True
+    assert compiled_analysis["compiled_code"] == compiled_sql
+    assert compiled_analysis["compiled_path"].endswith("/compiled/analysis_basic/analysis/customer_report.sql")
+    assert compiled_analysis["relation_name"] is None
+
+
 def write_static_loop_project(project: Path) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -4108,7 +4203,7 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
         assert isinstance(unit_test["depends_on"]["nodes"], list)
     for unique_id, node in manifest["nodes"].items():
         assert unique_id == node["unique_id"]
-        assert node["resource_type"] in {"model", "seed", "test"}
+        assert node["resource_type"] in {"model", "analysis", "seed", "test"}
         common_keys = {
             "unique_id",
             "resource_type",
@@ -4120,7 +4215,7 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
             "depends_on",
         }
         assert set(node) >= common_keys
-        if node["resource_type"] == "model":
+        if node["resource_type"] in {"model", "analysis"}:
             assert set(node) >= {
                 "patch_path",
                 "language",
@@ -6778,7 +6873,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         capture_output=True,
     )
     assert unsupported_type.returncode == 2
-    assert "--resource-type supports only model, seed, source, exposure, test, or unit_test" in unsupported_type.stderr
+    assert "--resource-type supports only model, analysis, seed, source, exposure, test, or unit_test" in unsupported_type.stderr
 
     for selector in [
         "state:modified",

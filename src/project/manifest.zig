@@ -575,7 +575,9 @@ fn writeUnitTestRows(writer: *Io.Writer, fixture: types.UnitTestFixture) !void {
 fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
     try writer.writeAll("{\"unique_id\":");
     try json.string(writer, node.unique_id);
-    try writer.writeAll(",\"resource_type\":\"model\",\"package_name\":");
+    try writer.writeAll(",\"resource_type\":");
+    try json.string(writer, node.resource_type);
+    try writer.writeAll(",\"package_name\":");
     try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
@@ -623,7 +625,11 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) 
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(node.compiled_path orelse ""));
         try writer.writeAll(",\"relation_name\":");
-        try json.string(writer, node.relation_name orelse "");
+        if (node.relation_name) |relation_name| {
+            try json.string(writer, relation_name);
+        } else {
+            try writer.writeAll("null");
+        }
         try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":false");
     }
     try writer.writeAll("}");

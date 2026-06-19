@@ -219,6 +219,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingProjectFile => stderr.writeAll("error: missing dbt_project.yml\n") catch {},
         error.InvalidProjectName => stderr.writeAll("error: dbt_project.yml must define a non-empty name\n") catch {},
         error.DuplicateModelName => stderr.writeAll("error: duplicate model name in supported M1 parser subset\n") catch {},
+        error.DuplicateAnalysisName => stderr.writeAll("error: duplicate analysis name in supported M1 parser subset\n") catch {},
         error.DuplicateSeedName => stderr.writeAll("error: duplicate seed name in supported M1 parser subset\n") catch {},
         error.DuplicateDocName => stderr.writeAll("error: duplicate docs block name in supported M1 parser subset\n") catch {},
         error.DuplicateExposureName => stderr.writeAll("error: duplicate exposure name in supported M1 parser subset\n") catch {},
@@ -252,7 +253,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedCleanPath => stderr.writeAll("error: clean-targets must contain non-empty project-relative paths\n") catch {},
         error.UnsupportedCleanOutsideProject => stderr.writeAll("error: clean refuses absolute paths or paths outside the project\n") catch {},
         error.UnsupportedCleanSourcePath => stderr.writeAll("error: clean refuses to remove model, seed, or macro source paths\n") catch {},
-        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, seed, source, exposure, test, or unit_test in the M1 parser subset\n") catch {},
+        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, analysis, seed, source, exposure, test, or unit_test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
         error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model or supported generic or singular SQL test resources\n") catch {},
         error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources\n") catch {},
@@ -383,7 +384,7 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
                 if (port == 0) return error.InvalidDocsServePort;
                 options.docs_port = port;
             } else if (equals(arg, "--resource-type")) {
-                if (!equals(value, "model") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "exposure") and !equals(value, "test") and !equals(value, "unit_test")) return error.UnsupportedResourceType;
+                if (!equals(value, "model") and !equals(value, "analysis") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "exposure") and !equals(value, "test") and !equals(value, "unit_test")) return error.UnsupportedResourceType;
                 options.resource_type = value;
             } else if (equals(arg, "--output")) {
                 if (equals(value, "text")) {
@@ -529,6 +530,7 @@ fn validateSelectorMethod(part: []const u8) !void {
 
 fn isSupportedResourceType(value: []const u8) bool {
     return equals(value, "model") or
+        equals(value, "analysis") or
         equals(value, "seed") or
         equals(value, "source") or
         equals(value, "exposure") or
