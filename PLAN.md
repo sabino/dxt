@@ -451,9 +451,10 @@ Current YAML selector and state/defer roadmap source note:
 `.agent/research/m2-yaml-selectors-state-defer-roadmap.md` maps dbt Core v1
 `selectors.yml`, `--selector`, `--state`, result/source-status selectors, and
 defer flags plus Fusion selector/state references to dxt ownership boundaries
-and a staged implementation sequence. The first recommended implementation is
-only root-project `selectors.yml` scalar string aliases that lower to existing
-Zig selector expressions. It does not implement YAML selector composition,
+and a staged implementation sequence. The first implemented slice supports
+root-project `selectors.yml` entries whose `definition` is a scalar string and
+lowers `--selector <name>` to existing Zig selector expressions for commands
+sharing the selector engine. It does not implement YAML selector composition,
 state/result/source-status matching, state artifact loading, or deferral
 semantics.
 

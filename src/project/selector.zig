@@ -45,6 +45,115 @@ const SelectorSpec = struct {
     children_depth: ?usize = null,
 };
 
+pub fn validateSelectorSyntax(value: []const u8) !void {
+    if (value.len == 0) return error.UnsupportedSelector;
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    var matched_any = false;
+    while (expressions.next()) |expression| {
+        try validateSelectorExpression(expression);
+        matched_any = true;
+    }
+    if (!matched_any) return error.UnsupportedSelector;
+}
+
+fn validateSelectorExpression(value: []const u8) !void {
+    var terms = std.mem.splitScalar(u8, value, ',');
+    var matched_any = false;
+    while (terms.next()) |raw_term| {
+        if (raw_term.len == 0) return error.UnsupportedSelector;
+        const part = try selectorTermValueForValidation(raw_term);
+        if (part.len == 0) return error.UnsupportedSelector;
+        if (std.mem.indexOfAny(u8, part, " \t\r")) |_| return error.UnsupportedSelector;
+        if (std.mem.indexOfScalar(u8, part, '+')) |_| return error.UnsupportedSelector;
+        if (std.mem.indexOfScalar(u8, part, '@')) |_| return error.UnsupportedSelector;
+        if (std.mem.indexOfScalar(u8, part, ':')) |_| try validateSelectorMethod(part);
+        matched_any = true;
+    }
+    if (!matched_any) return error.UnsupportedSelector;
+}
+
+fn selectorTermValueForValidation(raw_term: []const u8) ![]const u8 {
+    var start: usize = 0;
+    var end: usize = raw_term.len;
+    var has_childrens_parents = false;
+
+    if (start < end and raw_term[start] == '@') {
+        has_childrens_parents = true;
+        start += 1;
+    }
+
+    if (has_childrens_parents and std.mem.indexOfScalar(u8, raw_term[start..], '+') != null) return error.UnsupportedSelector;
+
+    if (start < end) {
+        if (raw_term[start] == '+') {
+            start += 1;
+        } else {
+            var digit_end = start;
+            while (digit_end < end and isSelectorDigit(raw_term[digit_end])) digit_end += 1;
+            if (digit_end > start and digit_end < end and raw_term[digit_end] == '+') {
+                _ = std.fmt.parseInt(usize, raw_term[start..digit_end], 10) catch return error.UnsupportedSelector;
+                start = digit_end + 1;
+            }
+        }
+    }
+
+    if (start >= end or raw_term[start] == '+' or raw_term[start] == '@') return error.UnsupportedSelector;
+
+    if (start < end) {
+        if (raw_term[end - 1] == '+') {
+            end -= 1;
+        } else {
+            var digit_start = end;
+            while (digit_start > start and isSelectorDigit(raw_term[digit_start - 1])) digit_start -= 1;
+            if (digit_start < end and digit_start > start and raw_term[digit_start - 1] == '+') {
+                _ = std.fmt.parseInt(usize, raw_term[digit_start..end], 10) catch return error.UnsupportedSelector;
+                end = digit_start - 1;
+            }
+        }
+    }
+    if (start >= end or raw_term[end - 1] == '+') return error.UnsupportedSelector;
+    return raw_term[start..end];
+}
+
+fn validateSelectorMethod(part: []const u8) !void {
+    const prefixes = [_][]const u8{
+        "tag:",
+        "path:",
+        "file:",
+        "package:",
+        "resource_type:",
+        "test_type:",
+        "source:",
+        "exposure:",
+        "unit_test:",
+        "config.materialized:",
+    };
+    for (prefixes) |prefix| {
+        if (std.mem.startsWith(u8, part, prefix)) {
+            if (part.len == prefix.len) return error.UnsupportedSelector;
+            const value = part[prefix.len..];
+            if (std.mem.eql(u8, prefix, "resource_type:") and !isSupportedResourceType(value)) return error.UnsupportedSelector;
+            if (std.mem.eql(u8, prefix, "test_type:") and !isSupportedTestType(value)) return error.UnsupportedSelector;
+            return;
+        }
+    }
+    return error.UnsupportedSelector;
+}
+
+fn isSupportedResourceType(value: []const u8) bool {
+    return std.mem.eql(u8, value, "model") or
+        std.mem.eql(u8, value, "analysis") or
+        std.mem.eql(u8, value, "seed") or
+        std.mem.eql(u8, value, "source") or
+        std.mem.eql(u8, value, "exposure") or
+        std.mem.eql(u8, value, "test") or
+        std.mem.eql(u8, value, "unit_test");
+}
+
+fn isSupportedTestType(value: []const u8) bool {
+    return std.mem.eql(u8, value, "generic") or std.mem.eql(u8, value, "singular") or std.mem.eql(u8, value, "data") or std.mem.eql(u8, value, "unit");
+}
+
 pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8) ![]SelectedResource {
     const select_spec = parseSelectorSpec(select);
     const exclude_spec = parseSelectorSpec(exclude);

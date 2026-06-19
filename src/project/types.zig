@@ -18,6 +18,7 @@ pub const Options = struct {
     docs_port: u16 = 8080,
     docs_open_browser: bool = false,
     select: ?[]const u8 = null,
+    selector: ?[]const u8 = null,
     exclude: ?[]const u8 = null,
     resource_type: ?[]const u8 = null,
     output: Output = .text,

@@ -6413,6 +6413,97 @@ def test_ls_multi_argv_and_repeated_selector_flags(tmp_path: Path):
     ]
 
 
+def test_ls_root_selectors_yml_scalar_aliases(tmp_path: Path):
+    project = copy_fixture(tmp_path, "selector_graph")
+
+    def ls_json(*args: str) -> list[str]:
+        result = subprocess.run(
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return [item["unique_id"] for item in json.loads(result.stdout)]
+
+    assert ls_json("--selector", "customer_family") == ls_json("--select", "*customers")
+    assert ls_json("--selector", "customer_and_descendants") == ls_json("--select", "customers+")
+    assert ls_json("--selector", "staging_views") == ["model.selector_graph.stg_customers"]
+    assert ls_json("--selector", "customer_family", "--exclude", "stg_customers") == [
+        "model.selector_graph.customers"
+    ]
+    assert ls_json("--selector", "customer_family", "--select", "orders") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        "model.selector_graph.stg_customers",
+    ]
+
+
+def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if not has_dbt_core:
+        pytest.skip("dbt Core is not installed for the optional selector alias oracle")
+    if not has_dbt_duckdb:
+        pytest.skip("dbt DuckDB adapter is not installed for the optional selector alias oracle")
+
+    from dbt.cli.main import dbtRunner
+
+    project = copy_fixture(tmp_path, "selector_graph")
+    (project / "profiles.yml").write_text(
+        "\n".join(
+            [
+                "default:",
+                "  target: dev",
+                "  outputs:",
+                "    dev:",
+                "      type: duckdb",
+                "      path: oracle.duckdb",
+                "      schema: main",
+            ]
+        )
+        + "\n"
+    )
+
+    dxt_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--selector", "customer_family", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert dxt_result.returncode == 0, dxt_result.stderr
+    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+
+    dbt_result = dbtRunner().invoke(
+        [
+            "ls",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--selector",
+            "customer_family",
+            "--output",
+            "json",
+        ]
+    )
+    dbt_stdout = capsys.readouterr().out
+    dbt_ids = sorted(
+        json.loads(line)["unique_id"]
+        for line in dbt_stdout.splitlines()
+        if line.strip().startswith("{")
+    )
+    if not dbt_result.success and not dbt_ids:
+        pytest.skip(f"dbt Core selector oracle unavailable: {dbt_result.exception!r}")
+
+    assert dxt_ids == dbt_ids
+
+
 def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
     project = copy_fixture(tmp_path, "inline_config")
 
@@ -7060,6 +7151,59 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     )
     assert unsupported_in_list.returncode == 2
     assert "selector syntax is not supported" in unsupported_in_list.stderr
+
+    missing_alias = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--selector", "customer_family"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert missing_alias.returncode == 2
+    assert "selector syntax is not supported" in missing_alias.stderr
+
+    duplicated_alias_project = copy_fixture(tmp_path / "duplicated_alias", "selector_graph")
+    (duplicated_alias_project / "selectors.yml").write_text(
+        "\n".join(
+            [
+                "selectors:",
+                "  - name: duplicate",
+                "    definition: customers",
+                "  - name: duplicate",
+                "    definition: orders",
+            ]
+        )
+        + "\n"
+    )
+    duplicated_alias = subprocess.run(
+        [DXT, "ls", "--project-dir", str(duplicated_alias_project), "--selector", "duplicate"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert duplicated_alias.returncode == 2
+    assert "selector syntax is not supported" in duplicated_alias.stderr
+
+    non_scalar_alias_project = copy_fixture(tmp_path / "non_scalar_alias", "selector_graph")
+    (non_scalar_alias_project / "selectors.yml").write_text(
+        "\n".join(
+            [
+                "selectors:",
+                "  - name: structured",
+                "    definition:",
+                "      method: tag",
+                "      value: nightly",
+            ]
+        )
+        + "\n"
+    )
+    non_scalar_alias = subprocess.run(
+        [DXT, "ls", "--project-dir", str(non_scalar_alias_project), "--selector", "structured"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert non_scalar_alias.returncode == 2
+    assert "selector syntax is not supported" in non_scalar_alias.stderr
 
 
 def test_ls_at_selector_includes_descendant_parents(tmp_path: Path):

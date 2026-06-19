@@ -10,6 +10,7 @@ const project_jinja = @import("project/jinja.zig");
 const project_loader = @import("project/loader.zig");
 const project_parse = @import("project/parse.zig");
 const project_resolve = @import("project/resolve.zig");
+const selector_config = @import("project/selector_config.zig");
 const manifest = @import("project/manifest.zig");
 const run_results = @import("project/run_results.zig");
 const selector = @import("project/selector.zig");
@@ -22,6 +23,7 @@ const execution_failure_message = "DuckDB execution failed";
 pub const Runtime = types.Runtime;
 pub const Options = types.Options;
 pub const Output = types.Output;
+pub const validateSelectorSyntax = selector.validateSelectorSyntax;
 
 const ColumnDef = types.ColumnDef;
 const GenericTestDef = types.GenericTestDef;
@@ -93,6 +95,7 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     defer graph.deinit();
 
     try resolveDependencies(&graph);
+    if (options.selector != null) _ = try resolveSelect(runtime, options);
     try writeWarnings(stderr, &graph);
     const active_models = countActiveNodes(&graph);
     const active_analyses = countActiveAnalyses(&graph);
@@ -123,7 +126,7 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
     defer graph.deinit();
 
     try resolveDependencies(&graph);
-    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const select = try resolveSelect(runtime, options);
     const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
     const resource_type = if (options.resource_type) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected = try selector.selectResources(runtime.allocator, &graph, resource_type, select, exclude);
@@ -164,7 +167,7 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     try resolveDependencies(&graph);
     try writeWarnings(stderr, &graph);
 
-    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const select = try resolveSelect(runtime, options);
     const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
 
@@ -199,7 +202,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     try resolveDependencies(&graph);
     try writeWarnings(stderr, &graph);
 
-    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const select = try resolveSelect(runtime, options);
     const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
 
@@ -244,10 +247,10 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
     try resolveDependencies(&graph);
     try writeWarnings(stderr, &graph);
 
-    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const select = try resolveSelect(runtime, options);
     const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected_sources = try selector.selectResources(runtime.allocator, &graph, "source", select, exclude);
-    if (selected_sources.len == 0 and options.select != null) {
+    if (selected_sources.len == 0 and select != null) {
         const selected_any = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
         if (selected_any.len != 0) return error.UnsupportedSourceFreshnessSelection;
     }
@@ -333,10 +336,10 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     try resolveDependencies(&graph);
     try writeWarnings(stderr, &graph);
 
-    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const select = try resolveSelect(runtime, options);
     const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected_models = try selector.selectResources(runtime.allocator, &graph, "model", select, exclude);
-    if (selected_models.len == 0 and options.select != null) {
+    if (selected_models.len == 0 and select != null) {
         const selected_any = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
         if (selected_any.len != 0) return error.UnsupportedRunSelection;
     }
@@ -386,11 +389,11 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     try resolveDependencies(&graph);
     try writeWarnings(stderr, &graph);
 
-    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const select = try resolveSelect(runtime, options);
     const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected_seeds = try selector.selectResources(runtime.allocator, &graph, "seed", select, exclude);
     if (selected_seeds.len == 0) {
-        if (options.select != null) {
+        if (select != null) {
             const selected_any = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
             if (selected_any.len != 0) return error.UnsupportedSeedSelection;
         }
@@ -432,11 +435,11 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     try resolveDependencies(&graph);
     try writeWarnings(stderr, &graph);
 
-    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const select = try resolveSelect(runtime, options);
     const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected = try selector.selectResources(runtime.allocator, &graph, "test", select, exclude);
     if (selected.len == 0) {
-        if (options.select != null) {
+        if (select != null) {
             const selected_any = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
             if (selected_any.len != 0) return error.UnsupportedTestExecution;
         }
@@ -477,7 +480,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     try resolveDependencies(&graph);
     try writeWarnings(stderr, &graph);
 
-    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const select = try resolveSelect(runtime, options);
     const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
 
@@ -765,6 +768,10 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     if (selected_kinds.model != 0) return error.UnsupportedModelExecution;
     if (selected_kinds.test_resource != 0) return error.UnsupportedTestExecution;
     return error.UnsupportedBuildSelection;
+}
+
+fn resolveSelect(runtime: Runtime, options: Options) !?[]const u8 {
+    return try selector_config.resolveSelection(runtime, options.project_dir, options.select, options.selector);
 }
 
 const CompileResult = struct {
