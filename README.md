@@ -138,7 +138,9 @@ Use the test layers deliberately:
 
 Use full `pytest -q` locally for broad runner/artifact changes or before a
 high-risk PR. Otherwise, let GitHub CI run the full integration matrix and
-publish pytest JUnit reports for review.
+publish pytest JUnit reports for review. GitHub CI also runs the public Jaffle
+parse and DuckDB build gates with a pinned, checksum-verified DuckDB CLI, so
+routine local work can stay focused on the touched layer.
 
 Optional compatibility gates:
 
@@ -150,7 +152,8 @@ python scripts/check_dbt_core_m1_oracle.py
 
 The Jaffle scripts use public fixtures and may clone their pinned refs by
 default. Pass `--project-dir path/to/jaffle_shop_duckdb` to run against an
-existing checkout.
+existing checkout. The build gate requires the `duckdb` CLI on `PATH` when run
+locally.
 
 ## Release Builds
 
@@ -165,4 +168,4 @@ that path is portable. See [docs/RELEASES.md](docs/RELEASES.md).
 Pre-alpha. The shipped surface is intentionally narrow and documented. The next
 work remains dbt Core compatibility first: wider Jinja/macro behavior, stronger
 runner semantics, broader selector parity, fuller artifacts, and public
-Jaffle-style build coverage.
+Jaffle-style compatibility coverage.

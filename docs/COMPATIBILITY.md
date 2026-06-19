@@ -106,5 +106,5 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | Full pytest matrix | Supported in CI | Full black-box CLI/artifact fixture gate on Python 3.11 and 3.12 with JUnit reports. |
 | Runtime-boundary scan | Supported | Prevents Python product-runtime drift. |
 | Public-safety scan | Supported | Prevents secrets/local paths/generated noise. |
-| Jaffle parse/build scripts | Partial | Public fixture compatibility gates for current supported subset; CI runs the public parse gate, and the DuckDB build gate remains available where the DuckDB CLI is installed. |
+| Jaffle parse/build scripts | Partial | Public fixture compatibility gates for current supported subset; CI runs the public parse gate and DuckDB build gate with a pinned, checksum-verified DuckDB CLI. Local build-gate runs require the `duckdb` CLI on `PATH`. |
 | dbt Core oracle harness | Partial | Optional developer-side comparison for supported M1 fixtures. |

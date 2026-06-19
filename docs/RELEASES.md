@@ -78,8 +78,9 @@ python scripts/check_public_safety.py
 
 Use full `pytest -q` locally before broad runner/artifact release changes. The
 GitHub CI workflow repeats the native and safety gates, runs the full pytest
-matrix with JUnit reports, and runs the public Jaffle parse gate. Release jobs
-focus on portable binary build validation and repository safety.
+matrix with JUnit reports, and runs the public Jaffle parse/build gate with a
+pinned, checksum-verified DuckDB CLI. Release jobs focus on portable binary
+build validation and repository safety.
 
 Verify downloaded artifacts with:
 
