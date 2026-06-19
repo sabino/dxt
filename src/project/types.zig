@@ -317,6 +317,9 @@ pub const GenericTestNode = struct {
     source_refs: std.ArrayList(SourceDep) = .empty,
     depends_on: std.ArrayList([]const u8) = .empty,
     macro_depends_on: std.ArrayList([]const u8) = .empty,
+    compiled: bool = false,
+    compiled_code: ?[]const u8 = null,
+    compiled_path: ?[]const u8 = null,
 };
 
 pub const SingularTestNode = struct {
