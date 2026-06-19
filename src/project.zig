@@ -358,6 +358,52 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     });
 }
 
+pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
+    defer graph.deinit();
+
+    try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+
+    const select = if (options.select) |value| try runtime.allocator.dupe(u8, value) else null;
+    const exclude = if (options.exclude) |value| try runtime.allocator.dupe(u8, value) else null;
+    const selected_seeds = try selector.selectResources(runtime.allocator, &graph, "seed", select, exclude);
+    if (selected_seeds.len == 0) {
+        if (options.select != null) {
+            const selected_any = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
+            if (selected_any.len != 0) return error.UnsupportedSeedSelection;
+        }
+        return error.UnsupportedSeedSelection;
+    }
+
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedSeedAdapterExecution;
+    const seed_nodes = try selectedSeedExecutionOrder(runtime, &graph, selected_seeds);
+    defer runtime.allocator.free(seed_nodes);
+    try validateSeedExecution(&graph, seed_nodes);
+
+    const target_dir = try targetDir(runtime, options);
+    const manifest_path = try writeManifest(runtime, &graph, target_dir);
+    const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+    var executed: std.ArrayList(run_results.NodeResult) = .empty;
+    defer {
+        deinitRunResults(runtime.allocator, executed.items);
+        executed.deinit(runtime.allocator);
+    }
+    for (seed_nodes, 0..) |node, index| {
+        if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
+            try appendSkippedAfterExecutionFailure(runtime.allocator, selected_seeds, seed_nodes[index + 1 ..], &.{}, node.unique_id, &executed);
+            return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Seed");
+        }
+    }
+
+    try writeRunResults(runtime, target_dir, executed.items);
+    try stdout.print("Seeded {d} seed(s) into {s}; wrote artifacts into {s}\n", .{
+        executed.items.len,
+        util.normalizeForDisplay(db_path),
+        util.normalizeForDisplay(manifest_path),
+    });
+}
+
 pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
     defer graph.deinit();

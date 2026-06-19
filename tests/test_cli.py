@@ -70,6 +70,7 @@ def test_root_help_uses_canonical_name():
     result = subprocess.run([DXT, "--help"], cwd=ROOT, check=True, text=True, capture_output=True)
     assert "Data eXecution & Transformation" in result.stdout
     assert "Data Transformation eXecutor" not in result.stdout
+    assert "Load supported selected DuckDB CSV seeds." in result.stdout
     assert "Execute supported selected DuckDB seeds, models, and tests." in result.stdout
     assert "Preflight selected seeds, models, and tests without running SQL." not in result.stdout
     assert result.stderr == ""
@@ -1330,6 +1331,93 @@ target-path: target
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed build execution slice")
+def test_seed_command_executes_selected_duckdb_seed_and_writes_run_results(tmp_path: Path):
+    project = copy_fixture(tmp_path, "seed_ref")
+    target = tmp_path / "seed-target"
+    result = subprocess.run(
+        [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Seeded 1 seed(s)" in result.stdout
+    assert result.stderr == ""
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == ["seed.seed_ref.raw_customers"]
+    assert run_results["results"][0]["compiled"] is None
+    assert run_results["results"][0]["compiled_code"] is None
+    assert run_results["results"][0]["relation_name"] is None
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select id, name from "main"."raw_customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "1,Ada"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed command execution slice")
+def test_seed_command_filters_mixed_selection_to_seed_resources(tmp_path: Path):
+    project = copy_fixture(tmp_path, "seed_ref")
+    target = tmp_path / "seed-target"
+    result = subprocess.run(
+        [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_customers", "stg_customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Seeded 1 seed(s)" in result.stdout
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == ["seed.seed_ref.raw_customers"]
+
+
+def test_seed_command_rejects_non_seed_selection_before_duckdb(tmp_path: Path):
+    project = copy_fixture(tmp_path, "seed_ref")
+    target = tmp_path / "seed-target"
+    result = subprocess.run(
+        [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "stg_customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "seed currently supports only selected seed resources" in result.stderr
+    assert not (target / "run_results.json").exists()
+    assert not (target / "dxt.duckdb").exists()
+
+
+def test_seed_command_rejects_package_seed_before_duckdb(tmp_path: Path):
+    project = copy_fixture(tmp_path, "package_ref_selector")
+    (project / "profiles.yml").write_text(
+        """default:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: dxt.duckdb
+      schema: main
+"""
+    )
+    target = tmp_path / "seed-target"
+    result = subprocess.run(
+        [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_pkg_customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "seed/build currently executes only root-project DuckDB seeds with default CSV settings" in result.stderr
+    assert not (target / "run_results.json").exists()
+    assert not (target / "dxt.duckdb").exists()
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed build execution slice")

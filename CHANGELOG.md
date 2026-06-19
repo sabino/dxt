@@ -9,6 +9,10 @@ compatibility.
 
 ### Added
 
+- `dxt seed` command for selected root-project DuckDB CSV seeds, reusing the
+  Zig seed execution boundary, writing `manifest.json` and seed-shaped Run
+  Results v6 rows, filtering mixed selections to seeds, and rejecting
+  selections that match no seeds before DuckDB side effects.
 - Singular SQL data tests in the Zig runtime, including `test-paths`
   discovery with `generic/` and `fixtures/` skipped, Manifest nodes without
   generic-only fields, `test_type:singular` / `test_type:data` selection, and
