@@ -336,6 +336,9 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
     if (!config.test_paths_set) {
         try config.test_paths.append(allocator, "tests");
     }
+    if (config.analysis_paths.items.len == 0) {
+        try config.analysis_paths.append(allocator, "analyses");
+    }
     return config;
 }
 
@@ -782,7 +785,8 @@ test "project config parser applies defaults for omitted paths" {
     try std.testing.expectEqualStrings("macros", config.macro_paths.items[0]);
     try std.testing.expectEqual(@as(usize, 1), config.test_paths.items.len);
     try std.testing.expectEqualStrings("tests", config.test_paths.items[0]);
-    try std.testing.expectEqual(@as(usize, 0), config.analysis_paths.items.len);
+    try std.testing.expectEqual(@as(usize, 1), config.analysis_paths.items.len);
+    try std.testing.expectEqualStrings("analyses", config.analysis_paths.items[0]);
     try std.testing.expectEqual(@as(usize, 0), config.snapshot_paths.items.len);
     try std.testing.expectEqual(@as(usize, 0), config.function_paths.items.len);
     try std.testing.expect(!config.clean_targets_set);

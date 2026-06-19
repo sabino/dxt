@@ -1,0 +1,10 @@
+version: 2
+
+analyses:
+  - name: customer_report
+    description: Customer report analysis
+    config:
+      tags: ["reporting"]
+    columns:
+      - name: customer_id
+        description: Customer identifier

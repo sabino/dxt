@@ -51,6 +51,14 @@ pub fn countActiveSeeds(graph: *const Graph) usize {
     return count;
 }
 
+pub fn countActiveAnalyses(graph: *const Graph) usize {
+    var count: usize = 0;
+    for (graph.nodes.items) |node| {
+        if (node.enabled and std.mem.eql(u8, node.resource_type, "analysis")) count += 1;
+    }
+    return count;
+}
+
 pub fn countActiveExposures(graph: *const Graph) usize {
     var count: usize = 0;
     for (graph.exposures.items) |exposure| {
@@ -248,6 +256,21 @@ pub fn rejectDuplicateModels(graph: *const Graph) !void {
                 std.mem.eql(u8, graph.nodes.items[i].unique_id, graph.nodes.items[j].unique_id))
             {
                 return error.DuplicateModelName;
+            }
+        }
+    }
+}
+
+pub fn rejectDuplicateAnalyses(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.nodes.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.nodes.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.nodes.items[i].resource_type, "analysis") and
+                std.mem.eql(u8, graph.nodes.items[j].resource_type, "analysis") and
+                std.mem.eql(u8, graph.nodes.items[i].unique_id, graph.nodes.items[j].unique_id))
+            {
+                return error.DuplicateAnalysisName;
             }
         }
     }

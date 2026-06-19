@@ -28,6 +28,7 @@ const rejectDuplicateDocs = project_resolve.rejectDuplicateDocs;
 const rejectDuplicateExposures = project_resolve.rejectDuplicateExposures;
 const rejectDuplicateMacroProperties = project_resolve.rejectDuplicateMacroProperties;
 const rejectDuplicateMacros = project_resolve.rejectDuplicateMacros;
+const rejectDuplicateAnalyses = project_resolve.rejectDuplicateAnalyses;
 const rejectDuplicateModels = project_resolve.rejectDuplicateModels;
 const rejectDuplicateSeeds = project_resolve.rejectDuplicateSeeds;
 const rejectDuplicateSingularTests = project_resolve.rejectDuplicateSingularTests;
@@ -39,6 +40,7 @@ pub const Callbacks = struct {
     parse_yaml_properties: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     parse_macros: *const fn (Runtime, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     parse_model: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
+    parse_analysis: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     parse_singular_test: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     parse_seed: *const fn (Runtime, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     apply_model_properties: *const fn (*Graph, []const u8) anyerror!void,
@@ -108,6 +110,34 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         }
     }
 
+    for (config.analysis_paths.items) |analysis_path| {
+        var sql_files: std.ArrayList([]const u8) = .empty;
+        defer sql_files.deinit(runtime.allocator);
+        var yaml_files: std.ArrayList([]const u8) = .empty;
+        defer yaml_files.deinit(runtime.allocator);
+        var md_files: std.ArrayList([]const u8) = .empty;
+        defer md_files.deinit(runtime.allocator);
+
+        const root = try pathJoin(runtime.allocator, &.{ options.project_dir, analysis_path });
+        discoverProjectFiles(runtime, root, analysis_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        sortStrings(sql_files.items);
+        sortStrings(yaml_files.items);
+        sortStrings(md_files.items);
+
+        for (md_files.items) |md_path| {
+            try callbacks.parse_doc_blocks(runtime, options.project_dir, analysis_path, md_path, config.name, &graph);
+        }
+        for (yaml_files.items) |yaml_path| {
+            try callbacks.parse_yaml_properties(runtime, options.project_dir, analysis_path, yaml_path, config.name, &graph);
+        }
+        for (sql_files.items) |sql_path| {
+            try callbacks.parse_analysis(runtime, options.project_dir, analysis_path, sql_path, config.name, &graph);
+        }
+    }
+
     try applyProjectModelPathConfigs(&graph, config.model_path_configs.items, true, null);
 
     for (config.seed_paths.items) |seed_path| {
@@ -147,6 +177,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     try callbacks.apply_model_properties(&graph, config.name);
     try callbacks.materialize_generic_tests(&graph);
     sortGraphResources(&graph);
+    try rejectDuplicateAnalyses(&graph);
     try rejectDuplicateModels(&graph);
     try rejectDuplicateSeeds(&graph);
     try rejectDuplicateSingularTests(&graph);
@@ -262,6 +293,34 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
 
             for (sql_files.items) |sql_path| {
                 try callbacks.parse_model(runtime, package_dir, model_path, sql_path, package_config.name, graph);
+            }
+        }
+
+        for (package_config.analysis_paths.items) |analysis_path| {
+            var sql_files: std.ArrayList([]const u8) = .empty;
+            defer sql_files.deinit(runtime.allocator);
+            var yaml_files: std.ArrayList([]const u8) = .empty;
+            defer yaml_files.deinit(runtime.allocator);
+            var md_files: std.ArrayList([]const u8) = .empty;
+            defer md_files.deinit(runtime.allocator);
+
+            const root = try pathJoin(runtime.allocator, &.{ package_dir, analysis_path });
+            discoverProjectFiles(runtime, root, analysis_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            sortStrings(sql_files.items);
+            sortStrings(yaml_files.items);
+            sortStrings(md_files.items);
+
+            for (md_files.items) |md_path| {
+                try callbacks.parse_doc_blocks(runtime, package_dir, analysis_path, md_path, package_config.name, graph);
+            }
+            for (yaml_files.items) |yaml_path| {
+                try callbacks.parse_yaml_properties(runtime, package_dir, analysis_path, yaml_path, package_config.name, graph);
+            }
+            for (sql_files.items) |sql_path| {
+                try callbacks.parse_analysis(runtime, package_dir, analysis_path, sql_path, package_config.name, graph);
             }
         }
 
