@@ -27,10 +27,19 @@
     "metadata": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["project_name"],
+      "required": [
+        "dbt_schema_version",
+        "dbt_version",
+        "generated_at",
+        "invocation_id",
+        "invocation_started_at",
+        "env",
+        "project_name",
+        "adapter_type"
+      ],
       "properties": {
-        "dbt_schema_version": {"type": "string"},
-        "dbt_version": {"type": "string"},
+        "dbt_schema_version": {"const": "https://schemas.getdbt.com/dbt/manifest/v12.json"},
+        "dbt_version": {"const": "0.0.0"},
         "generated_at": {"type": "string"},
         "invocation_id": {"type": ["string", "null"]},
         "invocation_started_at": {"type": ["string", "null"]},

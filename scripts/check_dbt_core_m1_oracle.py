@@ -417,6 +417,13 @@ def compare_manifest(
     allowed: list[str],
 ) -> None:
     assert_equal(f"{fixture} project_name", dxt_manifest["metadata"]["project_name"], dbt_manifest["metadata"]["project_name"])
+    assert_equal(f"{fixture} metadata schema version", dxt_manifest["metadata"]["dbt_schema_version"], dbt_manifest["metadata"]["dbt_schema_version"])
+    assert_equal(f"{fixture} metadata dbt_version placeholder", dxt_manifest["metadata"]["dbt_version"], "0.0.0")
+    assert_equal(f"{fixture} metadata invocation_id placeholder", dxt_manifest["metadata"]["invocation_id"], None)
+    assert_equal(f"{fixture} metadata invocation_started_at placeholder", dxt_manifest["metadata"]["invocation_started_at"], None)
+    assert_equal(f"{fixture} metadata env placeholder", dxt_manifest["metadata"]["env"], {})
+    if not isinstance(dxt_manifest["metadata"]["generated_at"], str):
+        raise OracleMismatch(f"{fixture} metadata generated_at: expected string placeholder, got {dxt_manifest['metadata']['generated_at']!r}")
     assert_equal(f"{fixture} node ids", sorted(dxt_manifest["nodes"]), sorted(dbt_manifest["nodes"]))
     assert_equal(f"{fixture} source ids", sorted(dxt_manifest["sources"]), sorted(dbt_manifest["sources"]))
     assert_equal(f"{fixture} exposure ids", sorted(dxt_manifest["exposures"]), sorted(dbt_manifest["exposures"]))

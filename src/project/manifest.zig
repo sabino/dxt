@@ -22,6 +22,10 @@ const JsonScalar = types.JsonScalar;
 const RefDep = types.RefDep;
 const SourceDep = types.SourceDep;
 
+const manifest_schema_version = "https://schemas.getdbt.com/dbt/manifest/v12.json";
+const deterministic_dbt_version = "0.0.0";
+const deterministic_generated_at = "1970-01-01T00:00:00Z";
+
 pub fn writeSelectedJson(writer: *Io.Writer, selected: []selector.SelectedResource) !void {
     try writeSelectedJsonWithKeys(writer, selected, null);
 }
@@ -121,11 +125,9 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
     errdefer out.deinit();
     const writer = &out.writer;
 
-    try writer.writeAll("{\n  \"metadata\": {\"project_name\": ");
-    try json.string(writer, graph.project_name);
-    try writer.writeAll(",\"adapter_type\":");
-    try json.string(writer, graph.adapter_type);
-    try writer.writeAll("},\n  \"nodes\": {");
+    try writer.writeAll("{\n  \"metadata\": ");
+    try writeManifestMetadata(writer, graph);
+    try writer.writeAll(",\n  \"nodes\": {");
     var node_index: usize = 0;
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
@@ -282,6 +284,20 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
     try writeChildMap(writer, graph);
     try writer.writeAll("\n  }\n}\n");
     return try out.toOwnedSlice();
+}
+
+fn writeManifestMetadata(writer: *Io.Writer, graph: *const Graph) !void {
+    try writer.writeAll("{\"dbt_schema_version\":");
+    try json.string(writer, manifest_schema_version);
+    try writer.writeAll(",\"dbt_version\":");
+    try json.string(writer, deterministic_dbt_version);
+    try writer.writeAll(",\"generated_at\":");
+    try json.string(writer, deterministic_generated_at);
+    try writer.writeAll(",\"invocation_id\":null,\"invocation_started_at\":null,\"env\":{},\"project_name\":");
+    try json.string(writer, graph.project_name);
+    try writer.writeAll(",\"adapter_type\":");
+    try json.string(writer, graph.adapter_type);
+    try writer.writeAll("}");
 }
 
 fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
@@ -1430,6 +1446,32 @@ test "manifest writer keeps table-level explicit column tests detached from top-
     try std.testing.expect(test_node.get("column_name").? == .null);
     const kwargs = test_node.get("test_metadata").?.object.get("kwargs").?.object;
     try std.testing.expectEqualStrings("customer_id", kwargs.get("column_name").?.string);
+}
+
+test "manifest writer emits deterministic v12 metadata fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo \"warehouse\"", .adapter_type = "duck\\db" };
+    defer graph.deinit();
+
+    const rendered = try renderManifest(std.testing.allocator, &graph);
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "demo \\\"warehouse\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "duck\\\\db") != null);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+    const metadata = parsed.value.object.get("metadata").?.object;
+    try std.testing.expectEqualStrings(manifest_schema_version, metadata.get("dbt_schema_version").?.string);
+    try std.testing.expectEqualStrings(deterministic_dbt_version, metadata.get("dbt_version").?.string);
+    try std.testing.expectEqualStrings(deterministic_generated_at, metadata.get("generated_at").?.string);
+    try std.testing.expect(metadata.get("invocation_id").? == .null);
+    try std.testing.expect(metadata.get("invocation_started_at").? == .null);
+    try std.testing.expectEqual(@as(usize, 0), metadata.get("env").?.object.count());
+    try std.testing.expectEqualStrings("demo \"warehouse\"", metadata.get("project_name").?.string);
+    try std.testing.expectEqualStrings("duck\\db", metadata.get("adapter_type").?.string);
 }
 
 test "manifest writer filters disabled resources and writes graph maps" {

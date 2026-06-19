@@ -4289,6 +4289,12 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
         "child_map",
     }
     assert "dxt_metadata" not in manifest
+    assert manifest["metadata"].get("dbt_schema_version") == "https://schemas.getdbt.com/dbt/manifest/v12.json"
+    assert manifest["metadata"].get("dbt_version") == "0.0.0"
+    assert isinstance(manifest["metadata"].get("generated_at"), str)
+    assert manifest["metadata"].get("invocation_id") is None
+    assert manifest["metadata"].get("invocation_started_at") is None
+    assert manifest["metadata"].get("env") == {}
     assert isinstance(manifest["metadata"].get("project_name"), str)
     assert isinstance(manifest["metadata"].get("adapter_type"), str)
     assert "generated_by" not in manifest["metadata"]

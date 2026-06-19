@@ -186,6 +186,11 @@ def validate_manifest_shape(manifest_path: Path, project_dir: Path) -> None:
         raise GateError(f"manifest schema slice validation failed:\n{formatted}")
 
     assert_equal("project name", manifest["metadata"]["project_name"], "jaffle_shop")
+    assert_equal("manifest schema version", manifest["metadata"]["dbt_schema_version"], "https://schemas.getdbt.com/dbt/manifest/v12.json")
+    assert_equal("manifest dbt version", manifest["metadata"]["dbt_version"], "0.0.0")
+    assert_equal("manifest invocation id", manifest["metadata"]["invocation_id"], None)
+    assert_equal("manifest invocation started at", manifest["metadata"]["invocation_started_at"], None)
+    assert_equal("manifest env", manifest["metadata"]["env"], {})
     assert_equal("model unique ids", sorted(id for id in manifest["nodes"] if id.startswith("model.")), EXPECTED_MODELS)
     assert_equal("seed unique ids", sorted(id for id in manifest["nodes"] if id.startswith("seed.")), EXPECTED_SEEDS)
     assert_equal("generic test unique ids", sorted(id for id in manifest["nodes"] if id.startswith("test.")), EXPECTED_TESTS)
