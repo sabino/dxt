@@ -36,6 +36,9 @@ compatibility.
 - CI validation pyramid split into native Zig/safety, Python integration matrix,
   and public Jaffle parse gates, with pytest JUnit reports and focused local
   validation guidance.
+- Shared Zig JSON writer helpers for artifact emission, replacing duplicated
+  per-artifact string escaping helpers across manifest, run-results, catalog,
+  and sources writers while keeping behavior stable.
 - Table-level model, seed, and source built-in generic tests with explicit
   `arguments.column_name`, including Manifest kwargs and DuckDB `build`
   execution for the existing supported test types while preserving dbt's

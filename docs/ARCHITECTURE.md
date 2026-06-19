@@ -55,6 +55,7 @@ flowchart LR
 | `src/project/selector.zig` | Selector matching, graph expansion, wildcards. |
 | `src/project/compiler.zig` | Render-only compiler subset and relation rendering. |
 | `src/project/duckdb.zig` | Current DuckDB CLI-backed SQL execution/introspection. |
+| `src/project/json.zig` | Shared JSON writer helpers for strings, nullable strings, booleans, object fields, and string arrays using Zig `std.json`. |
 | `src/project/manifest.zig` | Manifest v12-shaped JSON writer. |
 | `src/project/run_results.zig` | Run Results v6-shaped JSON writer. |
 | `src/project/catalog.zig` | Catalog v1-shaped JSON writer. |
@@ -102,6 +103,10 @@ flowchart LR
 ```mermaid
 flowchart TD
     Graph[Graph] --> ManifestWriter[src/project/manifest.zig]
+    JsonWriter[src/project/json.zig] --> ManifestWriter
+    JsonWriter --> RunResultsWriter
+    JsonWriter --> CatalogWriter
+    JsonWriter --> FreshnessCalc
     ManifestWriter --> Manifest[manifest.json]
     Runner[Execution orchestration] --> RunResultsWriter[src/project/run_results.zig]
     RunResultsWriter --> RunResults[run_results.json]

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const json = @import("json.zig");
 const types = @import("types.zig");
 
 const FreshnessThreshold = types.FreshnessThreshold;
@@ -69,11 +70,11 @@ pub fn renderSources(allocator: std.mem.Allocator, results: []const CheckResult)
     const writer = &out.writer;
 
     try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": ");
-    try writeJsonString(writer, "https://schemas.getdbt.com/dbt/sources/v3.json");
+    try json.string(writer, "https://schemas.getdbt.com/dbt/sources/v3.json");
     try writer.writeAll(", \"dbt_version\": ");
-    try writeJsonString(writer, "0.0.0");
+    try json.string(writer, "0.0.0");
     try writer.writeAll(", \"generated_at\": ");
-    try writeJsonString(writer, "1970-01-01T00:00:00Z");
+    try json.string(writer, "1970-01-01T00:00:00Z");
     try writer.writeAll(", \"invocation_id\": null, \"invocation_started_at\": null, \"env\": {}},\n");
     try writer.writeAll("  \"results\": [");
     for (results, 0..) |result, index| {
@@ -87,10 +88,10 @@ pub fn renderSources(allocator: std.mem.Allocator, results: []const CheckResult)
 fn writeResult(writer: *Io.Writer, result: CheckResult) !void {
     if (std.mem.eql(u8, result.status, "runtime error")) {
         try writer.writeAll("\n    {\"unique_id\": ");
-        try writeJsonString(writer, result.source.unique_id);
+        try json.string(writer, result.source.unique_id);
         try writer.writeAll(", \"error\": ");
         if (result.error_message) |message| {
-            try writeJsonString(writer, message);
+            try json.string(writer, message);
         } else {
             try writer.writeAll("null");
         }
@@ -100,15 +101,15 @@ fn writeResult(writer: *Io.Writer, result: CheckResult) !void {
 
     const freshness = result.source.freshness orelse return error.UnsupportedSourceFreshness;
     try writer.writeAll("\n    {\"unique_id\": ");
-    try writeJsonString(writer, result.source.unique_id);
+    try json.string(writer, result.source.unique_id);
     try writer.writeAll(", \"max_loaded_at\": ");
-    try writeJsonString(writer, result.max_loaded_at orelse return error.UnsupportedSourceFreshness);
+    try json.string(writer, result.max_loaded_at orelse return error.UnsupportedSourceFreshness);
     try writer.writeAll(", \"snapshotted_at\": ");
-    try writeJsonString(writer, result.snapshotted_at orelse return error.UnsupportedSourceFreshness);
+    try json.string(writer, result.snapshotted_at orelse return error.UnsupportedSourceFreshness);
     try writer.writeAll(", \"max_loaded_at_time_ago_in_s\": ");
     try writer.print("{d}", .{result.age_seconds});
     try writer.writeAll(", \"status\": ");
-    try writeJsonString(writer, result.status);
+    try json.string(writer, result.status);
     try writer.writeAll(", \"criteria\": ");
     try writeCriteria(writer, freshness);
     try writer.writeAll(", \"adapter_response\": {}, \"timing\": [{\"name\": \"execute\", \"started_at\": null, \"completed_at\": null}], \"thread_id\": \"Thread-1\", \"execution_time\": 0.0}");
@@ -121,7 +122,7 @@ fn writeCriteria(writer: *Io.Writer, threshold: FreshnessThreshold) !void {
     try writeTimeOrNull(writer, threshold.error_after);
     try writer.writeAll(", \"filter\": ");
     if (threshold.filter) |filter| {
-        try writeJsonString(writer, filter);
+        try json.string(writer, filter);
     } else {
         try writer.writeAll("null");
     }
@@ -135,15 +136,11 @@ fn writeTimeOrNull(writer: *Io.Writer, maybe_time: ?FreshnessTime) !void {
         try writer.writeAll("{\"count\": ");
         try writer.print("{d}", .{count});
         try writer.writeAll(", \"period\": ");
-        try writeJsonString(writer, period);
+        try json.string(writer, period);
         try writer.writeAll("}");
     } else {
         try writer.writeAll("null");
     }
-}
-
-fn writeJsonString(writer: *Io.Writer, value: []const u8) !void {
-    try std.json.Stringify.value(value, .{}, writer);
 }
 
 test "source freshness status follows error warn pass threshold order" {

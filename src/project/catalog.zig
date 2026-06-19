@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const json = @import("json.zig");
 
 pub const CatalogColumn = struct {
     name: []const u8,
@@ -46,11 +47,11 @@ pub fn renderCatalog(allocator: std.mem.Allocator, nodes: []const CatalogEntry, 
     const writer = &out.writer;
 
     try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": ");
-    try writeJsonString(writer, "https://schemas.getdbt.com/dbt/catalog/v1.json");
+    try json.string(writer, "https://schemas.getdbt.com/dbt/catalog/v1.json");
     try writer.writeAll(", \"dbt_version\": ");
-    try writeJsonString(writer, "0.0.0");
+    try json.string(writer, "0.0.0");
     try writer.writeAll(", \"generated_at\": ");
-    try writeJsonString(writer, "1970-01-01T00:00:00Z");
+    try json.string(writer, "1970-01-01T00:00:00Z");
     try writer.writeAll(", \"invocation_id\": null, \"invocation_started_at\": null, \"env\": {}");
     try writer.writeAll("},\n  \"nodes\": {");
     try writeCatalogEntryMap(writer, nodes);
@@ -64,36 +65,32 @@ fn writeCatalogEntryMap(writer: *Io.Writer, entries: []const CatalogEntry) !void
     for (entries, 0..) |entry, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("\n    ");
-        try writeJsonString(writer, entry.unique_id);
+        try json.string(writer, entry.unique_id);
         try writer.writeAll(": {\"metadata\": {\"type\": ");
-        try writeJsonString(writer, entry.relation_type);
+        try json.string(writer, entry.relation_type);
         try writer.writeAll(", \"schema\": ");
-        try writeJsonString(writer, entry.schema);
+        try json.string(writer, entry.schema);
         try writer.writeAll(", \"name\": ");
-        try writeJsonString(writer, entry.name);
+        try json.string(writer, entry.name);
         try writer.writeAll(", \"database\": null, \"comment\": null, \"owner\": null}, \"columns\": {");
         for (entry.columns.items, 0..) |column, column_index| {
             if (column_index != 0) try writer.writeAll(",");
             try writer.writeAll("\n      ");
-            try writeJsonString(writer, column.name);
+            try json.string(writer, column.name);
             try writer.writeAll(": {\"type\": ");
-            try writeJsonString(writer, column.data_type);
+            try json.string(writer, column.data_type);
             try writer.writeAll(", \"index\": ");
             try writer.print("{d}", .{column.index});
             try writer.writeAll(", \"name\": ");
-            try writeJsonString(writer, column.name);
+            try json.string(writer, column.name);
             try writer.writeAll(", \"comment\": null}");
         }
         if (entry.columns.items.len != 0) try writer.writeAll("\n    ");
         try writer.writeAll("}, \"stats\": {\"has_stats\": {\"id\": \"has_stats\", \"label\": \"Has Stats?\", \"value\": false, \"description\": \"Indicates whether there are statistics for this table\", \"include\": false}}, \"unique_id\": ");
-        try writeJsonString(writer, entry.unique_id);
+        try json.string(writer, entry.unique_id);
         try writer.writeAll("}");
     }
     if (entries.len != 0) try writer.writeAll("\n  ");
-}
-
-fn writeJsonString(writer: *Io.Writer, value: []const u8) !void {
-    try std.json.Stringify.value(value, .{}, writer);
 }
 
 test "catalog writer emits deterministic empty dbt catalog shape" {
