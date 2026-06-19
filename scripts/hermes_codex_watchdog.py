@@ -54,7 +54,7 @@ def main() -> int:
         print(message)
         notify(args.to, message)
         return 0
-    if output:
+    if output and "no ready_to_exit restart request" not in output:
         print(output)
     return 0
 
