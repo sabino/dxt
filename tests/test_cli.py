@@ -6440,9 +6440,16 @@ def test_ls_root_selectors_yml_scalar_aliases(tmp_path: Path):
 
 
 def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
-    if importlib.util.find_spec("dbt.cli.main") is None:
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if not has_dbt_core:
         pytest.skip("dbt Core is not installed for the optional selector alias oracle")
-    if importlib.util.find_spec("dbt.adapters.duckdb") is None:
+    if not has_dbt_duckdb:
         pytest.skip("dbt DuckDB adapter is not installed for the optional selector alias oracle")
 
     from dbt.cli.main import dbtRunner
