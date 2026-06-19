@@ -1740,6 +1740,44 @@ def test_test_command_executes_selected_duckdb_generic_tests(tmp_path: Path):
     assert all(item["relation_name"] is None for item in run_results["results"])
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")
+def test_test_command_does_not_build_missing_parent_relation(tmp_path: Path):
+    project = tmp_path / "test_command_missing_parent"
+    write_supported_model_test_project(
+        project,
+        "select 1 as customer_id, 'Ada' as customer_name\n",
+    )
+    target = tmp_path / "test-target"
+
+    result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "DuckDB execution failed" in result.stderr
+    assert (target / "manifest.json").exists()
+    assert not (target / "run_results.json").exists()
+
+    if (target / "dxt.duckdb").exists():
+        query = subprocess.run(
+            [
+                DUCKDB,
+                str(target / "dxt.duckdb"),
+                "-csv",
+                "-noheader",
+                "-c",
+                "select count(*) from information_schema.tables where table_schema = 'main' and table_name = 'customers'",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert query.returncode == 0, query.stderr
+        assert query.stdout.strip() == "0"
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 accepted_values build execution slice")
 def test_build_executes_selected_duckdb_accepted_values_generic_test(tmp_path: Path):
     project = tmp_path / "accepted_values_tests"

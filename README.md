@@ -60,7 +60,8 @@ Run the current DuckDB execution slices:
 ```sh
 ./zig-out/bin/dxt run --project-dir tests/fixtures/compile_basic --target-path target-dxt --select orders
 ./zig-out/bin/dxt build --project-dir tests/fixtures/seed_ref --target-path target-dxt --select +stg_customers
-./zig-out/bin/dxt test --project-dir tests/fixtures/model_properties --target-path target-dxt --select "not_null_customers_customer_id unique_customers_customer_id"
+./zig-out/bin/dxt run --project-dir tests/fixtures/model_properties --target-path target-dxt-tests --select customers
+./zig-out/bin/dxt test --project-dir tests/fixtures/model_properties --target-path target-dxt-tests --select "not_null_customers_customer_id unique_customers_customer_id"
 ./zig-out/bin/dxt build --project-dir tests/fixtures/model_properties --target-path target-dxt --select "not_null_customers_customer_id unique_customers_customer_id"
 ./zig-out/bin/dxt build --project-dir tests/fixtures/source_column_tests --target-path target-dxt --select "source:raw.customers+"
 ./zig-out/bin/dxt docs generate --project-dir tests/fixtures/docs_blocks --target-path target-dxt
