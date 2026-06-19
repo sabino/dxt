@@ -125,6 +125,14 @@ multi-agent workflows for this repo, raises the local thread cap, allows one
 recursive delegation layer, registers every dxt agent role, and keeps provider
 auth configuration out of tracked files.
 
+For interactive subagents, role sandbox settings remain useful defaults. For
+the autonomous Agent OS subprocesses launched by
+`scripts/agent_os_orchestrator.py`, the repo-local orchestrator uses
+`danger-full-access` so workers can access host GitHub auth, push branches, open
+PRs, and write shared Git worktree metadata. Treat the table below as a behavior
+contract, not a filesystem sandbox guarantee, when the Agent OS orchestrator is
+running.
+
 | Agent | Mode | Use for |
 | --- | --- | --- |
 | `dxt_product_manager` | GitHub-write, filesystem read-only | Monitor GitHub issue board health, priorities, stale claims, blockers, and readiness nudges. |

@@ -280,6 +280,7 @@ Required startup:
 1. Read AGENTS.md, PLAN.md, docs/AGENT_OS.md, docs/AGENT_PROTOCOLS.md, docs/MULTI_AGENT_WORKFLOW.md, and the role file.
 2. Inspect git status and confirm this worktree owns only this issue/branch.
 3. Re-read the GitHub issue and recent comments with gh before making decisions, because the user may nudge through issue comments.
+   If gh auth or network access fails inside this child worker, continue from the parent-supplied launch payload below instead of stopping solely for that reason. Record the gh failure in the final handoff, avoid broadening scope, and let the parent/supervisor post issue comments, push branches, or open PRs if child GitHub access remains unavailable.
 
 Issue payload at launch:
 ```json
@@ -293,6 +294,7 @@ Rules:
 - Use public-safe issue comments from docs/AGENT_PROTOCOLS.md for claims, plans, validation, and handoff.
 - If scope is unclear, comment a slice plan and stop instead of making broad product changes.
 - If you make code/docs changes, run the fastest relevant validation, inspect git diff/status, commit a coherent change, push the branch, and open or update a PR linked to the issue.
+- If local git metadata or GitHub access is blocked by the child sandbox, leave a clean coherent worktree with validation evidence in the final message so the parent can publish it.
 - Do not merge the PR yourself unless explicitly instructed by the supervisor loop.
 
 PR policy for this run:
@@ -616,6 +618,7 @@ def launch_product_manager(
     owner: str,
     profile: str,
     model: str,
+    sandbox: str,
     dry_run: bool,
     issue_limit: int,
     state: dict[str, Any],
@@ -643,7 +646,7 @@ def launch_product_manager(
         "--ask-for-approval",
         "never",
         "--sandbox",
-        "read-only",
+        sandbox,
         "exec",
         "--output-last-message",
         str(last_path),
@@ -689,6 +692,7 @@ def product_manager(args: argparse.Namespace) -> int:
         return 2
     profile = args.profile or config["default_profile"]
     model = args.model or config["default_model"]
+    sandbox = config.get("product_manager_sandbox") or "danger-full-access"
     deadline = None
     if args.max_minutes:
         deadline = time.monotonic() + args.max_minutes * 60
@@ -698,6 +702,7 @@ def product_manager(args: argparse.Namespace) -> int:
             owner=args.owner,
             profile=profile,
             model=model,
+            sandbox=sandbox,
             dry_run=args.dry_run,
             issue_limit=args.issue_limit,
             state=state,
