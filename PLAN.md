@@ -436,6 +436,16 @@ parents needed for those descendants in the supported graph subset. It does not
 implement YAML selectors, state/result/source-status selectors, indirect
 selection flags, or richer `ls` output formats.
 
+Current YAML selector and state/defer roadmap source note:
+`.agent/research/m2-yaml-selectors-state-defer-roadmap.md` maps dbt Core v1
+`selectors.yml`, `--selector`, `--state`, result/source-status selectors, and
+defer flags plus Fusion selector/state references to dxt ownership boundaries
+and a staged implementation sequence. The first recommended implementation is
+only root-project `selectors.yml` scalar string aliases that lower to existing
+Zig selector expressions. It does not implement YAML selector composition,
+state/result/source-status matching, state artifact loading, or deferral
+semantics.
+
 Current `ls` output formats source note:
 `.agent/research/m2-ls-output-formats.md` maps dbt Core v1 `ListTask` output
 generators and CLI `--output` choices to dxt's first richer listing output
