@@ -11,6 +11,8 @@ permissions:
 
 env:
   ZIG_VERSION: "0.16.0"
+  DUCKDB_VERSION: "1.4.2"
+  DUCKDB_CLI_SHA256: "fae3ba93eedf20b08bca4b23aeac1ba94c446f1c10d029c193e2fc4b4e0bc1bc"
 
 jobs:
   native:
@@ -107,6 +109,8 @@ jobs:
           if-no-files-found: ignore
 
   public-fixtures:
+    # Keep this context name stable for branch protection; the job now runs
+    # both public Jaffle parse and DuckDB build gates.
     name: public jaffle parse gate
     runs-on: ubuntu-latest
 
@@ -126,3 +130,18 @@ jobs:
 
       - name: Run public Jaffle parse gate
         run: python scripts/check_jaffle_shop_duckdb_parse.py
+
+      - name: Install DuckDB CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/duckdb"
+          curl --fail --location --show-error \
+            --output "$RUNNER_TEMP/duckdb_cli.zip" \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip"
+          echo "${DUCKDB_CLI_SHA256}  $RUNNER_TEMP/duckdb_cli.zip" | sha256sum --check -
+          unzip -q "$RUNNER_TEMP/duckdb_cli.zip" -d "$RUNNER_TEMP/duckdb"
+          chmod +x "$RUNNER_TEMP/duckdb/duckdb"
+          echo "$RUNNER_TEMP/duckdb" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/duckdb/duckdb" --version
+
+      - name: Run public Jaffle build gate
+        run: python scripts/check_jaffle_shop_duckdb_build.py --no-build
