@@ -9,15 +9,22 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   ZIG_VERSION: "0.16.0"
   DUCKDB_VERSION: "1.4.2"
   DUCKDB_CLI_SHA256: "fae3ba93eedf20b08bca4b23aeac1ba94c446f1c10d029c193e2fc4b4e0bc1bc"
+  JAFFLE_SHOP_DUCKDB_REPO: "https://github.com/dbt-labs/jaffle_shop_duckdb.git"
+  JAFFLE_SHOP_DUCKDB_REF: "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb"
 
 jobs:
   native:
     name: native zig and safety
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -64,6 +71,7 @@ jobs:
   integration:
     name: test py${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -113,6 +121,7 @@ jobs:
     # public Jaffle parse, DuckDB build/run, and docs-generate gates.
     name: public jaffle parse gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -128,8 +137,14 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
+      - name: Fetch public Jaffle fixture
+        run: |
+          git clone "${JAFFLE_SHOP_DUCKDB_REPO}" "$RUNNER_TEMP/jaffle_shop_duckdb"
+          git -C "$RUNNER_TEMP/jaffle_shop_duckdb" checkout "${JAFFLE_SHOP_DUCKDB_REF}"
+          git -C "$RUNNER_TEMP/jaffle_shop_duckdb" rev-parse HEAD
+
       - name: Run public Jaffle parse gate
-        run: python scripts/check_jaffle_shop_duckdb_parse.py
+        run: python scripts/check_jaffle_shop_duckdb_parse.py --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
 
       - name: Install DuckDB CLI
         run: |
@@ -144,10 +159,10 @@ jobs:
           "$RUNNER_TEMP/duckdb/duckdb" --version
 
       - name: Run public Jaffle build gate
-        run: python scripts/check_jaffle_shop_duckdb_build.py --no-build
+        run: python scripts/check_jaffle_shop_duckdb_build.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
 
       - name: Run public Jaffle run gate
-        run: python scripts/check_jaffle_shop_duckdb_run.py --no-build
+        run: python scripts/check_jaffle_shop_duckdb_run.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
 
       - name: Run public Jaffle docs gate
-        run: python scripts/check_jaffle_shop_duckdb_docs.py --no-build
+        run: python scripts/check_jaffle_shop_duckdb_docs.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"

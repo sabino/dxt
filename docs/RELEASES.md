@@ -80,7 +80,10 @@ Use full `pytest -q` locally before broad runner/artifact release changes. The
 GitHub CI workflow repeats the native and safety gates, runs the full pytest
 matrix with JUnit reports, and runs the public Jaffle parse/build/run/docs gate
 with a pinned, checksum-verified DuckDB CLI. Release jobs focus on portable
-binary build validation and repository safety.
+binary build validation and repository safety. Native Zig test coverage maps
+are collected by the separate GitHub `Coverage` workflow on Zig source/build
+PRs, pushes to `main`, and manual dispatch, so release prep can inspect coverage
+artifacts without making local release validation heavier.
 
 Verify downloaded artifacts with:
 

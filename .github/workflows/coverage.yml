@@ -1,0 +1,120 @@
+name: Coverage
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - "build.zig"
+      - "build.zig.zon"
+      - "src/**"
+      - ".github/workflows/coverage.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  native-zig:
+    name: native Zig coverage map
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Run native tests
+        run: zig build test --summary all
+
+      - name: Build standalone Zig test binary
+        run: |
+          mkdir -p reports/bin
+          zig test src/root.zig \
+            --test-no-exec \
+            -femit-bin=reports/bin/dxt-zig-tests \
+            --cache-dir "$RUNNER_TEMP/zig-cache" \
+            --global-cache-dir "$RUNNER_TEMP/zig-global-cache"
+
+      - name: Generate native test coverage map
+        run: |
+          mkdir -p reports/coverage
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import re
+
+          rows = []
+          total_tests = 0
+          total_lines = 0
+          for path in sorted(Path("src").rglob("*.zig")):
+              text = path.read_text()
+              tests = len(re.findall(r'(?m)^\\s*test\\s+"', text))
+              lines = sum(
+                  1
+                  for line in text.splitlines()
+                  if line.strip() and not line.lstrip().startswith("//")
+              )
+              total_tests += tests
+              total_lines += lines
+              rows.append({
+                  "path": path.as_posix(),
+                  "native_tests": tests,
+                  "non_comment_lines": lines,
+              })
+
+          report = {
+              "kind": "native_zig_test_coverage_map",
+              "description": "Static map of native Zig test declarations by source module. This is not line coverage.",
+              "totals": {
+                  "native_tests": total_tests,
+                  "non_comment_lines": total_lines,
+                  "source_files": len(rows),
+              },
+              "files": rows,
+          }
+          Path("reports/coverage/native-zig-test-map.json").write_text(json.dumps(report, indent=2) + "\\n")
+
+          markdown = [
+              "# Native Zig Test Coverage Map",
+              "",
+              "Static map of native Zig `test` declarations by source module. This is not line coverage.",
+              "",
+              f"- Source files: {len(rows)}",
+              f"- Native test declarations: {total_tests}",
+              f"- Non-comment source lines: {total_lines}",
+              "",
+              "| Module | Native tests | Non-comment lines |",
+              "| --- | ---: | ---: |",
+          ]
+          for row in rows:
+              markdown.append(f"| `{row['path']}` | {row['native_tests']} | {row['non_comment_lines']} |")
+          Path("reports/coverage/native-zig-test-map.md").write_text("\\n".join(markdown) + "\\n")
+          PY
+
+      - name: Summarize coverage artifact
+        if: always()
+        run: |
+          cat reports/coverage/native-zig-test-map.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload native coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-zig-coverage-map-${{ github.sha }}
+          path: reports/coverage
+          if-no-files-found: error
+          retention-days: 14

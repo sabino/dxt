@@ -106,6 +106,7 @@ in `.agent/runs/` and stay ignored.
 | Native unit tests | `zig build test` | Fast tests for parser, selector, graph, manifest, compiler, and helpers. |
 | Focused integration tests | `pytest -q tests/test_cli.py::...` | Local black-box checks against the native binary for touched CLI/artifact behavior. |
 | Full integration matrix | GitHub CI `test py3.11/py3.12` | Full pytest fixture coverage with JUnit reports, without repeating native release builds in every Python job. |
+| Native coverage artifacts | GitHub `Coverage` workflow | Optional native Zig test coverage map artifacts for Zig source/build changes, main pushes, and manual runs; not a required local gate or Python product-runtime coverage claim. |
 | Runtime boundary | `python scripts/check_runtime_boundary.py` | Prevent Python product-runtime drift. |
 | Public safety | `python scripts/check_public_safety.py` | Catch secrets, local paths, generated noise, and private artifacts. |
 | Public fixture gates | `scripts/check_jaffle_shop_duckdb_*.py` | Validate current public Jaffle-style parse/build/run/docs subsets; CI runs the parse, DuckDB build, DuckDB run, and docs-generate gates with a pinned, checksum-verified DuckDB CLI, while local runs can target the relevant script. |
