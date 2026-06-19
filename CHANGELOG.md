@@ -45,6 +45,10 @@ compatibility.
   model/seed execution failures, writing `status: "skipped"` rows for selected
   blocked descendants and selected blocked generic tests while preserving
   `--exclude`.
+- Partial `dxt build` data-test failure blocking for selected DuckDB model and
+  seed+model builds: ready selected data tests run before downstream selected
+  resources, and failing tests write `fail` plus downstream `skipped` Run
+  Results rows instead of creating blocked downstream relations.
 - Selector wildcard parity for bracket character classes in the shared Zig
   selector engine, covering `file:` and slash-aware `path:` selectors used by
   `dxt ls` and other selector-backed commands.
