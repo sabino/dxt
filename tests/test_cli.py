@@ -5381,7 +5381,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     assert repeated_keyed_json.returncode == 0, repeated_keyed_json.stderr
     assert json.loads(repeated_keyed_json.stdout) == [{"name": "orders", "unique_id": "model.inline_config.orders"}]
 
-    unsupported_keyed_json = subprocess.run(
+    package_keyed_json = subprocess.run(
         [
             DXT,
             "ls",
@@ -5392,6 +5392,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
             "--resource-type",
             "model",
             "--output-keys",
+            "package_name",
             "config.materialized",
             "non_existent_key",
         ],
@@ -5399,8 +5400,8 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert unsupported_keyed_json.returncode == 0, unsupported_keyed_json.stderr
-    assert json.loads(unsupported_keyed_json.stdout) == [{}]
+    assert package_keyed_json.returncode == 0, package_keyed_json.stderr
+    assert json.loads(package_keyed_json.stdout) == [{"package_name": "inline_config"}]
 
     missing_output_key = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--output", "json", "--output-keys"],
@@ -5789,6 +5790,8 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
             "--output",
             "json",
             "--output-keys",
+            "package_name",
+            "source_name",
             "original_file_path",
             "path",
             "selector",
@@ -5800,6 +5803,8 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     assert source_keyed_json.returncode == 0, source_keyed_json.stderr
     assert json.loads(source_keyed_json.stdout) == [
         {
+            "package_name": "source_ref",
+            "source_name": "raw",
             "original_file_path": "models/schema.yml",
             "path": "models/schema.yml",
             "selector": "source:source_ref.raw.customers",

@@ -27,11 +27,12 @@ Fusion/dbt Core v2 reference files:
 
 The implementation remains Zig-only and selected-resource only:
 
-- `src/project/selector.zig` carries the selected resource `path` alongside
-  `unique_id`, `name`, `resource_type`, `search_name`, `original_file_path`,
-  and selector output.
+- `src/project/selector.zig` carries the selected resource `package_name`,
+  source-only `source_name`, and `path` alongside `unique_id`, `name`,
+  `resource_type`, `search_name`, `original_file_path`, and selector output.
 - `src/project/manifest.zig` accepts additional compact JSON `output_keys`:
-  `path`, `original_file_path`, and `selector`.
+  `package_name`, source-only `source_name`, `path`, `original_file_path`,
+  and `selector`.
 - `selector` is a deliberate dxt compact selected-resource extension based on
   the existing `--output selector` surface; dbt Core exposes selector strings
   as a separate output mode rather than as a serialized node JSON property.
@@ -42,11 +43,15 @@ The implementation remains Zig-only and selected-resource only:
 
 This slice does not add full dbt node JSON parity, nested keys such as
 `config.materialized`, relation/config fields, metrics, semantic models, saved
-queries, or state/result/source-status selectors.
+queries, or state/result/source-status selectors. Local dbt Core 1.10.15 filters
+`output_keys` as top-level node fields only; upstream `1.latest` source has
+nested-key traversal in this area, so nested keys remain a pinned-version
+compatibility decision for a future slice.
 
 ## Validation
 
 - Native Zig selected-resource JSON tests cover the new keys, requested order,
   unknown-key skipping, and duplicate-key suppression.
 - Python CLI tests cover `dxt ls --output json --output-keys name path
-  original_file_path selector unique_id`.
+  original_file_path selector unique_id`, `package_name`, and source-only
+  `source_name`.

@@ -59,6 +59,10 @@ fn writeSelectedJsonObjectWithKeys(writer: *Io.Writer, item: selector.SelectedRe
             try writeSelectedJsonStringField(writer, "resource_type", item.resource_type, &wrote);
         } else if (std.mem.eql(u8, key, "name")) {
             try writeSelectedJsonStringField(writer, "name", item.name, &wrote);
+        } else if (std.mem.eql(u8, key, "package_name")) {
+            try writeSelectedJsonStringField(writer, "package_name", item.package_name, &wrote);
+        } else if (std.mem.eql(u8, key, "source_name")) {
+            if (item.source_name.len != 0) try writeSelectedJsonStringField(writer, "source_name", item.source_name, &wrote);
         } else if (std.mem.eql(u8, key, "path")) {
             try writeSelectedJsonStringField(writer, "path", util.normalizeForDisplay(item.path), &wrote);
         } else if (std.mem.eql(u8, key, "original_file_path")) {
@@ -880,6 +884,7 @@ test "selected resource JSON writer filters output keys in requested order" {
             .unique_id = "model.demo.customers",
             .resource_type = "model",
             .name = "customers",
+            .package_name = "demo",
             .path = "customers.sql",
             .original_file_path = "models/customers.sql",
             .selector = "demo.customers",
@@ -888,18 +893,20 @@ test "selected resource JSON writer filters output keys in requested order" {
             .unique_id = "source.demo.raw.customers",
             .resource_type = "source",
             .name = "customers",
+            .package_name = "demo",
+            .source_name = "raw",
             .path = "models/schema.yml",
             .original_file_path = "models/schema.yml",
             .selector = "source:demo.raw.customers",
         },
     };
-    const keys = [_][]const u8{ "name", "missing", "path", "original_file_path", "selector", "unique_id", "name" };
+    const keys = [_][]const u8{ "name", "package_name", "source_name", "config.materialized", "missing", "path", "original_file_path", "selector", "unique_id", "name" };
 
     const rendered = try renderSelectedJsonWithKeysForTest(std.testing.allocator, selected[0..], keys[0..]);
     defer std.testing.allocator.free(rendered);
 
     try std.testing.expectEqualStrings(
-        "[{\"name\":\"customers\",\"path\":\"customers.sql\",\"original_file_path\":\"models/customers.sql\",\"selector\":\"demo.customers\",\"unique_id\":\"model.demo.customers\"},{\"name\":\"customers\",\"path\":\"models/schema.yml\",\"original_file_path\":\"models/schema.yml\",\"selector\":\"source:demo.raw.customers\",\"unique_id\":\"source.demo.raw.customers\"}]\n",
+        "[{\"name\":\"customers\",\"package_name\":\"demo\",\"path\":\"customers.sql\",\"original_file_path\":\"models/customers.sql\",\"selector\":\"demo.customers\",\"unique_id\":\"model.demo.customers\"},{\"name\":\"customers\",\"package_name\":\"demo\",\"source_name\":\"raw\",\"path\":\"models/schema.yml\",\"original_file_path\":\"models/schema.yml\",\"selector\":\"source:demo.raw.customers\",\"unique_id\":\"source.demo.raw.customers\"}]\n",
         rendered,
     );
 }
