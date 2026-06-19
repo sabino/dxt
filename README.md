@@ -139,8 +139,9 @@ Use the test layers deliberately:
 Use full `pytest -q` locally for broad runner/artifact changes or before a
 high-risk PR. Otherwise, let GitHub CI run the full integration matrix and
 publish pytest JUnit reports for review. GitHub CI also runs the public Jaffle
-parse, DuckDB build, and DuckDB run gates with a pinned, checksum-verified
-DuckDB CLI, so routine local work can stay focused on the touched layer.
+parse, DuckDB build, DuckDB run, and docs-generate gates with a pinned,
+checksum-verified DuckDB CLI, so routine local work can stay focused on the
+touched layer.
 
 Optional compatibility gates:
 
@@ -148,13 +149,14 @@ Optional compatibility gates:
 python scripts/check_jaffle_shop_duckdb_parse.py
 python scripts/check_jaffle_shop_duckdb_build.py
 python scripts/check_jaffle_shop_duckdb_run.py
+python scripts/check_jaffle_shop_duckdb_docs.py
 python scripts/check_dbt_core_m1_oracle.py
 ```
 
 The Jaffle scripts use public fixtures and may clone their pinned refs by
 default. Pass `--project-dir path/to/jaffle_shop_duckdb` to run against an
-existing checkout. The build and run gates require the `duckdb` CLI on `PATH`
-when run locally.
+existing checkout. The build, run, and docs gates require the `duckdb` CLI on
+`PATH` when run locally.
 
 ## Release Builds
 

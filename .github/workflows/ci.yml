@@ -110,7 +110,7 @@ jobs:
 
   public-fixtures:
     # Keep this context name stable for branch protection; the job now runs
-    # public Jaffle parse, DuckDB build, and DuckDB run gates.
+    # public Jaffle parse, DuckDB build/run, and docs-generate gates.
     name: public jaffle parse gate
     runs-on: ubuntu-latest
 
@@ -148,3 +148,6 @@ jobs:
 
       - name: Run public Jaffle run gate
         run: python scripts/check_jaffle_shop_duckdb_run.py --no-build
+
+      - name: Run public Jaffle docs gate
+        run: python scripts/check_jaffle_shop_duckdb_docs.py --no-build
