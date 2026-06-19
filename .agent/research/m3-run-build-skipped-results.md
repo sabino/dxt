@@ -70,5 +70,6 @@ Required gates:
 - Native Zig tests for skipped run-result shape and blocked-resource helper behavior.
 - Pytest coverage for `run` and `build` model failure with blocked selected descendants.
 - Pytest coverage that `--exclude` removes would-be skipped descendants from `run_results.json`.
+- Pytest coverage for a selected seed execution failure blocking a selected dependent model and its selected generic tests.
 - Existing Run Results v6 schema slice validation.
 - Runtime-boundary and public-safety scans before PR handoff.
