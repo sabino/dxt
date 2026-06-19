@@ -19,8 +19,8 @@ Hard requirement: the `dxt` product runtime is Zig. Python may remain only for d
 - Keep user-facing product behavior in Zig and validate it through the native binary.
 - `src/project.zig` is a public/orchestration facade in transition, not the permanent home for all product logic. New shared data model, selector, parser, graph, manifest, loader, and utility code should move toward focused `src/project/*.zig` modules.
 - Keep behavior-preserving moves separate from feature behavior changes. Mechanical extraction commits should avoid selector/parser/runtime semantic changes beyond import visibility needed for the move.
-- Keep implementation slices small and reviewable.
-- During implementation, prefer local tests and focused self-checks over repeated agent reviews after each small edit. Run a second-agent/Codex review once at the coherent PR boundary, unless a specific blocker needs earlier independent analysis.
+- Keep implementation slices small and auditable.
+- During implementation, prefer local tests and focused self-checks. Second-agent/Codex reviews are optional and should be used only when explicitly requested or when a specific blocker needs independent analysis.
 - Prefer deterministic fixtures and local adapters before live warehouses.
 - Do not add broad dependencies or generated artifacts without a validation reason.
 - Run the fastest relevant verification before finishing a change.
@@ -40,5 +40,5 @@ Hard requirement: the `dxt` product runtime is Zig. Python may remain only for d
 
 - `main` should stay green.
 - Use feature branches and PRs for publication once the GitHub repository exists.
-- Require tests and one second-agent or human review at the PR boundary before merge, unless the active workflow explicitly allows self-merge after green checks.
+- Require green CI checks before merge. Second-agent or human review is not a mandatory merge gate while the active workflow allows self-merge after green checks.
 - Do not publish artifacts containing local paths, secrets, caches, logs, or private environment details.

@@ -20,6 +20,8 @@ pub const SelectedResource = struct {
     path: []const u8 = "",
     original_file_path: []const u8 = "",
     selector: []const u8 = "",
+    alias: []const u8 = "",
+    identifier: []const u8 = "",
     config_materialized: []const u8 = "",
     config_tags: []const []const u8 = &.{},
     has_config_tags: bool = false,
@@ -53,6 +55,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .path = node.path,
                 .original_file_path = node.original_file_path,
                 .selector = try pathBackedOutputSelector(allocator, node.package_name, node.path),
+                .alias = node.config_alias orelse node.name,
                 .config_materialized = node.materialized,
                 .config_tags = node.tags.items,
                 .has_config_tags = true,
@@ -70,6 +73,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .path = test_node.path,
                 .original_file_path = test_node.original_file_path,
                 .selector = try pathBackedOutputSelector(allocator, test_node.package_name, test_node.path),
+                .alias = test_node.alias,
                 .config_materialized = "test",
                 .has_config_tags = true,
             });
@@ -87,6 +91,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .path = test_node.path,
                 .original_file_path = test_node.original_file_path,
                 .selector = try pathBackedOutputSelector(allocator, test_node.package_name, test_node.path),
+                .alias = test_node.alias,
                 .config_materialized = "test",
                 .has_config_tags = true,
             });
@@ -104,6 +109,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .path = source.original_file_path,
                 .original_file_path = source.original_file_path,
                 .selector = try std.fmt.allocPrint(allocator, "source:{s}.{s}.{s}", .{ source.package_name, source.source_name, source.table_name }),
+                .identifier = source.identifier orelse source.table_name,
             });
         }
     }

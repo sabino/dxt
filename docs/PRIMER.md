@@ -48,8 +48,8 @@ flowchart TD
     D --> E[Add native Zig tests]
     E --> F[Add pytest/dbt oracle coverage when CLI or artifacts change]
     F --> G[Run local validation and public-safety checks]
-    G --> H[PR-boundary Codex or human review]
-    H --> I[Merge only after green checks]
+    G --> H[Open PR]
+    H --> I[Merge after green required checks]
 ```
 
 ## Project Flow
@@ -93,7 +93,7 @@ Every new compatibility slice should record:
 - affected artifact maps and schemas.
 - native Zig tests.
 - Python/dbt oracle tests for CLI, fixture, filesystem, or artifact behavior.
-- stop conditions that keep the slice reviewable.
+- stop conditions that keep the slice small and auditable.
 
 Public-safe research notes live in `.agent/research/`. Disposable run logs live
 in `.agent/runs/` and stay ignored.
