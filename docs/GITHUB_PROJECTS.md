@@ -11,10 +11,10 @@ bootstrap script in dry-run mode first:
 python scripts/github_agent_os.py project --dry-run --owner sabino --repo sabino/dxt
 ```
 
-Applying the project requires GitHub CLI auth with the `project` scope:
+Applying the project requires GitHub CLI auth with project scopes:
 
 ```sh
-gh auth refresh -s project
+gh auth refresh -s read:project -s project
 python scripts/github_agent_os.py project --apply --owner sabino --repo sabino/dxt
 ```
 

@@ -157,7 +157,7 @@ def project(args: argparse.Namespace) -> int:
     list_result = gh(["project", "list", "--owner", owner, "--format", "json"], check=False)
     if list_result.returncode != 0:
         print(list_result.stderr, file=sys.stderr)
-        print("GitHub Projects bootstrap requires: gh auth refresh -s project", file=sys.stderr)
+        print("GitHub Projects bootstrap requires: gh auth refresh -s read:project -s project", file=sys.stderr)
         return list_result.returncode
 
     projects = json.loads(list_result.stdout).get("projects", [])
