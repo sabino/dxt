@@ -2156,7 +2156,9 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
         node.patch_path = property.patch_path;
         if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.package_name, property.description, &node.doc_blocks);
         if (std.mem.eql(u8, node.resource_type, "model") and property.materialized.len != 0 and !node.inline_materialized) node.materialized = property.materialized;
-        if (property.enabled) |enabled| node.enabled = enabled;
+        if (property.enabled) |enabled| {
+            if (!node.inline_enabled) node.enabled = enabled;
+        }
         for (property.tags.items) |tag| {
             try appendUnique(graph.allocator, &node.tags, tag);
         }

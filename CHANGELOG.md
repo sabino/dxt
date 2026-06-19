@@ -49,6 +49,9 @@ compatibility.
   seed+model builds: ready selected data tests run before downstream selected
   resources, and failing tests write `fail` plus downstream `skipped` Run
   Results rows instead of creating blocked downstream relations.
+- Literal inline SQL model `config(enabled=false)` / `config(enabled=true)`
+  parsing in the Zig scanner, reusing the existing disabled-node manifest and
+  selector behavior while rejecting dynamic enabled expressions for now.
 - Selector wildcard parity for bracket character classes in the shared Zig
   selector engine, covering `file:` and slash-aware `path:` selectors used by
   `dxt ls` and other selector-backed commands.
