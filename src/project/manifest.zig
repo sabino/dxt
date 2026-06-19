@@ -70,6 +70,10 @@ fn writeSelectedJsonObjectWithKeys(writer: *Io.Writer, item: selector.SelectedRe
             try writeSelectedJsonStringField(writer, "original_file_path", util.normalizeForDisplay(item.original_file_path), &wrote);
         } else if (std.mem.eql(u8, key, "selector")) {
             try writeSelectedJsonStringField(writer, "selector", item.selector, &wrote);
+        } else if (std.mem.eql(u8, key, "alias")) {
+            if (item.alias.len != 0) try writeSelectedJsonStringField(writer, "alias", item.alias, &wrote);
+        } else if (std.mem.eql(u8, key, "identifier")) {
+            if (item.identifier.len != 0) try writeSelectedJsonStringField(writer, "identifier", item.identifier, &wrote);
         } else if (std.mem.eql(u8, key, "config.materialized")) {
             if (item.config_materialized.len != 0) try writeSelectedJsonStringField(writer, "config.materialized", item.config_materialized, &wrote);
         } else if (std.mem.eql(u8, key, "config.tags")) {
@@ -979,6 +983,7 @@ test "selected resource JSON writer filters output keys in requested order" {
             .path = "customers.sql",
             .original_file_path = "models/customers.sql",
             .selector = "demo.customers",
+            .alias = "customer_facts",
             .config_materialized = "table",
             .config_tags = &.{ "finance", "nightly" },
             .has_config_tags = true,
@@ -992,6 +997,7 @@ test "selected resource JSON writer filters output keys in requested order" {
             .path = "models/schema.yml",
             .original_file_path = "models/schema.yml",
             .selector = "source:demo.raw.customers",
+            .identifier = "raw_customers",
         },
         .{
             .unique_id = "model.demo.orders",
@@ -1005,13 +1011,13 @@ test "selected resource JSON writer filters output keys in requested order" {
             .has_config_tags = true,
         },
     };
-    const keys = [_][]const u8{ "name", "package_name", "source_name", "config.materialized", "config.tags", "missing", "path", "original_file_path", "selector", "unique_id", "name" };
+    const keys = [_][]const u8{ "name", "package_name", "source_name", "alias", "identifier", "config.materialized", "config.tags", "missing", "path", "original_file_path", "selector", "unique_id", "name" };
 
     const rendered = try renderSelectedJsonWithKeysForTest(std.testing.allocator, selected[0..], keys[0..]);
     defer std.testing.allocator.free(rendered);
 
     try std.testing.expectEqualStrings(
-        "[{\"name\":\"customers\",\"package_name\":\"demo\",\"config.materialized\":\"table\",\"config.tags\":[\"finance\",\"nightly\"],\"path\":\"customers.sql\",\"original_file_path\":\"models/customers.sql\",\"selector\":\"demo.customers\",\"unique_id\":\"model.demo.customers\"},{\"name\":\"customers\",\"package_name\":\"demo\",\"source_name\":\"raw\",\"path\":\"models/schema.yml\",\"original_file_path\":\"models/schema.yml\",\"selector\":\"source:demo.raw.customers\",\"unique_id\":\"source.demo.raw.customers\"},{\"name\":\"orders\",\"package_name\":\"demo\",\"config.materialized\":\"view\",\"config.tags\":[],\"path\":\"orders.sql\",\"original_file_path\":\"models/orders.sql\",\"selector\":\"demo.orders\",\"unique_id\":\"model.demo.orders\"}]\n",
+        "[{\"name\":\"customers\",\"package_name\":\"demo\",\"alias\":\"customer_facts\",\"config.materialized\":\"table\",\"config.tags\":[\"finance\",\"nightly\"],\"path\":\"customers.sql\",\"original_file_path\":\"models/customers.sql\",\"selector\":\"demo.customers\",\"unique_id\":\"model.demo.customers\"},{\"name\":\"customers\",\"package_name\":\"demo\",\"source_name\":\"raw\",\"identifier\":\"raw_customers\",\"path\":\"models/schema.yml\",\"original_file_path\":\"models/schema.yml\",\"selector\":\"source:demo.raw.customers\",\"unique_id\":\"source.demo.raw.customers\"},{\"name\":\"orders\",\"package_name\":\"demo\",\"config.materialized\":\"view\",\"config.tags\":[],\"path\":\"orders.sql\",\"original_file_path\":\"models/orders.sql\",\"selector\":\"demo.orders\",\"unique_id\":\"model.demo.orders\"}]\n",
         rendered,
     );
 }

@@ -5996,6 +5996,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
             "model",
             "--output-keys",
             "package_name",
+            "alias",
             "config.materialized",
             "config.tags",
             "non_existent_key",
@@ -6008,10 +6009,33 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     assert json.loads(package_keyed_json.stdout) == [
         {
             "package_name": "inline_config",
+            "alias": "orders",
             "config.materialized": "table",
             "config.tags": ["finance", "nightly"],
         }
     ]
+
+    alias_project = copy_fixture(tmp_path, "inline_relation_config")
+    alias_keyed_json = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(alias_project),
+            "--output",
+            "json",
+            "--select",
+            "orders",
+            "--output-keys",
+            "name",
+            "alias",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert alias_keyed_json.returncode == 0, alias_keyed_json.stderr
+    assert json.loads(alias_keyed_json.stdout) == [{"name": "orders", "alias": "order_facts"}]
 
     untagged_project = copy_fixture(tmp_path, "model_ref")
     untagged_keyed_json = subprocess.run(
@@ -6026,6 +6050,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
             "stg_customers",
             "--output-keys",
             "name",
+            "alias",
             "config.materialized",
             "config.tags",
         ],
@@ -6035,7 +6060,35 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     )
     assert untagged_keyed_json.returncode == 0, untagged_keyed_json.stderr
     assert json.loads(untagged_keyed_json.stdout) == [
-        {"name": "stg_customers", "config.materialized": "view", "config.tags": []}
+        {"name": "stg_customers", "alias": "stg_customers", "config.materialized": "view", "config.tags": []}
+    ]
+
+    source_project = copy_fixture(tmp_path, "source_ref")
+    source_keyed_json = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(source_project),
+            "--output",
+            "json",
+            "--resource-type",
+            "source",
+            "--select",
+            "source:raw.customers",
+            "--output-keys",
+            "name",
+            "source_name",
+            "identifier",
+            "alias",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert source_keyed_json.returncode == 0, source_keyed_json.stderr
+    assert json.loads(source_keyed_json.stdout) == [
+        {"name": "customers", "source_name": "raw", "identifier": "customers"}
     ]
 
     missing_output_key = subprocess.run(
