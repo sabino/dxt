@@ -1680,6 +1680,74 @@ models:
     )
 
 
+def write_build_test_failure_downstream_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: build_test_failure_skip
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text(
+        """{{ config(materialized='table') }}
+select null as customer_id, 'Ada' as customer_name
+"""
+    )
+    (project / "models" / "orders.sql").write_text(
+        """{{ config(materialized='table') }}
+select customer_id, customer_name
+from {{ ref("customers") }}
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+"""
+    )
+
+
+def write_seed_build_test_failure_downstream_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "seeds").mkdir()
+    (project / "dbt_project.yml").write_text(
+        """name: build_seed_test_failure_skip
+version: "1.0"
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: target
+"""
+    )
+    (project / "seeds" / "raw_customers.csv").write_text("customer_id,customer_name\n,Ada\n")
+    (project / "models" / "customers.sql").write_text(
+        """{{ config(materialized='table') }}
+select try_cast(customer_id as integer) as customer_id, customer_name
+from {{ ref("raw_customers") }}
+"""
+    )
+    (project / "models" / "orders.sql").write_text(
+        """{{ config(materialized='table') }}
+select customer_id, customer_name
+from {{ ref("customers") }}
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+"""
+    )
+
+
 def write_singular_test_project(project: Path, customers_sql: str, singular_sql: str) -> None:
     (project / "models").mkdir(parents=True)
     (project / "tests" / "generic").mkdir(parents=True)
@@ -3636,6 +3704,75 @@ def test_build_reports_failing_model_attached_generic_tests_in_run_results(tmp_p
     assert [item["status"] for item in run_results["results"]] == ["success", "fail", "fail"]
     assert [item["failures"] for item in run_results["results"]] == [None, 1, 1]
     assert all(item["message"] == "Got 1 result, configured to fail if != 0" for item in run_results["results"][1:])
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for build data-test failure skip coverage")
+def test_build_data_test_failure_skips_selected_downstream_model(tmp_path: Path):
+    project = tmp_path / "build_test_failure_skip"
+    write_build_test_failure_downstream_project(project)
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Built 2 model(s) and 1 test(s)" in result.stdout
+    assert "1 test(s) failed with 1 failure row(s)" in result.stdout
+    assert "one or more tests failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "model.build_test_failure_skip.customers",
+        "test.build_test_failure_skip.not_null_customers_customer_id.5c9bf9911d",
+        "model.build_test_failure_skip.orders",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["success", "fail", "skipped"]
+    assert [item["failures"] for item in run_results["results"]] == [None, 1, None]
+
+    missing_orders = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-batch", "-bail", "-c", 'select count(*) from "main"."orders"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert missing_orders.returncode != 0
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for seed/model build data-test failure skip coverage")
+def test_build_seed_model_data_test_failure_skips_selected_downstream_model(tmp_path: Path):
+    project = tmp_path / "build_seed_test_failure_skip"
+    write_seed_build_test_failure_downstream_project(project)
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Built 1 seed(s), 1 model(s), and 1 test(s)" in result.stdout
+    assert "1 test(s) failed with 1 failure row(s)" in result.stdout
+    assert "one or more tests failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "seed.build_seed_test_failure_skip.raw_customers",
+        "model.build_seed_test_failure_skip.customers",
+        "test.build_seed_test_failure_skip.not_null_customers_customer_id.5c9bf9911d",
+        "model.build_seed_test_failure_skip.orders",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["success", "success", "fail", "skipped"]
+    assert [item["failures"] for item in run_results["results"]] == [None, None, 1, None]
+
+    missing_orders = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-batch", "-bail", "-c", 'select count(*) from "main"."orders"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert missing_orders.returncode != 0
 
 
 def test_build_rejects_model_selection_with_unsupported_generic_test_before_duckdb(tmp_path: Path):
