@@ -25,6 +25,13 @@ pub const SelectedResource = struct {
     config_materialized: []const u8 = "",
     config_tags: []const []const u8 = &.{},
     has_config_tags: bool = false,
+    config_enabled: bool = true,
+    has_config_enabled: bool = false,
+    config_docs_show: bool = true,
+    has_config_docs_show: bool = false,
+    depends_on_nodes: []const []const u8 = &.{},
+    depends_on_macros: []const []const u8 = &.{},
+    has_depends_on: bool = false,
 };
 
 const SelectorSpec = struct {
@@ -59,6 +66,13 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .config_materialized = node.materialized,
                 .config_tags = node.tags.items,
                 .has_config_tags = true,
+                .config_enabled = node.enabled,
+                .has_config_enabled = true,
+                .config_docs_show = node.docs.show,
+                .has_config_docs_show = true,
+                .depends_on_nodes = node.depends_on.items,
+                .depends_on_macros = node.macro_depends_on.items,
+                .has_depends_on = true,
             });
         }
     }
@@ -76,6 +90,11 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .alias = test_node.alias,
                 .config_materialized = "test",
                 .has_config_tags = true,
+                .config_enabled = true,
+                .has_config_enabled = true,
+                .depends_on_nodes = test_node.depends_on.items,
+                .depends_on_macros = test_node.macro_depends_on.items,
+                .has_depends_on = true,
             });
         }
     }
@@ -94,6 +113,11 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .alias = test_node.alias,
                 .config_materialized = "test",
                 .has_config_tags = true,
+                .config_enabled = test_node.enabled,
+                .has_config_enabled = true,
+                .depends_on_nodes = test_node.depends_on.items,
+                .depends_on_macros = test_node.macro_depends_on.items,
+                .has_depends_on = true,
             });
         }
     }
@@ -125,6 +149,12 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .path = exposure.path,
                 .original_file_path = exposure.original_file_path,
                 .selector = try std.fmt.allocPrint(allocator, "exposure:{s}.{s}", .{ exposure.package_name, exposure.name }),
+                .config_tags = exposure.tags.items,
+                .has_config_tags = true,
+                .config_enabled = exposure.enabled,
+                .has_config_enabled = true,
+                .depends_on_nodes = exposure.depends_on.items,
+                .has_depends_on = true,
             });
         }
     }
@@ -142,6 +172,10 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .selector = try std.fmt.allocPrint(allocator, "unit_test:{s}.{s}", .{ unit_test.package_name, unit_test.name }),
                 .config_tags = unit_test.tags.items,
                 .has_config_tags = true,
+                .config_enabled = unit_test.enabled,
+                .has_config_enabled = true,
+                .depends_on_nodes = unit_test.depends_on.items,
+                .has_depends_on = true,
             });
         }
     }
