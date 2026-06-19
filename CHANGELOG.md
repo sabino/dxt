@@ -33,6 +33,9 @@ compatibility.
 - Selector wildcard parity for bracket character classes in the shared Zig
   selector engine, covering `file:` and slash-aware `path:` selectors used by
   `dxt ls` and other selector-backed commands.
+- CI validation pyramid split into native Zig/safety, Python integration matrix,
+  and public Jaffle parse gates, with pytest JUnit reports and focused local
+  validation guidance.
 - Table-level model, seed, and source built-in generic tests with explicit
   `arguments.column_name`, including Manifest kwargs and DuckDB `build`
   execution for the existing supported test types while preserving dbt's
