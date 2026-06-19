@@ -5469,12 +5469,16 @@ def test_ls_multi_argv_and_repeated_selector_flags(tmp_path: Path):
     assert ls_json("--select", "model.selector_graph.*customers") == []
     assert ls_json("--select", "file:orders.sql") == ["model.selector_graph.orders"]
     assert ls_json("--select", "file:orders") == ["model.selector_graph.orders"]
+    assert ls_json("--select", "file:ord[ea]rs.sql") == ["model.selector_graph.orders"]
+    assert ls_json("--select", "file:stg_[a-z]*.sql") == ["model.selector_graph.stg_customers"]
+    assert ls_json("--select", "file:ord[z-a]rs.sql") == []
     assert ls_json("--select", "file:*customers.sql") == [
         "model.selector_graph.customers",
         "model.selector_graph.stg_customers",
     ]
     assert ls_json("--select", "file:models/orders.sql") == []
     assert ls_json("--select", "path:models/stg_*") == ["model.selector_graph.stg_customers"]
+    assert ls_json("--select", "path:models/[op]*.sql") == ["model.selector_graph.orders"]
     assert ls_json("--select", "path:*orders.sql") == []
     assert ls_json("--select", "path:models?orders.sql") == []
     assert ls_json("--select", "path:models/stg?customers.sql") == ["model.selector_graph.stg_customers"]

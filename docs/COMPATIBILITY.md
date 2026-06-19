@@ -70,7 +70,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `+` graph expansion | Partial; includes dbt-style unlimited and depth-limited parent/child forms such as `+model`, `model+`, `1+model`, `model+1`, and `1+model+1`. |
 | `@` graph expansion | Partial; selects descendants plus the parents needed for those descendants in the supported graph subset. |
 | `--exclude` | Partial |
-| `tag:`, `path:`, `file:`, `package:`, `resource_type:`, `test_type:`, `config.materialized:` | Partial |
+| `tag:`, `path:`, `file:`, `package:`, `resource_type:`, `test_type:`, `config.materialized:` | Partial; wildcard matching includes `*`, `?`, and fnmatch-style bracket character classes in the supported selector methods. |
 | `source:`, `exposure:`, selected generic test names | Partial |
 | Wildcards | Partial; pinned to observed dbt Core behavior where tested. |
 | YAML selectors, state/result/source-status/access/group/version selectors | Planned |
