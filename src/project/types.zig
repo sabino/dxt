@@ -331,6 +331,7 @@ pub const SingularTestNode = struct {
     path: []const u8,
     original_file_path: []const u8,
     raw_code: []const u8,
+    enabled: bool = true,
     compiled: bool = false,
     compiled_code: ?[]const u8 = null,
     compiled_path: ?[]const u8 = null,

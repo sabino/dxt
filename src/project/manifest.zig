@@ -115,6 +115,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeGenericTestNode(allocator, writer, test_node);
     }
     for (graph.singular_tests.items) |test_node| {
+        if (!test_node.enabled) continue;
         if (node_index != 0) try writer.writeAll(",");
         node_index += 1;
         try writer.writeAll("\n    ");
@@ -191,6 +192,16 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeNode(allocator, writer, node);
         try writer.writeAll("]");
     }
+    for (graph.singular_tests.items) |test_node| {
+        if (test_node.enabled) continue;
+        if (disabled_index != 0) try writer.writeAll(",");
+        disabled_index += 1;
+        try writer.writeAll("\n    ");
+        try json.string(writer, test_node.unique_id);
+        try writer.writeAll(": [");
+        try writeSingularTestNode(writer, test_node);
+        try writer.writeAll("]");
+    }
     try writer.writeAll("\n  },\n  \"parent_map\": {");
     var parent_index: usize = 0;
     for (graph.nodes.items) |node| {
@@ -211,6 +222,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try json.stringArray(writer, test_node.depends_on.items);
     }
     for (graph.singular_tests.items) |test_node| {
+        if (!test_node.enabled) continue;
         if (parent_index != 0) try writer.writeAll(",");
         parent_index += 1;
         try writer.writeAll("\n    ");
@@ -252,6 +264,7 @@ fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
     for (graph.singular_tests.items) |candidate| {
+        if (!candidate.enabled) continue;
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
     for (graph.sources.items) |candidate| {
@@ -290,6 +303,7 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
         }
     }
     for (graph.singular_tests.items) |test_node| {
+        if (!test_node.enabled) continue;
         if (util.containsString(test_node.depends_on.items, unique_id)) {
             if (!child_first) try writer.writeAll(",");
             child_first = false;
@@ -750,7 +764,9 @@ fn writeSingularTestNode(writer: *Io.Writer, test_node: SingularTestNode) !void 
     try json.string(writer, util.normalizeForDisplay(test_node.original_file_path));
     try writer.writeAll(",\"patch_path\":null,\"language\":\"sql\",\"raw_code\":");
     try json.string(writer, test_node.raw_code);
-    try writer.writeAll(",\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
+    try writer.writeAll(",\"config\":{\"enabled\":");
+    try writer.writeAll(if (test_node.enabled) "true" else "false");
+    try writer.writeAll(",\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, test_node.depends_on.items);
@@ -1385,6 +1401,17 @@ test "manifest writer filters disabled resources and writes graph maps" {
         .raw_code = "select 1",
         .enabled = false,
     });
+    try graph.singular_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.disabled_assert_customers",
+        .name = "disabled_assert_customers",
+        .alias = "disabled_assert_customers",
+        .path = "disabled_assert_customers.sql",
+        .original_file_path = "tests/disabled_assert_customers.sql",
+        .raw_code = "{{ config(enabled=false) }} select 1",
+        .enabled = false,
+    });
+    try graph.singular_tests.items[0].depends_on.append(allocator, "model.demo.customers");
     try graph.exposures.append(allocator, .{
         .package_name = "demo",
         .unique_id = "exposure.demo.weekly_kpis",
@@ -1430,9 +1457,12 @@ test "manifest writer filters disabled resources and writes graph maps" {
     const nodes = root.get("nodes").?.object;
     try std.testing.expect(nodes.get("model.demo.customers") != null);
     try std.testing.expect(nodes.get("model.demo.disabled") == null);
+    try std.testing.expect(nodes.get("test.demo.disabled_assert_customers") == null);
 
     const disabled = root.get("disabled").?.object;
     try std.testing.expect(disabled.get("model.demo.disabled") != null);
+    const disabled_test = disabled.get("test.demo.disabled_assert_customers").?.array.items[0].object;
+    try std.testing.expect(!disabled_test.get("config").?.object.get("enabled").?.bool);
 
     const exposures = root.get("exposures").?.object;
     try std.testing.expect(exposures.get("exposure.demo.weekly_kpis") != null);
@@ -1462,6 +1492,7 @@ test "manifest writer filters disabled resources and writes graph maps" {
     try std.testing.expectEqual(@as(usize, 1), unit_test_parents.len);
     try std.testing.expectEqualStrings("model.demo.customers", unit_test_parents[0].string);
     try std.testing.expect(parent_map.get("exposure.demo.hidden") == null);
+    try std.testing.expect(parent_map.get("test.demo.disabled_assert_customers") == null);
 
     const child_map = root.get("child_map").?.object;
     const source_children = child_map.get("source.demo.raw.customers").?.array.items;
@@ -1473,5 +1504,6 @@ test "manifest writer filters disabled resources and writes graph maps" {
     try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", model_children[0].string);
     try std.testing.expectEqualStrings("unit_test.demo.customers.assert_customers", model_children[1].string);
     try std.testing.expect(child_map.get("model.demo.disabled") == null);
+    try std.testing.expect(child_map.get("test.demo.disabled_assert_customers") == null);
     try std.testing.expect(child_map.get("exposure.demo.hidden") == null);
 }

@@ -204,6 +204,7 @@ pub fn resolveDependencies(graph: *Graph) !void {
         sortStrings(exposure.depends_on.items);
     }
     for (graph.singular_tests.items) |*test_node| {
+        if (!test_node.enabled) continue;
         for (test_node.macro_depends_on.items) |macro_dep| {
             if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
         }

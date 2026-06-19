@@ -2284,6 +2284,64 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
     ]
 
 
+def test_inline_disabled_singular_sql_test_is_not_active(tmp_path: Path):
+    project = tmp_path / "singular_tests"
+    write_singular_test_project(
+        project,
+        "select 1 as customer_id\n",
+        "select * from {{ ref('customers') }} where customer_id is null;\n",
+    )
+    (project / "tests" / "disabled_missing_ref.sql").write_text(
+        "{{ config(enabled=false) }}\nselect * from {{ ref('missing_model') }}\n"
+    )
+    target = tmp_path / "parse-target"
+
+    parse_result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert parse_result.returncode == 0, parse_result.stderr
+    manifest_path = target / "manifest.json"
+    assert_manifest_schema_slice(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    assert sorted(unique_id for unique_id in manifest["nodes"] if unique_id.startswith("test.")) == [
+        "test.singular_tests.assert_customers"
+    ]
+    disabled_id = "test.singular_tests.disabled_missing_ref"
+    assert disabled_id not in manifest["parent_map"]
+    assert disabled_id not in manifest["child_map"]
+    assert list(manifest["disabled"]) == [disabled_id]
+    disabled_test = manifest["disabled"][disabled_id][0]
+    assert disabled_test["config"]["enabled"] is False
+    assert disabled_test["refs"] == [{"name": "missing_model", "package": None, "version": None}]
+    assert disabled_test["depends_on"]["nodes"] == []
+
+    list_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert list_result.returncode == 0, list_result.stderr
+    assert json.loads(list_result.stdout) == [
+        {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"}
+    ]
+
+    compile_target = tmp_path / "compile-target"
+    compile_result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(compile_target), "--select", "test_type:singular"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    assert "Compiled 0 model(s) and 1 test(s)" in compile_result.stdout
+    compiled_root = compile_target / "compiled" / "singular_tests" / "tests"
+    assert sorted(path.name for path in compiled_root.glob("*.sql")) == ["assert_customers.sql"]
+
+
 def test_compile_writes_selected_singular_sql_test_artifacts_without_duckdb(tmp_path: Path):
     project = tmp_path / "singular_tests"
     write_singular_test_project(
@@ -2379,6 +2437,9 @@ def test_build_and_test_execute_singular_sql_tests(tmp_path: Path):
         project,
         "select 1 as customer_id, 'Ada' as customer_name\n",
         "select * from {{ ref('customers') }} where customer_id is null;\n",
+    )
+    (project / "tests" / "disabled_missing_ref.sql").write_text(
+        "{{ config(enabled=false) }}\nselect * from {{ ref('missing_model') }}\n"
     )
     target = tmp_path / "singular-target"
 
