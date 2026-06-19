@@ -110,6 +110,63 @@ The Product Manager `--dry-run` previews the launch command and GitHub Project
 scope check. It does not ask the model for a no-write board plan; remove
 `--dry-run` only when repo-scoped issue, label, or Project writes are intended.
 
+## Company Loop
+
+The intended operating model is a small software company, not a single worker
+queue. The loop has four layers:
+
+1. Product Manager / board steward: inspect issues, Project state, `PLAN.md`,
+   support docs, and recent PRs; add or update missing roadmap slices; label
+   readiness, role, priority, risk, validation, and dependencies.
+2. Supervisor / principal engineer: choose the next batch, avoid branch/file
+   conflicts, launch workers in separate worktrees, monitor status, watch CI,
+   converge PRs, merge green changes, clean up worktrees, and feed results back
+   to the PM.
+3. Specialist network: use researcher, mapper, planner, QA, artifact, safety,
+   docs, and reflection roles before and after implementation when an issue is
+   complex or risky.
+4. Implementation workers: own one branch/worktree and one coherent slice, then
+   publish a PR with validation evidence.
+
+Run the PM loop before a worker batch when the board is empty, stale, or too
+broad:
+
+```sh
+python scripts/agent_os_orchestrator.py product-manager \
+  --repo sabino/dxt \
+  --profile azure \
+  --model gpt-5.5
+```
+
+Run implementation only after the board has ready, scoped issues:
+
+```sh
+python scripts/agent_os_orchestrator.py run \
+  --repo sabino/dxt \
+  --profile azure \
+  --model gpt-5.5 \
+  --loop \
+  --merge-ready
+```
+
+Use `status`, `nudge`, `stop`, and `merge-ready` from the supervisor pane
+between batches. Do not use the main tmux session for long feature
+implementation unless the feature is an orchestration fix.
+
+### Capability Reality Check
+
+| Capability | Current state |
+| --- | --- |
+| GitHub labels, seed issues, issue templates, and Project manifest | Real. `setup` can sync these from `.github/agent-team/`. |
+| PM board steward subprocess | Real but prompt-driven. It can inspect the board and use GitHub writes, including issue creation, but there is no deterministic backlog synthesizer yet. |
+| Parallel worker launches | Real. `run` claims ready issues, creates worktrees, and launches up to `default_max_workers` workers. |
+| Worker GitHub publication | Real for autonomous workers launched by the orchestrator because they use `danger-full-access`. |
+| Merge of green PRs | Real but simple. `merge-ready` merges non-draft PRs whose checks are green; it does not yet model dependencies or file conflicts. |
+| Multi-stage PM/research/mapper/worker/reviewer pipeline | Partially real through roles and labels; orchestration is still manual/prompt-driven. |
+| Principal conflict graph and merge queue | Aspirational. The supervisor must currently reason from `git worktree`, PRs, labels, and CI status. |
+| Automatic Project field reconciliation during every loop | Partially real. Setup can sync items; live per-issue field updates are still PM/supervisor work. |
+| Stale worktree and stale claim cleanup | Partially real through `status` and `stop`; automated cleanup needs a follow-up slice. |
+
 ## Codex Pull Plug
 
 Use the pull plug when this repo changes project-scoped Codex settings under

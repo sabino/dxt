@@ -599,6 +599,8 @@ Read AGENTS.md, PLAN.md, docs/AGENT_OS.md, docs/AGENT_PROTOCOLS.md, and .codex/a
 Mission:
 - Keep the GitHub issue board moving toward the dxt goal: a Zig dbt-core-compatible drop-in replacement.
 - Prioritize dbt Core compatibility slices over speculative expansion.
+- Create or update actionable GitHub issues when the open board has no next work or when roadmap gaps are obvious from PLAN.md/docs. Do not wait for a human to pre-create every slice.
+- Each new or updated issue must include acceptance criteria, role/priority/readiness labels, expected validation, dependencies or sequencing notes, and stop conditions.
 - Identify ready work, blocked work, stale claims, broad issues that need splitting, missing labels, and missing validation gates.
 - Use concise public-safe GitHub issue comments and label changes when they clearly improve routing.
 - Do not edit local files and do not implement product behavior.
