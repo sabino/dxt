@@ -34,7 +34,7 @@ compatibility.
   selector engine, covering `file:` and slash-aware `path:` selectors used by
   `dxt ls` and other selector-backed commands.
 - CI validation pyramid split into native Zig/safety, Python integration matrix,
-  and public Jaffle parse/build gates with a pinned and checksum-verified
+  and public Jaffle parse/build/run gates with a pinned and checksum-verified
   DuckDB CLI, pytest JUnit reports, and focused local validation guidance.
 - Shared Zig JSON writer helpers for artifact emission, replacing duplicated
   per-artifact string escaping helpers across manifest, run-results, catalog,
