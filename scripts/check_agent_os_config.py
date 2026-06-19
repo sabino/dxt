@@ -167,8 +167,12 @@ def validate_orchestrator(label_names: set[str], findings: list[str]) -> None:
             findings.append(f"orchestrator role_map[{index}] missing agent")
         if mode not in {"plan", "product", "research", "map", "implement", "review", "reflect", "docs", "qa"}:
             findings.append(f"orchestrator role_map[{index}] has invalid mode {mode!r}")
-        if sandbox not in {"read-only", "workspace-write"}:
+        if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
             findings.append(f"orchestrator role_map[{index}] has invalid sandbox {sandbox!r}")
+
+    product_manager_sandbox = config.get("product_manager_sandbox")
+    if product_manager_sandbox is not None and product_manager_sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
+        findings.append(f"orchestrator.json has invalid product_manager_sandbox {product_manager_sandbox!r}")
 
 
 def validate_issue_forms(label_names: set[str], findings: list[str]) -> None:

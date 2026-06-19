@@ -15,109 +15,110 @@
     "status:ci",
     "status:review"
   ],
+  "product_manager_sandbox": "danger-full-access",
   "fallback_agent": "dxt_supervisor_integrator",
   "role_map": [
     {
       "label": "role:pm",
       "agent": "dxt_product_manager",
       "mode": "product",
-      "sandbox": "read-only"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "role:supervisor",
       "agent": "dxt_supervisor_integrator",
       "mode": "plan",
-      "sandbox": "read-only"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "role:researcher",
       "agent": "dxt_dbt_reference_researcher",
       "mode": "research",
-      "sandbox": "read-only"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "role:mapper",
       "agent": "dxt_code_mapper",
       "mode": "map",
-      "sandbox": "read-only"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "role:worker",
       "agent": "dxt_zig_slice_worker",
       "mode": "implement",
-      "sandbox": "workspace-write"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "role:parity",
       "agent": "dxt_artifact_parity_reviewer",
       "mode": "review",
-      "sandbox": "read-only"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "role:auditor",
       "agent": "dxt_runtime_boundary_auditor",
       "mode": "review",
-      "sandbox": "read-only"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "role:reflection",
       "agent": "dxt_reflection_reviewer",
       "mode": "reflect",
-      "sandbox": "read-only"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "role:convergence",
       "agent": "dxt_convergence_reviewer",
       "mode": "review",
-      "sandbox": "read-only"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "area:compiler-jinja",
       "agent": "dxt_jinja_macro_specialist",
       "mode": "implement",
-      "sandbox": "workspace-write"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "area:selector",
       "agent": "dxt_selector_state_specialist",
       "mode": "implement",
-      "sandbox": "workspace-write"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "area:runner",
       "agent": "dxt_execution_adapter_specialist",
       "mode": "implement",
-      "sandbox": "workspace-write"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "area:duckdb",
       "agent": "dxt_execution_adapter_specialist",
       "mode": "implement",
-      "sandbox": "workspace-write"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "area:semantic",
       "agent": "dxt_semantic_crossdb_planner",
       "mode": "plan",
-      "sandbox": "read-only"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "area:cross-db",
       "agent": "dxt_semantic_crossdb_planner",
       "mode": "plan",
-      "sandbox": "read-only"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "area:docs",
       "agent": "dxt_docs_release_curator",
       "mode": "docs",
-      "sandbox": "workspace-write"
+      "sandbox": "danger-full-access"
     },
     {
       "label": "area:release",
       "agent": "dxt_docs_release_curator",
       "mode": "docs",
-      "sandbox": "workspace-write"
+      "sandbox": "danger-full-access"
     }
   ]
 }

@@ -82,6 +82,15 @@ commit them. Nudges are issue comments; running workers are instructed to read
 recent issue comments before major decisions, and the supervisor loop will pick
 up new issue state on the next polling cycle.
 
+Detached Agent OS workers launch through `codex exec` with
+`danger-full-access` in this repository. That is intentional: these workers are
+expected to use the host GitHub CLI auth/keyring, push branches, open PRs, and
+write Git metadata that may live outside the individual worktree directory. The
+role files still define behavioral boundaries such as read-only review or
+single-slice implementation, but the filesystem sandbox is not the enforcement
+mechanism for autonomous GitHub-backed work. Run this orchestrator only for this
+trusted repository.
+
 The Product Manager `--dry-run` previews the launch command and GitHub Project
 scope check. It does not ask the model for a no-write board plan; remove
 `--dry-run` only when repo-scoped issue, label, or Project writes are intended.
