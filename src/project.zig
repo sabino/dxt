@@ -165,15 +165,16 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
 
     const target_dir = try targetDir(runtime, options);
-    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir);
-    if (selected.len != 0 and !compile_result.saw_model) return error.UnsupportedCompileSelection;
+    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, true);
+    if (selected.len != 0 and !compile_result.saw_model and !compile_result.saw_singular_test) return error.UnsupportedCompileSelection;
 
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
-    try stdout.print("Compiled {d} model(s) into {s}\n", .{
+    try stdout.print("Compiled {d} model(s) and {d} test(s) into {s}\n", .{
         compile_result.count,
+        compile_result.test_count,
         util.normalizeForDisplay(compile_result.compiled_base),
     });
 }
@@ -190,7 +191,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
 
     const target_dir = try targetDir(runtime, options);
-    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir);
+    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false);
 
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
@@ -333,7 +334,7 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     try validateRunMaterializations(execution_order);
 
     const target_dir = try targetDir(runtime, options);
-    const compile_result = try compileSelectedModels(runtime, &graph, selected_models, target_dir);
+    const compile_result = try compileSelectedModels(runtime, &graph, selected_models, target_dir, false);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     if (compile_result.count == 0) return error.UnsupportedRunSelection;
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
@@ -461,7 +462,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     const selected = try selector.selectResources(runtime.allocator, &graph, null, select, exclude);
 
     const target_dir = try targetDir(runtime, options);
-    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir);
+    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     const selected_kinds = classifyBuildSelection(selected);
     if (selected_kinds.total == 0) return error.UnsupportedBuildSelection;
@@ -684,7 +685,9 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
 
 const CompileResult = struct {
     count: usize,
+    test_count: usize = 0,
     saw_model: bool,
+    saw_singular_test: bool = false,
     compiled_base: []const u8,
 };
 
@@ -1138,12 +1141,14 @@ fn targetDir(runtime: Runtime, options: Options) ![]const u8 {
     return try pathJoin(runtime.allocator, &.{ options.project_dir, target_path });
 }
 
-fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8) !CompileResult {
+fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, include_singular_tests: bool) !CompileResult {
     const compiled_base = try pathJoin(runtime.allocator, &.{ target_dir, "compiled" });
     try std.Io.Dir.cwd().createDirPath(runtime.io, compiled_base);
 
     var compiled_count: usize = 0;
+    var compiled_test_count: usize = 0;
     var saw_selected_model = false;
+    var saw_selected_singular_test = false;
     for (graph.nodes.items) |*node| {
         if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
         if (!selectionContains(selected, node.unique_id)) continue;
@@ -1162,7 +1167,31 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         compiled_count += 1;
     }
 
-    return .{ .count = compiled_count, .saw_model = saw_selected_model, .compiled_base = compiled_base };
+    if (include_singular_tests) {
+        for (graph.singular_tests.items) |*test_node| {
+            if (!selectionContains(selected, test_node.unique_id)) continue;
+            saw_selected_singular_test = true;
+
+            const compiled_code = try compiler.compileSingularTest(runtime.allocator, graph, test_node);
+            const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, test_node.package_name, test_node.original_file_path });
+            if (std.fs.path.dirname(compiled_path)) |parent| {
+                try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
+            }
+            try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = compiled_code });
+            test_node.compiled = true;
+            test_node.compiled_code = compiled_code;
+            test_node.compiled_path = util.normalizeForDisplay(compiled_path);
+            compiled_test_count += 1;
+        }
+    }
+
+    return .{
+        .count = compiled_count,
+        .test_count = compiled_test_count,
+        .saw_model = saw_selected_model,
+        .saw_singular_test = saw_selected_singular_test,
+        .compiled_base = compiled_base,
+    };
 }
 
 fn writeManifest(runtime: Runtime, graph: *const Graph, target_dir: []const u8) ![]const u8 {

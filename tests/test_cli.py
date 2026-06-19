@@ -753,7 +753,7 @@ def test_compile_rejects_selection_without_models(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "compile currently supports only selected SQL model resources" in result.stderr
+    assert "compile currently supports only selected SQL model or singular SQL test resources" in result.stderr
 
 
 def test_compile_uses_selected_node_package_for_compiled_path(tmp_path: Path):
@@ -2214,6 +2214,44 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
         {"unique_id": "model.singular_tests.customers", "resource_type": "model", "name": "customers"},
         {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"},
     ]
+
+
+def test_compile_writes_selected_singular_sql_test_artifacts_without_duckdb(tmp_path: Path):
+    project = tmp_path / "singular_tests"
+    write_singular_test_project(
+        project,
+        "select 1 as customer_id\n",
+        "select * from {{ ref('customers') }} where customer_id is null;\n",
+    )
+    target = tmp_path / "compile-target"
+
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "test_type:singular"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Compiled 0 model(s) and 1 test(s)" in result.stdout
+    assert not (target / "dxt.duckdb").exists()
+
+    compiled_path = target / "compiled" / "singular_tests" / "tests" / "assert_customers.sql"
+    compiled_sql = compiled_path.read_text()
+    assert compiled_sql.strip() == 'select * from "main"."customers" where customer_id is null;'
+
+    manifest_path = target / "manifest.json"
+    assert_manifest_schema_slice(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    test_node = manifest["nodes"]["test.singular_tests.assert_customers"]
+    assert test_node["compiled"] is True
+    assert test_node["compiled_code"] == compiled_sql
+    assert test_node["compiled_path"].endswith("/compiled/singular_tests/tests/assert_customers.sql")
+    assert test_node["extra_ctes"] == []
+    assert test_node["extra_ctes_injected"] is False
+    assert "test_metadata" not in test_node
+    assert "column_name" not in test_node
+    assert "attached_node" not in test_node
+    assert "compiled" not in manifest["nodes"]["model.singular_tests.customers"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for singular SQL test execution coverage")

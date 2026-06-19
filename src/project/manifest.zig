@@ -751,6 +751,13 @@ fn writeSingularTestNode(writer: *Io.Writer, test_node: SingularTestNode) !void 
     try writeRefDeps(writer, test_node.refs.items);
     try writer.writeAll(",\"sources\":");
     try writeSourceDeps(writer, test_node.source_refs.items);
+    if (test_node.compiled) {
+        try writer.writeAll(",\"compiled\":true,\"compiled_code\":");
+        try json.string(writer, test_node.compiled_code orelse "");
+        try writer.writeAll(",\"compiled_path\":");
+        try json.string(writer, util.normalizeForDisplay(test_node.compiled_path orelse ""));
+        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":false");
+    }
     try writer.writeAll("}");
 }
 
@@ -1238,6 +1245,9 @@ test "manifest writer emits singular tests without generic-only fields" {
         .path = "assert_customers.sql",
         .original_file_path = "tests/assert_customers.sql",
         .raw_code = "select * from {{ ref('customers') }} where customer_id is null",
+        .compiled = true,
+        .compiled_code = "select * from \"main\".\"customers\" where customer_id is null",
+        .compiled_path = "target/compiled/demo/tests/assert_customers.sql",
     });
     try graph.singular_tests.items[0].refs.append(allocator, .{ .package = null, .name = "customers" });
     try graph.singular_tests.items[0].depends_on.append(allocator, "model.demo.customers");
@@ -1254,6 +1264,17 @@ test "manifest writer emits singular tests without generic-only fields" {
     try std.testing.expect(test_node.get("test_metadata") == null);
     try std.testing.expect(test_node.get("column_name") == null);
     try std.testing.expect(test_node.get("attached_node") == null);
+    try std.testing.expect(test_node.get("compiled").?.bool);
+    try std.testing.expectEqualStrings(
+        "select * from \"main\".\"customers\" where customer_id is null",
+        test_node.get("compiled_code").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "target/compiled/demo/tests/assert_customers.sql",
+        test_node.get("compiled_path").?.string,
+    );
+    try std.testing.expectEqual(@as(usize, 0), test_node.get("extra_ctes").?.array.items.len);
+    try std.testing.expect(!test_node.get("extra_ctes_injected").?.bool);
     try std.testing.expectEqualStrings("customers", test_node.get("refs").?.array.items[0].object.get("name").?.string);
     try std.testing.expectEqualStrings(
         "model.demo.customers",

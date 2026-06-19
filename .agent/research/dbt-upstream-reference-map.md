@@ -68,9 +68,12 @@ Every compatibility slice should record:
 ## Current dxt Baseline
 
 - Product runtime is Zig and remains so.
-- Current implemented command surface is `parse`, `ls`, `compile`, `docs
-  generate`, `source freshness`, `run`, `build`, `version`, and help. `compile` and `docs generate`
-  are render-only artifact boundaries for the supported parser graph. `run`
+- Current implemented command surface is `parse`, `ls`, `clean`, `compile`,
+  `run`, `seed`, `test`, `build`, `docs generate`, `docs serve`,
+  `source freshness`, `version`, and help. `compile` and `docs generate`
+  are render-only artifact boundaries for the supported parser graph; `compile`
+  covers selected SQL models and selected singular SQL data tests in the
+  current subset. `run`
   executes selected enabled DuckDB SQL models with `table` and `view`
   materializations through a Zig-owned external CLI backend, validates
   supported materializations before opening DuckDB, executes selected models in
@@ -327,8 +330,9 @@ Every compatibility slice should record:
   anything.
 - Python/dbt oracle: compare `dbt compile` vs `dxt compile` for `single_model`,
   `model_ref`, `source_ref`, and inline config fixtures, normalizing
-  `compiled_code`, `compiled_path`, `relation_name`, and selected manifest
-  compiled fields without opening a warehouse connection.
+  `compiled_code`, `compiled_path`, `relation_name`, selected model manifest
+  compiled fields, and selected singular-test compiled fields without opening a
+  warehouse connection.
 - Artifact validation: add compile-only manifest fields only when emitted:
   `compiled_code`, `compiled`, `compiled_path`, `extra_ctes_injected`,
   `extra_ctes`, and `relation_name`. Do not emit successful `run_results.json`
