@@ -353,6 +353,50 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
     assert events["sources"] == [["raw", "events"]]
 
 
+def test_parse_time_context_keeps_execute_false_boundary_and_static_dependencies(tmp_path: Path):
+    project = copy_fixture(tmp_path, "parse_time_context")
+    parse_target = tmp_path / "parse-target"
+    parse_result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(parse_target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert parse_result.returncode == 0, parse_result.stderr
+
+    parse_manifest_path = parse_target / "manifest.json"
+    assert_manifest_schema_slice(parse_manifest_path)
+    parse_manifest = json.loads(parse_manifest_path.read_text())
+    parsed = parse_manifest["nodes"]["model.parse_time_context.context_orders"]
+    assert parsed["config"]["materialized"] == "table"
+    assert parsed["config"]["tags"] == ["parse_time"]
+    assert parsed["depends_on"]["nodes"] == [
+        "model.parse_time_context.customers",
+        "source.parse_time_context.raw.events",
+    ]
+    assert parsed["refs"] == [{"name": "customers", "package": None, "version": None}]
+    assert parsed["sources"] == [["raw", "events"]]
+
+    compile_target = tmp_path / "compile-target"
+    compile_result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(compile_target), "--select", "context_orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+
+    compiled = (compile_target / "compiled" / "parse_time_context" / "models" / "context_orders.sql").read_text()
+    assert 'union all select * from "main"."customers"' in compiled
+    assert 'union all select * from "raw"."events"' not in compiled
+    assert "{{" not in compiled
+    assert "{%" not in compiled
+
+    compile_manifest = json.loads((compile_target / "manifest.json").read_text())
+    compiled_node = compile_manifest["nodes"]["model.parse_time_context.context_orders"]
+    assert compiled_node["depends_on"]["nodes"] == parsed["depends_on"]["nodes"]
+
+
 def write_source_identifier_project(project: Path) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
