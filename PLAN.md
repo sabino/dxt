@@ -550,6 +550,16 @@ false. It does not implement database-backed `run_query`, adapter
 introspection, `elif`, complex expressions, or incremental materialization
 semantics.
 
+Current parse-time Jinja context boundary source note:
+issue #150 adds an explicit Zig parse context in `src/project/jinja.zig` where
+`execute=false`, supported parse-time `config()` returns empty text while
+mutating parser-owned node config, and literal `ref()` / `source()` calls
+return deterministic placeholders while preserving dependency records. It keeps
+the existing raw scanner's static dependency recovery inside branches that may
+render false. It does not implement general Jinja evaluation, database-backed
+`run_query`, `statement`, adapter introspection, macro execution, hook hidden
+dependencies, dispatch execution, or materialization lookup.
+
 Current static loop ref/source compile source note:
 `.agent/research/m2-static-loop-ref-source-compile.md` maps upstream dbt Core
 v1 and Fusion compile-time `ref()` / `source()` resolution to dxt's narrow

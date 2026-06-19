@@ -304,6 +304,18 @@ pub fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph
     try scanRange(allocator, sql, 0, sql.len, node, graph, &context);
 }
 
+pub fn renderParseExpression(allocator: std.mem.Allocator, span: []const u8, node: *Node, graph: ?*const Graph) ![]const u8 {
+    var scan_context = ScanContext{ .allocator = allocator };
+    defer scan_context.deinit();
+    const context = ParseTimeContext{
+        .allocator = allocator,
+        .node = node,
+        .graph = graph,
+        .scan_context = &scan_context,
+    };
+    return try context.renderExpression(std.mem.trim(u8, span, " \t\r\n"));
+}
+
 fn scanRange(allocator: std.mem.Allocator, sql: []const u8, start: usize, range_end: usize, node: *Node, graph: ?*const Graph, context: *ScanContext) !void {
     var index: usize = start;
     while (index + 1 < range_end) {
@@ -458,6 +470,68 @@ const ScanContext = struct {
 const ScanScope = struct {
     lists_len: usize,
     bindings_len: usize,
+};
+
+fn parseSingleCall(span: []const u8) !JinjaCall {
+    var index = skipWs(span, 0);
+    if (index >= span.len or !isIdentStart(span[index])) return error.UnsupportedJinja;
+    const ident_start = index;
+    index += 1;
+    while (index < span.len and isIdentChar(span[index])) index += 1;
+    const ident = span[ident_start..index];
+    const call = (try readJinjaCall(span, ident, index)) orelse return error.UnsupportedJinja;
+    if (std.mem.trim(u8, span[call.close + 1 ..], " \t\r\n").len != 0) return error.UnsupportedJinja;
+    return call;
+}
+
+const ParseTimeContext = struct {
+    allocator: std.mem.Allocator,
+    node: *Node,
+    graph: ?*const Graph,
+    scan_context: *const ScanContext,
+    execute: bool = false,
+
+    fn renderExpression(self: *const ParseTimeContext, span: []const u8) ![]const u8 {
+        if (std.mem.eql(u8, span, "execute")) {
+            return try self.allocator.dupe(u8, if (self.execute) "true" else "false");
+        }
+        const call = try parseSingleCall(span);
+        const args = span[call.open + 1 .. call.close];
+        return try self.renderCall(call, args);
+    }
+
+    fn renderCall(self: *const ParseTimeContext, call: JinjaCall, args: []const u8) ![]const u8 {
+        if (call.package_name != null) return error.UnsupportedJinja;
+        if (std.mem.eql(u8, call.name, "ref")) {
+            var strings = try parseLiteralOrVarArgsWithBindings(self.allocator, args, self.graph, self.scan_context.bindings.items, error.UnsupportedDynamicRef);
+            defer strings.deinit(self.allocator);
+            if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedDynamicRef;
+            try self.node.refs.append(self.allocator, .{
+                .package = if (strings.items.len == 2) strings.items[0] else null,
+                .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
+            });
+            return try self.allocator.dupe(u8, "__dxt_parse_ref__");
+        }
+        if (std.mem.eql(u8, call.name, "source")) {
+            var strings = try parseLiteralOrVarArgsWithBindings(self.allocator, args, self.graph, self.scan_context.bindings.items, error.UnsupportedDynamicSource);
+            defer strings.deinit(self.allocator);
+            if (strings.items.len != 2) return error.UnsupportedDynamicSource;
+            try self.node.source_refs.append(self.allocator, .{
+                .source_name = strings.items[0],
+                .table_name = strings.items[1],
+            });
+            return try self.allocator.dupe(u8, "__dxt_parse_source__");
+        }
+        if (std.mem.eql(u8, call.name, "config")) {
+            try parseConfig(self.allocator, args, self.node);
+            return try self.allocator.dupe(u8, "");
+        }
+        if (std.mem.eql(u8, call.name, "is_incremental")) {
+            if (std.mem.trim(u8, args, " \t\r\n").len != 0) return error.UnsupportedJinja;
+            return try self.allocator.dupe(u8, "false");
+        }
+        return error.UnsupportedJinja;
+    }
 };
 
 const SetListAssignment = struct {
@@ -688,6 +762,12 @@ fn findMatchingEndForPermissive(sql: []const u8, start: usize) ?EndForTag {
 
 fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, graph: ?*const Graph, context: *const ScanContext) !void {
     var i: usize = 0;
+    const parse_context = ParseTimeContext{
+        .allocator = allocator,
+        .node = node,
+        .graph = graph,
+        .scan_context = context,
+    };
     while (i < span.len) {
         if (span[i] == '"' or span[i] == '\'') {
             i = skipQuotedSpan(span, i) orelse return error.UnsupportedJinja;
@@ -725,26 +805,13 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
                 if (hasMacroPackage(known_graph, package_name)) return error.UnresolvedMacro;
             }
             return error.UnsupportedJinja;
-        } else if (std.mem.eql(u8, call.name, "ref")) {
-            var strings = try parseLiteralOrVarArgsWithBindings(allocator, args, graph, context.bindings.items, error.UnsupportedDynamicRef);
-            defer strings.deinit(allocator);
-            if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedDynamicRef;
-            try node.refs.append(allocator, .{
-                .package = if (strings.items.len == 2) strings.items[0] else null,
-                .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
-            });
-        } else if (std.mem.eql(u8, call.name, "source")) {
-            var strings = try parseLiteralOrVarArgsWithBindings(allocator, args, graph, context.bindings.items, error.UnsupportedDynamicSource);
-            defer strings.deinit(allocator);
-            if (strings.items.len != 2) return error.UnsupportedDynamicSource;
-            try node.source_refs.append(allocator, .{
-                .source_name = strings.items[0],
-                .table_name = strings.items[1],
-            });
-        } else if (std.mem.eql(u8, call.name, "config")) {
-            try parseConfig(allocator, args, node);
-        } else if (std.mem.eql(u8, call.name, "is_incremental")) {
-            if (std.mem.trim(u8, args, " \t\r\n").len != 0) return error.UnsupportedJinja;
+        } else if (std.mem.eql(u8, call.name, "ref") or
+            std.mem.eql(u8, call.name, "source") or
+            std.mem.eql(u8, call.name, "config") or
+            std.mem.eql(u8, call.name, "is_incremental"))
+        {
+            const rendered = try parse_context.renderCall(call, args);
+            allocator.free(rendered);
         } else {
             if (graph) |known_graph| {
                 if (findMacroIdForUnqualifiedNamespaceCall(known_graph, node.package_name, call.name)) |macro_id| {
@@ -1132,6 +1199,63 @@ fn appendTestDispatchConfig(graph: *Graph, macro_namespace: []const u8, search_o
         .macro_namespace = macro_namespace,
         .search_order = order,
     });
+}
+
+test "parse-time context renders execute false without expanding runtime behavior" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    const rendered = try renderParseExpression(allocator, "execute", &node, null);
+    try std.testing.expectEqualStrings("false", rendered);
+}
+
+test "parse-time context records supported calls and returns artifact-safe text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "",
+    };
+    defer deinitTestNode(allocator, &node);
+
+    const config_text = try renderParseExpression(allocator, "config(materialized='table', tags=['nightly'])", &node, null);
+    try std.testing.expectEqualStrings("", config_text);
+    try std.testing.expectEqualStrings("table", node.materialized);
+    try std.testing.expect(node.inline_materialized);
+    try std.testing.expectEqual(@as(usize, 1), node.tags.items.len);
+    try std.testing.expectEqualStrings("nightly", node.tags.items[0]);
+
+    const ref_text = try renderParseExpression(allocator, "ref('customers')", &node, null);
+    try std.testing.expectEqualStrings("__dxt_parse_ref__", ref_text);
+    const source_text = try renderParseExpression(allocator, "source('raw', 'events')", &node, null);
+    try std.testing.expectEqualStrings("__dxt_parse_source__", source_text);
+
+    try std.testing.expectEqual(@as(usize, 1), node.refs.items.len);
+    try std.testing.expectEqualStrings("customers", node.refs.items[0].name);
+    try std.testing.expectEqual(@as(usize, 1), node.source_refs.items.len);
+    try std.testing.expectEqualStrings("raw", node.source_refs.items[0].source_name);
+    try std.testing.expectEqualStrings("events", node.source_refs.items[0].table_name);
+
+    const incremental_text = try renderParseExpression(allocator, "is_incremental()", &node, null);
+    try std.testing.expectEqualStrings("false", incremental_text);
+    try std.testing.expectError(error.UnsupportedDynamicRef, renderParseExpression(allocator, "ref(target.name)", &node, null));
 }
 
 test "sql scanner extracts refs sources and config tags from jinja spans" {
