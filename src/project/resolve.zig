@@ -9,6 +9,7 @@ const Graph = types.Graph;
 const MacroDef = types.MacroDef;
 const Node = types.Node;
 const RefDep = types.RefDep;
+const SingularTestNode = types.SingularTestNode;
 const SourceDep = types.SourceDep;
 const SourceDef = types.SourceDef;
 const UnitTestDef = types.UnitTestDef;
@@ -202,6 +203,19 @@ pub fn resolveDependencies(graph: *Graph) !void {
         }
         sortStrings(exposure.depends_on.items);
     }
+    for (graph.singular_tests.items) |*test_node| {
+        for (test_node.macro_depends_on.items) |macro_dep| {
+            if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
+        }
+        sortStrings(test_node.macro_depends_on.items);
+        for (test_node.refs.items) |ref_dep| {
+            try appendUnique(graph.allocator, &test_node.depends_on, try resolveRefDependency(graph, test_node.package_name, ref_dep));
+        }
+        for (test_node.source_refs.items) |source_dep| {
+            try appendUnique(graph.allocator, &test_node.depends_on, try resolveSourceDependency(graph, test_node.package_name, source_dep));
+        }
+        sortStrings(test_node.depends_on.items);
+    }
     for (graph.unit_tests.items) |*unit_test| {
         if (!unit_test.enabled) continue;
         const model_unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ unit_test.package_name, unit_test.model });
@@ -215,6 +229,7 @@ pub fn resolveDependencies(graph: *Graph) !void {
 pub fn sortGraphResources(graph: *Graph) void {
     sortNodes(graph.nodes.items);
     sortTests(graph.tests.items);
+    sortSingularTests(graph.singular_tests.items);
     sortSources(graph.sources.items);
     sortExposures(graph.exposures.items);
     sortUnitTests(graph.unit_tests.items);
@@ -283,6 +298,18 @@ pub fn rejectDuplicateUnitTests(graph: *const Graph) !void {
         while (j < graph.unit_tests.items.len) : (j += 1) {
             if (std.mem.eql(u8, graph.unit_tests.items[i].unique_id, graph.unit_tests.items[j].unique_id)) {
                 return error.DuplicateUnitTestName;
+            }
+        }
+    }
+}
+
+pub fn rejectDuplicateSingularTests(graph: *const Graph) !void {
+    var i: usize = 0;
+    while (i < graph.singular_tests.items.len) : (i += 1) {
+        var j = i + 1;
+        while (j < graph.singular_tests.items.len) : (j += 1) {
+            if (std.mem.eql(u8, graph.singular_tests.items[i].unique_id, graph.singular_tests.items[j].unique_id)) {
+                return error.DuplicateSingularTestName;
             }
         }
     }
@@ -357,6 +384,14 @@ fn sortNodes(nodes: []Node) void {
 fn sortTests(tests: []GenericTestNode) void {
     std.mem.sort(GenericTestNode, tests, {}, struct {
         fn lessThan(_: void, a: GenericTestNode, b: GenericTestNode) bool {
+            return std.mem.lessThan(u8, a.unique_id, b.unique_id);
+        }
+    }.lessThan);
+}
+
+fn sortSingularTests(tests: []SingularTestNode) void {
+    std.mem.sort(SingularTestNode, tests, {}, struct {
+        fn lessThan(_: void, a: SingularTestNode, b: SingularTestNode) bool {
             return std.mem.lessThan(u8, a.unique_id, b.unique_id);
         }
     }.lessThan);

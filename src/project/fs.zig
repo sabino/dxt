@@ -16,8 +16,9 @@ pub fn resourceNameFromPath(allocator: std.mem.Allocator, path: []const u8, suff
 }
 
 pub fn relativeUnderResourcePath(relative_path: []const u8, resource_root: []const u8) []const u8 {
-    if (std.mem.startsWith(u8, relative_path, resource_root) and relative_path.len > resource_root.len and relative_path[resource_root.len] == '/') {
-        return relative_path[resource_root.len + 1 ..];
+    const root = std.mem.trimEnd(u8, resource_root, "/\\");
+    if (root.len != 0 and std.mem.startsWith(u8, relative_path, root) and relative_path.len > root.len and (relative_path[root.len] == '/' or relative_path[root.len] == '\\')) {
+        return relative_path[root.len + 1 ..];
     }
     return relative_path;
 }
@@ -282,6 +283,7 @@ test "modelNameFromPath strips sql suffix using resource name semantics" {
 
 test "relativeUnderResourcePath strips only slash-delimited resource roots" {
     try std.testing.expectEqualStrings("staging/orders.sql", relativeUnderResourcePath("models/staging/orders.sql", "models"));
+    try std.testing.expectEqualStrings("generic/test.sql", relativeUnderResourcePath("tests/generic/test.sql", "tests/"));
     try std.testing.expectEqualStrings("models_extra/orders.sql", relativeUnderResourcePath("models_extra/orders.sql", "models"));
     try std.testing.expectEqualStrings("models", relativeUnderResourcePath("models", "models"));
 }

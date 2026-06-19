@@ -486,7 +486,7 @@ def test_build_executes_model_with_static_jinja_set_for_loop(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 2 model(s) and 0 generic test(s)" in result.stdout
+    assert "Built 2 model(s) and 0 test(s)" in result.stdout
 
     query = subprocess.run(
         [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select credit_card_amount, coupon_amount, total_amount from "main"."orders"'],
@@ -736,7 +736,7 @@ def test_compile_docs_run_and_build_resolve_cli_vars(tmp_path: Path):
         assert "DuckDB execution requires the duckdb CLI" in build_result.stderr
     else:
         assert build_result.returncode == 0, build_result.stderr
-        assert "Built 2 model(s) and 0 generic test(s)" in build_result.stdout
+        assert "Built 2 model(s) and 0 test(s)" in build_result.stdout
         assert_run_results_schema_slice(build_target / "run_results.json")
     assert 'from "main"."alt_customers"' in (
         build_target / "compiled" / "dynamic_var_ref" / "models" / "orders.sql"
@@ -1225,7 +1225,7 @@ def test_build_executes_selected_duckdb_models_and_writes_run_results(tmp_path: 
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 2 model(s) and 0 generic test(s)" in result.stdout
+    assert "Built 2 model(s) and 0 test(s)" in result.stdout
     assert (target / "compiled" / "compile_basic" / "models" / "orders.sql").exists()
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
@@ -1410,7 +1410,7 @@ def test_build_executes_selected_duckdb_seed_and_dependent_model(tmp_path: Path)
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 seed(s), 1 model(s), and 0 generic test(s)" in result.stdout
+    assert "Built 1 seed(s), 1 model(s), and 0 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["unique_id"] for item in run_results["results"]] == [
@@ -1443,7 +1443,7 @@ def test_build_prepare_reports_test_execution_boundary(tmp_path: Path):
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "build currently executes only selected DuckDB model/seed/source not_null/unique/accepted_values/relationships column generic tests" in result.stderr
+    assert "test/build currently executes only selected DuckDB singular SQL tests and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
     assert not (target / "run_results.json").exists()
     manifest = json.loads((target / "manifest.json").read_text())
     assert "compiled" not in manifest["nodes"]["model.model_properties.customers"]
@@ -1590,6 +1590,56 @@ models:
           - unique
 """
     )
+
+
+def write_singular_test_project(project: Path, customers_sql: str, singular_sql: str) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "tests" / "generic").mkdir(parents=True)
+    (project / "tests" / "fixtures").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: singular_tests
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text(customers_sql)
+    (project / "tests" / "assert_customers.sql").write_text(singular_sql)
+    (project / "tests" / "generic" / "ignored_generic.sql").write_text(
+        "{% test ignored_generic(model) %}select 1{% endtest %}\n"
+    )
+    (project / "tests" / "fixtures" / "ignored_fixture.sql").write_text("select 1 as should_not_parse\n")
+
+
+def test_singular_sql_test_paths_skip_generic_and_fixtures_with_trailing_slash(tmp_path: Path):
+    project = tmp_path / "singular_trailing_slash"
+    (project / "models").mkdir(parents=True)
+    (project / "tests" / "generic").mkdir(parents=True)
+    (project / "tests" / "fixtures").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: singular_trailing_slash
+version: "1.0"
+model-paths: ["models"]
+test-paths: ["tests/"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text("select 1 as customer_id\n")
+    (project / "tests" / "generic" / "ignored_generic.sql").write_text(
+        "{% test ignored_generic(model) %}select 1{% endtest %}\n"
+    )
+    (project / "tests" / "fixtures" / "ignored_fixture.sql").write_text("select 1 as should_not_parse\n")
+    target = tmp_path / "parse-target"
+
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert sorted(unique_id for unique_id in manifest["nodes"] if unique_id.startswith("test.")) == []
 
 
 def write_accepted_values_model_test_project(project: Path, customers_sql: str) -> None:
@@ -1873,7 +1923,7 @@ def test_build_executes_selected_duckdb_model_and_supported_generic_tests(tmp_pa
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 model(s) and 2 generic test(s)" in result.stdout
+    assert "Built 1 model(s) and 2 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["unique_id"] for item in run_results["results"]] == [
@@ -1949,7 +1999,7 @@ def test_test_command_executes_selected_duckdb_generic_tests(tmp_path: Path):
         capture_output=True,
     )
     assert test_result.returncode == 0, test_result.stderr
-    assert "Tested 2 generic test(s)" in test_result.stdout
+    assert "Tested 2 test(s)" in test_result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     assert_manifest_schema_slice(target / "manifest.json")
     run_results = json.loads((target / "run_results.json").read_text())
@@ -2001,6 +2051,130 @@ def test_test_command_does_not_build_missing_parent_relation(tmp_path: Path):
         assert query.stdout.strip() == "0"
 
 
+def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Path):
+    project = tmp_path / "singular_tests"
+    write_singular_test_project(
+        project,
+        "select 1 as customer_id\n",
+        "select * from {{ ref('customers') }} where customer_id is null;\n",
+    )
+    target = tmp_path / "parse-target"
+
+    parse_result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert parse_result.returncode == 0, parse_result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+    manifest = json.loads((target / "manifest.json").read_text())
+    test_ids = sorted(unique_id for unique_id in manifest["nodes"] if unique_id.startswith("test."))
+    assert test_ids == ["test.singular_tests.assert_customers"]
+    node = manifest["nodes"]["test.singular_tests.assert_customers"]
+    assert node["resource_type"] == "test"
+    assert node["name"] == "assert_customers"
+    assert node["path"] == "assert_customers.sql"
+    assert node["original_file_path"] == "tests/assert_customers.sql"
+    assert "test_metadata" not in node
+    assert "column_name" not in node
+    assert "attached_node" not in node
+    assert node["refs"] == [{"name": "customers", "package": None, "version": None}]
+    assert manifest["parent_map"]["test.singular_tests.assert_customers"] == ["model.singular_tests.customers"]
+    assert manifest["child_map"]["model.singular_tests.customers"] == ["test.singular_tests.assert_customers"]
+    assert all("ignored" not in unique_id for unique_id in manifest["nodes"])
+
+    list_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert list_result.returncode == 0, list_result.stderr
+    assert json.loads(list_result.stdout) == [
+        {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"}
+    ]
+
+    generic_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert generic_result.returncode == 0, generic_result.stderr
+    assert json.loads(generic_result.stdout) == []
+
+    data_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:data", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert data_result.returncode == 0, data_result.stderr
+    assert json.loads(data_result.stdout) == [
+        {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"}
+    ]
+
+    dependency_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "customers", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert dependency_result.returncode == 0, dependency_result.stderr
+    assert json.loads(dependency_result.stdout) == [
+        {"unique_id": "model.singular_tests.customers", "resource_type": "model", "name": "customers"},
+        {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"},
+    ]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for singular SQL test execution coverage")
+def test_build_and_test_execute_singular_sql_tests(tmp_path: Path):
+    project = tmp_path / "singular_tests"
+    write_singular_test_project(
+        project,
+        "select 1 as customer_id, 'Ada' as customer_name\n",
+        "select * from {{ ref('customers') }} where customer_id is null;\n",
+    )
+    target = tmp_path / "singular-target"
+
+    build_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build_result.returncode == 0, build_result.stderr
+    assert "Built 1 model(s) and 1 test(s)" in build_result.stdout
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "model.singular_tests.customers",
+        "test.singular_tests.assert_customers",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["success", "pass"]
+    assert run_results["results"][1]["failures"] == 0
+    assert 'from "main"."customers"' in run_results["results"][1]["compiled_code"]
+
+    (project / "tests" / "assert_customers.sql").write_text(
+        "select * from {{ ref('customers') }} where customer_id = 1;\n"
+    )
+    test_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test_result.returncode == 1
+    assert "1 test(s) failed with 1 failure row(s)" in test_result.stdout
+    assert "one or more tests failed" in test_result.stderr
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == ["test.singular_tests.assert_customers"]
+    assert run_results["results"][0]["status"] == "fail"
+    assert run_results["results"][0]["failures"] == 1
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 accepted_values build execution slice")
 def test_build_executes_selected_duckdb_accepted_values_generic_test(tmp_path: Path):
     project = tmp_path / "accepted_values_tests"
@@ -2036,7 +2210,7 @@ def test_build_executes_selected_duckdb_accepted_values_generic_test(tmp_path: P
         capture_output=True,
     )
     assert build_result.returncode == 0, build_result.stderr
-    assert "Built 1 generic test(s)" in build_result.stdout
+    assert "Built 1 test(s)" in build_result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert len(run_results["results"]) == 1
@@ -2072,7 +2246,7 @@ def test_build_executes_selected_duckdb_accepted_values_quote_false_generic_test
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 model(s) and 1 generic test(s)" in result.stdout
+    assert "Built 1 model(s) and 1 test(s)" in result.stdout
     assert_manifest_schema_slice(target / "manifest.json")
     manifest = json.loads((target / "manifest.json").read_text())
     test_nodes = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
@@ -2130,8 +2304,8 @@ def test_build_reports_failing_duckdb_accepted_values_generic_test(tmp_path: Pat
         capture_output=True,
     )
     assert build_result.returncode == 1
-    assert "1 generic test(s) failed with 1 failure row(s)" in build_result.stdout
-    assert "one or more generic tests failed" in build_result.stderr
+    assert "1 test(s) failed with 1 failure row(s)" in build_result.stdout
+    assert "one or more tests failed" in build_result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["fail"]
@@ -2157,8 +2331,8 @@ def test_build_reports_failing_duckdb_accepted_values_quote_false_generic_test(t
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "1 generic test(s) failed with 1 failure row(s)" in result.stdout
-    assert "one or more generic tests failed" in result.stderr
+    assert "1 test(s) failed with 1 failure row(s)" in result.stdout
+    assert "one or more tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["success", "fail"]
@@ -2184,7 +2358,7 @@ def test_build_executes_selected_duckdb_model_and_accepted_values_generic_test(t
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 model(s) and 1 generic test(s)" in result.stdout
+    assert "Built 1 model(s) and 1 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["success", "pass"]
@@ -2227,7 +2401,7 @@ def test_build_executes_selected_duckdb_source_column_generic_tests(tmp_path: Pa
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 3 source generic test(s)" in result.stdout
+    assert "Built 3 source test(s)" in result.stdout
     assert_manifest_schema_slice(target / "manifest.json")
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
@@ -2291,7 +2465,7 @@ def test_build_executes_selected_duckdb_source_accepted_values_quote_false_gener
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 source generic test(s)" in result.stdout
+    assert "Built 1 source test(s)" in result.stdout
     assert_manifest_schema_slice(target / "manifest.json")
     manifest = json.loads((target / "manifest.json").read_text())
     test_nodes = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
@@ -2344,7 +2518,7 @@ def test_build_executes_selected_duckdb_source_relationships_generic_test(tmp_pa
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 source generic test(s)" in result.stdout
+    assert "Built 1 source test(s)" in result.stdout
     assert_manifest_schema_slice(target / "manifest.json")
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
@@ -2417,9 +2591,9 @@ def test_build_reports_failing_duckdb_source_relationships_generic_test(tmp_path
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "Built 1 source generic test(s)" in result.stdout
-    assert "1 generic test(s) failed with 1 failure row(s)" in result.stdout
-    assert "one or more generic tests failed" in result.stderr
+    assert "Built 1 source test(s)" in result.stdout
+    assert "1 test(s) failed with 1 failure row(s)" in result.stdout
+    assert "one or more tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["fail"]
@@ -2528,7 +2702,7 @@ def test_build_executes_selected_duckdb_source_to_source_relationships_generic_t
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 source generic test(s)" in result.stdout
+    assert "Built 1 source test(s)" in result.stdout
     assert_manifest_schema_slice(target / "manifest.json")
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
@@ -2596,7 +2770,7 @@ def test_build_executes_selected_duckdb_relationships_generic_test(tmp_path: Pat
         capture_output=True,
     )
     assert build_result.returncode == 0, build_result.stderr
-    assert "Built 1 generic test(s)" in build_result.stdout
+    assert "Built 1 test(s)" in build_result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     result = run_results["results"][0]
@@ -2651,8 +2825,8 @@ def test_build_reports_failing_duckdb_relationships_generic_test(tmp_path: Path)
         capture_output=True,
     )
     assert build_result.returncode == 1
-    assert "1 generic test(s) failed with 1 failure row(s)" in build_result.stdout
-    assert "one or more generic tests failed" in build_result.stderr
+    assert "1 test(s) failed with 1 failure row(s)" in build_result.stdout
+    assert "one or more tests failed" in build_result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["fail"]
@@ -2697,8 +2871,8 @@ def test_test_command_reports_failing_duckdb_generic_test(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "1 generic test(s) failed with 1 failure row(s)" in result.stdout
-    assert "one or more generic tests failed" in result.stderr
+    assert "1 test(s) failed with 1 failure row(s)" in result.stdout
+    assert "one or more tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["fail"]
@@ -2722,7 +2896,7 @@ def test_build_executes_selected_duckdb_models_and_relationships_generic_test(tm
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 2 model(s) and 1 generic test(s)" in result.stdout
+    assert "Built 2 model(s) and 1 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["unique_id"] for item in run_results["results"][:2]] == [
@@ -2750,7 +2924,7 @@ def test_build_executes_selected_duckdb_seed_model_and_supported_generic_tests(t
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 seed(s), 1 model(s), and 2 generic test(s)" in result.stdout
+    assert "Built 1 seed(s), 1 model(s), and 2 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["unique_id"] for item in run_results["results"]] == [
@@ -2831,7 +3005,7 @@ def test_build_executes_table_level_model_and_seed_generic_tests(tmp_path: Path)
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 seed(s), 1 model(s), and 2 generic test(s)" in result.stdout
+    assert "Built 1 seed(s), 1 model(s), and 2 test(s)" in result.stdout
     assert_manifest_schema_slice(target / "manifest.json")
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
@@ -2892,7 +3066,7 @@ def test_build_executes_table_level_source_generic_test(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 source generic test(s)" in result.stdout
+    assert "Built 1 source test(s)" in result.stdout
     assert_manifest_schema_slice(target / "manifest.json")
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
@@ -3006,7 +3180,7 @@ def test_build_executes_selected_duckdb_seed_column_generic_tests(tmp_path: Path
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 seed(s) and 3 generic test(s)" in result.stdout
+    assert "Built 1 seed(s) and 3 test(s)" in result.stdout
     assert_manifest_schema_slice(target / "manifest.json")
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
@@ -3036,7 +3210,7 @@ def test_build_executes_selected_duckdb_seed_column_default_quoted_accepted_valu
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 seed(s) and 1 generic test(s)" in result.stdout
+    assert "Built 1 seed(s) and 1 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["success", "pass"]
@@ -3077,7 +3251,7 @@ seeds:
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 2 seed(s) and 1 generic test(s)" in result.stdout
+    assert "Built 2 seed(s) and 1 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["unique_id"] for item in run_results["results"][:2]] == [
@@ -3102,9 +3276,9 @@ def test_build_reports_failing_seed_column_generic_tests(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "Built 1 seed(s) and 3 generic test(s)" in result.stdout
-    assert "2 generic test(s) failed with 2 failure row(s)" in result.stdout
-    assert "one or more generic tests failed" in result.stderr
+    assert "Built 1 seed(s) and 3 test(s)" in result.stdout
+    assert "2 test(s) failed with 2 failure row(s)" in result.stdout
+    assert "one or more tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["success", "pass", "fail", "fail"]
@@ -3130,7 +3304,7 @@ def test_build_executes_selected_duckdb_seed_model_and_accepted_values_generic_t
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 1 seed(s), 1 model(s), and 1 generic test(s)" in result.stdout
+    assert "Built 1 seed(s), 1 model(s), and 1 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["success", "success", "pass"]
@@ -3192,7 +3366,7 @@ models:
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Built 2 seed(s), 2 model(s), and 1 generic test(s)" in result.stdout
+    assert "Built 2 seed(s), 2 model(s), and 1 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["unique_id"] for item in run_results["results"][:4]] == [
@@ -3222,9 +3396,9 @@ def test_build_reports_failing_seed_model_attached_generic_tests_in_run_results(
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "Built 1 seed(s), 1 model(s), and 2 generic test(s)" in result.stdout
-    assert "2 generic test(s) failed with 2 failure row(s)" in result.stdout
-    assert "one or more generic tests failed" in result.stderr
+    assert "Built 1 seed(s), 1 model(s), and 2 test(s)" in result.stdout
+    assert "2 test(s) failed with 2 failure row(s)" in result.stdout
+    assert "one or more tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["success", "success", "fail", "fail"]
@@ -3253,7 +3427,7 @@ models:
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "build currently executes only selected DuckDB model/seed/source not_null/unique/accepted_values/relationships column generic tests" in result.stderr
+    assert "test/build currently executes only selected DuckDB singular SQL tests and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
@@ -3278,9 +3452,9 @@ def test_build_reports_failing_model_attached_generic_tests_in_run_results(tmp_p
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "Built 1 model(s) and 2 generic test(s)" in result.stdout
-    assert "2 generic test(s) failed with 2 failure row(s)" in result.stdout
-    assert "one or more generic tests failed" in result.stderr
+    assert "Built 1 model(s) and 2 test(s)" in result.stdout
+    assert "2 test(s) failed with 2 failure row(s)" in result.stdout
+    assert "one or more tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["success", "fail", "fail"]
@@ -3299,7 +3473,7 @@ def test_build_rejects_model_selection_with_unsupported_generic_test_before_duck
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "build currently executes only selected DuckDB model/seed/source not_null/unique/accepted_values/relationships column generic tests" in result.stderr
+    assert "test/build currently executes only selected DuckDB singular SQL tests and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
@@ -3333,7 +3507,7 @@ def test_build_executes_selected_duckdb_generic_tests_and_writes_run_results(tmp
         capture_output=True,
     )
     assert build_result.returncode == 0, build_result.stderr
-    assert "Built 2 generic test(s)" in build_result.stdout
+    assert "Built 2 test(s)" in build_result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["unique_id"] for item in run_results["results"]] == [
@@ -3384,8 +3558,8 @@ def test_build_reports_failing_duckdb_generic_tests_in_run_results(tmp_path: Pat
         capture_output=True,
     )
     assert build_result.returncode == 1
-    assert "2 generic test(s) failed with 2 failure row(s)" in build_result.stdout
-    assert "one or more generic tests failed" in build_result.stderr
+    assert "2 test(s) failed with 2 failure row(s)" in build_result.stdout
+    assert "one or more tests failed" in build_result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["fail", "fail"]
@@ -3519,7 +3693,7 @@ unit_tests:
         capture_output=True,
     )
     assert test.returncode != 0
-    assert "unit test and singular test execution are not supported yet" in test.stderr
+    assert "unit test execution is not supported yet" in test.stderr
     assert not (test_target / "run_results.json").exists()
 
 

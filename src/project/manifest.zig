@@ -9,6 +9,7 @@ const util = @import("util.zig");
 const Graph = types.Graph;
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
+const SingularTestNode = types.SingularTestNode;
 const SourceDef = types.SourceDef;
 const ExposureDef = types.ExposureDef;
 const UnitTestDef = types.UnitTestDef;
@@ -113,6 +114,14 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll(": ");
         try writeGenericTestNode(allocator, writer, test_node);
     }
+    for (graph.singular_tests.items) |test_node| {
+        if (node_index != 0) try writer.writeAll(",");
+        node_index += 1;
+        try writer.writeAll("\n    ");
+        try json.string(writer, test_node.unique_id);
+        try writer.writeAll(": ");
+        try writeSingularTestNode(writer, test_node);
+    }
     try writer.writeAll("\n  },\n  \"sources\": {");
     for (graph.sources.items, 0..) |source, index| {
         if (index != 0) try writer.writeAll(",");
@@ -201,6 +210,14 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll(": ");
         try json.stringArray(writer, test_node.depends_on.items);
     }
+    for (graph.singular_tests.items) |test_node| {
+        if (parent_index != 0) try writer.writeAll(",");
+        parent_index += 1;
+        try writer.writeAll("\n    ");
+        try json.string(writer, test_node.unique_id);
+        try writer.writeAll(": ");
+        try json.stringArray(writer, test_node.depends_on.items);
+    }
     for (graph.exposures.items) |exposure| {
         if (!exposure.enabled) continue;
         if (parent_index != 0) try writer.writeAll(",");
@@ -234,6 +251,9 @@ fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
     for (graph.tests.items) |candidate| {
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
+    for (graph.singular_tests.items) |candidate| {
+        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+    }
     for (graph.sources.items) |candidate| {
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
@@ -263,6 +283,13 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
         }
     }
     for (graph.tests.items) |test_node| {
+        if (util.containsString(test_node.depends_on.items, unique_id)) {
+            if (!child_first) try writer.writeAll(",");
+            child_first = false;
+            try json.string(writer, test_node.unique_id);
+        }
+    }
+    for (graph.singular_tests.items) |test_node| {
         if (util.containsString(test_node.depends_on.items, unique_id)) {
             if (!child_first) try writer.writeAll(",");
             child_first = false;
@@ -691,6 +718,32 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
         try json.string(writer, test_node.relationship_field);
     }
     try writer.writeAll("},\"namespace\":null},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
+    try json.stringArray(writer, test_node.macro_depends_on.items);
+    try writer.writeAll(",\"nodes\":");
+    try json.stringArray(writer, test_node.depends_on.items);
+    try writer.writeAll("},\"refs\":");
+    try writeRefDeps(writer, test_node.refs.items);
+    try writer.writeAll(",\"sources\":");
+    try writeSourceDeps(writer, test_node.source_refs.items);
+    try writer.writeAll("}");
+}
+
+fn writeSingularTestNode(writer: *Io.Writer, test_node: SingularTestNode) !void {
+    try writer.writeAll("{\"unique_id\":");
+    try json.string(writer, test_node.unique_id);
+    try writer.writeAll(",\"resource_type\":\"test\",\"package_name\":");
+    try json.string(writer, test_node.package_name);
+    try writer.writeAll(",\"name\":");
+    try json.string(writer, test_node.name);
+    try writer.writeAll(",\"alias\":");
+    try json.string(writer, test_node.alias);
+    try writer.writeAll(",\"path\":");
+    try json.string(writer, util.normalizeForDisplay(test_node.path));
+    try writer.writeAll(",\"original_file_path\":");
+    try json.string(writer, util.normalizeForDisplay(test_node.original_file_path));
+    try writer.writeAll(",\"patch_path\":null,\"language\":\"sql\",\"raw_code\":");
+    try json.string(writer, test_node.raw_code);
+    try writer.writeAll(",\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, test_node.depends_on.items);
@@ -1159,6 +1212,57 @@ test "manifest writer emits source relationship tests with source target deps" {
     try std.testing.expectEqualStrings("customer_id", kwargs.get("column_name").?.string);
     try std.testing.expectEqualStrings("source('raw', 'customers')", kwargs.get("to").?.string);
     try std.testing.expectEqualStrings("customer_id", kwargs.get("field").?.string);
+}
+
+test "manifest writer emits singular tests without generic-only fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1 as customer_id",
+    });
+    try graph.singular_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.assert_customers",
+        .name = "assert_customers",
+        .alias = "assert_customers",
+        .path = "assert_customers.sql",
+        .original_file_path = "tests/assert_customers.sql",
+        .raw_code = "select * from {{ ref('customers') }} where customer_id is null",
+    });
+    try graph.singular_tests.items[0].refs.append(allocator, .{ .package = null, .name = "customers" });
+    try graph.singular_tests.items[0].depends_on.append(allocator, "model.demo.customers");
+
+    const rendered = try renderManifest(std.testing.allocator, &graph);
+    defer std.testing.allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    const test_node = root.get("nodes").?.object.get("test.demo.assert_customers").?.object;
+    try std.testing.expectEqualStrings("test", test_node.get("resource_type").?.string);
+    try std.testing.expectEqualStrings("assert_customers", test_node.get("name").?.string);
+    try std.testing.expect(test_node.get("test_metadata") == null);
+    try std.testing.expect(test_node.get("column_name") == null);
+    try std.testing.expect(test_node.get("attached_node") == null);
+    try std.testing.expectEqualStrings("customers", test_node.get("refs").?.array.items[0].object.get("name").?.string);
+    try std.testing.expectEqualStrings(
+        "model.demo.customers",
+        root.get("parent_map").?.object.get("test.demo.assert_customers").?.array.items[0].string,
+    );
+    try std.testing.expectEqualStrings(
+        "test.demo.assert_customers",
+        root.get("child_map").?.object.get("model.demo.customers").?.array.items[0].string,
+    );
 }
 
 test "manifest writer keeps table-level explicit column tests detached from top-level column" {

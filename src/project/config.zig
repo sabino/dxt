@@ -283,6 +283,7 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
                     try parseInlineStringList(allocator, kv.value, &config.macro_paths);
                 }
             } else if (std.mem.eql(u8, kv.key, "test-paths")) {
+                config.test_paths_set = true;
                 if (std.mem.trim(u8, kv.value, " \t").len == 0) {
                     read_test_path_block = true;
                 } else {
@@ -331,6 +332,9 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
     }
     if (!config.macro_paths_set) {
         try config.macro_paths.append(allocator, "macros");
+    }
+    if (!config.test_paths_set) {
+        try config.test_paths.append(allocator, "tests");
     }
     return config;
 }
@@ -776,7 +780,8 @@ test "project config parser applies defaults for omitted paths" {
     try std.testing.expectEqualStrings("seeds", config.seed_paths.items[0]);
     try std.testing.expectEqual(@as(usize, 1), config.macro_paths.items.len);
     try std.testing.expectEqualStrings("macros", config.macro_paths.items[0]);
-    try std.testing.expectEqual(@as(usize, 0), config.test_paths.items.len);
+    try std.testing.expectEqual(@as(usize, 1), config.test_paths.items.len);
+    try std.testing.expectEqualStrings("tests", config.test_paths.items[0]);
     try std.testing.expectEqual(@as(usize, 0), config.analysis_paths.items.len);
     try std.testing.expectEqual(@as(usize, 0), config.snapshot_paths.items.len);
     try std.testing.expectEqual(@as(usize, 0), config.function_paths.items.len);

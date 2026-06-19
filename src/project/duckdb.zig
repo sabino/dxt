@@ -9,6 +9,7 @@ const Runtime = types.Runtime;
 const Graph = types.Graph;
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
+const SingularTestNode = types.SingularTestNode;
 const SourceDef = types.SourceDef;
 
 const DuckDbObjectKind = enum { table, view };
@@ -69,6 +70,15 @@ pub fn executeSeed(runtime: Runtime, db_path: []const u8, project_dir: []const u
 
 pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const GenericTestNode) !GenericTestExecutionResult {
     const compiled_sql = try renderGenericTestSql(runtime.allocator, graph, test_node);
+    errdefer runtime.allocator.free(compiled_sql);
+    const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
+    defer runtime.allocator.free(execution_sql);
+    const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
+    return .{ .compiled_code = compiled_sql, .failures = failures };
+}
+
+pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const SingularTestNode) !GenericTestExecutionResult {
+    const compiled_sql = try compiler.compileSingularTest(runtime.allocator, graph, test_node);
     errdefer runtime.allocator.free(compiled_sql);
     const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
     defer runtime.allocator.free(execution_sql);
@@ -530,10 +540,11 @@ fn genericTestNodeColumnName(test_node: *const GenericTestNode) ?[]const u8 {
 }
 
 pub fn renderGenericTestExecutionSql(allocator: std.mem.Allocator, compiled_sql: []const u8) ![]const u8 {
+    const query_sql = trimTrailingSqlTerminator(compiled_sql);
     return try std.fmt.allocPrint(
         allocator,
         "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\n{s}\n) dbt_internal_test;\n",
-        .{compiled_sql},
+        .{query_sql},
     );
 }
 
@@ -867,6 +878,11 @@ test "renderGenericTestSql renders not_null failure row query and wrapper" {
     try std.testing.expectEqualStrings(
         "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\nselect \"customer_id\"\nfrom \"analytics\".\"customers\"\nwhere \"customer_id\" is null\n) dbt_internal_test;\n",
         execution_sql,
+    );
+    const terminated_execution_sql = try renderGenericTestExecutionSql(allocator, "select 1 as failure_row; -- dbt singular test note\n");
+    try std.testing.expectEqualStrings(
+        "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\nselect 1 as failure_row\n) dbt_internal_test;\n",
+        terminated_execution_sql,
     );
 }
 

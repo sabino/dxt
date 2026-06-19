@@ -53,6 +53,7 @@ pub const ProjectConfig = struct {
     clean_targets: std.ArrayList([]const u8) = .empty,
     seed_docs: DocsConfig = .{},
     macro_paths_set: bool = false,
+    test_paths_set: bool = false,
     clean_targets_set: bool = false,
     validate_macro_args: bool = false,
     target_path: []const u8 = "target",
@@ -318,6 +319,20 @@ pub const GenericTestNode = struct {
     macro_depends_on: std.ArrayList([]const u8) = .empty,
 };
 
+pub const SingularTestNode = struct {
+    package_name: []const u8,
+    unique_id: []const u8,
+    name: []const u8,
+    alias: []const u8,
+    path: []const u8,
+    original_file_path: []const u8,
+    raw_code: []const u8,
+    refs: std.ArrayList(RefDep) = .empty,
+    source_refs: std.ArrayList(SourceDep) = .empty,
+    depends_on: std.ArrayList([]const u8) = .empty,
+    macro_depends_on: std.ArrayList([]const u8) = .empty,
+};
+
 pub const Graph = struct {
     allocator: std.mem.Allocator,
     project_name: []const u8,
@@ -330,6 +345,7 @@ pub const Graph = struct {
     vars: std.ArrayList(VarEntry) = .empty,
     nodes: std.ArrayList(Node) = .empty,
     tests: std.ArrayList(GenericTestNode) = .empty,
+    singular_tests: std.ArrayList(SingularTestNode) = .empty,
     sources: std.ArrayList(SourceDef) = .empty,
     exposures: std.ArrayList(ExposureDef) = .empty,
     unit_tests: std.ArrayList(UnitTestDef) = .empty,
@@ -349,6 +365,9 @@ pub const Graph = struct {
         }
         for (self.tests.items) |*test_node| {
             deinitGenericTestNode(self.allocator, test_node);
+        }
+        for (self.singular_tests.items) |*test_node| {
+            deinitSingularTestNode(self.allocator, test_node);
         }
         for (self.sources.items) |*source| {
             deinitSourceDef(self.allocator, source);
@@ -370,6 +389,7 @@ pub const Graph = struct {
         }
         self.nodes.deinit(self.allocator);
         self.tests.deinit(self.allocator);
+        self.singular_tests.deinit(self.allocator);
         self.sources.deinit(self.allocator);
         self.exposures.deinit(self.allocator);
         self.unit_tests.deinit(self.allocator);
@@ -435,6 +455,13 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
 
 pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
     test_node.accepted_values.deinit(allocator);
+    test_node.refs.deinit(allocator);
+    test_node.source_refs.deinit(allocator);
+    test_node.depends_on.deinit(allocator);
+    test_node.macro_depends_on.deinit(allocator);
+}
+
+pub fn deinitSingularTestNode(allocator: std.mem.Allocator, test_node: *SingularTestNode) void {
     test_node.refs.deinit(allocator);
     test_node.source_refs.deinit(allocator);
     test_node.depends_on.deinit(allocator);

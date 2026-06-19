@@ -1,9 +1,11 @@
 const std = @import("std");
 const types = @import("types.zig");
+const util = @import("util.zig");
 
 const Graph = types.Graph;
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
+const SingularTestNode = types.SingularTestNode;
 const SourceDef = types.SourceDef;
 const ExposureDef = types.ExposureDef;
 const UnitTestDef = types.UnitTestDef;
@@ -53,6 +55,20 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
     }
     for (graph.tests.items) |*test_node| {
         if (matchesResourceType(resource_type, "test") and matchesTestSelector(graph, test_node, select_spec) and (!exclude_spec.active or !matchesTestSelector(graph, test_node, exclude_spec))) {
+            try selected.append(allocator, .{
+                .unique_id = test_node.unique_id,
+                .name = test_node.name,
+                .resource_type = "test",
+                .package_name = test_node.package_name,
+                .search_name = test_node.name,
+                .path = test_node.path,
+                .original_file_path = test_node.original_file_path,
+                .selector = try pathBackedOutputSelector(allocator, test_node.package_name, test_node.path),
+            });
+        }
+    }
+    for (graph.singular_tests.items) |*test_node| {
+        if (matchesResourceType(resource_type, "test") and matchesSingularTestSelector(graph, test_node, select_spec) and (!exclude_spec.active or !matchesSingularTestSelector(graph, test_node, exclude_spec))) {
             try selected.append(allocator, .{
                 .unique_id = test_node.unique_id,
                 .name = test_node.name,
@@ -237,7 +253,59 @@ fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNod
     }
     if (std.mem.startsWith(u8, value, "test_type:")) {
         const test_type = value["test_type:".len..];
-        return std.mem.eql(u8, test_type, "generic");
+        return std.mem.eql(u8, test_type, "generic") or std.mem.eql(u8, test_type, "data");
+    }
+    if (std.mem.startsWith(u8, value, "package:")) {
+        return matchesUniqueIdPackage(graph, test_node.unique_id, value["package:".len..]);
+    }
+    if (std.mem.startsWith(u8, value, "path:")) {
+        const path = value["path:".len..];
+        return matchesPathSelector(path, test_node.original_file_path);
+    }
+    if (std.mem.startsWith(u8, value, "file:")) {
+        const file = value["file:".len..];
+        return matchesFileSelector(file, test_node.original_file_path);
+    }
+    return false;
+}
+
+fn matchesSingularTestSelector(graph: *const Graph, test_node: *const SingularTestNode, spec: SelectorSpec) bool {
+    if (!spec.active) return true;
+    if (spec.value.len == 0) return true;
+    return matchesSingularTestSelectorExpression(graph, test_node, spec.value);
+}
+
+fn matchesSingularTestSelectorExpression(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8) bool {
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (expressions.next()) |expression| {
+        if (matchesSingularTestSelectorIntersection(graph, test_node, expression)) return true;
+    }
+    return false;
+}
+
+fn matchesSingularTestSelectorIntersection(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8) bool {
+    var raw_terms = std.mem.splitScalar(u8, value, ',');
+    var matched_any = false;
+    while (raw_terms.next()) |raw_term| {
+        const term = parseSelectorTerm(raw_term);
+        if (!term.valid) return false;
+        if (term.value.len == 0) return false;
+        if (!matchesSingularTestSelectorTerm(graph, test_node, term.value) and !matchesGraphExpansion(graph, test_node.unique_id, term)) return false;
+        matched_any = true;
+    }
+    return matched_any;
+}
+
+fn matchesSingularTestSelectorTerm(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8) bool {
+    if (matchesSelectorPattern(value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id) or matchesSingularTestFqnPattern(value, test_node)) return true;
+    if (matchesSingularDependencyNameOrFqnSelector(graph, test_node, value)) return true;
+    if (std.mem.startsWith(u8, value, "resource_type:")) {
+        const resource_type = value["resource_type:".len..];
+        return std.mem.eql(u8, resource_type, "test");
+    }
+    if (std.mem.startsWith(u8, value, "test_type:")) {
+        const test_type = value["test_type:".len..];
+        return std.mem.eql(u8, test_type, "singular") or std.mem.eql(u8, test_type, "data");
     }
     if (std.mem.startsWith(u8, value, "package:")) {
         return matchesUniqueIdPackage(graph, test_node.unique_id, value["package:".len..]);
@@ -265,6 +333,21 @@ fn matchesAttachedNodeNameOrFqnSelector(graph: *const Graph, test_node: *const G
             return false;
         }
         return matchesSelectorPattern(value, node.name) or matchesNodeFqnPattern(value, node);
+    }
+    return false;
+}
+
+fn matchesSingularDependencyNameOrFqnSelector(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8) bool {
+    for (graph.nodes.items) |*node| {
+        if (!node.enabled or !util.containsString(test_node.depends_on.items, node.unique_id)) continue;
+        if (std.mem.startsWith(u8, value, "tag:")) {
+            const tag = value["tag:".len..];
+            for (node.tags.items) |node_tag| {
+                if (matchesSelectorPattern(tag, node_tag)) return true;
+            }
+            continue;
+        }
+        if (matchesSelectorPattern(value, node.name) or matchesNodeFqnPattern(value, node)) return true;
     }
     return false;
 }
@@ -526,6 +609,10 @@ fn matchesGenericTestFqnPattern(pattern: []const u8, test_node: *const GenericTe
     return matchesPathBackedFqnPattern(pattern, test_node.package_name, test_node.path);
 }
 
+fn matchesSingularTestFqnPattern(pattern: []const u8, test_node: *const SingularTestNode) bool {
+    return matchesPathBackedFqnPattern(pattern, test_node.package_name, test_node.path);
+}
+
 fn matchesUnitTestFqnPattern(pattern: []const u8, unit_test: *const UnitTestDef) bool {
     var buffer: [4096]u8 = undefined;
     var len: usize = 0;
@@ -778,6 +865,12 @@ fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, s
         if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
+    for (graph.singular_tests.items) |*target| {
+        if (!matchesSingularTestSelectorTerm(graph, target, spec.value)) continue;
+        if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
+        if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
+        if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
+    }
     for (graph.sources.items) |*target| {
         if (!matchesSourceSelectorTerm(graph, target, spec.value)) continue;
         if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
@@ -812,6 +905,9 @@ fn resourceInChildrensParentsSelection(graph: *const Graph, selected_unique_id: 
     for (graph.tests.items) |*resource| {
         if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
     }
+    for (graph.singular_tests.items) |*resource| {
+        if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
+    }
     for (graph.exposures.items) |*resource| {
         if (!resource.enabled) continue;
         if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
@@ -833,7 +929,7 @@ fn resourceDependsOnDepth(graph: *const Graph, resource_unique_id: []const u8, d
 }
 
 fn graphDepthLimit(graph: *const Graph) usize {
-    return graph.nodes.items.len + graph.tests.items.len + graph.sources.items.len + graph.exposures.items.len + graph.unit_tests.items.len + 1;
+    return graph.nodes.items.len + graph.tests.items.len + graph.singular_tests.items.len + graph.sources.items.len + graph.exposures.items.len + graph.unit_tests.items.len + 1;
 }
 
 fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8, remaining_depth: usize) bool {
@@ -844,6 +940,10 @@ fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, 
         return dependencyListContainsTransitive(graph, node.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
     for (graph.tests.items) |test_node| {
+        if (!std.mem.eql(u8, test_node.unique_id, resource_unique_id)) continue;
+        return dependencyListContainsTransitive(graph, test_node.depends_on.items, dependency_unique_id, remaining_depth - 1);
+    }
+    for (graph.singular_tests.items) |test_node| {
         if (!std.mem.eql(u8, test_node.unique_id, resource_unique_id)) continue;
         return dependencyListContainsTransitive(graph, test_node.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
@@ -925,6 +1025,53 @@ test "file selectors match only basename or stem" {
     try std.testing.expect(!matchesFileSelector("models/marts/orders.sql", "models/marts/orders.sql"));
     try std.testing.expect(!matchesFileSelector("marts/orders.sql", "models/marts/orders.sql"));
     try std.testing.expect(!matchesFileSelector("customers.sql", "models/marts/orders.sql"));
+}
+
+test "singular test selectors match type path file and graph expansion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "",
+    });
+    try graph.singular_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.assert_customers",
+        .name = "assert_customers",
+        .alias = "assert_customers",
+        .path = "assert_customers.sql",
+        .original_file_path = "tests/assert_customers.sql",
+        .raw_code = "select * from {{ ref('customers') }} where customer_id is null",
+    });
+    try graph.singular_tests.items[0].depends_on.append(allocator, "model.demo.customers");
+
+    const by_singular_type = try selectResources(allocator, &graph, "test", "test_type:singular", null);
+    try std.testing.expectEqual(@as(usize, 1), by_singular_type.len);
+    try std.testing.expectEqualStrings("test.demo.assert_customers", by_singular_type[0].unique_id);
+
+    const by_data_type = try selectResources(allocator, &graph, "test", "test_type:data", null);
+    try std.testing.expectEqual(@as(usize, 1), by_data_type.len);
+
+    const by_file = try selectResources(allocator, &graph, "test", "file:assert_customers", null);
+    try std.testing.expectEqual(@as(usize, 1), by_file.len);
+
+    const by_path = try selectResources(allocator, &graph, "test", "path:tests", null);
+    try std.testing.expectEqual(@as(usize, 1), by_path.len);
+
+    const by_child_expansion = try selectResources(allocator, &graph, "test", "customers+", null);
+    try std.testing.expectEqual(@as(usize, 1), by_child_expansion.len);
+
+    const by_dependency_name = try selectResources(allocator, &graph, "test", "customers", null);
+    try std.testing.expectEqual(@as(usize, 1), by_dependency_name.len);
 }
 
 test "unit test selectors match resource type name package and graph expansion" {

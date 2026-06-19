@@ -5,10 +5,12 @@ const types = @import("types.zig");
 
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
+const SingularTestNode = types.SingularTestNode;
 
 pub const NodeResult = struct {
     node: ?*const Node = null,
     test_node: ?*const GenericTestNode = null,
+    singular_test_node: ?*const SingularTestNode = null,
     status: []const u8 = "success",
     message: ?[]const u8 = null,
     failures: ?u64 = null,
@@ -58,7 +60,7 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     try writer.writeAll(", \"unique_id\": ");
     try json.string(writer, resultUniqueId(result));
     try writer.writeAll(", \"compiled\": ");
-    if (result.test_node != null or result.compiled_code != null) {
+    if (result.test_node != null or result.singular_test_node != null or result.compiled_code != null) {
         try writer.writeAll("true");
     } else if (result.node) |node| if (isCompiledResultNode(node)) {
         try writer.writeAll(if (node.compiled) "true" else "false");
@@ -87,6 +89,7 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
 fn resultUniqueId(result: NodeResult) []const u8 {
     if (result.node) |node| return node.unique_id;
     if (result.test_node) |test_node| return test_node.unique_id;
+    if (result.singular_test_node) |test_node| return test_node.unique_id;
     return "";
 }
 

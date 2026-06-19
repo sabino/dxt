@@ -7,6 +7,7 @@ const Graph = types.Graph;
 const MacroDef = types.MacroDef;
 const Node = types.Node;
 const RefDep = types.RefDep;
+const SingularTestNode = types.SingularTestNode;
 const SourceDep = types.SourceDep;
 const SourceDef = types.SourceDef;
 
@@ -131,6 +132,27 @@ pub fn compileModel(allocator: std.mem.Allocator, graph: *const Graph, node: *co
     errdefer out.deinit(allocator);
 
     try renderRange(&context, node.raw_code, 0, node.raw_code.len, &out);
+    return try out.toOwnedSlice(allocator);
+}
+
+pub fn compileSingularTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode) ![]const u8 {
+    const node = Node{
+        .resource_type = "test",
+        .package_name = test_node.package_name,
+        .unique_id = test_node.unique_id,
+        .name = test_node.name,
+        .path = test_node.path,
+        .original_file_path = test_node.original_file_path,
+        .raw_code = test_node.raw_code,
+        .materialized = "test",
+    };
+    var context = CompileContext.init(allocator, graph, &node);
+    defer context.deinit();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try renderRange(&context, test_node.raw_code, 0, test_node.raw_code.len, &out);
     return try out.toOwnedSlice(allocator);
 }
 
@@ -995,6 +1017,45 @@ test "compileModel renders config refs and sources" {
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[1]);
     defer allocator.free(compiled);
     try std.testing.expectEqualStrings("select * from \"main\".\"customers\" union all select * from \"raw_source\".\"raw_payments\" ", compiled);
+}
+
+test "compileSingularTest renders refs and sources" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1",
+    });
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.payments",
+        .source_name = "raw",
+        .table_name = "payments",
+        .identifier = "raw_payments",
+        .original_file_path = "models/schema.yml",
+        .schema_name = "raw_source",
+    });
+    try graph.singular_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.assert_customers",
+        .name = "assert_customers",
+        .alias = "assert_customers",
+        .path = "assert_customers.sql",
+        .original_file_path = "tests/assert_customers.sql",
+        .raw_code = "select * from {{ ref('customers') }} union all select * from {{ source('raw', 'payments') }};",
+    });
+
+    const compiled = try compileSingularTest(allocator, &graph, &graph.singular_tests.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select * from \"main\".\"customers\" union all select * from \"raw_source\".\"raw_payments\";", compiled);
 }
 
 test "compileModel rejects dynamic ref" {

@@ -9,6 +9,10 @@ compatibility.
 
 ### Added
 
+- Singular SQL data tests in the Zig runtime, including `test-paths`
+  discovery with `generic/` and `fixtures/` skipped, Manifest nodes without
+  generic-only fields, `test_type:singular` / `test_type:data` selection, and
+  DuckDB `build` / `test` execution through dbt-style failure-row counting.
 - Documentation baseline with a reader-focused README, primer, compatibility
   matrix, architecture diagrams, release process, and changelog.
 - GitHub Actions release workflow for tagged native Zig binary artifacts and
