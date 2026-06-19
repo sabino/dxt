@@ -274,6 +274,7 @@ pub const Node = struct {
     description: []const u8 = "",
     materialized: []const u8 = "view",
     inline_materialized: bool = false,
+    inline_enabled: bool = false,
     inline_tags: bool = false,
     config_schema: ?[]const u8 = null,
     config_alias: ?[]const u8 = null,

@@ -5352,6 +5352,61 @@ def test_ref_to_disabled_model_fails_loudly(tmp_path: Path):
     assert "ref targets a disabled model" in result.stderr
 
 
+def test_inline_config_enabled_false_model_is_disabled(tmp_path: Path):
+    project = copy_fixture(tmp_path, "inline_disabled_model")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", "target-dxt"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
+    assert sorted(manifest["nodes"]) == ["model.inline_disabled_model.active"]
+    disabled_id = "model.inline_disabled_model.disabled_customers"
+    assert disabled_id not in manifest["nodes"]
+    assert disabled_id not in manifest["parent_map"]
+    assert disabled_id not in manifest["child_map"]
+    assert list(manifest["disabled"]) == [disabled_id]
+    disabled_node = manifest["disabled"][disabled_id][0]
+    assert disabled_node["config"]["enabled"] is False
+    assert disabled_node["description"] == "Inline-disabled model should stay out of active graph"
+
+    ls_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert ls_result.returncode == 0, ls_result.stderr
+    assert ls_result.stdout.splitlines() == ["model.inline_disabled_model.active"]
+
+    compile_target = tmp_path / "compile-target"
+    compile_result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(compile_target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    assert "Compiled 1 model(s)" in compile_result.stdout
+    compiled_root = compile_target / "compiled" / "inline_disabled_model" / "models"
+    assert sorted(path.name for path in compiled_root.glob("*.sql")) == ["active.sql"]
+    assert (compiled_root / "active.sql").read_text().strip() == "select 1 as active_id"
+
+
+def test_ref_to_inline_disabled_model_fails_loudly(tmp_path: Path):
+    project = copy_fixture(tmp_path, "inline_disabled_ref")
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "ref targets a disabled model" in result.stderr
+
+
 def test_unmatched_model_property_warns_and_continues(tmp_path: Path):
     project = copy_fixture(tmp_path, "unmatched_model_property")
     result = subprocess.run(

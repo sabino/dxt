@@ -7,7 +7,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 
 | Command | Status | Current support | Planned gaps |
 | --- | --- | --- | --- |
-| `dxt parse` | Partial | Loads supported project files and writes a deterministic Manifest v12-shaped slice. | Full dbt parser parity, disabled resource maps, saved queries, semantic resources, full package behavior. |
+| `dxt parse` | Partial | Loads supported project files and writes a deterministic Manifest v12-shaped slice, including disabled SQL models from YAML properties and literal inline `config(enabled=false)`. | Full dbt parser parity, saved queries, semantic resources, full package behavior. |
 | `dxt ls` | Partial | Lists selected graph resources in text or JSON for supported selector syntax. | YAML selectors, state/result/source-status selectors, full indirect-selection parity. |
 | `dxt clean` | Partial | Deletes configured project-relative `clean-targets`, defaulting to the effective target path; protects source directories, rejects outside-project deletion, skips missing paths and plain files, and does not require a profile. | `--no-clean-project-files-only`, Fusion positional file args, symlink/canonical-path parity, richer dbt event output. |
 | `dxt compile` | Partial | Compiles selected enabled SQL models, selected supported built-in generic tests, and selected singular SQL tests through the supported render-only Jinja subset and writes compiled SQL plus manifest fields without opening DuckDB. | Custom generic test macro compilation, full Jinja, macro execution, adapter dispatch execution, arbitrary expressions, filters, hooks. |
@@ -39,7 +39,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 
 | Resource | Status | Current support | Planned gaps |
 | --- | --- | --- | --- |
-| Models | Partial | SQL discovery, refs/sources/docs/macros, YAML properties, columns, tags, materialized config, compile/run/build subset. | Full config precedence, contracts, versions, groups, access, incremental/ephemeral/snapshots, hooks/grants. |
+| Models | Partial | SQL discovery, refs/sources/docs/macros, YAML properties, columns, tags, materialized config, literal inline `enabled`, compile/run/build subset. | Full config precedence, contracts, versions, groups, access, incremental/ephemeral/snapshots, hooks/grants. |
 | Seeds | Partial | CSV discovery, root-project DuckDB `seed` and `build` execution, seed YAML column metadata, and supported root-project seed column or explicit table-level `column_name` generic tests including ref-backed and source-target relationships. | Package seed execution, seed configs, `quote_columns`, `column_types`, full materialization semantics. |
 | Sources | Partial | YAML source tables, source/table freshness config inheritance, narrow source schema rendering, table `identifier` physical-name overrides, source refs, source columns, source column and explicit table-level `column_name` tests including ref-backed and source-target relationships, catalog/source freshness subset. | Richer relation config such as database/quoting/project-level source config, metadata freshness. |
 | Exposures | Partial | YAML exposure parsing with refs/sources, tags, metadata, owner fields. | Full validation and richer artifact parity. |
@@ -56,7 +56,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | --- | --- | --- |
 | `ref()` | Partial | Literal, narrow scalar var-backed, and static loop-var refs in parse/list and compile-time relation rendering. |
 | `source()` | Partial | Literal, narrow scalar var-backed, and static loop-var sources in parse/list and compile-time relation rendering. |
-| `config()` | Partial | Inline tags, materialized, schema, alias in supported literal forms. |
+| `config()` | Partial | Inline tags, materialized, schema, alias, and literal model `enabled` in supported forms. |
 | `var()` | Partial | Scalar CLI/project vars for selected dependency arguments; strict JSON object input is parsed through Zig `std.json` and scalar values are stringified for the current dependency-argument resolver, with loose inline YAML-style scalar maps still accepted. |
 | `doc()` | Partial | Literal doc references. |
 | `target`, `this` | Partial | Narrow compile context for selected fields. |
