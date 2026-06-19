@@ -22,6 +22,11 @@ compatibility.
 - Multi-agent worktree workflow documentation, project-scoped Codex agent
   roles, and helper scripts for isolated concurrent development and PR
   convergence.
+
+### Fixed
+
+- Agent OS dry-runs no longer append ignored local run-state entries, and the
+  Hermes Codex watchdog stays silent when there is no ready restart request.
 - `dxt ls --output json --output-keys` support for compact `tags`,
   `config.enabled`, `config.docs.show`, `depends_on.nodes`, and
   `depends_on.macros` fields using the existing Zig graph data.

@@ -222,6 +222,8 @@ def ensure_worktree(branch: str, base: str, worktree_root: Path, dry_run: bool) 
     if dry_run:
         return worktree
     if worktree.exists():
+        if not (worktree / ".git").exists():
+            raise RuntimeError(f"worktree path exists but is not a git worktree: {worktree}")
         return worktree
     run_cmd(["git", "fetch", "origin"], capture=False)
     worktree.parent.mkdir(parents=True, exist_ok=True)
@@ -330,10 +332,8 @@ def launch_worker(
     merge_ready: bool,
     dry_run: bool,
 ) -> dict[str, Any]:
-    run_dir = worktree / ".agent" / "runs"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    log_path = run_dir / f"agent-os-issue-{issue['number']}.log"
-    last_path = run_dir / f"agent-os-issue-{issue['number']}-last.md"
+    log_path = worktree / ".agent" / "runs" / f"agent-os-issue-{issue['number']}.log"
+    last_path = worktree / ".agent" / "runs" / f"agent-os-issue-{issue['number']}-last.md"
     prompt = worker_prompt(
         repo=repo,
         issue=issue,
@@ -370,6 +370,8 @@ def launch_worker(
             "status": "dry-run",
         }
 
+    run_dir = worktree / ".agent" / "runs"
+    run_dir.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("a", encoding="utf-8")
     process = subprocess.Popen(
         cmd,
@@ -482,8 +484,11 @@ def run_once(args: argparse.Namespace, config: dict[str, Any], state: dict[str, 
             merge_ready=args.merge_ready,
             dry_run=args.dry_run,
         )
-        state.setdefault("runs", []).append(run)
-        print(f"launched issue #{number}: {role['agent']} on {branch}")
+        if args.dry_run:
+            print(f"dry-run issue #{number}: {role['agent']} on {branch}")
+        else:
+            state.setdefault("runs", []).append(run)
+            print(f"launched issue #{number}: {role['agent']} on {branch}")
     save_state(state)
     return 0
 
