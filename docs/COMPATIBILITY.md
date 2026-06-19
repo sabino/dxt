@@ -102,8 +102,9 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | --- | --- | --- |
 | `zig build` | Supported | Native compile gate. |
 | `zig build test` | Supported | Native unit/regression gate. |
-| `pytest -q` | Supported | Black-box CLI/artifact fixture gate. |
+| Focused local pytest | Supported | Fast black-box CLI/artifact fixture checks for touched behavior. |
+| Full pytest matrix | Supported in CI | Full black-box CLI/artifact fixture gate on Python 3.11 and 3.12 with JUnit reports. |
 | Runtime-boundary scan | Supported | Prevents Python product-runtime drift. |
 | Public-safety scan | Supported | Prevents secrets/local paths/generated noise. |
-| Jaffle parse/build scripts | Partial | Public fixture compatibility gates for current supported subset. |
+| Jaffle parse/build scripts | Partial | Public fixture compatibility gates for current supported subset; CI runs the public parse gate, and the DuckDB build gate remains available where the DuckDB CLI is installed. |
 | dbt Core oracle harness | Partial | Optional developer-side comparison for supported M1 fixtures. |

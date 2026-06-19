@@ -13,15 +13,9 @@ env:
   ZIG_VERSION: "0.16.0"
 
 jobs:
-  test:
-    name: test py${{ matrix.python-version }}
+  native:
+    name: native zig and safety
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version:
-          - "3.11"
-          - "3.12"
 
     steps:
       - name: Checkout
@@ -30,17 +24,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
-
-      - name: Install test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest
 
       - name: Print tool versions
         run: |
@@ -70,5 +59,70 @@ jobs:
       - name: Build release-safe binary
         run: zig build -Doptimize=ReleaseSafe --summary all
 
+  integration:
+    name: test py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Print tool versions
+        run: |
+          zig version
+          python --version
+
       - name: Run tests
-        run: pytest -q
+        run: pytest -q --junitxml=reports/pytest-${{ matrix.python-version }}.xml
+
+      - name: Upload pytest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-${{ matrix.python-version }}
+          path: reports/pytest-${{ matrix.python-version }}.xml
+          if-no-files-found: ignore
+
+  public-fixtures:
+    name: public jaffle parse gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Run public Jaffle parse gate
+        run: python scripts/check_jaffle_shop_duckdb_parse.py

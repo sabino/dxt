@@ -115,12 +115,12 @@ flowchart LR
 
 ## Development
 
-Run the standard local gate from the repository root:
+Run focused local gates from the repository root before committing:
 
 ```sh
 zig build
 zig build test
-pytest -q
+pytest -q tests/test_cli.py::test_name_for_the_changed_behavior
 python scripts/check_runtime_boundary.py
 python scripts/check_public_safety.py
 ```
@@ -129,12 +129,16 @@ Use the test layers deliberately:
 
 - `zig build` compiles the native CLI.
 - `zig build test` runs fast native unit/regression tests for core Zig logic.
-- `pytest -q` runs black-box integration and compatibility checks against the
-  compiled Zig binary.
+- Focused `pytest` runs black-box integration and compatibility checks against
+  the compiled Zig binary for touched CLI/artifact behavior.
 - `python scripts/check_runtime_boundary.py` verifies Python has not crossed
   into product runtime responsibilities.
 - `python scripts/check_public_safety.py` scans for local paths, secrets, caches,
   logs, and private artifacts.
+
+Use full `pytest -q` locally for broad runner/artifact changes or before a
+high-risk PR. Otherwise, let GitHub CI run the full integration matrix and
+publish pytest JUnit reports for review.
 
 Optional compatibility gates:
 

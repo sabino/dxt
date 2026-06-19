@@ -47,6 +47,11 @@ Use local tests and targeted self-checks during implementation. Use subagents or
 second-agent/Codex review for the coherent PR boundary instead of reviewing every
 small edit.
 
+Local validation should stay focused while CI carries the broader matrix:
+native Zig tests for touched core logic, targeted pytest for changed
+CLI/artifact behavior, runtime-boundary and public-safety scans before PR, then
+GitHub CI for the full Python integration matrix and public fixture gates.
+
 Long-running loops must have explicit stop conditions and logs under ignored paths such as `.agent/runs/`.
 
 ## Documentation And Release Automation
@@ -1138,6 +1143,10 @@ Exit criteria:
 ## Current Status
 
 - M0 is complete as the Zig `0.16.0` runtime scaffold.
+- CI now separates native Zig/safety gates, Python integration matrix gates, and
+  a public Jaffle parse compatibility gate. Pytest jobs emit JUnit reports for
+  review, and local development guidance now favors focused pytest runs plus
+  native/safety gates instead of full local pytest after every small slice.
 - M1 has started on stacked branches with native Zig artifact-first parser slices.
 - M1A has started with behavior-preserving `src/project/types.zig`, `src/project/selector.zig`, `src/project/manifest.zig`, `src/project/util.zig`, `src/project/config.zig`, `src/project/fs.zig`, `src/project/jinja.zig`, `src/project/resolve.zig`, `src/project/parse.zig`, and `src/project/loader.zig` extractions. `src/project/manifest.zig` owns selected-resource JSON and partial `manifest.json` writing with native tests for selected JSON shape, JSON escaping, exposure dependency ordering, disabled-resource filtering, graph-map output, and macro `supported_languages` emission. `src/project/util.zig` owns shared display, membership, append-dedup, string sorting, and narrow YAML scalar/list helpers. `src/project/config.zig` owns `dbt_project.yml` loading, project path/docs config parsing, narrow scalar top-level `vars` parsing, CLI `--vars` scalar map parsing, and applying parsed project path/docs configs to graph nodes. `src/project/fs.zig` owns deterministic resource file discovery, Linux directory traversal helpers, and resource path/name helpers. `src/project/jinja.zig` owns lexical Jinja call, parenthesis, quoted string, literal and var-backed argument helpers, supported model SQL scanning, inline config/tag parsing, and known macro-call scanning with native tests. `src/project/resolve.zig` owns graph lookup/count helpers, canonical graph resource ordering, duplicate resource validation, macro unique-id package extraction, low-level ref/source resolution helpers, and dependency-map mutation for refs, sources, and known macro dependencies. `src/project/parse.zig` owns narrow parser scalar helpers for YAML booleans, JSON-compatible scalar classification, source YAML table parsing, exposure YAML resource parsing, current top-level `{% macro %}`, `{% test %}`, `{% data_test %}`, and `{% materialization %}` block parsing, materialization `supported_languages` parsing, macro property YAML parsing, generic-test YAML item names, generic-test definition construction/cloning, generic-test relationship target ref parsing, exposure dependency parsing, exposure meta parsing, macro-property application, and generic-test identity/name/hash helpers with native tests. `src/project/loader.zig` owns graph loading order, target-path lookup, project/package resource traversal, root project and CLI vars application, macro/property application sequencing, duplicate checks, and graph sorting while using explicit callbacks into parser helpers that still live in the facade. `src/project.zig` remains the public parser/list facade and still owns docs block parsing, YAML model property parsing, model/seed parsing, generic-test materialization, warnings, and some resolver orchestration until follow-up extractions move those pieces behind focused internal modules.
 - CI format validation now covers every tracked Zig source file under `src/`, including extracted `src/project/*.zig` modules, so M1A module splits remain under the same formatting gate as the root CLI files.

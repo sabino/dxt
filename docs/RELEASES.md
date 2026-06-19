@@ -71,13 +71,15 @@ Before tagging, run:
 zig build
 zig build test
 zig build -Doptimize=ReleaseSafe
-pytest -q
+pytest -q tests/test_cli.py::test_name_for_the_changed_behavior
 python scripts/check_runtime_boundary.py
 python scripts/check_public_safety.py
 ```
 
-The GitHub workflow repeats the native and safety gates. Full pytest remains in
-CI; release jobs focus on portable binary build validation and repository safety.
+Use full `pytest -q` locally before broad runner/artifact release changes. The
+GitHub CI workflow repeats the native and safety gates, runs the full pytest
+matrix with JUnit reports, and runs the public Jaffle parse gate. Release jobs
+focus on portable binary build validation and repository safety.
 
 Verify downloaded artifacts with:
 
