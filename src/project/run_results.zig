@@ -196,6 +196,42 @@ test "run-results writer emits compiled model error result" {
     try std.testing.expectEqualStrings("\"main\".\"orders\"", result.get("relation_name").?.string);
 }
 
+test "run-results writer emits compiled model skipped result" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select * from {{ ref('customers') }}",
+        .compiled = true,
+        .compiled_code = "select * from \"main\".\"customers\"",
+        .relation_name = "\"main\".\"orders\"",
+    });
+
+    const rendered = try renderRunResults(allocator, &.{.{
+        .node = &graph.nodes.items[0],
+        .status = "skipped",
+    }});
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const result = parsed.value.object.get("results").?.array.items[0].object;
+    try std.testing.expectEqualStrings("skipped", result.get("status").?.string);
+    try std.testing.expectEqual(.null, result.get("message").?);
+    try std.testing.expectEqual(.null, result.get("failures").?);
+    try std.testing.expectEqualStrings("model.demo.orders", result.get("unique_id").?.string);
+    try std.testing.expectEqual(true, result.get("compiled").?.bool);
+    try std.testing.expectEqualStrings("select * from \"main\".\"customers\"", result.get("compiled_code").?.string);
+    try std.testing.expectEqualStrings("\"main\".\"orders\"", result.get("relation_name").?.string);
+}
+
 test "run-results writer emits generic test pass and fail statuses" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

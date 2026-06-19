@@ -26,6 +26,10 @@ compatibility.
   `dxt build` model/seed branches, writing completed prior `run_results.json`
   rows plus a sanitized `status: "error"` row for the failed resource and
   returning exit code `1`.
+- Partial skipped-result propagation for `dxt run` and supported `dxt build`
+  model/seed execution failures, writing `status: "skipped"` rows for selected
+  blocked descendants and selected blocked generic tests while preserving
+  `--exclude`.
 - Table-level model, seed, and source built-in generic tests with explicit
   `arguments.column_name`, including Manifest kwargs and DuckDB `build`
   execution for the existing supported test types while preserving dbt's
