@@ -1,4 +1,103 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+
+[features]
+multi_agent = true
+
 [agents]
-max_threads = 6
-max_depth = 1
-job_max_runtime_seconds = 1800
+max_threads = 18
+max_depth = 2
+job_max_runtime_seconds = 7200
+
+[agents.dxt_supervisor_integrator]
+description = "Supervisor for issue queue, worktree ownership, PR convergence, and PLAN.md sequencing."
+config_file = "agents/dxt_supervisor_integrator.toml"
+nickname_candidates = ["Ada", "Grace", "Turing"]
+
+[agents.dxt_issue_triager]
+description = "Read-only triager for labels, Project fields, readiness, and routing."
+config_file = "agents/dxt_issue_triager.toml"
+nickname_candidates = ["Iris", "Nora", "Uma"]
+
+[agents.dxt_code_mapper]
+description = "Read-only mapper for Zig owner modules, fixtures, artifacts, and validation."
+config_file = "agents/dxt_code_mapper.toml"
+nickname_candidates = ["Atlas", "Delta", "Scout"]
+
+[agents.dxt_dbt_reference_researcher]
+description = "Read-only researcher for dbt Core v1 and Fusion source reference maps."
+config_file = "agents/dxt_dbt_reference_researcher.toml"
+nickname_candidates = ["Hypatia", "Kepler", "Noether"]
+
+[agents.dxt_compatibility_curator]
+description = "Planner for turning dbt compatibility gaps into small source-grounded issues."
+config_file = "agents/dxt_compatibility_curator.toml"
+nickname_candidates = ["Curie", "Lovelace", "Franklin"]
+
+[agents.dxt_zig_runtime_architect]
+description = "Architecture reviewer for Zig module boundaries, adapter ABI, and dependency direction."
+config_file = "agents/dxt_zig_runtime_architect.toml"
+nickname_candidates = ["Babbage", "Hamilton", "Knuth"]
+
+[agents.dxt_zig_slice_worker]
+description = "Implementation worker for one small Zig product slice in an isolated worktree."
+config_file = "agents/dxt_zig_slice_worker.toml"
+nickname_candidates = ["Bolt", "Forge", "Vector"]
+
+[agents.dxt_jinja_macro_specialist]
+description = "Specialist for parse/runtime Jinja, macro namespace, dispatch, and dependencies."
+config_file = "agents/dxt_jinja_macro_specialist.toml"
+nickname_candidates = ["Jade", "Macro", "Rune"]
+
+[agents.dxt_selector_state_specialist]
+description = "Specialist for selectors, graph expansion, state/defer, result, and source-status behavior."
+config_file = "agents/dxt_selector_state_specialist.toml"
+nickname_candidates = ["Selene", "Quill", "Trace"]
+
+[agents.dxt_execution_adapter_specialist]
+description = "Specialist for DuckDB execution, adapter ABI, run results, catalog, and freshness."
+config_file = "agents/dxt_execution_adapter_specialist.toml"
+nickname_candidates = ["Arrow", "Flux", "Spark"]
+
+[agents.dxt_semantic_crossdb_planner]
+description = "Planner for semantic layer, metrics, saved queries, and cross-database execution."
+config_file = "agents/dxt_semantic_crossdb_planner.toml"
+nickname_candidates = ["Meridian", "Sage", "Vectoria"]
+
+[agents.dxt_qa_fixture_engineer]
+description = "Fixture and validation specialist for Zig tests, pytest, dbt oracles, and public gates."
+config_file = "agents/dxt_qa_fixture_engineer.toml"
+nickname_candidates = ["Beacon", "Gauge", "Signal"]
+
+[agents.dxt_artifact_parity_reviewer]
+description = "Read-only reviewer for artifact schema parity, ordering, escaping, and normalization."
+config_file = "agents/dxt_artifact_parity_reviewer.toml"
+nickname_candidates = ["Ledger", "Schema", "Tally"]
+
+[agents.dxt_runtime_boundary_auditor]
+description = "Read-only auditor for Zig runtime boundary and public-safety constraints."
+config_file = "agents/dxt_runtime_boundary_auditor.toml"
+nickname_candidates = ["Aegis", "Locke", "Sentinel"]
+
+[agents.dxt_reflection_reviewer]
+description = "Read-only reviewer for repeated failures, bad assumptions, dbt drift, and validation gaps."
+config_file = "agents/dxt_reflection_reviewer.toml"
+nickname_candidates = ["Mirror", "Socrates", "Vega"]
+
+[agents.dxt_network_coordinator]
+description = "Coordinator for peer specialist review without making every review a merge gate."
+config_file = "agents/dxt_network_coordinator.toml"
+nickname_candidates = ["Bridge", "Relay", "Weaver"]
+
+[agents.dxt_convergence_reviewer]
+description = "Read-only PR-boundary reviewer for overlap, risk, missing tests, generated noise, and readiness."
+config_file = "agents/dxt_convergence_reviewer.toml"
+nickname_candidates = ["Anchor", "Faro", "Harbor"]
+
+[agents.dxt_docs_release_curator]
+description = "Curator for public docs, compatibility wording, changelog, releases, and binary safety."
+config_file = "agents/dxt_docs_release_curator.toml"
+nickname_candidates = ["Page", "Quarto", "Scribe"]
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+startup_timeout_sec = 20

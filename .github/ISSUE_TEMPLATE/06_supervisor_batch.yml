@@ -1,0 +1,33 @@
+name: Supervisor Batch
+description: Decompose a larger milestone into non-overlapping child issues.
+title: "[supervisor] "
+labels: ["role:supervisor", "pattern:hierarchical", "status:needs-triage"]
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What larger milestone or problem is being decomposed?
+    validations:
+      required: true
+  - type: textarea
+    id: child_issues
+    attributes:
+      label: Child issue plan
+      description: List child issues, owners, and expected non-overlapping file scopes.
+    validations:
+      required: true
+  - type: textarea
+    id: ownership
+    attributes:
+      label: Ownership matrix
+      description: Name branches/worktrees, files, artifacts, and validation gates.
+    validations:
+      required: true
+  - type: checkboxes
+    id: plan_impact
+    attributes:
+      label: Planning impact
+      options:
+        - label: PLAN.md sequencing/risk/validation impact has been checked.
+          required: true

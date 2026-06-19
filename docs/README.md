@@ -10,7 +10,10 @@ full dbt compatibility unless a page explicitly says that a surface is covered.
 | [Primer](PRIMER.md) | Product goals, runtime rules, development loop, and high-level flow. |
 | [Compatibility Matrix](COMPATIBILITY.md) | Current support levels and planned dbt surfaces. |
 | [Architecture](ARCHITECTURE.md) | Zig module ownership, artifact flow, and Mermaid diagrams. |
-| [Multi-Agent Workflow](MULTI_AGENT_WORKFLOW.md) | Concurrent Codex/worktree workflow, project agent roles, validation, and PR convergence. |
+| [Agent OS](AGENT_OS.md) | Multidisciplinary agent-team operating model plus local autonomous Codex worker loop across GitHub Issues, Projects, PRs, and worktrees. |
+| [Agent Protocols](AGENT_PROTOCOLS.md) | Public-safe issue/PR comment formats, role nudges, handoffs, and reflection protocol. |
+| [GitHub Projects Setup](GITHUB_PROJECTS.md) | Desired Project fields, views, label syncing, seed issue bootstrap, and worker-loop commands. |
+| [Multi-Agent Workflow](MULTI_AGENT_WORKFLOW.md) | Concurrent Codex/worktree workflow, project agent roles, autonomous orchestration, validation, and PR convergence. |
 | [Release Process](RELEASES.md) | Release tags, binary artifacts, checksums, and safety gates. |
 | [Changelog](../CHANGELOG.md) | What has changed so far. |
 | [ExecPlan](../PLAN.md) | Active milestone plan and implementation sequencing. |

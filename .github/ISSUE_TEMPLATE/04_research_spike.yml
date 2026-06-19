@@ -1,0 +1,33 @@
+name: Research Spike
+description: Ask for public-safe upstream or design research before implementation.
+title: "[research] "
+labels: ["type:research", "status:needs-triage"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Research question
+      description: What decision should this answer?
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Sources to inspect
+      description: List upstream repos, docs, schemas, or public fixtures.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Expected output
+      description: Should findings become `.agent/research/`, docs, issue comments, or PLAN updates?
+    validations:
+      required: true
+  - type: textarea
+    id: stop
+    attributes:
+      label: Stop condition
+      description: Define when the spike is done or blocked.
+    validations:
+      required: true

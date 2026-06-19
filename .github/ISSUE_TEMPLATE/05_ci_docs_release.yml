@@ -1,0 +1,26 @@
+name: CI, Docs, or Release
+description: Plan CI, documentation, release automation, or packaging work.
+title: "[ops] "
+labels: ["type:docs", "status:needs-triage"]
+body:
+  - type: textarea
+    id: change
+    attributes:
+      label: Change
+      description: Describe the docs, CI, release, or package behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: gates
+    attributes:
+      label: Validation and safety gates
+      description: List workflows, scripts, release checks, and public-safety scans.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Release or documentation impact
+      description: Name README/docs/CHANGELOG/release files affected.
+    validations:
+      required: true

@@ -1,0 +1,48 @@
+name: Compatibility Slice
+description: Plan one source-grounded dbt compatibility slice.
+title: "[compat] "
+labels: ["type:compat", "status:needs-triage", "needs-reference-map"]
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: dbt behavior
+      description: Describe the dbt behavior this slice should match.
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: Upstream references
+      description: List dbt Core v1 files/symbols, Fusion v2 files/symbols, and artifact schema refs.
+      placeholder: |
+        dbt Core v1:
+        Fusion / v2:
+        Artifact schema:
+    validations:
+      required: true
+  - type: textarea
+    id: dxt_ownership
+    attributes:
+      label: dxt ownership
+      description: Name Zig owner modules, commands, and artifacts.
+      placeholder: |
+        Zig modules:
+        Commands:
+        Artifacts:
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation gates
+      description: List native Zig tests, Python/dbt oracle checks, and public fixture gates.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Scope boundaries
+      description: Explicitly list non-goals and stop conditions.
+    validations:
+      required: true

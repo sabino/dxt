@@ -1,5 +1,6 @@
 name = "dxt_dbt_reference_researcher"
 description = "Read-only researcher for source-grounded dbt Core v1 and Fusion reference mapping."
+nickname_candidates = ["Hypatia", "Kepler", "Noether"]
 model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"

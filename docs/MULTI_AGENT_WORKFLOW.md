@@ -4,9 +4,30 @@ This workflow lets multiple Codex instances work on `dxt` at the same time
 without sharing a dirty checkout. It is developer orchestration only; product
 runtime behavior remains Zig.
 
+For GitHub Issues, Projects, role nudges, and multidisciplinary agent-team
+coordination, see [Agent OS](AGENT_OS.md), [Agent Protocols](AGENT_PROTOCOLS.md),
+and [GitHub Projects Setup](GITHUB_PROJECTS.md).
+
 The source model is the official Codex subagents and worktrees guidance:
 subagents are explicit, bounded workers; worktrees isolate parallel branches;
 the main agent remains responsible for integration.
+
+For unattended local execution, use the Agent OS orchestrator. It consumes ready
+GitHub issues, creates one worktree per claimed issue, and launches separate
+Codex CLI workers:
+
+```sh
+python scripts/agent_os_orchestrator.py run \
+  --repo sabino/dxt \
+  --profile azure \
+  --model gpt-5.5 \
+  --max-workers 3 \
+  --loop
+```
+
+Use `python scripts/agent_os_orchestrator.py status` to watch local worker
+state and `python scripts/agent_os_orchestrator.py nudge <issue> "<message>"`
+to communicate through GitHub issue comments.
 
 ## Core Rules
 
@@ -72,9 +93,11 @@ codex -p "$DXT_CODEX_PROFILE" -m gpt-5.5 -C "$PWD" \
   "Read AGENTS.md and PLAN.md. Implement only the requested slice."
 ```
 
-Do not commit local profile names, provider details, session transcripts, or
-machine paths. If a CLI fallback writes useful findings, summarize them into a
-public-safe tracked doc or keep the raw output under `.agent/runs/`.
+Do not commit provider credentials, session transcripts, or machine paths. This
+repo intentionally documents the non-secret `azure` profile selector for local
+orchestration; override it with `--profile` or `DXT_CODEX_PROFILE` when needed.
+If a CLI fallback writes useful findings, summarize them into a public-safe
+tracked doc or keep the raw output under `.agent/runs/`.
 
 ## Ownership Matrix
 
@@ -96,6 +119,11 @@ worktrees.
 
 Project-scoped agent definitions live under `.codex/agents/`. Keep them small
 and dxt-specific.
+
+Project-scoped Codex configuration lives in `.codex/config.toml`. It enables
+multi-agent workflows for this repo, raises the local thread cap, allows one
+recursive delegation layer, registers every dxt agent role, and keeps provider
+auth configuration out of tracked files.
 
 | Agent | Mode | Use for |
 | --- | --- | --- |

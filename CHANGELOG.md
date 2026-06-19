@@ -9,6 +9,11 @@ compatibility.
 
 ### Added
 
+- GitHub-backed Agent OS scaffolding for multidisciplinary agent coordination:
+  issue forms, PR template, label/project/seed-issue manifests, project-scoped
+  specialist agents, validation/bootstrap scripts, a local autonomous Codex
+  worker orchestrator, project-local Codex subagent configuration, and docs for
+  supervisor, hierarchical, network, and reflection patterns.
 - Multi-agent worktree workflow documentation, project-scoped Codex agent
   roles, and helper scripts for isolated concurrent development and PR
   convergence.

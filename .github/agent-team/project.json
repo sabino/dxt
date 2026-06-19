@@ -1,0 +1,45 @@
+{
+  "title": "dxt Compatibility Execution",
+  "description": "Agent-coordinated dbt compatibility execution for dxt.",
+  "fields": [
+    {
+      "name": "Status",
+      "type": "SINGLE_SELECT",
+      "options": ["Intake", "Needs Reference Map", "Needs Slice Plan", "Ready", "Claimed", "In Worktree", "Local Validation", "PR Open", "CI Running", "CI Red", "Needs Review", "Ready To Merge", "Merged", "Deferred", "Blocked"]
+    },
+    {
+      "name": "Agent Role",
+      "type": "SINGLE_SELECT",
+      "options": ["supervisor", "triager", "mapper", "researcher", "architect", "worker", "qa", "artifact reviewer", "auditor", "reflection", "docs release"]
+    },
+    {
+      "name": "Track",
+      "type": "SINGLE_SELECT",
+      "options": ["dbt compatibility", "Zig runtime", "artifacts", "DuckDB execution", "semantic layer", "cross-db", "docs release", "safety"]
+    },
+    {
+      "name": "Pattern",
+      "type": "SINGLE_SELECT",
+      "options": ["supervisor", "hierarchical", "network", "reflection"]
+    },
+    {
+      "name": "Validation",
+      "type": "SINGLE_SELECT",
+      "options": ["native Zig", "focused pytest", "dbt oracle", "Jaffle gate", "safety", "runtime boundary", "CI only", "not applicable"]
+    },
+    {
+      "name": "PLAN Update",
+      "type": "SINGLE_SELECT",
+      "options": ["not needed", "required", "done"]
+    },
+    {
+      "name": "Source Grounding",
+      "type": "SINGLE_SELECT",
+      "options": ["missing", "linked", "not applicable"]
+    },
+    {
+      "name": "Branch",
+      "type": "TEXT"
+    }
+  ]
+}

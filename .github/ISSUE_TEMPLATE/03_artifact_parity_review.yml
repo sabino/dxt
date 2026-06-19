@@ -1,0 +1,31 @@
+name: Artifact Parity Review
+description: Request focused review of dbt-shaped JSON artifact behavior.
+title: "[artifact] "
+labels: ["type:artifact", "role:parity", "status:needs-triage", "risk:artifact-contract"]
+body:
+  - type: dropdown
+    id: artifact
+    attributes:
+      label: Artifact
+      options:
+        - manifest.json
+        - run_results.json
+        - catalog.json
+        - sources.json
+        - semantic_manifest.json
+    validations:
+      required: true
+  - type: textarea
+    id: fields
+    attributes:
+      label: Fields and schema
+      description: Name fields, schema version, ordering, and normalization concerns.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Link PR, fixture output, dbt oracle comparison, or schema validation.
+    validations:
+      required: true
