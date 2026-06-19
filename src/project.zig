@@ -340,8 +340,9 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
         deinitRunResults(runtime.allocator, executed.items);
         executed.deinit(runtime.allocator);
     }
-    for (execution_order) |node| {
+    for (execution_order, 0..) |node, index| {
         if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
+            try appendSkippedAfterExecutionFailure(runtime.allocator, selected_models, execution_order[index + 1 ..], &.{}, node.unique_id, &executed);
             return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Run");
         }
     }
@@ -427,8 +428,9 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             deinitRunResults(runtime.allocator, executed.items);
             executed.deinit(runtime.allocator);
         }
-        for (seed_nodes) |node| {
+        for (seed_nodes, 0..) |node, index| {
             if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
+                try appendSkippedAfterExecutionFailure(runtime.allocator, selected, seed_nodes[index + 1 ..], &.{}, node.unique_id, &executed);
                 return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
             }
         }
@@ -458,8 +460,9 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             deinitRunResults(runtime.allocator, executed.items);
             executed.deinit(runtime.allocator);
         }
-        for (seed_nodes) |node| {
+        for (seed_nodes, 0..) |node, index| {
             if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
+                try appendSkippedAfterExecutionFailure(runtime.allocator, selected, seed_nodes[index + 1 ..], test_nodes, node.unique_id, &executed);
                 return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
             }
         }
@@ -547,8 +550,9 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             deinitRunResults(runtime.allocator, executed.items);
             executed.deinit(runtime.allocator);
         }
-        for (execution_order) |node| {
+        for (execution_order, 0..) |node, index| {
             if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
+                try appendSkippedAfterExecutionFailure(runtime.allocator, selected, execution_order[index + 1 ..], test_nodes, node.unique_id, &executed);
                 return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
             }
         }
@@ -586,14 +590,16 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         }
         var seed_count: usize = 0;
         var model_count: usize = 0;
-        for (execution_order) |node| {
+        for (execution_order, 0..) |node, index| {
             if (std.mem.eql(u8, node.resource_type, "seed")) {
                 if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
+                    try appendSkippedAfterExecutionFailure(runtime.allocator, selected, execution_order[index + 1 ..], test_nodes, node.unique_id, &executed);
                     return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
                 }
                 seed_count += 1;
             } else {
                 if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
+                    try appendSkippedAfterExecutionFailure(runtime.allocator, selected, execution_order[index + 1 ..], test_nodes, node.unique_id, &executed);
                     return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
                 }
                 model_count += 1;
@@ -824,6 +830,64 @@ fn appendExecutionErrorResult(allocator: std.mem.Allocator, executed: *std.Array
     });
 }
 
+fn appendSkippedAfterExecutionFailure(
+    allocator: std.mem.Allocator,
+    selected: []const selector.SelectedResource,
+    remaining_nodes: []const *Node,
+    test_nodes: []const *GenericTestNode,
+    failed_unique_id: []const u8,
+    executed: *std.ArrayList(run_results.NodeResult),
+) !void {
+    var blocked: std.ArrayList([]const u8) = .empty;
+    defer blocked.deinit(allocator);
+    try blocked.append(allocator, failed_unique_id);
+
+    for (remaining_nodes) |node| {
+        if (!selectionContains(selected, node.unique_id)) continue;
+        if (!dependsOnAnyBlocked(node.depends_on.items, blocked.items)) continue;
+        try executed.append(allocator, .{
+            .node = node,
+            .status = "skipped",
+        });
+        try blocked.append(allocator, node.unique_id);
+    }
+
+    for (test_nodes) |test_node| {
+        if (!selectionContains(selected, test_node.unique_id)) continue;
+        if (!testDependsOnAnyBlocked(test_node, blocked.items)) continue;
+        try executed.append(allocator, .{
+            .test_node = test_node,
+            .status = "skipped",
+        });
+        try blocked.append(allocator, test_node.unique_id);
+    }
+}
+
+fn testDependsOnAnyBlocked(test_node: *const GenericTestNode, blocked: []const []const u8) bool {
+    if (dependsOnAnyBlocked(test_node.depends_on.items, blocked)) return true;
+    if (test_node.attached_node) |attached_node| {
+        if (containsUniqueId(blocked, attached_node)) return true;
+    }
+    if (test_node.attached_source_unique_id) |attached_source| {
+        if (containsUniqueId(blocked, attached_source)) return true;
+    }
+    return false;
+}
+
+fn dependsOnAnyBlocked(depends_on: []const []const u8, blocked: []const []const u8) bool {
+    for (depends_on) |dependency| {
+        if (containsUniqueId(blocked, dependency)) return true;
+    }
+    return false;
+}
+
+fn containsUniqueId(values: []const []const u8, unique_id: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, unique_id)) return true;
+    }
+    return false;
+}
+
 fn failExecution(runtime: Runtime, target_dir: []const u8, manifest_path: []const u8, db_path: []const u8, executed: []const run_results.NodeResult, stdout: *Io.Writer, verb: []const u8) !void {
     try writeRunResults(runtime, target_dir, executed);
     try stdout.print("{s} failed after {d} result(s) against {s}; wrote artifacts into {s}\n", .{
@@ -1040,6 +1104,120 @@ test "selected seed-model build order waits for selected seed dependencies" {
     try std.testing.expectEqual(@as(usize, 2), ordered.len);
     try std.testing.expectEqualStrings("seed.demo.raw_customers", ordered[0].unique_id);
     try std.testing.expectEqualStrings("model.demo.stg_customers", ordered[1].unique_id);
+}
+
+test "appendSkippedAfterExecutionFailure records selected blocked descendants only" {
+    const allocator = std.testing.allocator;
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select * from missing_relation",
+    });
+    var orders = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select * from {{ ref('customers') }}",
+    };
+    try orders.depends_on.append(allocator, "model.demo.customers");
+    try graph.nodes.append(allocator, orders);
+    var payments = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.payments",
+        .name = "payments",
+        .path = "payments.sql",
+        .original_file_path = "models/payments.sql",
+        .raw_code = "select * from {{ ref('orders') }}",
+    };
+    try payments.depends_on.append(allocator, "model.demo.orders");
+    try graph.nodes.append(allocator, payments);
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.independent",
+        .name = "independent",
+        .path = "independent.sql",
+        .original_file_path = "models/independent.sql",
+        .raw_code = "select 1",
+    });
+
+    var test_node = GenericTestNode{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_orders_order_id.abc",
+        .name = "not_null_orders_order_id",
+        .alias = "not_null_orders_order_id",
+        .path = "not_null_orders_order_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "order_id",
+        .attached_node = "model.demo.orders",
+    };
+    try test_node.depends_on.append(allocator, "model.demo.orders");
+    try graph.tests.append(allocator, test_node);
+
+    const selected = [_]selector.SelectedResource{
+        .{ .unique_id = "model.demo.customers", .name = "customers", .resource_type = "model" },
+        .{ .unique_id = "model.demo.orders", .name = "orders", .resource_type = "model" },
+        .{ .unique_id = "model.demo.payments", .name = "payments", .resource_type = "model" },
+        .{ .unique_id = "model.demo.independent", .name = "independent", .resource_type = "model" },
+        .{ .unique_id = "test.demo.not_null_orders_order_id.abc", .name = "not_null_orders_order_id", .resource_type = "test" },
+    };
+    const remaining = [_]*Node{ &graph.nodes.items[1], &graph.nodes.items[2], &graph.nodes.items[3] };
+    const tests = [_]*GenericTestNode{&graph.tests.items[0]};
+
+    var executed: std.ArrayList(run_results.NodeResult) = .empty;
+    defer executed.deinit(allocator);
+    try appendSkippedAfterExecutionFailure(allocator, &selected, &remaining, &tests, "model.demo.customers", &executed);
+
+    try std.testing.expectEqual(@as(usize, 3), executed.items.len);
+    try std.testing.expectEqualStrings("model.demo.orders", executed.items[0].node.?.unique_id);
+    try std.testing.expectEqualStrings("skipped", executed.items[0].status);
+    try std.testing.expectEqualStrings("model.demo.payments", executed.items[1].node.?.unique_id);
+    try std.testing.expectEqualStrings("test.demo.not_null_orders_order_id.abc", executed.items[2].test_node.?.unique_id);
+}
+
+test "appendSkippedAfterExecutionFailure honors post-exclude selected set" {
+    const allocator = std.testing.allocator;
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select * from missing_relation",
+    });
+    var orders = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select * from {{ ref('customers') }}",
+    };
+    try orders.depends_on.append(allocator, "model.demo.customers");
+    try graph.nodes.append(allocator, orders);
+
+    const selected = [_]selector.SelectedResource{
+        .{ .unique_id = "model.demo.customers", .name = "customers", .resource_type = "model" },
+    };
+    const remaining = [_]*Node{&graph.nodes.items[1]};
+
+    var executed: std.ArrayList(run_results.NodeResult) = .empty;
+    defer executed.deinit(allocator);
+    try appendSkippedAfterExecutionFailure(allocator, &selected, &remaining, &.{}, "model.demo.customers", &executed);
+
+    try std.testing.expectEqual(@as(usize, 0), executed.items.len);
 }
 
 test "parseModelPropertiesFromText records accepted_values quote false" {
