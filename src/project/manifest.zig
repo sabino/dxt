@@ -74,10 +74,20 @@ fn writeSelectedJsonObjectWithKeys(writer: *Io.Writer, item: selector.SelectedRe
             if (item.alias.len != 0) try writeSelectedJsonStringField(writer, "alias", item.alias, &wrote);
         } else if (std.mem.eql(u8, key, "identifier")) {
             if (item.identifier.len != 0) try writeSelectedJsonStringField(writer, "identifier", item.identifier, &wrote);
+        } else if (std.mem.eql(u8, key, "tags")) {
+            if (item.has_config_tags) try writeSelectedJsonStringArrayField(writer, "tags", item.config_tags, &wrote);
         } else if (std.mem.eql(u8, key, "config.materialized")) {
             if (item.config_materialized.len != 0) try writeSelectedJsonStringField(writer, "config.materialized", item.config_materialized, &wrote);
         } else if (std.mem.eql(u8, key, "config.tags")) {
             if (item.has_config_tags) try writeSelectedJsonStringArrayField(writer, "config.tags", item.config_tags, &wrote);
+        } else if (std.mem.eql(u8, key, "config.enabled")) {
+            if (item.has_config_enabled) try writeSelectedJsonBoolField(writer, "config.enabled", item.config_enabled, &wrote);
+        } else if (std.mem.eql(u8, key, "config.docs.show")) {
+            if (item.has_config_docs_show) try writeSelectedJsonBoolField(writer, "config.docs.show", item.config_docs_show, &wrote);
+        } else if (std.mem.eql(u8, key, "depends_on.nodes")) {
+            if (item.has_depends_on) try writeSelectedJsonStringArrayField(writer, "depends_on.nodes", item.depends_on_nodes, &wrote);
+        } else if (std.mem.eql(u8, key, "depends_on.macros")) {
+            if (item.has_depends_on) try writeSelectedJsonStringArrayField(writer, "depends_on.macros", item.depends_on_macros, &wrote);
         }
     }
     try writer.writeAll("}");
@@ -89,6 +99,14 @@ fn writeSelectedJsonStringField(writer: *Io.Writer, key: []const u8, value: []co
 
 fn writeSelectedJsonStringArrayField(writer: *Io.Writer, key: []const u8, value: []const []const u8, wrote: *bool) !void {
     try json.stringArrayField(writer, key, value, wrote);
+}
+
+fn writeSelectedJsonBoolField(writer: *Io.Writer, key: []const u8, value: bool, wrote: *bool) !void {
+    if (wrote.*) try writer.writeAll(",");
+    wrote.* = true;
+    try json.string(writer, key);
+    try writer.writeAll(":");
+    try json.boolValue(writer, value);
 }
 
 fn hasPriorKey(keys: []const []const u8, key: []const u8) bool {
@@ -993,6 +1011,13 @@ test "selected resource JSON writer filters output keys in requested order" {
             .config_materialized = "table",
             .config_tags = &.{ "finance", "nightly" },
             .has_config_tags = true,
+            .config_enabled = true,
+            .has_config_enabled = true,
+            .config_docs_show = true,
+            .has_config_docs_show = true,
+            .depends_on_nodes = &.{ "source.demo.raw.customers", "model.demo.stg_customers" },
+            .depends_on_macros = &.{"macro.demo.cents_to_dollars"},
+            .has_depends_on = true,
         },
         .{
             .unique_id = "source.demo.raw.customers",
@@ -1015,15 +1040,22 @@ test "selected resource JSON writer filters output keys in requested order" {
             .selector = "demo.orders",
             .config_materialized = "view",
             .has_config_tags = true,
+            .config_enabled = true,
+            .has_config_enabled = true,
+            .config_docs_show = false,
+            .has_config_docs_show = true,
+            .depends_on_nodes = &.{},
+            .depends_on_macros = &.{},
+            .has_depends_on = true,
         },
     };
-    const keys = [_][]const u8{ "name", "package_name", "source_name", "alias", "identifier", "config.materialized", "config.tags", "missing", "path", "original_file_path", "selector", "unique_id", "name" };
+    const keys = [_][]const u8{ "name", "package_name", "source_name", "alias", "identifier", "tags", "config.materialized", "config.tags", "config.enabled", "config.docs.show", "depends_on.nodes", "depends_on.macros", "missing", "path", "original_file_path", "selector", "unique_id", "name" };
 
     const rendered = try renderSelectedJsonWithKeysForTest(std.testing.allocator, selected[0..], keys[0..]);
     defer std.testing.allocator.free(rendered);
 
     try std.testing.expectEqualStrings(
-        "[{\"name\":\"customers\",\"package_name\":\"demo\",\"alias\":\"customer_facts\",\"config.materialized\":\"table\",\"config.tags\":[\"finance\",\"nightly\"],\"path\":\"customers.sql\",\"original_file_path\":\"models/customers.sql\",\"selector\":\"demo.customers\",\"unique_id\":\"model.demo.customers\"},{\"name\":\"customers\",\"package_name\":\"demo\",\"source_name\":\"raw\",\"identifier\":\"raw_customers\",\"path\":\"models/schema.yml\",\"original_file_path\":\"models/schema.yml\",\"selector\":\"source:demo.raw.customers\",\"unique_id\":\"source.demo.raw.customers\"},{\"name\":\"orders\",\"package_name\":\"demo\",\"config.materialized\":\"view\",\"config.tags\":[],\"path\":\"orders.sql\",\"original_file_path\":\"models/orders.sql\",\"selector\":\"demo.orders\",\"unique_id\":\"model.demo.orders\"}]\n",
+        "[{\"name\":\"customers\",\"package_name\":\"demo\",\"alias\":\"customer_facts\",\"tags\":[\"finance\",\"nightly\"],\"config.materialized\":\"table\",\"config.tags\":[\"finance\",\"nightly\"],\"config.enabled\":true,\"config.docs.show\":true,\"depends_on.nodes\":[\"source.demo.raw.customers\",\"model.demo.stg_customers\"],\"depends_on.macros\":[\"macro.demo.cents_to_dollars\"],\"path\":\"customers.sql\",\"original_file_path\":\"models/customers.sql\",\"selector\":\"demo.customers\",\"unique_id\":\"model.demo.customers\"},{\"name\":\"customers\",\"package_name\":\"demo\",\"source_name\":\"raw\",\"identifier\":\"raw_customers\",\"path\":\"models/schema.yml\",\"original_file_path\":\"models/schema.yml\",\"selector\":\"source:demo.raw.customers\",\"unique_id\":\"source.demo.raw.customers\"},{\"name\":\"orders\",\"package_name\":\"demo\",\"tags\":[],\"config.materialized\":\"view\",\"config.tags\":[],\"config.enabled\":true,\"config.docs.show\":false,\"depends_on.nodes\":[],\"depends_on.macros\":[],\"path\":\"orders.sql\",\"original_file_path\":\"models/orders.sql\",\"selector\":\"demo.orders\",\"unique_id\":\"model.demo.orders\"}]\n",
         rendered,
     );
 }

@@ -6158,6 +6158,41 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         {"name": "stg_customers", "alias": "stg_customers", "config.materialized": "view", "config.tags": []}
     ]
 
+    depends_keyed_json = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(untagged_project),
+            "--output",
+            "json",
+            "--select",
+            "customers",
+            "--output-keys",
+            "name",
+            "tags",
+            "depends_on",
+            "depends_on.nodes",
+            "depends_on.macros",
+            "config.enabled",
+            "config.docs.show",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert depends_keyed_json.returncode == 0, depends_keyed_json.stderr
+    assert json.loads(depends_keyed_json.stdout) == [
+        {
+            "name": "customers",
+            "tags": [],
+            "depends_on.nodes": ["model.model_ref.stg_customers"],
+            "depends_on.macros": [],
+            "config.enabled": True,
+            "config.docs.show": True,
+        }
+    ]
+
     source_project = copy_fixture(tmp_path, "source_ref")
     source_keyed_json = subprocess.run(
         [

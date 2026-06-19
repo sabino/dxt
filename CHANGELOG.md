@@ -9,6 +9,9 @@ compatibility.
 
 ### Added
 
+- `dxt ls --output json --output-keys` support for compact `tags`,
+  `config.enabled`, `config.docs.show`, `depends_on.nodes`, and
+  `depends_on.macros` fields using the existing Zig graph data.
 - First-class `analysis` resources in the Zig runtime for parse/list/compile:
   default `analyses` discovery, Manifest nodes with refs/sources/macros,
   YAML description/tag/column patches, `resource_type:analysis` selectors, and
