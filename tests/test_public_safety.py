@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import io
 from pathlib import Path
 import subprocess
+import tarfile
 
 
 SAFETY_PATH = Path(__file__).resolve().parents[1] / "scripts" / "check_public_safety.py"
@@ -11,6 +14,13 @@ assert SPEC is not None
 assert SPEC.loader is not None
 safety = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(safety)
+
+RELEASE_ARCHIVE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "check_release_archive.py"
+RELEASE_SPEC = importlib.util.spec_from_file_location("check_release_archive", RELEASE_ARCHIVE_PATH)
+assert RELEASE_SPEC is not None
+assert RELEASE_SPEC.loader is not None
+release_archive = importlib.util.module_from_spec(RELEASE_SPEC)
+RELEASE_SPEC.loader.exec_module(release_archive)
 
 
 def test_text_candidates_include_dbt_files():
@@ -47,3 +57,53 @@ def test_runtime_boundary_check_passes():
         capture_output=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def add_tar_file(archive: tarfile.TarFile, name: str, data: bytes, mode: int = 0o644):
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    info.mode = mode
+    archive.addfile(info, io.BytesIO(data))
+
+
+def write_release_archive(path: Path, *, leaked_binary_text: bytes = b""):
+    root = "dxt-v0.0.0-x86_64-linux-gnu"
+    with tarfile.open(path, "w:gz") as archive:
+        for directory in [root, f"{root}/docs"]:
+            info = tarfile.TarInfo(directory)
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o755
+            archive.addfile(info)
+        add_tar_file(archive, f"{root}/dxt", b"binary" + leaked_binary_text, 0o755)
+        add_tar_file(archive, f"{root}/README.md", b"# dxt\n")
+        add_tar_file(archive, f"{root}/CHANGELOG.md", b"# Changelog\n")
+        add_tar_file(archive, f"{root}/SECURITY.md", b"# Security\n")
+        add_tar_file(archive, f"{root}/docs/RELEASES.md", b"# Release Process\n")
+
+
+def test_release_archive_check_accepts_expected_shape(tmp_path):
+    archive = tmp_path / "dxt-v0.0.0-x86_64-linux-gnu.tar.gz"
+    write_release_archive(archive)
+
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    checksums = tmp_path / "dxt-v0.0.0-SHA256SUMS.txt"
+    checksums.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+
+    assert release_archive.main(
+        [
+            str(archive),
+            "--version",
+            "0.0.0",
+            "--target",
+            "x86_64-linux-gnu",
+            "--checksum-file",
+            str(checksums),
+        ]
+    ) == 0
+
+
+def test_release_archive_check_rejects_binary_path_leak(tmp_path):
+    archive = tmp_path / "dxt-v0.0.0-x86_64-linux-gnu.tar.gz"
+    write_release_archive(archive, leaked_binary_text=b"/home/example/private")
+
+    assert release_archive.main([str(archive), "--version", "0.0.0"]) == 1

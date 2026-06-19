@@ -123,6 +123,11 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Build target
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
 
@@ -144,10 +149,13 @@ jobs:
           test ! -f LICENSE || cp LICENSE "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           tar -tzf "dist/${name}.tar.gz"
-          if strings "dist/${name}/dxt" | grep -E '/home/|/media/|github_pat_|gh[opsu]_|sk-'; then
-            echo "binary appears to contain a private path or token pattern" >&2
-            exit 1
-          fi
+
+      - name: Check release archive safety
+        run: |
+          python scripts/check_release_archive.py \
+            "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" \
+            --version "${{ needs.verify.outputs.version }}" \
+            --target "${{ matrix.target }}"
 
       - name: Upload packaged binary
         uses: actions/upload-artifact@v4
@@ -167,6 +175,16 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -178,6 +196,13 @@ jobs:
           cd dist
           sha256sum *.tar.gz > "dxt-${{ needs.verify.outputs.tag }}-SHA256SUMS.txt"
           cat "dxt-${{ needs.verify.outputs.tag }}-SHA256SUMS.txt"
+
+      - name: Check release archives and checksums
+        run: |
+          python scripts/check_release_archive.py \
+            dist/*.tar.gz \
+            --version "${{ needs.verify.outputs.version }}" \
+            --checksum-file "dist/dxt-${{ needs.verify.outputs.tag }}-SHA256SUMS.txt"
 
       - name: Create or update draft release
         env:

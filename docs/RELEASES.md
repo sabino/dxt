@@ -37,7 +37,8 @@ Each release job:
 5. Builds `dxt` in `ReleaseSafe` mode for supported targets.
 6. Packages each binary with `README.md`, `LICENSE` if present, and release
    notes pointers.
-7. Scans packaged binaries for obvious private path or token patterns.
+7. Validates release archive contents, expected filenames, executable binary
+   metadata, binary/doc string safety, and checksum coverage.
 8. Writes `SHA256SUMS.txt`.
 9. Uploads artifacts to a draft GitHub Release.
 
@@ -59,6 +60,8 @@ after discovery and CLI path behavior are made portable and validated.
 - Run `python scripts/check_public_safety.py` before upload.
 - Run `python scripts/check_runtime_boundary.py` before upload.
 - Release archives should contain only the binary and public documentation.
+- Run `python scripts/check_release_archive.py <archive.tar.gz> --version
+  <version>` before upload when validating a local package.
 - Checksums must be generated from the exact uploaded archive files.
 - Until version injection is implemented, release tags must match both
   `dxt version` and `.version` in `build.zig.zon`.
@@ -76,14 +79,21 @@ python scripts/check_runtime_boundary.py
 python scripts/check_public_safety.py
 ```
 
+When validating a locally built package, run:
+
+```sh
+python scripts/check_release_archive.py dist/dxt-v0.0.0-x86_64-linux-gnu.tar.gz --version 0.0.0 --target x86_64-linux-gnu
+```
+
 Use full `pytest -q` locally before broad runner/artifact release changes. The
 GitHub CI workflow repeats the native and safety gates, runs the full pytest
 matrix with JUnit reports, and runs the public Jaffle parse/build/run/docs gate
 with a pinned, checksum-verified DuckDB CLI. Release jobs focus on portable
-binary build validation and repository safety. Native Zig test coverage maps
-are collected by the separate GitHub `Coverage` workflow on Zig source/build
-PRs, pushes to `main`, and manual dispatch, so release prep can inspect coverage
-artifacts without making local release validation heavier.
+binary build validation, repository safety, release archive safety, and
+checksum coverage. Native Zig test coverage maps are collected by the separate
+GitHub `Coverage` workflow on Zig source/build PRs, pushes to `main`, and
+manual dispatch, so release prep can inspect coverage artifacts without making
+local release validation heavier.
 
 Verify downloaded artifacts with:
 
