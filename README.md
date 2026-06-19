@@ -81,6 +81,7 @@ embedded DuckDB or another native adapter boundary, not Python runtime calls.
 | [Primer](docs/PRIMER.md) | Product goals, current workflow, architecture map, and development loop. |
 | [Compatibility Matrix](docs/COMPATIBILITY.md) | Truthful current support vs planned dbt surfaces. |
 | [Architecture](docs/ARCHITECTURE.md) | Module ownership, execution flow, and Mermaid diagrams. |
+| [Multi-Agent Workflow](docs/MULTI_AGENT_WORKFLOW.md) | Concurrent Codex/worktree workflow, project agent roles, validation, and PR convergence. |
 | [Release Process](docs/RELEASES.md) | GitHub release workflow, binary artifacts, checksums, and safety gates. |
 | [Changelog](CHANGELOG.md) | Human-readable history of shipped pre-alpha slices. |
 | [ExecPlan](PLAN.md) | Active engineering plan and milestone tracker. |
@@ -154,6 +155,11 @@ Native Zig coverage is collected on GitHub, not as a required local gate. The
 Zig test binary, and uploads a native test coverage map by source module for
 review. This is intentionally not Python coverage and does not claim line
 coverage for the Zig runtime.
+
+For concurrent Codex work, use one branch and one git worktree per editing
+agent. The project-scoped roles under `.codex/agents/` and helper scripts under
+`scripts/worktree_*.sh` are documented in
+[Multi-Agent Workflow](docs/MULTI_AGENT_WORKFLOW.md).
 
 Optional compatibility gates:
 

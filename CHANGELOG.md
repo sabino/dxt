@@ -9,6 +9,9 @@ compatibility.
 
 ### Added
 
+- Multi-agent worktree workflow documentation, project-scoped Codex agent
+  roles, and helper scripts for isolated concurrent development and PR
+  convergence.
 - `dxt ls --output json --output-keys` support for compact `tags`,
   `config.enabled`, `config.docs.show`, `depends_on.nodes`, and
   `depends_on.macros` fields using the existing Zig graph data.

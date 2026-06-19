@@ -47,6 +47,13 @@ Use local tests and targeted self-checks during implementation. Use subagents or
 make second-agent/Codex review a required PR gate unless the active workflow
 explicitly asks for it.
 
+Concurrent implementation must use isolated git worktrees. Each active editing
+Codex instance owns one branch and one worktree, records disposable local notes
+under `.agent/runs/`, keeps durable sequencing changes in `PLAN.md`, and
+converges by opening a focused PR. Branches should start from `origin/main`
+unless explicitly stacked. Overlapping file ownership must be planned before
+implementation. The canonical workflow is `docs/MULTI_AGENT_WORKFLOW.md`.
+
 Local validation should stay focused while CI carries the broader matrix:
 native Zig tests for touched core logic, targeted pytest for changed
 CLI/artifact behavior, runtime-boundary and public-safety scans before PR, then
@@ -61,6 +68,7 @@ Durable public documentation now has a dedicated home under `docs/`:
 - `docs/PRIMER.md` explains the product contract, runtime boundary, source-grounded compatibility loop, and validation layers.
 - `docs/COMPATIBILITY.md` is the current support matrix for commands, flags, resources, Jinja, selectors, artifacts, adapters, and validation.
 - `docs/ARCHITECTURE.md` records the Zig module ownership map and Mermaid diagrams for runtime, parse/artifact, execution, and future cross-database planning.
+- `docs/MULTI_AGENT_WORKFLOW.md` records the concurrent Codex/worktree workflow, project-scoped agent roles, validation expectations, and PR convergence rules.
 - `docs/RELEASES.md` documents the GitHub release process and native binary artifact policy.
 - `CHANGELOG.md` tracks shipped pre-alpha slices and should be updated for every coherent PR that changes user-visible behavior, compatibility scope, docs, release automation, or safety rules.
 
@@ -1242,10 +1250,22 @@ Exit criteria:
 - Data movement cost estimate drift.
 - Partial failures leaving stage artifacts or temp relations.
 - Sensitive data movement across trust boundaries.
+- Concurrent agents editing the same Zig module or fixture can create semantic
+  conflicts even when Git merges cleanly.
+- Dirty worktrees can make validation results ambiguous.
+- Local run notes, absolute paths, shell history, session transcripts, and raw
+  Codex output can leak if copied from `.agent/runs/` into tracked docs without
+  scanning.
+- Stacked worktree branches can pass locally but fail after upstream PRs merge
+  unless rebased and revalidated.
 
 ## Current Status
 
 - M0 is complete as the Zig `0.16.0` runtime scaffold.
+- Multi-agent development now has a dedicated worktree workflow under
+  `docs/MULTI_AGENT_WORKFLOW.md`, with project-scoped Codex agent roles under
+  `.codex/agents/` and helper scripts for starting, finishing, and pruning
+  worktrees.
 - CI now separates native Zig/safety gates, Python integration matrix gates, and
   a public Jaffle parse/build/run/docs compatibility gate with a pinned,
   checksum-verified DuckDB CLI.

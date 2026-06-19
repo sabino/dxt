@@ -13,6 +13,20 @@ Hard requirement: the `dxt` product runtime is Zig. Python may remain only for d
 - Store disposable agent run logs under `.agent/runs/`; that directory is ignored.
 - Store useful research notes under `.agent/research/` only after scanning for local paths and secrets.
 
+## Multi-Agent Worktree Rules
+
+- Use a separate git worktree for each concurrent Codex instance doing edits.
+- One editing agent owns one branch; do not share dirty worktrees.
+- Before editing, check `git status --short --branch` and confirm the branch scope.
+- Keep branch scopes disjoint by module, fixture, docs area, or compatibility slice.
+- If two agents must touch the same files, document sequencing and ownership in `PLAN.md` before edits.
+- Use project-scoped `.codex/agents/` roles as helpers, not as merge gates.
+- If interactive subagent spawning is unavailable or at the thread cap, use `codex exec` in a separate worktree and keep prompts scoped.
+- Converge through PRs into `main`; do not merge by copying files between worktrees.
+- Rebase each branch on `origin/main` before final validation.
+- Delete merged or stale worktrees only after confirming no uncommitted work.
+- See `docs/MULTI_AGENT_WORKFLOW.md` for the durable workflow.
+
 ## Engineering Rules
 
 - Preserve dbt compatibility as an observed contract: compare against dbt Core outputs and published artifact schemas.
