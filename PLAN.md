@@ -276,6 +276,15 @@ Initial milestones:
 
 Semantic query serving and external APIs are later than artifact and local CLI compatibility.
 
+Current semantic layer source note:
+`.agent/research/semantic-layer-metricflow-compatibility-map.md` maps dbt Core
+v1, Fusion, dbt Semantic Interfaces, and MetricFlow references to dxt's future
+semantic slices. The recommended sequence is first-class manifest resource maps,
+model-attached semantic models plus simple metrics, metric dependency
+resolution, saved-query parsing, `semantic_manifest.json` emission, selector
+support, and only then metric query planning/execution through Zig-owned planner
+modules.
+
 ## Adapter Roadmap
 
 1. DuckDB for local public fixtures and deterministic tests.
