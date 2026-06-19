@@ -1286,7 +1286,7 @@ Exit criteria:
   orchestrator that can claim ready issues, spawn Codex worker subprocesses in
   isolated worktrees, record ignored state/logs, accept issue-comment nudges,
   and merge green PRs when explicitly run with merge enabled. Creating/updating
-  the live GitHub Project requires a GitHub CLI token with the `project` scope.
+  the live GitHub Project requires GitHub CLI project scopes.
 - Multi-agent development now has a dedicated worktree workflow under
   `docs/MULTI_AGENT_WORKFLOW.md`, with project-scoped Codex agent roles under
   `.codex/agents/` and helper scripts for starting, finishing, and pruning

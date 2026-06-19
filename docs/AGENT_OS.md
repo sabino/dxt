@@ -25,10 +25,10 @@ python scripts/agent_os_orchestrator.py setup \
   --seed-issues
 ```
 
-GitHub Projects need a token with project scope:
+GitHub Projects need a token with project scopes:
 
 ```sh
-gh auth refresh -s project
+gh auth refresh -s read:project -s project
 python scripts/agent_os_orchestrator.py setup \
   --repo sabino/dxt \
   --apply-project

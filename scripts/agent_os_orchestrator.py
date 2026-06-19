@@ -367,7 +367,7 @@ def setup(args: argparse.Namespace) -> int:
         if project(argparse.Namespace(owner=args.owner, repo=repo, dry_run=False, apply=True)) != 0:
             return 1
     else:
-        print("project: skipped; use --apply-project after `gh auth refresh -s project`")
+        print("project: skipped; use --apply-project after `gh auth refresh -s read:project -s project`")
     return 0
 
 
