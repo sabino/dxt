@@ -53,6 +53,17 @@ under `.agent/runs/`, keeps durable sequencing changes in `PLAN.md`, and
 converges by opening a focused PR. Branches should start from `origin/main`
 unless explicitly stacked. Overlapping file ownership must be planned before
 implementation. The canonical workflow is `docs/MULTI_AGENT_WORKFLOW.md`.
+When work spans several roles, branches, issues, or review specialties, use the
+GitHub-backed Agent OS in `docs/AGENT_OS.md`, `docs/AGENT_PROTOCOLS.md`, and
+`docs/GITHUB_PROJECTS.md`. GitHub Issues/Projects hold public coordination
+state; `PLAN.md` remains the sequencing and risk source of truth.
+For unattended local execution, use `scripts/agent_os_orchestrator.py` to claim
+ready GitHub issues, create isolated worktrees, launch `codex exec` workers with
+the configured profile/model, record ignored run state, and optionally merge
+green PRs. Issues are the durable queue; the orchestrator is the local engine.
+Project-scoped Codex subagent configuration lives in `.codex/config.toml` and
+`.codex/agents/*.toml`; keep these repo-specific settings out of global Codex
+configuration.
 
 Local validation should stay focused while CI carries the broader matrix:
 native Zig tests for touched core logic, targeted pytest for changed
@@ -68,7 +79,8 @@ Durable public documentation now has a dedicated home under `docs/`:
 - `docs/PRIMER.md` explains the product contract, runtime boundary, source-grounded compatibility loop, and validation layers.
 - `docs/COMPATIBILITY.md` is the current support matrix for commands, flags, resources, Jinja, selectors, artifacts, adapters, and validation.
 - `docs/ARCHITECTURE.md` records the Zig module ownership map and Mermaid diagrams for runtime, parse/artifact, execution, and future cross-database planning.
-- `docs/MULTI_AGENT_WORKFLOW.md` records the concurrent Codex/worktree workflow, project-scoped agent roles, validation expectations, and PR convergence rules.
+- `docs/AGENT_OS.md`, `docs/AGENT_PROTOCOLS.md`, and `docs/GITHUB_PROJECTS.md` record the GitHub-backed multidisciplinary agent operating model, issue/PR communication protocol, and project bootstrap rules.
+- `docs/MULTI_AGENT_WORKFLOW.md` records the concurrent Codex/worktree workflow, project-scoped agent roles, autonomous local orchestration, validation expectations, and PR convergence rules.
 - `docs/RELEASES.md` documents the GitHub release process and native binary artifact policy.
 - `CHANGELOG.md` tracks shipped pre-alpha slices and should be updated for every coherent PR that changes user-visible behavior, compatibility scope, docs, release automation, or safety rules.
 
@@ -1258,10 +1270,23 @@ Exit criteria:
   scanning.
 - Stacked worktree branches can pass locally but fail after upstream PRs merge
   unless rebased and revalidated.
+- GitHub Projects can drift from repo-local manifests if labels, project fields,
+  or seed issues are edited manually without re-running the Agent OS bootstrap
+  checks.
+- Autonomous local workers can make progress without a human in the loop, but
+  they must still use one issue, one branch, and one worktree per slice, and
+  merge only after green checks.
 
 ## Current Status
 
 - M0 is complete as the Zig `0.16.0` runtime scaffold.
+- GitHub-backed agent coordination now has repo-local issue forms, label/project
+  manifests, seed issue definitions, project-scoped specialist roles,
+  developer-side bootstrap/validation scripts, and a local autonomous
+  orchestrator that can claim ready issues, spawn Codex worker subprocesses in
+  isolated worktrees, record ignored state/logs, accept issue-comment nudges,
+  and merge green PRs when explicitly run with merge enabled. Creating/updating
+  the live GitHub Project requires a GitHub CLI token with the `project` scope.
 - Multi-agent development now has a dedicated worktree workflow under
   `docs/MULTI_AGENT_WORKFLOW.md`, with project-scoped Codex agent roles under
   `.codex/agents/` and helper scripts for starting, finishing, and pruning

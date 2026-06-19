@@ -1,0 +1,42 @@
+[
+  {
+    "title": "[supervisor] M2 Jinja and macro compatibility decomposition",
+    "labels": ["role:supervisor", "pattern:hierarchical", "type:compat", "area:compiler-jinja", "area:macros", "needs-slice-plan", "ready-for-agent"],
+    "body": "## Objective\nDecompose M2 Jinja and macro compatibility into small source-grounded slices.\n\n## Autonomous Starting Point\nThe local Agent OS orchestrator may assign this to the supervisor or Jinja/macro specialist to create child slices, comment the slice plan, and stop before broad implementation if file ownership is unclear.\n\n## Child Issue Plan\n- Parse-time `execute=false` context boundary.\n- Macro namespace search order and dispatch parity.\n- Hook and hidden dependency recovery.\n\n## Validation\nNative Zig tests, focused pytest, and dbt oracle checks where CLI/artifacts change.\n\n## Stop Condition\nStop if slices overlap the same compiler/Jinja/macro modules without PLAN.md sequencing."
+  },
+  {
+    "title": "[compat] YAML selectors and state/defer roadmap",
+    "labels": ["type:compat", "area:selector", "needs-reference-map", "pattern:network", "ready-for-agent"],
+    "body": "## dbt Behavior\nPlan YAML selectors, state/result/source-status selectors, and defer semantics.\n\n## Autonomous Starting Point\nThe local Agent OS orchestrator may assign this to the selector/state specialist for a source-grounded reference map and next-slice proposal. It should not implement broad state/defer behavior in the first pass.\n\n## Upstream References\nNeeds dbt Core v1 selector and state references plus Fusion parser/selector references.\n\n## dxt Ownership\n`src/project/selector.zig`, graph resolution, artifact inputs, and future state manifest handling.\n\n## Validation\nNative selector tests plus fixture-backed CLI tests. Stop before implementing broad state/defer behavior without a source map."
+  },
+  {
+    "title": "[artifact] Expand manifest/run_results/schema parity plan",
+    "labels": ["type:artifact", "area:artifacts", "artifact:manifest", "artifact:run-results", "role:parity", "needs-reference-map", "ready-for-agent"],
+    "body": "## Artifact Scope\nPlan the next safe artifact-field expansion for `manifest.json` and `run_results.json`.\n\n## Autonomous Starting Point\nThe local Agent OS orchestrator may assign this to the artifact parity reviewer for a read-only reference map and field-risk review before any writer branch starts.\n\n## Evidence Needed\nPinned dbt artifact schemas, dbt oracle slices, deterministic ordering, and volatile-field normalization.\n\n## Stop Condition\nDo not invent dbt fields or emit dxt-only metadata into dbt artifacts."
+  },
+  {
+    "title": "[compat] DuckDB execution semantics and failure continuation",
+    "labels": ["type:compat", "area:runner", "area:duckdb", "command:build", "command:test", "gate:jaffle-build", "needs-slice-plan", "ready-for-agent"],
+    "body": "## Objective\nImprove DuckDB execution semantics, failure continuation, and run-results parity without moving runtime behavior out of Zig.\n\n## Autonomous Starting Point\nThe local Agent OS orchestrator may assign this to the execution/adapter specialist, but the first pass should produce a small slice plan if the issue is still too broad.\n\n## dxt Ownership\nDuckDB boundary, build/test/run scheduling, run_results writer, and fixture ladder.\n\n## Validation\nNative tests where possible, focused pytest, and relevant public Jaffle build/run gates."
+  },
+  {
+    "title": "[research] Semantic layer and MetricFlow compatibility map",
+    "labels": ["type:research", "area:semantic", "artifact:semantic-manifest", "needs-reference-map", "ready-for-agent"],
+    "body": "## Research Question\nWhat source-grounded slices are required for semantic models, metrics, saved queries, and semantic manifests?\n\n## Autonomous Starting Point\nThe local Agent OS orchestrator may assign this to the semantic/cross-db planner for research and issue breakdown only.\n\n## Expected Output\nA public-safe `.agent/research/` note and PLAN.md update only if sequencing or risk changes.\n\n## Stop Condition\nNo product implementation in this spike."
+  },
+  {
+    "title": "[research] Cross-database planner capability matrix",
+    "labels": ["type:research", "area:cross-db", "area:adapter-abi", "pattern:network", "needs-reference-map", "ready-for-agent"],
+    "body": "## Research Question\nDefine a dbt-compatible cross-database planning direction using adapter capabilities, staging, pushdown, and movement policy.\n\n## Autonomous Starting Point\nThe local Agent OS orchestrator may assign this to the semantic/cross-db planner for research and issue breakdown only.\n\n## Expected Output\nPublic-safe architecture note and issue breakdown.\n\n## Stop Condition\nDo not change dbt command semantics before dbt Core parity is stronger."
+  },
+  {
+    "title": "[ops] Release binary automation hardening",
+    "labels": ["type:release", "area:release", "type:ci", "gate:zig-test", "needs-slice-plan", "ready-for-agent"],
+    "body": "## Change\nHarden release packaging, checksums, version validation, and binary safety scans.\n\n## Autonomous Starting Point\nThe local Agent OS orchestrator may assign this to the docs/release curator for a narrow release-hardening plan and, if safe, a focused docs/CI slice.\n\n## Validation\nRelease workflow dry run, public-safety scan, runtime-boundary scan, and binary smoke checks.\n\n## Stop Condition\nDo not publish artifacts containing local paths, logs, caches, or private details."
+  },
+  {
+    "title": "[safety] Agent OS public-safety and runtime-boundary audit",
+    "labels": ["type:safety", "role:auditor", "risk:runtime-boundary", "risk:public-safety", "ready-for-agent"],
+    "body": "## Objective\nAudit agent coordination docs, issue templates, scripts, and GitHub automation for path, secret, transcript, and Python runtime-boundary risks.\n\n## Validation\n`python scripts/check_agent_os_config.py`, `python scripts/check_runtime_boundary.py`, and `python scripts/check_public_safety.py`.\n\n## Stop Condition\nBlock publication if tracked files include local absolute paths, secrets, raw logs, or session text."
+  }
+]

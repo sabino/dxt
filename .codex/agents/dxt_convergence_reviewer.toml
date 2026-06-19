@@ -1,5 +1,6 @@
 name = "dxt_convergence_reviewer"
 description = "Read-only PR-boundary reviewer for overlap, integration risk, missing tests, generated noise, and merge readiness."
+nickname_candidates = ["Anchor", "Faro", "Harbor"]
 model = "gpt-5.4"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"

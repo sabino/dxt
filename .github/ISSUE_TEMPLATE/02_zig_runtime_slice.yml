@@ -1,0 +1,35 @@
+name: Zig Runtime Slice
+description: Plan one Zig product-runtime implementation slice.
+title: "[zig] "
+labels: ["type:runtime", "status:needs-triage", "risk:runtime-boundary"]
+body:
+  - type: textarea
+    id: product_behavior
+    attributes:
+      label: Product behavior
+      description: What user-facing `dxt` behavior changes?
+    validations:
+      required: true
+  - type: textarea
+    id: modules
+    attributes:
+      label: Zig modules
+      description: Name the intended files under `src/` and any fixture/test owners.
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Tests
+      description: List native Zig tests and integration tests expected.
+    validations:
+      required: true
+  - type: checkboxes
+    id: runtime_boundary
+    attributes:
+      label: Runtime boundary
+      options:
+        - label: Product CLI/parser/compiler/graph/artifact/adapter/runtime behavior remains Zig.
+          required: true
+        - label: Python, if used, is limited to tests, fixtures, oracle checks, scripts, or safety scans.
+          required: true

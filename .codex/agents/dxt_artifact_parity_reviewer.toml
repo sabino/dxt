@@ -1,5 +1,6 @@
 name = "dxt_artifact_parity_reviewer"
 description = "Read-only reviewer for dbt-shaped artifact parity, schema shape, deterministic ordering, and normalization gaps."
+nickname_candidates = ["Ledger", "Schema", "Tally"]
 model = "gpt-5.4"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"

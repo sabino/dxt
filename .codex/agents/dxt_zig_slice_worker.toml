@@ -1,5 +1,6 @@
 name = "dxt_zig_slice_worker"
 description = "Implementation worker for one small dxt Zig product slice in an isolated worktree."
+nickname_candidates = ["Bolt", "Forge", "Vector"]
 model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"

@@ -81,7 +81,10 @@ embedded DuckDB or another native adapter boundary, not Python runtime calls.
 | [Primer](docs/PRIMER.md) | Product goals, current workflow, architecture map, and development loop. |
 | [Compatibility Matrix](docs/COMPATIBILITY.md) | Truthful current support vs planned dbt surfaces. |
 | [Architecture](docs/ARCHITECTURE.md) | Module ownership, execution flow, and Mermaid diagrams. |
-| [Multi-Agent Workflow](docs/MULTI_AGENT_WORKFLOW.md) | Concurrent Codex/worktree workflow, project agent roles, validation, and PR convergence. |
+| [Agent OS](docs/AGENT_OS.md) | Multidisciplinary agent-team operating model plus local autonomous Codex worker loop across GitHub Issues, Projects, PRs, and worktrees. |
+| [Agent Protocols](docs/AGENT_PROTOCOLS.md) | Public-safe issue/PR comment formats, role nudges, handoffs, and reflection protocol. |
+| [GitHub Projects Setup](docs/GITHUB_PROJECTS.md) | Desired Project fields, views, label syncing, seed issue bootstrap, and worker-loop commands. |
+| [Multi-Agent Workflow](docs/MULTI_AGENT_WORKFLOW.md) | Concurrent Codex/worktree workflow, project agent roles, autonomous orchestration, validation, and PR convergence. |
 | [Release Process](docs/RELEASES.md) | GitHub release workflow, binary artifacts, checksums, and safety gates. |
 | [Changelog](CHANGELOG.md) | Human-readable history of shipped pre-alpha slices. |
 | [ExecPlan](PLAN.md) | Active engineering plan and milestone tracker. |
@@ -160,6 +163,14 @@ For concurrent Codex work, use one branch and one git worktree per editing
 agent. The project-scoped roles under `.codex/agents/` and helper scripts under
 `scripts/worktree_*.sh` are documented in
 [Multi-Agent Workflow](docs/MULTI_AGENT_WORKFLOW.md).
+This repo also has project-local Codex subagent settings in `.codex/config.toml`
+so restarts pick up the dxt-specific thread limits and role registry.
+For issue/project-backed coordination across multiple specialist roles, use
+[Agent OS](docs/AGENT_OS.md), [Agent Protocols](docs/AGENT_PROTOCOLS.md), and
+[GitHub Projects Setup](docs/GITHUB_PROJECTS.md).
+To let development continue from ready GitHub issues into local Codex worker
+subprocesses, run `python scripts/agent_os_orchestrator.py run --profile azure
+--model gpt-5.5 --max-workers 3 --loop` from a clean supervisor checkout.
 
 Optional compatibility gates:
 

@@ -18,13 +18,18 @@ Hard requirement: the `dxt` product runtime is Zig. Python may remain only for d
 - Use a separate git worktree for each concurrent Codex instance doing edits.
 - One editing agent owns one branch; do not share dirty worktrees.
 - Before editing, check `git status --short --branch` and confirm the branch scope.
+- Keep dxt-specific Codex subagent configuration in project-local `.codex/config.toml` and `.codex/agents/*.toml`; do not move this repo's workflow rules into global Codex config.
 - Keep branch scopes disjoint by module, fixture, docs area, or compatibility slice.
 - If two agents must touch the same files, document sequencing and ownership in `PLAN.md` before edits.
 - Use project-scoped `.codex/agents/` roles as helpers, not as merge gates.
 - If interactive subagent spawning is unavailable or at the thread cap, use `codex exec` in a separate worktree and keep prompts scoped.
+- Use GitHub Issues and Projects for public coordination state when work spans multiple agents, branches, or review specialties.
+- Use `scripts/agent_os_orchestrator.py` when work should proceed autonomously from GitHub issues into local worktrees and Codex worker subprocesses.
+- Keep raw local agent output in ignored `.agent/runs/`; put only concise public-safe summaries in issues, PRs, docs, or `.agent/research/`.
 - Converge through PRs into `main`; do not merge by copying files between worktrees.
 - Rebase each branch on `origin/main` before final validation.
 - Delete merged or stale worktrees only after confirming no uncommitted work.
+- See `docs/AGENT_OS.md`, `docs/AGENT_PROTOCOLS.md`, and `docs/GITHUB_PROJECTS.md` for the GitHub-backed agent operating model.
 - See `docs/MULTI_AGENT_WORKFLOW.md` for the durable workflow.
 
 ## Engineering Rules

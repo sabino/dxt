@@ -1,0 +1,60 @@
+name: Agent OS Hygiene
+
+on:
+  pull_request:
+    paths:
+      - ".codex/agents/**"
+      - ".codex/config.toml"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/agent-team/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - ".github/workflows/agent-os-hygiene.yml"
+      - "AGENTS.md"
+      - "CHANGELOG.md"
+      - "PLAN.md"
+      - "README.md"
+      - "docs/AGENT_OS.md"
+      - "docs/AGENT_PROTOCOLS.md"
+      - "docs/GITHUB_PROJECTS.md"
+      - "docs/MULTI_AGENT_WORKFLOW.md"
+      - "docs/README.md"
+      - "scripts/agent_os_orchestrator.py"
+      - "scripts/check_agent_os_config.py"
+      - "scripts/github_agent_os.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: agent os config
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Agent OS config
+        run: python scripts/check_agent_os_config.py
+
+      - name: Validate orchestrator CLI
+        run: |
+          python scripts/agent_os_orchestrator.py --help
+          python scripts/agent_os_orchestrator.py run --repo sabino/dxt --dry-run --max-workers 0
+
+      - name: Run public-safety scan
+        run: python scripts/check_public_safety.py
+
+      - name: Check runtime boundary
+        run: python scripts/check_runtime_boundary.py
