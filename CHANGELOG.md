@@ -49,6 +49,8 @@ compatibility.
 - Strict JSON object parsing for stringified scalar `--vars` / project vars in
   the Zig parser, while preserving the existing loose inline YAML-style scalar
   map support for current fixtures.
+- `dxt ls --output json --output-keys` compact selected-resource expansion for
+  `package_name` and source-only `source_name`.
 - Table-level model, seed, and source built-in generic tests with explicit
   `arguments.column_name`, including Manifest kwargs and DuckDB `build`
   execution for the existing supported test types while preserving dbt's
