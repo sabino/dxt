@@ -1,0 +1,18 @@
+version: 2
+
+sources:
+  - name: raw
+    database: oracle
+    schema: Raw
+    quoting:
+      database: false
+      schema: true
+      identifier: false
+    tables:
+      - name: customers
+        identifier: RawCustomers
+      - name: orders
+        quoting:
+          database: true
+          schema: false
+          identifier: true

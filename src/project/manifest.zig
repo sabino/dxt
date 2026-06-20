@@ -424,6 +424,7 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
 }
 
 fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: SourceDef) !void {
+    const database_name = compiler.sourceDatabaseName(&source);
     const schema_name = compiler.sourceSchemaName(&source);
     const relation_name = try compiler.relationNameForSource(allocator, &source);
     defer allocator.free(relation_name);
@@ -436,12 +437,16 @@ fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: Sou
     try json.string(writer, source.source_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, source.table_name);
-    try writer.writeAll(",\"database\":null,\"schema\":");
+    try writer.writeAll(",\"database\":");
+    try writeNullableString(writer, database_name);
+    try writer.writeAll(",\"schema\":");
     try json.string(writer, schema_name);
     try writer.writeAll(",\"identifier\":");
     try json.string(writer, compiler.sourceIdentifier(&source));
     try writer.writeAll(",\"relation_name\":");
     try json.string(writer, relation_name);
+    try writer.writeAll(",\"quoting\":");
+    try writeSourceQuoting(writer, source.quoting);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(source.original_file_path));
     try writer.writeAll(",\"original_file_path\":");
@@ -467,6 +472,16 @@ fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: Sou
     try writer.writeAll(",\"loaded_at_query\":");
     try writeNullableString(writer, source.loaded_at_query);
     try writer.writeAll(",\"meta\":{},\"tags\":[]}}");
+}
+
+fn writeSourceQuoting(writer: *Io.Writer, quoting: types.SourceQuoting) !void {
+    try writer.writeAll("{\"database\":");
+    try writeNullableBool(writer, quoting.database);
+    try writer.writeAll(",\"schema\":");
+    try writeNullableBool(writer, quoting.schema);
+    try writer.writeAll(",\"identifier\":");
+    try writeNullableBool(writer, quoting.identifier);
+    try writer.writeAll(",\"column\":null}");
 }
 
 fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {
@@ -896,6 +911,14 @@ fn writeNullableString(writer: *Io.Writer, value: ?[]const u8) !void {
     try json.nullableString(writer, value);
 }
 
+fn writeNullableBool(writer: *Io.Writer, value: ?bool) !void {
+    if (value) |flag| {
+        try writer.writeAll(if (flag) "true" else "false");
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
 fn writeFreshnessThreshold(writer: *Io.Writer, value: ?types.FreshnessThreshold) !void {
     const threshold = value orelse {
         try writer.writeAll("null");
@@ -1184,8 +1207,10 @@ test "manifest writer emits source generic tests with null attached node" {
         .source_name = "raw",
         .table_name = "customers",
         .identifier = "raw_customers",
+        .database = "raw_db",
         .original_file_path = "models/schema.yml",
         .schema_name = "analytics_raw",
+        .quoting = .{ .database = false, .schema = true, .identifier = true },
         .loaded_at_field = "loaded_at",
         .freshness = .{
             .warn_after = .{ .count = 12, .period = "hour" },
@@ -1222,9 +1247,15 @@ test "manifest writer emits source generic tests with null attached node" {
 
     const root = parsed.value.object;
     const source_node = root.get("sources").?.object.get("source.demo.raw.customers").?.object;
+    try std.testing.expectEqualStrings("raw_db", source_node.get("database").?.string);
     try std.testing.expectEqualStrings("analytics_raw", source_node.get("schema").?.string);
     try std.testing.expectEqualStrings("raw_customers", source_node.get("identifier").?.string);
-    try std.testing.expectEqualStrings("\"analytics_raw\".\"raw_customers\"", source_node.get("relation_name").?.string);
+    try std.testing.expectEqualStrings("raw_db.\"analytics_raw\".\"raw_customers\"", source_node.get("relation_name").?.string);
+    const source_quoting = source_node.get("quoting").?.object;
+    try std.testing.expectEqual(false, source_quoting.get("database").?.bool);
+    try std.testing.expectEqual(true, source_quoting.get("schema").?.bool);
+    try std.testing.expectEqual(true, source_quoting.get("identifier").?.bool);
+    try std.testing.expect(source_quoting.get("column").? == .null);
     try std.testing.expectEqualStrings("loaded_at", source_node.get("loaded_at_field").?.string);
     try std.testing.expect(source_node.get("loaded_at_query").? == .null);
     const freshness = source_node.get("freshness").?.object;

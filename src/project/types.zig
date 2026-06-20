@@ -85,13 +85,21 @@ pub const SourceDef = struct {
     source_name: []const u8,
     table_name: []const u8,
     identifier: ?[]const u8 = null,
+    database: ?[]const u8 = null,
     original_file_path: []const u8,
     schema_name: ?[]const u8 = null,
+    quoting: SourceQuoting = .{},
     loaded_at_field: ?[]const u8 = null,
     loaded_at_query: ?[]const u8 = null,
     freshness: ?FreshnessThreshold = null,
     tests: std.ArrayList(GenericTestDef) = .empty,
     columns: std.ArrayList(ColumnDef) = .empty,
+};
+
+pub const SourceQuoting = struct {
+    database: ?bool = null,
+    schema: ?bool = null,
+    identifier: ?bool = null,
 };
 
 pub const FreshnessThreshold = struct {

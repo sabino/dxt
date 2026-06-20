@@ -35,6 +35,11 @@ compatibility.
   `severity`, `warn_if`, and `error_if` configs for model, seed, and source
   tests, apply `where`/`limit` to failure-row SQL, and classify warning results
   without failing `dxt test` or `dxt build`.
+- Source relation identity now parses source/table `database` plus source/table
+  `quoting` for database/schema/identifier, emits dbt-shaped Manifest source
+  fields, and applies the same resolved identity to `source()` compilation,
+  DuckDB source catalog lookup, source freshness SQL, and source generic-test
+  SQL.
 
 ### Fixed
 

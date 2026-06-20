@@ -127,23 +127,21 @@ pub fn renderSourceFreshnessSql(allocator: std.mem.Allocator, source: *const Sou
     const loaded_at_field = source.loaded_at_field orelse return error.UnsupportedSourceFreshness;
     const loaded_at_expression = std.mem.trim(u8, loaded_at_field, " \t\r\n");
     if (loaded_at_expression.len == 0) return error.UnsupportedSourceFreshness;
-    const quoted_schema = try compiler.quoteIdentifier(allocator, compiler.sourceSchemaName(source));
-    defer allocator.free(quoted_schema);
-    const quoted_table = try compiler.quoteIdentifier(allocator, compiler.sourceIdentifier(source));
-    defer allocator.free(quoted_table);
+    const relation_name = try compiler.relationNameForSource(allocator, source);
+    defer allocator.free(relation_name);
     const filter = if (source.freshness) |threshold| threshold.filter else null;
     const filter_expression = if (filter) |value| std.mem.trim(u8, value, " \t\r\n") else "";
     if (filter_expression.len != 0) {
         return try std.fmt.allocPrint(
             allocator,
-            "select coalesce(strftime(max({s}), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max({s})), 9.223372036854776e18) as age_seconds from {s}.{s} where {s};",
-            .{ loaded_at_expression, loaded_at_expression, quoted_schema, quoted_table, filter_expression },
+            "select coalesce(strftime(max({s}), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max({s})), 9.223372036854776e18) as age_seconds from {s} where {s};",
+            .{ loaded_at_expression, loaded_at_expression, relation_name, filter_expression },
         );
     }
     return try std.fmt.allocPrint(
         allocator,
-        "select coalesce(strftime(max({s}), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max({s})), 9.223372036854776e18) as age_seconds from {s}.{s};",
-        .{ loaded_at_expression, loaded_at_expression, quoted_schema, quoted_table },
+        "select coalesce(strftime(max({s}), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max({s})), 9.223372036854776e18) as age_seconds from {s};",
+        .{ loaded_at_expression, loaded_at_expression, relation_name },
     );
 }
 
@@ -184,6 +182,7 @@ fn databaseFileExists(runtime: Runtime, db_path: []const u8) bool {
 fn queryCatalogColumnsJson(runtime: Runtime, db_path: []const u8) ![]const u8 {
     const sql =
         \\select
+        \\    c.table_catalog,
         \\    c.table_schema,
         \\    c.table_name,
         \\    t.table_type,
@@ -220,16 +219,17 @@ fn catalogEntryForNode(allocator: std.mem.Allocator, graph: *const Graph, node: 
     defer allocator.free(schema_name);
     const identifier = compiler.relationIdentifierForNode(node);
 
-    return try catalogEntryForRelation(allocator, node.unique_id, schema_name, identifier, rows);
+    return try catalogEntryForRelation(allocator, node.unique_id, null, schema_name, identifier, rows);
 }
 
 fn catalogEntryForSource(allocator: std.mem.Allocator, source: *const SourceDef, rows: []const std.json.Value) !?catalog.CatalogEntry {
-    return try catalogEntryForRelation(allocator, source.unique_id, compiler.sourceSchemaName(source), compiler.sourceIdentifier(source), rows);
+    return try catalogEntryForRelation(allocator, source.unique_id, compiler.sourceDatabaseName(source), compiler.sourceSchemaName(source), compiler.sourceIdentifier(source), rows);
 }
 
-fn catalogEntryForRelation(allocator: std.mem.Allocator, unique_id: []const u8, schema_name: []const u8, identifier: []const u8, rows: []const std.json.Value) !?catalog.CatalogEntry {
+fn catalogEntryForRelation(allocator: std.mem.Allocator, unique_id: []const u8, database_name: ?[]const u8, schema_name: []const u8, identifier: []const u8, rows: []const std.json.Value) !?catalog.CatalogEntry {
     var entry = catalog.CatalogEntry{
         .unique_id = try allocator.dupe(u8, unique_id),
+        .database = if (database_name) |database| try allocator.dupe(u8, database) else null,
         .schema = try allocator.dupe(u8, schema_name),
         .name = try allocator.dupe(u8, identifier),
         .relation_type = try allocator.dupe(u8, ""),
@@ -238,12 +238,16 @@ fn catalogEntryForRelation(allocator: std.mem.Allocator, unique_id: []const u8, 
 
     for (rows) |row| {
         const object = if (row == .object) row.object else return error.DuckDbExecutionFailed;
+        const row_catalog = jsonObjectString(object, "table_catalog") orelse return error.DuckDbExecutionFailed;
         const row_schema = jsonObjectString(object, "table_schema") orelse return error.DuckDbExecutionFailed;
         const row_table = jsonObjectString(object, "table_name") orelse return error.DuckDbExecutionFailed;
         const row_type = jsonObjectString(object, "table_type") orelse return error.DuckDbExecutionFailed;
         const row_column = jsonObjectString(object, "column_name") orelse return error.DuckDbExecutionFailed;
         const row_index = jsonObjectUnsigned(object, "ordinal_position") orelse return error.DuckDbExecutionFailed;
         const row_data_type = jsonObjectString(object, "data_type") orelse return error.DuckDbExecutionFailed;
+        if (database_name) |database| {
+            if (!std.mem.eql(u8, row_catalog, database)) continue;
+        }
         if (!std.mem.eql(u8, row_schema, schema_name) or !std.mem.eql(u8, row_table, identifier)) continue;
         if (entry.columns.items.len == 0) {
             allocator.free(entry.relation_type);
@@ -883,6 +887,8 @@ test "renderGenericTestSql renders source generic tests against source relation"
         .source_name = "raw",
         .table_name = "customers",
         .identifier = "raw_customers",
+        .database = "raw_db",
+        .quoting = .{ .database = false, .schema = true, .identifier = false },
         .original_file_path = "models/schema.yml",
     });
     try graph.tests.append(allocator, .{
@@ -901,7 +907,7 @@ test "renderGenericTestSql renders source generic tests against source relation"
 
     const sql = try renderGenericTestSql(allocator, &graph, &graph.tests.items[0]);
     try std.testing.expectEqualStrings(
-        "select \"customer_id\"\nfrom \"raw\".\"raw_customers\"\nwhere \"customer_id\" is null",
+        "select \"customer_id\"\nfrom raw_db.\"raw\".raw_customers\nwhere \"customer_id\" is null",
         sql,
     );
 }
@@ -1289,9 +1295,9 @@ test "catalogEntryForNode maps DuckDB JSON rows to catalog metadata" {
 
     const rows_json =
         \\[
-        \\  {"table_schema":"main","table_name":"customers","table_type":"VIEW","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"},
-        \\  {"table_schema":"main","table_name":"orders","table_type":"BASE TABLE","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"},
-        \\  {"table_schema":"main","table_name":"orders","table_type":"BASE TABLE","column_name":"order_count","ordinal_position":2,"data_type":"BIGINT"}
+        \\  {"table_catalog":"dxt","table_schema":"main","table_name":"customers","table_type":"VIEW","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"},
+        \\  {"table_catalog":"dxt","table_schema":"main","table_name":"orders","table_type":"BASE TABLE","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"},
+        \\  {"table_catalog":"dxt","table_schema":"main","table_name":"orders","table_type":"BASE TABLE","column_name":"order_count","ordinal_position":2,"data_type":"BIGINT"}
         \\]
     ;
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rows_json, .{});
@@ -1323,13 +1329,14 @@ test "catalogEntryForSource maps DuckDB JSON rows to catalog source metadata" {
         .source_name = "raw",
         .table_name = "customers",
         .identifier = "raw_customers",
+        .database = "dxt",
         .original_file_path = "models/schema.yml",
         .schema_name = "analytics_raw",
     };
 
     const rows_json =
         \\[
-        \\  {"table_schema":"analytics_raw","table_name":"raw_customers","table_type":"BASE TABLE","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"}
+        \\  {"table_catalog":"dxt","table_schema":"analytics_raw","table_name":"raw_customers","table_type":"BASE TABLE","column_name":"customer_id","ordinal_position":1,"data_type":"INTEGER"}
         \\]
     ;
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rows_json, .{});
@@ -1341,6 +1348,7 @@ test "catalogEntryForSource maps DuckDB JSON rows to catalog source metadata" {
     }
 
     try std.testing.expectEqualStrings("source.demo.raw.customers", entry.unique_id);
+    try std.testing.expectEqualStrings("dxt", entry.database.?);
     try std.testing.expectEqualStrings("analytics_raw", entry.schema);
     try std.testing.expectEqualStrings("raw_customers", entry.name);
     try std.testing.expectEqualStrings("BASE TABLE", entry.relation_type);
@@ -1358,15 +1366,17 @@ test "renderSourceFreshnessSql quotes source relation and renders loaded_at_fiel
         .source_name = "raw",
         .table_name = "orders",
         .identifier = "raw_orders",
+        .database = "raw_db",
         .original_file_path = "models/schema.yml",
         .schema_name = "analytics_raw",
+        .quoting = .{ .database = false, .schema = true, .identifier = false },
         .loaded_at_field = "loaded_at",
         .freshness = .{ .filter = "order_id > 0" },
     };
 
     const sql = try renderSourceFreshnessSql(allocator, &source);
     try std.testing.expectEqualStrings(
-        "select coalesce(strftime(max(loaded_at), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max(loaded_at)), 9.223372036854776e18) as age_seconds from \"analytics_raw\".\"raw_orders\" where order_id > 0;",
+        "select coalesce(strftime(max(loaded_at), '%Y-%m-%dT%H:%M:%SZ'), '0001-01-01T00:00:00Z') as max_loaded_at, strftime(current_timestamp, '%Y-%m-%dT%H:%M:%SZ') as snapshotted_at, coalesce(epoch(current_timestamp) - epoch(max(loaded_at)), 9.223372036854776e18) as age_seconds from raw_db.\"analytics_raw\".raw_orders where order_id > 0;",
         sql,
     );
 
