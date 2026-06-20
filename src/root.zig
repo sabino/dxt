@@ -286,7 +286,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
             return .failure;
         },
         error.UnsupportedModelExecution => stderr.writeAll("error: model execution requires a DuckDB adapter and materialization runner; not implemented yet\n") catch {},
-        error.UnsupportedSeedExecution => stderr.writeAll("error: seed/build currently executes only root-project DuckDB seeds with default CSV settings\n") catch {},
+        error.UnsupportedSeedExecution => stderr.writeAll("error: seed/build currently executes only DuckDB CSV seeds with default CSV settings\n") catch {},
         error.UnsupportedTestExecution => stderr.writeAll("error: test/build currently executes only selected DuckDB singular SQL tests and model/seed/source not_null/unique/accepted_values/relationships column tests; unit test execution is not supported yet\n") catch {},
         error.UnsupportedDocsBrowserOpen => stderr.writeAll("error: docs serve browser opening is not implemented yet; use --no-browser\n") catch {},
         error.InvalidDocsServePort => stderr.writeAll("error: --port must be an integer between 1 and 65535\n") catch {},

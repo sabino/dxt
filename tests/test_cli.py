@@ -1669,29 +1669,181 @@ def test_seed_command_rejects_non_seed_selection_before_duckdb(tmp_path: Path):
     assert not (target / "dxt.duckdb").exists()
 
 
-def test_seed_command_rejects_package_seed_before_duckdb(tmp_path: Path):
-    project = copy_fixture(tmp_path, "package_ref_selector")
+def write_duckdb_profile(project: Path) -> None:
     (project / "profiles.yml").write_text(
         """default:
   target: dev
   outputs:
     dev:
       type: duckdb
-      path: dxt.duckdb
       schema: main
 """
     )
+
+
+def write_duckdb_profile_at(profiles_dir: Path, path: str | None = None) -> None:
+    profiles_dir.mkdir()
+    lines = [
+        "default:",
+        "  target: dev",
+        "  outputs:",
+        "    dev:",
+        "      type: duckdb",
+    ]
+    if path is not None:
+        lines.append(f"      path: {path}")
+    lines.append("      schema: main")
+    profiles_dir.joinpath("profiles.yml").write_text("\n".join(lines) + "\n")
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 package seed command execution slice")
+def test_seed_command_executes_package_seed_selected_by_package_selector(tmp_path: Path):
+    project = copy_fixture(tmp_path, "package_ref_selector")
+    write_duckdb_profile(project)
     target = tmp_path / "seed-target"
     result = subprocess.run(
-        [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_pkg_customers"],
+        [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "package:util_pkg"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "seed/build currently executes only root-project DuckDB seeds with default CSV settings" in result.stderr
-    assert not (target / "run_results.json").exists()
-    assert not (target / "dxt.duckdb").exists()
+    assert result.returncode == 0, result.stderr
+    assert "Seeded 1 seed(s)" in result.stdout
+    assert result.stderr == ""
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == ["seed.util_pkg.raw_pkg_customers"]
+    assert run_results["results"][0]["compiled"] is None
+    assert run_results["results"][0]["compiled_code"] is None
+    assert run_results["results"][0]["relation_name"] is None
+    assert str(project) not in (target / "manifest.json").read_text()
+    assert str(project) not in (target / "run_results.json").read_text()
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id, customer_name from "main"."raw_pkg_customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "1,Ada"
+
+
+def test_dbt_core_package_seed_manifest_and_run_results_oracle(tmp_path: Path):
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if not has_dbt_core:
+        pytest.skip("dbt Core is not installed for the optional package seed oracle")
+    if not has_dbt_duckdb:
+        pytest.skip("dbt DuckDB adapter is not installed for the optional package seed oracle")
+
+    from dbt.cli.main import dbtRunner
+    import dbt_common.events.base_types as dbt_event_base_types
+    import google.protobuf.json_format as protobuf_json_format
+
+    project = copy_fixture(tmp_path, "package_ref_selector")
+    dxt_profiles = tmp_path / "dxt-profiles"
+    dbt_profiles = tmp_path / "dbt-profiles"
+    write_duckdb_profile_at(dxt_profiles)
+    write_duckdb_profile_at(dbt_profiles, str(tmp_path / "dbt-oracle.duckdb"))
+    dxt_target = tmp_path / "dxt-target"
+    dbt_target = tmp_path / "dbt-target"
+
+    dxt_result = subprocess.run(
+        [
+            DXT,
+            "seed",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(dxt_profiles),
+            "--target-path",
+            str(dxt_target),
+            "--select",
+            "raw_pkg_customers",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert dxt_result.returncode == 0, dxt_result.stderr
+
+    original_message_to_json = protobuf_json_format.MessageToJson
+    original_event_message_to_json = dbt_event_base_types.MessageToJson
+
+    def compatible_message_to_json(message, *args, always_print_fields_with_no_presence=None, **kwargs):
+        if always_print_fields_with_no_presence is not None and "including_default_value_fields" not in kwargs:
+            kwargs["including_default_value_fields"] = always_print_fields_with_no_presence
+        return original_message_to_json(message, *args, **kwargs)
+
+    protobuf_json_format.MessageToJson = compatible_message_to_json
+    dbt_event_base_types.MessageToJson = compatible_message_to_json
+    try:
+        dbt_result = dbtRunner().invoke(
+            [
+                "seed",
+                "--project-dir",
+                str(project),
+                "--profiles-dir",
+                str(dbt_profiles),
+                "--target-path",
+                str(dbt_target),
+                "--select",
+                "raw_pkg_customers",
+            ]
+        )
+    finally:
+        protobuf_json_format.MessageToJson = original_message_to_json
+        dbt_event_base_types.MessageToJson = original_event_message_to_json
+    if not dbt_result.success:
+        pytest.skip(f"dbt Core package seed oracle unavailable: {dbt_result.exception!r}")
+
+    dxt_manifest = json.loads((dxt_target / "manifest.json").read_text())
+    dbt_manifest = json.loads((dbt_target / "manifest.json").read_text())
+    dxt_run_results = json.loads((dxt_target / "run_results.json").read_text())
+    dbt_run_results = json.loads((dbt_target / "run_results.json").read_text())
+    unique_id = "seed.util_pkg.raw_pkg_customers"
+    dxt_seed = dxt_manifest["nodes"][unique_id]
+    dbt_seed = dbt_manifest["nodes"][unique_id]
+    assert {
+        key: dxt_seed[key]
+        for key in ("unique_id", "resource_type", "package_name", "name", "path", "original_file_path")
+    } == {
+        key: dbt_seed[key]
+        for key in ("unique_id", "resource_type", "package_name", "name", "path", "original_file_path")
+    }
+
+    assert [item["unique_id"] for item in dxt_run_results["results"]] == [unique_id]
+    assert [item["unique_id"] for item in dbt_run_results["results"]] == [unique_id]
+    dxt_result_row = dxt_run_results["results"][0]
+    dbt_result_row = dbt_run_results["results"][0]
+    assert dxt_result_row["status"] == dbt_result_row["status"] == "success"
+    assert dxt_result_row["compiled"] == dbt_result_row.get("compiled")
+    assert dxt_result_row["compiled_code"] == dbt_result_row.get("compiled_code")
+    assert dxt_result_row["relation_name"] == dbt_result_row.get("relation_name")
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 package seed command execution slice")
+def test_seed_command_executes_package_seed_selected_by_dependency_selector(tmp_path: Path):
+    project = copy_fixture(tmp_path, "package_ref_selector")
+    write_duckdb_profile(project)
+    target = tmp_path / "seed-target"
+    result = subprocess.run(
+        [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "+pkg_seeded_customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Seeded 1 seed(s)" in result.stdout
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == ["seed.util_pkg.raw_pkg_customers"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed build execution slice")
@@ -1722,6 +1874,40 @@ def test_build_executes_selected_duckdb_seed_and_writes_run_results(tmp_path: Pa
 
     query = subprocess.run(
         [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select id, name from "main"."raw_customers"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "1,Ada"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 package seed build execution slice")
+def test_build_executes_selected_package_duckdb_seed_and_writes_run_results(tmp_path: Path):
+    project = copy_fixture(tmp_path, "package_ref_selector")
+    write_duckdb_profile(project)
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "package:util_pkg,resource_type:seed"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 seed(s)" in result.stdout
+    assert result.stderr == ""
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == ["seed.util_pkg.raw_pkg_customers"]
+    assert run_results["results"][0]["compiled"] is None
+    assert run_results["results"][0]["compiled_code"] is None
+    assert run_results["results"][0]["relation_name"] is None
+    assert str(project) not in (target / "manifest.json").read_text()
+    assert str(project) not in (target / "run_results.json").read_text()
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id, customer_name from "main"."raw_pkg_customers"'],
         cwd=ROOT,
         text=True,
         capture_output=True,

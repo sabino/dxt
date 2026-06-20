@@ -461,11 +461,8 @@ pub fn renderSeedSql(allocator: std.mem.Allocator, project_dir: []const u8, grap
     if (!std.mem.eql(u8, node.resource_type, "seed") or !std.mem.eql(u8, node.materialized, "seed")) {
         return error.UnsupportedSeedExecution;
     }
-    if (!std.mem.eql(u8, node.package_name, graph.project_name)) {
-        return error.UnsupportedSeedExecution;
-    }
 
-    const seed_file_path = try project_fs.pathJoin(allocator, &.{ project_dir, node.original_file_path });
+    const seed_file_path = try seedFilePath(allocator, project_dir, graph, node);
     defer allocator.free(seed_file_path);
     const seed_file_literal = try quoteSqlString(allocator, seed_file_path);
     defer allocator.free(seed_file_literal);
@@ -482,6 +479,24 @@ pub fn renderSeedSql(allocator: std.mem.Allocator, project_dir: []const u8, grap
         "create schema if not exists {s};\ncreate or replace table {s} as select * from read_csv_auto({s}, header = true);\n",
         .{ quoted_schema, relation_name, seed_file_literal },
     );
+}
+
+fn seedFilePath(allocator: std.mem.Allocator, project_dir: []const u8, graph: *const Graph, node: *const Node) ![]const u8 {
+    if (!isSafeRelativePath(node.original_file_path)) return error.UnsupportedSeedExecution;
+    const root = node.project_root orelse blk: {
+        if (!std.mem.eql(u8, node.package_name, graph.project_name)) return error.UnsupportedSeedExecution;
+        break :blk project_dir;
+    };
+    return try project_fs.pathJoin(allocator, &.{ root, node.original_file_path });
+}
+
+fn isSafeRelativePath(path: []const u8) bool {
+    if (path.len == 0 or std.fs.path.isAbsolute(path)) return false;
+    var parts = std.mem.tokenizeAny(u8, path, "/\\");
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, "..")) return false;
+    }
+    return true;
 }
 
 pub fn renderGenericTestSql(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
@@ -1413,6 +1428,53 @@ test "renderSeedSql creates table from root project seed CSV" {
         "create schema if not exists \"analytics\";\ncreate or replace table \"analytics\".\"raw_customers\" as select * from read_csv_auto('project/seeds/raw_customers.csv', header = true);\n",
         sql,
     );
+}
+
+test "renderSeedSql creates table from installed package seed CSV" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .resource_type = "seed",
+        .package_name = "pkg",
+        .unique_id = "seed.pkg.raw_customers",
+        .name = "raw_customers",
+        .project_root = try allocator.dupe(u8, "project/dbt_packages/pkg"),
+        .path = "raw_customers.csv",
+        .original_file_path = "seeds/raw_customers.csv",
+        .raw_code = "",
+        .materialized = "seed",
+    });
+
+    const sql = try renderSeedSql(allocator, "project", &graph, &graph.nodes.items[0]);
+    try std.testing.expectEqualStrings(
+        "create schema if not exists \"analytics\";\ncreate or replace table \"analytics\".\"raw_customers\" as select * from read_csv_auto('project/dbt_packages/pkg/seeds/raw_customers.csv', header = true);\n",
+        sql,
+    );
+}
+
+test "renderSeedSql rejects unsafe seed file paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.outside",
+        .name = "outside",
+        .path = "outside.csv",
+        .original_file_path = "../outside.csv",
+        .raw_code = "",
+        .materialized = "seed",
+    });
+
+    try std.testing.expectError(error.UnsupportedSeedExecution, renderSeedSql(allocator, "project", &graph, &graph.nodes.items[0]));
 }
 
 test "quoteSqlString escapes single quotes" {

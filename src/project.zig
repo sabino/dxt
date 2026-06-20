@@ -910,16 +910,16 @@ fn selectedSeedExecutionOrder(runtime: Runtime, graph: *Graph, selected: []const
 }
 
 fn validateSeedExecution(graph: *const Graph, nodes: []const *Node) !void {
+    _ = graph;
     for (nodes) |node| {
-        if (!std.mem.eql(u8, node.package_name, graph.project_name)) return error.UnsupportedSeedExecution;
         if (!std.mem.eql(u8, node.materialized, "seed")) return error.UnsupportedSeedExecution;
     }
 }
 
 fn validateSeedModelBuildExecution(graph: *const Graph, nodes: []const *Node) !void {
+    _ = graph;
     for (nodes) |node| {
         if (std.mem.eql(u8, node.resource_type, "seed")) {
-            if (!std.mem.eql(u8, node.package_name, graph.project_name)) return error.UnsupportedSeedExecution;
             if (!std.mem.eql(u8, node.materialized, "seed")) return error.UnsupportedSeedExecution;
         } else if (std.mem.eql(u8, node.resource_type, "model")) {
             if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedBuildModelMaterialization;
@@ -2413,7 +2413,7 @@ fn parseSingularTest(runtime: Runtime, project_dir: []const u8, test_root: []con
     try graph.singular_tests.append(runtime.allocator, test_node);
 }
 
-fn parseSeed(runtime: Runtime, seed_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+fn parseSeed(runtime: Runtime, project_root: []const u8, seed_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const seed_name = try resourceNameFromPath(runtime.allocator, relative_path, ".csv");
     const unique_id = try std.fmt.allocPrint(runtime.allocator, "seed.{s}.{s}", .{ package_name, seed_name });
     const seed_path = relativeUnderResourcePath(relative_path, seed_root);
@@ -2423,6 +2423,7 @@ fn parseSeed(runtime: Runtime, seed_root: []const u8, relative_path: []const u8,
         .package_name = package_name,
         .unique_id = unique_id,
         .name = seed_name,
+        .project_root = try runtime.allocator.dupe(u8, project_root),
         .path = seed_path,
         .original_file_path = relative_path,
         .raw_code = "",
