@@ -6744,6 +6744,12 @@ def test_ls_root_selectors_yml_scalar_aliases(tmp_path: Path):
     assert ls_json("--selector", "customer_family") == ls_json("--select", "*customers")
     assert ls_json("--selector", "customer_and_descendants") == ls_json("--select", "customers+")
     assert ls_json("--selector", "staging_views") == ["model.selector_graph.stg_customers"]
+    assert ls_json("--selector", "customer_union") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+    ]
+    assert ls_json("--selector", "staging_intersection") == ["model.selector_graph.stg_customers"]
+    assert ls_json("--selector", "customer_without_staging") == ["model.selector_graph.customers"]
     assert ls_json("--selector", "customer_family", "--exclude", "stg_customers") == [
         "model.selector_graph.customers"
     ]
@@ -6786,7 +6792,7 @@ def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys:
     )
 
     dxt_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--selector", "customer_family", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--selector", "customer_without_staging", "--output", "json"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -6802,7 +6808,7 @@ def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys:
             "--profiles-dir",
             str(project),
             "--selector",
-            "customer_family",
+            "customer_without_staging",
             "--output",
             "json",
         ]
@@ -7498,27 +7504,27 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     assert duplicated_alias.returncode == 2
     assert "selector syntax is not supported" in duplicated_alias.stderr
 
-    non_scalar_alias_project = copy_fixture(tmp_path / "non_scalar_alias", "selector_graph")
-    (non_scalar_alias_project / "selectors.yml").write_text(
+    unsupported_yaml_alias_project = copy_fixture(tmp_path / "unsupported_yaml_alias", "selector_graph")
+    (unsupported_yaml_alias_project / "selectors.yml").write_text(
         "\n".join(
             [
                 "selectors:",
-                "  - name: structured",
+                "  - name: stateful",
                 "    definition:",
-                "      method: tag",
-                "      value: nightly",
+                "      method: state",
+                "      value: modified",
             ]
         )
         + "\n"
     )
-    non_scalar_alias = subprocess.run(
-        [DXT, "ls", "--project-dir", str(non_scalar_alias_project), "--selector", "structured"],
+    unsupported_yaml_alias = subprocess.run(
+        [DXT, "ls", "--project-dir", str(unsupported_yaml_alias_project), "--selector", "stateful"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert non_scalar_alias.returncode == 2
-    assert "selector syntax is not supported" in non_scalar_alias.stderr
+    assert unsupported_yaml_alias.returncode == 2
+    assert "selector syntax is not supported" in unsupported_yaml_alias.stderr
 
 
 def test_ls_at_selector_includes_descendant_parents(tmp_path: Path):

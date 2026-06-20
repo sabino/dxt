@@ -5,3 +5,25 @@ selectors:
     definition: "customers+"
   - name: staging_views
     definition: "path:models/stg_*,config.materialized:view"
+  - name: customer_union
+    definition:
+      union:
+        - method: name
+          value: customers
+        - method: path
+          value: models/orders.sql
+  - name: staging_intersection
+    definition:
+      intersection:
+        - method: path
+          value: models/stg_*
+        - method: resource_type
+          value: model
+  - name: customer_without_staging
+    definition:
+      union:
+        - method: name
+          value: "*customers"
+      exclude:
+        - method: name
+          value: stg_customers
