@@ -664,9 +664,25 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) 
         } else {
             try writer.writeAll("null");
         }
-        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":false");
+        try writer.writeAll(",\"extra_ctes\":");
+        try writeExtraCtes(writer, node.extra_ctes.items);
+        try writer.writeAll(",\"extra_ctes_injected\":");
+        try writer.writeAll(if (node.extra_ctes.items.len != 0) "true" else "false");
     }
     try writer.writeAll("}");
+}
+
+fn writeExtraCtes(writer: *Io.Writer, extra_ctes: []const types.ExtraCte) !void {
+    try writer.writeAll("[");
+    for (extra_ctes, 0..) |extra_cte, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("{\"id\":");
+        try json.string(writer, extra_cte.id);
+        try writer.writeAll(",\"sql\":");
+        try json.string(writer, extra_cte.sql);
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("]");
 }
 
 fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
@@ -1115,6 +1131,43 @@ test "exposure dependency writer emits sources before other nodes" {
         "[\"source.demo.raw.customers\",\"model.demo.orders\",\"model.demo.customers\"]",
         rendered,
     );
+}
+
+test "manifest writer emits model extra_ctes and injection flag" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select * from {{ ref('ephemeral_orders') }}",
+        .materialized = "table",
+        .compiled = true,
+        .compiled_code = "with __dbt__cte__ephemeral_orders as (\nselect 1 as order_id\n)\nselect * from __dbt__cte__ephemeral_orders",
+        .compiled_path = "target/compiled/demo/models/orders.sql",
+        .relation_name = "\"main\".\"orders\"",
+    });
+    try graph.nodes.items[0].extra_ctes.append(allocator, .{
+        .id = "model.demo.ephemeral_orders",
+        .sql = try allocator.dupe(u8, "__dbt__cte__ephemeral_orders as (\nselect 1 as order_id\n)"),
+    });
+
+    const rendered = try renderManifest(allocator, &graph);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const node = parsed.value.object.get("nodes").?.object.get("model.demo.orders").?.object;
+    try std.testing.expect(node.get("extra_ctes_injected").?.bool);
+    const extra_ctes = node.get("extra_ctes").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), extra_ctes.len);
+    try std.testing.expectEqualStrings("model.demo.ephemeral_orders", extra_ctes[0].object.get("id").?.string);
+    try std.testing.expectEqualStrings("__dbt__cte__ephemeral_orders as (\nselect 1 as order_id\n)", extra_ctes[0].object.get("sql").?.string);
 }
 
 test "manifest writer emits source generic tests with null attached node" {

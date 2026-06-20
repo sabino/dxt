@@ -38,6 +38,10 @@ compatibility.
 
 ### Fixed
 
+- First DuckDB-compatible `ephemeral` model slice: downstream SQL models now
+  compile supported ephemeral parents into deterministic injected CTEs, emit
+  Manifest `extra_ctes` / `extra_ctes_injected`, and run/build without creating
+  standalone ephemeral DuckDB relations.
 - Agent OS dry-runs no longer append ignored local run-state entries, and the
   Hermes Codex watchdog stays silent when there is no ready restart request.
 - `dxt ls --output json --output-keys` support for compact `tags`,

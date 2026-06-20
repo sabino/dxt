@@ -139,6 +139,70 @@ def test_compile_select_limits_compiled_models_but_keeps_graph_context(tmp_path:
     assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
 
 
+def test_compile_injects_ephemeral_ctes_and_manifest_fields(tmp_path: Path):
+    project = copy_fixture(tmp_path, "ephemeral_cte")
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Compiled 2 model(s)" in result.stdout
+
+    compiled_root = target / "compiled" / "ephemeral_cte" / "models"
+    assert not (compiled_root / "base_ephemeral.sql").exists()
+    assert not (compiled_root / "filtered_ephemeral.sql").exists()
+    one_level_sql = (compiled_root / "final_one_level.sql").read_text()
+    chain_sql = (compiled_root / "final_chain.sql").read_text()
+    assert one_level_sql.count("__dbt__cte__base_ephemeral as") == 1
+    assert "from __dbt__cte__base_ephemeral" in one_level_sql
+    assert "__dbt__cte__base_ephemeral as" in chain_sql
+    assert "__dbt__cte__filtered_ephemeral as" in chain_sql
+    assert chain_sql.index("__dbt__cte__base_ephemeral as") < chain_sql.index("__dbt__cte__filtered_ephemeral as")
+    assert "from __dbt__cte__base_ephemeral" in chain_sql
+    assert "from __dbt__cte__filtered_ephemeral" in chain_sql
+    assert "{{" not in chain_sql
+    assert "{%" not in chain_sql
+
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_manifest_schema_slice(manifest_path)
+    assert manifest["nodes"]["model.ephemeral_cte.base_ephemeral"]["config"]["materialized"] == "ephemeral"
+    assert manifest["nodes"]["model.ephemeral_cte.filtered_ephemeral"]["config"]["materialized"] == "ephemeral"
+    assert "compiled" not in manifest["nodes"]["model.ephemeral_cte.base_ephemeral"]
+    final_one = manifest["nodes"]["model.ephemeral_cte.final_one_level"]
+    final_chain = manifest["nodes"]["model.ephemeral_cte.final_chain"]
+    assert final_one["extra_ctes_injected"] is True
+    assert [cte["id"] for cte in final_one["extra_ctes"]] == ["model.ephemeral_cte.base_ephemeral"]
+    assert final_one["compiled_code"] == one_level_sql
+    assert final_chain["extra_ctes_injected"] is True
+    assert [cte["id"] for cte in final_chain["extra_ctes"]] == [
+        "model.ephemeral_cte.base_ephemeral",
+        "model.ephemeral_cte.filtered_ephemeral",
+    ]
+    assert final_chain["compiled_code"] == chain_sql
+    assert final_chain["compiled_path"].endswith("/compiled/ephemeral_cte/models/final_chain.sql")
+
+
+def test_docs_generate_uses_ephemeral_cte_compile_path(tmp_path: Path):
+    project = copy_fixture(tmp_path, "ephemeral_cte")
+    target = tmp_path / "docs-target"
+    result = subprocess.run(
+        [DXT, "docs", "generate", "--project-dir", str(project), "--target-path", str(target), "--select", "final_chain"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    compiled = (target / "compiled" / "ephemeral_cte" / "models" / "final_chain.sql").read_text()
+    assert "__dbt__cte__base_ephemeral as" in compiled
+    assert "__dbt__cte__filtered_ephemeral as" in compiled
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["nodes"]["model.ephemeral_cte.final_chain"]["extra_ctes_injected"] is True
+
+
 def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
     project = copy_fixture(tmp_path, "analysis_basic")
     parse_target = tmp_path / "parse-target"
@@ -964,6 +1028,50 @@ def test_run_executes_selected_duckdb_models_and_writes_run_results(tmp_path: Pa
     assert query.stdout.strip() == "1,1"
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
+def test_run_executes_downstream_model_with_injected_ephemeral_ctes(tmp_path: Path):
+    project = copy_fixture(tmp_path, "ephemeral_cte")
+    target = tmp_path / "run-target"
+    result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "+final_chain"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Ran 1 model(s)" in result.stdout
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["nodes"]["model.ephemeral_cte.final_chain"]["extra_ctes_injected"] is True
+    assert "compiled" not in manifest["nodes"]["model.ephemeral_cte.base_ephemeral"]
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == ["model.ephemeral_cte.final_chain"]
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id, customer_name from "main"."final_chain"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "1,ADA"
+    relations = subprocess.run(
+        [
+            DUCKDB,
+            str(target / "dxt.duckdb"),
+            "-csv",
+            "-noheader",
+            "-c",
+            "select table_name from information_schema.tables where table_schema = 'main' order by table_name",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert relations.returncode == 0, relations.stderr
+    assert relations.stdout.strip().splitlines() == ["final_chain"]
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution failure slice")
 def test_run_writes_error_run_results_when_model_execution_fails(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
@@ -1385,6 +1493,33 @@ def test_build_executes_selected_duckdb_models_and_writes_run_results(tmp_path: 
     )
     assert query.returncode == 0, query.stderr
     assert query.stdout.strip() == "1,1"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 model build execution slice")
+def test_build_executes_downstream_model_with_injected_ephemeral_ctes(tmp_path: Path):
+    project = copy_fixture(tmp_path, "ephemeral_cte")
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "+final_chain"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Built 1 model(s) and 0 test(s)" in result.stdout
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == ["model.ephemeral_cte.final_chain"]
+    assert run_results["results"][0]["compiled"] is True
+    assert "__dbt__cte__filtered_ephemeral" in run_results["results"][0]["compiled_code"]
+
+    query = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select count(*) from "main"."final_chain"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert query.stdout.strip() == "1"
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 model build execution failure slice")

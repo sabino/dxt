@@ -4,6 +4,7 @@ const resolve = @import("resolve.zig");
 const types = @import("types.zig");
 
 const Graph = types.Graph;
+const ExtraCte = types.ExtraCte;
 const GenericTestNode = types.GenericTestNode;
 const MacroDef = types.MacroDef;
 const Node = types.Node;
@@ -125,7 +126,62 @@ const CompileContext = struct {
     }
 };
 
+pub const CompiledModel = struct {
+    compiled_code: []const u8,
+    extra_ctes: std.ArrayList(ExtraCte) = .empty,
+
+    pub fn deinit(self: *CompiledModel, allocator: std.mem.Allocator) void {
+        allocator.free(self.compiled_code);
+        for (self.extra_ctes.items) |extra_cte| allocator.free(extra_cte.sql);
+        self.extra_ctes.deinit(allocator);
+    }
+};
+
+const EphemeralCompileState = struct {
+    allocator: std.mem.Allocator,
+    graph: *const Graph,
+    extra_ctes: std.ArrayList(ExtraCte) = .empty,
+    stack: std.ArrayList([]const u8) = .empty,
+
+    fn init(allocator: std.mem.Allocator, graph: *const Graph) EphemeralCompileState {
+        return .{ .allocator = allocator, .graph = graph };
+    }
+
+    fn deinit(self: *EphemeralCompileState) void {
+        for (self.extra_ctes.items) |extra_cte| self.allocator.free(extra_cte.sql);
+        self.extra_ctes.deinit(self.allocator);
+        self.stack.deinit(self.allocator);
+    }
+};
+
 pub fn compileModel(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
+    return try compileModelBody(allocator, graph, node);
+}
+
+pub fn compileModelWithInjectedCtes(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) !CompiledModel {
+    var state = EphemeralCompileState.init(allocator, graph);
+    errdefer state.deinit();
+
+    try collectEphemeralDependencies(&state, node);
+
+    const body = try compileModelBody(allocator, graph, node);
+    errdefer allocator.free(body);
+
+    const compiled_code = if (state.extra_ctes.items.len == 0)
+        body
+    else blk: {
+        const injected = try injectExtraCtes(allocator, body, state.extra_ctes.items);
+        allocator.free(body);
+        break :blk injected;
+    };
+
+    const extra_ctes = state.extra_ctes;
+    state.extra_ctes = .empty;
+    state.stack.deinit(allocator);
+    return .{ .compiled_code = compiled_code, .extra_ctes = extra_ctes };
+}
+
+fn compileModelBody(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
 
@@ -134,6 +190,105 @@ pub fn compileModel(allocator: std.mem.Allocator, graph: *const Graph, node: *co
 
     try renderRange(&context, node.raw_code, 0, node.raw_code.len, &out);
     return try out.toOwnedSlice(allocator);
+}
+
+fn collectEphemeralDependencies(state: *EphemeralCompileState, node: *const Node) anyerror!void {
+    for (node.depends_on.items) |dependency| {
+        const dependency_node = findNodeByUniqueId(state.graph, dependency) orelse continue;
+        if (!std.mem.eql(u8, dependency_node.resource_type, "model")) continue;
+        if (!std.mem.eql(u8, dependency_node.materialized, "ephemeral")) continue;
+        try collectEphemeralNode(state, dependency_node);
+    }
+}
+
+fn collectEphemeralNode(state: *EphemeralCompileState, node: *const Node) anyerror!void {
+    if (extraCteContains(state.extra_ctes.items, node.unique_id)) return;
+    if (stringListContains(state.stack.items, node.unique_id)) return error.CyclicModelDependency;
+
+    try state.stack.append(state.allocator, node.unique_id);
+    errdefer _ = state.stack.pop();
+
+    try collectEphemeralDependencies(state, node);
+
+    const cte_name = try ephemeralCteName(state.allocator, node);
+    defer state.allocator.free(cte_name);
+    const compiled = try compileModelBody(state.allocator, state.graph, node);
+    defer state.allocator.free(compiled);
+    const trimmed = trimTrailingSqlTerminator(compiled);
+    const cte_sql = try std.fmt.allocPrint(
+        state.allocator,
+        "{s} as (\n{s}\n)",
+        .{ cte_name, trimmed },
+    );
+    errdefer state.allocator.free(cte_sql);
+
+    try state.extra_ctes.append(state.allocator, .{ .id = node.unique_id, .sql = cte_sql });
+    _ = state.stack.pop();
+}
+
+fn extraCteContains(extra_ctes: []const ExtraCte, id: []const u8) bool {
+    for (extra_ctes) |extra_cte| {
+        if (std.mem.eql(u8, extra_cte.id, id)) return true;
+    }
+    return false;
+}
+
+fn stringListContains(values: []const []const u8, value: []const u8) bool {
+    for (values) |candidate| {
+        if (std.mem.eql(u8, candidate, value)) return true;
+    }
+    return false;
+}
+
+pub fn ephemeralCteName(allocator: std.mem.Allocator, node: *const Node) ![]const u8 {
+    return try std.fmt.allocPrint(allocator, "__dbt__cte__{s}", .{relationIdentifierForNode(node)});
+}
+
+fn injectExtraCtes(allocator: std.mem.Allocator, body: []const u8, extra_ctes: []const ExtraCte) ![]const u8 {
+    var ctes: std.ArrayList(u8) = .empty;
+    defer ctes.deinit(allocator);
+    for (extra_ctes, 0..) |extra_cte, index| {
+        if (index != 0) try ctes.appendSlice(allocator, ",\n");
+        try ctes.appendSlice(allocator, extra_cte.sql);
+    }
+
+    const body_start = skipSqlWhitespace(body, 0);
+    if (startsWithSqlWith(body[body_start..])) {
+        const rest_start = skipSqlWhitespace(body, body_start + "with".len);
+        return try std.fmt.allocPrint(
+            allocator,
+            "{s}with {s},\n{s}",
+            .{ body[0..body_start], ctes.items, body[rest_start..] },
+        );
+    }
+    return try std.fmt.allocPrint(allocator, "with {s}\n{s}", .{ ctes.items, body });
+}
+
+fn startsWithSqlWith(sql: []const u8) bool {
+    if (sql.len < "with".len) return false;
+    if (!std.ascii.eqlIgnoreCase(sql[0.."with".len], "with")) return false;
+    return sql.len == "with".len or !std.ascii.isAlphanumeric(sql["with".len]);
+}
+
+fn skipSqlWhitespace(sql: []const u8, start: usize) usize {
+    var index = start;
+    while (index < sql.len and std.ascii.isWhitespace(sql[index])) index += 1;
+    return index;
+}
+
+fn trimTrailingSqlTerminator(sql: []const u8) []const u8 {
+    var end = trimSqlRight(sql).len;
+    if (end > 0 and sql[end - 1] == ';') {
+        end -= 1;
+        end = trimSqlRight(sql[0..end]).len;
+    }
+    return sql[0..end];
+}
+
+fn trimSqlRight(sql: []const u8) []const u8 {
+    var end = sql.len;
+    while (end > 0 and std.ascii.isWhitespace(sql[end - 1])) end -= 1;
+    return sql[0..end];
 }
 
 pub fn compileSingularTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode) ![]const u8 {
@@ -380,6 +535,9 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
         };
         const unique_id = try resolve.resolveRefDependency(graph, node.package_name, dep);
         const target = findNodeByUniqueId(graph, unique_id) orelse return error.UnresolvedRef;
+        if (std.mem.eql(u8, target.resource_type, "model") and std.mem.eql(u8, target.materialized, "ephemeral")) {
+            return try ephemeralCteName(allocator, target);
+        }
         return try relationNameForNode(allocator, graph, target);
     }
     if (std.mem.eql(u8, call.name, "source")) {
@@ -1927,4 +2085,96 @@ test "compileModel renders target and this context" {
         "select 'demo_profile' as profile_name, 'dev' as target_name, 'dev' as target_name_alias, 'postgres' as adapter_type, 'analytics' as target_schema, 'analytics_mart' as this_schema, 'order_facts' as this_name, 'order_facts' as this_table, 'order_facts' as this_identifier from \"analytics_mart\".\"order_facts\"",
         compiled,
     );
+}
+
+test "compileModelWithInjectedCtes orders chained ephemeral parents before downstream SQL" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.base",
+        .name = "base",
+        .path = "base.sql",
+        .original_file_path = "models/base.sql",
+        .raw_code = "select 1 as id;",
+        .materialized = "ephemeral",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.mid",
+        .name = "mid",
+        .path = "mid.sql",
+        .original_file_path = "models/mid.sql",
+        .raw_code = "select id + 1 as id from {{ ref('base') }}",
+        .materialized = "ephemeral",
+    });
+    try graph.nodes.items[1].depends_on.append(allocator, "model.demo.base");
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.final",
+        .name = "final",
+        .path = "final.sql",
+        .original_file_path = "models/final.sql",
+        .raw_code = "select * from {{ ref('mid') }}",
+        .materialized = "table",
+    });
+    try graph.nodes.items[2].depends_on.append(allocator, "model.demo.mid");
+
+    var compiled = try compileModelWithInjectedCtes(allocator, &graph, &graph.nodes.items[2]);
+    defer compiled.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), compiled.extra_ctes.items.len);
+    try std.testing.expectEqualStrings("model.demo.base", compiled.extra_ctes.items[0].id);
+    try std.testing.expectEqualStrings("model.demo.mid", compiled.extra_ctes.items[1].id);
+    try std.testing.expectEqualStrings("__dbt__cte__base as (\nselect 1 as id\n)", compiled.extra_ctes.items[0].sql);
+    try std.testing.expectEqualStrings("__dbt__cte__mid as (\nselect id + 1 as id from __dbt__cte__base\n)", compiled.extra_ctes.items[1].sql);
+    try std.testing.expectEqualStrings(
+        "with __dbt__cte__base as (\nselect 1 as id\n),\n__dbt__cte__mid as (\nselect id + 1 as id from __dbt__cte__base\n)\nselect * from __dbt__cte__mid",
+        compiled.compiled_code,
+    );
+}
+
+test "compileModelWithInjectedCtes rejects ephemeral dependency cycles" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.base",
+        .name = "base",
+        .path = "base.sql",
+        .original_file_path = "models/base.sql",
+        .raw_code = "select * from {{ ref('mid') }}",
+        .materialized = "ephemeral",
+    });
+    try graph.nodes.items[0].depends_on.append(allocator, "model.demo.mid");
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.mid",
+        .name = "mid",
+        .path = "mid.sql",
+        .original_file_path = "models/mid.sql",
+        .raw_code = "select * from {{ ref('base') }}",
+        .materialized = "ephemeral",
+    });
+    try graph.nodes.items[1].depends_on.append(allocator, "model.demo.base");
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.final",
+        .name = "final",
+        .path = "final.sql",
+        .original_file_path = "models/final.sql",
+        .raw_code = "select * from {{ ref('mid') }}",
+        .materialized = "table",
+    });
+    try graph.nodes.items[2].depends_on.append(allocator, "model.demo.mid");
+
+    try std.testing.expectError(error.CyclicModelDependency, compileModelWithInjectedCtes(allocator, &graph, &graph.nodes.items[2]));
 }

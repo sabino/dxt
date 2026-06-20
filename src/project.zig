@@ -835,7 +835,7 @@ fn selectedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []cons
     defer runtime.allocator.free(remaining);
     @memset(remaining, false);
     for (graph.nodes.items, 0..) |*node, index| {
-        remaining[index] = node.enabled and std.mem.eql(u8, node.resource_type, "model") and selectionContains(selected, node.unique_id);
+        remaining[index] = isExecutableModelNode(node) and selectionContains(selected, node.unique_id);
     }
 
     var ordered: std.ArrayList(*Node) = .empty;
@@ -844,7 +844,7 @@ fn selectedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []cons
         var progressed = false;
         for (graph.nodes.items, 0..) |*node, index| {
             if (!remaining[index]) continue;
-            if (!selectedModelDependenciesExecuted(selected, ordered.items, node)) continue;
+            if (!selectedModelDependenciesExecuted(graph, selected, ordered.items, node)) continue;
             try ordered.append(runtime.allocator, node);
             remaining[index] = false;
             progressed = true;
@@ -861,7 +861,7 @@ fn selectedSeedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []
     @memset(remaining, false);
     for (graph.nodes.items, 0..) |*node, index| {
         remaining[index] = node.enabled and
-            (std.mem.eql(u8, node.resource_type, "seed") or std.mem.eql(u8, node.resource_type, "model")) and
+            (std.mem.eql(u8, node.resource_type, "seed") or isExecutableModelNode(node)) and
             selectionContains(selected, node.unique_id);
     }
 
@@ -871,7 +871,7 @@ fn selectedSeedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []
         var progressed = false;
         for (graph.nodes.items, 0..) |*node, index| {
             if (!remaining[index]) continue;
-            if (!selectedSeedModelDependenciesExecuted(selected, ordered.items, node)) continue;
+            if (!selectedSeedModelDependenciesExecuted(graph, selected, ordered.items, node)) continue;
             try ordered.append(runtime.allocator, node);
             remaining[index] = false;
             progressed = true;
@@ -1341,11 +1341,15 @@ fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.N
 
 fn countSelectedGraphModels(graph: *const Graph, selected: []const selector.SelectedResource) usize {
     var count: usize = 0;
-    for (graph.nodes.items) |node| {
-        if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
+    for (graph.nodes.items) |*node| {
+        if (!isExecutableModelNode(node)) continue;
         if (selectionContains(selected, node.unique_id)) count += 1;
     }
     return count;
+}
+
+fn isExecutableModelNode(node: *const Node) bool {
+    return node.enabled and std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.materialized, "ephemeral");
 }
 
 fn countSelectedGraphSeeds(graph: *const Graph, selected: []const selector.SelectedResource) usize {
@@ -1368,22 +1372,35 @@ fn countSelectedDataTests(graph: *const Graph, selected: []const selector.Select
     return count;
 }
 
-fn selectedModelDependenciesExecuted(selected: []const selector.SelectedResource, executed: []const *Node, node: *const Node) bool {
+fn selectedModelDependenciesExecuted(graph: *const Graph, selected: []const selector.SelectedResource, executed: []const *Node, node: *const Node) bool {
     for (node.depends_on.items) |dependency| {
         if (!std.mem.startsWith(u8, dependency, "model.")) continue;
         if (!selectionContains(selected, dependency)) continue;
+        if (findGraphNodeByUniqueId(graph, dependency)) |dependency_node| {
+            if (std.mem.eql(u8, dependency_node.materialized, "ephemeral")) continue;
+        }
         if (!executedContains(executed, dependency)) return false;
     }
     return true;
 }
 
-fn selectedSeedModelDependenciesExecuted(selected: []const selector.SelectedResource, executed: []const *Node, node: *const Node) bool {
+fn selectedSeedModelDependenciesExecuted(graph: *const Graph, selected: []const selector.SelectedResource, executed: []const *Node, node: *const Node) bool {
     for (node.depends_on.items) |dependency| {
         if (!std.mem.startsWith(u8, dependency, "model.") and !std.mem.startsWith(u8, dependency, "seed.")) continue;
         if (!selectionContains(selected, dependency)) continue;
+        if (findGraphNodeByUniqueId(graph, dependency)) |dependency_node| {
+            if (std.mem.eql(u8, dependency_node.resource_type, "model") and std.mem.eql(u8, dependency_node.materialized, "ephemeral")) continue;
+        }
         if (!executedContains(executed, dependency)) return false;
     }
     return true;
+}
+
+fn findGraphNodeByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Node {
+    for (graph.nodes.items) |*node| {
+        if (std.mem.eql(u8, node.unique_id, unique_id)) return node;
+    }
+    return null;
 }
 
 fn executedContains(executed: []const *Node, unique_id: []const u8) bool {
@@ -1467,17 +1484,23 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
         if (!selectionContains(selected, node.unique_id)) continue;
         saw_selected_model = true;
+        if (std.mem.eql(u8, node.materialized, "ephemeral")) continue;
 
-        const compiled_code = try compiler.compileModel(runtime.allocator, graph, node);
+        var compiled_model = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, node);
+        errdefer compiled_model.deinit(runtime.allocator);
         const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, node.package_name, node.original_file_path });
         if (std.fs.path.dirname(compiled_path)) |parent| {
             try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
         }
-        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = compiled_code });
+        try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = compiled_model.compiled_code });
+        const relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
         node.compiled = true;
-        node.compiled_code = compiled_code;
+        node.compiled_code = compiled_model.compiled_code;
+        node.extra_ctes = compiled_model.extra_ctes;
+        compiled_model.compiled_code = "";
+        compiled_model.extra_ctes = .empty;
         node.compiled_path = util.normalizeForDisplay(compiled_path);
-        node.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
+        node.relation_name = relation_name;
         compiled_count += 1;
     }
 
@@ -1562,6 +1585,44 @@ fn selectionContains(selected: []const selector.SelectedResource, unique_id: []c
         if (std.mem.eql(u8, item.unique_id, unique_id)) return true;
     }
     return false;
+}
+
+test "selected model execution order skips selected ephemeral parents" {
+    const allocator = std.testing.allocator;
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.ephemeral_parent",
+        .name = "ephemeral_parent",
+        .path = "ephemeral_parent.sql",
+        .original_file_path = "models/ephemeral_parent.sql",
+        .raw_code = "select 1 as id",
+        .materialized = "ephemeral",
+    });
+    var downstream = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.downstream",
+        .name = "downstream",
+        .path = "downstream.sql",
+        .original_file_path = "models/downstream.sql",
+        .raw_code = "select * from {{ ref('ephemeral_parent') }}",
+        .materialized = "table",
+    };
+    try downstream.depends_on.append(allocator, "model.demo.ephemeral_parent");
+    try graph.nodes.append(allocator, downstream);
+
+    const selected = [_]selector.SelectedResource{
+        .{ .unique_id = "model.demo.ephemeral_parent", .name = "ephemeral_parent", .resource_type = "model" },
+        .{ .unique_id = "model.demo.downstream", .name = "downstream", .resource_type = "model" },
+    };
+    const runtime = Runtime{ .allocator = allocator, .io = undefined };
+    const ordered = try selectedModelExecutionOrder(runtime, &graph, &selected);
+    defer allocator.free(ordered);
+
+    try std.testing.expectEqual(@as(usize, 1), ordered.len);
+    try std.testing.expectEqualStrings("model.demo.downstream", ordered[0].unique_id);
 }
 
 test "selected seed-model build order waits for selected seed dependencies" {
