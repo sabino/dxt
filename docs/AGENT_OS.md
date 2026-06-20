@@ -90,6 +90,7 @@ python scripts/agent_os_orchestrator.py product-manager --repo sabino/dxt --prof
 python scripts/agent_os_orchestrator.py product-manager --repo sabino/dxt --profile azure --model gpt-5.5
 python scripts/agent_os_orchestrator.py nudge 123 "Narrow this to manifest fields only."
 python scripts/agent_os_orchestrator.py merge-ready --repo sabino/dxt --apply --delete-branch
+python scripts/agent_os_orchestrator.py cleanup --repo sabino/dxt
 python scripts/agent_os_orchestrator.py stop --issue 123
 ```
 
@@ -223,7 +224,7 @@ PR declares that specific review as a merge gate.
 | Multi-stage PM/research/mapper/worker/reviewer pipeline | Protocol-defined through issue stages, role labels, and required comment blocks; orchestration remains prompt-driven until a follow-up routing hook makes the gate mechanical. |
 | Principal conflict graph and merge queue | Initial implementation exists in the local orchestrator. It reads issue dependencies, active workers, worktrees, open PR files, merge state, and CI checks before launch or merge. |
 | Automatic Project field reconciliation during every loop | Partially real. Setup can sync items and reconcile unambiguous labels/comments into role, status, validation, source grounding, readiness, branch, and dependency fields with dry-run drift reporting; continuously running every loop remains PM/supervisor work. |
-| Stale worktree and stale claim cleanup | Partially real through `status` and `stop`; automated cleanup needs a follow-up slice. |
+| Stale worktree and stale claim cleanup | Initial dry-run-first cleanup is real. `cleanup` reports exited stale runs, clean merged agent worktree removal candidates, and stale `status:claimed` labels; `--apply` is required before removing labels or worktrees. |
 
 ## Codex Pull Plug
 

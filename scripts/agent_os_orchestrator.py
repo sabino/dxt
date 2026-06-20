@@ -27,6 +27,8 @@ DEPENDENCY_PATTERNS = (
     re.compile(r"\bblocked(?:\s+by)?\s*[:=]\s*#(\d+)\b", re.IGNORECASE),
 )
 BACKTICK_PATH_PATTERN = re.compile(r"`([^`]+)`")
+CLAIM_BRANCH_PATTERN = re.compile(r"dxt-agent-event:v1[^\n>]*\bstatus=claimed\b[^\n>]*\bbranch=([^\s>]+)")
+CLAIM_BRANCH_LINE_PATTERN = re.compile(r"^\s*[-*]\s*Branch:\s*`([^`]+)`\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 def no_color_env() -> dict[str, str]:
@@ -303,19 +305,37 @@ def fetch_issue_states(repo: str, numbers: set[int]) -> dict[int, str]:
     return states
 
 
+def process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def refresh_worker_lifecycle(state: dict[str, Any]) -> None:
+    for run in state.get("runs", []):
+        if run.get("status") not in {"running", "stopping"} or not run.get("pid"):
+            continue
+        try:
+            pid = int(run["pid"])
+        except (TypeError, ValueError):
+            continue
+        if process_alive(pid):
+            continue
+        run["status"] = "exited"
+        run.setdefault("exited_at", utc_now())
+
+
 def active_runs(state: dict[str, Any]) -> list[dict[str, Any]]:
     active: list[dict[str, Any]] = []
+    refresh_worker_lifecycle(state)
     for run in state.get("runs", []):
         if run.get("status") != "running":
             continue
-        pid = int(run["pid"])
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            run["status"] = "exited"
-            run["exited_at"] = utc_now()
-        else:
-            active.append(run)
+        active.append(run)
     return active
 
 
@@ -370,6 +390,13 @@ def worktree_dirty_files(worktree: Path) -> set[str]:
     return files
 
 
+def worktree_status_short(worktree: Path) -> list[str]:
+    result = run_cmd(["git", "-C", str(worktree), "status", "--short", "--branch"], check=False)
+    if result.returncode != 0:
+        return [f"status unavailable: {result.stderr.strip() or result.returncode}"]
+    return result.stdout.strip().splitlines()
+
+
 def fetch_worktree_snapshot(base: str) -> list[dict[str, Any]]:
     result = run_cmd(["git", "worktree", "list", "--porcelain"], check=False)
     if result.returncode != 0:
@@ -391,6 +418,19 @@ def fetch_worktree_snapshot(base: str) -> list[dict[str, Any]]:
 def branch_exists(branch: str) -> bool:
     result = run_cmd(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], check=False, capture=False)
     return result.returncode == 0
+
+
+def branch_merged_into_base(branch: str | None, base: str) -> bool:
+    if not branch or branch in {"main", "master"}:
+        return False
+    if not branch_exists(branch):
+        return False
+    result = run_cmd(["git", "merge-base", "--is-ancestor", branch, base], check=False)
+    return result.returncode == 0
+
+
+def agent_branch(branch: str | None) -> bool:
+    return bool(branch and branch.startswith("agent/"))
 
 
 def ensure_worktree(branch: str, base: str, worktree_root: Path, dry_run: bool) -> Path:
@@ -451,7 +491,7 @@ def fetch_pr_details(repo: str, pr_number: int) -> dict[str, Any] | None:
     return json.loads(result.stdout)
 
 
-def fetch_open_pr_snapshot(repo: str, *, strict: bool = False) -> list[dict[str, Any]]:
+def fetch_open_pr_snapshot(repo: str, *, strict: bool = False, include_checks: bool = True) -> list[dict[str, Any]]:
     result = gh(
         [
             "pr",
@@ -474,12 +514,219 @@ def fetch_open_pr_snapshot(repo: str, *, strict: bool = False) -> list[dict[str,
     prs = []
     for pr in json.loads(result.stdout):
         details = fetch_pr_details(repo, int(pr["number"])) or pr
-        checks_ok, checks_summary = pr_checks_green(int(pr["number"]), repo)
-        details["checks_ok"] = checks_ok
-        details["checks_summary"] = checks_summary
+        if include_checks:
+            checks_ok, checks_summary = pr_checks_green(int(pr["number"]), repo)
+            details["checks_ok"] = checks_ok
+            details["checks_summary"] = checks_summary
         details["files"] = sorted(normalized_file_set(details.get("files") or []))
         prs.append(details)
     return prs
+
+
+def fetch_claimed_issues(repo: str, *, limit: int) -> list[dict[str, Any]]:
+    result = gh(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--label",
+            "status:claimed",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,title,state,labels,url,comments",
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return json.loads(result.stdout)
+
+
+def fetch_issue_details(repo: str, numbers: set[int]) -> dict[int, dict[str, Any]]:
+    issues: dict[int, dict[str, Any]] = {}
+    for number in sorted(numbers):
+        result = gh(
+            [
+                "issue",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "number,title,state,labels,url,comments",
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            continue
+        payload = json.loads(result.stdout)
+        issues[int(payload["number"])] = payload
+    return issues
+
+
+def issue_claim_branch(issue: dict[str, Any]) -> str | None:
+    comments = issue.get("comments") or []
+    for comment in reversed(comments if isinstance(comments, list) else []):
+        if not isinstance(comment, dict):
+            continue
+        body = comment.get("body") or ""
+        match = CLAIM_BRANCH_PATTERN.search(body)
+        if match:
+            return match.group(1).strip("`")
+        match = CLAIM_BRANCH_LINE_PATTERN.search(body)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def open_pr_matches_issue_or_branch(pr: dict[str, Any], issue_number: int | None, branch: str | None) -> bool:
+    if branch and pr.get("headRefName") == branch:
+        return True
+    if issue_number is None:
+        return False
+    return issue_number in linked_issue_numbers(pr)
+
+
+def has_live_pr(open_prs: list[dict[str, Any]], issue_number: int | None, branch: str | None) -> bool:
+    return any(open_pr_matches_issue_or_branch(pr, issue_number, branch) for pr in open_prs)
+
+
+def run_issue_number(run: dict[str, Any]) -> int | None:
+    try:
+        return int(run["issue_number"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def plan_stale_exited_runs(
+    runs: list[dict[str, Any]],
+    issue_details: dict[int, dict[str, Any]],
+    open_prs: list[dict[str, Any]],
+    branch_merged: dict[str, bool],
+) -> list[dict[str, Any]]:
+    stale: list[dict[str, Any]] = []
+    for run in runs:
+        if run.get("status") != "exited":
+            continue
+        issue_number = run_issue_number(run)
+        branch = run.get("branch")
+        issue = issue_details.get(issue_number or -1, {})
+        issue_closed = issue.get("state") == "CLOSED"
+        merged = bool(branch_merged.get(str(branch), False))
+        live_pr = has_live_pr(open_prs, issue_number, branch if isinstance(branch, str) else None)
+        reasons: list[str] = []
+        if merged:
+            reasons.append("branch merged")
+        if issue_closed:
+            reasons.append("issue closed")
+        if reasons:
+            stale.append(
+                {
+                    "issue_number": issue_number,
+                    "branch": branch,
+                    "worktree": run.get("worktree"),
+                    "live_pr": live_pr,
+                    "reasons": reasons,
+                }
+            )
+    return stale
+
+
+def plan_stale_claims(
+    claimed_issues: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
+    open_prs: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    active_issues = {run_issue_number(run) for run in runs if run.get("status") == "running"}
+    exited_by_issue: dict[int, list[dict[str, Any]]] = {}
+    for run in runs:
+        issue_number = run_issue_number(run)
+        if issue_number is not None and run.get("status") == "exited":
+            exited_by_issue.setdefault(issue_number, []).append(run)
+
+    stale: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for issue in claimed_issues:
+        issue_number = int(issue["number"])
+        branch = issue_claim_branch(issue)
+        if branch is None and exited_by_issue.get(issue_number):
+            run_branch = exited_by_issue[issue_number][-1].get("branch")
+            branch = run_branch if isinstance(run_branch, str) else None
+        live_pr = has_live_pr(open_prs, issue_number, branch)
+        if issue_number in active_issues or live_pr:
+            continue
+        if exited_by_issue.get(issue_number):
+            stale.append(
+                {
+                    "issue_number": issue_number,
+                    "branch": branch,
+                    "reason": "exited worker without live PR",
+                }
+            )
+        elif issue.get("state") == "CLOSED":
+            stale.append(
+                {
+                    "issue_number": issue_number,
+                    "branch": branch,
+                    "reason": "closed issue without live PR",
+                }
+            )
+        else:
+            unresolved.append(
+                {
+                    "issue_number": issue_number,
+                    "branch": branch,
+                    "reason": "claimed label has no local exited worker evidence",
+                }
+            )
+    return stale, unresolved
+
+
+def plan_worktree_cleanup(worktrees: list[dict[str, str]], base: str, current_root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    removable: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    for item in worktrees:
+        branch = item.get("branch")
+        path_text = item.get("worktree")
+        if not branch or not path_text:
+            continue
+        path = Path(path_text)
+        merged = branch_merged_into_base(branch, base)
+        dirty = worktree_dirty_files(path) if path.exists() else set()
+        status_lines = worktree_status_short(path) if path.exists() else ["missing worktree path"]
+        entry = {
+            "branch": branch,
+            "worktree": path_text,
+            "merged": merged,
+            "dirty_files": sorted(dirty),
+            "status": status_lines,
+        }
+        if (
+            agent_branch(branch)
+            and merged
+            and not dirty
+            and path.exists()
+            and path.resolve() != current_root.resolve()
+        ):
+            removable.append({**entry, "reason": "clean merged agent worktree"})
+            continue
+        keep_reasons: list[str] = []
+        if not agent_branch(branch):
+            keep_reasons.append("not an agent branch")
+        if not merged:
+            keep_reasons.append("branch not merged")
+        if dirty:
+            keep_reasons.append("dirty worktree")
+        if not path.exists():
+            keep_reasons.append("missing worktree path")
+        if path.exists() and path.resolve() == current_root.resolve():
+            keep_reasons.append("current worktree")
+        kept.append({**entry, "reasons": keep_reasons})
+    return removable, kept
 
 
 def issue_is_dependency_clear(issue: dict[str, Any], dependency_states: dict[int, str]) -> tuple[bool, str]:
@@ -529,7 +776,7 @@ def branch_or_file_overlap(candidate_branch: str, issue: dict[str, Any], snapsho
 def build_supervisor_snapshot(repo: str, state: dict[str, Any], base: str, issues: list[dict[str, Any]]) -> dict[str, Any]:
     active = active_runs(state)
     worktrees = fetch_worktree_snapshot(base)
-    open_prs = fetch_open_pr_snapshot(repo)
+    open_prs = fetch_open_pr_snapshot(repo, include_checks=False)
     dependencies: set[int] = set()
     for issue in issues:
         dependencies.update(issue_dependency_numbers(issue))
@@ -1177,6 +1424,142 @@ def merge_ready(args: argparse.Namespace) -> int:
     return 0
 
 
+def remove_worktree_if_still_safe(candidate: dict[str, Any], base: str, current_root: Path) -> tuple[bool, str]:
+    branch = str(candidate.get("branch") or "")
+    path = Path(str(candidate.get("worktree") or ""))
+    if not agent_branch(branch):
+        return False, "not an agent branch"
+    if not path.exists():
+        return False, "worktree path no longer exists"
+    if path.resolve() == current_root.resolve():
+        return False, "refusing to remove the current worktree"
+    if worktree_dirty_files(path):
+        return False, "worktree is no longer clean"
+    if not branch_merged_into_base(branch, base):
+        return False, "branch is no longer proven merged"
+    result = run_cmd(["git", "worktree", "remove", str(path)], check=False, capture=True)
+    if result.returncode != 0:
+        return False, result.stderr.strip() or "git worktree remove failed"
+    return True, "removed"
+
+
+def cleanup(args: argparse.Namespace) -> int:
+    config = load_orchestrator()
+    repo = args.repo or default_repo()
+    base = args.base or config["default_base"]
+    if not args.no_fetch:
+        fetch = run_cmd(["git", "fetch", "origin"], check=False)
+        if fetch.returncode != 0:
+            print(f"warning: git fetch failed: {fetch.stderr.strip() or fetch.returncode}")
+
+    state = load_state()
+    active = active_runs(state)
+    runs = list(state.get("runs", []))
+    run_issue_numbers = {number for number in (run_issue_number(run) for run in runs) if number is not None}
+    open_prs = fetch_open_pr_snapshot(repo, include_checks=False)
+    claimed_issues = fetch_claimed_issues(repo, limit=args.issue_limit)
+    claimed_issue_numbers = {int(issue["number"]) for issue in claimed_issues}
+    issue_details = fetch_issue_details(repo, run_issue_numbers.union(claimed_issue_numbers))
+
+    worktree_result = run_cmd(["git", "worktree", "list", "--porcelain"], check=False)
+    worktrees = parse_worktree_porcelain(worktree_result.stdout) if worktree_result.returncode == 0 else []
+    branches = {
+        branch
+        for branch in [*(run.get("branch") for run in runs), *(item.get("branch") for item in worktrees)]
+        if isinstance(branch, str)
+    }
+    branch_merged = {branch: branch_merged_into_base(branch, base) for branch in branches}
+
+    stale_runs = plan_stale_exited_runs(runs, issue_details, open_prs, branch_merged)
+    stale_claims, unresolved_claims = plan_stale_claims(claimed_issues, runs, open_prs)
+    removable_worktrees, kept_worktrees = plan_worktree_cleanup(worktrees, base, ROOT)
+
+    print("cleanup report: " + ("apply" if args.apply else "dry-run"))
+    print(f"base: {base}")
+    print(f"active workers: {len(active)}")
+    print("process safety: cleanup does not send signals; use stop for explicit worker termination")
+    print(f"open PRs inspected: {len(open_prs)}")
+    print(f"claimed issues inspected: {len(claimed_issues)}")
+
+    print("stale exited runs:")
+    if stale_runs:
+        for item in stale_runs:
+            reasons = ", ".join(item["reasons"])
+            live_pr = "yes" if item["live_pr"] else "no"
+            print(f"  #{item['issue_number']} branch={item['branch']} reasons={reasons} live_pr={live_pr}")
+    else:
+        print("  none")
+
+    print("clean merged worktree candidates:")
+    if removable_worktrees:
+        for item in removable_worktrees:
+            print(f"  remove branch={item['branch']} path={item['worktree']}")
+            print("    evidence: git status --short --branch")
+            for line in item["status"]:
+                print(f"      {line}")
+    else:
+        print("  none")
+
+    kept_interesting = [
+        item
+        for item in kept_worktrees
+        if agent_branch(item.get("branch")) and (item.get("merged") or item.get("dirty_files"))
+    ]
+    if kept_interesting:
+        print("kept agent worktrees:")
+        for item in kept_interesting:
+            print(
+                f"  keep branch={item['branch']} path={item['worktree']} "
+                f"reasons={', '.join(item['reasons']) or 'none'}"
+            )
+
+    print("stale status:claimed labels:")
+    if stale_claims:
+        for item in stale_claims:
+            branch = item.get("branch") or "-"
+            print(f"  remove #{item['issue_number']} branch={branch} reason={item['reason']}")
+    else:
+        print("  none")
+
+    if unresolved_claims:
+        print("unresolved claimed labels:")
+        for item in unresolved_claims:
+            branch = item.get("branch") or "-"
+            print(f"  keep #{item['issue_number']} branch={branch} reason={item['reason']}")
+
+    if not args.apply:
+        print("dry run only; use cleanup --apply after reviewing the evidence")
+        save_state(state)
+        return 0
+
+    failures = 0
+    for item in removable_worktrees:
+        removed, message = remove_worktree_if_still_safe(item, base, ROOT)
+        if removed:
+            print(f"removed worktree branch={item['branch']}")
+        else:
+            failures += 1
+            print(f"skipped worktree branch={item['branch']}: {message}")
+
+    for item in stale_claims:
+        number = str(item["issue_number"])
+        result = gh(["issue", "edit", number, "--repo", repo, "--remove-label", "status:claimed"], check=False)
+        if result.returncode == 0:
+            print(f"removed status:claimed from issue #{number}")
+        else:
+            failures += 1
+            print(f"failed to remove status:claimed from issue #{number}: {result.stderr.strip() or result.returncode}")
+
+    stamp = utc_now()
+    stale_run_keys = {(item.get("issue_number"), item.get("branch")) for item in stale_runs}
+    for run in runs:
+        key = (run_issue_number(run), run.get("branch"))
+        if key in stale_run_keys:
+            run.setdefault("reconciled_at", stamp)
+    save_state(state)
+    return 1 if failures else 0
+
+
 def stop(args: argparse.Namespace) -> int:
     state = load_state()
     stopped = 0
@@ -1252,6 +1635,14 @@ def main() -> int:
     merge_parser.add_argument("--apply", action="store_true")
     merge_parser.add_argument("--delete-branch", action="store_true")
     merge_parser.set_defaults(func=merge_ready)
+
+    cleanup_parser = sub.add_parser("cleanup", help="Dry-run or apply safe Agent OS worker/worktree/claim cleanup.")
+    cleanup_parser.add_argument("--repo")
+    cleanup_parser.add_argument("--base")
+    cleanup_parser.add_argument("--issue-limit", type=int, default=100)
+    cleanup_parser.add_argument("--no-fetch", action="store_true")
+    cleanup_parser.add_argument("--apply", action="store_true")
+    cleanup_parser.set_defaults(func=cleanup)
 
     stop_parser = sub.add_parser("stop", help="Stop active local Codex workers launched by the orchestrator.")
     stop_parser.add_argument("--issue", type=int)
