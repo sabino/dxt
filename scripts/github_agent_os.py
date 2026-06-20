@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,18 @@ from check_agent_os_config import LABELS_PATH, PROJECT_PATH, SEED_ISSUES_PATH, l
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DEPENDENCY_PATTERNS = (
+    re.compile(r"\bdepends_on=#(\d+)\b", re.IGNORECASE),
+    re.compile(r"\bdepends(?:\s+on)?\s*[:=]\s*#(\d+)\b", re.IGNORECASE),
+    re.compile(r"\bblocked(?:\s+by)?\s*[:=]\s*#(\d+)\b", re.IGNORECASE),
+)
+AGENT_EVENT_PATTERN = re.compile(r"<!--\s*dxt-agent-event:v1\s+(.*?)-->", re.IGNORECASE | re.DOTALL)
+AGENT_EVENT_ATTR_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*)=([^\s>]+)")
+LOCAL_PATH_PATTERNS = (
+    re.compile("/home/" + "sabino"),
+    re.compile("/media/" + "sabino"),
+    re.compile("SABINO" + "_EXT4"),
+)
 
 
 def gh(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -351,7 +364,21 @@ def project_items(args: argparse.Namespace) -> int:
         return 1
     number, project_id = project_ref
 
-    issue_result = gh(["issue", "list", "--repo", repo, "--state", "open", "--limit", str(args.limit), "--json", "number,title,url,labels"], check=False)
+    issue_result = gh(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(args.limit),
+            "--json",
+            "number,title,url,labels,body,comments",
+        ],
+        check=False,
+    )
     if issue_result.returncode != 0:
         print(issue_result.stderr, file=sys.stderr)
         return issue_result.returncode
@@ -389,9 +416,10 @@ def project_items(args: argparse.Namespace) -> int:
         print(field_result.stderr, file=sys.stderr)
         return field_result.returncode
     fields = json.loads(field_result.stdout).get("fields", [])
-    field_options = {
+    project_fields = {
         field["name"]: {
             "id": field["id"],
+            "type": field.get("type"),
             "options": {option["name"]: option["id"] for option in field.get("options", [])},
         }
         for field in fields
@@ -406,46 +434,102 @@ def project_items(args: argparse.Namespace) -> int:
         if item is None:
             if args.dry_run:
                 print(f"would add issue #{issue['number']} to project")
+                report_project_field_drift(project_id, None, project_fields, issue, dry_run=True)
                 continue
             print(f"adding issue #{issue['number']} to project")
             added = gh(["project", "item-add", number, "--owner", owner, "--url", issue["url"], "--format", "json"])
             item = json.loads(added.stdout)
         else:
             print(f"exists in project: #{issue['number']}")
-        if not args.dry_run and not set_project_fields(project_id, item["id"], field_options, labels_for_issue):
+        if not report_project_field_drift(project_id, item, project_fields, issue, dry_run=args.dry_run):
             return 1
     return 0
 
 
-def set_project_fields(project_id: str, item_id: str, fields: dict[str, dict[str, object]], labels_for_issue: set[str]) -> bool:
-    values = {
-        "Agent Status": status_value(labels_for_issue),
-        "Agent Role": role_value(labels_for_issue),
-        "Track": track_value(labels_for_issue),
-        "Pattern": pattern_value(labels_for_issue),
-        "Validation": validation_value(labels_for_issue),
-        "Source Grounding": source_grounding_value(labels_for_issue),
-        "PLAN Update": plan_update_value(labels_for_issue),
-    }
+def report_project_field_drift(
+    project_id: str,
+    item: dict[str, object] | None,
+    fields: dict[str, dict[str, object]],
+    issue: dict[str, object],
+    *,
+    dry_run: bool,
+) -> bool:
+    item_id = str(item["id"]) if item is not None and "id" in item else ""
+    values, warnings = desired_project_values(issue)
+    issue_number = issue.get("number", "?")
+    for warning in warnings:
+        print(f"project field skipped for issue #{issue_number}: {warning}")
+
+    drift_found = False
     for field_name, option_name in values.items():
         if option_name is None:
             continue
         field = fields.get(field_name)
         if not field:
-            print(f"missing project field: {field_name}", file=sys.stderr)
+            message = f"missing project field: {field_name}"
+            if dry_run:
+                print(f"would need field for issue #{issue_number}: {field_name}")
+                drift_found = True
+                continue
+            print(message, file=sys.stderr)
             return False
-        if "options" not in field:
-            print(f"project field has no options: {field_name}", file=sys.stderr)
+
+        desired = str(option_name)
+        current = project_item_field_value(item or {}, field_name)
+        if current == desired:
+            continue
+
+        drift_found = True
+        current_display = current if current else "<empty>"
+        desired_display = desired if desired else "<empty>"
+        if dry_run:
+            print(f"field drift issue #{issue_number}: {field_name}: {current_display} -> {desired_display}")
+            continue
+
+        if not set_project_field(project_id, item_id, field_name, field, desired):
             return False
-        options = field["options"]
+        print(f"updated issue #{issue_number}: {field_name} -> {desired_display}")
+
+    if dry_run and item is not None and not drift_found:
+        print(f"project fields match: issue #{issue_number}")
+    return True
+
+
+def set_project_field(
+    project_id: str,
+    item_id: str,
+    field_name: str,
+    field: dict[str, object],
+    desired: str,
+) -> bool:
+    field_type = field.get("type")
+    if field_type == "ProjectV2SingleSelectField":
+        options = field.get("options")
         if not isinstance(options, dict):
             print(f"project field options are invalid: {field_name}", file=sys.stderr)
             return False
-        option_id = options.get(option_name)
+        option_id = options.get(desired)
         if not option_id:
-            print(f"missing project option: {field_name}={option_name}", file=sys.stderr)
+            print(f"missing project option: {field_name}={desired}", file=sys.stderr)
             return False
-        gh([
+        gh(
+            [
+                "project",
+                "item-edit",
+                "--id",
+                item_id,
+                "--project-id",
+                project_id,
+                "--field-id",
+                str(field["id"]),
+                "--single-select-option-id",
+                str(option_id),
+            ]
+        )
+        return True
+
+    if field_type == "ProjectV2Field":
+        cmd = [
             "project",
             "item-edit",
             "--id",
@@ -454,13 +538,65 @@ def set_project_fields(project_id: str, item_id: str, fields: dict[str, dict[str
             project_id,
             "--field-id",
             str(field["id"]),
-            "--single-select-option-id",
-            str(option_id),
-        ])
-    return True
+        ]
+        if desired:
+            cmd.extend(["--text", desired])
+        else:
+            cmd.append("--clear")
+        gh(cmd)
+        return True
+
+    print(f"unsupported project field type for {field_name}: {field_type}", file=sys.stderr)
+    return False
 
 
-def status_value(labels_for_issue: set[str]) -> str:
+def desired_project_values(issue: dict[str, object]) -> tuple[dict[str, str | None], list[str]]:
+    labels_for_issue = label_names(issue.get("labels"))
+    events = issue_event_attributes(issue)
+    warnings: list[str] = []
+    values = {
+        "Agent Status": status_value(labels_for_issue, latest_event_value(events, "status")),
+        "Agent Role": role_value(labels_for_issue, latest_event_value(events, "role"), warnings),
+        "Track": track_value(labels_for_issue),
+        "Pattern": pattern_value(labels_for_issue),
+        "Validation": validation_value(labels_for_issue),
+        "Source Grounding": source_grounding_value(labels_for_issue),
+        "PLAN Update": plan_update_value(labels_for_issue),
+        "Readiness": readiness_value(labels_for_issue, latest_event_value(events, "status")),
+        "Branch": branch_value(events, warnings),
+        "Dependencies": dependency_value(issue),
+    }
+    return values, warnings
+
+
+def label_names(value: object) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    names: set[str] = set()
+    for item in value:
+        if isinstance(item, str):
+            names.add(item)
+        elif isinstance(item, dict) and isinstance(item.get("name"), str):
+            names.add(item["name"])
+    return names
+
+
+def status_value(labels_for_issue: set[str], event_status: str | None = None) -> str:
+    event_map = {
+        "blocked": "Blocked",
+        "unblocked": "Ready",
+        "ready": "Ready",
+        "claimed": "Claimed",
+        "in_worktree": "In Worktree",
+        "in-worktree": "In Worktree",
+        "validated": "Local Validation",
+        "ci": "CI Running",
+        "ci-red": "CI Red",
+        "review": "Needs Review",
+        "merged": "Merged",
+    }
+    if event_status in event_map:
+        return event_map[event_status]
     if "status:blocked" in labels_for_issue:
         return "Blocked"
     if "status:review" in labels_for_issue:
@@ -478,21 +614,46 @@ def status_value(labels_for_issue: set[str]) -> str:
     return "Intake"
 
 
-def role_value(labels_for_issue: set[str]) -> str | None:
+def role_value(labels_for_issue: set[str], event_role: str | None = None, warnings: list[str] | None = None) -> str | None:
     role_map = {
         "role:pm": "product manager",
         "role:supervisor": "supervisor",
+        "role:triager": "triager",
         "role:mapper": "mapper",
         "role:researcher": "researcher",
+        "role:architect": "architect",
         "role:worker": "worker",
+        "role:qa": "qa",
         "role:parity": "artifact reviewer",
         "role:auditor": "auditor",
         "role:convergence": "artifact reviewer",
         "role:reflection": "reflection",
     }
-    for label, value in role_map.items():
-        if label in labels_for_issue:
-            return value
+    agent_role_map = {
+        "dxt_product_manager": "product manager",
+        "dxt_supervisor_integrator": "supervisor",
+        "dxt_issue_triager": "triager",
+        "dxt_code_mapper": "mapper",
+        "dxt_dbt_reference_researcher": "researcher",
+        "dxt_zig_runtime_architect": "architect",
+        "dxt_zig_slice_worker": "worker",
+        "dxt_qa_fixture_engineer": "qa",
+        "dxt_artifact_parity_reviewer": "artifact reviewer",
+        "dxt_convergence_reviewer": "artifact reviewer",
+        "dxt_runtime_boundary_auditor": "auditor",
+        "dxt_reflection_reviewer": "reflection",
+        "dxt_docs_release_curator": "docs release",
+    }
+    if event_role in agent_role_map:
+        return agent_role_map[event_role]
+    if event_role in set(role_map.values()):
+        return event_role
+    candidates = {value for label, value in role_map.items() if label in labels_for_issue}
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if len(candidates) > 1 and warnings is not None:
+        warnings.append(f"Agent Role has multiple role labels: {', '.join(sorted(candidates))}")
+        return None
     if "area:compiler-jinja" in labels_for_issue or "area:selector" in labels_for_issue or "area:runner" in labels_for_issue:
         return "worker"
     if "area:release" in labels_for_issue or "area:docs" in labels_for_issue:
@@ -559,6 +720,118 @@ def plan_update_value(labels_for_issue: set[str]) -> str:
     if "type:research" in labels_for_issue:
         return "required"
     return "not needed"
+
+
+def readiness_value(labels_for_issue: set[str], event_status: str | None = None) -> str:
+    if "status:blocked" in labels_for_issue or event_status == "blocked":
+        return "blocked"
+    if "status:review" in labels_for_issue or event_status == "review":
+        return "review"
+    if "status:claimed" in labels_for_issue or event_status == "claimed":
+        return "claimed"
+    if event_status in {"in_worktree", "in-worktree"}:
+        return "in worktree"
+    if event_status == "merged":
+        return "merged"
+    if "needs-reference-map" in labels_for_issue:
+        return "needs reference map"
+    if "needs-slice-plan" in labels_for_issue:
+        return "needs slice plan"
+    if "ready-for-agent" in labels_for_issue or "status:ready" in labels_for_issue or event_status in {"ready", "unblocked"}:
+        return "ready"
+    return "unknown"
+
+
+def branch_value(events: list[dict[str, str]], warnings: list[str]) -> str | None:
+    branch = latest_event_value(events, "branch")
+    if branch is None:
+        return None
+    if not public_safe_inline_text(branch):
+        warnings.append("Branch event value is not public-safe inline text")
+        return None
+    return branch
+
+
+def dependency_value(issue: dict[str, object]) -> str:
+    numbers = issue_dependency_numbers(issue)
+    return " ".join(f"depends_on=#{number}" for number in sorted(numbers))
+
+
+def issue_event_attributes(issue: dict[str, object]) -> list[dict[str, str]]:
+    texts = [issue.get("body") or ""]
+    comments = issue.get("comments") or []
+    if isinstance(comments, list):
+        for comment in comments:
+            if isinstance(comment, dict):
+                texts.append(comment.get("body") or "")
+    events: list[dict[str, str]] = []
+    for text in texts:
+        if not isinstance(text, str):
+            continue
+        for match in AGENT_EVENT_PATTERN.finditer(text):
+            attrs = {
+                attr_match.group(1): attr_match.group(2)
+                for attr_match in AGENT_EVENT_ATTR_PATTERN.finditer(match.group(1))
+            }
+            if attrs:
+                events.append(attrs)
+    return events
+
+
+def latest_event_value(events: list[dict[str, str]], key: str) -> str | None:
+    for event in reversed(events):
+        value = event.get(key)
+        if value:
+            return value
+    return None
+
+
+def dependency_numbers_from_text(text: str) -> set[int]:
+    numbers: set[int] = set()
+    for pattern in DEPENDENCY_PATTERNS:
+        for match in pattern.finditer(text):
+            numbers.add(int(match.group(1)))
+    return numbers
+
+
+def issue_dependency_numbers(issue: dict[str, object]) -> set[int]:
+    numbers: set[int] = set()
+    body = issue.get("body")
+    if isinstance(body, str):
+        numbers.update(dependency_numbers_from_text(body))
+    comments = issue.get("comments") or []
+    if isinstance(comments, list):
+        for comment in comments:
+            if isinstance(comment, dict) and isinstance(comment.get("body"), str):
+                numbers.update(dependency_numbers_from_text(comment["body"]))
+    return numbers
+
+
+def project_item_field_value(item: dict[str, object], field_name: str) -> str:
+    if not item:
+        return ""
+    candidate_keys = [field_name, field_name[:1].lower() + field_name[1:]]
+    for key in candidate_keys:
+        value = item.get(key)
+        if isinstance(value, str):
+            return value
+    normalized_field = normalize_project_key(field_name)
+    for key, value in item.items():
+        if normalize_project_key(key) == normalized_field and isinstance(value, str):
+            return value
+    return ""
+
+
+def normalize_project_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+
+def public_safe_inline_text(value: str) -> bool:
+    if "\n" in value or "\r" in value:
+        return False
+    if value.startswith("/") or value.startswith("~"):
+        return False
+    return not any(pattern.search(value) for pattern in LOCAL_PATH_PATTERNS)
 
 
 def validate(_: argparse.Namespace) -> int:

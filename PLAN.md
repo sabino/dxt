@@ -1348,7 +1348,10 @@ Exit criteria:
   project-scoped `.codex/` changes. The product-manager prompt and docs now
   require roadmap-gap issue creation when the queue is empty or stale, define
   the PM-created issue contract, and expose board/roadmap context in dry-run
-  output. Creating/updating the live GitHub Project requires GitHub CLI project
+  output. Project item sync can dry-run or apply unambiguous field
+  reconciliation from labels and public `dxt-agent-event` comments for role,
+  status, validation, source grounding, readiness, branch, and dependency
+  fields. Creating/updating the live GitHub Project requires GitHub CLI project
   scopes.
 - Multi-agent development now has a dedicated worktree workflow under
   `docs/MULTI_AGENT_WORKFLOW.md`, with project-scoped Codex agent roles under

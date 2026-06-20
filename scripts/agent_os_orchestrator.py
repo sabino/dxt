@@ -706,19 +706,19 @@ def setup(args: argparse.Namespace) -> int:
     from github_agent_os import labels, seed_issues, project, project_items
 
     if args.apply_labels:
-        if labels(argparse.Namespace(repo=repo, dry_run=False, check=False, apply=True)) != 0:
+        if labels(argparse.Namespace(repo=repo, dry_run=args.dry_run, check=False, apply=not args.dry_run)) != 0:
             return 1
     else:
         print("labels: skipped; use --apply-labels")
 
     if args.seed_issues:
-        if seed_issues(argparse.Namespace(repo=repo, dry_run=False, apply=True)) != 0:
+        if seed_issues(argparse.Namespace(repo=repo, dry_run=args.dry_run, apply=not args.dry_run)) != 0:
             return 1
     else:
         print("seed issues: skipped; use --seed-issues")
 
     if args.apply_project:
-        if project(argparse.Namespace(owner=args.owner, repo=repo, dry_run=False, apply=True)) != 0:
+        if project(argparse.Namespace(owner=args.owner, repo=repo, dry_run=args.dry_run, apply=not args.dry_run)) != 0:
             return 1
     else:
         print("project: skipped; use --apply-project after `gh auth refresh -s read:project -s project`")
@@ -728,8 +728,8 @@ def setup(args: argparse.Namespace) -> int:
             argparse.Namespace(
                 owner=args.owner,
                 repo=repo,
-                dry_run=False,
-                apply=True,
+                dry_run=args.dry_run,
+                apply=not args.dry_run,
                 limit=args.item_limit,
                 project_item_limit=args.project_item_limit,
             )
@@ -1204,6 +1204,7 @@ def main() -> int:
     setup_parser.add_argument("--seed-issues", action="store_true")
     setup_parser.add_argument("--apply-project", action="store_true")
     setup_parser.add_argument("--sync-project-items", action="store_true")
+    setup_parser.add_argument("--dry-run", action="store_true")
     setup_parser.add_argument("--item-limit", type=int, default=100)
     setup_parser.add_argument("--project-item-limit", type=int, default=1000)
     setup_parser.set_defaults(func=setup)

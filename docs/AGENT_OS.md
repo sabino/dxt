@@ -197,7 +197,7 @@ launching implementation workers.
 | Merge of green PRs | Real. `merge-ready` queues non-draft PRs whose checks are green, merge state is clean, dependencies are closed, and file sets do not overlap an earlier queued PR. |
 | Multi-stage PM/research/mapper/worker/reviewer pipeline | Partially real through roles and labels; orchestration is still manual/prompt-driven. |
 | Principal conflict graph and merge queue | Initial implementation exists in the local orchestrator. It reads issue dependencies, active workers, worktrees, open PR files, merge state, and CI checks before launch or merge. |
-| Automatic Project field reconciliation during every loop | Partially real. Setup can sync items; live per-issue field updates are still PM/supervisor work. |
+| Automatic Project field reconciliation during every loop | Partially real. Setup can sync items and reconcile unambiguous labels/comments into role, status, validation, source grounding, readiness, branch, and dependency fields with dry-run drift reporting; continuously running every loop remains PM/supervisor work. |
 | Stale worktree and stale claim cleanup | Partially real through `status` and `stop`; automated cleanup needs a follow-up slice. |
 
 ## Codex Pull Plug

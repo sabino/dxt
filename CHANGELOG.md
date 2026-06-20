@@ -18,6 +18,9 @@ compatibility.
   bootstrap scripts, a local autonomous Codex worker orchestrator, project-local
   Codex subagent configuration, and docs for supervisor, hierarchical, network,
   and reflection patterns.
+- Agent OS Project item reconciliation for unambiguous labels and
+  `dxt-agent-event` comments, including dry-run field drift reporting plus
+  public-safe readiness, branch, and dependency fields.
 - Codex pull-plug restart helpers for ignored local handoff state, optional
   detached `codex exec` relaunches, and a two-phase tmux/Hermes watchdog path
   that can resume Codex in the same visible terminal pane only after the active

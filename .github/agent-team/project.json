@@ -38,7 +38,16 @@
       "options": ["missing", "linked", "not applicable"]
     },
     {
+      "name": "Readiness",
+      "type": "SINGLE_SELECT",
+      "options": ["unknown", "blocked", "needs reference map", "needs slice plan", "ready", "claimed", "in worktree", "review", "merged"]
+    },
+    {
       "name": "Branch",
+      "type": "TEXT"
+    },
+    {
+      "name": "Dependencies",
       "type": "TEXT"
     }
   ]
