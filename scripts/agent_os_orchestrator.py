@@ -599,11 +599,15 @@ Read AGENTS.md, PLAN.md, docs/AGENT_OS.md, docs/AGENT_PROTOCOLS.md, and .codex/a
 Mission:
 - Keep the GitHub issue board moving toward the dxt goal: a Zig dbt-core-compatible drop-in replacement.
 - Prioritize dbt Core compatibility slices over speculative expansion.
-- Create or update actionable GitHub issues when the open board has no next work or when roadmap gaps are obvious from PLAN.md/docs. Do not wait for a human to pre-create every slice.
-- Each new or updated issue must include acceptance criteria, role/priority/readiness labels, expected validation, dependencies or sequencing notes, and stop conditions.
+- Treat the board as empty or stale when the snapshot has no open issues, no ready unclaimed issues outside blocked/claimed/review labels, or only orchestration work while PLAN.md/docs name immediate dbt Core compatibility gaps.
+- Create or update actionable GitHub issues for those roadmap gaps. Do not wait for a human to pre-create every slice.
+- Each PM-created issue must include role, priority, readiness, risk, validation, dependencies or sequencing notes, acceptance criteria, and stop conditions.
+- Use these sections for new issue bodies when possible: Objective, Current Reality, Role and Labels, Priority, Readiness, Risk, Dependencies / Sequencing, Acceptance Criteria, Validation, Stop Condition.
 - Identify ready work, blocked work, stale claims, broad issues that need splitting, missing labels, and missing validation gates.
 - Use concise public-safe GitHub issue comments and label changes when they clearly improve routing.
 - Do not edit local files and do not implement product behavior.
+- Stop before launching implementation workers; recommend the next supervisor/orchestrator command instead.
+- Never publish local absolute paths, private hostnames or mounts, secrets, tokens, raw command logs, raw Codex/session transcripts, or `.agent/runs/` contents in issues or comments.
 
 {project_note}
 
@@ -669,7 +673,37 @@ def launch_product_manager(
     if dry_run:
         print(f"would launch product manager for {repo}")
         print(f"project scopes usable: {can_apply_project}")
-        print("  " + " ".join(cmd[:13]) + " <prompt>")
+        print(
+            "board snapshot: "
+            f"issues={len(snapshot.get('issues') or [])} "
+            f"pull_requests={len(snapshot.get('pull_requests') or [])}"
+        )
+        if snapshot.get("issue_error"):
+            print("issue snapshot error: present")
+        if snapshot.get("pr_error"):
+            print("pull request snapshot error: present")
+        print(
+            "prompt context files: AGENTS.md, PLAN.md, docs/AGENT_OS.md, "
+            "docs/AGENT_PROTOCOLS.md, .codex/agents/dxt_product_manager.toml"
+        )
+        print(
+            "backlog synthesis rule: create roadmap-gap issues when the board "
+            "is empty, stale, or missing PLAN.md/dbt compatibility slices"
+        )
+        print(
+            "PM issue contract: role, priority, readiness, risk, validation, "
+            "dependencies/sequencing, acceptance criteria, stop conditions"
+        )
+        print(
+            "public-safety guard: no local paths, secrets, raw logs, transcripts, "
+            "or implementation worker launches"
+        )
+        print(
+            "  "
+            f"codex -p {profile} -m {model} -C <repo-root> "
+            f"--ask-for-approval never --sandbox {sandbox} exec "
+            "--output-last-message <ignored-last-message> <prompt>"
+        )
         return
 
     log_handle = log_path.open("a", encoding="utf-8")

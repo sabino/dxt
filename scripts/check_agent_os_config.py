@@ -12,6 +12,8 @@ CONFIG_PATH = ROOT / ".codex" / "config.toml"
 LABELS_PATH = ROOT / ".github" / "agent-team" / "labels.json"
 PROJECT_PATH = ROOT / ".github" / "agent-team" / "project.json"
 ORCHESTRATOR_PATH = ROOT / ".github" / "agent-team" / "orchestrator.json"
+ORCHESTRATOR_SCRIPT = ROOT / "scripts" / "agent_os_orchestrator.py"
+PRODUCT_MANAGER_ROLE_PATH = ROOT / ".codex" / "agents" / "dxt_product_manager.toml"
 SEED_ISSUES_PATH = ROOT / ".github" / "agent-team" / "seed_issues.json"
 ISSUE_TEMPLATE_DIR = ROOT / ".github" / "ISSUE_TEMPLATE"
 
@@ -52,6 +54,28 @@ LOCAL_PATH_PATTERNS = [
     re.compile("/media/" + "sabino"),
     re.compile("SABINO" + "_EXT4"),
 ]
+
+PM_CONTRACT_FRAGMENTS = {
+    ORCHESTRATOR_SCRIPT: [
+        "Treat the board as empty or stale",
+        "Create or update actionable GitHub issues for those roadmap gaps",
+        "role, priority, readiness, risk, validation, dependencies or sequencing notes, acceptance criteria, and stop conditions",
+        "Board snapshot:",
+        "prompt context files:",
+        "public-safety guard:",
+    ],
+    ROOT / "docs" / "AGENT_OS.md": [
+        "PM Backlog Synthesis Contract",
+        "Treat the board as empty or stale",
+        "PM-created issue must include role, priority, readiness, risk, validation, dependencies or sequencing notes, acceptance criteria, and stop conditions",
+        "local absolute paths, private hostnames or mounts, secrets, tokens, raw command logs, raw Codex/session transcripts",
+    ],
+    PRODUCT_MANAGER_ROLE_PATH: [
+        "creating or updating issues when the board is empty, stale, or missing ready PLAN.md compatibility work",
+        "role, priority, readiness, risk, validation, dependencies or sequencing notes, acceptance criteria, and stop conditions",
+        "Do not launch implementation workers from the PM pass",
+    ],
+}
 
 
 def load_json(path: Path) -> object:
@@ -321,6 +345,20 @@ def validate_docs(findings: list[str]) -> None:
             check_no_local_paths(path, findings)
 
 
+def validate_product_manager_contract(findings: list[str]) -> None:
+    for path, fragments in PM_CONTRACT_FRAGMENTS.items():
+        if not path.exists():
+            findings.append(f"missing {path.relative_to(ROOT)}")
+            continue
+        text = re.sub(r"\s+", " ", path.read_text(encoding="utf-8"))
+        for fragment in fragments:
+            normalized_fragment = re.sub(r"\s+", " ", fragment)
+            if normalized_fragment not in text:
+                findings.append(
+                    f"{path.relative_to(ROOT)} missing PM backlog synthesis contract fragment: {fragment!r}"
+                )
+
+
 def validate_config() -> list[str]:
     findings: list[str] = []
     label_names = validate_labels(findings)
@@ -331,6 +369,7 @@ def validate_config() -> list[str]:
     validate_agents(findings)
     validate_codex_config(findings)
     validate_docs(findings)
+    validate_product_manager_contract(findings)
     return findings
 
 

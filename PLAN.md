@@ -1340,8 +1340,11 @@ Exit criteria:
   and merge green PRs when explicitly run with merge enabled. The local
   supervision layer includes a detached `codex exec` pull-plug handoff and a
   two-phase tmux/Hermes watchdog path for exact-terminal Codex restarts after
-  project-scoped `.codex/` changes. Creating/updating the live GitHub Project
-  requires GitHub CLI project scopes.
+  project-scoped `.codex/` changes. The product-manager prompt and docs now
+  require roadmap-gap issue creation when the queue is empty or stale, define
+  the PM-created issue contract, and expose board/roadmap context in dry-run
+  output. Creating/updating the live GitHub Project requires GitHub CLI project
+  scopes.
 - Multi-agent development now has a dedicated worktree workflow under
   `docs/MULTI_AGENT_WORKFLOW.md`, with project-scoped Codex agent roles under
   `.codex/agents/` and helper scripts for starting, finishing, and pruning
