@@ -217,6 +217,10 @@ After merging:
 - Delete the remote branch if appropriate.
 - Remove or prune stale worktrees only after checking they have no uncommitted
   work.
+- For Agent OS worktrees, start with
+  `python scripts/agent_os_orchestrator.py cleanup --repo sabino/dxt`; it is a
+  dry run by default and requires `--apply` before removing clean merged
+  worktrees or stale `status:claimed` labels.
 
 ## Stop Conditions
 

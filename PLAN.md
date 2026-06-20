@@ -1351,8 +1351,10 @@ Exit criteria:
   output. Project item sync can dry-run or apply unambiguous field
   reconciliation from labels and public `dxt-agent-event` comments for role,
   status, validation, source grounding, readiness, branch, and dependency
-  fields. Creating/updating the live GitHub Project requires GitHub CLI project
-  scopes.
+  fields. Agent OS cleanup now has a dry-run-first command that reports exited
+  stale runs, clean merged agent worktree removal candidates, and stale
+  `status:claimed` labels before any `--apply` action. Creating/updating the
+  live GitHub Project requires GitHub CLI project scopes.
 - Multi-agent development now has a dedicated worktree workflow under
   `docs/MULTI_AGENT_WORKFLOW.md`, with project-scoped Codex agent roles under
   `.codex/agents/` and helper scripts for starting, finishing, and pruning
