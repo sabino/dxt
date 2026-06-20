@@ -24,7 +24,9 @@ python scripts/github_agent_os.py project-items --apply --owner sabino --repo sa
 The scripts are repo-scoped: `--owner` must match the owner in `--repo` for
 Project item sync. `project --apply` reconciles missing single-select options on
 existing fields, including the custom `Agent Status` field used instead of
-GitHub's built-in `Status` field.
+GitHub's built-in `Status` field. `project-items --dry-run` compares current
+Project item values with values derived from public-safe labels and
+`dxt-agent-event` issue comments before any write.
 
 ## Fields
 
@@ -37,7 +39,30 @@ GitHub's built-in `Status` field.
 | Validation | single select | Strongest currently required evidence. |
 | PLAN Update | single select | Whether `PLAN.md` must change. |
 | Source Grounding | single select | Whether upstream references are linked. |
+| Readiness | single select | Queue readiness derived from readiness/status labels and event comments. |
 | Branch | text | Branch name only, never local path. |
+| Dependencies | text | Issue dependencies as `depends_on=#123` tokens from issue bodies or comments. |
+
+## Field Reconciliation
+
+`project-items --apply` updates only fields with unambiguous public sources:
+
+| Field | Source |
+| --- | --- |
+| Agent Status | `status:*`, readiness labels, or known `dxt-agent-event` statuses. |
+| Agent Role | Latest `dxt-agent-event` role, or exactly one role label. Multiple role labels are skipped unless an event resolves them. |
+| Track | Area/type labels with a single mapped track. |
+| Pattern | `pattern:*` labels. |
+| Validation | `gate:*`, `type:safety`, `risk:runtime-boundary`, or `type:ci` labels. |
+| Source Grounding | `needs-reference-map`, `type:research`, or `type:compat` labels. |
+| PLAN Update | `needs-slice-plan` or `type:research` labels. |
+| Readiness | Blocked/review/claimed/ready labels plus known event statuses. |
+| Branch | Latest public-safe `branch=` value in a `dxt-agent-event` comment. |
+| Dependencies | `depends_on=#123`, `depends on: #123`, or `blocked by: #123` in the issue body or comments. |
+
+If a value cannot be derived without ambiguity, the script reports the skipped
+field and leaves it unchanged. Text fields are restricted to public-safe inline
+values; local paths are not written.
 
 ## Views
 
@@ -67,6 +92,7 @@ python scripts/github_agent_os.py labels --apply
 python scripts/github_agent_os.py seed-issues --dry-run
 python scripts/github_agent_os.py seed-issues --apply
 python scripts/github_agent_os.py project-items --dry-run --owner sabino --repo sabino/dxt
+python scripts/agent_os_orchestrator.py setup --repo sabino/dxt --apply-project --sync-project-items --dry-run
 ```
 
 Seed issues are starter backlog entries only. They exist so the autonomous

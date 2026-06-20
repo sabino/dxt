@@ -22,6 +22,10 @@ Use these headings when a comment changes coordination state.
 <!-- dxt-agent-event:v1 status=claimed role= branch= -->
 ```
 
+Use `depends_on=#123` in the hidden event comment when the issue or PR must
+wait for another issue. Plain text forms `depends on: #123` and `blocked by:
+#123` are also recognized for Project dependency summaries and launch blocking.
+
 ### Reference Map
 
 ```md
