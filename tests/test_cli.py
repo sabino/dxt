@@ -1819,6 +1819,71 @@ models:
     )
 
 
+def write_generic_test_config_project(project: Path, severity: str = "warn", error_if: str = "> 0", where: str = "status = 'checked'") -> None:
+    (project / "models").mkdir(parents=True, exist_ok=True)
+    (project / "seeds").mkdir(exist_ok=True)
+    (project / "dbt_project.yml").write_text(
+        """name: generic_test_config_tests
+version: "1.0"
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text(
+        """{{ config(materialized='table') }}
+select 1 as customer_id, 'checked' as status
+union all select null as customer_id, 'checked' as status
+union all select null as customer_id, 'checked' as status
+union all select null as customer_id, 'ignored' as status
+"""
+    )
+    (project / "seeds" / "raw_customers.csv").write_text("customer_id,status\n1,checked\n,checked\n")
+    (project / "models" / "schema.yml").write_text(
+        f"""version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests:
+          - not_null:
+              config:
+                where: "{where}"
+                limit: 1
+                severity: {severity}
+                warn_if: "> 0"
+                error_if: "{error_if}"
+seeds:
+  - name: raw_customers
+    columns:
+      - name: customer_id
+        tests:
+          - not_null:
+              config:
+                where: "status = 'checked'"
+                limit: 2
+                severity: error
+                warn_if: "> 1"
+                error_if: "> 2"
+sources:
+  - name: raw
+    schema: main
+    tables:
+      - name: orders
+        columns:
+          - name: customer_id
+            tests:
+              - not_null:
+                  config:
+                    where: "status = 'checked'"
+                    limit: 3
+                    severity: warn
+                    warn_if: "> 0"
+                    error_if: "> 10"
+"""
+    )
+
+
 def write_run_failure_continuation_project(project: Path) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -2365,6 +2430,115 @@ def test_test_command_executes_selected_duckdb_generic_tests(tmp_path: Path):
     assert [item["failures"] for item in run_results["results"]] == [0, 0]
     assert all(item["compiled"] is True for item in run_results["results"])
     assert all(item["relation_name"] is None for item in run_results["results"])
+
+
+def test_parse_emits_generic_test_config_for_model_seed_and_source_tests(tmp_path: Path):
+    project = tmp_path / "generic_test_config_parse"
+    write_generic_test_config_project(project)
+    target = tmp_path / "parse-target"
+
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+
+    manifest = json.loads((target / "manifest.json").read_text())
+    tests = {
+        node["unique_id"]: node
+        for node in manifest["nodes"].values()
+        if node["resource_type"] == "test" and node["test_metadata"]["name"] == "not_null"
+    }
+    assert sorted(tests) == [
+        "test.generic_test_config_tests.not_null_customers_customer_id.5c9bf9911d",
+        "test.generic_test_config_tests.not_null_raw_customers_customer_id.ad2454198a",
+        "test.generic_test_config_tests.source_not_null_raw_orders_customer_id.3962c6ab03",
+    ]
+
+    model_config = tests["test.generic_test_config_tests.not_null_customers_customer_id.5c9bf9911d"]["config"]
+    assert model_config["where"] == "status = 'checked'"
+    assert model_config["limit"] == 1
+    assert model_config["severity"] == "warn"
+    assert model_config["warn_if"] == "> 0"
+    assert model_config["error_if"] == "> 0"
+
+    seed_config = tests["test.generic_test_config_tests.not_null_raw_customers_customer_id.ad2454198a"]["config"]
+    assert seed_config["where"] == "status = 'checked'"
+    assert seed_config["limit"] == 2
+    assert seed_config["severity"] == "error"
+    assert seed_config["warn_if"] == "> 1"
+    assert seed_config["error_if"] == "> 2"
+
+    source_config = tests["test.generic_test_config_tests.source_not_null_raw_orders_customer_id.3962c6ab03"]["config"]
+    assert source_config["where"] == "status = 'checked'"
+    assert source_config["limit"] == 3
+    assert source_config["severity"] == "warn"
+    assert source_config["warn_if"] == "> 0"
+    assert source_config["error_if"] == "> 10"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for generic test config execution coverage")
+def test_generic_test_configs_drive_test_and_build_statuses(tmp_path: Path):
+    project = tmp_path / "generic_test_config_execution"
+    write_generic_test_config_project(project, severity="warn", error_if="> 0")
+    target = tmp_path / "test-target"
+
+    run_result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+
+    test_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "not_null_customers_customer_id"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test_result.returncode == 0, test_result.stderr
+    assert "Tested 1 test(s)" in test_result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    result = run_results["results"][0]
+    assert result["status"] == "warn"
+    assert result["failures"] == 1
+    assert result["message"] == "Got 1 result, configured to warn if > 0"
+    assert "from (select * from" in result["compiled_code"]
+    assert "status = 'checked'" in result["compiled_code"]
+    assert result["compiled_code"].endswith("limit 1")
+
+    write_generic_test_config_project(project, severity="error", error_if="> 0")
+    fail_target = tmp_path / "build-fail-target"
+    fail_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(fail_target), "--select", "customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert fail_result.returncode == 1
+    assert "1 test(s) failed with 1 failure row(s)" in fail_result.stdout
+    assert "one or more tests failed" in fail_result.stderr
+    fail_results = json.loads((fail_target / "run_results.json").read_text())
+    assert [item["status"] for item in fail_results["results"]] == ["success", "fail"]
+    assert fail_results["results"][1]["message"] == "Got 1 result, configured to fail if > 0"
+
+    write_generic_test_config_project(project, severity="error", error_if="> 0", where="status = 'missing'")
+    pass_target = tmp_path / "build-pass-target"
+    pass_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(pass_target), "--select", "customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert pass_result.returncode == 0, pass_result.stderr
+    pass_results = json.loads((pass_target / "run_results.json").read_text())
+    assert [item["status"] for item in pass_results["results"]] == ["success", "pass"]
+    assert pass_results["results"][1]["failures"] == 0
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")

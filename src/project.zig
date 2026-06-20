@@ -49,6 +49,7 @@ const parseInlineStringList = util.parseInlineStringList;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 const appendGenericTestDef = project_parse.appendGenericTestDef;
 const appendGenericTestDefClone = project_parse.appendGenericTestDefClone;
+const applyGenericTestConfigValue = project_parse.applyGenericTestConfigValue;
 const parseBool = project_parse.parseBool;
 const parseExposuresFromText = project_parse.parseExposuresFromText;
 const genericTestUniqueId = project_parse.genericTestUniqueId;
@@ -1209,12 +1210,18 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
         .generic => |test_node| try duckdb.executeGenericTest(runtime, db_path, graph, test_node),
         .singular => |test_node| try duckdb.executeSingularTest(runtime, db_path, graph, test_node),
     };
-    const failed = execution.failures != 0;
-    const message = if (failed) try formatTestFailureMessage(runtime.allocator, execution.failures) else null;
+    const classification = switch (test_ref) {
+        .generic => |test_node| try classifyGenericTestResult(execution.failures, test_node.config),
+        .singular => classifyDefaultTestResult(execution.failures),
+    };
+    const message = if (classification.message_kind) |kind|
+        try formatTestThresholdMessage(runtime.allocator, execution.failures, kind, classification.condition orelse "!= 0")
+    else
+        null;
     switch (test_ref) {
         .generic => |test_node| try executed.append(runtime.allocator, .{
             .test_node = test_node,
-            .status = if (failed) "fail" else "pass",
+            .status = classification.status,
             .message = message,
             .failures = execution.failures,
             .compiled_code = execution.compiled_code,
@@ -1222,7 +1229,7 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
         }),
         .singular => |test_node| try executed.append(runtime.allocator, .{
             .singular_test_node = test_node,
-            .status = if (failed) "fail" else "pass",
+            .status = classification.status,
             .message = message,
             .failures = execution.failures,
             .compiled_code = execution.compiled_code,
@@ -1230,9 +1237,57 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
         }),
     }
     return .{
-        .failed_tests = if (failed) 1 else 0,
-        .total_failures = if (failed) execution.failures else 0,
+        .failed_tests = if (classification.fails_command) 1 else 0,
+        .total_failures = if (classification.fails_command) execution.failures else 0,
     };
+}
+
+const TestResultClassification = struct {
+    status: []const u8,
+    fails_command: bool = false,
+    message_kind: ?[]const u8 = null,
+    condition: ?[]const u8 = null,
+};
+
+fn classifyDefaultTestResult(failures: u64) TestResultClassification {
+    if (failures == 0) return .{ .status = "pass" };
+    return .{ .status = "fail", .fails_command = true, .message_kind = "fail", .condition = "!= 0" };
+}
+
+fn classifyGenericTestResult(failures: u64, config: types.GenericTestConfig) !TestResultClassification {
+    if (std.ascii.eqlIgnoreCase(config.severity, "warn")) {
+        if (try evaluateTestThreshold(failures, config.warn_if)) {
+            return .{ .status = "warn", .message_kind = "warn", .condition = config.warn_if };
+        }
+        return .{ .status = "pass" };
+    }
+    if (!std.ascii.eqlIgnoreCase(config.severity, "error")) return error.UnsupportedTestExecution;
+    if (try evaluateTestThreshold(failures, config.error_if)) {
+        return .{ .status = "fail", .fails_command = true, .message_kind = "fail", .condition = config.error_if };
+    }
+    if (try evaluateTestThreshold(failures, config.warn_if)) {
+        return .{ .status = "warn", .message_kind = "warn", .condition = config.warn_if };
+    }
+    return .{ .status = "pass" };
+}
+
+fn evaluateTestThreshold(failures: u64, condition: []const u8) !bool {
+    const trimmed = std.mem.trim(u8, condition, " \t\r\n");
+    const operators = [_][]const u8{ ">=", "<=", "!=", "==", ">", "<", "=" };
+    for (operators) |operator| {
+        if (!std.mem.startsWith(u8, trimmed, operator)) continue;
+        const rhs = std.mem.trim(u8, trimmed[operator.len..], " \t\r\n");
+        if (rhs.len == 0) return error.UnsupportedTestExecution;
+        const threshold = std.fmt.parseUnsigned(u64, rhs, 10) catch return error.UnsupportedTestExecution;
+        if (std.mem.eql(u8, operator, ">=")) return failures >= threshold;
+        if (std.mem.eql(u8, operator, "<=")) return failures <= threshold;
+        if (std.mem.eql(u8, operator, "!=")) return failures != threshold;
+        if (std.mem.eql(u8, operator, "==")) return failures == threshold;
+        if (std.mem.eql(u8, operator, ">")) return failures > threshold;
+        if (std.mem.eql(u8, operator, "<")) return failures < threshold;
+        if (std.mem.eql(u8, operator, "=")) return failures == threshold;
+    }
+    return error.UnsupportedTestExecution;
 }
 
 fn dataTestDependenciesCompleted(test_ref: DataTestRef, completed_nodes: []const []const u8) bool {
@@ -1338,12 +1393,38 @@ fn executedContains(executed: []const *Node, unique_id: []const u8) bool {
     return false;
 }
 
-fn formatTestFailureMessage(allocator: std.mem.Allocator, failures: u64) ![]const u8 {
+fn formatTestThresholdMessage(allocator: std.mem.Allocator, failures: u64, kind: []const u8, condition: []const u8) ![]const u8 {
     return try std.fmt.allocPrint(
         allocator,
-        "Got {d} {s}, configured to fail if != 0",
-        .{ failures, if (failures == 1) "result" else "results" },
+        "Got {d} {s}, configured to {s} if {s}",
+        .{ failures, if (failures == 1) "result" else "results", kind, condition },
     );
+}
+
+test "classifyGenericTestResult follows severity and threshold config" {
+    const warn_config = types.GenericTestConfig{ .severity = "warn", .warn_if = "> 0", .error_if = "> 0" };
+    const warn_result = try classifyGenericTestResult(1, warn_config);
+    try std.testing.expectEqualStrings("warn", warn_result.status);
+    try std.testing.expect(!warn_result.fails_command);
+    try std.testing.expectEqualStrings("warn", warn_result.message_kind.?);
+
+    const fail_config = types.GenericTestConfig{ .severity = "ERROR", .warn_if = "> 0", .error_if = "> 1" };
+    const fail_result = try classifyGenericTestResult(2, fail_config);
+    try std.testing.expectEqualStrings("fail", fail_result.status);
+    try std.testing.expect(fail_result.fails_command);
+    try std.testing.expectEqualStrings("fail", fail_result.message_kind.?);
+
+    const downgraded_result = try classifyGenericTestResult(1, fail_config);
+    try std.testing.expectEqualStrings("warn", downgraded_result.status);
+    try std.testing.expect(!downgraded_result.fails_command);
+
+    const pass_result = try classifyGenericTestResult(0, fail_config);
+    try std.testing.expectEqualStrings("pass", pass_result.status);
+    try std.testing.expect(!pass_result.fails_command);
+
+    try std.testing.expect(try evaluateTestThreshold(3, ">= 3"));
+    try std.testing.expect(try evaluateTestThreshold(3, "= 3"));
+    try std.testing.expect(!try evaluateTestThreshold(3, "< 3"));
 }
 
 fn appendSourceFreshnessRuntimeError(allocator: std.mem.Allocator, results: *std.ArrayList(source_freshness.CheckResult), source: *const SourceDef, message: []const u8) !void {
@@ -2093,6 +2174,10 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                     if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
                     continue;
                 }
+                if (std.mem.eql(u8, kv.key, "config")) {
+                    if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                    continue;
+                }
 
                 const test_def = try currentGenericTestDef(graph, model_index, current_column, active_test_target, active_test_index.?);
                 if (std.mem.eql(u8, kv.key, "values")) {
@@ -2119,6 +2204,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                     test_def.relationship_field = try dupTrimmedScalar(allocator, kv.value);
                     continue;
                 }
+                if (try applyGenericTestConfigValue(allocator, test_def, kv.key, kv.value)) continue;
             }
 
             if (in_config and indent > config_indent) {
@@ -2371,6 +2457,7 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
         .accepted_values_quote = test_def.accepted_values_quote,
         .relationship_to = test_def.relationship_to,
         .relationship_field = test_def.relationship_field,
+        .config = test_def.config,
         .attached_node = node.unique_id,
     };
     errdefer deinitGenericTestNode(graph.allocator, &test_node);
@@ -2417,6 +2504,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .accepted_values_quote = test_def.accepted_values_quote,
         .relationship_to = test_def.relationship_to,
         .relationship_field = test_def.relationship_field,
+        .config = test_def.config,
     };
     const names = try synthesizeGenericTestNames(graph.allocator, source_test_def, source_target_name, effective_column_name);
     const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, source.package_name, names.full, test_def, source_model_kwarg, effective_column_name);
@@ -2442,6 +2530,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .accepted_values_quote = test_def.accepted_values_quote,
         .relationship_to = test_def.relationship_to,
         .relationship_field = test_def.relationship_field,
+        .config = test_def.config,
         .attached_node = null,
         .attached_source = .{ .source_name = source.source_name, .table_name = source.table_name },
         .attached_source_unique_id = source.unique_id,

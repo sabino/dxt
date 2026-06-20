@@ -155,7 +155,7 @@
     "test_config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "materialized", "severity", "fail_calc", "warn_if", "error_if", "schema", "tags", "meta"],
+      "required": ["enabled", "materialized", "severity", "fail_calc", "warn_if", "error_if", "schema", "where", "limit", "tags", "meta"],
       "properties": {
         "enabled": {"type": "boolean"},
         "materialized": {"type": "string"},
@@ -164,6 +164,8 @@
         "warn_if": {"type": "string"},
         "error_if": {"type": "string"},
         "schema": {"type": "string"},
+        "where": {"type": ["string", "null"]},
+        "limit": {"type": ["integer", "null"]},
         "tags": {"$ref": "#/$defs/unique_id_array"},
         "meta": {"type": "object"}
       }

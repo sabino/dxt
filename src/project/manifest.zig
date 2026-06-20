@@ -783,7 +783,25 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
         try writer.writeAll(",\"field\":");
         try json.string(writer, test_node.relationship_field);
     }
-    try writer.writeAll("},\"namespace\":null},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
+    try writer.writeAll("},\"namespace\":null},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":");
+    try json.string(writer, test_node.config.severity);
+    try writer.writeAll(",\"fail_calc\":\"count(*)\",\"warn_if\":");
+    try json.string(writer, test_node.config.warn_if);
+    try writer.writeAll(",\"error_if\":");
+    try json.string(writer, test_node.config.error_if);
+    try writer.writeAll(",\"schema\":\"dbt_test__audit\",\"where\":");
+    if (test_node.config.where) |where_sql| {
+        try json.string(writer, where_sql);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"limit\":");
+    if (test_node.config.limit) |limit| {
+        try writer.print("{d}", .{limit});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, test_node.depends_on.items);
@@ -818,7 +836,7 @@ fn writeSingularTestNode(writer: *Io.Writer, test_node: SingularTestNode) !void 
     try json.string(writer, test_node.raw_code);
     try writer.writeAll(",\"config\":{\"enabled\":");
     try writer.writeAll(if (test_node.enabled) "true" else "false");
-    try writer.writeAll(",\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
+    try writer.writeAll(",\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"where\":null,\"limit\":null,\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, test_node.depends_on.items);
@@ -1267,6 +1285,50 @@ test "manifest writer emits source relationship tests with source and ref deps" 
     try std.testing.expectEqualStrings("customer_id", kwargs.get("column_name").?.string);
     try std.testing.expectEqualStrings("ref('customers')", kwargs.get("to").?.string);
     try std.testing.expectEqualStrings("customer_id", kwargs.get("field").?.string);
+}
+
+test "manifest writer emits generic test config overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_customers_customer_id.abc",
+        .name = "not_null_customers_customer_id",
+        .alias = "not_null_customers_customer_id",
+        .path = "not_null_customers_customer_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "customer_id",
+        .attached_node = "model.demo.customers",
+        .config = .{
+            .where = "customer_id > 0",
+            .limit = 2,
+            .severity = "warn",
+            .warn_if = "> 0",
+            .error_if = "> 10",
+        },
+    });
+    try graph.tests.items[0].macro_depends_on.append(allocator, "macro.dbt.test_not_null");
+    try graph.tests.items[0].depends_on.append(allocator, "model.demo.customers");
+    try graph.tests.items[0].refs.append(allocator, .{ .package = null, .name = "customers" });
+
+    const rendered = try renderManifest(std.testing.allocator, &graph);
+    defer std.testing.allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const config = parsed.value.object.get("nodes").?.object.get("test.demo.not_null_customers_customer_id.abc").?.object.get("config").?.object;
+    try std.testing.expectEqualStrings("warn", config.get("severity").?.string);
+    try std.testing.expectEqualStrings("> 0", config.get("warn_if").?.string);
+    try std.testing.expectEqualStrings("> 10", config.get("error_if").?.string);
+    try std.testing.expectEqualStrings("customer_id > 0", config.get("where").?.string);
+    try std.testing.expectEqual(@as(i64, 2), config.get("limit").?.integer);
 }
 
 test "manifest writer emits source relationship tests with source target deps" {
