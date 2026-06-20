@@ -19,6 +19,14 @@ from check_agent_os_config import ORCHESTRATOR_PATH, load_json, validate_config
 ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / ".agent" / "runs" / "agent-os"
 STATE_PATH = STATE_DIR / "state.json"
+MERGEABLE_STATES = {"CLEAN", "HAS_HOOKS"}
+OVERLAP_LABEL_PREFIXES = ("area:", "artifact:", "command:")
+DEPENDENCY_PATTERNS = (
+    re.compile(r"\bdepends_on=#(\d+)\b", re.IGNORECASE),
+    re.compile(r"\bdepends(?:\s+on)?\s*[:=]\s*#(\d+)\b", re.IGNORECASE),
+    re.compile(r"\bblocked(?:\s+by)?\s*[:=]\s*#(\d+)\b", re.IGNORECASE),
+)
+BACKTICK_PATH_PATTERN = re.compile(r"`([^`]+)`")
 
 
 def no_color_env() -> dict[str, str]:
@@ -100,6 +108,89 @@ def save_state(state: dict[str, Any]) -> None:
 def issue_labels(issue: dict[str, Any]) -> set[str]:
     labels = issue.get("labels") or []
     return {label["name"] for label in labels if isinstance(label, dict) and isinstance(label.get("name"), str)}
+
+
+def label_names(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    names: set[str] = set()
+    for item in value:
+        if isinstance(item, str):
+            names.add(item)
+        elif isinstance(item, dict) and isinstance(item.get("name"), str):
+            names.add(item["name"])
+    return names
+
+
+def overlap_labels(labels: set[str]) -> set[str]:
+    return {label for label in labels if label.startswith(OVERLAP_LABEL_PREFIXES)}
+
+
+def dependency_numbers_from_text(text: str) -> set[int]:
+    numbers: set[int] = set()
+    for pattern in DEPENDENCY_PATTERNS:
+        for match in pattern.finditer(text):
+            numbers.add(int(match.group(1)))
+    return numbers
+
+
+def issue_dependency_numbers(issue: dict[str, Any]) -> set[int]:
+    numbers = dependency_numbers_from_text(issue.get("body") or "")
+    for comment in issue.get("comments") or []:
+        if isinstance(comment, dict):
+            numbers.update(dependency_numbers_from_text(comment.get("body") or ""))
+    numbers.discard(int(issue.get("number") or 0))
+    return numbers
+
+
+def pr_dependency_numbers(pr: dict[str, Any]) -> set[int]:
+    numbers = dependency_numbers_from_text(pr.get("body") or "")
+    for issue in pr.get("closingIssuesReferences") or []:
+        if isinstance(issue, dict) and issue.get("number"):
+            numbers.discard(int(issue["number"]))
+    numbers.discard(int(pr.get("number") or 0))
+    return numbers
+
+
+def issue_text_blocks(issue: dict[str, Any]) -> list[str]:
+    blocks = [issue.get("body") or ""]
+    for comment in issue.get("comments") or []:
+        if isinstance(comment, dict):
+            blocks.append(comment.get("body") or "")
+    return blocks
+
+
+def issue_expected_files(issue: dict[str, Any]) -> set[str]:
+    files: set[str] = set()
+    for block in issue_text_blocks(issue):
+        for line in block.splitlines():
+            lowered = line.lower()
+            if not any(marker in lowered for marker in ("files expected", "expected files", "owner files", "changed files")):
+                continue
+            matches = BACKTICK_PATH_PATTERN.findall(line)
+            if matches:
+                files.update(normalized_file_set(matches))
+                continue
+            _, _, value = line.partition(":")
+            files.update(normalized_file_set([item.strip() for item in value.split(",")]))
+    return files
+
+
+def normalized_file_set(paths: Any) -> set[str]:
+    files: set[str] = set()
+    if not isinstance(paths, list):
+        return files
+    for item in paths:
+        path: str | None = None
+        if isinstance(item, str):
+            path = item
+        elif isinstance(item, dict) and isinstance(item.get("path"), str):
+            path = item["path"]
+        if path:
+            normalized = path.strip().lstrip("./")
+            if normalized:
+                files.add(normalized)
+    return files
 
 
 def pick_role(config: dict[str, Any], labels: set[str]) -> dict[str, Any]:
@@ -200,6 +291,18 @@ def fetch_candidate_issues(repo: str, config: dict[str, Any], limit: int) -> lis
     return ready[:limit]
 
 
+def fetch_issue_states(repo: str, numbers: set[int]) -> dict[int, str]:
+    states: dict[int, str] = {}
+    for number in sorted(numbers):
+        result = gh(["issue", "view", str(number), "--repo", repo, "--json", "state"], check=False)
+        if result.returncode != 0:
+            states[number] = "UNKNOWN"
+            continue
+        payload = json.loads(result.stdout)
+        states[number] = str(payload.get("state") or "UNKNOWN")
+    return states
+
+
 def active_runs(state: dict[str, Any]) -> list[dict[str, Any]]:
     active: list[dict[str, Any]] = []
     for run in state.get("runs", []):
@@ -221,6 +324,68 @@ def issue_already_running(state: dict[str, Any], issue_number: int) -> bool:
         if int(run.get("issue_number", -1)) == issue_number:
             return True
     return False
+
+
+def parse_worktree_porcelain(output: str) -> list[dict[str, str]]:
+    worktrees: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in output.splitlines():
+        if not line:
+            if current:
+                worktrees.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        if key == "worktree":
+            if current:
+                worktrees.append(current)
+            current = {"worktree": value}
+        elif key == "branch":
+            current["branch"] = value.removeprefix("refs/heads/")
+        elif key == "HEAD":
+            current["head"] = value
+    if current:
+        worktrees.append(current)
+    return worktrees
+
+
+def branch_changed_files(branch: str, base: str) -> set[str]:
+    result = run_cmd(["git", "diff", "--name-only", f"{base}...{branch}"], check=False)
+    if result.returncode != 0:
+        return set()
+    return normalized_file_set(result.stdout.splitlines())
+
+
+def worktree_dirty_files(worktree: Path) -> set[str]:
+    result = run_cmd(["git", "-C", str(worktree), "status", "--porcelain"], check=False)
+    if result.returncode != 0:
+        return set()
+    files: set[str] = set()
+    for line in result.stdout.splitlines():
+        path = line[3:] if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        if path:
+            files.add(path)
+    return files
+
+
+def fetch_worktree_snapshot(base: str) -> list[dict[str, Any]]:
+    result = run_cmd(["git", "worktree", "list", "--porcelain"], check=False)
+    if result.returncode != 0:
+        return []
+    snapshot: list[dict[str, Any]] = []
+    for item in parse_worktree_porcelain(result.stdout):
+        branch = item.get("branch")
+        path = item.get("worktree")
+        if not branch or not path:
+            continue
+        worktree_path = Path(path)
+        files = branch_changed_files(branch, base)
+        if worktree_path.exists():
+            files.update(worktree_dirty_files(worktree_path))
+        snapshot.append({**item, "files": sorted(files)})
+    return snapshot
 
 
 def branch_exists(branch: str) -> bool:
@@ -266,6 +431,127 @@ def safe_issue_text(issue: dict[str, Any]) -> str:
         ],
     }
     return json.dumps(payload, indent=2, sort_keys=True)
+
+
+def fetch_pr_details(repo: str, pr_number: int) -> dict[str, Any] | None:
+    result = gh(
+        [
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            repo,
+            "--json",
+            "number,title,isDraft,headRefName,baseRefName,url,body,labels,files,mergeStateStatus,closingIssuesReferences",
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return json.loads(result.stdout)
+
+
+def fetch_open_pr_snapshot(repo: str, *, strict: bool = False) -> list[dict[str, Any]]:
+    result = gh(
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title,isDraft,headRefName,baseRefName,url,mergeStateStatus,labels",
+            "--limit",
+            "50",
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        if strict:
+            raise RuntimeError(result.stderr.strip() or "failed to list pull requests")
+        return []
+    prs = []
+    for pr in json.loads(result.stdout):
+        details = fetch_pr_details(repo, int(pr["number"])) or pr
+        checks_ok, checks_summary = pr_checks_green(int(pr["number"]), repo)
+        details["checks_ok"] = checks_ok
+        details["checks_summary"] = checks_summary
+        details["files"] = sorted(normalized_file_set(details.get("files") or []))
+        prs.append(details)
+    return prs
+
+
+def issue_is_dependency_clear(issue: dict[str, Any], dependency_states: dict[int, str]) -> tuple[bool, str]:
+    blocked = [
+        f"#{number}={state}"
+        for number, state in sorted(dependency_states.items())
+        if number in issue_dependency_numbers(issue) and state != "CLOSED"
+    ]
+    if blocked:
+        return False, "waiting for dependency " + ", ".join(blocked)
+    return True, "dependencies clear"
+
+
+def branch_or_file_overlap(candidate_branch: str, issue: dict[str, Any], snapshot: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    candidate_labels = issue_labels(issue)
+    candidate_overlap_labels = overlap_labels(candidate_labels)
+    candidate_files = issue_expected_files(issue)
+    for run in snapshot.get("active_runs", []):
+        if run.get("branch") == candidate_branch:
+            blockers.append(f"branch already active in worker pid={run.get('pid', '-')}")
+            continue
+        run_labels = overlap_labels(label_names(run.get("labels")))
+        overlap = sorted(candidate_overlap_labels.intersection(run_labels))
+        if overlap and "risk:branch-overlap" in candidate_labels:
+            blockers.append(f"active worker #{run.get('issue_number')} shares labels {', '.join(overlap)}")
+    for pr in snapshot.get("open_prs", []):
+        if pr.get("headRefName") == candidate_branch:
+            blockers.append(f"branch already has open PR #{pr.get('number')}")
+            continue
+        pr_labels = overlap_labels(label_names(pr.get("labels")))
+        overlap = sorted(candidate_overlap_labels.intersection(pr_labels))
+        if overlap and "risk:branch-overlap" in candidate_labels:
+            blockers.append(f"open PR #{pr.get('number')} shares labels {', '.join(overlap)}")
+        file_overlap = candidate_files.intersection(normalized_file_set(pr.get("files") or []))
+        if file_overlap:
+            blockers.append(f"open PR #{pr.get('number')} touches expected files {', '.join(sorted(file_overlap)[:5])}")
+    for worktree in snapshot.get("worktrees", []):
+        if worktree.get("branch") == candidate_branch:
+            blockers.append("branch already exists in a worktree")
+        file_overlap = candidate_files.intersection(normalized_file_set(worktree.get("files") or []))
+        if file_overlap:
+            blockers.append(f"worktree {worktree.get('branch')} touches expected files {', '.join(sorted(file_overlap)[:5])}")
+    return blockers
+
+
+def build_supervisor_snapshot(repo: str, state: dict[str, Any], base: str, issues: list[dict[str, Any]]) -> dict[str, Any]:
+    active = active_runs(state)
+    worktrees = fetch_worktree_snapshot(base)
+    open_prs = fetch_open_pr_snapshot(repo)
+    dependencies: set[int] = set()
+    for issue in issues:
+        dependencies.update(issue_dependency_numbers(issue))
+    for pr in open_prs:
+        dependencies.update(pr_dependency_numbers(pr))
+    dependency_states = fetch_issue_states(repo, dependencies)
+    return {
+        "captured_at": utc_now(),
+        "active_runs": active,
+        "worktrees": worktrees,
+        "open_prs": open_prs,
+        "dependency_states": dependency_states,
+    }
+
+
+def launch_blockers(issue: dict[str, Any], branch: str, snapshot: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    ok, dependency_summary = issue_is_dependency_clear(issue, snapshot.get("dependency_states", {}))
+    if not ok:
+        blockers.append(dependency_summary)
+    blockers.extend(branch_or_file_overlap(branch, issue, snapshot))
+    return blockers
 
 
 def worker_prompt(
@@ -464,7 +750,7 @@ def run_once(args: argparse.Namespace, config: dict[str, Any], state: dict[str, 
         save_state(state)
         return 0
 
-    candidates = fetch_candidate_issues(repo, config, free_slots)
+    candidates = fetch_candidate_issues(repo, config, max(free_slots * 4, free_slots))
     if not candidates:
         print("no ready issues found")
         save_state(state)
@@ -476,14 +762,27 @@ def run_once(args: argparse.Namespace, config: dict[str, Any], state: dict[str, 
     worktree_root = Path(args.worktree_root or config["worktree_root"])
     if not worktree_root.is_absolute():
         worktree_root = (ROOT / worktree_root).resolve()
+    snapshot = build_supervisor_snapshot(repo, state, base, candidates)
+    print(
+        "principal snapshot: "
+        f"issues={len(candidates)} active={len(snapshot['active_runs'])} "
+        f"worktrees={len(snapshot['worktrees'])} open_prs={len(snapshot['open_prs'])}"
+    )
 
+    launched = 0
     for issue in candidates:
+        if launched >= free_slots:
+            break
         number = int(issue["number"])
         if issue_already_running(state, number):
             continue
         labels = issue_labels(issue)
         role = pick_role(config, labels)
         branch = args.branch or f"agent/issue-{number}-{slugify(issue['title'])}"
+        blockers = launch_blockers(issue, branch, snapshot)
+        if blockers:
+            print(f"skipping issue #{number}: " + "; ".join(blockers))
+            continue
         worktree = ensure_worktree(branch, base, worktree_root, args.dry_run)
         claim_issue(repo, issue, role, branch, args.dry_run or args.no_claim)
         run = launch_worker(
@@ -501,8 +800,10 @@ def run_once(args: argparse.Namespace, config: dict[str, Any], state: dict[str, 
         if args.dry_run:
             print(f"dry-run issue #{number}: {role['agent']} on {branch}")
         else:
+            run["labels"] = sorted(labels)
             state.setdefault("runs", []).append(run)
             print(f"launched issue #{number}: {role['agent']} on {branch}")
+        launched += 1
     save_state(state)
     return 0
 
@@ -789,35 +1090,80 @@ def pr_checks_green(pr_number: int, repo: str) -> tuple[bool, str]:
     return True, "all checks green"
 
 
+def linked_issue_numbers(pr: dict[str, Any]) -> list[int]:
+    numbers: list[int] = []
+    for issue in pr.get("closingIssuesReferences") or []:
+        if isinstance(issue, dict) and issue.get("number"):
+            numbers.append(int(issue["number"]))
+    return numbers
+
+
+def plan_merge_queue(prs: list[dict[str, Any]], dependency_states: dict[int, str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    queued: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    queued_files: dict[int, set[str]] = {}
+    for pr in sorted(prs, key=lambda item: int(item["number"])):
+        reasons: list[str] = []
+        if pr.get("isDraft"):
+            reasons.append("draft")
+        if not pr.get("checks_ok"):
+            reasons.append(str(pr.get("checks_summary") or "checks not green"))
+        merge_state = str(pr.get("mergeStateStatus") or "UNKNOWN")
+        if merge_state not in MERGEABLE_STATES:
+            reasons.append(f"requires rebase or repair: merge state {merge_state}")
+        for number in sorted(pr_dependency_numbers(pr)):
+            state = dependency_states.get(number, "UNKNOWN")
+            if state != "CLOSED":
+                reasons.append(f"waiting for dependency #{number}={state}")
+        files = normalized_file_set(pr.get("files") or [])
+        for queued_pr in queued:
+            overlap = files.intersection(queued_files.get(int(queued_pr["number"]), set()))
+            if overlap:
+                reasons.append(
+                    f"overlaps PR #{queued_pr['number']} files: "
+                    + ", ".join(sorted(overlap)[:5])
+                )
+                break
+        if reasons:
+            blocked.append({**pr, "blocked_reasons": reasons})
+            continue
+        queued.append(pr)
+        queued_files[int(pr["number"])] = files
+    return queued, blocked
+
+
+def comment_merge_fan_in(repo: str, pr: dict[str, Any], checks_summary: str) -> None:
+    issue_numbers = linked_issue_numbers(pr)
+    if not issue_numbers:
+        return
+    body = f"""<!-- dxt-agent-event:v1 status=merged role=supervisor -->
+## Merge Fan-In
+
+- PR: #{pr['number']} {pr['title']}
+- Branch: `{pr.get('headRefName')}`
+- Result: merged after green checks under Agent OS policy.
+- Checks: {checks_summary}
+"""
+    for number in issue_numbers:
+        gh(["issue", "comment", str(number), "--repo", repo, "--body", body], check=False)
+
+
 def merge_ready(args: argparse.Namespace) -> int:
     repo = args.repo or default_repo()
-    result = gh(
-        [
-            "pr",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "open",
-            "--json",
-            "number,title,isDraft,headRefName,url",
-            "--limit",
-            "50",
-        ],
-        check=False,
-    )
-    if result.returncode != 0:
-        print(result.stderr, file=sys.stderr)
-        return result.returncode
-    prs = json.loads(result.stdout)
-    ready = []
+    try:
+        prs = fetch_open_pr_snapshot(repo, strict=True)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    dependencies: set[int] = set()
     for pr in prs:
-        if pr.get("isDraft"):
-            continue
-        ok, why = pr_checks_green(int(pr["number"]), repo)
-        print(f"PR #{pr['number']}: {why}")
-        if ok:
-            ready.append(pr)
+        dependencies.update(pr_dependency_numbers(pr))
+    dependency_states = fetch_issue_states(repo, dependencies)
+    ready, blocked = plan_merge_queue(prs, dependency_states)
+    for pr in ready:
+        print(f"PR #{pr['number']}: queued, {pr.get('checks_summary')}")
+    for pr in blocked:
+        print(f"PR #{pr['number']}: blocked, " + "; ".join(pr.get("blocked_reasons") or []))
     if not args.apply:
         print(f"would merge {len(ready)} green PR(s); use --apply")
         return 0
@@ -827,6 +1173,7 @@ def merge_ready(args: argparse.Namespace) -> int:
             cmd.append("--delete-branch")
         print(f"merging PR #{pr['number']}: {pr['title']}")
         gh(cmd)
+        comment_merge_fan_in(repo, pr, str(pr.get("checks_summary") or "all checks green"))
     return 0
 
 

@@ -206,6 +206,12 @@ Before merging:
 - Confirm overlapping branches are either merged first or explicitly re-scoped.
 - Merge after required checks pass.
 
+The local `merge-ready` queue enforces this policy for autonomous convergence:
+it skips draft PRs, PRs without green checks, PRs whose GitHub merge state is
+not clean, PRs that declare open dependencies, and later PRs whose changed files
+overlap an earlier queued PR. With `--apply`, it posts a concise merge fan-in
+comment back to linked issues after each successful merge.
+
 After merging:
 
 - Delete the remote branch if appropriate.
