@@ -618,6 +618,7 @@
         "schema",
         "identifier",
         "relation_name",
+        "quoting",
         "path",
         "original_file_path",
         "fqn",
@@ -639,6 +640,7 @@
         "schema": {"type": "string"},
         "identifier": {"type": "string"},
         "relation_name": {"type": "string"},
+        "quoting": {"$ref": "#/$defs/source_quoting"},
         "path": {"type": "string"},
         "original_file_path": {"type": "string"},
         "fqn": {"$ref": "#/$defs/unique_id_array"},
@@ -652,6 +654,17 @@
           "type": "object",
           "additionalProperties": {"$ref": "#/$defs/column"}
         }
+      }
+    },
+    "source_quoting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["database", "schema", "identifier", "column"],
+      "properties": {
+        "database": {"type": ["boolean", "null"]},
+        "schema": {"type": ["boolean", "null"]},
+        "identifier": {"type": ["boolean", "null"]},
+        "column": {"type": ["boolean", "null"]}
       }
     },
     "macro": {

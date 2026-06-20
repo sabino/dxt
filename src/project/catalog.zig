@@ -10,6 +10,7 @@ pub const CatalogColumn = struct {
 
 pub const CatalogEntry = struct {
     unique_id: []const u8,
+    database: ?[]const u8 = null,
     schema: []const u8,
     name: []const u8,
     relation_type: []const u8,
@@ -29,6 +30,7 @@ pub fn deinitCatalogEntries(allocator: std.mem.Allocator, entries: *CatalogEntri
 pub fn deinitEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(CatalogEntry)) void {
     for (entries.items) |*entry| {
         allocator.free(entry.unique_id);
+        if (entry.database) |database| allocator.free(database);
         allocator.free(entry.schema);
         allocator.free(entry.name);
         allocator.free(entry.relation_type);
@@ -72,7 +74,13 @@ fn writeCatalogEntryMap(writer: *Io.Writer, entries: []const CatalogEntry) !void
         try json.string(writer, entry.schema);
         try writer.writeAll(", \"name\": ");
         try json.string(writer, entry.name);
-        try writer.writeAll(", \"database\": null, \"comment\": null, \"owner\": null}, \"columns\": {");
+        try writer.writeAll(", \"database\": ");
+        if (entry.database) |database| {
+            try json.string(writer, database);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(", \"comment\": null, \"owner\": null}, \"columns\": {");
         for (entry.columns.items, 0..) |column, column_index| {
             if (column_index != 0) try writer.writeAll(",");
             try writer.writeAll("\n      ");

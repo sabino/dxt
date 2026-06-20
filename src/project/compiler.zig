@@ -16,8 +16,16 @@ const SourceDef = types.SourceDef;
 const max_macro_render_depth = 8;
 
 const Relation = struct {
+    database: ?[]const u8 = null,
     schema: []const u8,
     identifier: []const u8,
+    quoting: RelationQuoting = .{},
+};
+
+const RelationQuoting = struct {
+    database: bool = true,
+    schema: bool = true,
+    identifier: bool = true,
 };
 
 const StaticList = struct {
@@ -1231,7 +1239,24 @@ pub fn relationIdentifierForNode(node: *const Node) []const u8 {
 }
 
 pub fn relationNameForSource(allocator: std.mem.Allocator, source: *const SourceDef) ![]const u8 {
-    return renderRelation(allocator, .{ .schema = sourceSchemaName(source), .identifier = sourceIdentifier(source) });
+    return renderRelation(allocator, .{
+        .database = sourceDatabaseName(source),
+        .schema = sourceSchemaName(source),
+        .identifier = sourceIdentifier(source),
+        .quoting = .{
+            .database = source.quoting.database orelse true,
+            .schema = source.quoting.schema orelse true,
+            .identifier = source.quoting.identifier orelse true,
+        },
+    });
+}
+
+pub fn sourceDatabaseName(source: *const SourceDef) ?[]const u8 {
+    if (source.database) |database| {
+        const trimmed = std.mem.trim(u8, database, " \t\r\n");
+        if (trimmed.len != 0) return trimmed;
+    }
+    return null;
 }
 
 pub fn sourceSchemaName(source: *const SourceDef) []const u8 {
@@ -1251,11 +1276,22 @@ pub fn sourceIdentifier(source: *const SourceDef) []const u8 {
 }
 
 fn renderRelation(allocator: std.mem.Allocator, relation: Relation) ![]const u8 {
-    const schema = try quoteIdentifier(allocator, relation.schema);
+    const schema = try renderRelationComponent(allocator, relation.schema, relation.quoting.schema);
     defer allocator.free(schema);
-    const identifier = try quoteIdentifier(allocator, relation.identifier);
+    const identifier = try renderRelationComponent(allocator, relation.identifier, relation.quoting.identifier);
     defer allocator.free(identifier);
+    if (relation.database) |database_name| {
+        const database = try renderRelationComponent(allocator, database_name, relation.quoting.database);
+        defer allocator.free(database);
+        return try std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{ database, schema, identifier });
+    }
     return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ schema, identifier });
+}
+
+fn renderRelationComponent(allocator: std.mem.Allocator, value: []const u8, should_quote: bool) ![]const u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (should_quote) return try quoteIdentifier(allocator, trimmed);
+    return try allocator.dupe(u8, trimmed);
 }
 
 pub fn quoteIdentifier(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
@@ -2177,4 +2213,29 @@ test "compileModelWithInjectedCtes rejects ephemeral dependency cycles" {
     try graph.nodes.items[2].depends_on.append(allocator, "model.demo.mid");
 
     try std.testing.expectError(error.CyclicModelDependency, compileModelWithInjectedCtes(allocator, &graph, &graph.nodes.items[2]));
+}
+
+test "relationNameForSource renders database and source quote policy" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source = SourceDef{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.customers",
+        .source_name = "raw",
+        .table_name = "customers",
+        .database = "raw_db",
+        .schema_name = "RawSchema",
+        .identifier = "RawCustomers",
+        .quoting = .{
+            .database = false,
+            .schema = true,
+            .identifier = false,
+        },
+        .original_file_path = "models/schema.yml",
+    };
+
+    const relation_name = try relationNameForSource(allocator, &source);
+    try std.testing.expectEqualStrings("raw_db.\"RawSchema\".RawCustomers", relation_name);
 }

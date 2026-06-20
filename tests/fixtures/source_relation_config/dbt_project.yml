@@ -1,0 +1,4 @@
+name: source_relation_config
+version: "1.0"
+model-paths: ["models"]
+target-path: target

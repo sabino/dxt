@@ -15,6 +15,7 @@ const MacroProperty = types.MacroProperty;
 const MetaEntry = types.MetaEntry;
 const RefDep = types.RefDep;
 const SourceDep = types.SourceDep;
+const SourceQuoting = types.SourceQuoting;
 const UnitTestFixture = types.UnitTestFixture;
 const UnitTestRow = types.UnitTestRow;
 const KeyValue = util.KeyValue;
@@ -37,12 +38,15 @@ const findMacroIndexByPackageAndName = resolve.findMacroIndexByPackageAndName;
 const FreshnessTimeKey = enum { warn_after, error_after };
 const SourceConfigScope = enum { none, source, table };
 const FreshnessScope = enum { none, source, table };
+const SourceQuotingScope = enum { none, source, table };
 const SourceTestTarget = enum { none, table, column };
 const UnitTestSection = enum { none, given, expect, config };
 const UnitTestRowsTarget = enum { none, given, expect };
 
 const SourceDefaults = struct {
+    database: ?[]const u8 = null,
     schema_name: ?[]const u8 = null,
+    quoting: SourceQuoting = .{},
     loaded_at_field: ?[]const u8 = null,
     loaded_at_query: ?[]const u8 = null,
     freshness: ?types.FreshnessThreshold = null,
@@ -888,6 +892,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
     var in_columns = false;
     var config_scope: SourceConfigScope = .none;
     var freshness_scope: FreshnessScope = .none;
+    var quoting_scope: SourceQuotingScope = .none;
     var test_target: SourceTestTarget = .none;
     var active_test_target: SourceTestTarget = .none;
     var active_values_target: SourceTestTarget = .none;
@@ -901,6 +906,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
     var column_item_indent: ?usize = null;
     var config_indent: usize = 0;
     var freshness_indent: usize = 0;
+    var quoting_indent: usize = 0;
     var freshness_time_indent: usize = 0;
     var tests_indent: usize = 0;
     var active_test_indent: usize = 0;
@@ -949,6 +955,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             current_column = null;
             config_scope = .none;
             freshness_scope = .none;
+            quoting_scope = .none;
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -976,6 +983,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             current_column = null;
             config_scope = .none;
             freshness_scope = .none;
+            quoting_scope = .none;
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -993,6 +1001,9 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             freshness_time_key = null;
             freshness_time_scope = .none;
             freshness_time_update = .{};
+        }
+        if (quoting_scope != .none and indent <= quoting_indent) {
+            quoting_scope = .none;
         }
 
         if (test_target != .none and indent <= tests_indent and !std.mem.startsWith(u8, trimmed, "- ")) {
@@ -1012,6 +1023,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             column_item_indent = null;
             config_scope = if (config_scope == .table) .none else config_scope;
             freshness_scope = if (freshness_scope == .table) .none else freshness_scope;
+            quoting_scope = if (quoting_scope == .table) .none else quoting_scope;
             freshness_time_key = null;
             test_target = .none;
             active_test_target = .none;
@@ -1029,6 +1041,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
             current_column = null;
             config_scope = .none;
             freshness_scope = .none;
+            quoting_scope = .none;
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -1076,6 +1089,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 active_values_index = null;
                 config_scope = .none;
                 freshness_scope = .none;
+                quoting_scope = .none;
                 freshness_time_key = null;
             } else if (source_item_indent == null or indent == source_item_indent.?) {
                 source_item_indent = indent;
@@ -1088,6 +1102,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 current_column = null;
                 config_scope = .none;
                 freshness_scope = .none;
+                quoting_scope = .none;
                 test_target = .none;
                 active_test_target = .none;
                 active_values_target = .none;
@@ -1112,8 +1127,10 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                     .unique_id = unique_id,
                     .source_name = source_name,
                     .table_name = name,
+                    .database = source_defaults.database,
                     .original_file_path = relative_path,
                     .schema_name = source_defaults.schema_name,
+                    .quoting = source_defaults.quoting,
                     .loaded_at_field = source_defaults.loaded_at_field,
                     .loaded_at_query = source_defaults.loaded_at_query,
                     .freshness = source_defaults.freshness,
@@ -1124,6 +1141,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 current_column = null;
                 config_scope = .none;
                 freshness_scope = .none;
+                quoting_scope = .none;
                 test_target = .none;
                 active_test_target = .none;
                 active_values_target = .none;
@@ -1140,6 +1158,11 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
         if (in_tables and current_table_index != null and table_item_indent != null and indent > table_item_indent.?) {
             const kv = splitKeyValue(trimmed) orelse continue;
             const source = &graph.sources.items[current_table_index.?];
+
+            if (quoting_scope == .table and indent > quoting_indent) {
+                try applySourceQuotingKeyValue(&source.quoting, kv);
+                continue;
+            }
 
             if (active_test_index != null and indent > active_test_indent) {
                 if (std.mem.eql(u8, kv.key, "arguments")) {
@@ -1230,6 +1253,10 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 config_indent = indent;
                 freshness_scope = .none;
                 freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "database")) {
+                source.database = if (isYamlNull(kv.value)) null else try dupTrimmedScalar(allocator, kv.value);
+                freshness_scope = .none;
+                freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "loaded_at_field")) {
                 if ((table_top_loaded_at_query or table_config_loaded_at_query) and !isYamlNull(kv.value)) return error.UnsupportedYaml;
                 if (table_config) {
@@ -1252,6 +1279,12 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "identifier")) {
                 source.identifier = try dupTrimmedScalar(allocator, kv.value);
+                freshness_scope = .none;
+                freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "quoting")) {
+                try beginSourceQuotingBlock(kv.value);
+                quoting_scope = .table;
+                quoting_indent = indent;
                 freshness_scope = .none;
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "tests") or std.mem.eql(u8, kv.key, "data_tests")) {
@@ -1291,6 +1324,11 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
         if (current_source != null and source_item_indent != null and indent > source_item_indent.?) {
             const kv = splitKeyValue(trimmed) orelse continue;
 
+            if (quoting_scope == .source and indent > quoting_indent) {
+                try applySourceQuotingKeyValue(&source_defaults.quoting, kv);
+                continue;
+            }
+
             if (freshness_scope == .source and indent > freshness_indent) {
                 if (std.mem.eql(u8, kv.key, "filter")) {
                     try applyFreshnessFilter(allocator, &source_defaults.freshness, kv);
@@ -1325,8 +1363,18 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 config_indent = indent;
                 freshness_scope = .none;
                 freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "database")) {
+                source_defaults.database = if (isYamlNull(kv.value)) null else try dupTrimmedScalar(allocator, kv.value);
+                freshness_scope = .none;
+                freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "schema")) {
                 source_defaults.schema_name = try dupSourceSchemaScalar(allocator, graph, kv.value);
+                freshness_scope = .none;
+                freshness_time_key = null;
+            } else if (std.mem.eql(u8, kv.key, "quoting")) {
+                try beginSourceQuotingBlock(kv.value);
+                quoting_scope = .source;
+                quoting_indent = indent;
                 freshness_scope = .none;
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "loaded_at_field")) {
@@ -1700,6 +1748,22 @@ fn beginFreshnessBlock(freshness: *?types.FreshnessThreshold, value: []const u8)
     }
     if (trimmed.len != 0) return error.UnsupportedYaml;
     if (freshness.* == null) freshness.* = .{};
+}
+
+fn beginSourceQuotingBlock(value: []const u8) !void {
+    if (std.mem.trim(u8, value, " \t\r").len != 0) return error.UnsupportedYaml;
+}
+
+fn applySourceQuotingKeyValue(quoting: *SourceQuoting, kv: KeyValue) !void {
+    if (std.mem.eql(u8, kv.key, "database")) {
+        quoting.database = try parseBool(kv.value);
+    } else if (std.mem.eql(u8, kv.key, "schema")) {
+        quoting.schema = try parseBool(kv.value);
+    } else if (std.mem.eql(u8, kv.key, "identifier")) {
+        quoting.identifier = try parseBool(kv.value);
+    } else {
+        return error.UnsupportedYaml;
+    }
 }
 
 fn applyFreshnessFilter(allocator: std.mem.Allocator, freshness: *?types.FreshnessThreshold, kv: KeyValue) !void {
@@ -2971,6 +3035,52 @@ test "parseSourcesFromText records source table identifier without changing logi
     try std.testing.expectEqualStrings("source.pkg.raw.customers", graph.sources.items[0].unique_id);
     try std.testing.expectEqualStrings("customers", graph.sources.items[0].table_name);
     try std.testing.expectEqualStrings("raw_customers", graph.sources.items[0].identifier.?);
+}
+
+test "parseSourcesFromText resolves source database and table quoting overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    database: raw_db
+        \\    schema: RawSchema
+        \\    quoting:
+        \\      database: false
+        \\      schema: true
+        \\      identifier: false
+        \\    tables:
+        \\      - name: inherited
+        \\      - name: override
+        \\        database: override_db
+        \\        identifier: RawOverride
+        \\        quoting:
+        \\          database: true
+        \\          identifier: true
+    ;
+
+    try parseSourcesFromText(allocator, yaml, "models/schema.yml", "pkg", &graph);
+
+    try std.testing.expectEqual(@as(usize, 2), graph.sources.items.len);
+    const inherited = graph.sources.items[0];
+    try std.testing.expectEqualStrings("raw_db", inherited.database.?);
+    try std.testing.expectEqualStrings("RawSchema", inherited.schema_name.?);
+    try std.testing.expectEqual(false, inherited.quoting.database.?);
+    try std.testing.expectEqual(true, inherited.quoting.schema.?);
+    try std.testing.expectEqual(false, inherited.quoting.identifier.?);
+
+    const override = graph.sources.items[1];
+    try std.testing.expectEqualStrings("override_db", override.database.?);
+    try std.testing.expectEqualStrings("RawOverride", override.identifier.?);
+    try std.testing.expectEqual(true, override.quoting.database.?);
+    try std.testing.expectEqual(true, override.quoting.schema.?);
+    try std.testing.expectEqual(true, override.quoting.identifier.?);
 }
 
 test "parseSourcesFromText records table-level source freshness" {

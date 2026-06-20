@@ -31,6 +31,7 @@ DEFAULT_FIXTURES = [
     "package_macro_namespace",
     "package_ref_selector",
     "project_model_path_config",
+    "source_relation_config",
 ]
 ALLOWED_MISMATCHES: dict[tuple[str, str, str], tuple[Any, Any, str]] = {
     (
@@ -356,6 +357,9 @@ def compare_source(fixture: str, unique_id: str, dbt_source: dict[str, Any], dxt
     label = f"{fixture} {unique_id}"
     for key in ["resource_type", "package_name", "source_name", "name"]:
         assert_equal(f"{label} {key}", dxt_source.get(key), dbt_source.get(key))
+    if fixture == "source_relation_config":
+        for key in ["database", "schema", "identifier", "relation_name", "quoting"]:
+            assert_equal(f"{label} {key}", dxt_source.get(key), dbt_source.get(key))
 
 
 def compare_exposure(
