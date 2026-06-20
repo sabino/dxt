@@ -186,6 +186,31 @@ command logs, raw Codex/session transcripts, or `.agent/runs/` contents. The PM
 pass may recommend the next supervisor/orchestrator command, but it stops before
 launching implementation workers.
 
+### Specialist Pipeline Gate
+
+Broad compatibility issues should not jump straight from intake to a
+write-capable implementation worker. Use the staged protocol in
+[Agent Protocols](AGENT_PROTOCOLS.md): intake/routing, reference research,
+ownership mapping, slice planning, implementation, then optional PR review and
+audit.
+
+The worker start gate is satisfied only when the issue names the source map or
+declares it not applicable, owner modules and artifacts, validation gates, stop
+conditions, branch/worktree scope, and an overlap check. If the issue is missing
+any of those fields, the supervisor routes it to the researcher, mapper, or
+planner role instead of launching a worker.
+
+Split parent issues before implementation when the work spans multiple owner
+modules, commands, artifact writers, fixture ladders, or validation tracks.
+Child issues must have non-overlapping file scopes. If child issues must touch
+the same module or fixture family, document the order in `PLAN.md` before
+launching workers.
+
+Reviewer, QA fixture, artifact parity, convergence, and runtime-boundary/auditor
+passes run after a PR exists or when a supervisor explicitly requests them. They
+leave validation or handoff comments, and they are advisory unless the issue or
+PR declares that specific review as a merge gate.
+
 ### Capability Reality Check
 
 | Capability | Current state |
@@ -195,7 +220,7 @@ launching implementation workers.
 | Parallel worker launches | Real. `run` claims ready issues, creates worktrees, and launches up to `default_max_workers` workers. |
 | Worker GitHub publication | Real for autonomous workers launched by the orchestrator because they use `danger-full-access`. |
 | Merge of green PRs | Real. `merge-ready` queues non-draft PRs whose checks are green, merge state is clean, dependencies are closed, and file sets do not overlap an earlier queued PR. |
-| Multi-stage PM/research/mapper/worker/reviewer pipeline | Partially real through roles and labels; orchestration is still manual/prompt-driven. |
+| Multi-stage PM/research/mapper/worker/reviewer pipeline | Protocol-defined through issue stages, role labels, and required comment blocks; orchestration remains prompt-driven until a follow-up routing hook makes the gate mechanical. |
 | Principal conflict graph and merge queue | Initial implementation exists in the local orchestrator. It reads issue dependencies, active workers, worktrees, open PR files, merge state, and CI checks before launch or merge. |
 | Automatic Project field reconciliation during every loop | Partially real. Setup can sync items and reconcile unambiguous labels/comments into role, status, validation, source grounding, readiness, branch, and dependency fields with dry-run drift reporting; continuously running every loop remains PM/supervisor work. |
 | Stale worktree and stale claim cleanup | Partially real through `status` and `stop`; automated cleanup needs a follow-up slice. |
