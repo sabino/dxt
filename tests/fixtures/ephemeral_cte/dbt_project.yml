@@ -1,0 +1,4 @@
+name: ephemeral_cte
+version: "1.0"
+model-paths: ["models"]
+target-path: target

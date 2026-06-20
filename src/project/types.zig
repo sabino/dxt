@@ -272,6 +272,11 @@ pub const UnmatchedMacroProperty = struct {
     patch_path: []const u8,
 };
 
+pub const ExtraCte = struct {
+    id: []const u8,
+    sql: []const u8,
+};
+
 pub const Node = struct {
     resource_type: []const u8 = "model",
     package_name: []const u8,
@@ -302,6 +307,7 @@ pub const Node = struct {
     compiled_code: ?[]const u8 = null,
     compiled_path: ?[]const u8 = null,
     relation_name: ?[]const u8 = null,
+    extra_ctes: std.ArrayList(ExtraCte) = .empty,
 };
 
 pub const GenericTestNode = struct {
@@ -470,6 +476,10 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     node.source_refs.deinit(allocator);
     node.depends_on.deinit(allocator);
     node.macro_depends_on.deinit(allocator);
+    for (node.extra_ctes.items) |extra_cte| {
+        allocator.free(extra_cte.sql);
+    }
+    node.extra_ctes.deinit(allocator);
 }
 
 pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
