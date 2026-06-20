@@ -72,6 +72,16 @@ python scripts/agent_os_orchestrator.py run \
   --merge-ready
 ```
 
+Before each batch, the supervisor loop builds a principal snapshot from the
+ready issue list, local worker state, git worktrees, open PRs, dependency
+comments, and PR check/mergeability state. The snapshot is used to skip
+launches that are still waiting on dependency comments such as
+`depends_on=#123`, reuse an active branch/worktree, touch files named in a
+public-safe `files expected` note that overlap active work, or carry a
+branch-overlap risk against active work. This keeps the visible tmux session as
+the principal engineer loop while issue implementation stays in isolated
+workers.
+
 Useful control commands:
 
 ```sh
@@ -184,9 +194,9 @@ launching implementation workers.
 | PM board steward subprocess | Real and prompt-driven, with a deterministic launch contract check. It can inspect the board and use GitHub writes, including roadmap-gap issue creation; issue synthesis is still performed by the PM subprocess rather than a separate rule engine. |
 | Parallel worker launches | Real. `run` claims ready issues, creates worktrees, and launches up to `default_max_workers` workers. |
 | Worker GitHub publication | Real for autonomous workers launched by the orchestrator because they use `danger-full-access`. |
-| Merge of green PRs | Real but simple. `merge-ready` merges non-draft PRs whose checks are green; it does not yet model dependencies or file conflicts. |
+| Merge of green PRs | Real. `merge-ready` queues non-draft PRs whose checks are green, merge state is clean, dependencies are closed, and file sets do not overlap an earlier queued PR. |
 | Multi-stage PM/research/mapper/worker/reviewer pipeline | Partially real through roles and labels; orchestration is still manual/prompt-driven. |
-| Principal conflict graph and merge queue | Aspirational. The supervisor must currently reason from `git worktree`, PRs, labels, and CI status. |
+| Principal conflict graph and merge queue | Initial implementation exists in the local orchestrator. It reads issue dependencies, active workers, worktrees, open PR files, merge state, and CI checks before launch or merge. |
 | Automatic Project field reconciliation during every loop | Partially real. Setup can sync items; live per-issue field updates are still PM/supervisor work. |
 | Stale worktree and stale claim cleanup | Partially real through `status` and `stop`; automated cleanup needs a follow-up slice. |
 

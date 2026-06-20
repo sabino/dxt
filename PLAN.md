@@ -1337,7 +1337,12 @@ Exit criteria:
   bootstrap/validation scripts, and a local autonomous
   orchestrator that can claim ready issues, spawn Codex worker subprocesses in
   isolated worktrees, record ignored state/logs, accept issue-comment nudges,
-  and merge green PRs when explicitly run with merge enabled. The local
+  and merge green PRs when explicitly run with merge enabled. The supervisor
+  loop now builds a principal snapshot of ready issues, active worker state,
+  git worktrees, open PRs, dependency comments, changed PR files, merge state,
+  and CI checks before launches or merges, and the merge-ready queue skips draft,
+  red, conflicting, overlapping, or dependency-blocked PRs while posting fan-in
+  summaries back to linked issues after applied merges. The local
   supervision layer includes a detached `codex exec` pull-plug handoff and a
   two-phase tmux/Hermes watchdog path for exact-terminal Codex restarts after
   project-scoped `.codex/` changes. The product-manager prompt and docs now
