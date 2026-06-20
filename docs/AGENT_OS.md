@@ -107,8 +107,10 @@ route all comments, pushes, and PR updates through the supervisor instead of
 asking that reviewer subprocess to publish.
 
 The Product Manager `--dry-run` previews the launch command and GitHub Project
-scope check. It does not ask the model for a no-write board plan; remove
-`--dry-run` only when repo-scoped issue, label, or Project writes are intended.
+scope check, board snapshot size, prompt source files, backlog synthesis rule,
+PM issue contract, and public-safety guard. It does not ask the model for a
+no-write board plan; remove `--dry-run` only when repo-scoped issue, label, or
+Project writes are intended.
 
 ## Company Loop
 
@@ -153,12 +155,33 @@ Use `status`, `nudge`, `stop`, and `merge-ready` from the supervisor pane
 between batches. Do not use the main tmux session for long feature
 implementation unless the feature is an orchestration fix.
 
+### PM Backlog Synthesis Contract
+
+The PM pass must keep the queue alive without waiting for a human to pre-create
+every issue. Treat the board as empty or stale when the snapshot has no open
+issues, no ready unclaimed issues outside blocked/claimed/review labels, or
+only Agent OS infrastructure work while `PLAN.md` and compatibility docs name
+immediate dbt Core compatibility gaps.
+
+When that happens, the PM should create or update roadmap-gap issues rather than
+only reporting the gap. A PM-created issue must include role, priority,
+readiness, risk, validation, dependencies or sequencing notes, acceptance
+criteria, and stop conditions. Prefer these body sections for new issues:
+Objective, Current Reality, Role and Labels, Priority, Readiness, Risk,
+Dependencies / Sequencing, Acceptance Criteria, Validation, and Stop Condition.
+
+PM issue bodies and comments are public coordination state. They must not
+include local absolute paths, private hostnames or mounts, secrets, tokens, raw
+command logs, raw Codex/session transcripts, or `.agent/runs/` contents. The PM
+pass may recommend the next supervisor/orchestrator command, but it stops before
+launching implementation workers.
+
 ### Capability Reality Check
 
 | Capability | Current state |
 | --- | --- |
 | GitHub labels, seed issues, issue templates, and Project manifest | Real. `setup` can sync these from `.github/agent-team/`. |
-| PM board steward subprocess | Real but prompt-driven. It can inspect the board and use GitHub writes, including issue creation, but there is no deterministic backlog synthesizer yet. |
+| PM board steward subprocess | Real and prompt-driven, with a deterministic launch contract check. It can inspect the board and use GitHub writes, including roadmap-gap issue creation; issue synthesis is still performed by the PM subprocess rather than a separate rule engine. |
 | Parallel worker launches | Real. `run` claims ready issues, creates worktrees, and launches up to `default_max_workers` workers. |
 | Worker GitHub publication | Real for autonomous workers launched by the orchestrator because they use `danger-full-access`. |
 | Merge of green PRs | Real but simple. `merge-ready` merges non-draft PRs whose checks are green; it does not yet model dependencies or file conflicts. |
