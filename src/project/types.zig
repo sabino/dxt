@@ -282,6 +282,7 @@ pub const Node = struct {
     package_name: []const u8,
     unique_id: []const u8,
     name: []const u8,
+    project_root: ?[]const u8 = null,
     path: []const u8,
     original_file_path: []const u8,
     patch_path: ?[]const u8 = null,
@@ -464,6 +465,7 @@ pub fn deinitDispatchConfigs(allocator: std.mem.Allocator, configs: *std.ArrayLi
 }
 
 pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
+    if (node.project_root) |project_root| allocator.free(project_root);
     node.tags.deinit(allocator);
     node.doc_blocks.deinit(allocator);
     deinitGenericTestDefs(allocator, &node.tests);

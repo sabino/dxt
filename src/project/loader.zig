@@ -42,7 +42,7 @@ pub const Callbacks = struct {
     parse_model: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     parse_analysis: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     parse_singular_test: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
-    parse_seed: *const fn (Runtime, []const u8, []const u8, []const u8, *Graph) anyerror!void,
+    parse_seed: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     apply_model_properties: *const fn (*Graph, []const u8) anyerror!void,
     materialize_generic_tests: *const fn (*Graph) anyerror!void,
     resolve_macro_dependencies: *const fn (*Graph) anyerror!void,
@@ -166,7 +166,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
             try callbacks.parse_yaml_properties(runtime, options.project_dir, seed_path, yaml_path, config.name, &graph);
         }
         for (seed_files.items) |relative_path| {
-            try callbacks.parse_seed(runtime, seed_path, relative_path, config.name, &graph);
+            try callbacks.parse_seed(runtime, options.project_dir, seed_path, relative_path, config.name, &graph);
         }
     }
     applyProjectSeedDocs(&graph, config.name, config.seed_docs);
@@ -350,7 +350,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
                 try callbacks.parse_yaml_properties(runtime, package_dir, seed_path, yaml_path, package_config.name, graph);
             }
             for (seed_files.items) |relative_path| {
-                try callbacks.parse_seed(runtime, seed_path, relative_path, package_config.name, graph);
+                try callbacks.parse_seed(runtime, package_dir, seed_path, relative_path, package_config.name, graph);
             }
         }
         try applyProjectModelPathConfigs(graph, package_config.model_path_configs.items, false, package_config.name);
