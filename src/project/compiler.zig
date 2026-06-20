@@ -171,41 +171,62 @@ pub fn compileGenericTest(allocator: std.mem.Allocator, graph: *const Graph, tes
 
     const relation_name = try genericTestRelationName(allocator, graph, test_node);
     defer allocator.free(relation_name);
+    const model_sql = try genericTestModelSql(allocator, relation_name, test_node.config.where);
+    defer allocator.free(model_sql);
     const quoted_column = try quoteIdentifier(allocator, column_name);
     defer allocator.free(quoted_column);
 
     if (is_not_null) {
-        return try std.fmt.allocPrint(
+        const sql = try std.fmt.allocPrint(
             allocator,
             "select {s}\nfrom {s}\nwhere {s} is null",
-            .{ quoted_column, relation_name, quoted_column },
+            .{ quoted_column, model_sql, quoted_column },
         );
+        return try applyGenericTestLimit(allocator, sql, test_node.config.limit);
     }
     if (is_accepted_values) {
         const accepted_values = try renderAcceptedValuesList(allocator, test_node.accepted_values.items, test_node.accepted_values_quote orelse true);
         defer allocator.free(accepted_values);
-        return try std.fmt.allocPrint(
+        const sql = try std.fmt.allocPrint(
             allocator,
             "with all_values as (\n    select\n        {s} as value_field,\n        count(*) as n_records\n    from {s}\n    group by {s}\n)\nselect *\nfrom all_values\nwhere value_field not in ({s})",
-            .{ quoted_column, relation_name, quoted_column, accepted_values },
+            .{ quoted_column, model_sql, quoted_column, accepted_values },
         );
+        return try applyGenericTestLimit(allocator, sql, test_node.config.limit);
     }
     if (is_relationships) {
         const parent_relation_name = try relationshipTargetRelationName(allocator, graph, test_node);
         defer allocator.free(parent_relation_name);
         const quoted_parent_field = try quoteIdentifier(allocator, test_node.relationship_field);
         defer allocator.free(quoted_parent_field);
-        return try std.fmt.allocPrint(
+        const sql = try std.fmt.allocPrint(
             allocator,
             "with child as (\n    select {s} as from_field\n    from {s}\n    where {s} is not null\n),\nparent as (\n    select {s} as to_field\n    from {s}\n)\nselect\n    from_field\nfrom child\nleft join parent\n    on child.from_field = parent.to_field\nwhere parent.to_field is null",
-            .{ quoted_column, relation_name, quoted_column, quoted_parent_field, parent_relation_name },
+            .{ quoted_column, model_sql, quoted_column, quoted_parent_field, parent_relation_name },
         );
+        return try applyGenericTestLimit(allocator, sql, test_node.config.limit);
     }
-    return try std.fmt.allocPrint(
+    const sql = try std.fmt.allocPrint(
         allocator,
         "select\n    {s} as unique_field,\n    count(*) as n_records\nfrom {s}\nwhere {s} is not null\ngroup by {s}\nhaving count(*) > 1",
-        .{ quoted_column, relation_name, quoted_column, quoted_column },
+        .{ quoted_column, model_sql, quoted_column, quoted_column },
     );
+    return try applyGenericTestLimit(allocator, sql, test_node.config.limit);
+}
+
+fn genericTestModelSql(allocator: std.mem.Allocator, relation_name: []const u8, where_sql: ?[]const u8) ![]const u8 {
+    if (where_sql) |filter| {
+        return try std.fmt.allocPrint(allocator, "(select * from {s} where {s}) dbt_subquery", .{ relation_name, filter });
+    }
+    return try allocator.dupe(u8, relation_name);
+}
+
+fn applyGenericTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?u64) ![]const u8 {
+    if (limit) |row_limit| {
+        defer allocator.free(sql);
+        return try std.fmt.allocPrint(allocator, "{s}\nlimit {d}", .{ sql, row_limit });
+    }
+    return sql;
 }
 
 fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_index: usize, out: *std.ArrayList(u8)) anyerror!void {
@@ -1235,6 +1256,45 @@ test "compileGenericTest renders supported built-in failure-row SQL" {
     try std.testing.expect(std.mem.indexOf(u8, compiled, "\"customer_type\" as value_field") != null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"main\".\"customers\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "value_field not in ('new', 'returning')") != null);
+}
+
+test "compileGenericTest applies where and limit configs to failure-row SQL" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "select 1",
+        .materialized = "table",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_customers_customer_id.abc",
+        .name = "not_null_customers_customer_id",
+        .alias = "not_null_customers_customer_id",
+        .path = "not_null_customers_customer_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "customer_id",
+        .attached_node = "model.demo.customers",
+        .config = .{ .where = "status = 'active'", .limit = 5 },
+    });
+    try graph.tests.items[0].depends_on.append(allocator, "model.demo.customers");
+
+    const compiled = try compileGenericTest(allocator, &graph, &graph.tests.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings(
+        "select \"customer_id\"\nfrom (select * from \"main\".\"customers\" where status = 'active') dbt_subquery\nwhere \"customer_id\" is null\nlimit 5",
+        compiled,
+    );
 }
 
 test "compileModel rejects dynamic ref" {

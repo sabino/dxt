@@ -193,6 +193,15 @@ pub const GenericTestDef = struct {
     accepted_values_quote: ?bool = null,
     relationship_to: []const u8 = "",
     relationship_field: []const u8 = "",
+    config: GenericTestConfig = .{},
+};
+
+pub const GenericTestConfig = struct {
+    where: ?[]const u8 = null,
+    limit: ?u64 = null,
+    severity: []const u8 = "ERROR",
+    warn_if: []const u8 = "!= 0",
+    error_if: []const u8 = "!= 0",
 };
 
 pub const DocBlock = struct {
@@ -315,6 +324,7 @@ pub const GenericTestNode = struct {
     attached_source_unique_id: ?[]const u8 = null,
     relationship_source_to: ?SourceDep = null,
     relationship_source_to_unique_id: ?[]const u8 = null,
+    config: GenericTestConfig = .{},
     refs: std.ArrayList(RefDep) = .empty,
     source_refs: std.ArrayList(SourceDep) = .empty,
     depends_on: std.ArrayList([]const u8) = .empty,

@@ -132,12 +132,39 @@ pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTes
         .accepted_values_quote = source.accepted_values_quote,
         .relationship_to = source.relationship_to,
         .relationship_field = source.relationship_field,
+        .config = source.config,
     };
     errdefer cloned.accepted_values.deinit(graph.allocator);
     for (source.accepted_values.items) |value| {
         try cloned.accepted_values.append(graph.allocator, value);
     }
     try tests.append(graph.allocator, cloned);
+}
+
+pub fn applyGenericTestConfigValue(allocator: std.mem.Allocator, test_def: *GenericTestDef, key: []const u8, value: []const u8) !bool {
+    if (std.mem.eql(u8, key, "where")) {
+        test_def.config.where = try dupTrimmedScalar(allocator, value);
+        return true;
+    }
+    if (std.mem.eql(u8, key, "limit")) {
+        const limit_text = try dupTrimmedScalar(allocator, value);
+        defer allocator.free(limit_text);
+        test_def.config.limit = std.fmt.parseUnsigned(u64, limit_text, 10) catch return error.UnsupportedYaml;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "severity")) {
+        test_def.config.severity = try dupTrimmedScalar(allocator, value);
+        return true;
+    }
+    if (std.mem.eql(u8, key, "warn_if")) {
+        test_def.config.warn_if = try dupTrimmedScalar(allocator, value);
+        return true;
+    }
+    if (std.mem.eql(u8, key, "error_if")) {
+        test_def.config.error_if = try dupTrimmedScalar(allocator, value);
+        return true;
+    }
+    return false;
 }
 
 pub fn parseMacros(runtime: types.Runtime, project_dir: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
@@ -1119,6 +1146,10 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                     if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
                     continue;
                 }
+                if (std.mem.eql(u8, kv.key, "config")) {
+                    if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                    continue;
+                }
                 const test_def = try currentSourceGenericTestDef(source, current_column, active_test_target, active_test_index.?);
                 if (std.mem.eql(u8, kv.key, "values")) {
                     if (std.mem.trim(u8, kv.value, " \t").len == 0) {
@@ -1144,6 +1175,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                     test_def.relationship_field = try dupTrimmedScalar(allocator, kv.value);
                     continue;
                 }
+                if (try applyGenericTestConfigValue(allocator, test_def, kv.key, kv.value)) continue;
             }
 
             if (freshness_scope == .table and indent > freshness_indent) {
@@ -2153,6 +2185,26 @@ test "appendGenericTestDefClone copies nested accepted values list" {
     try std.testing.expectEqual(@as(usize, 2), clones.items[0].accepted_values.items.len);
     try std.testing.expectEqualStrings("placed", clones.items[0].accepted_values.items[0]);
     try std.testing.expectEqualStrings("returned", clones.items[0].accepted_values.items[1]);
+}
+
+test "applyGenericTestConfigValue parses supported generic test config scalars" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var test_def = GenericTestDef{ .name = "not_null" };
+    try std.testing.expect(try applyGenericTestConfigValue(allocator, &test_def, "where", "\"customer_id > 0\""));
+    try std.testing.expect(try applyGenericTestConfigValue(allocator, &test_def, "limit", "2"));
+    try std.testing.expect(try applyGenericTestConfigValue(allocator, &test_def, "severity", "warn"));
+    try std.testing.expect(try applyGenericTestConfigValue(allocator, &test_def, "warn_if", "\"> 0\""));
+    try std.testing.expect(try applyGenericTestConfigValue(allocator, &test_def, "error_if", "\"> 10\""));
+    try std.testing.expect(!try applyGenericTestConfigValue(allocator, &test_def, "store_failures", "true"));
+
+    try std.testing.expectEqualStrings("customer_id > 0", test_def.config.where.?);
+    try std.testing.expectEqual(@as(u64, 2), test_def.config.limit.?);
+    try std.testing.expectEqualStrings("warn", test_def.config.severity);
+    try std.testing.expectEqualStrings("> 0", test_def.config.warn_if);
+    try std.testing.expectEqualStrings("> 10", test_def.config.error_if);
 }
 
 test "parseMacrosFromText extracts top-level macro blocks" {

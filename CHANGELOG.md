@@ -31,6 +31,10 @@ compatibility.
 - Root-project `selectors.yml` scalar string aliases for selector-backed
   commands through `--selector <name>`, lowering supported alias definitions to
   the existing Zig selector engine.
+- Supported built-in DuckDB generic tests now parse and emit `where`, `limit`,
+  `severity`, `warn_if`, and `error_if` configs for model, seed, and source
+  tests, apply `where`/`limit` to failure-row SQL, and classify warning results
+  without failing `dxt test` or `dxt build`.
 
 ### Fixed
 
