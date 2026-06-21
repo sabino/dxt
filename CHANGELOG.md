@@ -56,6 +56,10 @@ compatibility.
   `store_failures`, materialize deterministic `dbt_test__audit` failure tables
   for non-empty failing-row SQL in `dxt test` / `dxt build`, and drop those
   audit tables on zero-row passing runs to avoid stale failure artifacts.
+- `dxt compile` now supports compile-only custom generic tests on source and
+  seed columns, in addition to model columns, for root-project and
+  installed-package `{% test %}` / `{% data_test %}` blocks that use the
+  existing static `{{ model }}` and `{{ column_name }}` renderer.
 
 ### Fixed
 

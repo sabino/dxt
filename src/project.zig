@@ -2983,7 +2983,7 @@ fn materializeGenericTests(graph: *Graph) !void {
             for (column.tests.items) |test_def| {
                 if (isSupportedGenericTest(test_def, column.name)) {
                     try appendGenericTestNode(graph, node, test_def, column.name);
-                } else if (try modelColumnCustomGenericTestDef(graph, node, test_def, column.name)) |custom_test_def| {
+                } else if (try nodeColumnCustomGenericTestDef(graph, node, test_def, column.name)) |custom_test_def| {
                     try appendGenericTestNode(graph, node, custom_test_def, column.name);
                 }
             }
@@ -2999,6 +2999,8 @@ fn materializeGenericTests(graph: *Graph) !void {
             for (column.tests.items) |test_def| {
                 if (isSupportedSourceGenericTest(test_def, column.name)) {
                     try appendSourceGenericTestNode(graph, source, test_def, column.name);
+                } else if (try sourceColumnCustomGenericTestDef(graph, source, test_def, column.name)) |custom_test_def| {
+                    try appendSourceGenericTestNode(graph, source, custom_test_def, column.name);
                 }
             }
         }
@@ -3079,6 +3081,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
     defer graph.allocator.free(source_model_kwarg);
     const source_test_def = GenericTestDef{
         .name = source_test_name,
+        .namespace = test_def.namespace,
         .column_name = test_def.column_name,
         .accepted_values = test_def.accepted_values,
         .accepted_values_quote = test_def.accepted_values_quote,
@@ -3087,15 +3090,21 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .config = test_def.config,
     };
     const names = try synthesizeGenericTestNames(graph.allocator, source_test_def, source_target_name, effective_column_name);
-    const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, source.package_name, names.full, test_def, source_model_kwarg, effective_column_name);
+    const unique_id_metadata = if (isBuiltInGenericTestName(test_def.name)) source_test_def else test_def;
+    const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, source.package_name, names.full, unique_id_metadata, source_model_kwarg, effective_column_name);
     for (graph.tests.items) |existing| {
         if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
     }
 
-    const raw_code = if (std.mem.eql(u8, names.compiled, names.full))
-        try std.fmt.allocPrint(graph.allocator, "{{{{ test_{s}(**_dbt_generic_test_kwargs) }}}}", .{test_def.name})
+    const macro_call = if (test_def.namespace) |namespace|
+        try std.fmt.allocPrint(graph.allocator, "{s}.test_{s}", .{ namespace, test_def.name })
     else
-        try std.fmt.allocPrint(graph.allocator, "{{{{ test_{s}(**_dbt_generic_test_kwargs) }}}}{{{{ config(alias=\"{s}\") }}}}", .{ test_def.name, names.compiled });
+        try std.fmt.allocPrint(graph.allocator, "test_{s}", .{test_def.name});
+    defer graph.allocator.free(macro_call);
+    const raw_code = if (std.mem.eql(u8, names.compiled, names.full))
+        try std.fmt.allocPrint(graph.allocator, "{{{{ {s}(**_dbt_generic_test_kwargs) }}}}", .{macro_call})
+    else
+        try std.fmt.allocPrint(graph.allocator, "{{{{ {s}(**_dbt_generic_test_kwargs) }}}}{{{{ config(alias=\"{s}\") }}}}", .{ macro_call, names.compiled });
     var test_node = GenericTestNode{
         .package_name = source.package_name,
         .unique_id = unique_id,
@@ -3143,8 +3152,8 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         try appendSourceDepUnique(graph.allocator, &test_node.source_refs, attached_source_dep);
         try appendUnique(graph.allocator, &test_node.depends_on, source.unique_id);
     }
-    try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
-    if (!std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
+    try appendGenericTestMacroDependency(graph, &test_node, test_def);
+    if (isBuiltInGenericTestName(test_def.name) and !std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
         try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
     }
     try graph.tests.append(graph.allocator, test_node);
@@ -3204,15 +3213,26 @@ fn splitGenericTestNamespace(test_name: []const u8) !?GenericTestNamespace {
     return .{ .namespace = test_name[0..first_dot], .name = test_name[first_dot + 1 ..] };
 }
 
-fn modelColumnCustomGenericTestDef(graph: *const Graph, node: *const Node, test_def: GenericTestDef, column_name: ?[]const u8) !?GenericTestDef {
+fn nodeColumnCustomGenericTestDef(graph: *const Graph, node: *const Node, test_def: GenericTestDef, column_name: ?[]const u8) !?GenericTestDef {
     if (column_name == null) return null;
     if (isBuiltInGenericTestName(test_def.name)) return null;
-    if (!std.mem.eql(u8, node.resource_type, "model")) return null;
+    if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed")) return null;
 
+    return try columnCustomGenericTestDef(graph, node.package_name, test_def);
+}
+
+fn sourceColumnCustomGenericTestDef(graph: *const Graph, source: *const SourceDef, test_def: GenericTestDef, column_name: ?[]const u8) !?GenericTestDef {
+    if (column_name == null) return null;
+    if (isBuiltInGenericTestName(test_def.name)) return null;
+
+    return try columnCustomGenericTestDef(graph, source.package_name, test_def);
+}
+
+fn columnCustomGenericTestDef(graph: *const Graph, package_name: []const u8, test_def: GenericTestDef) !?GenericTestDef {
     const namespace_parts = try splitGenericTestNamespace(test_def.name);
     const macro_package = if (namespace_parts) |parts| parts.namespace else graph.project_name;
     const macro_test_name = if (namespace_parts) |parts| parts.name else test_def.name;
-    if (namespace_parts == null and !std.mem.eql(u8, node.package_name, graph.project_name)) return null;
+    if (namespace_parts == null and !std.mem.eql(u8, package_name, graph.project_name)) return null;
     if (std.mem.eql(u8, macro_package, "dbt")) return error.UnsupportedCustomGenericTest;
 
     const macro_name = try std.fmt.allocPrint(graph.allocator, "test_{s}", .{macro_test_name});
@@ -3331,6 +3351,96 @@ test "materializeGenericTests activates package model column custom generic test
     try std.testing.expectEqualStrings("{{ util_pkg.test_positive_amount(**_dbt_generic_test_kwargs) }}", test_node.raw_code);
     try std.testing.expectEqual(@as(usize, 2), test_node.macro_depends_on.items.len);
     try std.testing.expectEqualStrings("macro.util_pkg.test_positive_amount", test_node.macro_depends_on.items[0]);
+    try std.testing.expectEqualStrings("macro.dbt.get_where_subquery", test_node.macro_depends_on.items[1]);
+}
+
+test "materializeGenericTests activates root project source column custom generic tests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    var source = SourceDef{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.orders_src",
+        .source_name = "raw",
+        .table_name = "orders_src",
+        .original_file_path = "models/schema.yml",
+    };
+    var column = ColumnDef{ .name = "amount" };
+    try column.tests.append(allocator, .{ .name = "positive_amount" });
+    try source.columns.append(allocator, column);
+    try graph.sources.append(allocator, source);
+    try graph.macros.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.test_positive_amount",
+        .name = "test_positive_amount",
+        .path = "custom_tests.sql",
+        .original_file_path = "macros/custom_tests.sql",
+        .macro_sql = "{% test positive_amount(model, column_name) %}select {{ column_name }} from {{ model }}{% endtest %}",
+    });
+
+    try materializeGenericTests(&graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.tests.items.len);
+    const test_node = graph.tests.items[0];
+    try std.testing.expectEqualStrings("positive_amount", test_node.test_name);
+    try std.testing.expectEqualStrings("source_positive_amount_raw_orders_src_amount", test_node.name);
+    try std.testing.expectEqualStrings("amount", test_node.column_name.?);
+    try std.testing.expect(test_node.attached_node == null);
+    try std.testing.expectEqualStrings("source.demo.raw.orders_src", test_node.attached_source_unique_id.?);
+    try std.testing.expectEqualStrings("{{ test_positive_amount(**_dbt_generic_test_kwargs) }}", test_node.raw_code);
+    try std.testing.expectEqual(@as(usize, 1), test_node.depends_on.items.len);
+    try std.testing.expectEqualStrings("source.demo.raw.orders_src", test_node.depends_on.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), test_node.macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.demo.test_positive_amount", test_node.macro_depends_on.items[0]);
+    try std.testing.expectEqualStrings("macro.dbt.get_where_subquery", test_node.macro_depends_on.items[1]);
+}
+
+test "materializeGenericTests activates package seed column custom generic tests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    var node = Node{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.orders_seed",
+        .name = "orders_seed",
+        .path = "orders_seed.csv",
+        .original_file_path = "seeds/orders_seed.csv",
+        .patch_path = "models/schema.yml",
+        .raw_code = "",
+    };
+    var column = ColumnDef{ .name = "amount" };
+    try column.tests.append(allocator, .{ .name = "util_pkg.nonzero_amount" });
+    try node.columns.append(allocator, column);
+    try graph.nodes.append(allocator, node);
+    try graph.macros.append(allocator, .{
+        .package_name = "util_pkg",
+        .unique_id = "macro.util_pkg.test_nonzero_amount",
+        .name = "test_nonzero_amount",
+        .path = "custom_tests.sql",
+        .original_file_path = "macros/custom_tests.sql",
+        .macro_sql = "{% data_test nonzero_amount(model, column_name) %}select {{ column_name }} from {{ model }}{% enddata_test %}",
+    });
+
+    try materializeGenericTests(&graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.tests.items.len);
+    const test_node = graph.tests.items[0];
+    try std.testing.expectEqualStrings("nonzero_amount", test_node.test_name);
+    try std.testing.expectEqualStrings("util_pkg", test_node.test_namespace.?);
+    try std.testing.expectEqualStrings("util_pkg_nonzero_amount_orders_seed_amount", test_node.name);
+    try std.testing.expectEqualStrings("seed.demo.orders_seed", test_node.attached_node.?);
+    try std.testing.expectEqualStrings("{{ util_pkg.test_nonzero_amount(**_dbt_generic_test_kwargs) }}", test_node.raw_code);
+    try std.testing.expectEqual(@as(usize, 1), test_node.depends_on.items.len);
+    try std.testing.expectEqualStrings("seed.demo.orders_seed", test_node.depends_on.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), test_node.macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.util_pkg.test_nonzero_amount", test_node.macro_depends_on.items[0]);
     try std.testing.expectEqualStrings("macro.dbt.get_where_subquery", test_node.macro_depends_on.items[1]);
 }
 

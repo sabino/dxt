@@ -368,6 +368,157 @@ where {{ column_name }} < 0
         assert "{%" not in dbt_positive["compiled_code"]
 
 
+def test_compile_renders_source_and_seed_column_custom_generic_tests(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_seed_custom_generic_test_compile")
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Compiled 0 model(s) and 2 test(s)" in result.stdout
+
+    compiled_root = target / "compiled" / "source_seed_custom_generic_test_compile"
+    source_sql = (compiled_root / "source_positive_amount_raw_orders_src_amount.sql").read_text()
+    seed_sql = (compiled_root / "util_pkg_nonzero_amount_orders_seed_amount.sql").read_text()
+    assert "select amount" in source_sql
+    assert 'from "raw"."orders_src"' in source_sql
+    assert "where amount < 0" in source_sql
+    assert "select amount" in seed_sql
+    assert 'from "main"."orders_seed"' in seed_sql
+    assert "where amount = 0" in seed_sql
+    assert "{{" not in source_sql + seed_sql
+    assert "{%" not in source_sql + seed_sql
+
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
+    tests_by_name = {node["test_metadata"]["name"]: node for node in manifest["nodes"].values() if node["resource_type"] == "test"}
+
+    source_test = tests_by_name["positive_amount"]
+    assert source_test["name"] == "source_positive_amount_raw_orders_src_amount"
+    assert source_test["raw_code"] == "{{ test_positive_amount(**_dbt_generic_test_kwargs) }}"
+    assert source_test["test_metadata"] == {
+        "name": "positive_amount",
+        "kwargs": {
+            "model": "{{ get_where_subquery(source('raw', 'orders_src')) }}",
+            "column_name": "amount",
+        },
+        "namespace": None,
+    }
+    assert source_test["attached_node"] is None
+    assert source_test["depends_on"]["nodes"] == ["source.source_seed_custom_generic_test_compile.raw.orders_src"]
+    assert source_test["depends_on"]["macros"] == [
+        "macro.source_seed_custom_generic_test_compile.test_positive_amount",
+        "macro.dbt.get_where_subquery",
+    ]
+    assert source_test["sources"] == [["raw", "orders_src"]]
+    assert source_test["compiled"] is True
+    assert source_test["compiled_code"] == source_sql
+
+    seed_test = tests_by_name["nonzero_amount"]
+    assert seed_test["name"] == "util_pkg_nonzero_amount_orders_seed_amount"
+    assert seed_test["raw_code"] == "{{ util_pkg.test_nonzero_amount(**_dbt_generic_test_kwargs) }}"
+    assert seed_test["test_metadata"] == {
+        "name": "nonzero_amount",
+        "kwargs": {
+            "model": "{{ get_where_subquery(ref('orders_seed')) }}",
+            "column_name": "amount",
+        },
+        "namespace": "util_pkg",
+    }
+    assert seed_test["attached_node"] == "seed.source_seed_custom_generic_test_compile.orders_seed"
+    assert seed_test["depends_on"]["nodes"] == ["seed.source_seed_custom_generic_test_compile.orders_seed"]
+    assert seed_test["depends_on"]["macros"] == [
+        "macro.util_pkg.test_nonzero_amount",
+        "macro.dbt.get_where_subquery",
+    ]
+    assert seed_test["compiled"] is True
+    assert seed_test["compiled_code"] == seed_sql
+
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if has_dbt_core and has_dbt_duckdb:
+        from dbt.cli.main import dbtRunner
+        import dbt_common.events.base_types as dbt_event_base_types
+        import google.protobuf.json_format as protobuf_json_format
+
+        (project / "dbt_packages" / "util_pkg" / "macros" / "custom_tests.sql").write_text(
+            """{% test nonzero_amount(model, column_name) %}
+select {{ column_name }}
+from {{ model }}
+where {{ column_name }} = 0
+{% endtest %}
+"""
+        )
+        dbt_profiles = tmp_path / "dbt-profiles"
+        dbt_profiles.mkdir()
+        (dbt_profiles / "profiles.yml").write_text(
+            "\n".join(
+                [
+                    "source_seed_custom_generic_test_compile:",
+                    "  target: dev",
+                    "  outputs:",
+                    "    dev:",
+                    "      type: duckdb",
+                    f"      path: {tmp_path / 'oracle.duckdb'}",
+                    "      schema: main",
+                ]
+            )
+            + "\n"
+        )
+        dbt_target = tmp_path / "dbt-target"
+        original_message_to_json = protobuf_json_format.MessageToJson
+        original_event_message_to_json = dbt_event_base_types.MessageToJson
+
+        def compatible_message_to_json(message, *args, always_print_fields_with_no_presence=None, **kwargs):
+            if always_print_fields_with_no_presence is not None and "including_default_value_fields" not in kwargs:
+                kwargs["including_default_value_fields"] = always_print_fields_with_no_presence
+            return original_message_to_json(message, *args, **kwargs)
+
+        protobuf_json_format.MessageToJson = compatible_message_to_json
+        dbt_event_base_types.MessageToJson = compatible_message_to_json
+        try:
+            dbt_result = dbtRunner().invoke(
+                [
+                    "compile",
+                    "--project-dir",
+                    str(project),
+                    "--profiles-dir",
+                    str(dbt_profiles),
+                    "--target-path",
+                    str(dbt_target),
+                    "--select",
+                    "test_type:generic",
+                ]
+            )
+        finally:
+            protobuf_json_format.MessageToJson = original_message_to_json
+            dbt_event_base_types.MessageToJson = original_event_message_to_json
+        assert dbt_result.success, dbt_result.exception
+        dbt_manifest = json.loads((dbt_target / "manifest.json").read_text())
+        dbt_tests = {node["test_metadata"]["name"]: node for node in dbt_manifest["nodes"].values() if node["resource_type"] == "test"}
+        dbt_source = dbt_tests["positive_amount"]
+        dbt_seed = dbt_tests["nonzero_amount"]
+        for dxt_node, dbt_node in [(source_test, dbt_source), (seed_test, dbt_seed)]:
+            assert dxt_node["unique_id"] == dbt_node["unique_id"]
+            assert dxt_node["raw_code"] == dbt_node["raw_code"]
+            assert dxt_node["test_metadata"] == dbt_node["test_metadata"]
+            assert dxt_node["attached_node"] == dbt_node["attached_node"]
+            assert dxt_node["depends_on"] == dbt_node["depends_on"]
+            assert dxt_node["compiled"] == dbt_node["compiled"]
+            assert "{{" not in dbt_node["compiled_code"]
+            assert "{%" not in dbt_node["compiled_code"]
+
+
 def test_compile_rejects_unsupported_custom_generic_test_body(tmp_path: Path):
     project = copy_fixture(tmp_path, "custom_generic_test_compile")
     (project / "macros" / "custom_tests.sql").write_text(
@@ -386,7 +537,7 @@ select {{ column_name }} from {{ model }}
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "custom generic test compilation currently supports only model-column test blocks" in result.stderr
+    assert "custom generic test compilation currently supports only model, seed, or source column test blocks" in result.stderr
 
 
 def test_test_and_build_reject_custom_generic_tests_before_runtime(tmp_path: Path):
@@ -416,6 +567,31 @@ def test_test_and_build_reject_custom_generic_tests_before_runtime(tmp_path: Pat
 
 def test_test_and_build_reject_package_custom_generic_tests_before_runtime(tmp_path: Path):
     project = copy_fixture(tmp_path, "package_custom_generic_test_compile")
+    test_target = tmp_path / "test-target"
+    test_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(test_target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test_result.returncode == 2
+    assert "test/build currently executes only selected DuckDB singular SQL tests" in test_result.stderr
+    assert not (test_target / "run_results.json").exists()
+
+    build_target = tmp_path / "build-target"
+    build_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(build_target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build_result.returncode == 2
+    assert "test/build currently executes only selected DuckDB singular SQL tests" in build_result.stderr
+    assert not (build_target / "run_results.json").exists()
+
+
+def test_test_and_build_reject_source_seed_custom_generic_tests_before_runtime(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_seed_custom_generic_test_compile")
     test_target = tmp_path / "test-target"
     test_result = subprocess.run(
         [DXT, "test", "--project-dir", str(project), "--target-path", str(test_target), "--select", "test_type:generic"],
@@ -3875,7 +4051,7 @@ def test_parse_emits_generic_test_config_for_model_seed_and_source_tests(tmp_pat
     assert sorted(tests) == [
         "test.generic_test_config_tests.not_null_customers_customer_id.5c9bf9911d",
         "test.generic_test_config_tests.not_null_raw_customers_customer_id.ad2454198a",
-        "test.generic_test_config_tests.source_not_null_raw_orders_customer_id.3962c6ab03",
+        "test.generic_test_config_tests.source_not_null_raw_orders_customer_id.bbc5804683",
     ]
     model_test = tests["test.generic_test_config_tests.not_null_customers_customer_id.5c9bf9911d"]
     assert model_test["database"] == "memory"
@@ -3900,7 +4076,7 @@ def test_parse_emits_generic_test_config_for_model_seed_and_source_tests(tmp_pat
     assert seed_config["error_if"] == "> 2"
     assert seed_config["store_failures"] is None
 
-    source_config = tests["test.generic_test_config_tests.source_not_null_raw_orders_customer_id.3962c6ab03"]["config"]
+    source_config = tests["test.generic_test_config_tests.source_not_null_raw_orders_customer_id.bbc5804683"]["config"]
     assert source_config["where"] == "status = 'checked'"
     assert source_config["limit"] == 3
     assert source_config["severity"] == "warn"
