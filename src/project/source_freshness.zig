@@ -1,8 +1,10 @@
 const std = @import("std");
 const Io = std.Io;
+const project_fs = @import("fs.zig");
 const json = @import("json.zig");
 const types = @import("types.zig");
 
+const Runtime = types.Runtime;
 const FreshnessThreshold = types.FreshnessThreshold;
 const FreshnessTime = types.FreshnessTime;
 const SourceDef = types.SourceDef;
@@ -16,12 +18,94 @@ pub const CheckResult = struct {
     error_message: ?[]const u8 = null,
 };
 
+pub const SourceStatusRow = struct {
+    unique_id: []const u8,
+    status: []const u8,
+};
+
+pub const SourceStatusIndex = struct {
+    rows: []SourceStatusRow = &.{},
+
+    pub fn deinit(self: *SourceStatusIndex, allocator: std.mem.Allocator) void {
+        for (self.rows) |row| {
+            allocator.free(row.unique_id);
+            allocator.free(row.status);
+        }
+        allocator.free(self.rows);
+        self.* = .{};
+    }
+
+    pub fn statusFor(self: *const SourceStatusIndex, unique_id: []const u8) ?[]const u8 {
+        for (self.rows) |row| {
+            if (std.mem.eql(u8, row.unique_id, unique_id)) return row.status;
+        }
+        return null;
+    }
+};
+
 pub fn deinitResults(allocator: std.mem.Allocator, results: []const CheckResult) void {
     for (results) |result| {
         if (result.max_loaded_at) |value| allocator.free(value);
         if (result.snapshotted_at) |value| allocator.free(value);
         if (result.error_message) |value| allocator.free(value);
     }
+}
+
+pub fn loadSourceStatusIndex(runtime: Runtime, state_dir: []const u8) !SourceStatusIndex {
+    const path = try project_fs.pathJoin(runtime.allocator, &.{ state_dir, "sources.json" });
+    defer runtime.allocator.free(path);
+    const text = std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return error.MissingSourcesArtifact,
+        else => return err,
+    };
+    defer runtime.allocator.free(text);
+    return try parseSourceStatusIndex(runtime.allocator, text);
+}
+
+pub fn parseSourceStatusIndex(allocator: std.mem.Allocator, text: []const u8) !SourceStatusIndex {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, text, .{}) catch return error.MalformedSourcesArtifact;
+    defer parsed.deinit();
+
+    const root = if (parsed.value == .object) parsed.value.object else return error.MalformedSourcesArtifact;
+    const metadata_value = root.get("metadata") orelse return error.MalformedSourcesArtifact;
+    const metadata = if (metadata_value == .object) metadata_value.object else return error.MalformedSourcesArtifact;
+    const schema_value = metadata.get("dbt_schema_version") orelse return error.MalformedSourcesArtifact;
+    const schema_version = if (schema_value == .string) schema_value.string else return error.MalformedSourcesArtifact;
+    if (!std.mem.eql(u8, schema_version, "https://schemas.getdbt.com/dbt/sources/v3.json")) return error.UnsupportedSourcesSchemaVersion;
+
+    const results_value = root.get("results") orelse return error.MalformedSourcesArtifact;
+    const results = if (results_value == .array) results_value.array else return error.MalformedSourcesArtifact;
+
+    var rows: std.ArrayList(SourceStatusRow) = .empty;
+    errdefer {
+        for (rows.items) |row| {
+            allocator.free(row.unique_id);
+            allocator.free(row.status);
+        }
+        rows.deinit(allocator);
+    }
+
+    for (results.items) |result_value| {
+        const result = if (result_value == .object) result_value.object else return error.MalformedSourcesArtifact;
+        const unique_id_value = result.get("unique_id") orelse return error.MalformedSourcesArtifact;
+        const status_value = result.get("status") orelse return error.MalformedSourcesArtifact;
+        const unique_id = if (unique_id_value == .string) unique_id_value.string else return error.MalformedSourcesArtifact;
+        const status = if (status_value == .string) status_value.string else return error.MalformedSourcesArtifact;
+        if (!isSupportedSourceStatus(status)) return error.MalformedSourcesArtifact;
+        try rows.append(allocator, .{
+            .unique_id = try allocator.dupe(u8, unique_id),
+            .status = try allocator.dupe(u8, status),
+        });
+    }
+
+    return .{ .rows = try rows.toOwnedSlice(allocator) };
+}
+
+pub fn isSupportedSourceStatus(status: []const u8) bool {
+    return std.mem.eql(u8, status, "pass") or
+        std.mem.eql(u8, status, "warn") or
+        std.mem.eql(u8, status, "error") or
+        std.mem.eql(u8, status, "runtime error");
 }
 
 pub fn isRunnableSource(source: *const SourceDef) bool {
@@ -229,4 +313,40 @@ test "sources writer emits dbt v3 runtime error shape" {
     try std.testing.expectEqualStrings("runtime error", result.get("status").?.string);
     try std.testing.expectEqualStrings("DuckDB execution failed", result.get("error").?.string);
     try std.testing.expect(result.get("criteria") == null);
+}
+
+test "sources v3 status loader indexes freshness statuses" {
+    var index = try parseSourceStatusIndex(std.testing.allocator,
+        \\{
+        \\  "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/sources/v3.json"},
+        \\  "results": [
+        \\    {"unique_id": "source.demo.raw.customers", "status": "pass"},
+        \\    {"unique_id": "source.demo.raw.orders", "status": "warn"},
+        \\    {"unique_id": "source.demo.raw.payments", "status": "error"}
+        \\  ],
+        \\  "elapsed_time": 0.0
+        \\}
+    );
+    defer index.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("pass", index.statusFor("source.demo.raw.customers").?);
+    try std.testing.expectEqualStrings("warn", index.statusFor("source.demo.raw.orders").?);
+    try std.testing.expectEqualStrings("error", index.statusFor("source.demo.raw.payments").?);
+    try std.testing.expect(index.statusFor("source.demo.raw.missing") == null);
+}
+
+test "sources v3 status loader rejects malformed and version mismatched artifacts" {
+    try std.testing.expectError(error.MalformedSourcesArtifact, parseSourceStatusIndex(std.testing.allocator, "{\"metadata\":{},\"results\":[]}"));
+    try std.testing.expectError(error.UnsupportedSourcesSchemaVersion, parseSourceStatusIndex(std.testing.allocator,
+        \\{
+        \\  "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/sources/v2.json"},
+        \\  "results": []
+        \\}
+    ));
+    try std.testing.expectError(error.MalformedSourcesArtifact, parseSourceStatusIndex(std.testing.allocator,
+        \\{
+        \\  "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/sources/v3.json"},
+        \\  "results": [{"unique_id": "source.demo.raw.orders"}]
+        \\}
+    ));
 }

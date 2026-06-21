@@ -13,6 +13,7 @@ pub const Options = struct {
     target: ?[]const u8 = null,
     target_path: ?[]const u8 = null,
     vars: ?[]const u8 = null,
+    state: ?[]const u8 = null,
     threads: ?[]const u8 = null,
     docs_host: []const u8 = "127.0.0.1",
     docs_port: u16 = 8080,

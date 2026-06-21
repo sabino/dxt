@@ -1,4 +1,5 @@
 const std = @import("std");
+const source_freshness = @import("source_freshness.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 
@@ -9,6 +10,10 @@ const SingularTestNode = types.SingularTestNode;
 const SourceDef = types.SourceDef;
 const ExposureDef = types.ExposureDef;
 const UnitTestDef = types.UnitTestDef;
+
+pub const SelectionContext = struct {
+    source_status_index: ?*const source_freshness.SourceStatusIndex = null,
+};
 
 pub const SelectedResource = struct {
     unique_id: []const u8,
@@ -54,6 +59,28 @@ pub fn validateSelectorSyntax(value: []const u8) !void {
         matched_any = true;
     }
     if (!matched_any) return error.UnsupportedSelector;
+}
+
+pub fn usesSourceStatusSelector(select: ?[]const u8, exclude: ?[]const u8) bool {
+    if (select) |value| {
+        if (selectorValueUsesSourceStatus(value)) return true;
+    }
+    if (exclude) |value| {
+        if (selectorValueUsesSourceStatus(value)) return true;
+    }
+    return false;
+}
+
+fn selectorValueUsesSourceStatus(value: []const u8) bool {
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (expressions.next()) |expression| {
+        var terms = std.mem.splitScalar(u8, expression, ',');
+        while (terms.next()) |raw_term| {
+            const term = parseSelectorTerm(raw_term);
+            if (term.valid and std.mem.startsWith(u8, term.value, "source_status:")) return true;
+        }
+    }
+    return false;
 }
 
 fn validateSelectorExpression(value: []const u8) !void {
@@ -127,6 +154,7 @@ fn validateSelectorMethod(part: []const u8) !void {
         "exposure:",
         "unit_test:",
         "config.materialized:",
+        "source_status:",
     };
     for (prefixes) |prefix| {
         if (std.mem.startsWith(u8, part, prefix)) {
@@ -134,6 +162,7 @@ fn validateSelectorMethod(part: []const u8) !void {
             const value = part[prefix.len..];
             if (std.mem.eql(u8, prefix, "resource_type:") and !isSupportedResourceType(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "test_type:") and !isSupportedTestType(value)) return error.UnsupportedSelector;
+            if (std.mem.eql(u8, prefix, "source_status:") and !isSupportedSourceStatusSelector(value)) return error.UnsupportedSelector;
             return;
         }
     }
@@ -154,14 +183,22 @@ fn isSupportedTestType(value: []const u8) bool {
     return std.mem.eql(u8, value, "generic") or std.mem.eql(u8, value, "singular") or std.mem.eql(u8, value, "data") or std.mem.eql(u8, value, "unit");
 }
 
+fn isSupportedSourceStatusSelector(value: []const u8) bool {
+    return std.mem.eql(u8, value, "pass") or std.mem.eql(u8, value, "warn") or std.mem.eql(u8, value, "error");
+}
+
 pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8) ![]SelectedResource {
+    return try selectResourcesWithContext(allocator, graph, resource_type, select, exclude, .{});
+}
+
+pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8, context: SelectionContext) ![]SelectedResource {
     const select_spec = parseSelectorSpec(select);
     const exclude_spec = parseSelectorSpec(exclude);
     var selected: std.ArrayList(SelectedResource) = .empty;
     errdefer selected.deinit(allocator);
     for (graph.nodes.items) |*node| {
         if (!node.enabled) continue;
-        if (matchesResourceType(resource_type, node.resource_type) and matchesSelector(graph, node, select_spec) and (!exclude_spec.active or !matchesSelector(graph, node, exclude_spec))) {
+        if (matchesResourceType(resource_type, node.resource_type) and matchesSelector(graph, node, select_spec, context) and (!exclude_spec.active or !matchesSelector(graph, node, exclude_spec, context))) {
             try selected.append(allocator, .{
                 .unique_id = node.unique_id,
                 .name = node.name,
@@ -186,7 +223,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
         }
     }
     for (graph.tests.items) |*test_node| {
-        if (matchesResourceType(resource_type, "test") and matchesTestSelector(graph, test_node, select_spec) and (!exclude_spec.active or !matchesTestSelector(graph, test_node, exclude_spec))) {
+        if (matchesResourceType(resource_type, "test") and matchesTestSelector(graph, test_node, select_spec, context) and (!exclude_spec.active or !matchesTestSelector(graph, test_node, exclude_spec, context))) {
             try selected.append(allocator, .{
                 .unique_id = test_node.unique_id,
                 .name = test_node.name,
@@ -209,7 +246,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
     }
     for (graph.singular_tests.items) |*test_node| {
         if (!test_node.enabled) continue;
-        if (matchesResourceType(resource_type, "test") and matchesSingularTestSelector(graph, test_node, select_spec) and (!exclude_spec.active or !matchesSingularTestSelector(graph, test_node, exclude_spec))) {
+        if (matchesResourceType(resource_type, "test") and matchesSingularTestSelector(graph, test_node, select_spec, context) and (!exclude_spec.active or !matchesSingularTestSelector(graph, test_node, exclude_spec, context))) {
             try selected.append(allocator, .{
                 .unique_id = test_node.unique_id,
                 .name = test_node.name,
@@ -232,7 +269,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
         }
     }
     for (graph.sources.items) |*source| {
-        if (matchesResourceType(resource_type, "source") and matchesSourceSelector(graph, source, select_spec) and (!exclude_spec.active or !matchesSourceSelector(graph, source, exclude_spec))) {
+        if (matchesResourceType(resource_type, "source") and matchesSourceSelector(graph, source, select_spec, context) and (!exclude_spec.active or !matchesSourceSelector(graph, source, exclude_spec, context))) {
             try selected.append(allocator, .{
                 .unique_id = source.unique_id,
                 .name = source.table_name,
@@ -249,7 +286,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
     }
     for (graph.exposures.items) |*exposure| {
         if (!exposure.enabled) continue;
-        if (matchesResourceType(resource_type, "exposure") and matchesExposureSelector(graph, exposure, select_spec) and (!exclude_spec.active or !matchesExposureSelector(graph, exposure, exclude_spec))) {
+        if (matchesResourceType(resource_type, "exposure") and matchesExposureSelector(graph, exposure, select_spec, context) and (!exclude_spec.active or !matchesExposureSelector(graph, exposure, exclude_spec, context))) {
             try selected.append(allocator, .{
                 .unique_id = exposure.unique_id,
                 .name = exposure.name,
@@ -270,7 +307,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
     }
     for (graph.unit_tests.items) |*unit_test| {
         if (!unit_test.enabled) continue;
-        if (matchesResourceType(resource_type, "unit_test") and matchesUnitTestSelector(graph, unit_test, select_spec) and (!exclude_spec.active or !matchesUnitTestSelector(graph, unit_test, exclude_spec))) {
+        if (matchesResourceType(resource_type, "unit_test") and matchesUnitTestSelector(graph, unit_test, select_spec, context) and (!exclude_spec.active or !matchesUnitTestSelector(graph, unit_test, exclude_spec, context))) {
             try selected.append(allocator, .{
                 .unique_id = unit_test.unique_id,
                 .name = unit_test.name,
@@ -317,28 +354,28 @@ fn matchesResourceType(requested: ?[]const u8, actual: []const u8) bool {
     return true;
 }
 
-fn matchesSelector(graph: *const Graph, node: *const Node, spec: SelectorSpec) bool {
+fn matchesSelector(graph: *const Graph, node: *const Node, spec: SelectorSpec, context: SelectionContext) bool {
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
-    return matchesNodeSelectorExpression(graph, node, spec.value);
+    return matchesNodeSelectorExpression(graph, node, spec.value, context);
 }
 
-fn matchesNodeSelectorExpression(graph: *const Graph, node: *const Node, value: []const u8) bool {
+fn matchesNodeSelectorExpression(graph: *const Graph, node: *const Node, value: []const u8, context: SelectionContext) bool {
     var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
     while (expressions.next()) |expression| {
-        if (matchesNodeSelectorIntersection(graph, node, expression)) return true;
+        if (matchesNodeSelectorIntersection(graph, node, expression, context)) return true;
     }
     return false;
 }
 
-fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value: []const u8) bool {
+fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value: []const u8, context: SelectionContext) bool {
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
         if (!term.valid) return false;
         if (term.value.len == 0) return false;
-        if (!matchesNodeSelectorTerm(graph, node, term.value) and !matchesGraphExpansion(graph, node.unique_id, term)) return false;
+        if (!matchesNodeSelectorTerm(graph, node, term.value) and !matchesGraphExpansion(graph, node.unique_id, term, context)) return false;
         matched_any = true;
     }
     return matched_any;
@@ -380,28 +417,28 @@ fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []cons
     return false;
 }
 
-fn matchesTestSelector(graph: *const Graph, test_node: *const GenericTestNode, spec: SelectorSpec) bool {
+fn matchesTestSelector(graph: *const Graph, test_node: *const GenericTestNode, spec: SelectorSpec, context: SelectionContext) bool {
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
-    return matchesTestSelectorExpression(graph, test_node, spec.value);
+    return matchesTestSelectorExpression(graph, test_node, spec.value, context);
 }
 
-fn matchesTestSelectorExpression(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8) bool {
+fn matchesTestSelectorExpression(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8, context: SelectionContext) bool {
     var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
     while (expressions.next()) |expression| {
-        if (matchesTestSelectorIntersection(graph, test_node, expression)) return true;
+        if (matchesTestSelectorIntersection(graph, test_node, expression, context)) return true;
     }
     return false;
 }
 
-fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8) bool {
+fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8, context: SelectionContext) bool {
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
         if (!term.valid) return false;
         if (term.value.len == 0) return false;
-        if (!matchesTestSelectorTerm(graph, test_node, term.value) and !matchesGraphExpansion(graph, test_node.unique_id, term)) return false;
+        if (!matchesTestSelectorTerm(graph, test_node, term.value) and !matchesGraphExpansion(graph, test_node.unique_id, term, context)) return false;
         matched_any = true;
     }
     return matched_any;
@@ -432,28 +469,28 @@ fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNod
     return false;
 }
 
-fn matchesSingularTestSelector(graph: *const Graph, test_node: *const SingularTestNode, spec: SelectorSpec) bool {
+fn matchesSingularTestSelector(graph: *const Graph, test_node: *const SingularTestNode, spec: SelectorSpec, context: SelectionContext) bool {
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
-    return matchesSingularTestSelectorExpression(graph, test_node, spec.value);
+    return matchesSingularTestSelectorExpression(graph, test_node, spec.value, context);
 }
 
-fn matchesSingularTestSelectorExpression(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8) bool {
+fn matchesSingularTestSelectorExpression(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8, context: SelectionContext) bool {
     var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
     while (expressions.next()) |expression| {
-        if (matchesSingularTestSelectorIntersection(graph, test_node, expression)) return true;
+        if (matchesSingularTestSelectorIntersection(graph, test_node, expression, context)) return true;
     }
     return false;
 }
 
-fn matchesSingularTestSelectorIntersection(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8) bool {
+fn matchesSingularTestSelectorIntersection(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8, context: SelectionContext) bool {
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
         if (!term.valid) return false;
         if (term.value.len == 0) return false;
-        if (!matchesSingularTestSelectorTerm(graph, test_node, term.value) and !matchesGraphExpansion(graph, test_node.unique_id, term)) return false;
+        if (!matchesSingularTestSelectorTerm(graph, test_node, term.value) and !matchesGraphExpansion(graph, test_node.unique_id, term, context)) return false;
         matched_any = true;
     }
     return matched_any;
@@ -521,34 +558,34 @@ fn matchesSingularDependencyNameOrFqnSelector(graph: *const Graph, test_node: *c
     return false;
 }
 
-fn matchesSourceSelector(graph: *const Graph, source: *const SourceDef, spec: SelectorSpec) bool {
+fn matchesSourceSelector(graph: *const Graph, source: *const SourceDef, spec: SelectorSpec, context: SelectionContext) bool {
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
-    return matchesSourceSelectorExpression(graph, source, spec.value);
+    return matchesSourceSelectorExpression(graph, source, spec.value, context);
 }
 
-fn matchesSourceSelectorExpression(graph: *const Graph, source: *const SourceDef, value: []const u8) bool {
+fn matchesSourceSelectorExpression(graph: *const Graph, source: *const SourceDef, value: []const u8, context: SelectionContext) bool {
     var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
     while (expressions.next()) |expression| {
-        if (matchesSourceSelectorIntersection(graph, source, expression)) return true;
+        if (matchesSourceSelectorIntersection(graph, source, expression, context)) return true;
     }
     return false;
 }
 
-fn matchesSourceSelectorIntersection(graph: *const Graph, source: *const SourceDef, value: []const u8) bool {
+fn matchesSourceSelectorIntersection(graph: *const Graph, source: *const SourceDef, value: []const u8, context: SelectionContext) bool {
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
         if (!term.valid) return false;
         if (term.value.len == 0) return false;
-        if (!matchesSourceSelectorTerm(graph, source, term.value) and !matchesGraphExpansion(graph, source.unique_id, term)) return false;
+        if (!matchesSourceSelectorTerm(graph, source, term.value, context) and !matchesGraphExpansion(graph, source.unique_id, term, context)) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, value: []const u8) bool {
+fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, value: []const u8, context: SelectionContext) bool {
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
         return std.mem.eql(u8, resource_type, "source");
@@ -558,6 +595,12 @@ fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, valu
     }
     if (std.mem.startsWith(u8, value, "package:")) {
         return matchesUniqueIdPackage(graph, source.unique_id, value["package:".len..]);
+    }
+    if (std.mem.startsWith(u8, value, "source_status:")) {
+        const requested = value["source_status:".len..];
+        const index = context.source_status_index orelse return false;
+        const status = index.statusFor(source.unique_id) orelse return false;
+        return std.mem.eql(u8, requested, status);
     }
     if (std.mem.startsWith(u8, value, "source:")) {
         const source_value = value["source:".len..];
@@ -583,28 +626,28 @@ fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, valu
     return false;
 }
 
-fn matchesExposureSelector(graph: *const Graph, exposure: *const ExposureDef, spec: SelectorSpec) bool {
+fn matchesExposureSelector(graph: *const Graph, exposure: *const ExposureDef, spec: SelectorSpec, context: SelectionContext) bool {
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
-    return matchesExposureSelectorExpression(graph, exposure, spec.value);
+    return matchesExposureSelectorExpression(graph, exposure, spec.value, context);
 }
 
-fn matchesExposureSelectorExpression(graph: *const Graph, exposure: *const ExposureDef, value: []const u8) bool {
+fn matchesExposureSelectorExpression(graph: *const Graph, exposure: *const ExposureDef, value: []const u8, context: SelectionContext) bool {
     var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
     while (expressions.next()) |expression| {
-        if (matchesExposureSelectorIntersection(graph, exposure, expression)) return true;
+        if (matchesExposureSelectorIntersection(graph, exposure, expression, context)) return true;
     }
     return false;
 }
 
-fn matchesExposureSelectorIntersection(graph: *const Graph, exposure: *const ExposureDef, value: []const u8) bool {
+fn matchesExposureSelectorIntersection(graph: *const Graph, exposure: *const ExposureDef, value: []const u8, context: SelectionContext) bool {
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
         if (!term.valid) return false;
         if (term.value.len == 0) return false;
-        if (!matchesExposureSelectorTerm(graph, exposure, term.value) and !matchesGraphExpansion(graph, exposure.unique_id, term)) return false;
+        if (!matchesExposureSelectorTerm(graph, exposure, term.value) and !matchesGraphExpansion(graph, exposure.unique_id, term, context)) return false;
         matched_any = true;
     }
     return matched_any;
@@ -643,28 +686,28 @@ fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef
     return false;
 }
 
-fn matchesUnitTestSelector(graph: *const Graph, unit_test: *const UnitTestDef, spec: SelectorSpec) bool {
+fn matchesUnitTestSelector(graph: *const Graph, unit_test: *const UnitTestDef, spec: SelectorSpec, context: SelectionContext) bool {
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
-    return matchesUnitTestSelectorExpression(graph, unit_test, spec.value);
+    return matchesUnitTestSelectorExpression(graph, unit_test, spec.value, context);
 }
 
-fn matchesUnitTestSelectorExpression(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8) bool {
+fn matchesUnitTestSelectorExpression(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8, context: SelectionContext) bool {
     var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
     while (expressions.next()) |expression| {
-        if (matchesUnitTestSelectorIntersection(graph, unit_test, expression)) return true;
+        if (matchesUnitTestSelectorIntersection(graph, unit_test, expression, context)) return true;
     }
     return false;
 }
 
-fn matchesUnitTestSelectorIntersection(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8) bool {
+fn matchesUnitTestSelectorIntersection(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8, context: SelectionContext) bool {
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
         const term = parseSelectorTerm(raw_term);
         if (!term.valid) return false;
         if (term.value.len == 0) return false;
-        if (!matchesUnitTestSelectorTerm(graph, unit_test, term.value) and !matchesGraphExpansion(graph, unit_test.unique_id, term)) return false;
+        if (!matchesUnitTestSelectorTerm(graph, unit_test, term.value) and !matchesGraphExpansion(graph, unit_test.unique_id, term, context)) return false;
         matched_any = true;
     }
     return matched_any;
@@ -1020,7 +1063,7 @@ fn isSelectorDigit(byte: u8) bool {
     return byte >= '0' and byte <= '9';
 }
 
-fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, spec: SelectorSpec) bool {
+fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, spec: SelectorSpec, context: SelectionContext) bool {
     if (!spec.include_childrens_parents and !spec.include_parents and !spec.include_children) return false;
     for (graph.nodes.items) |*target| {
         if (!target.enabled or !matchesNodeSelectorTerm(graph, target, spec.value)) continue;
@@ -1042,7 +1085,7 @@ fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, s
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     for (graph.sources.items) |*target| {
-        if (!matchesSourceSelectorTerm(graph, target, spec.value)) continue;
+        if (!matchesSourceSelectorTerm(graph, target, spec.value, context)) continue;
         if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
@@ -1196,6 +1239,66 @@ test "file selectors match only basename or stem" {
     try std.testing.expect(!matchesFileSelector("models/marts/orders.sql", "models/marts/orders.sql"));
     try std.testing.expect(!matchesFileSelector("marts/orders.sql", "models/marts/orders.sql"));
     try std.testing.expect(!matchesFileSelector("customers.sql", "models/marts/orders.sql"));
+}
+
+test "source status selectors match sources and graph expansions from sources.json state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.customers",
+        .source_name = "raw",
+        .table_name = "customers",
+        .original_file_path = "models/schema.yml",
+    });
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.orders",
+        .source_name = "raw",
+        .table_name = "orders",
+        .original_file_path = "models/schema.yml",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.stg_customers",
+        .name = "stg_customers",
+        .path = "stg_customers.sql",
+        .original_file_path = "models/stg_customers.sql",
+        .raw_code = "",
+    });
+    try graph.nodes.items[0].depends_on.append(allocator, "source.demo.raw.customers");
+
+    var status_rows = [_]source_freshness.SourceStatusRow{
+        .{ .unique_id = "source.demo.raw.customers", .status = "warn" },
+        .{ .unique_id = "source.demo.raw.orders", .status = "error" },
+    };
+    const status_index = source_freshness.SourceStatusIndex{ .rows = &status_rows };
+    const context = SelectionContext{ .source_status_index = &status_index };
+
+    const warn_sources = try selectResourcesWithContext(allocator, &graph, "source", "source_status:warn", null, context);
+    try std.testing.expectEqual(@as(usize, 1), warn_sources.len);
+    try std.testing.expectEqualStrings("source.demo.raw.customers", warn_sources[0].unique_id);
+
+    const error_sources = try selectResourcesWithContext(allocator, &graph, "source", "source_status:error", null, context);
+    try std.testing.expectEqual(@as(usize, 1), error_sources.len);
+    try std.testing.expectEqualStrings("source.demo.raw.orders", error_sources[0].unique_id);
+
+    const pass_sources = try selectResourcesWithContext(allocator, &graph, "source", "source_status:pass", null, context);
+    try std.testing.expectEqual(@as(usize, 0), pass_sources.len);
+
+    const warn_with_children = try selectResourcesWithContext(allocator, &graph, null, "source_status:warn+", null, context);
+    try std.testing.expectEqual(@as(usize, 2), warn_with_children.len);
+    try std.testing.expectEqualStrings("model.demo.stg_customers", warn_with_children[0].unique_id);
+    try std.testing.expectEqualStrings("source.demo.raw.customers", warn_with_children[1].unique_id);
+
+    try std.testing.expect(usesSourceStatusSelector("source_status:warn+", null));
+    try std.testing.expect(usesSourceStatusSelector(null, "source_status:error"));
+    try std.testing.expect(!usesSourceStatusSelector("source:raw.customers", null));
 }
 
 test "singular test selectors match type path file and graph expansion" {
