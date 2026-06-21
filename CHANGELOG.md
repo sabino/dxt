@@ -69,6 +69,10 @@ compatibility.
 
 ### Fixed
 
+- DuckDB `source freshness` now reports selected sources that have freshness
+  thresholds but no `loaded_at_field` or `loaded_at_query` as dbt-shaped
+  Sources v3 runtime-error rows explaining that DuckDB does not support
+  metadata-based freshness, while continuing other selected loaded-at checks.
 - First DuckDB-compatible `ephemeral` model slice: downstream SQL models now
   compile supported ephemeral parents into deterministic injected CTEs, emit
   Manifest `extra_ctes` / `extra_ctes_injected`, and run/build without creating
