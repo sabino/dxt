@@ -8554,6 +8554,106 @@ def test_ls_multi_argv_and_repeated_selector_flags(tmp_path: Path):
     ]
 
 
+def test_dbt_core_file_selector_basename_stem_and_literal_wildcard_oracle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if not has_dbt_core:
+        pytest.skip("dbt Core is not installed for the optional file selector oracle")
+    if not has_dbt_duckdb:
+        pytest.skip("dbt DuckDB adapter is not installed for the optional file selector oracle")
+
+    from dbt.cli.main import dbtRunner
+
+    project = tmp_path / "file_selector_edge"
+    models = project / "models"
+    models.mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        "\n".join(
+            [
+                "name: file_selector_edge",
+                'version: "1.0"',
+                "profile: default",
+                'model-paths: ["models"]',
+                "target-path: target",
+            ]
+        )
+        + "\n"
+    )
+    (project / "profiles.yml").write_text(
+        "\n".join(
+            [
+                "default:",
+                "  target: dev",
+                "  outputs:",
+                "    dev:",
+                "      type: duckdb",
+                "      path: oracle.duckdb",
+                "      schema: main",
+            ]
+        )
+        + "\n"
+    )
+    for file_name, value in [
+        ("orders.v1.sql", 1),
+        ("literal]bracket.sql", 2),
+        ("literal[bracket].sql", 3),
+        ("question?mark.sql", 4),
+        ("star*mark.sql", 5),
+    ]:
+        (models / file_name).write_text(f"select {value} as id\n")
+
+    selectors = [
+        "file:orders.v1",
+        "file:orders.v1.sql",
+        "file:literal[]]bracket",
+        "file:literal[]]bracket.sql",
+        "file:literal[[]bracket[]]",
+        "file:question[?]mark",
+        "file:star[*]mark",
+    ]
+
+    for selector in selectors:
+        dxt_result = subprocess.run(
+            [DXT, "ls", "--project-dir", str(project), "--select", selector, "--output", "json"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert dxt_result.returncode == 0, dxt_result.stderr
+        dxt_ids = sorted(item["unique_id"] for item in json.loads(dxt_result.stdout))
+
+        dbt_result = dbtRunner().invoke(
+            [
+                "ls",
+                "--project-dir",
+                str(project),
+                "--profiles-dir",
+                str(project),
+                "--select",
+                selector,
+                "--output",
+                "json",
+            ]
+        )
+        dbt_stdout = capsys.readouterr().out
+        dbt_ids = sorted(
+            json.loads(line)["unique_id"]
+            for line in dbt_stdout.splitlines()
+            if line.strip().startswith("{")
+        )
+        if not dbt_result.success and not dbt_ids:
+            pytest.skip(f"dbt Core file selector oracle unavailable: {dbt_result.exception!r}")
+
+        assert dxt_ids == dbt_ids
+
+
 def test_ls_root_selectors_yml_scalar_aliases(tmp_path: Path):
     project = copy_fixture(tmp_path, "selector_graph")
 

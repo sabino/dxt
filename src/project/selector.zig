@@ -996,7 +996,7 @@ fn matchesCharacterClass(pattern: []const u8, start: usize, value: u8) ?Characte
     if (negated) index += 1;
     if (index >= pattern.len) return null;
     const class_start = index;
-    var close = index;
+    var close = if (pattern[index] == ']') index + 1 else index;
     while (close < pattern.len and pattern[close] != ']') close += 1;
     if (close >= pattern.len or close == class_start) return null;
 
@@ -1248,6 +1248,11 @@ test "selector wildcard patterns support fnmatch character classes" {
     try std.testing.expect(!matchesSelectorPattern("ord[!e]rs", "orders"));
     try std.testing.expect(matchesSelectorPattern("ord[!z-a]rs", "orders"));
     try std.testing.expect(matchesSelectorPattern("ord[[]rs", "ord[rs"));
+    try std.testing.expect(matchesSelectorPattern("ord[]]rs", "ord]rs"));
+    try std.testing.expect(!matchesSelectorPattern("ord[!]]rs", "ord]rs"));
+    try std.testing.expect(matchesSelectorPattern("ord[!]]rs", "orders"));
+    try std.testing.expect(matchesSelectorPattern("ord[*]rs", "ord*rs"));
+    try std.testing.expect(matchesSelectorPattern("ord[?]rs", "ord?rs"));
     try std.testing.expect(matchesSelectorPattern("ord[rs", "ord[rs"));
     try std.testing.expect(!matchesSelectorPattern("*a*a*a*a*a*a*a*a*a*a*b", "aaaaaaaaaa"));
     try std.testing.expect(matchesPathSelector("models/[os]*.sql", "models/orders.sql"));
@@ -1270,9 +1275,16 @@ test "file selectors match only basename or stem" {
     try std.testing.expect(matchesFileSelector("orders", "models/marts/orders.sql"));
     try std.testing.expect(matchesFileSelector("*orders.sql", "models/marts/orders.sql"));
     try std.testing.expect(matchesFileSelector("*orders", "models/marts/orders.sql"));
+    try std.testing.expect(matchesFileSelector("orders.v1", "models/marts/orders.v1.sql"));
+    try std.testing.expect(matchesFileSelector("orders.v1.sql", "models/marts/orders.v1.sql"));
     try std.testing.expect(matchesFileSelector("ord[ea]rs.sql", "models/marts/orders.sql"));
     try std.testing.expect(matchesFileSelector("ord[a-z]rs", "models/marts/orders.sql"));
     try std.testing.expect(!matchesFileSelector("ord[!e]rs.sql", "models/marts/orders.sql"));
+    try std.testing.expect(matchesFileSelector("literal[]]bracket", "models/marts/literal]bracket.sql"));
+    try std.testing.expect(matchesFileSelector("literal[]]bracket.sql", "models/marts/literal]bracket.sql"));
+    try std.testing.expect(matchesFileSelector("literal[[]bracket[]]", "models/marts/literal[bracket].sql"));
+    try std.testing.expect(matchesFileSelector("question[?]mark", "models/marts/question?mark.sql"));
+    try std.testing.expect(matchesFileSelector("star[*]mark", "models/marts/star*mark.sql"));
     try std.testing.expect(matchesFileSelector("schema.yml", "models/schema.yml"));
     try std.testing.expect(matchesFileSelector("schema", "models/schema.yml"));
     try std.testing.expect(!matchesFileSelector("models/marts/orders.sql", "models/marts/orders.sql"));

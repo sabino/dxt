@@ -132,6 +132,8 @@ compatibility.
 - Selector wildcard parity for bracket character classes in the shared Zig
   selector engine, covering `file:` and slash-aware `path:` selectors used by
   `dxt ls` and other selector-backed commands.
+- `file:` selectors now match dbt Core's basename/stem behavior for multi-dot
+  filenames and bracket-escaped literal `]`, `*`, and `?` filename characters.
 - CI validation pyramid split into native Zig/safety, Python integration matrix,
   and public Jaffle parse/build/run/docs gates with a pinned and
   checksum-verified DuckDB CLI, pytest JUnit reports, and focused local
