@@ -60,6 +60,9 @@ compatibility.
   seed columns, in addition to model columns, for root-project and
   installed-package `{% test %}` / `{% data_test %}` blocks that use the
   existing static `{{ model }}` and `{{ column_name }}` renderer.
+- Narrow static `{% if %}` rendering now supports `elif` chains plus simple
+  `==` / `!=` comparisons over supported bool and string compile-context
+  values without expanding into general Jinja expression evaluation.
 
 ### Fixed
 

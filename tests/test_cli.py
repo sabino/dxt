@@ -848,6 +848,7 @@ sources:
     (project / "dbt_project.yml").write_text(
         """name: static_if_compile
 version: "1.0"
+profile: static_if_compile
 model-paths: ["models"]
 target-path: target
 """
@@ -864,6 +865,18 @@ union all select 0 as id
 {% if not is_incremental() %}
 where id >= 0
 {% endif %}
+{% if false %}
+union all select -1 as id
+{% elif target.name == 'dev' %}
+union all select 2 as id
+{% else %}
+union all select -2 as id
+{% endif %}
+{% if this.identifier != 'events' %}
+union all select -3 as id
+{% elif 'events' == this.name %}
+union all select 3 as id
+{% endif %}
 """
     )
 
@@ -872,8 +885,35 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
     project = tmp_path / "static_if_compile"
     write_static_if_project(project)
     target = tmp_path / "compile-target"
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "profiles.yml").write_text(
+        "\n".join(
+            [
+                "static_if_compile:",
+                "  target: dev",
+                "  outputs:",
+                "    dev:",
+                "      type: duckdb",
+                f"      path: {tmp_path / 'oracle.duckdb'}",
+                "      schema: main",
+            ]
+        )
+        + "\n"
+    )
     result = subprocess.run(
-        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "events"],
+        [
+            DXT,
+            "compile",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(profiles_dir),
+            "--target-path",
+            str(target),
+            "--select",
+            "events",
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -884,7 +924,12 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
     assert 'union all select * from "main"."customers"' in compiled
     assert 'union all select * from "raw"."events"' in compiled
     assert "where id >= 0" in compiled
+    assert "union all select 2 as id" in compiled
+    assert "union all select 3 as id" in compiled
     assert "union all select 0 as id" not in compiled
+    assert "union all select -1 as id" not in compiled
+    assert "union all select -2 as id" not in compiled
+    assert "union all select -3 as id" not in compiled
     assert "{{" not in compiled
     assert "{%" not in compiled
 
@@ -896,6 +941,60 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
     ]
     assert events["refs"] == [{"name": "customers", "package": None, "version": None}]
     assert events["sources"] == [["raw", "events"]]
+
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if has_dbt_core and has_dbt_duckdb:
+        from dbt.cli.main import dbtRunner
+        import dbt_common.events.base_types as dbt_event_base_types
+        import google.protobuf.json_format as protobuf_json_format
+
+        events_path = project / "models" / "events.sql"
+        events_path.write_text(
+            "-- depends_on: {{ ref('customers') }}\n"
+            "-- depends_on: {{ source('raw', 'events') }}\n"
+            + events_path.read_text()
+        )
+        dbt_target = tmp_path / "dbt-target"
+        original_message_to_json = protobuf_json_format.MessageToJson
+        original_event_message_to_json = dbt_event_base_types.MessageToJson
+
+        def compatible_message_to_json(message, *args, always_print_fields_with_no_presence=None, **kwargs):
+            if always_print_fields_with_no_presence is not None and "including_default_value_fields" not in kwargs:
+                kwargs["including_default_value_fields"] = always_print_fields_with_no_presence
+            return original_message_to_json(message, *args, **kwargs)
+
+        protobuf_json_format.MessageToJson = compatible_message_to_json
+        dbt_event_base_types.MessageToJson = compatible_message_to_json
+        try:
+            dbt_result = dbtRunner().invoke(
+                [
+                    "compile",
+                    "--project-dir",
+                    str(project),
+                    "--profiles-dir",
+                    str(profiles_dir),
+                    "--target-path",
+                    str(dbt_target),
+                    "--select",
+                    "events",
+                ]
+            )
+        finally:
+            protobuf_json_format.MessageToJson = original_message_to_json
+            dbt_event_base_types.MessageToJson = original_event_message_to_json
+        assert dbt_result.success, dbt_result.exception
+        dbt_compiled = (dbt_target / "compiled" / "static_if_compile" / "models" / "events.sql").read_text()
+        assert "union all select 2 as id" in dbt_compiled
+        assert "union all select 3 as id" in dbt_compiled
+        assert "union all select -1 as id" not in dbt_compiled
+        assert "union all select -2 as id" not in dbt_compiled
+        assert "union all select -3 as id" not in dbt_compiled
 
 
 def test_parse_time_context_keeps_execute_false_boundary_and_static_dependencies(tmp_path: Path):
