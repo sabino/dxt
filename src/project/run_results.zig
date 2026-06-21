@@ -7,12 +7,14 @@ const types = @import("types.zig");
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
 const SingularTestNode = types.SingularTestNode;
+const UnitTestDef = types.UnitTestDef;
 const Runtime = types.Runtime;
 
 pub const NodeResult = struct {
     node: ?*const Node = null,
     test_node: ?*const GenericTestNode = null,
     singular_test_node: ?*const SingularTestNode = null,
+    unit_test_node: ?*const UnitTestDef = null,
     status: []const u8 = "success",
     message: ?[]const u8 = null,
     failures: ?u64 = null,
@@ -145,7 +147,7 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     try writer.writeAll(", \"unique_id\": ");
     try json.string(writer, resultUniqueId(result));
     try writer.writeAll(", \"compiled\": ");
-    if (result.test_node != null or result.singular_test_node != null or result.compiled_code != null) {
+    if (result.test_node != null or result.singular_test_node != null or result.unit_test_node != null or result.compiled_code != null) {
         try writer.writeAll("true");
     } else if (result.node) |node| if (isCompiledResultNode(node)) {
         try writer.writeAll(if (node.compiled) "true" else "false");
@@ -177,6 +179,7 @@ fn resultUniqueId(result: NodeResult) []const u8 {
     if (result.node) |node| return node.unique_id;
     if (result.test_node) |test_node| return test_node.unique_id;
     if (result.singular_test_node) |test_node| return test_node.unique_id;
+    if (result.unit_test_node) |unit_test| return unit_test.unique_id;
     return "";
 }
 
@@ -525,4 +528,41 @@ test "run-results writer preserves seed model and generic test shape" {
     try std.testing.expectEqualStrings("pass", results[2].object.get("status").?.string);
     try std.testing.expectEqual(true, results[2].object.get("compiled").?.bool);
     try std.testing.expectEqual(.null, results[2].object.get("relation_name").?);
+}
+
+test "run-results writer emits unit test pass and fail statuses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.unit_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "unit_test.demo.orders.assert_order_flags",
+        .name = "assert_order_flags",
+        .model = "orders",
+        .path = "schema.yml",
+        .original_file_path = "models/schema.yml",
+    });
+
+    const rendered = try renderRunResults(allocator, &.{
+        .{
+            .unit_test_node = &graph.unit_tests.items[0],
+            .status = "fail",
+            .message = "Got 2 results, configured to fail if != 0",
+            .failures = 2,
+            .compiled_code = "select count(*) as failures from dxt_unit_diff",
+        },
+    });
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const result = parsed.value.object.get("results").?.array.items[0].object;
+    try std.testing.expectEqualStrings("fail", result.get("status").?.string);
+    try std.testing.expectEqualStrings("unit_test.demo.orders.assert_order_flags", result.get("unique_id").?.string);
+    try std.testing.expectEqual(@as(i64, 2), result.get("failures").?.integer);
+    try std.testing.expectEqual(true, result.get("compiled").?.bool);
+    try std.testing.expectEqualStrings("select count(*) as failures from dxt_unit_diff", result.get("compiled_code").?.string);
+    try std.testing.expectEqual(.null, result.get("relation_name").?);
 }

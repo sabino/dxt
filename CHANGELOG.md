@@ -70,6 +70,11 @@ compatibility.
 - Public Jaffle fixture CI now has explicit `dxt ls` and `dxt compile` gates
   alongside parse, DuckDB build/run, and docs-generate, with compile artifact
   checks for generated SQL files and dbt-shaped Manifest fields.
+- `dxt test` and test-only `dxt build` now execute selected supported unit
+  tests through DuckDB for the parsed dict row-fixture subset, materializing
+  literal `ref`/local default-quoted `source` fixtures inside a rollback-only
+  transaction, comparing projected actual rows to expected rows, and writing
+  Run Results v6 pass/fail rows.
 
 ### Fixed
 

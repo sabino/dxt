@@ -6296,7 +6296,7 @@ def test_parse_writes_minimal_manifest(tmp_path: Path):
     assert str(project) not in manifest_path.read_text()
 
 
-def test_parse_and_ls_include_read_only_unit_tests(tmp_path: Path):
+def test_parse_and_ls_include_unit_tests(tmp_path: Path):
     project = tmp_path / "unit_test_project"
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -6376,28 +6376,170 @@ unit_tests:
     assert list_selector.returncode == 0, list_selector.stderr
     assert list_selector.stdout.strip() == "unit_test:unit_test_project.assert_order_flags"
 
-    build_target = tmp_path / "unit-test-build-target"
-    build = subprocess.run(
-        [DXT, "build", "--project-dir", str(project), "--target-path", str(build_target), "--select", "resource_type:unit_test"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
-    assert build.returncode != 0
-    assert "unit test execution is not supported yet" in build.stderr
-    assert (build_target / "manifest.json").exists()
-    assert not (build_target / "run_results.json").exists()
 
-    test_target = tmp_path / "unit-test-command-target"
-    test = subprocess.run(
-        [DXT, "test", "--project-dir", str(project), "--target-path", str(test_target), "--select", "resource_type:unit_test"],
+def write_unit_test_execution_project(project: Path, expected_order_id: int = 1) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: unit_test_execution_project
+version: '1.0'
+profile: unit_test_execution_project
+model-paths: ['models']
+"""
+    )
+    (project / "models" / "stg_orders.sql").write_text("select 999 as order_id, false as has_food\n")
+    (project / "models" / "orders.sql").write_text("select * from {{ ref('stg_orders') }} where has_food\n")
+    (project / "models" / "schema.yml").write_text(
+        f"""version: 2
+unit_tests:
+  - name: assert_food_orders
+    model: orders
+    given:
+      - input: ref('stg_orders')
+        rows:
+          - {{order_id: 1, has_food: true}}
+          - {{order_id: 2, has_food: false}}
+    expect:
+      rows:
+        - {{order_id: {expected_order_id}, has_food: true}}
+"""
+    )
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for unit test execution coverage")
+def test_test_command_executes_selected_duckdb_unit_tests(tmp_path: Path):
+    project = tmp_path / "unit_test_execution_project"
+    write_unit_test_execution_project(project)
+    target = tmp_path / "unit-test-command-target"
+
+    result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "resource_type:unit_test"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert test.returncode != 0
-    assert "unit test execution is not supported yet" in test.stderr
-    assert not (test_target / "run_results.json").exists()
+
+    assert result.returncode == 0, result.stderr
+    assert "Tested 1 test(s)" in result.stdout
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    unit_id = "unit_test.unit_test_execution_project.orders.assert_food_orders"
+    assert [item["unique_id"] for item in run_results["results"]] == [unit_id]
+    result_row = run_results["results"][0]
+    assert result_row["status"] == "pass"
+    assert result_row["failures"] == 0
+    assert result_row["compiled"] is True
+    assert '"main"."stg_orders"' in result_row["compiled_code"]
+    assert "except all" in result_row["compiled_code"]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for unit test execution coverage")
+def test_build_executes_selected_duckdb_unit_tests_and_records_failures(tmp_path: Path):
+    project = tmp_path / "unit_test_execution_failure_project"
+    write_unit_test_execution_project(project, expected_order_id=2)
+    target = tmp_path / "unit-test-build-target"
+
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "resource_type:unit_test"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "Built 1 test(s)" in result.stdout
+    assert "1 test(s) failed with 2 failure row(s)" in result.stdout
+    assert "one or more tests failed" in result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    result_row = run_results["results"][0]
+    assert result_row["unique_id"] == "unit_test.unit_test_execution_project.orders.assert_food_orders"
+    assert result_row["status"] == "fail"
+    assert result_row["failures"] == 2
+    assert result_row["message"] == "Got 2 results, configured to fail if != 0"
+
+
+def test_dbt_core_unit_test_status_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if not has_dbt_core:
+        pytest.skip("dbt Core is not installed for the optional unit test oracle")
+    if not has_dbt_duckdb:
+        pytest.skip("dbt DuckDB adapter is not installed for the optional unit test oracle")
+
+    from dbt.cli.main import dbtRunner
+
+    project = tmp_path / "unit_test_execution_project"
+    write_unit_test_execution_project(project)
+    (project / "profiles.yml").write_text(
+        "\n".join(
+            [
+                "unit_test_execution_project:",
+                "  target: dev",
+                "  outputs:",
+                "    dev:",
+                "      type: duckdb",
+                "      path: oracle.duckdb",
+                "      schema: main",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    dxt_target = tmp_path / "dxt-target"
+    dxt_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(dxt_target), "--select", "resource_type:unit_test"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert dxt_result.returncode == 0, dxt_result.stderr
+    dxt_status = json.loads((dxt_target / "run_results.json").read_text())["results"][0]["status"]
+
+    dbt_target = tmp_path / "dbt-target"
+    dbt_runner = dbtRunner()
+    dbt_runner.invoke(
+        [
+            "run",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--target-path",
+            str(dbt_target),
+            "--select",
+            "stg_orders",
+        ]
+    )
+    capsys.readouterr()
+    dbt_runner.invoke(
+        [
+            "test",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--target-path",
+            str(dbt_target),
+            "--select",
+            "resource_type:unit_test",
+        ]
+    )
+    capsys.readouterr()
+    dbt_run_results = dbt_target / "run_results.json"
+    if not dbt_run_results.exists():
+        pytest.skip("dbt Core unit test oracle did not produce run_results.json in this environment")
+    dbt_status = json.loads(dbt_run_results.read_text())["results"][0]["status"]
+
+    assert dxt_status == "pass"
+    assert dbt_status == dxt_status
 
 
 def assert_partial_manifest_schema(manifest: dict) -> None:
