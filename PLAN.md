@@ -1360,6 +1360,14 @@ Exit criteria:
 
 ## Current Status
 
+- Issue #187 is the active Manifest v12 node identity/checksum slice. Branch
+  `agent/issue-187-artifact-manifest-v12-node-identity-and-checksum` owns
+  `src/project/manifest.zig`, the seed raw-content load in `src/project.zig`,
+  the pinned Manifest v12 schema slice, focused CLI/schema assertions, and the
+  dbt Core M1 oracle comparison for node `database`, `schema`, `alias`, `fqn`,
+  and `checksum` fields. The slice is limited to currently supported model,
+  analysis, seed, generic data-test, singular data-test, and disabled-node
+  artifact shapes.
 - Issue #180 is the active store-failures implementation slice. Branch
   `agent/issue-180-compat-store-failures-config-for-duckdb-data-tes` owns the
   current data-test `store_failures` config, manifest/run-results shape, and

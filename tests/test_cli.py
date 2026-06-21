@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import json
+import hashlib
 import shutil
 import importlib.util
 import copy
@@ -94,6 +95,10 @@ def duckdb_scalar(db_path: Path, sql: str) -> str:
     return result.stdout.strip()
 
 
+def dbt_sha256_text(value: str) -> dict[str, str]:
+    return {"name": "sha256", "checksum": hashlib.sha256(value.rstrip("\r\n").encode()).hexdigest()}
+
+
 def test_compile_writes_compiled_sql_and_manifest_fields(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     target = tmp_path / "compile-target"
@@ -119,6 +124,11 @@ def test_compile_writes_compiled_sql_and_manifest_fields(tmp_path: Path):
     assert_partial_manifest_schema(manifest)
     assert_manifest_schema_slice(manifest_path)
     orders = manifest["nodes"]["model.compile_basic.orders"]
+    assert orders["database"] == "memory"
+    assert orders["schema"] == "main"
+    assert orders["alias"] == "orders"
+    assert orders["fqn"] == ["compile_basic", "orders"]
+    assert orders["checksum"] == dbt_sha256_text((project / "models" / "orders.sql").read_text())
     assert orders["compiled"] is True
     assert orders["compiled_code"] == orders_sql
     assert orders["compiled_path"].endswith("/compiled/compile_basic/models/orders.sql")
@@ -233,6 +243,11 @@ def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
     analysis_id = "analysis.analysis_basic.customer_report"
     analysis = parse_manifest["nodes"][analysis_id]
     assert analysis["resource_type"] == "analysis"
+    assert analysis["database"] == "memory"
+    assert analysis["schema"] == "main"
+    assert analysis["alias"] == "customer_report"
+    assert analysis["fqn"] == ["analysis_basic", "analysis", "customer_report"]
+    assert analysis["checksum"] == dbt_sha256_text((project / "analyses" / "customer_report.sql").read_text())
     assert analysis["path"] == "analysis/customer_report.sql"
     assert analysis["original_file_path"] == "analyses/customer_report.sql"
     assert analysis["description"] == "Customer report analysis"
@@ -1079,6 +1094,11 @@ def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
     assert_manifest_schema_slice(manifest_path)
     orders = manifest["nodes"]["model.inline_relation_config.orders"]
     uses_orders = manifest["nodes"]["model.inline_relation_config.uses_orders"]
+    assert orders["database"] == "memory"
+    assert orders["schema"] == "analytics_mart"
+    assert orders["alias"] == "order_facts"
+    assert orders["fqn"] == ["inline_relation_config", "orders"]
+    assert orders["checksum"] == dbt_sha256_text((ROOT / "tests" / "fixtures" / "inline_relation_config" / "models" / "orders.sql").read_text())
     assert orders["relation_name"] == '"analytics_mart"."order_facts"'
     assert uses_orders["compiled_code"].strip() == 'select *\nfrom "analytics_mart"."order_facts"'
     if command_name == "docs generate":
@@ -3296,8 +3316,14 @@ def test_parse_emits_generic_test_config_for_model_seed_and_source_tests(tmp_pat
         "test.generic_test_config_tests.not_null_raw_customers_customer_id.ad2454198a",
         "test.generic_test_config_tests.source_not_null_raw_orders_customer_id.3962c6ab03",
     ]
+    model_test = tests["test.generic_test_config_tests.not_null_customers_customer_id.5c9bf9911d"]
+    assert model_test["database"] == "memory"
+    assert model_test["schema"] == "main_dbt_test__audit"
+    assert model_test["alias"] == "not_null_customers_customer_id"
+    assert model_test["fqn"] == ["generic_test_config_tests", "not_null_customers_customer_id"]
+    assert model_test["checksum"] == {"name": "none", "checksum": ""}
 
-    model_config = tests["test.generic_test_config_tests.not_null_customers_customer_id.5c9bf9911d"]["config"]
+    model_config = model_test["config"]
     assert model_config["where"] == "status = 'checked'"
     assert model_config["limit"] == 1
     assert model_config["severity"] == "warn"
@@ -3505,6 +3531,11 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
     node = manifest["nodes"]["test.singular_tests.assert_customers"]
     assert node["resource_type"] == "test"
     assert node["name"] == "assert_customers"
+    assert node["database"] == "memory"
+    assert node["schema"] == "main_dbt_test__audit"
+    assert node["alias"] == "assert_customers"
+    assert node["fqn"] == ["singular_tests", "assert_customers"]
+    assert node["checksum"] == dbt_sha256_text((project / "tests" / "assert_customers.sql").read_text())
     assert node["path"] == "assert_customers.sql"
     assert node["original_file_path"] == "tests/assert_customers.sql"
     assert "test_metadata" not in node
@@ -3589,6 +3620,11 @@ def test_inline_disabled_singular_sql_test_is_not_active(tmp_path: Path):
     assert disabled_id not in manifest["child_map"]
     assert list(manifest["disabled"]) == [disabled_id]
     disabled_test = manifest["disabled"][disabled_id][0]
+    assert disabled_test["database"] == "memory"
+    assert disabled_test["schema"] == "main_dbt_test__audit"
+    assert disabled_test["alias"] == "disabled_missing_ref"
+    assert disabled_test["fqn"] == ["singular_tests", "disabled_missing_ref"]
+    assert disabled_test["checksum"] == dbt_sha256_text((project / "tests" / "disabled_missing_ref.sql").read_text())
     assert disabled_test["config"]["enabled"] is False
     assert disabled_test["refs"] == [{"name": "missing_model", "package": None, "version": None}]
     assert disabled_test["depends_on"]["nodes"] == []
@@ -5573,12 +5609,24 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
             "resource_type",
             "package_name",
             "name",
+            "database",
+            "schema",
+            "alias",
+            "fqn",
+            "checksum",
             "path",
             "original_file_path",
             "config",
             "depends_on",
         }
         assert set(node) >= common_keys
+        assert node["database"] in {"memory", None} or isinstance(node["database"], str)
+        assert isinstance(node["schema"], str)
+        assert isinstance(node["alias"], str)
+        assert isinstance(node["fqn"], list)
+        assert set(node["checksum"]) == {"name", "checksum"}
+        assert isinstance(node["checksum"]["name"], str)
+        assert isinstance(node["checksum"]["checksum"], str)
         if node["resource_type"] in {"model", "analysis"}:
             assert set(node) >= {
                 "patch_path",
@@ -6847,6 +6895,11 @@ def test_disabled_model_is_not_active_but_is_represented(tmp_path: Path):
     assert disabled_id not in manifest["child_map"]
     assert list(manifest["disabled"]) == [disabled_id]
     disabled_node = manifest["disabled"][disabled_id][0]
+    assert disabled_node["database"] == "memory"
+    assert disabled_node["schema"] == "main"
+    assert disabled_node["alias"] == "disabled_customers"
+    assert disabled_node["fqn"] == ["disabled_model", "disabled_customers"]
+    assert disabled_node["checksum"] == dbt_sha256_text((project / "models" / "disabled_customers.sql").read_text())
     assert disabled_node["config"]["enabled"] is False
     assert disabled_node["description"] == "Disabled model should stay out of active graph"
 
@@ -6889,6 +6942,11 @@ def test_inline_config_enabled_false_model_is_disabled(tmp_path: Path):
     assert disabled_id not in manifest["child_map"]
     assert list(manifest["disabled"]) == [disabled_id]
     disabled_node = manifest["disabled"][disabled_id][0]
+    assert disabled_node["database"] == "memory"
+    assert disabled_node["schema"] == "main"
+    assert disabled_node["alias"] == "disabled_customers"
+    assert disabled_node["fqn"] == ["inline_disabled_model", "disabled_customers"]
+    assert disabled_node["checksum"] == dbt_sha256_text((project / "models" / "disabled_customers.sql").read_text())
     assert disabled_node["config"]["enabled"] is False
     assert disabled_node["description"] == "Inline-disabled model should stay out of active graph"
 
@@ -7137,6 +7195,11 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     ]
     seed = manifest["nodes"]["seed.seed_ref.raw_customers"]
     assert seed["resource_type"] == "seed"
+    assert seed["database"] == "memory"
+    assert seed["schema"] == "main"
+    assert seed["alias"] == "raw_customers"
+    assert seed["fqn"] == ["seed_ref", "raw_customers"]
+    assert seed["checksum"] == dbt_sha256_text((project / "seeds" / "raw_customers.csv").read_text())
     assert seed["path"] == "raw_customers.csv"
     assert seed["original_file_path"] == "seeds/raw_customers.csv"
     assert seed["config"]["enabled"] is True
