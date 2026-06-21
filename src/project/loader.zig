@@ -44,6 +44,7 @@ pub const Callbacks = struct {
     parse_singular_test: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     parse_seed: *const fn (Runtime, []const u8, []const u8, []const u8, []const u8, *Graph) anyerror!void,
     apply_model_properties: *const fn (*Graph, []const u8) anyerror!void,
+    apply_singular_test_properties: *const fn (*Graph, []const u8) anyerror!void,
     materialize_generic_tests: *const fn (*Graph) anyerror!void,
     resolve_macro_dependencies: *const fn (*Graph) anyerror!void,
 };
@@ -174,6 +175,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
 
     try rejectDuplicateMacroProperties(&graph);
     try applyMacroProperties(&graph);
+    try callbacks.apply_singular_test_properties(&graph, config.name);
     try callbacks.apply_model_properties(&graph, config.name);
     try callbacks.materialize_generic_tests(&graph);
     sortGraphResources(&graph);
@@ -357,6 +359,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
         try callbacks.apply_model_properties(graph, package_config.name);
         applyProjectSeedDocs(graph, package_config.name, package_config.seed_docs);
         try loadSingularTests(runtime, package_dir, package_config.name, package_config.test_paths.items, callbacks, graph);
+        try callbacks.apply_singular_test_properties(graph, package_config.name);
     }
 }
 
@@ -375,6 +378,11 @@ fn loadSingularTests(runtime: Runtime, project_dir: []const u8, package_name: []
             else => return err,
         };
         sortStrings(sql_files.items);
+        sortStrings(yaml_files.items);
+
+        for (yaml_files.items) |yaml_path| {
+            try callbacks.parse_yaml_properties(runtime, project_dir, test_path, yaml_path, package_name, graph);
+        }
 
         for (sql_files.items) |sql_path| {
             if (!isSingularTestSqlPath(test_path, sql_path)) continue;

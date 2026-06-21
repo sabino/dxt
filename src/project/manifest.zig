@@ -153,7 +153,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, test_node.unique_id);
         try writer.writeAll(": ");
-        try writeSingularTestNode(writer, test_node);
+        try writeSingularTestNode(allocator, writer, test_node);
     }
     try writer.writeAll("\n  },\n  \"sources\": {");
     for (graph.sources.items, 0..) |source, index| {
@@ -231,7 +231,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, test_node.unique_id);
         try writer.writeAll(": [");
-        try writeSingularTestNode(writer, test_node);
+        try writeSingularTestNode(allocator, writer, test_node);
         try writer.writeAll("]");
     }
     try writer.writeAll("\n  },\n  \"parent_map\": {");
@@ -850,7 +850,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     try writer.writeAll("}");
 }
 
-fn writeSingularTestNode(writer: *Io.Writer, test_node: SingularTestNode) !void {
+fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_node: SingularTestNode) !void {
     try writer.writeAll("{\"unique_id\":");
     try json.string(writer, test_node.unique_id);
     try writer.writeAll(",\"resource_type\":\"test\",\"package_name\":");
@@ -863,11 +863,45 @@ fn writeSingularTestNode(writer: *Io.Writer, test_node: SingularTestNode) !void 
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.original_file_path));
-    try writer.writeAll(",\"patch_path\":null,\"language\":\"sql\",\"raw_code\":");
+    try writer.writeAll(",\"patch_path\":");
+    if (test_node.patch_path) |patch_path| {
+        const dbt_patch_path = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ test_node.package_name, util.normalizeForDisplay(patch_path) });
+        defer allocator.free(dbt_patch_path);
+        try json.string(writer, dbt_patch_path);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"language\":\"sql\",\"raw_code\":");
     try json.string(writer, test_node.raw_code);
+    try writer.writeAll(",\"description\":");
+    try json.string(writer, test_node.description);
+    try writer.writeAll(",\"doc_blocks\":");
+    try json.stringArray(writer, test_node.doc_blocks.items);
+    try writer.writeAll(",\"tags\":");
+    try json.stringArray(writer, test_node.tags.items);
     try writer.writeAll(",\"config\":{\"enabled\":");
     try writer.writeAll(if (test_node.enabled) "true" else "false");
-    try writer.writeAll(",\"materialized\":\"test\",\"severity\":\"ERROR\",\"fail_calc\":\"count(*)\",\"warn_if\":\"!= 0\",\"error_if\":\"!= 0\",\"schema\":\"dbt_test__audit\",\"where\":null,\"limit\":null,\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
+    try writer.writeAll(",\"materialized\":\"test\",\"severity\":");
+    try json.string(writer, test_node.config.severity);
+    try writer.writeAll(",\"fail_calc\":\"count(*)\",\"warn_if\":");
+    try json.string(writer, test_node.config.warn_if);
+    try writer.writeAll(",\"error_if\":");
+    try json.string(writer, test_node.config.error_if);
+    try writer.writeAll(",\"schema\":\"dbt_test__audit\",\"where\":");
+    if (test_node.config.where) |where_sql| {
+        try json.string(writer, where_sql);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"limit\":");
+    if (test_node.config.limit) |limit| {
+        try writer.print("{d}", .{limit});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"tags\":");
+    try json.stringArray(writer, test_node.tags.items);
+    try writer.writeAll(",\"meta\":{}},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, test_node.depends_on.items);
@@ -1509,11 +1543,21 @@ test "manifest writer emits singular tests without generic-only fields" {
         .alias = "assert_customers",
         .path = "assert_customers.sql",
         .original_file_path = "tests/assert_customers.sql",
+        .patch_path = "tests/schema.yml",
         .raw_code = "select * from {{ ref('customers') }} where customer_id is null",
+        .description = "patched singular test",
+        .config = .{
+            .where = "status = 'checked'",
+            .limit = 1,
+            .severity = "Warn",
+            .warn_if = "> 0",
+            .error_if = "> 10",
+        },
         .compiled = true,
         .compiled_code = "select * from \"main\".\"customers\" where customer_id is null",
         .compiled_path = "target/compiled/demo/tests/assert_customers.sql",
     });
+    try graph.singular_tests.items[0].tags.append(allocator, "singular");
     try graph.singular_tests.items[0].refs.append(allocator, .{ .package = null, .name = "customers" });
     try graph.singular_tests.items[0].depends_on.append(allocator, "model.demo.customers");
 
@@ -1526,6 +1570,16 @@ test "manifest writer emits singular tests without generic-only fields" {
     const test_node = root.get("nodes").?.object.get("test.demo.assert_customers").?.object;
     try std.testing.expectEqualStrings("test", test_node.get("resource_type").?.string);
     try std.testing.expectEqualStrings("assert_customers", test_node.get("name").?.string);
+    try std.testing.expectEqualStrings("demo://tests/schema.yml", test_node.get("patch_path").?.string);
+    try std.testing.expectEqualStrings("patched singular test", test_node.get("description").?.string);
+    try std.testing.expectEqualStrings("singular", test_node.get("tags").?.array.items[0].string);
+    const config = test_node.get("config").?.object;
+    try std.testing.expectEqualStrings("Warn", config.get("severity").?.string);
+    try std.testing.expectEqualStrings("> 0", config.get("warn_if").?.string);
+    try std.testing.expectEqualStrings("> 10", config.get("error_if").?.string);
+    try std.testing.expectEqualStrings("status = 'checked'", config.get("where").?.string);
+    try std.testing.expectEqual(@as(i64, 1), config.get("limit").?.integer);
+    try std.testing.expectEqualStrings("singular", config.get("tags").?.array.items[0].string);
     try std.testing.expect(test_node.get("test_metadata") == null);
     try std.testing.expect(test_node.get("column_name") == null);
     try std.testing.expect(test_node.get("attached_node") == null);

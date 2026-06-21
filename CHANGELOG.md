@@ -40,6 +40,11 @@ compatibility.
   fields, and applies the same resolved identity to `source()` compilation,
   DuckDB source catalog lookup, source freshness SQL, and source generic-test
   SQL.
+- Singular SQL data-test YAML patches now parse top-level `tests:` /
+  `data_tests:` entries for description, config tags, enabled, severity,
+  thresholds, `where`, and `limit`; emit those Manifest fields without
+  generic-only test fields; and apply supported configs during DuckDB
+  `dxt test` / `dxt build`.
 
 ### Fixed
 

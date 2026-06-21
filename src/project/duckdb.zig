@@ -78,7 +78,7 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
 }
 
 pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const SingularTestNode) !GenericTestExecutionResult {
-    const compiled_sql = try compiler.compileSingularTest(runtime.allocator, graph, test_node);
+    const compiled_sql = try renderSingularTestSql(runtime.allocator, graph, test_node);
     errdefer runtime.allocator.free(compiled_sql);
     const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
     defer runtime.allocator.free(execution_sql);
@@ -507,6 +507,30 @@ pub fn renderGenericTestSql(allocator: std.mem.Allocator, graph: *const Graph, t
     return try compiler.compileGenericTest(allocator, graph, test_node);
 }
 
+pub fn renderSingularTestSql(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode) ![]const u8 {
+    const compiled_sql = try compiler.compileSingularTest(allocator, graph, test_node);
+    return try applySingularTestConfig(allocator, compiled_sql, test_node.config.where, test_node.config.limit);
+}
+
+fn applySingularTestConfig(allocator: std.mem.Allocator, compiled_sql: []const u8, where_sql: ?[]const u8, limit: ?u64) ![]const u8 {
+    if (where_sql) |filter| {
+        defer allocator.free(compiled_sql);
+        const query_sql = trimTrailingSqlTerminator(compiled_sql);
+        const wrapped = try std.fmt.allocPrint(allocator, "select * from (\n{s}\n) dbt_internal_test where {s}", .{ query_sql, filter });
+        return try applyTestLimit(allocator, wrapped, limit);
+    }
+    return try applyTestLimit(allocator, compiled_sql, limit);
+}
+
+fn applyTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?u64) ![]const u8 {
+    if (limit) |row_limit| {
+        defer allocator.free(sql);
+        const query_sql = trimTrailingSqlTerminator(sql);
+        return try std.fmt.allocPrint(allocator, "{s}\nlimit {d}", .{ query_sql, row_limit });
+    }
+    return sql;
+}
+
 pub fn renderGenericTestExecutionSql(allocator: std.mem.Allocator, compiled_sql: []const u8) ![]const u8 {
     const query_sql = trimTrailingSqlTerminator(compiled_sql);
     return try std.fmt.allocPrint(
@@ -758,6 +782,17 @@ test "renderGenericTestSql renders not_null failure row query and wrapper" {
     try std.testing.expectEqualStrings(
         "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\nselect 1 as failure_row\n) dbt_internal_test;\n",
         terminated_execution_sql,
+    );
+
+    const configured_singular_sql = try applySingularTestConfig(
+        allocator,
+        try allocator.dupe(u8, "select * from \"analytics\".\"customers\" where id > 0;\n"),
+        "status = 'checked'",
+        1,
+    );
+    try std.testing.expectEqualStrings(
+        "select * from (\nselect * from \"analytics\".\"customers\" where id > 0\n) dbt_internal_test where status = 'checked'\nlimit 1",
+        configured_singular_sql,
     );
 }
 

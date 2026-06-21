@@ -87,6 +87,7 @@ const loader_callbacks = project_loader.Callbacks{
     .parse_singular_test = parseSingularTest,
     .parse_seed = parseSeed,
     .apply_model_properties = applyModelProperties,
+    .apply_singular_test_properties = applySingularTestProperties,
     .materialize_generic_tests = materializeGenericTests,
     .resolve_macro_dependencies = resolveMacroDependencies,
 };
@@ -1215,7 +1216,7 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
     };
     const classification = switch (test_ref) {
         .generic => |test_node| try classifyGenericTestResult(execution.failures, test_node.config),
-        .singular => classifyDefaultTestResult(execution.failures),
+        .singular => |test_node| try classifyGenericTestResult(execution.failures, test_node.config),
     };
     const message = if (classification.message_kind) |kind|
         try formatTestThresholdMessage(runtime.allocator, execution.failures, kind, classification.condition orelse "!= 0")
@@ -2041,6 +2042,115 @@ test "parseModelPropertiesFromText records table-level generic test column_name 
     try std.testing.expectEqual(false, seed_test.accepted_values_quote.?);
 }
 
+test "parseSingularTestPropertiesFromText records top-level patches and ignores nested generic tests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\models:
+        \\  - name: customers
+        \\    columns:
+        \\      - name: customer_id
+        \\        data_tests:
+        \\          - not_null
+        \\data_tests:
+        \\  - name: assert_customers
+        \\    description: "patched singular test"
+        \\    config:
+        \\      enabled: false
+        \\      tags: [nightly, singular]
+        \\      where: "status = 'checked'"
+        \\      limit: 2
+        \\      severity: warn
+        \\      warn_if: "> 0"
+        \\      error_if: "> 10"
+    ;
+
+    try parseSingularTestPropertiesFromText(allocator, yaml, "tests/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.singular_test_properties.items.len);
+    const property = graph.singular_test_properties.items[0];
+    try std.testing.expectEqualStrings("assert_customers", property.name);
+    try std.testing.expectEqualStrings("tests/schema.yml", property.patch_path);
+    try std.testing.expectEqualStrings("patched singular test", property.description);
+    try std.testing.expectEqual(false, property.enabled.?);
+    try std.testing.expectEqualStrings("status = 'checked'", property.config.where.?);
+    try std.testing.expectEqual(@as(u64, 2), property.config.limit.?);
+    try std.testing.expectEqualStrings("Warn", property.config.severity);
+    try std.testing.expectEqualStrings("> 0", property.config.warn_if);
+    try std.testing.expectEqualStrings("> 10", property.config.error_if);
+    try std.testing.expectEqual(@as(usize, 2), property.tags.items.len);
+    try std.testing.expectEqualStrings("nightly", property.tags.items[0]);
+    try std.testing.expectEqualStrings("singular", property.tags.items[1]);
+}
+
+test "applySingularTestProperties applies config and preserves inline enabled precedence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.singular_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.assert_customers",
+        .name = "assert_customers",
+        .alias = "assert_customers",
+        .path = "assert_customers.sql",
+        .original_file_path = "tests/assert_customers.sql",
+        .raw_code = "select 1",
+    });
+    try graph.singular_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.inline_disabled",
+        .name = "inline_disabled",
+        .alias = "inline_disabled",
+        .path = "inline_disabled.sql",
+        .original_file_path = "tests/inline_disabled.sql",
+        .raw_code = "{{ config(enabled=false) }} select 1",
+        .enabled = false,
+        .inline_enabled = true,
+    });
+
+    const yaml =
+        \\version: 2
+        \\tests:
+        \\  - name: assert_customers
+        \\    description: "patched singular test"
+        \\    config:
+        \\      enabled: false
+        \\      tags: [singular]
+        \\      where: "status = 'checked'"
+        \\      limit: 1
+        \\      severity: warn
+        \\      warn_if: "> 0"
+        \\      error_if: "> 10"
+        \\  - name: inline_disabled
+        \\    config:
+        \\      enabled: true
+    ;
+    try parseSingularTestPropertiesFromText(allocator, yaml, "tests/schema.yml", "demo", &graph);
+    try applySingularTestProperties(&graph, "demo");
+
+    const patched = graph.singular_tests.items[0];
+    try std.testing.expect(!patched.enabled);
+    try std.testing.expectEqualStrings("tests/schema.yml", patched.patch_path.?);
+    try std.testing.expectEqualStrings("patched singular test", patched.description);
+    try std.testing.expectEqualStrings("status = 'checked'", patched.config.where.?);
+    try std.testing.expectEqual(@as(u64, 1), patched.config.limit.?);
+    try std.testing.expectEqualStrings("Warn", patched.config.severity);
+    try std.testing.expectEqualStrings("> 0", patched.config.warn_if);
+    try std.testing.expectEqualStrings("> 10", patched.config.error_if);
+    try std.testing.expectEqual(@as(usize, 1), patched.tags.items.len);
+    try std.testing.expectEqualStrings("singular", patched.tags.items[0]);
+
+    try std.testing.expect(!graph.singular_tests.items[1].enabled);
+}
+
 fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
@@ -2083,6 +2193,7 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
     try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseUnitTestsFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseModelPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
+    try parseSingularTestPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseMacroPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
 }
 
@@ -2326,6 +2437,117 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
     }
 }
 
+fn parseSingularTestPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    var in_data_tests = false;
+    var in_config = false;
+    var data_tests_indent: usize = 0;
+    var test_item_indent: usize = 0;
+    var config_indent: usize = 0;
+    var current_test: ?usize = null;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (indent == 0 and (std.mem.eql(u8, trimmed, "data_tests:") or std.mem.eql(u8, trimmed, "tests:"))) {
+            in_data_tests = true;
+            in_config = false;
+            data_tests_indent = indent;
+            current_test = null;
+            continue;
+        }
+        if (!in_data_tests) continue;
+        if (indent <= data_tests_indent and !std.mem.eql(u8, trimmed, "data_tests:")) {
+            in_data_tests = false;
+            in_config = false;
+            current_test = null;
+            continue;
+        }
+        if (in_config and indent <= config_indent and !std.mem.eql(u8, trimmed, "config:")) {
+            in_config = false;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "- ")) {
+            if (in_config and indent > config_indent) return error.UnsupportedYaml;
+            if (!std.mem.startsWith(u8, trimmed, "- name:")) return error.UnsupportedYaml;
+            const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
+            try graph.singular_test_properties.append(allocator, .{
+                .package_name = package_name,
+                .name = name,
+                .patch_path = relative_path,
+            });
+            current_test = graph.singular_test_properties.items.len - 1;
+            test_item_indent = indent;
+            in_config = false;
+            continue;
+        }
+
+        const test_index = current_test orelse continue;
+        if (indent <= test_item_indent) continue;
+        if (splitKeyValue(trimmed)) |kv| {
+            if (in_config and indent > config_indent) {
+                var property = &graph.singular_test_properties.items[test_index];
+                if (std.mem.eql(u8, kv.key, "enabled")) {
+                    property.enabled = try parseBool(kv.value);
+                } else if (std.mem.eql(u8, kv.key, "tags")) {
+                    try parseInlineStringList(allocator, kv.value, &property.tags);
+                } else if (try applySingularTestConfigValue(allocator, property, kv.key, kv.value)) {
+                    continue;
+                } else if (std.mem.eql(u8, kv.key, "store_failures") or std.mem.eql(u8, kv.key, "store_failures_as")) {
+                    return error.UnsupportedYaml;
+                } else {
+                    return error.UnsupportedYaml;
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, kv.key, "description")) {
+                graph.singular_test_properties.items[test_index].description = try dupTrimmedScalar(allocator, kv.value);
+            } else if (std.mem.eql(u8, kv.key, "config")) {
+                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                in_config = true;
+                config_indent = indent;
+            }
+        }
+    }
+}
+
+fn applySingularTestConfigValue(allocator: std.mem.Allocator, property: *types.SingularTestProperty, key: []const u8, value: []const u8) !bool {
+    if (std.mem.eql(u8, key, "where")) {
+        property.config.where = try dupTrimmedScalar(allocator, value);
+        return true;
+    }
+    if (std.mem.eql(u8, key, "limit")) {
+        const limit_text = try dupTrimmedScalar(allocator, value);
+        defer allocator.free(limit_text);
+        property.config.limit = std.fmt.parseUnsigned(u64, limit_text, 10) catch return error.UnsupportedYaml;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "severity")) {
+        property.config.severity = try dupNormalizedSingularTestSeverity(allocator, value);
+        return true;
+    }
+    if (std.mem.eql(u8, key, "warn_if")) {
+        property.config.warn_if = try dupTrimmedScalar(allocator, value);
+        return true;
+    }
+    if (std.mem.eql(u8, key, "error_if")) {
+        property.config.error_if = try dupTrimmedScalar(allocator, value);
+        return true;
+    }
+    return false;
+}
+
+fn dupNormalizedSingularTestSeverity(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    const severity = try dupTrimmedScalar(allocator, value);
+    defer allocator.free(severity);
+    if (std.ascii.eqlIgnoreCase(severity, "warn")) return try allocator.dupe(u8, "Warn");
+    if (std.ascii.eqlIgnoreCase(severity, "error")) return try allocator.dupe(u8, "Error");
+    return error.UnsupportedYaml;
+}
+
 fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const full_path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const sql = try std.Io.Dir.cwd().readFileAlloc(runtime.io, full_path, runtime.allocator, .limited(16 * 1024 * 1024));
@@ -2402,6 +2624,7 @@ fn parseSingularTest(runtime: Runtime, project_dir: []const u8, test_root: []con
         .original_file_path = relative_path,
         .raw_code = sql,
         .enabled = scan_node.enabled,
+        .inline_enabled = scan_node.inline_enabled,
         .refs = scan_node.refs,
         .source_refs = scan_node.source_refs,
         .macro_depends_on = scan_node.macro_depends_on,
@@ -2462,6 +2685,34 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
         }
         sortColumns(node.columns.items);
     }
+}
+
+fn applySingularTestProperties(graph: *Graph, package_name: []const u8) !void {
+    for (graph.singular_test_properties.items) |property| {
+        if (!std.mem.eql(u8, property.package_name, package_name)) continue;
+        const test_index = findSingularTestIndexByPackageAndName(graph, property.package_name, property.name) orelse continue;
+        var test_node = &graph.singular_tests.items[test_index];
+        test_node.patch_path = property.patch_path;
+        if (property.description.len != 0) test_node.description = try resolveDocDescription(graph, property.package_name, property.description, &test_node.doc_blocks);
+        if (property.enabled) |enabled| {
+            if (!test_node.inline_enabled) test_node.enabled = enabled;
+        }
+        if (property.config.where) |where_sql| test_node.config.where = where_sql;
+        if (property.config.limit) |limit| test_node.config.limit = limit;
+        test_node.config.severity = property.config.severity;
+        test_node.config.warn_if = property.config.warn_if;
+        test_node.config.error_if = property.config.error_if;
+        for (property.tags.items) |tag| {
+            try appendUnique(graph.allocator, &test_node.tags, tag);
+        }
+    }
+}
+
+fn findSingularTestIndexByPackageAndName(graph: *const Graph, package_name: []const u8, name: []const u8) ?usize {
+    for (graph.singular_tests.items, 0..) |test_node, index| {
+        if (std.mem.eql(u8, test_node.package_name, package_name) and std.mem.eql(u8, test_node.name, name)) return index;
+    }
+    return null;
 }
 
 fn materializeGenericTests(graph: *Graph) !void {
