@@ -1100,7 +1100,7 @@ fn validateGenericTestExecution(test_node: *const GenericTestNode) !void {
         return;
     }
     if (!std.mem.eql(u8, test_node.test_name, "not_null") and !std.mem.eql(u8, test_node.test_name, "unique")) {
-        return error.UnsupportedTestExecution;
+        return;
     }
 }
 
@@ -1359,6 +1359,31 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
     errdefer {
         runtime.allocator.free(execution.compiled_code);
         if (execution.relation_name) |relation_name| runtime.allocator.free(relation_name);
+    }
+    if (execution.execution_error) {
+        const message = try runtime.allocator.dupe(u8, execution_failure_message);
+        errdefer runtime.allocator.free(message);
+        switch (test_ref) {
+            .generic => |test_node| try executed.append(runtime.allocator, .{
+                .test_node = test_node,
+                .status = "error",
+                .message = message,
+                .compiled_code = execution.compiled_code,
+                .owns_compiled_code = true,
+                .relation_name = execution.relation_name,
+                .owns_relation_name = execution.relation_name != null,
+            }),
+            .singular => |test_node| try executed.append(runtime.allocator, .{
+                .singular_test_node = test_node,
+                .status = "error",
+                .message = message,
+                .compiled_code = execution.compiled_code,
+                .owns_compiled_code = true,
+                .relation_name = execution.relation_name,
+                .owns_relation_name = execution.relation_name != null,
+            }),
+        }
+        return .{ .failed_tests = 1 };
     }
     const classification = switch (test_ref) {
         .generic => |test_node| try classifyGenericTestResult(execution.failures, test_node.config),
@@ -1655,6 +1680,35 @@ test "classifyGenericTestResult follows severity and threshold config" {
     try std.testing.expect(try evaluateTestThreshold(3, ">= 3"));
     try std.testing.expect(try evaluateTestThreshold(3, "= 3"));
     try std.testing.expect(!try evaluateTestThreshold(3, "< 3"));
+}
+
+test "validateGenericTestExecution allows custom column tests and rejects missing columns" {
+    const custom = GenericTestNode{
+        .package_name = "demo",
+        .unique_id = "test.demo.positive_amount_orders_amount.abc",
+        .name = "positive_amount_orders_amount",
+        .alias = "positive_amount_orders_amount",
+        .path = "positive_amount_orders_amount.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_positive_amount(**_dbt_generic_test_kwargs) }}",
+        .test_name = "positive_amount",
+        .column_name = "amount",
+        .attached_node = "model.demo.orders",
+    };
+    try validateGenericTestExecution(&custom);
+
+    const table_level_custom = GenericTestNode{
+        .package_name = "demo",
+        .unique_id = "test.demo.positive_amount_orders.abc",
+        .name = "positive_amount_orders",
+        .alias = "positive_amount_orders",
+        .path = "positive_amount_orders.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_positive_amount(**_dbt_generic_test_kwargs) }}",
+        .test_name = "positive_amount",
+        .attached_node = "model.demo.orders",
+    };
+    try std.testing.expectError(error.UnsupportedTestExecution, validateGenericTestExecution(&table_level_custom));
 }
 
 fn appendSourceFreshnessRuntimeError(allocator: std.mem.Allocator, results: *std.ArrayList(source_freshness.CheckResult), source: *const SourceDef, message: []const u8) !void {
@@ -3201,6 +3255,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .original_file_path = source.original_file_path,
         .raw_code = raw_code,
         .test_name = test_def.name,
+        .test_namespace = test_def.namespace,
         .column_name = column_name,
         .argument_column_name = effective_column_name,
         .accepted_values_quote = test_def.accepted_values_quote,

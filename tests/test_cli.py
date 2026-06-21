@@ -540,79 +540,280 @@ select {{ column_name }} from {{ model }}
     assert "custom generic test compilation currently supports only model, seed, or source column test blocks" in result.stderr
 
 
-def test_test_and_build_reject_custom_generic_tests_before_runtime(tmp_path: Path):
+def statuses_by_generic_test_name(target: Path) -> dict[str, str]:
+    manifest = json.loads((target / "manifest.json").read_text())
+    test_name_by_id = {
+        unique_id: node["test_metadata"]["name"]
+        for unique_id, node in manifest["nodes"].items()
+        if node["resource_type"] == "test"
+    }
+    run_results = json.loads((target / "run_results.json").read_text())
+    return {
+        test_name_by_id[row["unique_id"]]: row["status"]
+        for row in run_results["results"]
+        if row["unique_id"] in test_name_by_id
+    }
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for custom generic test execution coverage")
+def test_test_and_build_execute_root_project_custom_generic_tests(tmp_path: Path):
     project = copy_fixture(tmp_path, "custom_generic_test_compile")
     test_target = tmp_path / "test-target"
+    run_result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(test_target), "--select", "orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+
     test_result = subprocess.run(
         [DXT, "test", "--project-dir", str(project), "--target-path", str(test_target), "--select", "test_type:generic"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert test_result.returncode == 2
-    assert "test/build currently executes only selected DuckDB singular SQL tests" in test_result.stderr
-    assert not (test_target / "run_results.json").exists()
+    assert test_result.returncode == 1
+    assert "1 test(s) failed with 1 failure row(s)" in test_result.stdout
+    assert_run_results_schema_slice(test_target / "run_results.json")
+    test_rows = json.loads((test_target / "run_results.json").read_text())["results"]
+    assert statuses_by_generic_test_name(test_target) == {"positive_amount": "pass", "nonzero_amount": "fail"}
+    assert {row["failures"] for row in test_rows} == {0, 1}
+    assert all("{{" not in row["compiled_code"] for row in test_rows)
+    assert any("where amount < 0" in row["compiled_code"] for row in test_rows)
+    assert any("where discount = 0" in row["compiled_code"] for row in test_rows)
 
     build_target = tmp_path / "build-target"
     build_result = subprocess.run(
-        [DXT, "build", "--project-dir", str(project), "--target-path", str(build_target), "--select", "test_type:generic"],
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(build_target), "--select", "orders+"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert build_result.returncode == 2
-    assert "test/build currently executes only selected DuckDB singular SQL tests" in build_result.stderr
-    assert not (build_target / "run_results.json").exists()
+    assert build_result.returncode == 1
+    assert "1 test(s) failed with 1 failure row(s)" in build_result.stdout
+    assert_run_results_schema_slice(build_target / "run_results.json")
+    assert statuses_by_generic_test_name(build_target) == {"positive_amount": "pass", "nonzero_amount": "fail"}
+
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if has_dbt_core and has_dbt_duckdb:
+        from dbt.cli.main import dbtRunner
+        import dbt_common.events.base_types as dbt_event_base_types
+        import google.protobuf.json_format as protobuf_json_format
+
+        (project / "macros" / "custom_tests.sql").write_text(
+            """{% test positive_amount(model, column_name) %}
+select {{ column_name }}
+from {{ model }}
+where {{ column_name }} < 0
+{% endtest %}
+
+{% test nonzero_amount(model, column_name) %}
+select {{ column_name }}
+from {{ model }}
+where {{ column_name }} = 0
+{% endtest %}
+"""
+        )
+        dbt_profiles = tmp_path / "dbt-profiles"
+        dbt_profiles.mkdir()
+        (dbt_profiles / "profiles.yml").write_text(
+            "\n".join(
+                [
+                    "custom_generic_test_compile:",
+                    "  target: dev",
+                    "  outputs:",
+                    "    dev:",
+                    "      type: duckdb",
+                    f"      path: {tmp_path / 'oracle.duckdb'}",
+                    "      schema: main",
+                ]
+            )
+            + "\n"
+        )
+        dbt_target = tmp_path / "dbt-target"
+        original_message_to_json = protobuf_json_format.MessageToJson
+        original_event_message_to_json = dbt_event_base_types.MessageToJson
+
+        def compatible_message_to_json(message, *args, always_print_fields_with_no_presence=None, **kwargs):
+            if always_print_fields_with_no_presence is not None and "including_default_value_fields" not in kwargs:
+                kwargs["including_default_value_fields"] = always_print_fields_with_no_presence
+            return original_message_to_json(message, *args, **kwargs)
+
+        protobuf_json_format.MessageToJson = compatible_message_to_json
+        dbt_event_base_types.MessageToJson = compatible_message_to_json
+        try:
+            dbt_result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(project),
+                    "--profiles-dir",
+                    str(dbt_profiles),
+                    "--target-path",
+                    str(dbt_target),
+                    "--select",
+                    "orders+",
+                ]
+            )
+        finally:
+            protobuf_json_format.MessageToJson = original_message_to_json
+            dbt_event_base_types.MessageToJson = original_event_message_to_json
+        assert dbt_result.exception is None
+        assert statuses_by_generic_test_name(build_target) == statuses_by_generic_test_name(dbt_target)
 
 
-def test_test_and_build_reject_package_custom_generic_tests_before_runtime(tmp_path: Path):
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for package custom generic test execution coverage")
+def test_build_executes_installed_package_custom_generic_tests(tmp_path: Path):
     project = copy_fixture(tmp_path, "package_custom_generic_test_compile")
-    test_target = tmp_path / "test-target"
-    test_result = subprocess.run(
-        [DXT, "test", "--project-dir", str(project), "--target-path", str(test_target), "--select", "test_type:generic"],
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "orders+"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert test_result.returncode == 2
-    assert "test/build currently executes only selected DuckDB singular SQL tests" in test_result.stderr
-    assert not (test_target / "run_results.json").exists()
-
-    build_target = tmp_path / "build-target"
-    build_result = subprocess.run(
-        [DXT, "build", "--project-dir", str(project), "--target-path", str(build_target), "--select", "test_type:generic"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
-    assert build_result.returncode == 2
-    assert "test/build currently executes only selected DuckDB singular SQL tests" in build_result.stderr
-    assert not (build_target / "run_results.json").exists()
+    assert result.returncode == 1
+    assert "1 test(s) failed with 1 failure row(s)" in result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    assert statuses_by_generic_test_name(target) == {"positive_amount": "pass", "nonzero_amount": "fail"}
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert all(row["unique_id"].startswith("test.package_custom_generic_test_compile.") for row in run_results["results"][1:])
+    assert all("util_pkg." not in row["compiled_code"] for row in run_results["results"][1:])
 
 
-def test_test_and_build_reject_source_seed_custom_generic_tests_before_runtime(tmp_path: Path):
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for source and seed custom generic test execution coverage")
+def test_build_executes_source_and_seed_custom_generic_tests(tmp_path: Path):
     project = copy_fixture(tmp_path, "source_seed_custom_generic_test_compile")
-    test_target = tmp_path / "test-target"
-    test_result = subprocess.run(
-        [DXT, "test", "--project-dir", str(project), "--target-path", str(test_target), "--select", "test_type:generic"],
+    source_target = tmp_path / "source-build-target"
+    db_path = source_target / "dxt.duckdb"
+    source_target.mkdir()
+    create_source = subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            'create schema raw; create table raw.orders_src as select -1 as amount;',
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert test_result.returncode == 2
-    assert "test/build currently executes only selected DuckDB singular SQL tests" in test_result.stderr
-    assert not (test_target / "run_results.json").exists()
+    assert create_source.returncode == 0, create_source.stderr
 
-    build_target = tmp_path / "build-target"
-    build_result = subprocess.run(
-        [DXT, "build", "--project-dir", str(project), "--target-path", str(build_target), "--select", "test_type:generic"],
+    source_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(source_target), "--select", "source:raw.orders_src+"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert build_result.returncode == 2
-    assert "test/build currently executes only selected DuckDB singular SQL tests" in build_result.stderr
-    assert not (build_target / "run_results.json").exists()
+    assert source_result.returncode == 1
+    assert "1 test(s) failed with 1 failure row(s)" in source_result.stdout
+    assert_run_results_schema_slice(source_target / "run_results.json")
+    assert statuses_by_generic_test_name(source_target) == {"positive_amount": "fail"}
+
+    seed_target = tmp_path / "seed-build-target"
+    seed_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(seed_target), "--select", "orders_seed+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert seed_result.returncode == 0, seed_result.stderr
+    assert_run_results_schema_slice(seed_target / "run_results.json")
+    assert statuses_by_generic_test_name(seed_target) == {"nonzero_amount": "pass"}
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for custom generic test warning/error coverage")
+def test_custom_generic_test_warn_and_execution_error_results(tmp_path: Path):
+    project = copy_fixture(tmp_path, "custom_generic_test_compile")
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+
+models:
+  - name: orders
+    columns:
+      - name: discount
+        tests:
+          - nonzero_amount:
+              config:
+                severity: warn
+                warn_if: "> 0"
+                error_if: "> 10"
+"""
+    )
+    warn_target = tmp_path / "warn-target"
+    warn_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(warn_target), "--select", "orders+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert warn_result.returncode == 0, warn_result.stderr
+    assert_run_results_schema_slice(warn_target / "run_results.json")
+    warn_rows = json.loads((warn_target / "run_results.json").read_text())["results"]
+    assert [row["status"] for row in warn_rows] == ["success", "warn"]
+    assert warn_rows[1]["message"] == "Got 1 result, configured to warn if > 0"
+
+    (project / "macros" / "custom_tests.sql").write_text(
+        """{% test nonzero_amount(model, column_name) %}
+select missing_{{ column_name }}
+from {{ model }}
+{% endtest %}
+"""
+    )
+    error_target = tmp_path / "error-target"
+    run_result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(error_target), "--select", "orders"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    test_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(error_target), "--select", "nonzero_amount_orders_discount"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test_result.returncode == 1
+    assert "1 test(s) failed with 0 failure row(s)" in test_result.stdout
+    assert_run_results_schema_slice(error_target / "run_results.json")
+    error_row = json.loads((error_target / "run_results.json").read_text())["results"][0]
+    assert error_row["status"] == "error"
+    assert error_row["message"] == "DuckDB execution failed"
+    assert error_row["failures"] is None
+    assert "missing_discount" in error_row["compiled_code"]
+
+
+def test_test_rejects_unsupported_custom_generic_test_body_before_run_results(tmp_path: Path):
+    project = copy_fixture(tmp_path, "custom_generic_test_compile")
+    (project / "macros" / "custom_tests.sql").write_text(
+        """{% test positive_amount(model, column_name) %}
+{% if true %}
+select {{ column_name }} from {{ model }}
+{% endif %}
+{% endtest %}
+"""
+    )
+    target = tmp_path / "test-target"
+    result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "positive_amount_orders_amount"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "custom generic test compilation currently supports only model, seed, or source column test blocks" in result.stderr
+    assert not (target / "run_results.json").exists()
 
 
 def test_compile_injects_ephemeral_ctes_and_manifest_fields(tmp_path: Path):
@@ -2977,7 +3178,7 @@ def test_build_prepare_reports_test_execution_boundary(tmp_path: Path):
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "test/build currently executes only selected DuckDB singular SQL tests and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
+    assert "test/build currently executes only selected DuckDB singular SQL tests, supported custom generic column tests, and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
     assert not (target / "run_results.json").exists()
     manifest = json.loads((target / "manifest.json").read_text())
     assert "compiled" not in manifest["nodes"]["model.model_properties.customers"]
@@ -6061,7 +6262,7 @@ models:
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "test/build currently executes only selected DuckDB singular SQL tests and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
+    assert "test/build currently executes only selected DuckDB singular SQL tests, supported custom generic column tests, and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
@@ -6176,7 +6377,7 @@ def test_build_rejects_model_selection_with_unsupported_generic_test_before_duck
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "test/build currently executes only selected DuckDB singular SQL tests and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
+    assert "test/build currently executes only selected DuckDB singular SQL tests, supported custom generic column tests, and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()

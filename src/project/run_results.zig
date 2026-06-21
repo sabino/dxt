@@ -220,6 +220,45 @@ test "run-results writer emits dbt v6 success shape" {
     try std.testing.expectEqualStrings("\"main\".\"customers\"", result.get("relation_name").?.string);
 }
 
+test "run-results writer emits custom generic test error shape" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.positive_amount_orders_amount.abc",
+        .name = "positive_amount_orders_amount",
+        .alias = "positive_amount_orders_amount",
+        .path = "positive_amount_orders_amount.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_positive_amount(**_dbt_generic_test_kwargs) }}",
+        .test_name = "positive_amount",
+        .column_name = "amount",
+        .attached_node = "model.demo.orders",
+    });
+
+    const rendered = try renderRunResults(allocator, &.{.{
+        .test_node = &graph.tests.items[0],
+        .status = "error",
+        .message = "DuckDB execution failed",
+        .compiled_code = "select missing_amount from \"main\".\"orders\"",
+    }});
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const result = parsed.value.object.get("results").?.array.items[0].object;
+    try std.testing.expectEqualStrings("error", result.get("status").?.string);
+    try std.testing.expectEqualStrings("DuckDB execution failed", result.get("message").?.string);
+    try std.testing.expectEqualStrings("test.demo.positive_amount_orders_amount.abc", result.get("unique_id").?.string);
+    try std.testing.expectEqual(true, result.get("compiled").?.bool);
+    try std.testing.expectEqualStrings("select missing_amount from \"main\".\"orders\"", result.get("compiled_code").?.string);
+    try std.testing.expectEqual(.null, result.get("failures").?);
+    try std.testing.expectEqual(.null, result.get("relation_name").?);
+}
+
 test "run-results status index loads dbt v6 result statuses" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
