@@ -3,6 +3,7 @@ const catalog = @import("catalog.zig");
 const compiler = @import("compiler.zig");
 const project_fs = @import("fs.zig");
 const selector = @import("selector.zig");
+const unit_test_plan = @import("unit_test.zig");
 const types = @import("types.zig");
 
 const Runtime = types.Runtime;
@@ -11,6 +12,7 @@ const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
 const SingularTestNode = types.SingularTestNode;
 const SourceDef = types.SourceDef;
+const UnitTestDef = types.UnitTestDef;
 
 const DuckDbObjectKind = enum { table, view };
 
@@ -18,6 +20,11 @@ pub const GenericTestExecutionResult = struct {
     compiled_code: []const u8,
     failures: u64,
     relation_name: ?[]const u8 = null,
+};
+
+pub const UnitTestExecutionResult = struct {
+    compiled_code: []const u8,
+    failures: u64,
 };
 
 pub const FreshnessQueryResult = struct {
@@ -87,6 +94,18 @@ pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const 
     const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
     const relation_name = try syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures);
     return .{ .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
+}
+
+pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !void {
+    try unit_test_plan.validateUnitTest(allocator, graph, unit_test);
+}
+
+pub fn executeUnitTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, unit_test: *const UnitTestDef) !UnitTestExecutionResult {
+    const planned = try unit_test_plan.renderUnitTestSql(runtime.allocator, graph, unit_test);
+    defer runtime.allocator.free(planned.execution_sql);
+    errdefer runtime.allocator.free(planned.compiled_code);
+    const failures = try queryUnitTestFailures(runtime, db_path, planned.execution_sql);
+    return .{ .compiled_code = planned.compiled_code, .failures = failures };
 }
 
 fn syncTestFailureRelation(runtime: Runtime, db_path: []const u8, config: types.GenericTestConfig, alias: []const u8, compiled_sql: []const u8, failures: u64) !?[]const u8 {
@@ -392,6 +411,28 @@ fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
 }
 
 fn queryGenericTestFailures(runtime: Runtime, db_path: []const u8, sql: []const u8) !u64 {
+    const result = std.process.run(runtime.allocator, runtime.io, .{
+        .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", sql },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch |err| switch (err) {
+        error.FileNotFound => return error.DuckDbCliNotFound,
+        else => return err,
+    };
+    defer runtime.allocator.free(result.stdout);
+    defer runtime.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code == 0) {
+            const field = firstCsvField(result.stdout) orelse return error.DuckDbExecutionFailed;
+            return std.fmt.parseUnsigned(u64, field, 10) catch error.DuckDbExecutionFailed;
+        },
+        else => {},
+    }
+    return error.DuckDbExecutionFailed;
+}
+
+fn queryUnitTestFailures(runtime: Runtime, db_path: []const u8, sql: []const u8) !u64 {
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
