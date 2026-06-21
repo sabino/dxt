@@ -2994,6 +2994,69 @@ select 42 as answer
     )
 
 
+def write_build_failure_continuation_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: build_failure_continue
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "aa_bad_parent.sql").write_text(
+        """{{ config(materialized='table') }}
+select * from missing_relation
+"""
+    )
+    (project / "models" / "ab_bad_child.sql").write_text(
+        """{{ config(materialized='table') }}
+select * from {{ ref("aa_bad_parent") }}
+"""
+    )
+    (project / "models" / "zz_independent.sql").write_text(
+        """{{ config(materialized='table') }}
+select 42 as answer
+"""
+    )
+
+
+def write_build_test_failure_continuation_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: build_test_failure_continue
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text(
+        """{{ config(materialized='table') }}
+select null as customer_id, 'Ada' as customer_name
+"""
+    )
+    (project / "models" / "orders.sql").write_text(
+        """{{ config(materialized='table') }}
+select customer_id, customer_name
+from {{ ref("customers") }}
+"""
+    )
+    (project / "models" / "zz_independent.sql").write_text(
+        """{{ config(materialized='table') }}
+select 42 as answer
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+"""
+    )
+
+
 def write_build_test_failure_downstream_project(project: Path) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -3531,6 +3594,94 @@ def test_run_continues_independent_model_after_execution_failure(tmp_path: Path)
     )
     assert query.returncode == 0, query.stderr
     assert query.stdout.strip() == "42"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for build failure continuation coverage")
+def test_build_continues_independent_model_after_execution_failure(tmp_path: Path):
+    project = tmp_path / "build_failure_continue"
+    write_build_failure_continuation_project(project)
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Build failed after 3 result(s)" in result.stdout
+    assert "one or more selected resources failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "model.build_failure_continue.aa_bad_parent",
+        "model.build_failure_continue.ab_bad_child",
+        "model.build_failure_continue.zz_independent",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["error", "skipped", "success"]
+    assert run_results["results"][0]["message"] == "DuckDB execution failed"
+    assert run_results["results"][1]["message"] is None
+    assert run_results["results"][2]["message"] is None
+
+    independent = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select answer from "main"."zz_independent"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert independent.returncode == 0, independent.stderr
+    assert independent.stdout.strip() == "42"
+
+    blocked_child = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-batch", "-bail", "-c", 'select count(*) from "main"."ab_bad_child"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert blocked_child.returncode != 0
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for build test-failure continuation coverage")
+def test_build_continues_independent_model_after_data_test_failure(tmp_path: Path):
+    project = tmp_path / "build_test_failure_continue"
+    write_build_test_failure_continuation_project(project)
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Built 3 model(s) and 1 test(s)" in result.stdout
+    assert "1 test(s) failed with 1 failure row(s)" in result.stdout
+    assert "one or more tests failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in run_results["results"]] == [
+        "model.build_test_failure_continue.customers",
+        "test.build_test_failure_continue.not_null_customers_customer_id.5c9bf9911d",
+        "model.build_test_failure_continue.orders",
+        "model.build_test_failure_continue.zz_independent",
+    ]
+    assert [item["status"] for item in run_results["results"]] == ["success", "fail", "skipped", "success"]
+    assert [item["failures"] for item in run_results["results"]] == [None, 1, None, None]
+
+    independent = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select answer from "main"."zz_independent"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert independent.returncode == 0, independent.stderr
+    assert independent.stdout.strip() == "42"
+
+    blocked_orders = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-batch", "-bail", "-c", 'select count(*) from "main"."orders"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert blocked_orders.returncode != 0
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")
