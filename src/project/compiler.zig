@@ -1754,6 +1754,111 @@ test "compileGenericTest renders package custom generic test body" {
     try std.testing.expect(std.mem.indexOf(u8, compiled, "where amount < 0") != null);
 }
 
+test "compileGenericTest renders source custom generic test body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.sources.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.orders_src",
+        .source_name = "raw",
+        .table_name = "orders_src",
+        .original_file_path = "models/schema.yml",
+    });
+    try graph.macros.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.test_positive_amount",
+        .name = "test_positive_amount",
+        .path = "custom_tests.sql",
+        .original_file_path = "macros/custom_tests.sql",
+        .macro_sql =
+        \\{% test positive_amount(model, column_name) %}
+        \\select {{ column_name }}
+        \\from {{ model }}
+        \\where {{ column_name }} < 0
+        \\{% endtest %}
+        ,
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.source_positive_amount_raw_orders_src_amount.abc",
+        .name = "source_positive_amount_raw_orders_src_amount",
+        .alias = "source_positive_amount_raw_orders_src_amount",
+        .path = "source_positive_amount_raw_orders_src_amount.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_positive_amount(**_dbt_generic_test_kwargs) }}",
+        .test_name = "positive_amount",
+        .column_name = "amount",
+        .attached_source = .{ .source_name = "raw", .table_name = "orders_src" },
+        .attached_source_unique_id = "source.demo.raw.orders_src",
+    });
+    try graph.tests.items[0].depends_on.append(allocator, "source.demo.raw.orders_src");
+    try graph.tests.items[0].macro_depends_on.append(allocator, "macro.demo.test_positive_amount");
+
+    const compiled = try compileGenericTest(allocator, &graph, &graph.tests.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "select amount") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"raw\".\"orders_src\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "where amount < 0") != null);
+}
+
+test "compileGenericTest renders seed custom generic test body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.orders_seed",
+        .name = "orders_seed",
+        .path = "orders_seed.csv",
+        .original_file_path = "seeds/orders_seed.csv",
+        .raw_code = "",
+    });
+    try graph.macros.append(allocator, .{
+        .package_name = "util_pkg",
+        .unique_id = "macro.util_pkg.test_nonzero_amount",
+        .name = "test_nonzero_amount",
+        .path = "custom_tests.sql",
+        .original_file_path = "macros/custom_tests.sql",
+        .macro_sql =
+        \\{% data_test nonzero_amount(model, column_name) %}
+        \\select {{ column_name }}
+        \\from {{ model }}
+        \\where {{ column_name }} = 0
+        \\{% enddata_test %}
+        ,
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.util_pkg_nonzero_amount_orders_seed_amount.abc",
+        .name = "util_pkg_nonzero_amount_orders_seed_amount",
+        .alias = "util_pkg_nonzero_amount_orders_seed_amount",
+        .path = "util_pkg_nonzero_amount_orders_seed_amount.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ util_pkg.test_nonzero_amount(**_dbt_generic_test_kwargs) }}",
+        .test_name = "nonzero_amount",
+        .test_namespace = "util_pkg",
+        .column_name = "amount",
+        .attached_node = "seed.demo.orders_seed",
+    });
+    try graph.tests.items[0].depends_on.append(allocator, "seed.demo.orders_seed");
+    try graph.tests.items[0].macro_depends_on.append(allocator, "macro.util_pkg.test_nonzero_amount");
+    try graph.tests.items[0].macro_depends_on.append(allocator, "macro.dbt.get_where_subquery");
+
+    const compiled = try compileGenericTest(allocator, &graph, &graph.tests.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "select amount") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"main\".\"orders_seed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "where amount = 0") != null);
+}
+
 test "compileGenericTest rejects unsupported custom generic test body" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -1,0 +1,7 @@
+name: source_seed_custom_generic_test_compile
+version: "1.0"
+profile: source_seed_custom_generic_test_compile
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]

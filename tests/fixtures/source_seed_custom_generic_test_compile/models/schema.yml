@@ -1,0 +1,17 @@
+version: 2
+
+sources:
+  - name: raw
+    tables:
+      - name: orders_src
+        columns:
+          - name: amount
+            data_tests:
+              - positive_amount
+
+seeds:
+  - name: orders_seed
+    columns:
+      - name: amount
+        tests:
+          - util_pkg.nonzero_amount
