@@ -19,8 +19,13 @@
 
 ## dxt Ownership
 
+- `src/project/config.zig` owns the current `dbt_project.yml` `sources:`
+  config parser slice for root-project supported fields.
+- `src/project/loader.zig` copies root project source configs onto the graph
+  before parsing root project source YAML.
 - `src/project/parse.zig` owns the current YAML slice for source-level and
-  table-level top-level/config keys.
+  table-level top-level/config keys and applies project-level defaults before
+  YAML source/table overrides.
 - `src/project/types.zig` carries resolved source relation and freshness
   fields in `SourceDef`.
 - `src/project/compiler.zig` centralizes resolved source relation rendering for
@@ -35,6 +40,14 @@
 - Source-level `schema:` supports literal values and the narrow
   `{{ target.schema }}` token form, including suffixes such as
   `{{ target.schema }}_raw`.
+- Root-project `dbt_project.yml` `sources:` configs support the current
+  relation/freshness subset for root project source definitions:
+  `+database`, `+schema`, `+identifier`, `+quoting`, `+loaded_at_field`,
+  `+loaded_at_query`, and `+freshness`.
+- Project-level source configs are lower precedence than source YAML and table
+  YAML values. Package-level configs feed source defaults, source-level project
+  configs refine those defaults, and table-level project configs apply before
+  table YAML overrides.
 - Source-level and table-level `loaded_at_field`, `loaded_at_query`, and
   `freshness` are parsed both as top-level source/table keys and under
   `config:`.
@@ -57,20 +70,22 @@
 
 - No general Jinja rendering in source properties.
 - No metadata freshness or adapter metadata APIs.
-- No project-level `sources:` config from `dbt_project.yml`.
-- No database, quoting, external table, source `identifier`, or adapter-specific
-  relation behavior beyond the resolved schema/table identifier currently
-  stored on `SourceDef`.
+- No package-installed project source config application from root
+  `dbt_project.yml`.
+- No external table, richer source metadata, source-level `identifier`
+  semantics, or adapter-specific relation behavior beyond the current resolved
+  database/schema/table identifier contract stored on `SourceDef`.
 - No source-status selectors.
 - No Python product runtime.
 
 ## Validation
 
-- Native parser tests cover source config inheritance, table overrides,
-  incomplete threshold preservation, `freshness: null`, narrow target-schema rendering,
-  and same-layer loaded-at conflicts.
+- Native parser tests cover project-level and YAML source config inheritance,
+  table overrides, incomplete threshold preservation, `freshness: null`, narrow
+  target-schema rendering, and same-layer loaded-at conflicts.
 - Native compiler, DuckDB, and manifest tests cover resolved source relation
   rendering and Manifest v12-shaped source fields.
 - Python CLI coverage exercises inherited source freshness, resolved source
-  schema rendering, table `loaded_at_query`, table freshness overrides, skipped
-  null freshness, `sources.json`, and schema-validated `manifest.json`.
+  schema rendering, table `loaded_at_query`, table freshness overrides,
+  project-level relation/freshness configs across compile/docs/freshness/test,
+  skipped null freshness, `sources.json`, and schema-validated `manifest.json`.

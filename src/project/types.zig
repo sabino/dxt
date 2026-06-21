@@ -49,6 +49,7 @@ pub const ProjectConfig = struct {
     snapshot_paths: std.ArrayList([]const u8) = .empty,
     function_paths: std.ArrayList([]const u8) = .empty,
     model_path_configs: std.ArrayList(ModelPathConfig) = .empty,
+    source_project_configs: std.ArrayList(SourceProjectConfig) = .empty,
     dispatch_configs: std.ArrayList(DispatchConfig) = .empty,
     vars: std.ArrayList(VarEntry) = .empty,
     clean_targets: std.ArrayList([]const u8) = .empty,
@@ -71,6 +72,22 @@ pub const ModelPathConfig = struct {
     materialized: []const u8 = "",
     tags: std.ArrayList([]const u8) = .empty,
     docs: DocsConfig = .{},
+};
+
+pub const SourceProjectConfig = struct {
+    package_name: []const u8,
+    source_name: ?[]const u8 = null,
+    table_name: ?[]const u8 = null,
+    database: ?[]const u8 = null,
+    schema_name: ?[]const u8 = null,
+    identifier: ?[]const u8 = null,
+    quoting: SourceQuoting = .{},
+    loaded_at_field: ?[]const u8 = null,
+    loaded_at_query: ?[]const u8 = null,
+    loaded_at_field_set: bool = false,
+    loaded_at_query_set: bool = false,
+    freshness: ?FreshnessThreshold = null,
+    freshness_set: bool = false,
 };
 
 pub const DocsConfig = struct {
@@ -408,6 +425,7 @@ pub const Graph = struct {
     unmatched_macro_properties: std.ArrayList(UnmatchedMacroProperty) = .empty,
     macro_argument_warnings: std.ArrayList([]const u8) = .empty,
     dispatch_configs: std.ArrayList(DispatchConfig) = .empty,
+    source_project_configs: std.ArrayList(SourceProjectConfig) = .empty,
     validate_macro_args: bool = false,
 
     pub fn deinit(self: *Graph) void {
@@ -456,6 +474,7 @@ pub const Graph = struct {
         self.unmatched_macro_properties.deinit(self.allocator);
         self.macro_argument_warnings.deinit(self.allocator);
         deinitDispatchConfigs(self.allocator, &self.dispatch_configs);
+        self.source_project_configs.deinit(self.allocator);
         self.vars.deinit(self.allocator);
     }
 };
@@ -481,6 +500,7 @@ pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig)
     config.snapshot_paths.deinit(allocator);
     config.function_paths.deinit(allocator);
     config.model_path_configs.deinit(allocator);
+    config.source_project_configs.deinit(allocator);
     deinitDispatchConfigs(allocator, &config.dispatch_configs);
     config.vars.deinit(allocator);
     config.clean_targets.deinit(allocator);
