@@ -5799,6 +5799,44 @@ def assert_sources_schema_slice(sources_path: Path) -> None:
     assert errors == []
 
 
+def write_sources_state(state_dir: Path, rows: dict[str, str]) -> Path:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    artifact = {
+        "metadata": {
+            "dbt_schema_version": "https://schemas.getdbt.com/dbt/sources/v3.json",
+            "dbt_version": "0.0.0",
+            "generated_at": "1970-01-01T00:00:00Z",
+            "invocation_id": None,
+            "invocation_started_at": None,
+            "env": {},
+        },
+        "results": [
+            {
+                "unique_id": unique_id,
+                "max_loaded_at": "2026-06-17T12:00:00Z",
+                "snapshotted_at": "2026-06-17T14:00:00Z",
+                "max_loaded_at_time_ago_in_s": 7200.0,
+                "status": status,
+                "criteria": {
+                    "warn_after": {"count": 1, "period": "hour"},
+                    "error_after": {"count": 1, "period": "day"},
+                    "filter": None,
+                },
+                "adapter_response": {},
+                "timing": [{"name": "execute", "started_at": None, "completed_at": None}],
+                "thread_id": "Thread-1",
+                "execution_time": 0.0,
+            }
+            for unique_id, status in rows.items()
+        ],
+        "elapsed_time": 0.0,
+    }
+    path = state_dir / "sources.json"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    assert_sources_schema_slice(path)
+    return path
+
+
 def test_manifest_schema_validator_rejects_missing_required_key(tmp_path: Path):
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps({"metadata": {}}), encoding="utf-8")
@@ -7924,6 +7962,241 @@ def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys:
     )
     if not dbt_result.success and not dbt_ids:
         pytest.skip(f"dbt Core selector oracle unavailable: {dbt_result.exception!r}")
+
+    assert dxt_ids == dbt_ids
+
+
+def test_ls_source_status_selects_sources_from_sources_json_state(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_freshness")
+    state_dir = tmp_path / "state"
+    write_sources_state(
+        state_dir,
+        {
+            "source.source_freshness.raw.customers": "warn",
+            "source.source_freshness.raw.orders": "error",
+            "source.source_freshness.raw.expression_customers": "pass",
+        },
+    )
+
+    def selected_ids(status: str) -> list[str]:
+        result = subprocess.run(
+            [
+                DXT,
+                "ls",
+                "--project-dir",
+                str(project),
+                "--state",
+                str(state_dir),
+                "--select",
+                f"source_status:{status}",
+                "--output",
+                "json",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return [item["unique_id"] for item in json.loads(result.stdout)]
+
+    assert selected_ids("error") == ["source.source_freshness.raw.orders"]
+    assert selected_ids("warn") == ["source.source_freshness.raw.customers"]
+    assert selected_ids("pass") == ["source.source_freshness.raw.expression_customers"]
+
+
+def test_source_status_selector_reuses_shared_engine_for_compile(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_ref")
+    state_dir = tmp_path / "state"
+    target = tmp_path / "compile-target"
+    write_sources_state(state_dir, {"source.source_ref.raw.customers": "warn"})
+
+    result = subprocess.run(
+        [
+            DXT,
+            "compile",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--state",
+            str(state_dir),
+            "--select",
+            "source_status:warn+",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Compiled 1 model(s)" in result.stdout
+    compiled = target / "compiled" / "source_ref" / "models" / "stg_customers.sql"
+    assert compiled.exists()
+    assert 'from "raw"."customers"' in compiled.read_text()
+
+
+def test_source_status_selector_reports_missing_malformed_and_version_mismatch(tmp_path: Path):
+    project = copy_fixture(tmp_path, "source_ref")
+
+    missing = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(tmp_path / "missing-state"),
+            "--select",
+            "source_status:warn",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert missing.returncode == 2
+    assert "directory containing sources.json" in missing.stderr
+
+    no_state = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "source_status:warn"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert no_state.returncode == 2
+    assert "source_status selectors require --state" in no_state.stderr
+
+    malformed_state = tmp_path / "malformed"
+    malformed_state.mkdir()
+    (malformed_state / "sources.json").write_text("{\"metadata\":{},\"results\":[]}", encoding="utf-8")
+    malformed = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(malformed_state),
+            "--select",
+            "source_status:warn",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert malformed.returncode == 2
+    assert "sources.json is malformed" in malformed.stderr
+
+    version_state = tmp_path / "version"
+    version_state.mkdir()
+    (version_state / "sources.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/sources/v2.json"},
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    version = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(version_state),
+            "--select",
+            "source_status:warn",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert version.returncode == 2
+    assert "dbt Sources v3 schema" in version.stderr
+
+
+def test_dbt_core_source_status_selector_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if not has_dbt_core:
+        pytest.skip("dbt Core is not installed for the optional source_status oracle")
+    if not has_dbt_duckdb:
+        pytest.skip("dbt DuckDB adapter is not installed for the optional source_status oracle")
+
+    from dbt.cli.main import dbtRunner
+
+    project = copy_fixture(tmp_path, "source_ref")
+    state_dir = tmp_path / "state"
+    write_sources_state(state_dir, {"source.source_ref.raw.customers": "warn"})
+    (project / "profiles.yml").write_text(
+        "\n".join(
+            [
+                "default:",
+                "  target: dev",
+                "  outputs:",
+                "    dev:",
+                "      type: duckdb",
+                "      path: oracle.duckdb",
+                "      schema: main",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    dxt_result = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(state_dir),
+            "--select",
+            "source_status:warn",
+            "--output",
+            "json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert dxt_result.returncode == 0, dxt_result.stderr
+    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+
+    dbt_target = tmp_path / "dbt-target"
+    dbt_target.mkdir()
+    shutil.copy(state_dir / "sources.json", dbt_target / "sources.json")
+    dbt_result = dbtRunner().invoke(
+        [
+            "ls",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--target-path",
+            str(dbt_target),
+            "--state",
+            str(state_dir),
+            "--select",
+            "source_status:warn",
+            "--output",
+            "json",
+        ]
+    )
+    dbt_stdout = capsys.readouterr().out
+    dbt_ids = sorted(
+        json.loads(line)["unique_id"]
+        for line in dbt_stdout.splitlines()
+        if line.strip().startswith("{")
+    )
+    if not dbt_result.success and not dbt_ids:
+        pytest.skip(f"dbt Core source_status status oracle unavailable: {dbt_result.exception!r}")
 
     assert dxt_ids == dbt_ids
 

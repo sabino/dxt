@@ -255,6 +255,10 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedCleanSourcePath => stderr.writeAll("error: clean refuses to remove model, seed, or macro source paths\n") catch {},
         error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, analysis, seed, source, exposure, test, or unit_test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
+        error.MissingSourceStatusState => stderr.writeAll("error: source_status selectors require --state pointing to a directory containing sources.json\n") catch {},
+        error.MissingSourcesArtifact => stderr.writeAll("error: --state must point to a directory containing sources.json for source_status selectors\n") catch {},
+        error.MalformedSourcesArtifact => stderr.writeAll("error: sources.json is malformed or missing required freshness result fields\n") catch {},
+        error.UnsupportedSourcesSchemaVersion => stderr.writeAll("error: sources.json must use dbt Sources v3 schema for source_status selectors\n") catch {},
         error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model or supported generic or singular SQL test resources\n") catch {},
         error.UnsupportedCustomGenericTest => stderr.writeAll("error: custom generic test compilation currently supports only root-project model-column test blocks with static SQL plus {{ model }} and {{ column_name }}\n") catch {},
         error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources\n") catch {},
@@ -375,6 +379,9 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
                 options.target = value;
             } else if (equals(arg, "--vars")) {
                 options.vars = value;
+            } else if (equals(arg, "--state")) {
+                if (mode == .common_only or mode == .clean or mode == .docs_serve) return error.UnsupportedCommandOption;
+                options.state = value;
             } else if (equals(arg, "--threads")) {
                 if (mode == .common_only or mode == .clean) return error.UnsupportedCommandOption;
                 options.threads = value;
@@ -451,6 +458,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
         equals(arg, "--target") or
         equals(arg, "--target-path") or
         equals(arg, "--vars") or
+        equals(arg, "--state") or
         equals(arg, "--threads"))
     {
         return true;
@@ -558,6 +566,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\  --select <selector> [selector ...]
                 \\  --selector <name> [name ...]
                 \\  --exclude <selector> [selector ...]
+                \\  --state <path>
                 \\
             );
         }
@@ -611,6 +620,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\  --select <selector> [selector ...]
                 \\  --selector <name> [name ...]
                 \\  --exclude <selector> [selector ...]
+                \\  --state <path>
                 \\
             );
         },

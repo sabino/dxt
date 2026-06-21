@@ -134,8 +134,10 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
     try resolveDependencies(&graph);
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
+    var selection_state = try loadSelectionState(runtime, options, selection);
+    defer selection_state.deinit(runtime.allocator);
     const resource_type = if (options.resource_type) |value| try runtime.allocator.dupe(u8, value) else null;
-    const selected = try selector.selectResources(runtime.allocator, &graph, resource_type, selection.select, selection.exclude);
+    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, resource_type, selection.select, selection.exclude, selection_state.context());
     switch (options.output) {
         .json => try manifest.writeSelectedJsonWithKeys(stdout, selected, options.output_keys),
         .name => {
@@ -175,7 +177,9 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    const selected = try selector.selectResources(runtime.allocator, &graph, null, selection.select, selection.exclude);
+    var selection_state = try loadSelectionState(runtime, options, selection);
+    defer selection_state.deinit(runtime.allocator);
+    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
 
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, true, true);
@@ -210,7 +214,9 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    const selected = try selector.selectResources(runtime.allocator, &graph, null, selection.select, selection.exclude);
+    var selection_state = try loadSelectionState(runtime, options, selection);
+    defer selection_state.deinit(runtime.allocator);
+    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
 
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
@@ -255,9 +261,12 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    const selected_sources = try selector.selectResources(runtime.allocator, &graph, "source", selection.select, selection.exclude);
+    var selection_state = try loadSelectionState(runtime, options, selection);
+    defer selection_state.deinit(runtime.allocator);
+    const selection_context = selection_state.context();
+    const selected_sources = try selector.selectResourcesWithContext(runtime.allocator, &graph, "source", selection.select, selection.exclude, selection_context);
     if (selected_sources.len == 0 and selection.select != null) {
-        const selected_any = try selector.selectResources(runtime.allocator, &graph, null, selection.select, selection.exclude);
+        const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
         if (selected_any.len != 0) return error.UnsupportedSourceFreshnessSelection;
     }
 
@@ -344,9 +353,12 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    const selected_models = try selector.selectResources(runtime.allocator, &graph, "model", selection.select, selection.exclude);
+    var selection_state = try loadSelectionState(runtime, options, selection);
+    defer selection_state.deinit(runtime.allocator);
+    const selection_context = selection_state.context();
+    const selected_models = try selector.selectResourcesWithContext(runtime.allocator, &graph, "model", selection.select, selection.exclude, selection_context);
     if (selected_models.len == 0 and selection.select != null) {
-        const selected_any = try selector.selectResources(runtime.allocator, &graph, null, selection.select, selection.exclude);
+        const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
         if (selected_any.len != 0) return error.UnsupportedRunSelection;
     }
 
@@ -397,10 +409,13 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    const selected_seeds = try selector.selectResources(runtime.allocator, &graph, "seed", selection.select, selection.exclude);
+    var selection_state = try loadSelectionState(runtime, options, selection);
+    defer selection_state.deinit(runtime.allocator);
+    const selection_context = selection_state.context();
+    const selected_seeds = try selector.selectResourcesWithContext(runtime.allocator, &graph, "seed", selection.select, selection.exclude, selection_context);
     if (selected_seeds.len == 0) {
         if (selection.select != null) {
-            const selected_any = try selector.selectResources(runtime.allocator, &graph, null, selection.select, selection.exclude);
+            const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
             if (selected_any.len != 0) return error.UnsupportedSeedSelection;
         }
         return error.UnsupportedSeedSelection;
@@ -443,10 +458,13 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    const selected = try selector.selectResources(runtime.allocator, &graph, "test", selection.select, selection.exclude);
+    var selection_state = try loadSelectionState(runtime, options, selection);
+    defer selection_state.deinit(runtime.allocator);
+    const selection_context = selection_state.context();
+    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, "test", selection.select, selection.exclude, selection_context);
     if (selected.len == 0) {
         if (selection.select != null) {
-            const selected_any = try selector.selectResources(runtime.allocator, &graph, null, selection.select, selection.exclude);
+            const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
             if (selected_any.len != 0) return error.UnsupportedTestExecution;
         }
         return error.UnsupportedTestSelection;
@@ -488,7 +506,9 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    const selected = try selector.selectResources(runtime.allocator, &graph, null, selection.select, selection.exclude);
+    var selection_state = try loadSelectionState(runtime, options, selection);
+    defer selection_state.deinit(runtime.allocator);
+    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
 
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
@@ -778,6 +798,26 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
 
 fn resolveSelection(runtime: Runtime, options: Options) !selector_config.ResolvedSelection {
     return try selector_config.resolveSelection(runtime, options.project_dir, options.select, options.exclude, options.selector);
+}
+
+const SelectionState = struct {
+    source_status_index: ?source_freshness.SourceStatusIndex = null,
+
+    fn deinit(self: *SelectionState, allocator: std.mem.Allocator) void {
+        if (self.source_status_index) |*index| index.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn context(self: *const SelectionState) selector.SelectionContext {
+        if (self.source_status_index) |*index| return .{ .source_status_index = index };
+        return .{};
+    }
+};
+
+fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_config.ResolvedSelection) !SelectionState {
+    if (!selector.usesSourceStatusSelector(selection.select, selection.exclude)) return .{};
+    const state_dir = options.state orelse return error.MissingSourceStatusState;
+    return .{ .source_status_index = try source_freshness.loadSourceStatusIndex(runtime, state_dir) };
 }
 
 const CompileResult = struct {
