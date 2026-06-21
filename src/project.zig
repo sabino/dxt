@@ -75,6 +75,7 @@ const countActiveSeeds = project_resolve.countActiveSeeds;
 const findDoc = project_resolve.findDoc;
 const findNodeIndexByResourceTypeAndName = project_resolve.findNodeIndexByResourceTypeAndName;
 const resolveDependencies = project_resolve.resolveDependencies;
+const findMacroIdByPackageAndName = project_resolve.findMacroIdByPackageAndName;
 const resolveRefDependency = project_resolve.resolveRefDependency;
 const resolveSourceDependency = project_resolve.resolveSourceDependency;
 
@@ -1542,7 +1543,9 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         for (graph.tests.items) |*test_node| {
             if (!selectionContains(selected, test_node.unique_id)) continue;
             saw_selected_generic_test = true;
-            validateGenericTestExecution(test_node) catch return error.UnsupportedCompileSelection;
+            if (isBuiltInGenericTestName(test_node.test_name)) {
+                validateGenericTestExecution(test_node) catch return error.UnsupportedCompileSelection;
+            }
 
             const compiled_code = compiler.compileGenericTest(runtime.allocator, graph, test_node) catch |err| switch (err) {
                 error.UnsupportedTestExecution => return error.UnsupportedCompileSelection,
@@ -2812,7 +2815,7 @@ fn materializeGenericTests(graph: *Graph) !void {
         }
         for (node.columns.items) |column| {
             for (column.tests.items) |test_def| {
-                if (isSupportedGenericTest(test_def, column.name)) {
+                if (isSupportedGenericTest(test_def, column.name) or try isRootProjectModelColumnCustomGenericTest(graph, node, test_def, column.name)) {
                     try appendGenericTestNode(graph, node, test_def, column.name);
                 }
             }
@@ -2885,8 +2888,8 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
     }
     try test_node.refs.append(graph.allocator, .{ .package = null, .name = node.name });
     try appendUnique(graph.allocator, &test_node.depends_on, node.unique_id);
-    try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
-    if (!std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
+    try appendGenericTestMacroDependency(graph, &test_node, test_def.name);
+    if (isBuiltInGenericTestName(test_def.name) and !std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
         try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
     }
     try graph.tests.append(graph.allocator, test_node);
@@ -3006,6 +3009,81 @@ fn isSupportedSourceGenericTest(test_def: GenericTestDef, column_name: ?[]const 
         std.mem.eql(u8, test_def.name, "unique") or
         (std.mem.eql(u8, test_def.name, "accepted_values") and test_def.accepted_values.items.len != 0) or
         (std.mem.eql(u8, test_def.name, "relationships") and test_def.relationship_to.len != 0 and test_def.relationship_field.len != 0);
+}
+
+fn isBuiltInGenericTestName(test_name: []const u8) bool {
+    return std.mem.eql(u8, test_name, "not_null") or
+        std.mem.eql(u8, test_name, "unique") or
+        std.mem.eql(u8, test_name, "accepted_values") or
+        std.mem.eql(u8, test_name, "relationships");
+}
+
+fn isRootProjectModelColumnCustomGenericTest(graph: *const Graph, node: *const Node, test_def: GenericTestDef, column_name: ?[]const u8) !bool {
+    if (column_name == null) return false;
+    if (isBuiltInGenericTestName(test_def.name)) return false;
+    if (!std.mem.eql(u8, node.resource_type, "model")) return false;
+    if (!std.mem.eql(u8, node.package_name, graph.project_name)) return false;
+    if (std.mem.indexOfScalar(u8, test_def.name, '.') != null) return false;
+
+    const macro_name = try std.fmt.allocPrint(graph.allocator, "test_{s}", .{test_def.name});
+    defer graph.allocator.free(macro_name);
+    return findMacroIdByPackageAndName(graph, graph.project_name, macro_name) != null;
+}
+
+fn appendGenericTestMacroDependency(graph: *Graph, test_node: *GenericTestNode, test_name: []const u8) !void {
+    if (isBuiltInGenericTestName(test_name)) {
+        try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_name}));
+        return;
+    }
+
+    const macro_name = try std.fmt.allocPrint(graph.allocator, "test_{s}", .{test_name});
+    defer graph.allocator.free(macro_name);
+    const macro_id = findMacroIdByPackageAndName(graph, graph.project_name, macro_name) orelse return error.UnresolvedMacro;
+    try test_node.macro_depends_on.append(graph.allocator, macro_id);
+}
+
+test "materializeGenericTests activates root project model column custom generic tests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .patch_path = "models/schema.yml",
+        .raw_code = "select 1 as amount",
+    };
+    var column = ColumnDef{ .name = "amount" };
+    try column.tests.append(allocator, .{ .name = "positive_amount" });
+    try node.columns.append(allocator, column);
+    try graph.nodes.append(allocator, node);
+    try graph.macros.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.test_positive_amount",
+        .name = "test_positive_amount",
+        .path = "custom_tests.sql",
+        .original_file_path = "macros/custom_tests.sql",
+        .macro_sql = "{% test positive_amount(model, column_name) %}select {{ column_name }} from {{ model }}{% endtest %}",
+    });
+
+    try materializeGenericTests(&graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.tests.items.len);
+    const test_node = graph.tests.items[0];
+    try std.testing.expectEqualStrings("positive_amount", test_node.test_name);
+    try std.testing.expectEqualStrings("amount", test_node.column_name.?);
+    try std.testing.expectEqualStrings("amount", test_node.argument_column_name.?);
+    try std.testing.expectEqualStrings("model.demo.orders", test_node.attached_node.?);
+    try std.testing.expectEqualStrings("{{ test_positive_amount(**_dbt_generic_test_kwargs) }}", test_node.raw_code);
+    try std.testing.expectEqual(@as(usize, 1), test_node.depends_on.items.len);
+    try std.testing.expectEqualStrings("model.demo.orders", test_node.depends_on.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), test_node.macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.demo.test_positive_amount", test_node.macro_depends_on.items[0]);
 }
 
 fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {

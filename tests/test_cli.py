@@ -160,6 +160,100 @@ def test_compile_select_limits_compiled_models_but_keeps_graph_context(tmp_path:
     assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
 
 
+def test_compile_renders_root_project_model_column_custom_generic_tests(tmp_path: Path):
+    project = copy_fixture(tmp_path, "custom_generic_test_compile")
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Compiled 0 model(s) and 2 test(s)" in result.stdout
+
+    positive_sql = (target / "compiled" / "custom_generic_test_compile" / "positive_amount_orders_amount.sql").read_text()
+    nonzero_sql = (target / "compiled" / "custom_generic_test_compile" / "nonzero_amount_orders_discount.sql").read_text()
+    assert "select amount" in positive_sql
+    assert 'from "main"."orders"' in positive_sql
+    assert "where amount < 0" in positive_sql
+    assert "select discount" in nonzero_sql
+    assert 'from "main"."orders"' in nonzero_sql
+    assert "where discount = 0" in nonzero_sql
+    assert "{{" not in positive_sql + nonzero_sql
+    assert "{%" not in positive_sql + nonzero_sql
+
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
+    tests_by_name = {node["test_metadata"]["name"]: node for node in manifest["nodes"].values() if node["resource_type"] == "test"}
+
+    positive = tests_by_name["positive_amount"]
+    assert positive["raw_code"] == "{{ test_positive_amount(**_dbt_generic_test_kwargs) }}"
+    assert positive["test_metadata"]["kwargs"]["model"] == "{{ get_where_subquery(ref('orders')) }}"
+    assert positive["test_metadata"]["kwargs"]["column_name"] == "amount"
+    assert positive["attached_node"] == "model.custom_generic_test_compile.orders"
+    assert positive["depends_on"]["nodes"] == ["model.custom_generic_test_compile.orders"]
+    assert positive["depends_on"]["macros"] == ["macro.custom_generic_test_compile.test_positive_amount"]
+    assert positive["compiled"] is True
+    assert positive["compiled_code"] == positive_sql
+    assert positive["compiled_path"].endswith("/compiled/custom_generic_test_compile/positive_amount_orders_amount.sql")
+
+    nonzero = tests_by_name["nonzero_amount"]
+    assert nonzero["raw_code"] == "{{ test_nonzero_amount(**_dbt_generic_test_kwargs) }}"
+    assert nonzero["test_metadata"]["kwargs"]["column_name"] == "discount"
+    assert nonzero["depends_on"]["macros"] == ["macro.custom_generic_test_compile.test_nonzero_amount"]
+    assert nonzero["compiled"] is True
+    assert nonzero["compiled_code"] == nonzero_sql
+
+
+def test_compile_rejects_unsupported_custom_generic_test_body(tmp_path: Path):
+    project = copy_fixture(tmp_path, "custom_generic_test_compile")
+    (project / "macros" / "custom_tests.sql").write_text(
+        """{% test positive_amount(model, column_name) %}
+{% if true %}
+select {{ column_name }} from {{ model }}
+{% endif %}
+{% endtest %}
+"""
+    )
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "positive_amount_orders_amount"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "custom generic test compilation currently supports only root-project model-column test blocks" in result.stderr
+
+
+def test_test_and_build_reject_custom_generic_tests_before_runtime(tmp_path: Path):
+    project = copy_fixture(tmp_path, "custom_generic_test_compile")
+    test_target = tmp_path / "test-target"
+    test_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(test_target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test_result.returncode == 2
+    assert "test/build currently executes only selected DuckDB singular SQL tests" in test_result.stderr
+    assert not (test_target / "run_results.json").exists()
+
+    build_target = tmp_path / "build-target"
+    build_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(build_target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build_result.returncode == 2
+    assert "test/build currently executes only selected DuckDB singular SQL tests" in build_result.stderr
+    assert not (build_target / "run_results.json").exists()
+
+
 def test_compile_injects_ephemeral_ctes_and_manifest_fields(tmp_path: Path):
     project = copy_fixture(tmp_path, "ephemeral_cte")
     target = tmp_path / "compile-target"

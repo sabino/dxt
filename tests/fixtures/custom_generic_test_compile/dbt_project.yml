@@ -1,0 +1,6 @@
+name: custom_generic_test_compile
+version: "1.0"
+profile: custom_generic_test_compile
+
+model-paths: ["models"]
+macro-paths: ["macros"]
