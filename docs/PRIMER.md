@@ -109,7 +109,7 @@ in `.agent/runs/` and stay ignored.
 | Native coverage artifacts | GitHub `Coverage` workflow | Optional native Zig test coverage map artifacts for Zig source/build changes, main pushes, and manual runs; not a required local gate or Python product-runtime coverage claim. |
 | Runtime boundary | `python scripts/check_runtime_boundary.py` | Prevent Python product-runtime drift. |
 | Public safety | `python scripts/check_public_safety.py` | Catch secrets, local paths, generated noise, and private artifacts. |
-| Public fixture gates | `scripts/check_jaffle_shop_duckdb_*.py` | Validate current public Jaffle-style parse/build/run/docs subsets; CI runs the parse, DuckDB build, DuckDB run, and docs-generate gates with a pinned, checksum-verified DuckDB CLI, while local runs can target the relevant script. |
+| Public fixture gates | `scripts/check_jaffle_shop_duckdb_*.py` | Validate current public Jaffle-style parse, `ls`, `compile`, build, run, and docs-generate subsets; CI runs the parse, ls, compile, DuckDB build, DuckDB run, and docs-generate gates with a pinned, checksum-verified DuckDB CLI for execution/docs gates, while local runs can target the relevant script. |
 
 ## Where To Start
 

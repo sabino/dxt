@@ -63,6 +63,9 @@ compatibility.
 - Narrow static `{% if %}` rendering now supports `elif` chains plus simple
   `==` / `!=` comparisons over supported bool and string compile-context
   values without expanding into general Jinja expression evaluation.
+- Public Jaffle fixture CI now has explicit `dxt ls` and `dxt compile` gates
+  alongside parse, DuckDB build/run, and docs-generate, with compile artifact
+  checks for generated SQL files and dbt-shaped Manifest fields.
 
 ### Fixed
 
