@@ -274,6 +274,13 @@ pub const ModelProperty = struct {
     tests: std.ArrayList(GenericTestDef) = .empty,
     columns: std.ArrayList(ColumnDef) = .empty,
     enabled: ?bool = null,
+    quote_columns: ?bool = null,
+    seed_column_types: std.ArrayList(SeedColumnType) = .empty,
+};
+
+pub const SeedColumnType = struct {
+    name: []const u8,
+    data_type: []const u8,
 };
 
 pub const UnmatchedModelProperty = struct {
@@ -329,6 +336,8 @@ pub const Node = struct {
     inline_tags: bool = false,
     config_schema: ?[]const u8 = null,
     config_alias: ?[]const u8 = null,
+    quote_columns: ?bool = null,
+    seed_column_types: std.ArrayList(SeedColumnType) = .empty,
     enabled: bool = true,
     docs: DocsConfig = .{},
     tags: std.ArrayList([]const u8) = .empty,
@@ -527,6 +536,7 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     node.source_refs.deinit(allocator);
     node.depends_on.deinit(allocator);
     node.macro_depends_on.deinit(allocator);
+    node.seed_column_types.deinit(allocator);
     for (node.extra_ctes.items) |extra_cte| {
         allocator.free(extra_cte.sql);
     }
@@ -606,6 +616,7 @@ fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) v
         deinitGenericTestDefs(allocator, &column.tests);
     }
     property.columns.deinit(allocator);
+    property.seed_column_types.deinit(allocator);
 }
 
 fn deinitMacroProperty(allocator: std.mem.Allocator, property: *MacroProperty) void {

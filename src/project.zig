@@ -2001,6 +2001,37 @@ test "parseModelPropertiesFromText records seed column generic tests" {
     try std.testing.expectEqual(false, column.tests.items[1].accepted_values_quote.?);
 }
 
+test "parseModelPropertiesFromText records seed quote columns and column types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    const yaml =
+        \\version: 2
+        \\seeds:
+        \\  - name: raw_customers
+        \\    config:
+        \\      quote_columns: false
+        \\      column_types:
+        \\        amount: decimal(10,2)
+        \\        customer_id: integer
+    ;
+
+    try parseModelPropertiesFromText(allocator, yaml, "seeds/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 1), graph.model_properties.items.len);
+    const property = graph.model_properties.items[0];
+    try std.testing.expectEqualStrings("seed", property.resource_type);
+    try std.testing.expectEqual(false, property.quote_columns.?);
+    try std.testing.expectEqual(@as(usize, 2), property.seed_column_types.items.len);
+    try std.testing.expectEqualStrings("amount", property.seed_column_types.items[0].name);
+    try std.testing.expectEqualStrings("decimal(10,2)", property.seed_column_types.items[0].data_type);
+    try std.testing.expectEqualStrings("customer_id", property.seed_column_types.items[1].name);
+    try std.testing.expectEqualStrings("integer", property.seed_column_types.items[1].data_type);
+}
+
 test "parseModelPropertiesFromText records table-level generic test column_name arguments" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2207,6 +2238,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
     var in_models = false;
     var in_columns = false;
     var in_config = false;
+    var in_seed_column_types = false;
     var active_resource_type: []const u8 = "model";
     var test_target: TestTarget = .none;
     var active_test_target: TestTarget = .none;
@@ -2215,6 +2247,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
     var model_item_indent: ?usize = null;
     var column_item_indent: ?usize = null;
     var config_indent: usize = 0;
+    var seed_column_types_indent: usize = 0;
     var tests_indent: usize = 0;
     var active_test_indent: usize = 0;
     var active_values_indent: usize = 0;
@@ -2234,6 +2267,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             in_models = true;
             in_columns = false;
             in_config = false;
+            in_seed_column_types = false;
             active_resource_type = if (std.mem.eql(u8, trimmed, "seeds:")) "seed" else if (std.mem.eql(u8, trimmed, "analyses:")) "analysis" else "model";
             test_target = .none;
             active_test_target = .none;
@@ -2252,6 +2286,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             in_models = false;
             in_columns = false;
             in_config = false;
+            in_seed_column_types = false;
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -2275,6 +2310,10 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
         }
         if (in_config and indent <= config_indent and !std.mem.eql(u8, trimmed, "config:")) {
             in_config = false;
+            in_seed_column_types = false;
+        }
+        if (in_seed_column_types and indent <= seed_column_types_indent) {
+            in_seed_column_types = false;
         }
         if (in_columns and current_model != null and indent <= (model_item_indent orelse 0) and !std.mem.startsWith(u8, trimmed, "- name:")) {
             in_columns = false;
@@ -2324,6 +2363,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                     active_values_target = .none;
                     active_values_index = null;
                     in_config = false;
+                    in_seed_column_types = false;
                 } else {
                     try graph.model_properties.append(allocator, .{ .package_name = package_name, .resource_type = active_resource_type, .name = name, .patch_path = relative_path });
                     current_model = graph.model_properties.items.len - 1;
@@ -2332,6 +2372,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                     column_item_indent = null;
                     in_columns = false;
                     in_config = false;
+                    in_seed_column_types = false;
                     test_target = .none;
                     active_test_target = .none;
                     active_test_index = null;
@@ -2344,6 +2385,11 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
 
         const model_index = current_model orelse continue;
         if (splitKeyValue(trimmed)) |kv| {
+            if (in_seed_column_types and indent > seed_column_types_indent) {
+                try appendSeedColumnType(allocator, &graph.model_properties.items[model_index], kv.key, kv.value);
+                continue;
+            }
+
             if (active_test_index != null and indent > active_test_indent) {
                 if (std.mem.eql(u8, kv.key, "arguments")) {
                     if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
@@ -2390,6 +2436,12 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                 } else if (std.mem.eql(u8, kv.key, "tags")) {
                     try parseInlineStringList(allocator, kv.value, &graph.model_properties.items[model_index].tags);
                     sortStrings(graph.model_properties.items[model_index].tags.items);
+                } else if (std.mem.eql(u8, active_resource_type, "seed") and std.mem.eql(u8, kv.key, "quote_columns")) {
+                    graph.model_properties.items[model_index].quote_columns = try parseBool(kv.value);
+                } else if (std.mem.eql(u8, active_resource_type, "seed") and std.mem.eql(u8, kv.key, "column_types")) {
+                    if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                    in_seed_column_types = true;
+                    seed_column_types_indent = indent;
                 }
                 continue;
             }
@@ -2669,6 +2721,16 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
         node.patch_path = property.patch_path;
         if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.package_name, property.description, &node.doc_blocks);
         if (std.mem.eql(u8, node.resource_type, "model") and property.materialized.len != 0 and !node.inline_materialized) node.materialized = property.materialized;
+        if (std.mem.eql(u8, node.resource_type, "seed")) {
+            if (property.quote_columns) |quote_columns| node.quote_columns = quote_columns;
+            if (property.seed_column_types.items.len != 0) {
+                node.seed_column_types.clearRetainingCapacity();
+                for (property.seed_column_types.items) |column_type| {
+                    try node.seed_column_types.append(graph.allocator, column_type);
+                }
+                sortSeedColumnTypes(node.seed_column_types.items);
+            }
+        }
         if (property.enabled) |enabled| {
             if (!node.inline_enabled) node.enabled = enabled;
         }
@@ -2933,6 +2995,20 @@ fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
     }
 }
 
+fn appendSeedColumnType(allocator: std.mem.Allocator, property: *types.ModelProperty, raw_name: []const u8, raw_type: []const u8) !void {
+    const name = try dupTrimmedScalar(allocator, raw_name);
+    const data_type = try dupTrimmedScalar(allocator, raw_type);
+    if (name.len == 0 or data_type.len == 0) return error.UnsupportedYaml;
+    for (property.seed_column_types.items) |*existing| {
+        if (std.mem.eql(u8, existing.name, name)) {
+            existing.data_type = data_type;
+            return;
+        }
+    }
+    try property.seed_column_types.append(allocator, .{ .name = name, .data_type = data_type });
+    sortSeedColumnTypes(property.seed_column_types.items);
+}
+
 fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.ArrayList(ColumnDef), source: ColumnDef) !void {
     for (columns.items) |*existing| {
         if (std.mem.eql(u8, existing.name, source.name)) {
@@ -3007,6 +3083,14 @@ fn sortGenericTestDefs(tests: []GenericTestDef) void {
 fn sortColumns(columns: []ColumnDef) void {
     std.mem.sort(ColumnDef, columns, {}, struct {
         fn lessThan(_: void, a: ColumnDef, b: ColumnDef) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+}
+
+fn sortSeedColumnTypes(column_types: []types.SeedColumnType) void {
+    std.mem.sort(types.SeedColumnType, column_types, {}, struct {
+        fn lessThan(_: void, a: types.SeedColumnType, b: types.SeedColumnType) bool {
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lessThan);

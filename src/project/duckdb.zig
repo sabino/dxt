@@ -478,11 +478,41 @@ pub fn renderSeedSql(allocator: std.mem.Allocator, project_dir: []const u8, grap
     const relation_name = try compiler.relationNameForNode(allocator, graph, node);
     defer allocator.free(relation_name);
 
+    const read_csv_options = try renderSeedReadCsvOptions(allocator, seed_file_literal, node);
+    defer allocator.free(read_csv_options);
+
     return try std.fmt.allocPrint(
         allocator,
-        "create schema if not exists {s};\ncreate or replace table {s} as select * from read_csv_auto({s}, header = true);\n",
-        .{ quoted_schema, relation_name, seed_file_literal },
+        "create schema if not exists {s};\ncreate or replace table {s} as select * from read_csv_auto({s});\n",
+        .{ quoted_schema, relation_name, read_csv_options },
     );
+}
+
+fn renderSeedReadCsvOptions(allocator: std.mem.Allocator, seed_file_literal: []const u8, node: *const Node) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, seed_file_literal);
+    try out.appendSlice(allocator, ", header = true");
+    if (node.quote_columns) |quote_columns| {
+        try out.appendSlice(allocator, ", normalize_names = ");
+        try out.appendSlice(allocator, if (quote_columns) "false" else "true");
+    }
+    if (node.seed_column_types.items.len != 0) {
+        try out.appendSlice(allocator, ", types = {");
+        for (node.seed_column_types.items, 0..) |column_type, index| {
+            if (column_type.name.len == 0 or column_type.data_type.len == 0) return error.UnsupportedSeedExecution;
+            if (index != 0) try out.appendSlice(allocator, ", ");
+            const column_name = try quoteSqlString(allocator, column_type.name);
+            defer allocator.free(column_name);
+            const data_type = try quoteSqlString(allocator, column_type.data_type);
+            defer allocator.free(data_type);
+            try out.appendSlice(allocator, column_name);
+            try out.appendSlice(allocator, ":");
+            try out.appendSlice(allocator, data_type);
+        }
+        try out.appendSlice(allocator, "}");
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
 fn seedFilePath(allocator: std.mem.Allocator, project_dir: []const u8, graph: *const Graph, node: *const Node) ![]const u8 {
@@ -1497,6 +1527,35 @@ test "renderSeedSql creates table from installed package seed CSV" {
     const sql = try renderSeedSql(allocator, "project", &graph, &graph.nodes.items[0]);
     try std.testing.expectEqualStrings(
         "create schema if not exists \"analytics\";\ncreate or replace table \"analytics\".\"raw_customers\" as select * from read_csv_auto('project/dbt_packages/pkg/seeds/raw_customers.csv', header = true);\n",
+        sql,
+    );
+}
+
+test "renderSeedSql applies seed quote columns and column types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    var node = Node{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.raw_customers",
+        .name = "raw_customers",
+        .path = "raw_customers.csv",
+        .original_file_path = "seeds/raw_customers.csv",
+        .raw_code = "",
+        .materialized = "seed",
+        .quote_columns = false,
+    };
+    try node.seed_column_types.append(allocator, .{ .name = "amount", .data_type = "decimal(10,2)" });
+    try node.seed_column_types.append(allocator, .{ .name = "customer_id", .data_type = "integer" });
+    try graph.nodes.append(allocator, node);
+
+    const sql = try renderSeedSql(allocator, "project", &graph, &graph.nodes.items[0]);
+    try std.testing.expectEqualStrings(
+        "create schema if not exists \"analytics\";\ncreate or replace table \"analytics\".\"raw_customers\" as select * from read_csv_auto('project/seeds/raw_customers.csv', header = true, normalize_names = true, types = {'amount':'decimal(10,2)', 'customer_id':'integer'});\n",
         sql,
     );
 }

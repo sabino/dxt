@@ -48,6 +48,10 @@ compatibility.
   thresholds, `where`, and `limit`; emit those Manifest fields without
   generic-only test fields; and apply supported configs during DuckDB
   `dxt test` / `dxt build`.
+- DuckDB-backed `dxt seed` and seed paths inside `dxt build` now parse
+  supported seed YAML `quote_columns` and `column_types` configs for root and
+  installed-package CSV seeds, preserve those config fields in `manifest.json`,
+  and apply them at the DuckDB CSV load boundary.
 
 ### Fixed
 

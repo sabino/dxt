@@ -144,12 +144,17 @@
     "seed_config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "materialized", "tags", "docs"],
+      "required": ["enabled", "materialized", "tags", "docs", "quote_columns", "column_types"],
       "properties": {
         "enabled": {"type": "boolean"},
         "materialized": {"type": "string"},
         "tags": {"$ref": "#/$defs/unique_id_array"},
-        "docs": {"$ref": "#/$defs/docs_config"}
+        "docs": {"$ref": "#/$defs/docs_config"},
+        "quote_columns": {"type": ["boolean", "null"]},
+        "column_types": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
       }
     },
     "test_config": {
