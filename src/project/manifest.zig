@@ -941,7 +941,13 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
         try writer.writeAll(",\"field\":");
         try json.string(writer, test_node.relationship_field);
     }
-    try writer.writeAll("},\"namespace\":null},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":");
+    try writer.writeAll("},\"namespace\":");
+    if (test_node.test_namespace) |namespace| {
+        try json.string(writer, namespace);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":");
     try json.string(writer, test_node.config.severity);
     try writer.writeAll(",\"fail_calc\":\"count(*)\",\"warn_if\":");
     try json.string(writer, test_node.config.warn_if);

@@ -260,7 +260,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MalformedSourcesArtifact => stderr.writeAll("error: sources.json is malformed or missing required freshness result fields\n") catch {},
         error.UnsupportedSourcesSchemaVersion => stderr.writeAll("error: sources.json must use dbt Sources v3 schema for source_status selectors\n") catch {},
         error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model or supported generic or singular SQL test resources\n") catch {},
-        error.UnsupportedCustomGenericTest => stderr.writeAll("error: custom generic test compilation currently supports only root-project model-column test blocks with static SQL plus {{ model }} and {{ column_name }}\n") catch {},
+        error.UnsupportedCustomGenericTest => stderr.writeAll("error: custom generic test compilation currently supports only model-column test blocks with static SQL plus {{ model }} and {{ column_name }}\n") catch {},
         error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources\n") catch {},
         error.UnsupportedSeedSelection => stderr.writeAll("error: seed currently supports only selected seed resources\n") catch {},
         error.UnsupportedTestSelection => stderr.writeAll("error: test currently supports only supported DuckDB test resources\n") catch {},

@@ -1,0 +1,11 @@
+version: 2
+
+models:
+  - name: orders
+    columns:
+      - name: amount
+        data_tests:
+          - util_pkg.positive_amount
+      - name: discount
+        tests:
+          - util_pkg.nonzero_amount

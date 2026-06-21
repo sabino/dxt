@@ -195,7 +195,10 @@ def test_compile_renders_root_project_model_column_custom_generic_tests(tmp_path
     assert positive["test_metadata"]["kwargs"]["column_name"] == "amount"
     assert positive["attached_node"] == "model.custom_generic_test_compile.orders"
     assert positive["depends_on"]["nodes"] == ["model.custom_generic_test_compile.orders"]
-    assert positive["depends_on"]["macros"] == ["macro.custom_generic_test_compile.test_positive_amount"]
+    assert positive["depends_on"]["macros"] == [
+        "macro.custom_generic_test_compile.test_positive_amount",
+        "macro.dbt.get_where_subquery",
+    ]
     assert positive["compiled"] is True
     assert positive["compiled_code"] == positive_sql
     assert positive["compiled_path"].endswith("/compiled/custom_generic_test_compile/positive_amount_orders_amount.sql")
@@ -203,9 +206,166 @@ def test_compile_renders_root_project_model_column_custom_generic_tests(tmp_path
     nonzero = tests_by_name["nonzero_amount"]
     assert nonzero["raw_code"] == "{{ test_nonzero_amount(**_dbt_generic_test_kwargs) }}"
     assert nonzero["test_metadata"]["kwargs"]["column_name"] == "discount"
-    assert nonzero["depends_on"]["macros"] == ["macro.custom_generic_test_compile.test_nonzero_amount"]
+    assert nonzero["depends_on"]["macros"] == [
+        "macro.custom_generic_test_compile.test_nonzero_amount",
+        "macro.dbt.get_where_subquery",
+    ]
     assert nonzero["compiled"] is True
     assert nonzero["compiled_code"] == nonzero_sql
+
+
+def test_compile_renders_installed_package_model_column_custom_generic_tests(tmp_path: Path):
+    project = copy_fixture(tmp_path, "package_custom_generic_test_compile")
+    target = tmp_path / "compile-target"
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Compiled 0 model(s) and 2 test(s)" in result.stdout
+
+    compiled_root = target / "compiled" / "package_custom_generic_test_compile"
+    positive_sql = (compiled_root / "util_pkg_positive_amount_orders_amount.sql").read_text()
+    nonzero_sql = (compiled_root / "util_pkg_nonzero_amount_orders_discount.sql").read_text()
+    assert "select amount" in positive_sql
+    assert 'from "main"."orders"' in positive_sql
+    assert "where amount < 0" in positive_sql
+    assert "select discount" in nonzero_sql
+    assert 'from "main"."orders"' in nonzero_sql
+    assert "where discount = 0" in nonzero_sql
+    assert "{{" not in positive_sql + nonzero_sql
+    assert "{%" not in positive_sql + nonzero_sql
+
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_partial_manifest_schema(manifest)
+    assert_manifest_schema_slice(manifest_path)
+    tests_by_name = {node["test_metadata"]["name"]: node for node in manifest["nodes"].values() if node["resource_type"] == "test"}
+
+    positive = tests_by_name["positive_amount"]
+    assert positive["package_name"] == "package_custom_generic_test_compile"
+    assert positive["name"] == "util_pkg_positive_amount_orders_amount"
+    assert positive["raw_code"] == "{{ util_pkg.test_positive_amount(**_dbt_generic_test_kwargs) }}"
+    assert positive["test_metadata"] == {
+        "name": "positive_amount",
+        "kwargs": {
+            "model": "{{ get_where_subquery(ref('orders')) }}",
+            "column_name": "amount",
+        },
+        "namespace": "util_pkg",
+    }
+    assert positive["attached_node"] == "model.package_custom_generic_test_compile.orders"
+    assert positive["depends_on"]["nodes"] == ["model.package_custom_generic_test_compile.orders"]
+    assert positive["depends_on"]["macros"] == [
+        "macro.util_pkg.test_positive_amount",
+        "macro.dbt.get_where_subquery",
+    ]
+    assert positive["compiled"] is True
+    assert positive["compiled_code"] == positive_sql
+    assert positive["compiled_path"].endswith(
+        "/compiled/package_custom_generic_test_compile/util_pkg_positive_amount_orders_amount.sql"
+    )
+
+    nonzero = tests_by_name["nonzero_amount"]
+    assert nonzero["raw_code"] == "{{ util_pkg.test_nonzero_amount(**_dbt_generic_test_kwargs) }}"
+    assert nonzero["test_metadata"]["namespace"] == "util_pkg"
+    assert nonzero["test_metadata"]["kwargs"]["column_name"] == "discount"
+    assert nonzero["depends_on"]["macros"] == [
+        "macro.util_pkg.test_nonzero_amount",
+        "macro.dbt.get_where_subquery",
+    ]
+    assert nonzero["compiled"] is True
+    assert nonzero["compiled_code"] == nonzero_sql
+
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if has_dbt_core and has_dbt_duckdb:
+        from dbt.cli.main import dbtRunner
+        import dbt_common.events.base_types as dbt_event_base_types
+        import google.protobuf.json_format as protobuf_json_format
+
+        (project / "models" / "schema.yml").write_text(
+            """version: 2
+
+models:
+  - name: orders
+    columns:
+      - name: amount
+        data_tests:
+          - util_pkg.positive_amount
+"""
+        )
+        (project / "dbt_packages" / "util_pkg" / "macros" / "custom_tests.sql").write_text(
+            """{% test positive_amount(model, column_name) %}
+select {{ column_name }}
+from {{ model }}
+where {{ column_name }} < 0
+{% endtest %}
+"""
+        )
+        dbt_profiles = tmp_path / "dbt-profiles"
+        dbt_profiles.mkdir()
+        (dbt_profiles / "profiles.yml").write_text(
+            "\n".join(
+                [
+                    "package_custom_generic_test_compile:",
+                    "  target: dev",
+                    "  outputs:",
+                    "    dev:",
+                    "      type: duckdb",
+                    f"      path: {tmp_path / 'oracle.duckdb'}",
+                    "      schema: main",
+                ]
+            )
+            + "\n"
+        )
+        dbt_target = tmp_path / "dbt-target"
+        original_message_to_json = protobuf_json_format.MessageToJson
+        original_event_message_to_json = dbt_event_base_types.MessageToJson
+
+        def compatible_message_to_json(message, *args, always_print_fields_with_no_presence=None, **kwargs):
+            if always_print_fields_with_no_presence is not None and "including_default_value_fields" not in kwargs:
+                kwargs["including_default_value_fields"] = always_print_fields_with_no_presence
+            return original_message_to_json(message, *args, **kwargs)
+
+        protobuf_json_format.MessageToJson = compatible_message_to_json
+        dbt_event_base_types.MessageToJson = compatible_message_to_json
+        try:
+            dbt_result = dbtRunner().invoke(
+                [
+                    "compile",
+                    "--project-dir",
+                    str(project),
+                    "--profiles-dir",
+                    str(dbt_profiles),
+                    "--target-path",
+                    str(dbt_target),
+                    "--select",
+                    "test_type:generic",
+                ]
+            )
+        finally:
+            protobuf_json_format.MessageToJson = original_message_to_json
+            dbt_event_base_types.MessageToJson = original_event_message_to_json
+        assert dbt_result.success, dbt_result.exception
+        dbt_manifest = json.loads((dbt_target / "manifest.json").read_text())
+        dbt_tests = {node["test_metadata"]["name"]: node for node in dbt_manifest["nodes"].values() if node["resource_type"] == "test"}
+        dbt_positive = dbt_tests["positive_amount"]
+        assert positive["unique_id"] == dbt_positive["unique_id"]
+        assert positive["raw_code"] == dbt_positive["raw_code"]
+        assert positive["test_metadata"] == dbt_positive["test_metadata"]
+        assert positive["depends_on"] == dbt_positive["depends_on"]
+        assert positive["compiled"] == dbt_positive["compiled"]
+        assert "where amount < 0" in dbt_positive["compiled_code"]
+        assert "{{" not in dbt_positive["compiled_code"]
+        assert "{%" not in dbt_positive["compiled_code"]
 
 
 def test_compile_rejects_unsupported_custom_generic_test_body(tmp_path: Path):
@@ -226,11 +386,36 @@ select {{ column_name }} from {{ model }}
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "custom generic test compilation currently supports only root-project model-column test blocks" in result.stderr
+    assert "custom generic test compilation currently supports only model-column test blocks" in result.stderr
 
 
 def test_test_and_build_reject_custom_generic_tests_before_runtime(tmp_path: Path):
     project = copy_fixture(tmp_path, "custom_generic_test_compile")
+    test_target = tmp_path / "test-target"
+    test_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(test_target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test_result.returncode == 2
+    assert "test/build currently executes only selected DuckDB singular SQL tests" in test_result.stderr
+    assert not (test_target / "run_results.json").exists()
+
+    build_target = tmp_path / "build-target"
+    build_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(build_target), "--select", "test_type:generic"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build_result.returncode == 2
+    assert "test/build currently executes only selected DuckDB singular SQL tests" in build_result.stderr
+    assert not (build_target / "run_results.json").exists()
+
+
+def test_test_and_build_reject_package_custom_generic_tests_before_runtime(tmp_path: Path):
+    project = copy_fixture(tmp_path, "package_custom_generic_test_compile")
     test_target = tmp_path / "test-target"
     test_result = subprocess.run(
         [DXT, "test", "--project-dir", str(project), "--target-path", str(test_target), "--select", "test_type:generic"],
