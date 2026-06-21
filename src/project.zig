@@ -527,12 +527,17 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             deinitRunResults(runtime.allocator, executed.items);
             executed.deinit(runtime.allocator);
         }
-        for (seed_nodes, 0..) |node, index| {
+        var blocked: std.ArrayList([]const u8) = .empty;
+        defer blocked.deinit(runtime.allocator);
+        var had_failure = false;
+        for (seed_nodes) |node| {
+            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &executed)) continue;
             if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
-                try appendSkippedAfterExecutionFailure(runtime.allocator, selected, seed_nodes[index + 1 ..], &.{}, node.unique_id, &executed);
-                return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
+                try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
+                had_failure = true;
             }
         }
+        if (had_failure) return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
 
         try writeRunResults(runtime, target_dir, executed.items);
         try stdout.print("Built {d} seed(s) into {s}; wrote artifacts into {s}\n", .{
@@ -564,29 +569,36 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         const executed_tests = try runtime.allocator.alloc(bool, test_nodes.len);
         defer runtime.allocator.free(executed_tests);
         @memset(executed_tests, false);
-        for (seed_nodes, 0..) |node, index| {
+        var blocked: std.ArrayList([]const u8) = .empty;
+        defer blocked.deinit(runtime.allocator);
+        var had_execution_failure = false;
+        var test_failures = GenericTestExecutionSummary{};
+        for (seed_nodes) |node| {
+            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &executed)) {
+                try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                continue;
+            }
             if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
-                try appendSkippedAfterExecutionFailure(runtime.allocator, selected, seed_nodes[index + 1 ..], test_nodes, node.unique_id, &executed);
-                return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
+                try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
+                had_execution_failure = true;
+                try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                continue;
             }
             try executed_node_ids.append(runtime.allocator, node.unique_id);
             var failed_test_blockers: std.ArrayList([]const u8) = .empty;
             defer failed_test_blockers.deinit(runtime.allocator);
             const test_summary = try appendReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed, &failed_test_blockers);
             if (test_summary.failed_tests != 0) {
-                try appendSkippedAfterDataTestFailure(runtime.allocator, selected, seed_nodes[index + 1 ..], test_nodes, executed_tests, failed_test_blockers.items, &executed);
-                try writeRunResults(runtime, target_dir, executed.items);
-                try stdout.print("Built {d} seed(s) and {d} test(s) into {s}; wrote artifacts into {s}\n", .{
-                    seed_nodes.len,
-                    test_nodes.len,
-                    util.normalizeForDisplay(db_path),
-                    util.normalizeForDisplay(manifest_path),
-                });
-                try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
-                return error.TestFailure;
+                try appendBlockedRoots(runtime.allocator, &blocked, failed_test_blockers.items);
+                test_failures.failed_tests += test_summary.failed_tests;
+                test_failures.total_failures += test_summary.total_failures;
             }
         }
-        const test_summary = try appendUnexecutedDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, &executed);
+        try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+        const test_summary = try appendRemainingReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed);
+        test_failures.failed_tests += test_summary.failed_tests;
+        test_failures.total_failures += test_summary.total_failures;
+        if (had_execution_failure) return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
 
         try writeRunResults(runtime, target_dir, executed.items);
         try stdout.print("Built {d} seed(s) and {d} test(s) into {s}; wrote artifacts into {s}\n", .{
@@ -595,8 +607,8 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             util.normalizeForDisplay(db_path),
             util.normalizeForDisplay(manifest_path),
         });
-        if (test_summary.failed_tests != 0) {
-            try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
+        if (test_failures.failed_tests != 0) {
+            try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ test_failures.failed_tests, test_failures.total_failures });
             return error.TestFailure;
         }
         return;
@@ -675,29 +687,36 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         const executed_tests = try runtime.allocator.alloc(bool, test_nodes.len);
         defer runtime.allocator.free(executed_tests);
         @memset(executed_tests, false);
-        for (execution_order, 0..) |node, index| {
+        var blocked: std.ArrayList([]const u8) = .empty;
+        defer blocked.deinit(runtime.allocator);
+        var had_execution_failure = false;
+        var test_failures = GenericTestExecutionSummary{};
+        for (execution_order) |node| {
+            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &executed)) {
+                try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                continue;
+            }
             if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
-                try appendSkippedAfterExecutionFailure(runtime.allocator, selected, execution_order[index + 1 ..], test_nodes, node.unique_id, &executed);
-                return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
+                try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
+                had_execution_failure = true;
+                try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                continue;
             }
             try executed_node_ids.append(runtime.allocator, node.unique_id);
             var failed_test_blockers: std.ArrayList([]const u8) = .empty;
             defer failed_test_blockers.deinit(runtime.allocator);
             const test_summary = try appendReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed, &failed_test_blockers);
             if (test_summary.failed_tests != 0) {
-                try appendSkippedAfterDataTestFailure(runtime.allocator, selected, execution_order[index + 1 ..], test_nodes, executed_tests, failed_test_blockers.items, &executed);
-                try writeRunResults(runtime, target_dir, executed.items);
-                try stdout.print("Built {d} model(s) and {d} test(s) into {s}; wrote artifacts into {s}\n", .{
-                    execution_order.len,
-                    test_nodes.len,
-                    util.normalizeForDisplay(db_path),
-                    util.normalizeForDisplay(manifest_path),
-                });
-                try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
-                return error.TestFailure;
+                try appendBlockedRoots(runtime.allocator, &blocked, failed_test_blockers.items);
+                test_failures.failed_tests += test_summary.failed_tests;
+                test_failures.total_failures += test_summary.total_failures;
             }
         }
-        const test_summary = try appendUnexecutedDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, &executed);
+        try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+        const test_summary = try appendRemainingReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed);
+        test_failures.failed_tests += test_summary.failed_tests;
+        test_failures.total_failures += test_summary.total_failures;
+        if (had_execution_failure) return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
 
         try writeRunResults(runtime, target_dir, executed.items);
         try stdout.print("Built {d} model(s) and {d} test(s) into {s}; wrote artifacts into {s}\n", .{
@@ -706,8 +725,8 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             util.normalizeForDisplay(db_path),
             util.normalizeForDisplay(manifest_path),
         });
-        if (test_summary.failed_tests != 0) {
-            try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
+        if (test_failures.failed_tests != 0) {
+            try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ test_failures.failed_tests, test_failures.total_failures });
             return error.TestFailure;
         }
         return;
@@ -736,17 +755,29 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         const executed_tests = try runtime.allocator.alloc(bool, test_nodes.len);
         defer runtime.allocator.free(executed_tests);
         @memset(executed_tests, false);
-        for (execution_order, 0..) |node, index| {
+        var blocked: std.ArrayList([]const u8) = .empty;
+        defer blocked.deinit(runtime.allocator);
+        var had_execution_failure = false;
+        var test_failures = GenericTestExecutionSummary{};
+        for (execution_order) |node| {
+            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &executed)) {
+                try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                continue;
+            }
             if (std.mem.eql(u8, node.resource_type, "seed")) {
                 if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
-                    try appendSkippedAfterExecutionFailure(runtime.allocator, selected, execution_order[index + 1 ..], test_nodes, node.unique_id, &executed);
-                    return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
+                    try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
+                    had_execution_failure = true;
+                    try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                    continue;
                 }
                 seed_count += 1;
             } else {
                 if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
-                    try appendSkippedAfterExecutionFailure(runtime.allocator, selected, execution_order[index + 1 ..], test_nodes, node.unique_id, &executed);
-                    return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
+                    try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
+                    had_execution_failure = true;
+                    try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                    continue;
                 }
                 model_count += 1;
             }
@@ -755,20 +786,16 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             defer failed_test_blockers.deinit(runtime.allocator);
             const test_summary = try appendReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed, &failed_test_blockers);
             if (test_summary.failed_tests != 0) {
-                try appendSkippedAfterDataTestFailure(runtime.allocator, selected, execution_order[index + 1 ..], test_nodes, executed_tests, failed_test_blockers.items, &executed);
-                try writeRunResults(runtime, target_dir, executed.items);
-                try stdout.print("Built {d} seed(s), {d} model(s), and {d} test(s) into {s}; wrote artifacts into {s}\n", .{
-                    seed_count,
-                    model_count,
-                    test_nodes.len,
-                    util.normalizeForDisplay(db_path),
-                    util.normalizeForDisplay(manifest_path),
-                });
-                try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
-                return error.TestFailure;
+                try appendBlockedRoots(runtime.allocator, &blocked, failed_test_blockers.items);
+                test_failures.failed_tests += test_summary.failed_tests;
+                test_failures.total_failures += test_summary.total_failures;
             }
         }
-        const test_summary = try appendUnexecutedDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, &executed);
+        try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+        const test_summary = try appendRemainingReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed);
+        test_failures.failed_tests += test_summary.failed_tests;
+        test_failures.total_failures += test_summary.total_failures;
+        if (had_execution_failure) return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
 
         try writeRunResults(runtime, target_dir, executed.items);
         try stdout.print("Built {d} seed(s), {d} model(s), and {d} test(s) into {s}; wrote artifacts into {s}\n", .{
@@ -778,8 +805,8 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             util.normalizeForDisplay(db_path),
             util.normalizeForDisplay(manifest_path),
         });
-        if (test_summary.failed_tests != 0) {
-            try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ test_summary.failed_tests, test_summary.total_failures });
+        if (test_failures.failed_tests != 0) {
+            try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ test_failures.failed_tests, test_failures.total_failures });
             return error.TestFailure;
         }
         return;
@@ -1231,17 +1258,19 @@ fn appendReadyDataTestResults(
     return summary;
 }
 
-fn appendUnexecutedDataTestResults(
+fn appendRemainingReadyDataTestResults(
     runtime: Runtime,
     db_path: []const u8,
     graph: *const Graph,
     test_nodes: []const DataTestRef,
     executed_tests: []bool,
+    completed_nodes: []const []const u8,
     executed: *std.ArrayList(run_results.NodeResult),
 ) !GenericTestExecutionSummary {
     var summary: GenericTestExecutionSummary = .{};
     for (test_nodes, 0..) |test_ref, index| {
         if (executed_tests[index]) continue;
+        if (!dataTestDependenciesCompleted(test_ref, completed_nodes)) continue;
         const result = try appendOneDataTestResult(runtime, db_path, graph, test_ref, executed);
         executed_tests[index] = true;
         summary.failed_tests += result.failed_tests;
@@ -1369,6 +1398,32 @@ fn appendDataTestBlockedRoots(allocator: std.mem.Allocator, blocked_roots: *std.
         if (std.mem.startsWith(u8, dependency, "model.") or std.mem.startsWith(u8, dependency, "seed.")) {
             try appendUniqueString(allocator, blocked_roots, dependency);
         }
+    }
+}
+
+fn appendBlockedRoots(allocator: std.mem.Allocator, blocked: *std.ArrayList([]const u8), roots: []const []const u8) !void {
+    for (roots) |root| {
+        try appendUniqueString(allocator, blocked, root);
+    }
+}
+
+fn appendSkippedBlockedDataTests(
+    allocator: std.mem.Allocator,
+    selected: []const selector.SelectedResource,
+    test_nodes: []const DataTestRef,
+    executed_tests: []bool,
+    blocked: []const []const u8,
+    executed: *std.ArrayList(run_results.NodeResult),
+) !void {
+    for (test_nodes, 0..) |test_node, index| {
+        if (executed_tests[index]) continue;
+        if (!selectionContains(selected, test_node.uniqueId())) continue;
+        if (!testDependsOnAnyBlocked(test_node, blocked)) continue;
+        switch (test_node) {
+            .generic => |generic| try executed.append(allocator, .{ .test_node = generic, .status = "skipped" }),
+            .singular => |singular| try executed.append(allocator, .{ .singular_test_node = singular, .status = "skipped" }),
+        }
+        executed_tests[index] = true;
     }
 }
 
@@ -1880,6 +1935,62 @@ test "appendSkippedIfNodeDependsOnBlocked records one blocked model" {
     try std.testing.expectEqualStrings("model.demo.orders", executed.items[0].node.?.unique_id);
     try std.testing.expectEqualStrings("skipped", executed.items[0].status);
     try std.testing.expect(containsUniqueId(blocked.items, "model.demo.orders"));
+}
+
+test "appendSkippedBlockedDataTests records selected tests blocked by skipped nodes" {
+    const allocator = std.testing.allocator;
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    var orders_test = GenericTestNode{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_orders_order_id.def",
+        .name = "not_null_orders_order_id",
+        .alias = "not_null_orders_order_id",
+        .path = "not_null_orders_order_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "order_id",
+        .attached_node = "model.demo.orders",
+    };
+    try orders_test.depends_on.append(allocator, "model.demo.orders");
+    try graph.tests.append(allocator, orders_test);
+    var independent_test = GenericTestNode{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_independent_id.ghi",
+        .name = "not_null_independent_id",
+        .alias = "not_null_independent_id",
+        .path = "not_null_independent_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "id",
+        .attached_node = "model.demo.independent",
+    };
+    try independent_test.depends_on.append(allocator, "model.demo.independent");
+    try graph.tests.append(allocator, independent_test);
+
+    const selected = [_]selector.SelectedResource{
+        .{ .unique_id = "test.demo.not_null_orders_order_id.def", .name = "not_null_orders_order_id", .resource_type = "test" },
+        .{ .unique_id = "test.demo.not_null_independent_id.ghi", .name = "not_null_independent_id", .resource_type = "test" },
+    };
+    const tests = [_]DataTestRef{
+        .{ .generic = &graph.tests.items[0] },
+        .{ .generic = &graph.tests.items[1] },
+    };
+    var executed_tests = [_]bool{ false, false };
+    const blocked = [_][]const u8{"model.demo.orders"};
+
+    var executed: std.ArrayList(run_results.NodeResult) = .empty;
+    defer executed.deinit(allocator);
+    try appendSkippedBlockedDataTests(allocator, &selected, &tests, &executed_tests, &blocked, &executed);
+
+    try std.testing.expectEqual(@as(usize, 1), executed.items.len);
+    try std.testing.expectEqualStrings("test.demo.not_null_orders_order_id.def", executed.items[0].test_node.?.unique_id);
+    try std.testing.expectEqualStrings("skipped", executed.items[0].status);
+    try std.testing.expect(executed_tests[0]);
+    try std.testing.expect(!executed_tests[1]);
 }
 
 test "appendSkippedAfterDataTestFailure skips selected downstream nodes and unexecuted tests" {

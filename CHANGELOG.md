@@ -111,6 +111,10 @@ compatibility.
 - `dxt run` now continues selected independent DuckDB SQL models after a
   selected model execution failure while still recording selected blocked
   descendants as `skipped` rows in `run_results.json`.
+- `dxt build` now continues selected independent supported DuckDB seeds,
+  models, and data tests after supported execution or data-test failures while
+  still writing dbt-shaped `error` / `fail` and selected blocked `skipped`
+  rows.
 - Partial `dxt build` data-test failure blocking for selected DuckDB model and
   seed+model builds: ready selected data tests run before downstream selected
   resources, and failing tests write `fail` plus downstream `skipped` Run
