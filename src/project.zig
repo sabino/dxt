@@ -829,22 +829,37 @@ fn resolveSelection(runtime: Runtime, options: Options) !selector_config.Resolve
 
 const SelectionState = struct {
     source_status_index: ?source_freshness.SourceStatusIndex = null,
+    result_status_index: ?run_results.ResultStatusIndex = null,
 
     fn deinit(self: *SelectionState, allocator: std.mem.Allocator) void {
         if (self.source_status_index) |*index| index.deinit(allocator);
+        if (self.result_status_index) |*index| index.deinit(allocator);
         self.* = .{};
     }
 
     fn context(self: *const SelectionState) selector.SelectionContext {
-        if (self.source_status_index) |*index| return .{ .source_status_index = index };
-        return .{};
+        var ctx: selector.SelectionContext = .{};
+        if (self.source_status_index) |*index| ctx.source_status_index = index;
+        if (self.result_status_index) |*index| ctx.result_status_index = index;
+        return ctx;
     }
 };
 
 fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_config.ResolvedSelection) !SelectionState {
-    if (!selector.usesSourceStatusSelector(selection.select, selection.exclude)) return .{};
-    const state_dir = options.state orelse return error.MissingSourceStatusState;
-    return .{ .source_status_index = try source_freshness.loadSourceStatusIndex(runtime, state_dir) };
+    const needs_source_status = selector.usesSourceStatusSelector(selection.select, selection.exclude);
+    const needs_result = selector.usesResultSelector(selection.select, selection.exclude);
+    if (!needs_source_status and !needs_result) return .{};
+
+    const state_dir = options.state orelse {
+        if (needs_result) return error.MissingResultState;
+        return error.MissingSourceStatusState;
+    };
+
+    var state: SelectionState = .{};
+    errdefer state.deinit(runtime.allocator);
+    if (needs_source_status) state.source_status_index = try source_freshness.loadSourceStatusIndex(runtime, state_dir);
+    if (needs_result) state.result_status_index = try run_results.loadResultStatusIndex(runtime, state_dir);
+    return state;
 }
 
 const CompileResult = struct {

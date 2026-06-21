@@ -1,11 +1,13 @@
 const std = @import("std");
 const Io = std.Io;
+const project_fs = @import("fs.zig");
 const json = @import("json.zig");
 const types = @import("types.zig");
 
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
 const SingularTestNode = types.SingularTestNode;
+const Runtime = types.Runtime;
 
 pub const NodeResult = struct {
     node: ?*const Node = null,
@@ -19,6 +21,87 @@ pub const NodeResult = struct {
     relation_name: ?[]const u8 = null,
     owns_relation_name: bool = false,
 };
+
+pub const ResultStatusRow = struct {
+    unique_id: []const u8,
+    status: []const u8,
+};
+
+pub const ResultStatusIndex = struct {
+    rows: []ResultStatusRow = &.{},
+
+    pub fn deinit(self: *ResultStatusIndex, allocator: std.mem.Allocator) void {
+        for (self.rows) |row| {
+            allocator.free(row.unique_id);
+            allocator.free(row.status);
+        }
+        allocator.free(self.rows);
+        self.* = .{};
+    }
+
+    pub fn statusFor(self: *const ResultStatusIndex, unique_id: []const u8) ?[]const u8 {
+        for (self.rows) |row| {
+            if (std.mem.eql(u8, row.unique_id, unique_id)) return row.status;
+        }
+        return null;
+    }
+};
+
+pub fn loadResultStatusIndex(runtime: Runtime, state_dir: []const u8) !ResultStatusIndex {
+    const path = try project_fs.pathJoin(runtime.allocator, &.{ state_dir, "run_results.json" });
+    defer runtime.allocator.free(path);
+    const text = std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return error.MissingRunResultsArtifact,
+        else => return err,
+    };
+    defer runtime.allocator.free(text);
+    return try parseResultStatusIndex(runtime.allocator, text);
+}
+
+pub fn parseResultStatusIndex(allocator: std.mem.Allocator, text: []const u8) !ResultStatusIndex {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, text, .{}) catch return error.MalformedRunResultsArtifact;
+    defer parsed.deinit();
+
+    const root = if (parsed.value == .object) parsed.value.object else return error.MalformedRunResultsArtifact;
+    const metadata_value = root.get("metadata") orelse return error.MalformedRunResultsArtifact;
+    const metadata = if (metadata_value == .object) metadata_value.object else return error.MalformedRunResultsArtifact;
+    const schema_value = metadata.get("dbt_schema_version") orelse return error.MalformedRunResultsArtifact;
+    const schema_version = if (schema_value == .string) schema_value.string else return error.MalformedRunResultsArtifact;
+    if (!std.mem.eql(u8, schema_version, "https://schemas.getdbt.com/dbt/run-results/v6.json")) return error.UnsupportedRunResultsSchemaVersion;
+
+    const results_value = root.get("results") orelse return error.MalformedRunResultsArtifact;
+    const results = if (results_value == .array) results_value.array else return error.MalformedRunResultsArtifact;
+
+    var rows: std.ArrayList(ResultStatusRow) = .empty;
+    errdefer {
+        for (rows.items) |row| {
+            allocator.free(row.unique_id);
+            allocator.free(row.status);
+        }
+        rows.deinit(allocator);
+    }
+
+    for (results.items) |result_value| {
+        const result = if (result_value == .object) result_value.object else return error.MalformedRunResultsArtifact;
+        const unique_id_value = result.get("unique_id") orelse return error.MalformedRunResultsArtifact;
+        const status_value = result.get("status") orelse return error.MalformedRunResultsArtifact;
+        const unique_id = if (unique_id_value == .string) unique_id_value.string else return error.MalformedRunResultsArtifact;
+        const status = if (status_value == .string) status_value.string else return error.MalformedRunResultsArtifact;
+        try rows.append(allocator, .{
+            .unique_id = try allocator.dupe(u8, unique_id),
+            .status = try allocator.dupe(u8, status),
+        });
+    }
+
+    return .{ .rows = try rows.toOwnedSlice(allocator) };
+}
+
+pub fn isSupportedResultSelectorStatus(status: []const u8) bool {
+    return std.mem.eql(u8, status, "success") or
+        std.mem.eql(u8, status, "error") or
+        std.mem.eql(u8, status, "fail") or
+        std.mem.eql(u8, status, "skipped");
+}
 
 pub fn renderRunResults(allocator: std.mem.Allocator, results: []const NodeResult) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
@@ -132,6 +215,53 @@ test "run-results writer emits dbt v6 success shape" {
     try std.testing.expectEqual(true, result.get("compiled").?.bool);
     try std.testing.expectEqualStrings("select 1 as id", result.get("compiled_code").?.string);
     try std.testing.expectEqualStrings("\"main\".\"customers\"", result.get("relation_name").?.string);
+}
+
+test "run-results status index loads dbt v6 result statuses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const text =
+        \\{
+        \\  "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/run-results/v6.json"},
+        \\  "results": [
+        \\    {"unique_id": "model.demo.customers", "status": "success"},
+        \\    {"unique_id": "model.demo.orders", "status": "error"},
+        \\    {"unique_id": "test.demo.not_null_customers_id.abc", "status": "fail"},
+        \\    {"unique_id": "model.demo.downstream", "status": "skipped"},
+        \\    {"unique_id": "test.demo.accepted_values_orders_status.def", "status": "pass"}
+        \\  ],
+        \\  "elapsed_time": 0.0
+        \\}
+    ;
+
+    var index = try parseResultStatusIndex(allocator, text);
+    defer index.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 5), index.rows.len);
+    try std.testing.expectEqualStrings("success", index.statusFor("model.demo.customers").?);
+    try std.testing.expectEqualStrings("error", index.statusFor("model.demo.orders").?);
+    try std.testing.expectEqualStrings("fail", index.statusFor("test.demo.not_null_customers_id.abc").?);
+    try std.testing.expectEqualStrings("skipped", index.statusFor("model.demo.downstream").?);
+    try std.testing.expectEqualStrings("pass", index.statusFor("test.demo.accepted_values_orders_status.def").?);
+    try std.testing.expect(index.statusFor("model.demo.missing") == null);
+}
+
+test "run-results status index reports malformed and version mismatch artifacts" {
+    try std.testing.expectError(error.MalformedRunResultsArtifact, parseResultStatusIndex(std.testing.allocator, "{}"));
+    try std.testing.expectError(
+        error.UnsupportedRunResultsSchemaVersion,
+        parseResultStatusIndex(std.testing.allocator,
+            \\{"metadata":{"dbt_schema_version":"https://schemas.getdbt.com/dbt/run-results/v5.json"},"results":[]}
+        ),
+    );
+    try std.testing.expectError(
+        error.MalformedRunResultsArtifact,
+        parseResultStatusIndex(std.testing.allocator,
+            \\{"metadata":{"dbt_schema_version":"https://schemas.getdbt.com/dbt/run-results/v6.json"},"results":[{"unique_id":"model.demo.customers"}]}
+        ),
+    );
 }
 
 test "run-results writer emits seed result with dbt Core null compiled fields" {
