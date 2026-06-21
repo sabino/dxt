@@ -426,9 +426,11 @@ Current file selector source note:
 `FileSelectorMethod` and Fusion path/selector references to dxt's first
 `file:` selector slice. This slice matches selectable resource
 `original_file_path` basenames and stems for `ls` and all commands that reuse
-the common selector engine. Remaining selector gaps include YAML selectors,
-state/result/source-status selectors, path normalization, richer `ls` output
-formats, and fnmatch escaping beyond literal `[` through `[[]`.
+the common selector engine, including the supported Python `fnmatch` bracket
+escape subset for literal `[`, `]`, `*`, and `?` filename characters.
+Remaining selector gaps include YAML selectors, state/result/source-status
+selectors, path normalization, richer `ls` output formats, and broader selector
+dialect choices.
 
 Current depth-limited plus selector source note:
 `.agent/research/m2-depth-limited-plus-selectors.md` maps dbt Core v1

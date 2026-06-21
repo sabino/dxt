@@ -37,6 +37,10 @@
 - Bracket character classes and negated character classes follow the supported
   Python `fnmatch` subset used by dbt Core v1, for example
   `file:ord[ea]rs.sql`, `file:ord[a-z]rs.sql`, and `file:ord[!x]rs.sql`.
+- Literal wildcard characters escaped through bracket expressions match dbt
+  Core v1 basename/stem behavior for the supported subset, for example
+  `file:literal[]]bracket`, `file:literal[[]bracket[]]`,
+  `file:question[?]mark`, and `file:star[*]mark`.
 - Path-bearing values such as `file:models/orders.sql` do not match, preserving
   the distinction between dbt's `file:` and `path:` methods.
 
@@ -47,14 +51,15 @@
 - No YAML selectors.
 - No state/result/source-status selectors.
 - No richer `ls` output formats.
-- No path normalization, patch-path matching, or bracket-character `fnmatch`
-  escaping beyond literal `[` through `[[]`.
+- No path normalization, patch-path matching, or broader selector dialect
+  changes.
 - No Python product runtime.
 
 ## Validation
 
-- Native selector tests cover basename, stem, wildcard, bracket class,
-  negated-class, range, literal `[`, and non-path matching.
+- Native selector tests cover basename, stem, multi-dot stems, wildcard,
+  bracket class, negated-class, range, literal `[`, literal `]`, literal `*`,
+  literal `?`, and non-path matching.
 - CLI coverage exercises `dxt ls --select file:...` for model SQL files, seed
   CSV files, generic-test schema YAML, source schema YAML, and exposure schema
   YAML, model `file:`/`path:` bracket-class selectors, plus `dxt docs generate`
