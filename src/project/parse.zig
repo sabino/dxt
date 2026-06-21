@@ -170,6 +170,10 @@ pub fn applyGenericTestConfigValue(allocator: std.mem.Allocator, test_def: *Gene
         test_def.config.error_if = try dupTrimmedScalar(allocator, value);
         return true;
     }
+    if (std.mem.eql(u8, key, "store_failures")) {
+        test_def.config.store_failures = try parseBool(value);
+        return true;
+    }
     return false;
 }
 
@@ -2316,13 +2320,15 @@ test "applyGenericTestConfigValue parses supported generic test config scalars" 
     try std.testing.expect(try applyGenericTestConfigValue(allocator, &test_def, "severity", "warn"));
     try std.testing.expect(try applyGenericTestConfigValue(allocator, &test_def, "warn_if", "\"> 0\""));
     try std.testing.expect(try applyGenericTestConfigValue(allocator, &test_def, "error_if", "\"> 10\""));
-    try std.testing.expect(!try applyGenericTestConfigValue(allocator, &test_def, "store_failures", "true"));
+    try std.testing.expect(try applyGenericTestConfigValue(allocator, &test_def, "store_failures", "true"));
+    try std.testing.expect(!try applyGenericTestConfigValue(allocator, &test_def, "store_failures_as", "table"));
 
     try std.testing.expectEqualStrings("customer_id > 0", test_def.config.where.?);
     try std.testing.expectEqual(@as(u64, 2), test_def.config.limit.?);
     try std.testing.expectEqualStrings("warn", test_def.config.severity);
     try std.testing.expectEqualStrings("> 0", test_def.config.warn_if);
     try std.testing.expectEqualStrings("> 10", test_def.config.error_if);
+    try std.testing.expectEqual(true, test_def.config.store_failures.?);
 }
 
 test "parseMacrosFromText extracts top-level macro blocks" {

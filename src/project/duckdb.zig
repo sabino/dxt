@@ -17,6 +17,7 @@ const DuckDbObjectKind = enum { table, view };
 pub const GenericTestExecutionResult = struct {
     compiled_code: []const u8,
     failures: u64,
+    relation_name: ?[]const u8 = null,
 };
 
 pub const FreshnessQueryResult = struct {
@@ -74,7 +75,8 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
     const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
     defer runtime.allocator.free(execution_sql);
     const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
-    return .{ .compiled_code = compiled_sql, .failures = failures };
+    const relation_name = try syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures);
+    return .{ .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
 }
 
 pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const SingularTestNode) !GenericTestExecutionResult {
@@ -83,7 +85,51 @@ pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const 
     const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
     defer runtime.allocator.free(execution_sql);
     const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
-    return .{ .compiled_code = compiled_sql, .failures = failures };
+    const relation_name = try syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures);
+    return .{ .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
+}
+
+fn syncTestFailureRelation(runtime: Runtime, db_path: []const u8, config: types.GenericTestConfig, alias: []const u8, compiled_sql: []const u8, failures: u64) !?[]const u8 {
+    if (config.store_failures == null or !config.store_failures.?) return null;
+
+    const relation_name = try testFailureRelationName(runtime.allocator, alias);
+    errdefer runtime.allocator.free(relation_name);
+
+    const sql = if (failures == 0)
+        try renderDropTestFailureRelationSql(runtime.allocator, relation_name)
+    else
+        try renderStoreTestFailuresSql(runtime.allocator, relation_name, compiled_sql);
+    defer runtime.allocator.free(sql);
+
+    try executeSql(runtime, db_path, sql);
+    if (failures == 0) {
+        runtime.allocator.free(relation_name);
+        return null;
+    }
+    return relation_name;
+}
+
+pub fn testFailureRelationName(allocator: std.mem.Allocator, alias: []const u8) ![]const u8 {
+    const schema = try compiler.quoteIdentifier(allocator, "dbt_test__audit");
+    defer allocator.free(schema);
+    const identifier = try compiler.quoteIdentifier(allocator, alias);
+    defer allocator.free(identifier);
+    return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ schema, identifier });
+}
+
+fn renderStoreTestFailuresSql(allocator: std.mem.Allocator, relation_name: []const u8, compiled_sql: []const u8) ![]const u8 {
+    const query_sql = trimTrailingSqlTerminator(compiled_sql);
+    const schema = try compiler.quoteIdentifier(allocator, "dbt_test__audit");
+    defer allocator.free(schema);
+    return try std.fmt.allocPrint(
+        allocator,
+        "create schema if not exists {s};\ncreate or replace table {s} as select * from (\n{s}\n) dbt_internal_test;\n",
+        .{ schema, relation_name, query_sql },
+    );
+}
+
+fn renderDropTestFailureRelationSql(allocator: std.mem.Allocator, relation_name: []const u8) ![]const u8 {
+    return try std.fmt.allocPrint(allocator, "drop table if exists {s};\n", .{relation_name});
 }
 
 pub fn querySourceFreshness(runtime: Runtime, db_path: []const u8, source: *const SourceDef) !FreshnessQueryResult {
@@ -767,6 +813,24 @@ test "quoteSqlString escapes embedded quotes" {
     defer arena.deinit();
     const rendered = try quoteSqlString(arena.allocator(), "a'b");
     try std.testing.expectEqualStrings("'a''b'", rendered);
+}
+
+test "store failures SQL targets deterministic audit relation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const relation_name = try testFailureRelationName(allocator, "not_null_customers_customer_id");
+    try std.testing.expectEqualStrings("\"dbt_test__audit\".\"not_null_customers_customer_id\"", relation_name);
+
+    const create_sql = try renderStoreTestFailuresSql(allocator, relation_name, "select * from customers where id is null;\n");
+    try std.testing.expectEqualStrings(
+        "create schema if not exists \"dbt_test__audit\";\ncreate or replace table \"dbt_test__audit\".\"not_null_customers_customer_id\" as select * from (\nselect * from customers where id is null\n) dbt_internal_test;\n",
+        create_sql,
+    );
+
+    const drop_sql = try renderDropTestFailureRelationSql(allocator, relation_name);
+    try std.testing.expectEqualStrings("drop table if exists \"dbt_test__audit\".\"not_null_customers_customer_id\";\n", drop_sql);
 }
 
 test "renderGenericTestSql renders not_null failure row query and wrapper" {
