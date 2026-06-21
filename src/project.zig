@@ -306,7 +306,7 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
                 continue;
             };
             if (source.loaded_at_field == null and source.loaded_at_query == null) {
-                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires loaded_at_field or loaded_at_query");
+                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, source_freshness.unsupported_metadata_freshness_message);
                 had_failure = true;
                 continue;
             }

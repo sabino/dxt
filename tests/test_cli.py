@@ -11216,7 +11216,7 @@ def test_source_freshness_loaded_at_query_owns_filtering(tmp_path: Path):
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source freshness runtime-error coverage")
-def test_source_freshness_writes_runtime_error_result_for_missing_loaded_at_field(tmp_path: Path):
+def test_source_freshness_reports_unsupported_duckdb_metadata_and_continues(tmp_path: Path):
     project = copy_fixture(tmp_path, "source_freshness")
     target = tmp_path / "freshness-target"
     target.mkdir()
@@ -11228,7 +11228,12 @@ def test_source_freshness_writes_runtime_error_result_for_missing_loaded_at_fiel
             "-batch",
             "-bail",
             "-c",
-            "create schema raw; create table raw.orders (order_id integer);",
+            (
+                "create schema raw; "
+                "create table raw.customers as select 1 as customer_id, current_timestamp - interval '2 hours' as loaded_at; "
+                "create table raw.orders (order_id integer); "
+                "create table raw.query_customers as select 1 as customer_id, current_timestamp - interval '2 hours' as loaded_at;"
+            ),
         ],
         cwd=ROOT,
         check=True,
@@ -11246,26 +11251,34 @@ def test_source_freshness_writes_runtime_error_result_for_missing_loaded_at_fiel
             "--target-path",
             str(target),
             "--select",
-            "source:raw.orders",
+            "source:raw.customers source:raw.orders source:raw.query_customers",
         ],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "Checked freshness for 1 source(s)" in result.stdout
+    assert "Checked freshness for 3 source(s)" in result.stdout
     assert "one or more source freshness checks failed" in result.stderr
 
     sources_path = target / "sources.json"
     assert_sources_schema_slice(sources_path)
     sources = json.loads(sources_path.read_text())
-    assert len(sources["results"]) == 1
-    result_row = sources["results"][0]
-    assert result_row == {
+    rows = {row["unique_id"]: row for row in sources["results"]}
+    assert sorted(rows) == [
+        "source.source_freshness.raw.customers",
+        "source.source_freshness.raw.orders",
+        "source.source_freshness.raw.query_customers",
+    ]
+    assert rows["source.source_freshness.raw.customers"]["status"] == "warn"
+    assert rows["source.source_freshness.raw.query_customers"]["status"] == "warn"
+    assert rows["source.source_freshness.raw.orders"] == {
         "unique_id": "source.source_freshness.raw.orders",
-        "error": "source freshness currently requires loaded_at_field or loaded_at_query",
+        "error": "source freshness requires loaded_at_field or loaded_at_query because the DuckDB adapter does not support metadata-based freshness",
         "status": "runtime error",
     }
+    assert "error" not in rows["source.source_freshness.raw.customers"]
+    assert "error" not in rows["source.source_freshness.raw.query_customers"]
     assert str(project) not in sources_path.read_text()
 
 

@@ -43,6 +43,8 @@ pub const SourceStatusIndex = struct {
     }
 };
 
+pub const unsupported_metadata_freshness_message = "source freshness requires loaded_at_field or loaded_at_query because the DuckDB adapter does not support metadata-based freshness";
+
 pub fn deinitResults(allocator: std.mem.Allocator, results: []const CheckResult) void {
     for (results) |result| {
         if (result.max_loaded_at) |value| allocator.free(value);
@@ -118,7 +120,9 @@ pub fn validateThreshold(threshold: FreshnessThreshold) !void {
 }
 
 pub fn unsupportedExecutionReason(source: *const SourceDef) ?[]const u8 {
-    _ = source;
+    if (source.freshness != null and source.loaded_at_field == null and source.loaded_at_query == null) {
+        return unsupported_metadata_freshness_message;
+    }
     return null;
 }
 
@@ -256,6 +260,38 @@ test "source freshness allows loaded_at_query to take precedence over inherited 
     };
 
     try std.testing.expect(unsupportedExecutionReason(&source) == null);
+}
+
+test "source freshness reports unsupported DuckDB metadata freshness reason" {
+    const source = SourceDef{
+        .package_name = "demo",
+        .unique_id = "source.demo.raw.orders",
+        .source_name = "raw",
+        .table_name = "orders",
+        .original_file_path = "models/schema.yml",
+        .freshness = .{
+            .warn_after = .{ .count = 1, .period = "hour" },
+            .error_after = .{ .count = 1, .period = "day" },
+        },
+    };
+
+    const reason = unsupportedExecutionReason(&source).?;
+    try std.testing.expectEqualStrings(unsupported_metadata_freshness_message, reason);
+
+    const rendered = try renderSources(std.testing.allocator, &.{.{
+        .source = &source,
+        .status = "runtime error",
+        .error_message = reason,
+    }});
+    defer std.testing.allocator.free(rendered);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("results").?.array.items[0].object;
+    try std.testing.expectEqualStrings("source.demo.raw.orders", result.get("unique_id").?.string);
+    try std.testing.expectEqualStrings("runtime error", result.get("status").?.string);
+    try std.testing.expectEqualStrings(unsupported_metadata_freshness_message, result.get("error").?.string);
+    try std.testing.expect(result.get("criteria") == null);
 }
 
 test "sources writer emits dbt v3 success shape" {
