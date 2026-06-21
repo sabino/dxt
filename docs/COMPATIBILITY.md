@@ -62,7 +62,7 @@ behavior, with DuckDB as the first deterministic execution adapter.
 | `var()` | Partial | Scalar CLI/project vars for selected dependency arguments; strict JSON object input is parsed through Zig `std.json` and scalar values are stringified for the current dependency-argument resolver, with loose inline YAML-style scalar maps still accepted. |
 | `doc()` | Partial | Literal doc references. |
 | `target`, `this` | Partial | Narrow compile context for selected fields. |
-| `{% set %}` / `{% for %}` / `{% if %}` | Partial | Static string-list assignments, simple loops, loop-var dependency recovery and relation rendering, and narrow static conditionals only. |
+| `{% set %}` / `{% for %}` / `{% if %}` | Partial | Static string-list assignments, simple loops, loop-var dependency recovery and relation rendering, and narrow static conditionals including `elif` plus `==` / `!=` over supported bool/string context values. |
 | `execute`, `run_query`, `statement`, adapter introspection | Partial/planned | Compile/run-style rendering treats `execute` as true for static `if`; database-backed Jinja behavior remains planned. |
 | Macro execution and dispatch | Partial | Static discovery/dependency extraction plus a narrow Jaffle-style adapter dispatch wrapper rendering subset. |
 

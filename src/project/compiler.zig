@@ -48,12 +48,24 @@ const ForBlock = struct {
 };
 
 const IfBlock = struct {
-    condition_value: bool,
-    body_start: usize,
-    body_end: usize,
-    else_body_start: ?usize = null,
-    else_body_end: ?usize = null,
+    selected_body_start: ?usize = null,
+    selected_body_end: usize = 0,
     end_tag_close: usize,
+};
+
+const StaticConditionValue = union(enum) {
+    boolean: bool,
+    string: []const u8,
+};
+
+const StaticComparisonOperator = enum {
+    equal,
+    not_equal,
+};
+
+const StaticComparison = struct {
+    operator: StaticComparisonOperator,
+    operator_start: usize,
 };
 
 const CompileContext = struct {
@@ -467,11 +479,9 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                 continue;
             }
             if (isIfStatement(span)) {
-                const block = try parseIfBlock(sql, close + 2, span);
-                if (block.condition_value) {
-                    try renderRange(context, sql, block.body_start, block.body_end, out);
-                } else if (block.else_body_start) |else_start| {
-                    try renderRange(context, sql, else_start, block.else_body_end.?, out);
+                const block = try parseIfBlock(context, sql, close + 2, span);
+                if (block.selected_body_start) |selected_start| {
+                    try renderRange(context, sql, selected_start, block.selected_body_end, out);
                 }
                 index = block.end_tag_close;
                 continue;
@@ -1145,29 +1155,190 @@ fn isElifStatement(span: []const u8) bool {
     return std.mem.startsWith(u8, span, "elif ") or std.mem.eql(u8, span, "elif");
 }
 
-fn parseIfBlock(sql: []const u8, body_start: usize, span: []const u8) !IfBlock {
-    const condition_value = try parseStaticIfCondition(span);
-    const endif = try findMatchingEndIf(sql, body_start);
-    return .{
-        .condition_value = condition_value,
-        .body_start = body_start,
-        .body_end = endif.body_end,
-        .else_body_start = endif.else_body_start,
-        .else_body_end = endif.else_body_end,
-        .end_tag_close = endif.end_tag_close,
-    };
+fn parseIfBlock(context: *CompileContext, sql: []const u8, body_start: usize, span: []const u8) !IfBlock {
+    var index = body_start;
+    var depth: usize = 1;
+    var branch_start = body_start;
+    var branch_active = try parseStaticIfCondition(context, span);
+    var selected_body_start: ?usize = null;
+    var selected_body_end: usize = 0;
+    var seen_else = false;
+
+    while (index + 1 < sql.len) {
+        if (sql[index] != '{') {
+            index += 1;
+            continue;
+        }
+        if (sql[index + 1] == '#') {
+            const close = std.mem.indexOfPos(u8, sql, index + 2, "#}") orelse return error.UnsupportedJinja;
+            index = close + 2;
+            continue;
+        }
+        if (sql[index + 1] != '%') {
+            index += 1;
+            continue;
+        }
+        const close = std.mem.indexOfPos(u8, sql, index + 2, "%}") orelse return error.UnsupportedJinja;
+        const tag_span = std.mem.trim(u8, sql[index + 2 .. close], " \t\r\n-");
+        if (isIfStatement(tag_span)) {
+            depth += 1;
+        } else if (isEndIfStatement(tag_span)) {
+            depth -= 1;
+            if (depth == 0) {
+                if (branch_active and selected_body_start == null) {
+                    selected_body_start = branch_start;
+                    selected_body_end = index;
+                }
+                return .{
+                    .selected_body_start = selected_body_start,
+                    .selected_body_end = selected_body_end,
+                    .end_tag_close = close + 2,
+                };
+            }
+        } else if (depth == 1 and isElifStatement(tag_span)) {
+            if (seen_else) return error.UnsupportedJinja;
+            if (branch_active and selected_body_start == null) {
+                selected_body_start = branch_start;
+                selected_body_end = index;
+            }
+            branch_start = close + 2;
+            branch_active = if (selected_body_start == null)
+                try parseStaticIfCondition(context, tag_span)
+            else
+                false;
+        } else if (depth == 1 and isElseStatement(tag_span)) {
+            if (seen_else) return error.UnsupportedJinja;
+            seen_else = true;
+            if (branch_active and selected_body_start == null) {
+                selected_body_start = branch_start;
+                selected_body_end = index;
+            }
+            branch_start = close + 2;
+            branch_active = selected_body_start == null;
+        }
+        index = close + 2;
+    }
+    return error.UnsupportedJinja;
 }
 
-fn parseStaticIfCondition(span: []const u8) !bool {
-    if (!isIfStatement(span)) return error.UnsupportedJinja;
-    const condition = std.mem.trim(u8, span["if".len..], " \t\r\n");
+fn parseStaticIfCondition(context: *CompileContext, span: []const u8) !bool {
+    const keyword_len: usize = if (isIfStatement(span))
+        "if".len
+    else if (isElifStatement(span))
+        "elif".len
+    else
+        return error.UnsupportedJinja;
+    const condition = std.mem.trim(u8, span[keyword_len..], " \t\r\n");
+    if (condition.len == 0) return error.UnsupportedJinja;
+
+    if (parseStaticBooleanCondition(condition)) |value| return value;
+
+    if (findStaticComparison(condition)) |comparison| {
+        const operator_len: usize = switch (comparison.operator) {
+            .equal, .not_equal => 2,
+        };
+        const lhs_span = std.mem.trim(u8, condition[0..comparison.operator_start], " \t\r\n");
+        const rhs_span = std.mem.trim(u8, condition[comparison.operator_start + operator_len ..], " \t\r\n");
+        if (lhs_span.len == 0 or rhs_span.len == 0) return error.UnsupportedJinja;
+
+        const lhs = try parseStaticConditionValue(context, lhs_span);
+        defer deinitStaticConditionValue(context.allocator, lhs);
+        const rhs = try parseStaticConditionValue(context, rhs_span);
+        defer deinitStaticConditionValue(context.allocator, rhs);
+
+        const equal = switch (lhs) {
+            .boolean => |lhs_bool| switch (rhs) {
+                .boolean => |rhs_bool| lhs_bool == rhs_bool,
+                .string => return error.UnsupportedJinja,
+            },
+            .string => |lhs_string| switch (rhs) {
+                .boolean => return error.UnsupportedJinja,
+                .string => |rhs_string| std.mem.eql(u8, lhs_string, rhs_string),
+            },
+        };
+        return switch (comparison.operator) {
+            .equal => equal,
+            .not_equal => !equal,
+        };
+    }
+
+    return error.UnsupportedJinja;
+}
+
+fn parseStaticBooleanCondition(condition: []const u8) ?bool {
+    if (std.mem.startsWith(u8, condition, "not ")) {
+        const operand = std.mem.trim(u8, condition["not".len..], " \t\r\n");
+        const value = parseStaticBooleanCondition(operand) orelse return null;
+        return !value;
+    }
     if (std.ascii.eqlIgnoreCase(condition, "true")) return true;
     if (std.ascii.eqlIgnoreCase(condition, "false")) return false;
     if (std.mem.eql(u8, condition, "execute")) return true;
-    if (std.mem.eql(u8, condition, "not execute")) return false;
     if (std.mem.eql(u8, condition, "is_incremental()")) return false;
-    if (std.mem.eql(u8, condition, "not is_incremental()")) return true;
+    return null;
+}
+
+fn parseStaticConditionValue(context: *CompileContext, expression: []const u8) !StaticConditionValue {
+    if (parseStaticBooleanCondition(expression)) |value| return .{ .boolean = value };
+    if (expression[0] == '"' or expression[0] == '\'') {
+        const parsed = try jinja.parseQuoted(context.allocator, expression, 0);
+        errdefer context.allocator.free(parsed.value);
+        if (std.mem.trim(u8, expression[parsed.next..], " \t\r\n").len != 0) return error.UnsupportedJinja;
+        return .{ .string = parsed.value };
+    }
+    if (context.getVar(expression)) |value| return .{ .string = try context.allocator.dupe(u8, value) };
+    if (std.mem.startsWith(u8, expression, "target.")) {
+        const attribute = std.mem.trim(u8, expression["target.".len..], " \t\r\n");
+        if (attribute.len == 0) return error.UnsupportedJinja;
+        return .{ .string = try renderTargetAttribute(context.allocator, context.graph, attribute) };
+    }
+    if (std.mem.startsWith(u8, expression, "this.")) {
+        const attribute = std.mem.trim(u8, expression["this.".len..], " \t\r\n");
+        if (attribute.len == 0) return error.UnsupportedJinja;
+        return .{ .string = try renderThisAttribute(context.allocator, context.graph, context.node, attribute) };
+    }
     return error.UnsupportedJinja;
+}
+
+fn deinitStaticConditionValue(allocator: std.mem.Allocator, value: StaticConditionValue) void {
+    switch (value) {
+        .boolean => {},
+        .string => |owned| allocator.free(owned),
+    }
+}
+
+fn findStaticComparison(condition: []const u8) ?StaticComparison {
+    var index: usize = 0;
+    var paren_depth: usize = 0;
+    var found: ?StaticComparison = null;
+    while (index < condition.len) : (index += 1) {
+        if (condition[index] == '"' or condition[index] == '\'') {
+            index = (jinja.skipQuotedSpan(condition, index) orelse return null) - 1;
+            continue;
+        }
+        if (condition[index] == '(') {
+            paren_depth += 1;
+            continue;
+        }
+        if (condition[index] == ')') {
+            if (paren_depth == 0) return null;
+            paren_depth -= 1;
+            continue;
+        }
+        if (paren_depth != 0 or index + 1 >= condition.len) continue;
+        const operator: ?StaticComparisonOperator = if (std.mem.eql(u8, condition[index .. index + 2], "=="))
+            .equal
+        else if (std.mem.eql(u8, condition[index .. index + 2], "!="))
+            .not_equal
+        else
+            null;
+        if (operator) |op| {
+            if (found != null) return null;
+            found = .{ .operator = op, .operator_start = index };
+            index += 1;
+        }
+    }
+    return found;
 }
 
 fn parseForBlock(sql: []const u8, body_start: usize, span: []const u8) !ForBlock {
@@ -1202,58 +1373,6 @@ fn parseForBlock(sql: []const u8, body_start: usize, span: []const u8) !ForBlock
     };
 }
 
-const EndIfTag = struct {
-    body_end: usize,
-    else_body_start: ?usize = null,
-    else_body_end: ?usize = null,
-    end_tag_close: usize,
-};
-
-fn findMatchingEndIf(sql: []const u8, start: usize) !EndIfTag {
-    var index = start;
-    var depth: usize = 1;
-    var else_start: ?usize = null;
-    var else_close: ?usize = null;
-    while (index + 1 < sql.len) {
-        if (sql[index] != '{') {
-            index += 1;
-            continue;
-        }
-        if (sql[index + 1] == '#') {
-            const close = std.mem.indexOfPos(u8, sql, index + 2, "#}") orelse return error.UnsupportedJinja;
-            index = close + 2;
-            continue;
-        }
-        if (sql[index + 1] != '%') {
-            index += 1;
-            continue;
-        }
-        const close = std.mem.indexOfPos(u8, sql, index + 2, "%}") orelse return error.UnsupportedJinja;
-        const span = std.mem.trim(u8, sql[index + 2 .. close], " \t\r\n-");
-        if (isIfStatement(span)) {
-            depth += 1;
-        } else if (isEndIfStatement(span)) {
-            depth -= 1;
-            if (depth == 0) {
-                return .{
-                    .body_end = else_start orelse index,
-                    .else_body_start = else_close,
-                    .else_body_end = if (else_start != null) index else null,
-                    .end_tag_close = close + 2,
-                };
-            }
-        } else if (depth == 1 and isElifStatement(span)) {
-            return error.UnsupportedJinja;
-        } else if (depth == 1 and isElseStatement(span)) {
-            if (else_start != null) return error.UnsupportedJinja;
-            else_start = index;
-            else_close = close + 2;
-        }
-        index = close + 2;
-    }
-    return error.UnsupportedJinja;
-}
-
 const EndForTag = struct {
     start: usize,
     close: usize,
@@ -1262,6 +1381,7 @@ const EndForTag = struct {
 fn findMatchingEndFor(sql: []const u8, start: usize) ?EndForTag {
     var index = start;
     var depth: usize = 1;
+    var if_depth: usize = 0;
     while (index + 1 < sql.len) {
         if (sql[index] != '{') {
             index += 1;
@@ -1278,7 +1398,14 @@ fn findMatchingEndFor(sql: []const u8, start: usize) ?EndForTag {
         }
         const close = std.mem.indexOfPos(u8, sql, index + 2, "%}") orelse return null;
         const span = std.mem.trim(u8, sql[index + 2 .. close], " \t\r\n-");
-        if (isForStatement(span)) {
+        if (isIfStatement(span)) {
+            if_depth += 1;
+        } else if (isEndIfStatement(span) and if_depth > 0) {
+            if_depth -= 1;
+        } else if (if_depth != 0) {
+            // Ignore loop-like tags inside nested if bodies while finding the
+            // current loop boundary.
+        } else if (isForStatement(span)) {
             depth += 1;
         } else if (isEndForStatement(span)) {
             depth -= 1;
@@ -2388,6 +2515,31 @@ test "compileModel renders static if branches for render-only context" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+    var graph = Graph{
+        .allocator = allocator,
+        .project_name = "demo",
+        .target_schema = "analytics",
+        .target_name = "dev",
+    };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select {% if false %}0{% else %}1{% endif %} as value, {% if execute %}'compile'{% else %}'parse'{% endif %} as mode, {% if not execute %}0{% else %}1{% endif %} as executes, {% if is_incremental() %}1{% else %}0{% endif %} as incremental, {% if false %}'wrong'{% elif target.name == 'dev' %}'dev'{% else %}'other'{% endif %} as target_name, {% if this.schema != 'analytics' %}'wrong'{% elif this.name == \"orders\" %}'orders'{% endif %} as this_name",
+    });
+
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select 1 as value, 'compile' as mode, 1 as executes, 0 as incremental, 'dev' as target_name, 'orders' as this_name", compiled);
+}
+
+test "compileModel renders static if comparisons against loop variables" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     var graph = Graph{ .allocator = allocator, .project_name = "demo" };
     defer graph.deinit();
     try graph.nodes.append(allocator, .{
@@ -2396,15 +2548,15 @@ test "compileModel renders static if branches for render-only context" {
         .name = "orders",
         .path = "orders.sql",
         .original_file_path = "models/orders.sql",
-        .raw_code = "select {% if false %}0{% else %}1{% endif %} as value, {% if execute %}'compile'{% else %}'parse'{% endif %} as mode, {% if not execute %}0{% else %}1{% endif %} as executes, {% if is_incremental() %}1{% else %}0{% endif %} as incremental",
+        .raw_code = "{% set methods = ['card', 'cash'] %}{% for method in methods %}{% if method == 'card' %}card{% elif method != 'cash' %}bad{% else %}cash{% endif %}:{% endfor %}",
     });
 
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
     defer allocator.free(compiled);
-    try std.testing.expectEqualStrings("select 1 as value, 'compile' as mode, 1 as executes, 0 as incremental", compiled);
+    try std.testing.expectEqualStrings("card:cash:", compiled);
 }
 
-test "compileModel rejects unsupported if conditions and elif branches" {
+test "compileModel rejects unsupported reached if conditions" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2424,7 +2576,7 @@ test "compileModel rejects unsupported if conditions and elif branches" {
         .name = "elif",
         .path = "elif.sql",
         .original_file_path = "models/elif.sql",
-        .raw_code = "{% if false %}select 1{% elif true %}select 2{% endif %}",
+        .raw_code = "{% if false %}select 1{% elif var('enabled') %}select 2{% endif %}",
     });
 
     try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
