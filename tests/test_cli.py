@@ -3057,6 +3057,57 @@ models:
     )
 
 
+def write_build_seed_failure_continuation_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "seeds").mkdir()
+    (project / "dbt_project.yml").write_text(
+        """name: build_seed_failure_continue
+version: "1.0"
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: target
+"""
+    )
+    (project / "seeds" / "aa_bad_seed.csv").write_text("customer_id,customer_name\nnot_an_int,Ada\n")
+    (project / "seeds" / "zz_independent_seed.csv").write_text("customer_id,customer_name\n42,Indy\n")
+    (project / "models" / "ab_bad_child.sql").write_text(
+        """{{ config(materialized='table') }}
+select try_cast(customer_id as integer) as customer_id, customer_name
+from {{ ref("aa_bad_seed") }}
+"""
+    )
+    (project / "seeds" / "schema.yml").write_text(
+        """version: 2
+seeds:
+  - name: aa_bad_seed
+    config:
+      column_types:
+        customer_id: integer
+"""
+    )
+    (project / "models" / "zz_independent.sql").write_text(
+        """{{ config(materialized='table') }}
+select try_cast(customer_id as integer) as customer_id, customer_name
+from {{ ref("zz_independent_seed") }}
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+models:
+  - name: ab_bad_child
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+  - name: zz_independent
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+"""
+    )
+
+
 def write_build_test_failure_downstream_project(project: Path) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -3682,6 +3733,86 @@ def test_build_continues_independent_model_after_data_test_failure(tmp_path: Pat
         capture_output=True,
     )
     assert blocked_orders.returncode != 0
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for build seed-failure continuation coverage")
+def test_build_continues_independent_seed_model_test_after_seed_failure(tmp_path: Path):
+    project = tmp_path / "build_seed_failure_continue"
+    write_build_seed_failure_continuation_project(project)
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [
+            DXT,
+            "build",
+            "--project-dir",
+            str(project),
+            "--target-path",
+            str(target),
+            "--select",
+            "aa_bad_seed+ zz_independent_seed+",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "Build failed after" in result.stdout
+    assert "one or more selected resources failed" in result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+
+    results_by_id = {item["unique_id"]: item for item in run_results["results"]}
+    assert results_by_id["seed.build_seed_failure_continue.aa_bad_seed"]["status"] == "error"
+    assert results_by_id["seed.build_seed_failure_continue.aa_bad_seed"]["message"] == "DuckDB execution failed"
+    assert results_by_id["model.build_seed_failure_continue.ab_bad_child"]["status"] == "skipped"
+    assert results_by_id["model.build_seed_failure_continue.ab_bad_child"]["message"] is None
+    assert results_by_id["seed.build_seed_failure_continue.zz_independent_seed"]["status"] == "success"
+    assert results_by_id["model.build_seed_failure_continue.zz_independent"]["status"] == "success"
+
+    skipped_test = next(
+        item
+        for item in run_results["results"]
+        if item["unique_id"].startswith("test.build_seed_failure_continue.not_null_ab_bad_child_customer_id.")
+    )
+    assert skipped_test["status"] == "skipped"
+    assert skipped_test["message"] is None
+    passed_test = next(
+        item
+        for item in run_results["results"]
+        if item["unique_id"].startswith("test.build_seed_failure_continue.not_null_zz_independent_customer_id.")
+    )
+    assert passed_test["status"] == "pass"
+    assert passed_test["failures"] == 0
+
+    failing_seed_index = next(
+        index
+        for index, item in enumerate(run_results["results"])
+        if item["unique_id"] == "seed.build_seed_failure_continue.aa_bad_seed"
+    )
+    independent_model_index = next(
+        index
+        for index, item in enumerate(run_results["results"])
+        if item["unique_id"] == "model.build_seed_failure_continue.zz_independent"
+    )
+    assert failing_seed_index < independent_model_index
+
+    independent = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select customer_id, customer_name from "main"."zz_independent"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert independent.returncode == 0, independent.stderr
+    assert independent.stdout.strip() == "42,Indy"
+
+    blocked_child = subprocess.run(
+        [DUCKDB, str(target / "dxt.duckdb"), "-batch", "-bail", "-c", 'select count(*) from "main"."ab_bad_child"'],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert blocked_child.returncode != 0
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")
@@ -5175,20 +5306,24 @@ def test_build_seed_execution_failure_skips_selected_model_and_generic_tests(tmp
     project = tmp_path / "build_seed_model_tests"
     write_seed_model_test_project(
         project,
-        "customer_id,customer_name\n1,Ada\n2,Bob\n",
+        "customer_id,customer_name\nnot_an_int,Ada\n2,Bob\n",
     )
-    seed_path = project / "seeds" / "raw_customers.csv"
-    seed_path.chmod(0)
+    (project / "seeds" / "schema.yml").write_text(
+        """version: 2
+seeds:
+  - name: raw_customers
+    config:
+      column_types:
+        customer_id: integer
+"""
+    )
     target = tmp_path / "build-target"
-    try:
-        result = subprocess.run(
-            [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "+customers"],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-        )
-    finally:
-        seed_path.chmod(0o644)
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "+customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
 
     assert result.returncode == 1
     assert "Build failed after 4 result(s)" in result.stdout
