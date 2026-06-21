@@ -40,6 +40,9 @@ compatibility.
   fields, and applies the same resolved identity to `source()` compilation,
   DuckDB source catalog lookup, source freshness SQL, and source generic-test
   SQL.
+- Root-project `dbt_project.yml` `sources:` configs now provide lower-precedence
+  defaults for supported source relation identity and freshness fields used by
+  `compile`, `docs generate`, `source freshness`, and supported source tests.
 - Singular SQL data-test YAML patches now parse top-level `tests:` /
   `data_tests:` entries for description, config tags, enabled, severity,
   thresholds, `where`, and `limit`; emit those Manifest fields without

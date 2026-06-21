@@ -15,6 +15,7 @@ const MacroProperty = types.MacroProperty;
 const MetaEntry = types.MetaEntry;
 const RefDep = types.RefDep;
 const SourceDep = types.SourceDep;
+const SourceProjectConfig = types.SourceProjectConfig;
 const SourceQuoting = types.SourceQuoting;
 const UnitTestFixture = types.UnitTestFixture;
 const UnitTestRow = types.UnitTestRow;
@@ -46,6 +47,7 @@ const UnitTestRowsTarget = enum { none, given, expect };
 const SourceDefaults = struct {
     database: ?[]const u8 = null,
     schema_name: ?[]const u8 = null,
+    identifier: ?[]const u8 = null,
     quoting: SourceQuoting = .{},
     loaded_at_field: ?[]const u8 = null,
     loaded_at_query: ?[]const u8 = null,
@@ -1110,6 +1112,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 active_values_index = null;
                 freshness_time_key = null;
                 source_defaults = .{};
+                try applyProjectSourceDefaults(allocator, graph, package_name, name, null, &source_defaults);
                 source_top_loaded_at_field = false;
                 source_top_loaded_at_query = false;
                 source_config_loaded_at_field = false;
@@ -1122,18 +1125,21 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 table_item_indent = indent;
                 const source_name = current_source orelse return error.UnsupportedYaml;
                 const unique_id = try std.fmt.allocPrint(allocator, "source.{s}.{s}.{s}", .{ package_name, source_name, name });
+                var table_defaults = source_defaults;
+                try applyProjectSourceDefaults(allocator, graph, package_name, source_name, name, &table_defaults);
                 try graph.sources.append(allocator, .{
                     .package_name = package_name,
                     .unique_id = unique_id,
                     .source_name = source_name,
                     .table_name = name,
-                    .database = source_defaults.database,
+                    .database = table_defaults.database,
                     .original_file_path = relative_path,
-                    .schema_name = source_defaults.schema_name,
-                    .quoting = source_defaults.quoting,
-                    .loaded_at_field = source_defaults.loaded_at_field,
-                    .loaded_at_query = source_defaults.loaded_at_query,
-                    .freshness = source_defaults.freshness,
+                    .schema_name = table_defaults.schema_name,
+                    .identifier = table_defaults.identifier,
+                    .quoting = table_defaults.quoting,
+                    .loaded_at_field = table_defaults.loaded_at_field,
+                    .loaded_at_query = table_defaults.loaded_at_query,
+                    .freshness = table_defaults.freshness,
                 });
                 current_table_index = graph.sources.items.len - 1;
                 in_columns = false;
@@ -1792,6 +1798,54 @@ fn applyPendingFreshnessTime(freshness_target: *?types.FreshnessThreshold, time_
         .error_after => freshness.error_after = time,
     }
     freshness_target.* = freshness;
+}
+
+fn applyProjectSourceDefaults(allocator: std.mem.Allocator, graph: *const Graph, package_name: []const u8, source_name: []const u8, table_name: ?[]const u8, defaults: *SourceDefaults) !void {
+    for (graph.source_project_configs.items) |config| {
+        if (!projectSourceConfigMatches(config, package_name, source_name, table_name)) continue;
+        if (config.database) |database| defaults.database = database;
+        if (config.schema_name) |schema_name| defaults.schema_name = try dupSourceSchemaScalar(allocator, graph, schema_name);
+        if (config.identifier) |identifier| defaults.identifier = identifier;
+        mergeSourceQuoting(&defaults.quoting, config.quoting);
+        if (config.loaded_at_field_set) {
+            defaults.loaded_at_field = config.loaded_at_field;
+            defaults.loaded_at_query = null;
+        }
+        if (config.loaded_at_query_set) {
+            defaults.loaded_at_query = config.loaded_at_query;
+        }
+        if (config.freshness_set) {
+            mergeProjectFreshness(&defaults.freshness, config.freshness);
+        }
+    }
+}
+
+fn projectSourceConfigMatches(config: SourceProjectConfig, package_name: []const u8, source_name: []const u8, table_name: ?[]const u8) bool {
+    if (!std.mem.eql(u8, config.package_name, package_name)) return false;
+    if (config.source_name) |configured_source| {
+        if (!std.mem.eql(u8, configured_source, source_name)) return false;
+    }
+    if (table_name == null) return config.table_name == null;
+    if (config.table_name) |configured_table| return std.mem.eql(u8, configured_table, table_name.?);
+    return false;
+}
+
+fn mergeSourceQuoting(target: *SourceQuoting, source: SourceQuoting) void {
+    if (source.database) |database| target.database = database;
+    if (source.schema) |schema| target.schema = schema;
+    if (source.identifier) |identifier| target.identifier = identifier;
+}
+
+fn mergeProjectFreshness(target: *?types.FreshnessThreshold, source: ?types.FreshnessThreshold) void {
+    const incoming = source orelse {
+        target.* = null;
+        return;
+    };
+    var merged = target.* orelse types.FreshnessThreshold{};
+    if (incoming.warn_after) |warn_after| merged.warn_after = warn_after;
+    if (incoming.error_after) |error_after| merged.error_after = error_after;
+    if (incoming.filter) |filter| merged.filter = filter;
+    target.* = merged;
 }
 
 fn dupSourceSchemaScalar(allocator: std.mem.Allocator, graph: *const Graph, value: []const u8) ![]const u8 {
@@ -3192,6 +3246,76 @@ test "parseSourcesFromText applies source config defaults and table overrides" {
     const disabled_freshness = graph.sources.items[3];
     try std.testing.expectEqualStrings("loaded_at", disabled_freshness.loaded_at_field.?);
     try std.testing.expect(disabled_freshness.freshness == null);
+}
+
+test "parseSourcesFromText applies project-level source configs before yaml overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+
+    try graph.source_project_configs.append(allocator, .{
+        .package_name = "demo",
+        .database = "raw_db",
+        .quoting = .{ .database = false, .schema = true },
+    });
+    try graph.source_project_configs.append(allocator, .{
+        .package_name = "demo",
+        .source_name = "raw",
+        .schema_name = "{{ target.schema }}_raw",
+        .loaded_at_field = "project_loaded_at",
+        .loaded_at_field_set = true,
+        .freshness = .{
+            .warn_after = .{ .count = 12, .period = "hour" },
+            .error_after = .{ .count = 1, .period = "day" },
+        },
+        .freshness_set = true,
+    });
+    try graph.source_project_configs.append(allocator, .{
+        .package_name = "demo",
+        .source_name = "raw",
+        .table_name = "orders",
+        .identifier = "raw_orders",
+        .loaded_at_query = "select max(loaded_at) from raw.raw_orders",
+        .loaded_at_query_set = true,
+        .freshness = .{ .warn_after = .{ .count = 3, .period = "hour" } },
+        .freshness_set = true,
+    });
+
+    const yaml =
+        \\version: 2
+        \\sources:
+        \\  - name: raw
+        \\    tables:
+        \\      - name: customers
+        \\      - name: orders
+        \\        loaded_at_field: yaml_loaded_at
+        \\        freshness:
+        \\          error_after:
+        \\            count: 2
+        \\            period: day
+    ;
+
+    try parseSourcesFromText(allocator, yaml, "models/schema.yml", "demo", &graph);
+
+    try std.testing.expectEqual(@as(usize, 2), graph.sources.items.len);
+    const customers = graph.sources.items[0];
+    try std.testing.expectEqualStrings("raw_db", customers.database.?);
+    try std.testing.expectEqualStrings("analytics_raw", customers.schema_name.?);
+    try std.testing.expectEqual(false, customers.quoting.database.?);
+    try std.testing.expectEqual(true, customers.quoting.schema.?);
+    try std.testing.expectEqualStrings("project_loaded_at", customers.loaded_at_field.?);
+    try std.testing.expectEqual(@as(u64, 12), customers.freshness.?.warn_after.?.count.?);
+    try std.testing.expectEqual(@as(u64, 1), customers.freshness.?.error_after.?.count.?);
+
+    const orders = graph.sources.items[1];
+    try std.testing.expectEqualStrings("raw_orders", orders.identifier.?);
+    try std.testing.expectEqualStrings("yaml_loaded_at", orders.loaded_at_field.?);
+    try std.testing.expect(orders.loaded_at_query == null);
+    try std.testing.expectEqual(@as(u64, 3), orders.freshness.?.warn_after.?.count.?);
+    try std.testing.expectEqual(@as(u64, 2), orders.freshness.?.error_after.?.count.?);
 }
 
 test "parseSourcesFromText rejects same-layer source loaded_at conflicts" {

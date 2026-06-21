@@ -7,7 +7,11 @@ const ProjectConfig = types.ProjectConfig;
 const ModelPathConfig = types.ModelPathConfig;
 const DispatchConfig = types.DispatchConfig;
 const DocsConfig = types.DocsConfig;
+const FreshnessThreshold = types.FreshnessThreshold;
+const FreshnessTime = types.FreshnessTime;
 const Graph = types.Graph;
+const SourceProjectConfig = types.SourceProjectConfig;
+const SourceQuoting = types.SourceQuoting;
 const VarEntry = types.VarEntry;
 const deinitProjectConfig = types.deinitProjectConfig;
 const KeyValue = util.KeyValue;
@@ -323,6 +327,7 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
     try parseProjectFlags(text, &config);
     try parseProjectDispatchConfigs(allocator, text, &config.dispatch_configs);
     try parseProjectModelPathConfigs(allocator, text, &config.model_path_configs);
+    try parseProjectSourceConfigs(allocator, text, &config.source_project_configs);
     try parseProjectSeedDocs(allocator, text, &config.seed_docs);
     if (config.model_paths.items.len == 0) {
         try config.model_paths.append(allocator, "models");
@@ -567,6 +572,9 @@ const PathStackEntry = struct {
     name: []const u8,
 };
 
+const FreshnessTimeKey = enum { warn_after, error_after };
+const ProjectSourceBlock = enum { none, freshness, quoting };
+
 fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, configs: *std.ArrayList(ModelPathConfig)) !void {
     var in_models = false;
     var in_package = false;
@@ -665,6 +673,214 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
             try path_stack.append(allocator, .{ .indent = indent, .name = try dupTrimmedScalar(allocator, kv.key) });
         }
     }
+}
+
+fn parseProjectSourceConfigs(allocator: std.mem.Allocator, text: []const u8, configs: *std.ArrayList(SourceProjectConfig)) !void {
+    var in_sources = false;
+    var sources_indent: usize = 0;
+    var path_stack: std.ArrayList(PathStackEntry) = .empty;
+    defer path_stack.deinit(allocator);
+
+    var block: ProjectSourceBlock = .none;
+    var block_indent: usize = 0;
+    var block_config_index: usize = 0;
+    var freshness_time_key: ?FreshnessTimeKey = null;
+    var freshness_time_indent: usize = 0;
+    var freshness_time_update = FreshnessTime{};
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const indent = leadingSpaces(line);
+
+        if (freshness_time_key != null and indent <= freshness_time_indent) {
+            try applyProjectFreshnessTime(&configs.items[block_config_index].freshness, freshness_time_key.?, freshness_time_update);
+            freshness_time_key = null;
+            freshness_time_update = .{};
+        }
+
+        if (std.mem.eql(u8, trimmed, "sources:")) {
+            in_sources = true;
+            sources_indent = indent;
+            path_stack.clearRetainingCapacity();
+            block = .none;
+            freshness_time_key = null;
+            continue;
+        }
+        if (!in_sources) continue;
+        if (indent <= sources_indent and !std.mem.eql(u8, trimmed, "sources:")) {
+            in_sources = false;
+            path_stack.clearRetainingCapacity();
+            block = .none;
+            freshness_time_key = null;
+            continue;
+        }
+
+        if (block != .none and indent <= block_indent) {
+            block = .none;
+            freshness_time_key = null;
+        }
+        while (path_stack.items.len != 0 and indent <= path_stack.items[path_stack.items.len - 1].indent) {
+            _ = path_stack.pop();
+        }
+
+        const kv = splitKeyValue(trimmed) orelse continue;
+
+        if (block == .quoting and indent > block_indent) {
+            try applyProjectSourceQuotingKeyValue(&configs.items[block_config_index].quoting, kv);
+            continue;
+        }
+
+        if (block == .freshness and indent > block_indent) {
+            if (std.mem.eql(u8, kv.key, "filter")) {
+                var freshness = configs.items[block_config_index].freshness orelse FreshnessThreshold{};
+                freshness.filter = try dupTrimmedScalar(allocator, kv.value);
+                configs.items[block_config_index].freshness = freshness;
+                configs.items[block_config_index].freshness_set = true;
+                continue;
+            }
+            if (std.mem.eql(u8, kv.key, "warn_after")) {
+                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                freshness_time_key = .warn_after;
+                freshness_time_indent = indent;
+                freshness_time_update = .{};
+                continue;
+            }
+            if (std.mem.eql(u8, kv.key, "error_after")) {
+                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                freshness_time_key = .error_after;
+                freshness_time_indent = indent;
+                freshness_time_update = .{};
+                continue;
+            }
+            if (freshness_time_key != null and indent > freshness_time_indent) {
+                try applyProjectFreshnessTimeKeyValue(allocator, &freshness_time_update, kv);
+                continue;
+            }
+        }
+
+        if (!std.mem.startsWith(u8, kv.key, "+")) {
+            if (std.mem.trim(u8, kv.value, " \t\r").len == 0) {
+                try path_stack.append(allocator, .{ .indent = indent, .name = try dupTrimmedScalar(allocator, kv.key) });
+            }
+            continue;
+        }
+
+        if (path_stack.items.len == 0 or path_stack.items.len > 3) continue;
+        const config_index = try getOrCreateSourceProjectConfigIndex(allocator, configs, path_stack.items);
+        const config = &configs.items[config_index];
+        const key = kv.key[1..];
+        if (std.mem.eql(u8, key, "database")) {
+            config.database = if (isProjectYamlNull(kv.value)) null else try dupTrimmedScalar(allocator, kv.value);
+        } else if (std.mem.eql(u8, key, "schema")) {
+            config.schema_name = if (isProjectYamlNull(kv.value)) null else try dupTrimmedScalar(allocator, kv.value);
+        } else if (std.mem.eql(u8, key, "identifier")) {
+            config.identifier = if (isProjectYamlNull(kv.value)) null else try dupTrimmedScalar(allocator, kv.value);
+        } else if (std.mem.eql(u8, key, "loaded_at_field")) {
+            if (config.loaded_at_query_set and !isProjectYamlNull(kv.value)) return error.UnsupportedYaml;
+            config.loaded_at_field_set = true;
+            config.loaded_at_field = if (isProjectYamlNull(kv.value)) null else try dupTrimmedScalar(allocator, kv.value);
+            config.loaded_at_query = null;
+        } else if (std.mem.eql(u8, key, "loaded_at_query")) {
+            if (config.loaded_at_field_set and !isProjectYamlNull(kv.value)) return error.UnsupportedYaml;
+            config.loaded_at_query_set = true;
+            config.loaded_at_query = if (isProjectYamlNull(kv.value)) null else try dupTrimmedScalar(allocator, kv.value);
+        } else if (std.mem.eql(u8, key, "quoting")) {
+            if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+            block = .quoting;
+            block_indent = indent;
+            block_config_index = config_index;
+        } else if (std.mem.eql(u8, key, "freshness")) {
+            config.freshness_set = true;
+            if (isProjectYamlNull(kv.value)) {
+                config.freshness = null;
+                block = .none;
+            } else {
+                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
+                if (config.freshness == null) config.freshness = .{};
+                block = .freshness;
+                block_indent = indent;
+                block_config_index = config_index;
+            }
+            freshness_time_key = null;
+        }
+    }
+
+    if (freshness_time_key != null) {
+        try applyProjectFreshnessTime(&configs.items[block_config_index].freshness, freshness_time_key.?, freshness_time_update);
+    }
+}
+
+fn getOrCreateSourceProjectConfigIndex(allocator: std.mem.Allocator, configs: *std.ArrayList(SourceProjectConfig), stack: []const PathStackEntry) !usize {
+    const package_name = stack[0].name;
+    const source_name: ?[]const u8 = if (stack.len >= 2) stack[1].name else null;
+    const table_name: ?[]const u8 = if (stack.len >= 3) stack[2].name else null;
+    for (configs.items, 0..) |*config, index| {
+        if (!std.mem.eql(u8, config.package_name, package_name)) continue;
+        if (!optionalStringEql(config.source_name, source_name)) continue;
+        if (!optionalStringEql(config.table_name, table_name)) continue;
+        return index;
+    }
+    try configs.append(allocator, .{
+        .package_name = package_name,
+        .source_name = source_name,
+        .table_name = table_name,
+    });
+    return configs.items.len - 1;
+}
+
+fn optionalStringEql(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left == null and right == null) return true;
+    if (left == null or right == null) return false;
+    return std.mem.eql(u8, left.?, right.?);
+}
+
+fn isProjectYamlNull(value: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    return std.mem.eql(u8, trimmed, "null") or std.mem.eql(u8, trimmed, "~");
+}
+
+fn parseBool(value: []const u8) !bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r");
+    if (std.ascii.eqlIgnoreCase(trimmed, "true")) return true;
+    if (std.ascii.eqlIgnoreCase(trimmed, "false")) return false;
+    return error.UnsupportedYaml;
+}
+
+fn applyProjectSourceQuotingKeyValue(quoting: *SourceQuoting, kv: KeyValue) !void {
+    if (std.mem.eql(u8, kv.key, "database")) {
+        quoting.database = try parseBool(kv.value);
+    } else if (std.mem.eql(u8, kv.key, "schema")) {
+        quoting.schema = try parseBool(kv.value);
+    } else if (std.mem.eql(u8, kv.key, "identifier")) {
+        quoting.identifier = try parseBool(kv.value);
+    } else {
+        return error.UnsupportedYaml;
+    }
+}
+
+fn applyProjectFreshnessTimeKeyValue(allocator: std.mem.Allocator, time: *FreshnessTime, kv: KeyValue) !void {
+    if (!std.mem.eql(u8, kv.key, "count") and !std.mem.eql(u8, kv.key, "period")) return;
+    if (std.mem.eql(u8, kv.key, "count")) {
+        const count_text = std.mem.trim(u8, kv.value, " \t\r");
+        time.count = try std.fmt.parseUnsigned(u64, count_text, 10);
+    } else {
+        const period = try dupTrimmedScalar(allocator, kv.value);
+        if (!std.mem.eql(u8, period, "minute") and !std.mem.eql(u8, period, "hour") and !std.mem.eql(u8, period, "day")) return error.UnsupportedYaml;
+        time.period = period;
+    }
+}
+
+fn applyProjectFreshnessTime(freshness_target: *?FreshnessThreshold, time_key: FreshnessTimeKey, time: FreshnessTime) !void {
+    if (time.count == null or time.period == null) return;
+    var freshness = freshness_target.* orelse FreshnessThreshold{};
+    switch (time_key) {
+        .warn_after => freshness.warn_after = time,
+        .error_after => freshness.error_after = time,
+    }
+    freshness_target.* = freshness;
 }
 
 fn parseProjectSeedDocs(allocator: std.mem.Allocator, text: []const u8, docs: *DocsConfig) !void {
@@ -885,6 +1101,65 @@ test "project config parser reads paths and nested docs configs" {
     try std.testing.expectEqualStrings("#336699", model_config.docs.node_color.?);
     try std.testing.expect(config.seed_docs.configured);
     try std.testing.expect(!config.seed_docs.show);
+}
+
+test "project config parser reads source project configs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const text =
+        \\name: demo
+        \\sources:
+        \\  demo:
+        \\    +database: raw_db
+        \\    +quoting:
+        \\      database: false
+        \\      schema: true
+        \\    raw:
+        \\      +schema: "{{ target.schema }}_raw"
+        \\      +loaded_at_field: loaded_at
+        \\      +freshness:
+        \\        warn_after:
+        \\          count: 12
+        \\          period: hour
+        \\      customers:
+        \\        +identifier: raw_customers
+        \\        +loaded_at_query: select max(loaded_at) from raw.raw_customers
+        \\        +freshness:
+        \\          error_after:
+        \\            count: 1
+        \\            period: day
+    ;
+
+    var config = try parseProjectConfigText(allocator, text);
+    defer deinitProjectConfig(allocator, &config);
+
+    try std.testing.expectEqual(@as(usize, 3), config.source_project_configs.items.len);
+    const package_config = config.source_project_configs.items[0];
+    try std.testing.expectEqualStrings("demo", package_config.package_name);
+    try std.testing.expect(package_config.source_name == null);
+    try std.testing.expect(package_config.table_name == null);
+    try std.testing.expectEqualStrings("raw_db", package_config.database.?);
+    try std.testing.expectEqual(false, package_config.quoting.database.?);
+    try std.testing.expectEqual(true, package_config.quoting.schema.?);
+
+    const source_config = config.source_project_configs.items[1];
+    try std.testing.expectEqualStrings("raw", source_config.source_name.?);
+    try std.testing.expect(source_config.table_name == null);
+    try std.testing.expectEqualStrings("{{ target.schema }}_raw", source_config.schema_name.?);
+    try std.testing.expect(source_config.loaded_at_field_set);
+    try std.testing.expectEqualStrings("loaded_at", source_config.loaded_at_field.?);
+    try std.testing.expectEqual(@as(u64, 12), source_config.freshness.?.warn_after.?.count.?);
+    try std.testing.expectEqualStrings("hour", source_config.freshness.?.warn_after.?.period.?);
+
+    const table_config = config.source_project_configs.items[2];
+    try std.testing.expectEqualStrings("customers", table_config.table_name.?);
+    try std.testing.expectEqualStrings("raw_customers", table_config.identifier.?);
+    try std.testing.expect(table_config.loaded_at_query_set);
+    try std.testing.expectEqualStrings("select max(loaded_at) from raw.raw_customers", table_config.loaded_at_query.?);
+    try std.testing.expectEqual(@as(u64, 1), table_config.freshness.?.error_after.?.count.?);
+    try std.testing.expectEqualStrings("day", table_config.freshness.?.error_after.?.period.?);
 }
 
 test "project config parser reads dispatch search order entries" {

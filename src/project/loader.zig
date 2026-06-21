@@ -10,6 +10,7 @@ const util = @import("util.zig");
 const Runtime = types.Runtime;
 const Options = types.Options;
 const DispatchConfig = types.DispatchConfig;
+const SourceProjectConfig = types.SourceProjectConfig;
 const Graph = types.Graph;
 const loadProjectConfig = project_config.loadProjectConfig;
 const deinitProjectConfig = types.deinitProjectConfig;
@@ -74,6 +75,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         graph.target_name = identity.target_name;
     }
     try appendDispatchConfigsToGraph(runtime.allocator, &graph, config.dispatch_configs.items);
+    try appendSourceProjectConfigsToGraph(runtime.allocator, &graph, config.source_project_configs.items);
     try graph.vars.appendSlice(runtime.allocator, config.vars.items);
     if (options.vars) |vars_text| {
         try parseVarsText(runtime.allocator, vars_text, &graph.vars);
@@ -201,6 +203,10 @@ fn appendDispatchConfigsToGraph(allocator: std.mem.Allocator, graph: *Graph, con
             .search_order = search_order,
         });
     }
+}
+
+fn appendSourceProjectConfigsToGraph(allocator: std.mem.Allocator, graph: *Graph, configs: []const SourceProjectConfig) !void {
+    try graph.source_project_configs.appendSlice(allocator, configs);
 }
 
 fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []const u8, macro_paths: []const []const u8, parse_properties: bool, callbacks: Callbacks, graph: *Graph) !void {

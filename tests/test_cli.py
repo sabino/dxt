@@ -546,6 +546,74 @@ from {{ source('raw', 'customers') }}
     )
 
 
+def write_project_level_source_config_project(project: Path) -> None:
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: project_level_source_config
+version: "1.0"
+model-paths: ["models"]
+target-path: target
+sources:
+  project_level_source_config:
+    +database: dxt
+    +quoting:
+      database: false
+      schema: true
+      identifier: false
+    raw:
+      +schema: Raw
+      +loaded_at_field: project_loaded_at
+      +freshness:
+        warn_after:
+          count: 1
+          period: hour
+        error_after:
+          count: 1
+          period: day
+      customers:
+        +identifier: RawCustomers
+      orders:
+        +identifier: RawOrders
+        +loaded_at_query: select max(project_loaded_at) from "Raw".RawOrders
+        +freshness:
+          warn_after:
+            count: 3
+            period: hour
+"""
+    )
+    (project / "models" / "schema.yml").write_text(
+        """version: 2
+
+sources:
+  - name: raw
+    tables:
+      - name: customers
+        columns:
+          - name: customer_id
+            tests:
+              - not_null
+      - name: orders
+        loaded_at_field: yaml_loaded_at
+        freshness:
+          error_after:
+            count: 2
+            period: day
+        columns:
+          - name: order_id
+            tests:
+              - not_null
+"""
+    )
+    (project / "models" / "stg_sources.sql").write_text(
+        """select customer_id as id, project_loaded_at as loaded_at
+from {{ source('raw', 'customers') }}
+union all
+select order_id as id, yaml_loaded_at as loaded_at
+from {{ source('raw', 'orders') }}
+"""
+    )
+
+
 def test_source_identifier_compiles_physical_relation_and_preserves_logical_source_key(tmp_path: Path):
     project = tmp_path / "source_identifier"
     write_source_identifier_project(project)
@@ -734,6 +802,98 @@ def test_source_database_and_quoting_drive_compile_catalog_freshness_and_tests(t
     assert test_result.returncode == 0, test_result.stderr
     run_results = json.loads((target / "run_results.json").read_text())
     source_tests = [row for row in run_results["results"] if row["unique_id"].startswith("test.source_relation_config.source_not_null_raw_customers_customer_id.")]
+    assert len(source_tests) == 1
+    assert "from dxt.\"Raw\".RawCustomers" in source_tests[0]["compiled_code"]
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for project-level source config execution coverage")
+def test_project_level_source_config_inherits_into_freshness_docs_and_tests(tmp_path: Path):
+    project = tmp_path / "project_level_source_config"
+    write_project_level_source_config_project(project)
+    target = tmp_path / "target"
+    target.mkdir()
+    db_path = target / "dxt.duckdb"
+    subprocess.run(
+        [
+            DUCKDB,
+            str(db_path),
+            "-batch",
+            "-bail",
+            "-c",
+            'create schema "Raw"; create table "Raw".RawCustomers as select 1 as customer_id, current_timestamp as project_loaded_at; create table "Raw".RawOrders as select 10 as order_id, current_timestamp as project_loaded_at, current_timestamp as yaml_loaded_at;',
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    compile_result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    compiled = (target / "compiled" / "project_level_source_config" / "models" / "stg_sources.sql").read_text()
+    assert "from dxt.\"Raw\".RawCustomers" in compiled
+    assert "from dxt.\"Raw\".RawOrders" in compiled
+
+    manifest_path = target / "manifest.json"
+    assert_manifest_schema_slice(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    customers = manifest["sources"]["source.project_level_source_config.raw.customers"]
+    assert customers["database"] == "dxt"
+    assert customers["schema"] == "Raw"
+    assert customers["identifier"] == "RawCustomers"
+    assert customers["loaded_at_field"] == "project_loaded_at"
+    assert customers["loaded_at_query"] is None
+    assert customers["freshness"]["warn_after"] == {"count": 1, "period": "hour"}
+    orders = manifest["sources"]["source.project_level_source_config.raw.orders"]
+    assert orders["identifier"] == "RawOrders"
+    assert orders["loaded_at_field"] == "yaml_loaded_at"
+    assert orders["loaded_at_query"] is None
+    assert orders["freshness"]["warn_after"] == {"count": 3, "period": "hour"}
+    assert orders["freshness"]["error_after"] == {"count": 2, "period": "day"}
+
+    docs_result = subprocess.run(
+        [DXT, "docs", "generate", "--project-dir", str(project), "--target-path", str(target), "--select", "source:raw"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert docs_result.returncode == 0, docs_result.stderr
+    catalog_path = target / "catalog.json"
+    assert_catalog_schema_slice(catalog_path)
+    catalog = json.loads(catalog_path.read_text())
+    assert catalog["sources"]["source.project_level_source_config.raw.customers"]["metadata"]["name"] == "RawCustomers"
+    assert catalog["sources"]["source.project_level_source_config.raw.orders"]["metadata"]["name"] == "RawOrders"
+
+    freshness_result = subprocess.run(
+        [DXT, "source", "freshness", "--project-dir", str(project), "--target-path", str(target), "--select", "source:raw"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert freshness_result.returncode == 0, freshness_result.stderr
+    assert_sources_schema_slice(target / "sources.json")
+    sources = json.loads((target / "sources.json").read_text())
+    assert [row["unique_id"] for row in sources["results"]] == [
+        "source.project_level_source_config.raw.customers",
+        "source.project_level_source_config.raw.orders",
+    ]
+    assert {row["status"] for row in sources["results"]} == {"pass"}
+
+    test_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "source_not_null_raw_customers_customer_id"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test_result.returncode == 0, test_result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    source_tests = [row for row in run_results["results"] if row["unique_id"].startswith("test.project_level_source_config.source_not_null_raw_customers_customer_id.")]
     assert len(source_tests) == 1
     assert "from dxt.\"Raw\".RawCustomers" in source_tests[0]["compiled_code"]
 
