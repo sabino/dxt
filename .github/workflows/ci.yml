@@ -118,7 +118,7 @@ jobs:
 
   public-fixtures:
     # Keep this context name stable for branch protection; the job now runs
-    # public Jaffle parse, DuckDB build/run, and docs-generate gates.
+    # public Jaffle parse, ls, compile, DuckDB build/run, and docs-generate gates.
     name: public jaffle parse gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -145,6 +145,12 @@ jobs:
 
       - name: Run public Jaffle parse gate
         run: python scripts/check_jaffle_shop_duckdb_parse.py --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
+
+      - name: Run public Jaffle ls gate
+        run: python scripts/check_jaffle_shop_duckdb_ls.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
+
+      - name: Run public Jaffle compile gate
+        run: python scripts/check_jaffle_shop_duckdb_compile.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
 
       - name: Install DuckDB CLI
         run: |
