@@ -877,6 +877,9 @@ rows when their blocked dependency is encountered. This does not add threaded
 queue parity, retries/fail-fast flags, unsupported resource execution, raw
 adapter errors in artifacts, snapshots, incremental models, hooks, grants,
 full materialization macro execution, or Python product runtime behavior.
+Issue #197 adds focused pytest coverage for a selected seed execution error
+that skips the blocked model/test branch while a later independent selected
+seed/model/test branch still writes success/pass run-result rows.
 
 Current DuckDB docs catalog source note:
 `.agent/research/m3-duckdb-docs-catalog.md` maps dbt Core v1 docs catalog
