@@ -405,7 +405,8 @@ fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, t
     const model_sql = try genericTestModelSql(allocator, relation_name, test_node.config.where);
     defer allocator.free(model_sql);
 
-    return try renderCustomGenericTestBody(allocator, macro.macro_sql, block.body.start, block.body.end, model_sql, column_name);
+    const sql = try renderCustomGenericTestBody(allocator, macro.macro_sql, block.body.start, block.body.end, model_sql, column_name);
+    return try applyGenericTestLimit(allocator, sql, test_node.config.limit);
 }
 
 fn genericTestModelSql(allocator: std.mem.Allocator, relation_name: []const u8, where_sql: ?[]const u8) ![]const u8 {

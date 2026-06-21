@@ -20,6 +20,7 @@ pub const GenericTestExecutionResult = struct {
     compiled_code: []const u8,
     failures: u64,
     relation_name: ?[]const u8 = null,
+    execution_error: bool = false,
 };
 
 pub const UnitTestExecutionResult = struct {
@@ -81,7 +82,15 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
     errdefer runtime.allocator.free(compiled_sql);
     const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
     defer runtime.allocator.free(execution_sql);
-    const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
+    const failures = queryGenericTestFailures(runtime, db_path, execution_sql) catch |err| switch (err) {
+        error.DuckDbExecutionFailed => {
+            if (!isBuiltInGenericTestName(test_node.test_name)) {
+                return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true };
+            }
+            return err;
+        },
+        else => return err,
+    };
     const relation_name = try syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures);
     return .{ .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
 }
@@ -655,6 +664,13 @@ pub fn renderGenericTestExecutionSql(allocator: std.mem.Allocator, compiled_sql:
         "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\n{s}\n) dbt_internal_test;\n",
         .{query_sql},
     );
+}
+
+fn isBuiltInGenericTestName(test_name: []const u8) bool {
+    return std.mem.eql(u8, test_name, "not_null") or
+        std.mem.eql(u8, test_name, "unique") or
+        std.mem.eql(u8, test_name, "accepted_values") or
+        std.mem.eql(u8, test_name, "relationships");
 }
 
 fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {

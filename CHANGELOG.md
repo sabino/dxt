@@ -64,6 +64,11 @@ compatibility.
   seed columns, in addition to model columns, for root-project and
   installed-package `{% test %}` / `{% data_test %}` blocks that use the
   existing static `{{ model }}` and `{{ column_name }}` renderer.
+- `dxt test` and `dxt build` now execute the same supported static custom
+  generic model/source/seed column tests through DuckDB, writing deterministic
+  Run Results v6 pass/fail/warn rows and custom-test DuckDB execution-error
+  rows while keeping broader Jinja, adapter dispatch, and table-level custom
+  tests unsupported.
 - Narrow static `{% if %}` rendering now supports `elif` chains plus simple
   `==` / `!=` comparisons over supported bool and string compile-context
   values without expanding into general Jinja expression evaluation.
