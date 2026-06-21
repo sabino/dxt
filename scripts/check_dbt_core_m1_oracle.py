@@ -333,6 +333,8 @@ def compare_node(
 ) -> None:
     label = f"{fixture} {unique_id}"
     assert_equal(f"{label} resource_type", dxt_node.get("resource_type"), dbt_node.get("resource_type"))
+    for key in ["database", "schema", "alias", "fqn", "checksum"]:
+        assert_equal(f"{label} {key}", dxt_node.get(key), dbt_node.get(key))
     assert_equal(f"{label} depends_on.nodes", sorted(depends_on_nodes(dxt_node)), sorted(depends_on_nodes(dbt_node)))
     assert_equal(
         f"{label} depends_on.macros",

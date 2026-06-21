@@ -136,7 +136,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, node.unique_id);
         try writer.writeAll(": ");
-        try writeNode(allocator, writer, node);
+        try writeNode(allocator, writer, graph, node);
     }
     for (graph.tests.items) |test_node| {
         if (node_index != 0) try writer.writeAll(",");
@@ -144,7 +144,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, test_node.unique_id);
         try writer.writeAll(": ");
-        try writeGenericTestNode(allocator, writer, test_node);
+        try writeGenericTestNode(allocator, writer, graph, test_node);
     }
     for (graph.singular_tests.items) |test_node| {
         if (!test_node.enabled) continue;
@@ -153,7 +153,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, test_node.unique_id);
         try writer.writeAll(": ");
-        try writeSingularTestNode(allocator, writer, test_node);
+        try writeSingularTestNode(allocator, writer, graph, test_node);
     }
     try writer.writeAll("\n  },\n  \"sources\": {");
     for (graph.sources.items, 0..) |source, index| {
@@ -221,7 +221,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, node.unique_id);
         try writer.writeAll(": [");
-        try writeNode(allocator, writer, node);
+        try writeNode(allocator, writer, graph, node);
         try writer.writeAll("]");
     }
     for (graph.singular_tests.items) |test_node| {
@@ -231,7 +231,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, test_node.unique_id);
         try writer.writeAll(": [");
-        try writeSingularTestNode(allocator, writer, test_node);
+        try writeSingularTestNode(allocator, writer, graph, test_node);
         try writer.writeAll("]");
     }
     try writer.writeAll("\n  },\n  \"parent_map\": {");
@@ -375,12 +375,121 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
     try writer.writeAll("]");
 }
 
-fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
+fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, node: Node) !void {
     if (std.mem.eql(u8, node.resource_type, "seed")) {
-        try writeSeedNode(allocator, writer, node);
+        try writeSeedNode(allocator, writer, graph, node);
     } else {
-        try writeModelNode(allocator, writer, node);
+        try writeModelNode(allocator, writer, graph, node);
     }
+}
+
+fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, node: *const Node) !void {
+    const schema_name = try compiler.relationSchemaForNode(allocator, graph, node);
+    defer allocator.free(schema_name);
+    const alias = compiler.relationIdentifierForNode(node);
+
+    try writer.writeAll(",\"database\":");
+    try writeNullableString(writer, databaseNameForGraph(graph));
+    try writer.writeAll(",\"schema\":");
+    try json.string(writer, schema_name);
+    try writer.writeAll(",\"alias\":");
+    try json.string(writer, alias);
+    try writer.writeAll(",\"fqn\":");
+    try writeFqnFromPath(writer, node.package_name, node.path, node.name);
+    try writer.writeAll(",\"checksum\":");
+    try writeSha256Checksum(writer, node.raw_code);
+}
+
+fn writeTestNodeIdentityFields(
+    allocator: std.mem.Allocator,
+    writer: *Io.Writer,
+    graph: *const Graph,
+    package_name: []const u8,
+    path: []const u8,
+    name: []const u8,
+    raw_code: ?[]const u8,
+) !void {
+    const schema_name = try std.fmt.allocPrint(allocator, "{s}_dbt_test__audit", .{graph.target_schema});
+    defer allocator.free(schema_name);
+
+    try writer.writeAll(",\"database\":");
+    try writeNullableString(writer, databaseNameForGraph(graph));
+    try writer.writeAll(",\"schema\":");
+    try json.string(writer, schema_name);
+    try writer.writeAll(",\"fqn\":");
+    try writeFqnFromPath(writer, package_name, path, name);
+    try writer.writeAll(",\"checksum\":");
+    if (raw_code) |code| {
+        try writeSha256Checksum(writer, code);
+    } else {
+        try writeNoneChecksum(writer);
+    }
+}
+
+fn databaseNameForGraph(graph: *const Graph) ?[]const u8 {
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return null;
+    const configured_path = graph.database_path orelse return "memory";
+    const trimmed = std.mem.trim(u8, configured_path, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, ":memory:")) return "memory";
+    const basename = std.fs.path.basename(trimmed);
+    if (basename.len == 0) return "memory";
+    if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot| {
+        if (dot != 0) return basename[0..dot];
+    }
+    return basename;
+}
+
+fn writeFqnFromPath(writer: *Io.Writer, package_name: []const u8, path: []const u8, fallback_name: []const u8) !void {
+    try writer.writeAll("[");
+    try json.string(writer, package_name);
+
+    const normalized_path = util.normalizeForDisplay(path);
+    const stem_path = stemFromPath(normalized_path);
+    var wrote_path_part = false;
+    var parts = std.mem.splitScalar(u8, stem_path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0) continue;
+        try writer.writeAll(",");
+        try json.string(writer, part);
+        wrote_path_part = true;
+    }
+
+    if (!wrote_path_part) {
+        try writer.writeAll(",");
+        try json.string(writer, fallback_name);
+    }
+    try writer.writeAll("]");
+}
+
+fn stemFromPath(path: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| {
+        const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse 0;
+        if (dot != 0 and dot > slash) return path[0..dot];
+    }
+    return path;
+}
+
+fn writeSha256Checksum(writer: *Io.Writer, raw_code: []const u8) !void {
+    const checksum_input = trimTrailingNewlines(raw_code);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(checksum_input, &digest, .{});
+    var hex: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    try writer.writeAll("{\"name\":\"sha256\",\"checksum\":");
+    try json.string(writer, hex[0..]);
+    try writer.writeAll("}");
+}
+
+fn writeNoneChecksum(writer: *Io.Writer) !void {
+    try writer.writeAll("{\"name\":\"none\",\"checksum\":\"\"}");
+}
+
+fn trimTrailingNewlines(value: []const u8) []const u8 {
+    var end = value.len;
+    while (end != 0 and (value[end - 1] == '\n' or value[end - 1] == '\r')) {
+        end -= 1;
+    }
+    return value[0..end];
 }
 
 fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: MacroDef) !void {
@@ -621,7 +730,7 @@ fn writeUnitTestRows(writer: *Io.Writer, fixture: types.UnitTestFixture) !void {
     try writer.writeAll("]");
 }
 
-fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
+fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, node: Node) !void {
     try writer.writeAll("{\"unique_id\":");
     try json.string(writer, node.unique_id);
     try writer.writeAll(",\"resource_type\":");
@@ -630,6 +739,7 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) 
     try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
+    try writeNodeIdentityFields(allocator, writer, graph, &node);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -700,13 +810,14 @@ fn writeExtraCtes(writer: *Io.Writer, extra_ctes: []const types.ExtraCte) !void 
     try writer.writeAll("]");
 }
 
-fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !void {
+fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, node: Node) !void {
     try writer.writeAll("{\"unique_id\":");
     try json.string(writer, node.unique_id);
     try writer.writeAll(",\"resource_type\":\"seed\",\"package_name\":");
     try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
+    try writeNodeIdentityFields(allocator, writer, graph, &node);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -769,7 +880,7 @@ fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
     try writer.writeAll("}");
 }
 
-fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_node: GenericTestNode) !void {
+fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, test_node: GenericTestNode) !void {
     const argument_column_name = genericTestNodeColumnName(&test_node);
     try writer.writeAll("{\"unique_id\":");
     try json.string(writer, test_node.unique_id);
@@ -779,6 +890,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     try json.string(writer, test_node.name);
     try writer.writeAll(",\"alias\":");
     try json.string(writer, test_node.alias);
+    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, null);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -871,7 +983,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     try writer.writeAll("}");
 }
 
-fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_node: SingularTestNode) !void {
+fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, test_node: SingularTestNode) !void {
     try writer.writeAll("{\"unique_id\":");
     try json.string(writer, test_node.unique_id);
     try writer.writeAll(",\"resource_type\":\"test\",\"package_name\":");
@@ -880,6 +992,7 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_
     try json.string(writer, test_node.name);
     try writer.writeAll(",\"alias\":");
     try json.string(writer, test_node.alias);
+    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, test_node.raw_code);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -1252,6 +1365,108 @@ test "manifest writer emits model extra_ctes and injection flag" {
     try std.testing.expectEqual(@as(usize, 1), extra_ctes.len);
     try std.testing.expectEqualStrings("model.demo.ephemeral_orders", extra_ctes[0].object.get("id").?.string);
     try std.testing.expectEqualStrings("__dbt__cte__ephemeral_orders as (\nselect 1 as order_id\n)", extra_ctes[0].object.get("sql").?.string);
+}
+
+test "manifest writer emits node identity fields and deterministic checksums" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{
+        .allocator = allocator,
+        .project_name = "demo",
+        .target_schema = "analytics",
+        .database_path = "warehouse.duckdb",
+    };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "marts/orders.sql",
+        .original_file_path = "models/marts/orders.sql",
+        .raw_code = "select * from {{ ref('customers') }}\n",
+        .config_schema = "mart",
+        .config_alias = "order_facts",
+    });
+    try graph.nodes.append(allocator, .{
+        .resource_type = "analysis",
+        .package_name = "demo",
+        .unique_id = "analysis.demo.customer_report",
+        .name = "customer_report",
+        .path = "analysis/customer_report.sql",
+        .original_file_path = "analyses/customer_report.sql",
+        .raw_code = "select 1\n",
+        .materialized = "analysis",
+    });
+    try graph.nodes.append(allocator, .{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.raw_customers",
+        .name = "raw_customers",
+        .path = "raw_customers.csv",
+        .original_file_path = "seeds/raw_customers.csv",
+        .raw_code = "id,name\n1,Ada\n",
+        .materialized = "seed",
+    });
+    try graph.tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_orders_order_id.abc",
+        .name = "not_null_orders_order_id",
+        .alias = "not_null_orders_order_id",
+        .path = "not_null_orders_order_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "order_id",
+        .attached_node = "model.demo.orders",
+    });
+    try graph.singular_tests.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "test.demo.assert_orders",
+        .name = "assert_orders",
+        .alias = "assert_orders",
+        .path = "assert_orders.sql",
+        .original_file_path = "tests/assert_orders.sql",
+        .raw_code = "select * from {{ ref('orders') }} where order_id is null\n",
+    });
+
+    const rendered = try renderManifest(std.testing.allocator, &graph);
+    defer std.testing.allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+
+    const nodes = parsed.value.object.get("nodes").?.object;
+    const model = nodes.get("model.demo.orders").?.object;
+    try std.testing.expectEqualStrings("warehouse", model.get("database").?.string);
+    try std.testing.expectEqualStrings("analytics_mart", model.get("schema").?.string);
+    try std.testing.expectEqualStrings("order_facts", model.get("alias").?.string);
+    try std.testing.expectEqualStrings("demo", model.get("fqn").?.array.items[0].string);
+    try std.testing.expectEqualStrings("marts", model.get("fqn").?.array.items[1].string);
+    try std.testing.expectEqualStrings("orders", model.get("fqn").?.array.items[2].string);
+    try std.testing.expectEqualStrings("sha256", model.get("checksum").?.object.get("name").?.string);
+    try std.testing.expectEqualStrings("85302a290e52a84ebe6d9b408ba8819fbc322fa5dc12e18b05b36e84c61964e1", model.get("checksum").?.object.get("checksum").?.string);
+
+    const analysis = nodes.get("analysis.demo.customer_report").?.object;
+    try std.testing.expectEqualStrings("analytics", analysis.get("schema").?.string);
+    try std.testing.expectEqualStrings("customer_report", analysis.get("alias").?.string);
+    try std.testing.expectEqualStrings("analysis", analysis.get("fqn").?.array.items[1].string);
+    try std.testing.expectEqualStrings("customer_report", analysis.get("fqn").?.array.items[2].string);
+
+    const seed = nodes.get("seed.demo.raw_customers").?.object;
+    try std.testing.expectEqualStrings("raw_customers", seed.get("alias").?.string);
+    try std.testing.expectEqualStrings("55c71c9b41468b359a456098ac08d1c1680c00793c36fe8d0bab95ff678e6921", seed.get("checksum").?.object.get("checksum").?.string);
+
+    const generic_test = nodes.get("test.demo.not_null_orders_order_id.abc").?.object;
+    try std.testing.expectEqualStrings("analytics_dbt_test__audit", generic_test.get("schema").?.string);
+    try std.testing.expectEqualStrings("none", generic_test.get("checksum").?.object.get("name").?.string);
+    try std.testing.expectEqualStrings("", generic_test.get("checksum").?.object.get("checksum").?.string);
+
+    const singular_test = nodes.get("test.demo.assert_orders").?.object;
+    try std.testing.expectEqualStrings("analytics_dbt_test__audit", singular_test.get("schema").?.string);
+    try std.testing.expectEqualStrings("assert_orders", singular_test.get("fqn").?.array.items[1].string);
+    try std.testing.expectEqualStrings("8bdadb531b4ad2aadfba0bb1503616889457b490daec830109910b2994536962", singular_test.get("checksum").?.object.get("checksum").?.string);
 }
 
 test "manifest writer emits source generic tests with null attached node" {

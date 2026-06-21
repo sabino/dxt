@@ -2710,6 +2710,9 @@ fn parseSingularTest(runtime: Runtime, project_dir: []const u8, test_root: []con
 }
 
 fn parseSeed(runtime: Runtime, project_root: []const u8, seed_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    const full_path = try pathJoin(runtime.allocator, &.{ project_root, relative_path });
+    defer runtime.allocator.free(full_path);
+    const raw_csv = try std.Io.Dir.cwd().readFileAlloc(runtime.io, full_path, runtime.allocator, .limited(16 * 1024 * 1024));
     const seed_name = try resourceNameFromPath(runtime.allocator, relative_path, ".csv");
     const unique_id = try std.fmt.allocPrint(runtime.allocator, "seed.{s}.{s}", .{ package_name, seed_name });
     const seed_path = relativeUnderResourcePath(relative_path, seed_root);
@@ -2722,7 +2725,7 @@ fn parseSeed(runtime: Runtime, project_root: []const u8, seed_root: []const u8, 
         .project_root = try runtime.allocator.dupe(u8, project_root),
         .path = seed_path,
         .original_file_path = relative_path,
-        .raw_code = "",
+        .raw_code = raw_csv,
         .materialized = "seed",
     };
     errdefer {
