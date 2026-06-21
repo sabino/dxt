@@ -1929,6 +1929,44 @@ def test_seed_command_executes_selected_duckdb_seed_and_writes_run_results(tmp_p
     assert query.stdout.strip() == "1,Ada"
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for seed quote_columns and column_types coverage")
+def test_seed_command_honors_seed_quote_columns_and_column_types(tmp_path: Path):
+    project = tmp_path / "seed_config_tests"
+    write_seed_config_project(project)
+    target = tmp_path / "seed-target"
+    result = subprocess.run(
+        [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "raw_customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["nodes"]["seed.seed_config_tests.raw_customers"]["config"]["quote_columns"] is True
+    assert manifest["nodes"]["seed.seed_config_tests.raw_customers"]["config"]["column_types"]["amount"] == "decimal(10,2)"
+
+    query = subprocess.run(
+        [
+            DUCKDB,
+            str(target / "dxt.duckdb"),
+            "-json",
+            "-c",
+            "select column_name, data_type from information_schema.columns where table_schema = 'main' and table_name = 'raw_customers' order by ordinal_position",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert json.loads(query.stdout) == [
+        {"column_name": "Order ID", "data_type": "INTEGER"},
+        {"column_name": "customer name", "data_type": "VARCHAR"},
+        {"column_name": "amount", "data_type": "DECIMAL(10,2)"},
+    ]
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed command execution slice")
 def test_seed_command_filters_mixed_selection_to_seed_resources(tmp_path: Path):
     project = copy_fixture(tmp_path, "seed_ref")
@@ -2137,6 +2175,36 @@ def test_seed_command_executes_package_seed_selected_by_dependency_selector(tmp_
     assert [item["unique_id"] for item in run_results["results"]] == ["seed.util_pkg.raw_pkg_customers"]
 
 
+def test_parse_preserves_root_and_package_seed_quote_columns_and_column_types(tmp_path: Path):
+    project = tmp_path / "seed_config_tests"
+    write_seed_config_project(project)
+    target = tmp_path / "parse-target"
+    result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+    manifest = json.loads((target / "manifest.json").read_text())
+
+    root_config = manifest["nodes"]["seed.seed_config_tests.raw_customers"]["config"]
+    assert root_config["quote_columns"] is True
+    assert root_config["column_types"] == {
+        "Order ID": "integer",
+        "amount": "decimal(10,2)",
+        "customer name": "varchar",
+    }
+
+    package_config = manifest["nodes"]["seed.util_pkg.raw_pkg_orders"]["config"]
+    assert package_config["quote_columns"] is False
+    assert package_config["column_types"] == {
+        "amount": "decimal(10,2)",
+        "order_id": "integer",
+    }
+
+
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed build execution slice")
 def test_build_executes_selected_duckdb_seed_and_writes_run_results(tmp_path: Path):
     project = copy_fixture(tmp_path, "seed_ref")
@@ -2205,6 +2273,48 @@ def test_build_executes_selected_package_duckdb_seed_and_writes_run_results(tmp_
     )
     assert query.returncode == 0, query.stderr
     assert query.stdout.strip() == "1,Ada"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for build seed quote_columns and column_types coverage")
+def test_build_honors_package_seed_quote_columns_false_and_column_types(tmp_path: Path):
+    project = tmp_path / "seed_config_tests"
+    write_seed_config_project(project)
+    write_duckdb_profile(project)
+    target = tmp_path / "build-target"
+    result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "package:util_pkg,resource_type:seed"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+    assert_run_results_schema_slice(target / "run_results.json")
+    manifest = json.loads((target / "manifest.json").read_text())
+    package_config = manifest["nodes"]["seed.util_pkg.raw_pkg_orders"]["config"]
+    assert package_config["quote_columns"] is False
+    assert package_config["column_types"] == {
+        "amount": "decimal(10,2)",
+        "order_id": "integer",
+    }
+
+    query = subprocess.run(
+        [
+            DUCKDB,
+            str(target / "dxt.duckdb"),
+            "-json",
+            "-c",
+            "select column_name, data_type from information_schema.columns where table_schema = 'main' and table_name = 'raw_pkg_orders' order by ordinal_position",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert query.returncode == 0, query.stderr
+    assert json.loads(query.stdout) == [
+        {"column_name": "order_id", "data_type": "INTEGER"},
+        {"column_name": "amount", "data_type": "DECIMAL(10,2)"},
+    ]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed build execution slice")
@@ -2348,6 +2458,50 @@ seeds:
       - name: customer_id
         tests:
 {tests}"""
+    )
+
+
+def write_seed_config_project(project: Path) -> None:
+    (project / "seeds").mkdir(parents=True)
+    (project / "dbt_packages" / "util_pkg" / "seeds").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        """name: seed_config_tests
+version: "1.0"
+profile: default
+seed-paths: ["seeds"]
+target-path: target
+"""
+    )
+    (project / "seeds" / "raw_customers.csv").write_text("Order ID,customer name,amount\n1,Ada,10.50\n")
+    (project / "seeds" / "schema.yml").write_text(
+        """version: 2
+seeds:
+  - name: raw_customers
+    config:
+      quote_columns: true
+      column_types:
+        Order ID: integer
+        amount: decimal(10,2)
+        customer name: varchar
+"""
+    )
+    (project / "dbt_packages" / "util_pkg" / "dbt_project.yml").write_text(
+        """name: util_pkg
+version: "1.0"
+seed-paths: ["seeds"]
+"""
+    )
+    (project / "dbt_packages" / "util_pkg" / "seeds" / "raw_pkg_orders.csv").write_text("Order ID,amount\n1,10.50\n")
+    (project / "dbt_packages" / "util_pkg" / "seeds" / "schema.yml").write_text(
+        """version: 2
+seeds:
+  - name: raw_pkg_orders
+    config:
+      quote_columns: false
+      column_types:
+        amount: decimal(10,2)
+        order_id: integer
+"""
     )
 
 

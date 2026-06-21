@@ -731,11 +731,26 @@ fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, node: Node) !
     try json.stringArray(writer, node.tags.items);
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
+    try writer.writeAll(",\"quote_columns\":");
+    try writeNullableBool(writer, node.quote_columns);
+    try writer.writeAll(",\"column_types\":");
+    try writeSeedColumnTypes(writer, node.seed_column_types.items);
     try writer.writeAll("},\"docs\":");
     try writeDocsConfig(writer, node.docs);
     try writer.writeAll(",\"depends_on\":{\"macros\":[],\"nodes\":");
     try json.stringArray(writer, node.depends_on.items);
     try writer.writeAll("}}");
+}
+
+fn writeSeedColumnTypes(writer: *Io.Writer, column_types: []const types.SeedColumnType) !void {
+    try writer.writeAll("{");
+    for (column_types, 0..) |column_type, index| {
+        if (index != 0) try writer.writeAll(",");
+        try json.string(writer, column_type.name);
+        try writer.writeAll(":");
+        try json.string(writer, column_type.data_type);
+    }
+    try writer.writeAll("}");
 }
 
 fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
