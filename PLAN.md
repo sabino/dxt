@@ -944,6 +944,16 @@ implement `state:`, `result:`, `source_status:fresher`, manifest comparison,
 deferral, source freshness execution changes, metadata freshness, or
 non-DuckDB adapter behavior.
 
+Current result selector source note:
+Issue #198 adds the first read-only Run Results v6 state input for selectors.
+When a resolved selector expression contains `result:error`, `result:fail`,
+`result:success`, or `result:skipped`, commands that reuse the shared Zig
+selector engine can read `--state/run_results.json`, validate the dbt Run
+Results v6 schema URL, index result `unique_id` / `status` rows, and match
+graph resources plus expansions such as `result:error+`. This slice does not
+implement broader `result:` statuses, `state:`, manifest comparison, deferral,
+retry selection, partial-parse cache behavior, or run-result writing changes.
+
 Current DuckDB test command source note:
 `.agent/research/m3-duckdb-test-command.md` maps dbt Core v1 `TestTask`,
 `TestRunner`, build/test runner reuse, and selector test-type behavior plus

@@ -6308,6 +6308,44 @@ def write_sources_state(state_dir: Path, rows: dict[str, str]) -> Path:
     return path
 
 
+def write_run_results_state(state_dir: Path, rows: dict[str, str]) -> Path:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    artifact = {
+        "metadata": {
+            "dbt_schema_version": "https://schemas.getdbt.com/dbt/run-results/v6.json",
+            "dbt_version": "0.0.0",
+            "generated_at": "1970-01-01T00:00:00Z",
+            "invocation_id": None,
+            "invocation_started_at": None,
+            "env": {},
+        },
+        "results": [
+            {
+                "status": status,
+                "timing": [
+                    {"name": "compile", "started_at": None, "completed_at": None},
+                    {"name": "execute", "started_at": None, "completed_at": None},
+                ],
+                "thread_id": "Thread-1",
+                "execution_time": 0.0,
+                "adapter_response": {},
+                "message": None,
+                "failures": 1 if status == "fail" else None,
+                "unique_id": unique_id,
+                "compiled": None,
+                "compiled_code": None,
+                "relation_name": None,
+            }
+            for unique_id, status in rows.items()
+        ],
+        "elapsed_time": 0.0,
+    }
+    path = state_dir / "run_results.json"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    assert_run_results_schema_slice(path)
+    return path
+
+
 def test_manifest_schema_validator_rejects_missing_required_key(tmp_path: Path):
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps({"metadata": {}}), encoding="utf-8")
@@ -8584,6 +8622,281 @@ def test_source_status_selector_reports_missing_malformed_and_version_mismatch(t
     )
     assert version.returncode == 2
     assert "dbt Sources v3 schema" in version.stderr
+
+
+def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_path: Path):
+    project = copy_fixture(tmp_path, "selector_graph")
+    (project / "models" / "schema.yml").write_text(
+        "\n".join(
+            [
+                "version: 2",
+                "models:",
+                "  - name: customers",
+                "    columns:",
+                "      - name: customer_id",
+                "        tests:",
+                "          - not_null",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    tests_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert tests_result.returncode == 0, tests_result.stderr
+    test_id = json.loads(tests_result.stdout)[0]["unique_id"]
+
+    state_dir = tmp_path / "state"
+    write_run_results_state(
+        state_dir,
+        {
+            "model.selector_graph.stg_customers": "success",
+            "model.selector_graph.customers": "error",
+            "model.selector_graph.orders": "skipped",
+            test_id: "fail",
+        },
+    )
+
+    def selected_ids(status: str) -> list[str]:
+        result = subprocess.run(
+            [
+                DXT,
+                "ls",
+                "--project-dir",
+                str(project),
+                "--state",
+                str(state_dir),
+                "--select",
+                f"result:{status}",
+                "--output",
+                "json",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return [item["unique_id"] for item in json.loads(result.stdout)]
+
+    assert selected_ids("success") == ["model.selector_graph.stg_customers"]
+    assert selected_ids("error") == ["model.selector_graph.customers"]
+    assert selected_ids("skipped") == ["model.selector_graph.orders"]
+    assert selected_ids("fail") == [test_id]
+
+    expanded = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(state_dir),
+            "--select",
+            "result:error+",
+            "--output",
+            "json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert expanded.returncode == 0, expanded.stderr
+    assert [item["unique_id"] for item in json.loads(expanded.stdout)] == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+        test_id,
+    ]
+
+
+def test_result_selector_reports_missing_malformed_and_version_mismatch(tmp_path: Path):
+    project = copy_fixture(tmp_path, "selector_graph")
+
+    missing = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(tmp_path / "missing-state"),
+            "--select",
+            "result:error",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert missing.returncode == 2
+    assert "directory containing run_results.json" in missing.stderr
+
+    no_state = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "result:error"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert no_state.returncode == 2
+    assert "result selectors require --state" in no_state.stderr
+
+    malformed_state = tmp_path / "malformed"
+    malformed_state.mkdir()
+    (malformed_state / "run_results.json").write_text("{\"metadata\":{},\"results\":[]}", encoding="utf-8")
+    malformed = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(malformed_state),
+            "--select",
+            "result:error",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert malformed.returncode == 2
+    assert "run_results.json is malformed" in malformed.stderr
+
+    version_state = tmp_path / "version"
+    version_state.mkdir()
+    (version_state / "run_results.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/run-results/v5.json"},
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    version = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(version_state),
+            "--select",
+            "result:error",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert version.returncode == 2
+    assert "dbt Run Results v6 schema" in version.stderr
+
+
+def test_dbt_core_result_selector_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if not has_dbt_core:
+        pytest.skip("dbt Core is not installed for the optional result selector oracle")
+    if not has_dbt_duckdb:
+        pytest.skip("dbt DuckDB adapter is not installed for the optional result selector oracle")
+
+    from dbt.cli.main import dbtRunner
+
+    project = copy_fixture(tmp_path, "selector_graph")
+    (project / "profiles.yml").write_text(
+        "\n".join(
+            [
+                "default:",
+                "  target: dev",
+                "  outputs:",
+                "    dev:",
+                "      type: duckdb",
+                "      path: oracle.duckdb",
+                "      schema: main",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "state"
+    parse_result = dbtRunner().invoke(
+        [
+            "parse",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--target-path",
+            str(state_dir),
+        ]
+    )
+    capsys.readouterr()
+    if not parse_result.success:
+        pytest.skip(f"dbt Core result selector oracle parse unavailable: {parse_result.exception!r}")
+
+    write_run_results_state(
+        state_dir,
+        {
+            "model.selector_graph.customers": "error",
+            "model.selector_graph.orders": "skipped",
+            "model.selector_graph.stg_customers": "success",
+        },
+    )
+
+    dxt_result = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(state_dir),
+            "--select",
+            "result:error+",
+            "--output",
+            "json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert dxt_result.returncode == 0, dxt_result.stderr
+    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+
+    dbt_result = dbtRunner().invoke(
+        [
+            "ls",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--target-path",
+            str(tmp_path / "dbt-target"),
+            "--state",
+            str(state_dir),
+            "--select",
+            "result:error+",
+            "--output",
+            "json",
+        ]
+    )
+    dbt_stdout = capsys.readouterr().out
+    dbt_ids = sorted(
+        json.loads(line)["unique_id"]
+        for line in dbt_stdout.splitlines()
+        if line.strip().startswith("{")
+    )
+    if not dbt_result.success and not dbt_ids:
+        pytest.skip(f"dbt Core result selector oracle unavailable: {dbt_result.exception!r}")
+
+    assert dxt_ids == dbt_ids
 
 
 def test_dbt_core_source_status_selector_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
