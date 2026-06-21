@@ -15,6 +15,7 @@ const manifest = @import("project/manifest.zig");
 const run_results = @import("project/run_results.zig");
 const selector = @import("project/selector.zig");
 const source_freshness = @import("project/source_freshness.zig");
+const state_artifacts = @import("project/state.zig");
 const types = @import("project/types.zig");
 const util = @import("project/util.zig");
 
@@ -830,10 +831,12 @@ fn resolveSelection(runtime: Runtime, options: Options) !selector_config.Resolve
 const SelectionState = struct {
     source_status_index: ?source_freshness.SourceStatusIndex = null,
     result_status_index: ?run_results.ResultStatusIndex = null,
+    prior_manifest_index: ?state_artifacts.PriorManifestIndex = null,
 
     fn deinit(self: *SelectionState, allocator: std.mem.Allocator) void {
         if (self.source_status_index) |*index| index.deinit(allocator);
         if (self.result_status_index) |*index| index.deinit(allocator);
+        if (self.prior_manifest_index) |*index| index.deinit(allocator);
         self.* = .{};
     }
 
@@ -841,6 +844,7 @@ const SelectionState = struct {
         var ctx: selector.SelectionContext = .{};
         if (self.source_status_index) |*index| ctx.source_status_index = index;
         if (self.result_status_index) |*index| ctx.result_status_index = index;
+        if (self.prior_manifest_index) |*index| ctx.prior_manifest_index = index;
         return ctx;
     }
 };
@@ -848,15 +852,18 @@ const SelectionState = struct {
 fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_config.ResolvedSelection) !SelectionState {
     const needs_source_status = selector.usesSourceStatusSelector(selection.select, selection.exclude);
     const needs_result = selector.usesResultSelector(selection.select, selection.exclude);
-    if (!needs_source_status and !needs_result) return .{};
+    const needs_state = selector.usesStateSelector(selection.select, selection.exclude);
+    if (!needs_source_status and !needs_result and !needs_state) return .{};
 
     const state_dir = options.state orelse {
+        if (needs_state) return error.MissingStateManifestState;
         if (needs_result) return error.MissingResultState;
         return error.MissingSourceStatusState;
     };
 
     var state: SelectionState = .{};
     errdefer state.deinit(runtime.allocator);
+    if (needs_state) state.prior_manifest_index = try state_artifacts.loadPriorManifestIndex(runtime, state_dir);
     if (needs_source_status) state.source_status_index = try source_freshness.loadSourceStatusIndex(runtime, state_dir);
     if (needs_result) state.result_status_index = try run_results.loadResultStatusIndex(runtime, state_dir);
     return state;

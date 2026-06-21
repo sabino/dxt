@@ -460,10 +460,11 @@ support root-project `selectors.yml` entries whose `definition` is a scalar
 string or a narrow composition of supported selector leaves through `union`,
 `intersection`, and `exclude`, then lower `--selector <name>` to the existing
 Zig selector and exclude expressions for commands sharing the selector engine.
-They do not implement method: selector references, default selectors,
-indirect-selection overrides, package/config YAML method broadening,
-state/result/source-status matching, state artifact loading, or deferral
-semantics.
+They also support artifact-backed `result:*`, `source_status:*`, and first-slice
+`state:new` matching through the common Zig selector engine. They do not
+implement method: selector references, default selectors, indirect-selection
+overrides, package/config YAML method broadening, broader state comparison, or
+deferral semantics.
 
 Current `ls` output formats source note:
 `.agent/research/m2-ls-output-formats.md` maps dbt Core v1 `ListTask` output

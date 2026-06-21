@@ -1,6 +1,7 @@
 const std = @import("std");
 const run_results = @import("run_results.zig");
 const source_freshness = @import("source_freshness.zig");
+const state = @import("state.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 
@@ -15,6 +16,7 @@ const UnitTestDef = types.UnitTestDef;
 pub const SelectionContext = struct {
     source_status_index: ?*const source_freshness.SourceStatusIndex = null,
     result_status_index: ?*const run_results.ResultStatusIndex = null,
+    prior_manifest_index: ?*const state.PriorManifestIndex = null,
 };
 
 pub const SelectedResource = struct {
@@ -83,6 +85,16 @@ pub fn usesResultSelector(select: ?[]const u8, exclude: ?[]const u8) bool {
     return false;
 }
 
+pub fn usesStateSelector(select: ?[]const u8, exclude: ?[]const u8) bool {
+    if (select) |value| {
+        if (selectorValueUsesState(value)) return true;
+    }
+    if (exclude) |value| {
+        if (selectorValueUsesState(value)) return true;
+    }
+    return false;
+}
+
 fn selectorValueUsesSourceStatus(value: []const u8) bool {
     var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
     while (expressions.next()) |expression| {
@@ -102,6 +114,18 @@ fn selectorValueUsesResult(value: []const u8) bool {
         while (terms.next()) |raw_term| {
             const term = parseSelectorTerm(raw_term);
             if (term.valid and std.mem.startsWith(u8, term.value, "result:")) return true;
+        }
+    }
+    return false;
+}
+
+fn selectorValueUsesState(value: []const u8) bool {
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (expressions.next()) |expression| {
+        var terms = std.mem.splitScalar(u8, expression, ',');
+        while (terms.next()) |raw_term| {
+            const term = parseSelectorTerm(raw_term);
+            if (term.valid and std.mem.startsWith(u8, term.value, "state:")) return true;
         }
     }
     return false;
@@ -180,6 +204,7 @@ fn validateSelectorMethod(part: []const u8) !void {
         "config.materialized:",
         "source_status:",
         "result:",
+        "state:",
     };
     for (prefixes) |prefix| {
         if (std.mem.startsWith(u8, part, prefix)) {
@@ -189,6 +214,7 @@ fn validateSelectorMethod(part: []const u8) !void {
             if (std.mem.eql(u8, prefix, "test_type:") and !isSupportedTestType(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "source_status:") and !isSupportedSourceStatusSelector(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "result:") and !run_results.isSupportedResultSelectorStatus(value)) return error.UnsupportedSelector;
+            if (std.mem.eql(u8, prefix, "state:") and !isSupportedStateSelector(value)) return error.UnsupportedSelector;
             return;
         }
     }
@@ -213,11 +239,22 @@ fn isSupportedSourceStatusSelector(value: []const u8) bool {
     return std.mem.eql(u8, value, "pass") or std.mem.eql(u8, value, "warn") or std.mem.eql(u8, value, "error");
 }
 
+fn isSupportedStateSelector(value: []const u8) bool {
+    return std.mem.eql(u8, value, "new");
+}
+
 fn matchesResultSelector(unique_id: []const u8, value: []const u8, context: SelectionContext) bool {
     const requested = value["result:".len..];
     const index = context.result_status_index orelse return false;
     const status = index.statusFor(unique_id) orelse return false;
     return std.mem.eql(u8, requested, status);
+}
+
+fn matchesStateSelector(unique_id: []const u8, value: []const u8, context: SelectionContext) bool {
+    const requested = value["state:".len..];
+    if (!std.mem.eql(u8, requested, "new")) return false;
+    const index = context.prior_manifest_index orelse return false;
+    return !index.contains(unique_id);
 }
 
 pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8) ![]SelectedResource {
@@ -415,6 +452,7 @@ fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value
 }
 
 fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(node.unique_id, value, context);
     if (matchesSelectorPattern(value, node.name) or std.mem.eql(u8, value, node.unique_id) or matchesNodeFqnPattern(value, node)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
@@ -479,6 +517,7 @@ fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const Generi
 }
 
 fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(test_node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(test_node.unique_id, value, context);
     if (matchesSelectorPattern(value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id) or matchesGenericTestFqnPattern(value, test_node)) return true;
     if (matchesAttachedNodeNameOrFqnSelector(graph, test_node, value)) return true;
@@ -532,6 +571,7 @@ fn matchesSingularTestSelectorIntersection(graph: *const Graph, test_node: *cons
 }
 
 fn matchesSingularTestSelectorTerm(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(test_node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(test_node.unique_id, value, context);
     if (matchesSelectorPattern(value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id) or matchesSingularTestFqnPattern(value, test_node)) return true;
     if (std.mem.startsWith(u8, value, "tag:")) {
@@ -622,6 +662,7 @@ fn matchesSourceSelectorIntersection(graph: *const Graph, source: *const SourceD
 }
 
 fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(source.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(source.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
@@ -691,6 +732,7 @@ fn matchesExposureSelectorIntersection(graph: *const Graph, exposure: *const Exp
 }
 
 fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(exposure.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(exposure.unique_id, value, context);
     if (matchesSelectorPattern(value, exposure.name) or matchesUniqueIdFqnPattern(value, exposure.unique_id)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
@@ -752,6 +794,7 @@ fn matchesUnitTestSelectorIntersection(graph: *const Graph, unit_test: *const Un
 }
 
 fn matchesUnitTestSelectorTerm(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(unit_test.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(unit_test.unique_id, value, context);
     if (matchesSelectorPattern(value, unit_test.name) or
         std.mem.eql(u8, value, unit_test.unique_id) or
@@ -1434,6 +1477,67 @@ test "result selectors match run_results state and graph expansions" {
     try std.testing.expect(usesResultSelector("result:error+", null));
     try std.testing.expect(usesResultSelector(null, "result:skipped"));
     try std.testing.expect(!usesResultSelector("source_status:warn", null));
+}
+
+test "state new selectors match prior manifest membership and graph expansions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.stg_customers",
+        .name = "stg_customers",
+        .path = "stg_customers.sql",
+        .original_file_path = "models/stg_customers.sql",
+        .raw_code = "",
+    });
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.customers",
+        .name = "customers",
+        .path = "customers.sql",
+        .original_file_path = "models/customers.sql",
+        .raw_code = "",
+    });
+    try graph.nodes.items[1].depends_on.append(allocator, "model.demo.stg_customers");
+    try graph.nodes.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "",
+    });
+    try graph.nodes.items[2].depends_on.append(allocator, "model.demo.customers");
+
+    var prior_unique_ids = [_][]const u8{
+        "model.demo.stg_customers",
+    };
+    const prior_manifest = state.PriorManifestIndex{ .unique_ids = &prior_unique_ids };
+    const context = SelectionContext{ .prior_manifest_index = &prior_manifest };
+
+    const new_resources = try selectResourcesWithContext(allocator, &graph, null, "state:new", null, context);
+    try std.testing.expectEqual(@as(usize, 2), new_resources.len);
+    try std.testing.expectEqualStrings("model.demo.customers", new_resources[0].unique_id);
+    try std.testing.expectEqualStrings("model.demo.orders", new_resources[1].unique_id);
+
+    const new_with_parents = try selectResourcesWithContext(allocator, &graph, null, "+state:new", null, context);
+    try std.testing.expectEqual(@as(usize, 3), new_with_parents.len);
+    try std.testing.expectEqualStrings("model.demo.customers", new_with_parents[0].unique_id);
+    try std.testing.expectEqualStrings("model.demo.orders", new_with_parents[1].unique_id);
+    try std.testing.expectEqualStrings("model.demo.stg_customers", new_with_parents[2].unique_id);
+
+    const new_with_children = try selectResourcesWithContext(allocator, &graph, null, "state:new+", "orders", context);
+    try std.testing.expectEqual(@as(usize, 1), new_with_children.len);
+    try std.testing.expectEqualStrings("model.demo.customers", new_with_children[0].unique_id);
+
+    try std.testing.expect(usesStateSelector("state:new+", null));
+    try std.testing.expect(usesStateSelector(null, "+state:new"));
+    try std.testing.expect(!usesStateSelector("result:error", null));
 }
 
 test "singular test selectors match type path file and graph expansion" {

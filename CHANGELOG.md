@@ -31,6 +31,10 @@ compatibility.
 - Root-project `selectors.yml` scalar string aliases for selector-backed
   commands through `--selector <name>`, lowering supported alias definitions to
   the existing Zig selector engine.
+- `state:new` selectors now read prior Manifest v12 `manifest.json` resource
+  IDs from `--state`, select current supported resources absent from that prior
+  manifest, and compose through existing graph expansion and `--exclude`
+  behavior.
 - Supported built-in DuckDB generic tests now parse and emit `where`, `limit`,
   `severity`, `warn_if`, and `error_if` configs for model, seed, and source
   tests, apply `where`/`limit` to failure-row SQL, and classify warning results

@@ -6621,6 +6621,43 @@ def write_run_results_state(state_dir: Path, rows: dict[str, str]) -> Path:
     return path
 
 
+def write_manifest_state(state_dir: Path, unique_ids: list[str]) -> Path:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    artifact = {
+        "metadata": {
+            "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+            "dbt_version": "0.0.0",
+            "generated_at": "1970-01-01T00:00:00Z",
+            "invocation_id": None,
+            "invocation_started_at": None,
+            "env": {},
+        },
+        "nodes": {
+            unique_id: {"unique_id": unique_id}
+            for unique_id in unique_ids
+            if unique_id.startswith(("model.", "analysis.", "seed.", "test."))
+        },
+        "sources": {
+            unique_id: {"unique_id": unique_id}
+            for unique_id in unique_ids
+            if unique_id.startswith("source.")
+        },
+        "exposures": {
+            unique_id: {"unique_id": unique_id}
+            for unique_id in unique_ids
+            if unique_id.startswith("exposure.")
+        },
+        "unit_tests": {
+            unique_id: {"unique_id": unique_id}
+            for unique_id in unique_ids
+            if unique_id.startswith("unit_test.")
+        },
+    }
+    path = state_dir / "manifest.json"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    return path
+
+
 def test_manifest_schema_validator_rejects_missing_required_key(tmp_path: Path):
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps({"metadata": {}}), encoding="utf-8")
@@ -9169,6 +9206,162 @@ def test_result_selector_reports_missing_malformed_and_version_mismatch(tmp_path
     assert "dbt Run Results v6 schema" in version.stderr
 
 
+def test_ls_state_new_selects_resources_from_prior_manifest_state(tmp_path: Path):
+    project = copy_fixture(tmp_path, "selector_graph")
+    state_dir = tmp_path / "state"
+    write_manifest_state(
+        state_dir,
+        [
+            "model.selector_graph.stg_customers",
+            "model.selector_graph.orders",
+        ],
+    )
+
+    def selected_ids(selector: str) -> list[str]:
+        result = subprocess.run(
+            [
+                DXT,
+                "ls",
+                "--project-dir",
+                str(project),
+                "--state",
+                str(state_dir),
+                "--select",
+                selector,
+                "--output",
+                "json",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return [item["unique_id"] for item in json.loads(result.stdout)]
+
+    assert selected_ids("state:new") == ["model.selector_graph.customers"]
+    assert selected_ids("state:new+") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.orders",
+    ]
+    assert selected_ids("+state:new") == [
+        "model.selector_graph.customers",
+        "model.selector_graph.stg_customers",
+    ]
+
+    excluded = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(state_dir),
+            "--select",
+            "+state:new",
+            "--exclude",
+            "stg_customers",
+            "--output",
+            "json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert excluded.returncode == 0, excluded.stderr
+    assert [item["unique_id"] for item in json.loads(excluded.stdout)] == [
+        "model.selector_graph.customers"
+    ]
+
+
+def test_state_new_selector_reports_missing_malformed_and_version_mismatch(tmp_path: Path):
+    project = copy_fixture(tmp_path, "selector_graph")
+
+    missing = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(tmp_path / "missing-state"),
+            "--select",
+            "state:new",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert missing.returncode == 2
+    assert "directory containing manifest.json" in missing.stderr
+
+    no_state = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "state:new"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert no_state.returncode == 2
+    assert "state selectors require --state" in no_state.stderr
+
+    malformed_state = tmp_path / "malformed"
+    malformed_state.mkdir()
+    (malformed_state / "manifest.json").write_text(
+        "{\"metadata\":{},\"nodes\":{}}",
+        encoding="utf-8",
+    )
+    malformed = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(malformed_state),
+            "--select",
+            "state:new",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert malformed.returncode == 2
+    assert "manifest.json is malformed" in malformed.stderr
+
+    version_state = tmp_path / "version"
+    version_state.mkdir()
+    (version_state / "manifest.json").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v11.json"
+                },
+                "nodes": {},
+                "sources": {},
+                "exposures": {},
+                "unit_tests": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    version = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(version_state),
+            "--select",
+            "state:new",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert version.returncode == 2
+    assert "dbt Manifest v12 schema" in version.stderr
+
+
 def test_dbt_core_result_selector_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     try:
         has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
@@ -9270,6 +9463,107 @@ def test_dbt_core_result_selector_oracle(tmp_path: Path, capsys: pytest.CaptureF
     )
     if not dbt_result.success and not dbt_ids:
         pytest.skip(f"dbt Core result selector oracle unavailable: {dbt_result.exception!r}")
+
+    assert dxt_ids == dbt_ids
+
+
+def test_dbt_core_state_new_selector_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    try:
+        has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
+        has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
+    except ModuleNotFoundError:
+        has_dbt_core = False
+        has_dbt_duckdb = False
+
+    if not has_dbt_core:
+        pytest.skip("dbt Core is not installed for the optional state:new oracle")
+    if not has_dbt_duckdb:
+        pytest.skip("dbt DuckDB adapter is not installed for the optional state:new oracle")
+
+    from dbt.cli.main import dbtRunner
+
+    project = copy_fixture(tmp_path, "selector_graph")
+    (project / "profiles.yml").write_text(
+        "\n".join(
+            [
+                "default:",
+                "  target: dev",
+                "  outputs:",
+                "    dev:",
+                "      type: duckdb",
+                "      path: oracle.duckdb",
+                "      schema: main",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "state"
+    parse_result = dbtRunner().invoke(
+        [
+            "parse",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--target-path",
+            str(state_dir),
+        ]
+    )
+    capsys.readouterr()
+    if not parse_result.success:
+        pytest.skip(f"dbt Core state:new oracle parse unavailable: {parse_result.exception!r}")
+
+    (project / "models" / "vip_customers.sql").write_text(
+        "select * from {{ ref('customers') }}\n",
+        encoding="utf-8",
+    )
+
+    dxt_result = subprocess.run(
+        [
+            DXT,
+            "ls",
+            "--project-dir",
+            str(project),
+            "--state",
+            str(state_dir),
+            "--select",
+            "state:new",
+            "--output",
+            "json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert dxt_result.returncode == 0, dxt_result.stderr
+    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+
+    dbt_result = dbtRunner().invoke(
+        [
+            "ls",
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(project),
+            "--target-path",
+            str(tmp_path / "dbt-target"),
+            "--state",
+            str(state_dir),
+            "--select",
+            "state:new",
+            "--output",
+            "json",
+        ]
+    )
+    dbt_stdout = capsys.readouterr().out
+    dbt_ids = sorted(
+        json.loads(line)["unique_id"]
+        for line in dbt_stdout.splitlines()
+        if line.strip().startswith("{")
+    )
+    if not dbt_result.success and not dbt_ids:
+        pytest.skip(f"dbt Core state:new oracle unavailable: {dbt_result.exception!r}")
 
     assert dxt_ids == dbt_ids
 
