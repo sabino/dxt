@@ -227,6 +227,7 @@ pub const GenericTestConfig = struct {
     severity: []const u8 = "ERROR",
     warn_if: []const u8 = "!= 0",
     error_if: []const u8 = "!= 0",
+    store_failures: ?bool = null,
 };
 
 pub const DocBlock = struct {
@@ -338,6 +339,8 @@ pub const Node = struct {
     config_alias: ?[]const u8 = null,
     quote_columns: ?bool = null,
     seed_column_types: std.ArrayList(SeedColumnType) = .empty,
+    test_config: GenericTestConfig = .{},
+    inline_store_failures: bool = false,
     enabled: bool = true,
     docs: DocsConfig = .{},
     tags: std.ArrayList([]const u8) = .empty,
@@ -400,6 +403,7 @@ pub const SingularTestNode = struct {
     config: GenericTestConfig = .{},
     enabled: bool = true,
     inline_enabled: bool = false,
+    inline_store_failures: bool = false,
     compiled: bool = false,
     compiled_code: ?[]const u8 = null,
     compiled_path: ?[]const u8 = null,

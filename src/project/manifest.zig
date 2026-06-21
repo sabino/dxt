@@ -847,6 +847,12 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_n
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"store_failures\":");
+    if (test_node.config.store_failures) |store_failures| {
+        try writer.writeAll(if (store_failures) "true" else "false");
+    } else {
+        try writer.writeAll("null");
+    }
     try writer.writeAll(",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
@@ -911,6 +917,12 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, test_
     try writer.writeAll(",\"limit\":");
     if (test_node.config.limit) |limit| {
         try writer.print("{d}", .{limit});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"store_failures\":");
+    if (test_node.config.store_failures) |store_failures| {
+        try writer.writeAll(if (store_failures) "true" else "false");
     } else {
         try writer.writeAll("null");
     }
@@ -1445,6 +1457,7 @@ test "manifest writer emits generic test config overrides" {
             .severity = "warn",
             .warn_if = "> 0",
             .error_if = "> 10",
+            .store_failures = true,
         },
     });
     try graph.tests.items[0].macro_depends_on.append(allocator, "macro.dbt.test_not_null");
@@ -1462,6 +1475,7 @@ test "manifest writer emits generic test config overrides" {
     try std.testing.expectEqualStrings("> 10", config.get("error_if").?.string);
     try std.testing.expectEqualStrings("customer_id > 0", config.get("where").?.string);
     try std.testing.expectEqual(@as(i64, 2), config.get("limit").?.integer);
+    try std.testing.expect(config.get("store_failures").?.bool);
 }
 
 test "manifest writer emits source relationship tests with source target deps" {
@@ -1567,6 +1581,7 @@ test "manifest writer emits singular tests without generic-only fields" {
             .severity = "Warn",
             .warn_if = "> 0",
             .error_if = "> 10",
+            .store_failures = true,
         },
         .compiled = true,
         .compiled_code = "select * from \"main\".\"customers\" where customer_id is null",
@@ -1594,6 +1609,7 @@ test "manifest writer emits singular tests without generic-only fields" {
     try std.testing.expectEqualStrings("> 10", config.get("error_if").?.string);
     try std.testing.expectEqualStrings("status = 'checked'", config.get("where").?.string);
     try std.testing.expectEqual(@as(i64, 1), config.get("limit").?.integer);
+    try std.testing.expect(config.get("store_failures").?.bool);
     try std.testing.expectEqualStrings("singular", config.get("tags").?.array.items[0].string);
     try std.testing.expect(test_node.get("test_metadata") == null);
     try std.testing.expect(test_node.get("column_name") == null);

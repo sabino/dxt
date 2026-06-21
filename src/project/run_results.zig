@@ -16,6 +16,8 @@ pub const NodeResult = struct {
     failures: ?u64 = null,
     compiled_code: ?[]const u8 = null,
     owns_compiled_code: bool = false,
+    relation_name: ?[]const u8 = null,
+    owns_relation_name: bool = false,
 };
 
 pub fn renderRunResults(allocator: std.mem.Allocator, results: []const NodeResult) ![]const u8 {
@@ -77,7 +79,9 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
         try writer.writeAll("null");
     } else try writer.writeAll("null");
     try writer.writeAll(", \"relation_name\": ");
-    if (result.node) |node| if (isCompiledResultNode(node) and node.relation_name != null) {
+    if (result.relation_name) |relation_name| {
+        try json.string(writer, relation_name);
+    } else if (result.node) |node| if (isCompiledResultNode(node) and node.relation_name != null) {
         const relation_name = node.relation_name.?;
         try json.string(writer, relation_name);
     } else {
@@ -259,6 +263,7 @@ test "run-results writer emits generic test pass and fail statuses" {
             .message = "Got 1 result, configured to fail if != 0",
             .failures = 1,
             .compiled_code = "select 1 as failures",
+            .relation_name = "\"dbt_test__audit\".\"not_null_customers_customer_id\"",
         },
     });
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
@@ -270,7 +275,7 @@ test "run-results writer emits generic test pass and fail statuses" {
     try std.testing.expectEqual(@as(i64, 1), result.get("failures").?.integer);
     try std.testing.expectEqual(true, result.get("compiled").?.bool);
     try std.testing.expectEqualStrings("select 1 as failures", result.get("compiled_code").?.string);
-    try std.testing.expectEqual(.null, result.get("relation_name").?);
+    try std.testing.expectEqualStrings("\"dbt_test__audit\".\"not_null_customers_customer_id\"", result.get("relation_name").?.string);
 }
 
 test "run-results writer preserves mixed model and generic test order" {

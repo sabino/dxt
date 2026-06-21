@@ -1021,6 +1021,10 @@ fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !voi
     if (try parseConfigQuotedValue(allocator, args, "alias")) |value| {
         node.config_alias = value;
     }
+    if (try parseConfigBoolLiteral(args, "store_failures")) |store_failures| {
+        node.test_config.store_failures = store_failures;
+        node.inline_store_failures = true;
+    }
 }
 
 fn parseConfigQuotedValue(allocator: std.mem.Allocator, args: []const u8, key: []const u8) !?[]const u8 {
@@ -1274,7 +1278,7 @@ test "sql scanner extracts refs sources and config tags from jinja spans" {
     defer deinitTestNode(allocator, &node);
 
     try scanSql(allocator,
-        \\{{ config(materialized="table", enabled=false, tags=["nightly", 'core'], schema="mart", alias='customer_orders') }}
+        \\{{ config(materialized="table", enabled=false, tags=["nightly", 'core'], schema="mart", alias='customer_orders', store_failures=true) }}
         \\select * from {{ ref("stg_customers") }}
         \\union all select * from {{ source('raw', "customers") }}
         \\select {{ "ref('not_a_dependency')" }} as literal_ref
@@ -1291,6 +1295,8 @@ test "sql scanner extracts refs sources and config tags from jinja spans" {
     try std.testing.expect(node.inline_enabled);
     try std.testing.expectEqualStrings("mart", node.config_schema.?);
     try std.testing.expectEqualStrings("customer_orders", node.config_alias.?);
+    try std.testing.expectEqual(true, node.test_config.store_failures.?);
+    try std.testing.expect(node.inline_store_failures);
     try std.testing.expectEqual(@as(usize, 2), node.tags.items.len);
 }
 

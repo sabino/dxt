@@ -52,6 +52,10 @@ compatibility.
   supported seed YAML `quote_columns` and `column_types` configs for root and
   installed-package CSV seeds, preserve those config fields in `manifest.json`,
   and apply them at the DuckDB CSV load boundary.
+- Supported DuckDB generic and singular data tests now parse and emit
+  `store_failures`, materialize deterministic `dbt_test__audit` failure tables
+  for non-empty failing-row SQL in `dxt test` / `dxt build`, and drop those
+  audit tables on zero-row passing runs to avoid stale failure artifacts.
 
 ### Fixed
 

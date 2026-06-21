@@ -1214,6 +1214,10 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
         .generic => |test_node| try duckdb.executeGenericTest(runtime, db_path, graph, test_node),
         .singular => |test_node| try duckdb.executeSingularTest(runtime, db_path, graph, test_node),
     };
+    errdefer {
+        runtime.allocator.free(execution.compiled_code);
+        if (execution.relation_name) |relation_name| runtime.allocator.free(relation_name);
+    }
     const classification = switch (test_ref) {
         .generic => |test_node| try classifyGenericTestResult(execution.failures, test_node.config),
         .singular => |test_node| try classifyGenericTestResult(execution.failures, test_node.config),
@@ -1230,6 +1234,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .failures = execution.failures,
             .compiled_code = execution.compiled_code,
             .owns_compiled_code = true,
+            .relation_name = execution.relation_name,
+            .owns_relation_name = execution.relation_name != null,
         }),
         .singular => |test_node| try executed.append(runtime.allocator, .{
             .singular_test_node = test_node,
@@ -1238,6 +1244,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .failures = execution.failures,
             .compiled_code = execution.compiled_code,
             .owns_compiled_code = true,
+            .relation_name = execution.relation_name,
+            .owns_relation_name = execution.relation_name != null,
         }),
     }
     return .{
@@ -1338,6 +1346,9 @@ fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.N
     for (results) |result| {
         if (result.owns_compiled_code) {
             if (result.compiled_code) |compiled_code| allocator.free(compiled_code);
+        }
+        if (result.owns_relation_name) {
+            if (result.relation_name) |relation_name| allocator.free(relation_name);
         }
         if (result.message) |message| allocator.free(message);
     }
@@ -2099,6 +2110,7 @@ test "parseSingularTestPropertiesFromText records top-level patches and ignores 
         \\      severity: warn
         \\      warn_if: "> 0"
         \\      error_if: "> 10"
+        \\      store_failures: true
     ;
 
     try parseSingularTestPropertiesFromText(allocator, yaml, "tests/schema.yml", "demo", &graph);
@@ -2114,6 +2126,7 @@ test "parseSingularTestPropertiesFromText records top-level patches and ignores 
     try std.testing.expectEqualStrings("Warn", property.config.severity);
     try std.testing.expectEqualStrings("> 0", property.config.warn_if);
     try std.testing.expectEqualStrings("> 10", property.config.error_if);
+    try std.testing.expectEqual(true, property.config.store_failures.?);
     try std.testing.expectEqual(@as(usize, 2), property.tags.items.len);
     try std.testing.expectEqualStrings("nightly", property.tags.items[0]);
     try std.testing.expectEqualStrings("singular", property.tags.items[1]);
@@ -2160,6 +2173,7 @@ test "applySingularTestProperties applies config and preserves inline enabled pr
         \\      severity: warn
         \\      warn_if: "> 0"
         \\      error_if: "> 10"
+        \\      store_failures: true
         \\  - name: inline_disabled
         \\    config:
         \\      enabled: true
@@ -2176,6 +2190,7 @@ test "applySingularTestProperties applies config and preserves inline enabled pr
     try std.testing.expectEqualStrings("Warn", patched.config.severity);
     try std.testing.expectEqualStrings("> 0", patched.config.warn_if);
     try std.testing.expectEqualStrings("> 10", patched.config.error_if);
+    try std.testing.expectEqual(true, patched.config.store_failures.?);
     try std.testing.expectEqual(@as(usize, 1), patched.tags.items.len);
     try std.testing.expectEqualStrings("singular", patched.tags.items[0]);
 
@@ -2589,6 +2604,10 @@ fn applySingularTestConfigValue(allocator: std.mem.Allocator, property: *types.S
         property.config.error_if = try dupTrimmedScalar(allocator, value);
         return true;
     }
+    if (std.mem.eql(u8, key, "store_failures")) {
+        property.config.store_failures = try parseBool(value);
+        return true;
+    }
     return false;
 }
 
@@ -2675,8 +2694,10 @@ fn parseSingularTest(runtime: Runtime, project_dir: []const u8, test_root: []con
         .path = test_path,
         .original_file_path = relative_path,
         .raw_code = sql,
+        .config = scan_node.test_config,
         .enabled = scan_node.enabled,
         .inline_enabled = scan_node.inline_enabled,
+        .inline_store_failures = scan_node.inline_store_failures,
         .refs = scan_node.refs,
         .source_refs = scan_node.source_refs,
         .macro_depends_on = scan_node.macro_depends_on,
@@ -2764,6 +2785,7 @@ fn applySingularTestProperties(graph: *Graph, package_name: []const u8) !void {
         test_node.config.severity = property.config.severity;
         test_node.config.warn_if = property.config.warn_if;
         test_node.config.error_if = property.config.error_if;
+        if (!test_node.inline_store_failures) test_node.config.store_failures = property.config.store_failures;
         for (property.tags.items) |tag| {
             try appendUnique(graph.allocator, &test_node.tags, tag);
         }

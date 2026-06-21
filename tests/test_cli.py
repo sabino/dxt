@@ -83,6 +83,17 @@ def copy_fixture(tmp_path: Path, name: str) -> Path:
     return dest
 
 
+def duckdb_scalar(db_path: Path, sql: str) -> str:
+    result = subprocess.run(
+        [DUCKDB, str(db_path), "-csv", "-noheader", "-batch", "-bail", "-c", sql],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return result.stdout.strip()
+
+
 def test_compile_writes_compiled_sql_and_manifest_fields(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     target = tmp_path / "compile-target"
@@ -2585,9 +2596,16 @@ models:
     )
 
 
-def write_generic_test_config_project(project: Path, severity: str = "warn", error_if: str = "> 0", where: str = "status = 'checked'") -> None:
+def write_generic_test_config_project(
+    project: Path,
+    severity: str = "warn",
+    error_if: str = "> 0",
+    where: str = "status = 'checked'",
+    store_failures: bool | None = None,
+) -> None:
     (project / "models").mkdir(parents=True, exist_ok=True)
     (project / "seeds").mkdir(exist_ok=True)
+    store_failures_line = "" if store_failures is None else f"                store_failures: {str(store_failures).lower()}\n"
     (project / "dbt_project.yml").write_text(
         """name: generic_test_config_tests
 version: "1.0"
@@ -2619,6 +2637,7 @@ models:
                 severity: {severity}
                 warn_if: "> 0"
                 error_if: "{error_if}"
+{store_failures_line}\
 seeds:
   - name: raw_customers
     columns:
@@ -2769,9 +2788,13 @@ def write_singular_test_config_project(
     severity: str = "warn",
     error_if: str = "> 10",
     enabled: bool = True,
+    store_failures: bool | None = None,
+    inline_store_failures: bool = False,
 ) -> None:
     (project / "models").mkdir(parents=True, exist_ok=True)
     (project / "tests").mkdir(exist_ok=True)
+    store_failures_line = "" if store_failures is None else f"      store_failures: {str(store_failures).lower()}\n"
+    inline_config = "{{ config(store_failures=true) }}\n" if inline_store_failures else ""
     (project / "dbt_project.yml").write_text(
         """name: singular_test_configs
 version: "1.0"
@@ -2788,7 +2811,7 @@ union all select 3 as customer_id, 'ignored' as status
 """
     )
     (project / "tests" / "assert_customers.sql").write_text(
-        "select * from {{ ref('customers') }} where customer_id > 0;\n"
+        f"{inline_config}select * from {{{{ ref('customers') }}}} where customer_id > 0;\n"
     )
     (project / "tests" / "disabled_assert.sql").write_text("select * from {{ ref('missing_model') }}\n")
     (project / "tests" / "schema.yml").write_text(
@@ -2804,6 +2827,7 @@ data_tests:
       severity: {severity}
       warn_if: "> 0"
       error_if: "{error_if}"
+{store_failures_line}\
   - name: disabled_assert
     config:
       enabled: false
@@ -3279,6 +3303,7 @@ def test_parse_emits_generic_test_config_for_model_seed_and_source_tests(tmp_pat
     assert model_config["severity"] == "warn"
     assert model_config["warn_if"] == "> 0"
     assert model_config["error_if"] == "> 0"
+    assert model_config["store_failures"] is None
 
     seed_config = tests["test.generic_test_config_tests.not_null_raw_customers_customer_id.ad2454198a"]["config"]
     assert seed_config["where"] == "status = 'checked'"
@@ -3286,6 +3311,7 @@ def test_parse_emits_generic_test_config_for_model_seed_and_source_tests(tmp_pat
     assert seed_config["severity"] == "error"
     assert seed_config["warn_if"] == "> 1"
     assert seed_config["error_if"] == "> 2"
+    assert seed_config["store_failures"] is None
 
     source_config = tests["test.generic_test_config_tests.source_not_null_raw_orders_customer_id.3962c6ab03"]["config"]
     assert source_config["where"] == "status = 'checked'"
@@ -3293,6 +3319,7 @@ def test_parse_emits_generic_test_config_for_model_seed_and_source_tests(tmp_pat
     assert source_config["severity"] == "warn"
     assert source_config["warn_if"] == "> 0"
     assert source_config["error_if"] == "> 10"
+    assert source_config["store_failures"] is None
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for generic test config execution coverage")
@@ -3354,6 +3381,67 @@ def test_generic_test_configs_drive_test_and_build_statuses(tmp_path: Path):
     pass_results = json.loads((pass_target / "run_results.json").read_text())
     assert [item["status"] for item in pass_results["results"]] == ["success", "pass"]
     assert pass_results["results"][1]["failures"] == 0
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for generic test store_failures coverage")
+def test_generic_test_store_failures_materializes_and_drops_audit_relation(tmp_path: Path):
+    project = tmp_path / "generic_test_store_failures"
+    write_generic_test_config_project(project, severity="error", error_if="> 0", store_failures=True)
+    target = tmp_path / "store-target"
+    db_path = target / "dxt.duckdb"
+
+    run_result = subprocess.run(
+        [DXT, "run", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+
+    test_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "not_null_customers_customer_id"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test_result.returncode == 1
+    assert "1 test(s) failed with 1 failure row(s)" in test_result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    assert_manifest_schema_slice(target / "manifest.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    result = run_results["results"][0]
+    assert result["status"] == "fail"
+    assert result["relation_name"] == '"dbt_test__audit"."not_null_customers_customer_id"'
+    assert result["compiled_code"].endswith("limit 1")
+    manifest = json.loads((target / "manifest.json").read_text())
+    test_node = manifest["nodes"][result["unique_id"]]
+    assert test_node["config"]["store_failures"] is True
+    assert duckdb_scalar(db_path, 'select count(*) from "dbt_test__audit"."not_null_customers_customer_id"') == "1"
+
+    write_generic_test_config_project(
+        project,
+        severity="error",
+        error_if="> 0",
+        where="status = 'missing'",
+        store_failures=True,
+    )
+    pass_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert pass_result.returncode == 0, pass_result.stderr
+    pass_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in pass_results["results"]] == ["success", "pass"]
+    assert pass_results["results"][1]["relation_name"] is None
+    assert (
+        duckdb_scalar(
+            db_path,
+            "select count(*) from information_schema.tables where table_schema = 'dbt_test__audit' and table_name = 'not_null_customers_customer_id'",
+        )
+        == "0"
+    )
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")
@@ -3689,6 +3777,60 @@ def test_singular_sql_test_yaml_configs_drive_test_and_build_statuses(tmp_path: 
     fail_results = json.loads((fail_target / "run_results.json").read_text())
     assert [item["status"] for item in fail_results["results"]] == ["success", "fail"]
     assert fail_results["results"][1]["message"] == "Got 1 result, configured to fail if > 0"
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for singular SQL test store_failures coverage")
+def test_singular_sql_test_store_failures_supports_inline_config_and_drop_on_pass(tmp_path: Path):
+    project = tmp_path / "singular_store_failures"
+    write_singular_test_config_project(
+        project,
+        severity="error",
+        error_if="> 0",
+        store_failures=False,
+        inline_store_failures=True,
+    )
+    target = tmp_path / "store-target"
+    db_path = target / "dxt.duckdb"
+
+    build_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build_result.returncode == 1
+    assert "1 test(s) failed with 1 failure row(s)" in build_result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    assert_manifest_schema_slice(target / "manifest.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    result = run_results["results"][1]
+    assert result["unique_id"] == "test.singular_test_configs.assert_customers"
+    assert result["status"] == "fail"
+    assert result["relation_name"] == '"dbt_test__audit"."assert_customers"'
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert manifest["nodes"][result["unique_id"]]["config"]["store_failures"] is True
+    assert duckdb_scalar(db_path, 'select count(*) from "dbt_test__audit"."assert_customers"') == "1"
+
+    (project / "tests" / "assert_customers.sql").write_text(
+        "{{ config(store_failures=true) }}\nselect * from {{ ref('customers') }} where customer_id < 0;\n"
+    )
+    pass_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "tag:singular_yaml"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert pass_result.returncode == 0, pass_result.stderr
+    pass_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in pass_results["results"]] == ["pass"]
+    assert pass_results["results"][0]["relation_name"] is None
+    assert (
+        duckdb_scalar(
+            db_path,
+            "select count(*) from information_schema.tables where table_schema = 'dbt_test__audit' and table_name = 'assert_customers'",
+        )
+        == "0"
+    )
 
 
 def test_compile_writes_selected_generic_test_artifacts_without_duckdb(tmp_path: Path):
