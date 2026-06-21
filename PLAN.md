@@ -982,6 +982,19 @@ Manifest fields without opening DuckDB or writing `run_results.json`. It does
 not add custom generic macro execution, generic test configs, `store_failures`,
 new test types, or adapter dispatch execution.
 
+Current package custom generic-test compile source note:
+`.agent/research/m2-package-custom-generic-tests.md` maps dbt Core v1
+namespaced generic-test parsing and compile artifact behavior to dxt's narrow
+installed-package custom generic-test compile slice. This slice lets root
+project model-column YAML tests call installed-package `{% test %}` or
+`{% data_test %}` blocks through `package_name.test_name`, emits dbt-shaped
+`raw_code`, `test_metadata.namespace`, macro dependencies including the package
+test macro and `macro.dbt.get_where_subquery`, and writes selected compiled SQL
+for static bodies that use only `{{ model }}` and `{{ column_name }}`. It does
+not execute custom generic tests in `dxt test` or `dxt build`, support
+non-column/source/seed custom tests, execute adapter dispatch, or add general
+Jinja/macro behavior.
+
 The next source-grounded M1/M2 slices after macro block variant support are:
 
 1. Extend the render-only artifact boundary to adapter-free docs generation:

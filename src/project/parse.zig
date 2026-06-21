@@ -134,6 +134,7 @@ pub fn appendGenericTestDef(allocator: std.mem.Allocator, tests: *std.ArrayList(
 pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTestDef), source: GenericTestDef) !void {
     var cloned = GenericTestDef{
         .name = source.name,
+        .namespace = source.namespace,
         .column_name = source.column_name,
         .accepted_values_quote = source.accepted_values_quote,
         .relationship_to = source.relationship_to,
@@ -2060,6 +2061,12 @@ pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: Generi
         clean_args.deinit(allocator);
     }
 
+    const synthetic_name = if (test_def.namespace) |namespace|
+        try std.fmt.allocPrint(allocator, "{s}_{s}", .{ namespace, test_def.name })
+    else
+        test_def.name;
+    defer if (test_def.namespace != null) allocator.free(synthetic_name);
+
     const argument_name = if (std.mem.startsWith(u8, test_def.name, "source_")) test_def.name["source_".len..] else test_def.name;
     if (column_name) |column| try clean_args.append(allocator, try cleanTestNamePart(allocator, column));
     if (std.mem.eql(u8, argument_name, "relationships")) {
@@ -2074,7 +2081,7 @@ pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: Generi
         }
     }
 
-    const test_identifier = try std.fmt.allocPrint(allocator, "{s}_{s}", .{ test_def.name, model_name });
+    const test_identifier = try std.fmt.allocPrint(allocator, "{s}_{s}", .{ synthetic_name, model_name });
     const unique = try joinStrings(allocator, clean_args.items, "__");
     defer allocator.free(unique);
 
@@ -2107,25 +2114,26 @@ pub fn genericTestUniqueIdForModelKwarg(allocator: std.mem.Allocator, package_na
 }
 
 fn genericTestMetadataRepr(allocator: std.mem.Allocator, test_def: GenericTestDef, model_kwarg: []const u8, column_name: ?[]const u8) ![]const u8 {
+    const namespace = test_def.namespace orelse "None";
     if (std.mem.eql(u8, test_def.name, "accepted_values")) {
         const values = try pythonReprStringList(allocator, test_def.accepted_values.items);
         defer allocator.free(values);
         if (column_name) |column| {
             if (test_def.accepted_values_quote) |quote| {
-                return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\", 'quote': '{s}', 'values': {s}}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, model_kwarg, if (quote) "True" else "False", values, test_def.name });
+                return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\", 'quote': '{s}', 'values': {s}}}, 'name': '{s}', 'namespace': '{s}'}}", .{ column, model_kwarg, if (quote) "True" else "False", values, test_def.name, namespace });
             }
-            return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\", 'values': {s}}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, model_kwarg, values, test_def.name });
+            return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\", 'values': {s}}}, 'name': '{s}', 'namespace': '{s}'}}", .{ column, model_kwarg, values, test_def.name, namespace });
         }
     }
     if (std.mem.eql(u8, test_def.name, "relationships")) {
         if (column_name) |column| {
-            return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'field': '{s}', 'model': \"{s}\", 'to': \"{s}\"}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, test_def.relationship_field, model_kwarg, test_def.relationship_to, test_def.name });
+            return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'field': '{s}', 'model': \"{s}\", 'to': \"{s}\"}}, 'name': '{s}', 'namespace': '{s}'}}", .{ column, test_def.relationship_field, model_kwarg, test_def.relationship_to, test_def.name, namespace });
         }
     }
     if (column_name) |column| {
-        return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\"}}, 'name': '{s}', 'namespace': 'None'}}", .{ column, model_kwarg, test_def.name });
+        return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'column_name': '{s}', 'model': \"{s}\"}}, 'name': '{s}', 'namespace': '{s}'}}", .{ column, model_kwarg, test_def.name, namespace });
     }
-    return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'model': \"{s}\"}}, 'name': '{s}', 'namespace': 'None'}}", .{ model_kwarg, test_def.name });
+    return try std.fmt.allocPrint(allocator, "{{'kwargs': {{'model': \"{s}\"}}, 'name': '{s}', 'namespace': '{s}'}}", .{ model_kwarg, test_def.name, namespace });
 }
 
 fn genericTestHashSuffix(input: []const u8) [10]u8 {
