@@ -2449,6 +2449,55 @@ target-path: target
     (project / "tests" / "fixtures" / "ignored_fixture.sql").write_text("select 1 as should_not_parse\n")
 
 
+def write_singular_test_config_project(
+    project: Path,
+    *,
+    severity: str = "warn",
+    error_if: str = "> 10",
+    enabled: bool = True,
+) -> None:
+    (project / "models").mkdir(parents=True, exist_ok=True)
+    (project / "tests").mkdir(exist_ok=True)
+    (project / "dbt_project.yml").write_text(
+        """name: singular_test_configs
+version: "1.0"
+model-paths: ["models"]
+test-paths: ["tests"]
+target-path: target
+"""
+    )
+    (project / "models" / "customers.sql").write_text(
+        """{{ config(materialized='table') }}
+select 1 as customer_id, 'checked' as status
+union all select 2 as customer_id, 'checked' as status
+union all select 3 as customer_id, 'ignored' as status
+"""
+    )
+    (project / "tests" / "assert_customers.sql").write_text(
+        "select * from {{ ref('customers') }} where customer_id > 0;\n"
+    )
+    (project / "tests" / "disabled_assert.sql").write_text("select * from {{ ref('missing_model') }}\n")
+    (project / "tests" / "schema.yml").write_text(
+        f"""version: 2
+data_tests:
+  - name: assert_customers
+    description: "patched singular test"
+    config:
+      enabled: {str(enabled).lower()}
+      tags: [singular_yaml, nightly]
+      where: "status = 'checked'"
+      limit: 1
+      severity: {severity}
+      warn_if: "> 0"
+      error_if: "{error_if}"
+  - name: disabled_assert
+    config:
+      enabled: false
+      tags: [disabled_yaml]
+"""
+    )
+
+
 def test_singular_sql_test_paths_skip_generic_and_fixtures_with_trailing_slash(tmp_path: Path):
     project = tmp_path / "singular_trailing_slash"
     (project / "models").mkdir(parents=True)
@@ -3202,6 +3251,130 @@ def test_compile_writes_selected_singular_sql_test_artifacts_without_duckdb(tmp_
     assert "column_name" not in test_node
     assert "attached_node" not in test_node
     assert "compiled" not in manifest["nodes"]["model.singular_tests.customers"]
+
+
+def test_parse_and_compile_apply_singular_sql_test_yaml_patches(tmp_path: Path):
+    project = tmp_path / "singular_test_configs"
+    write_singular_test_config_project(project)
+    target = tmp_path / "parse-target"
+
+    parse_result = subprocess.run(
+        [DXT, "parse", "--project-dir", str(project), "--target-path", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert parse_result.returncode == 0, parse_result.stderr
+    assert_manifest_schema_slice(target / "manifest.json")
+    manifest = json.loads((target / "manifest.json").read_text())
+
+    test_id = "test.singular_test_configs.assert_customers"
+    disabled_id = "test.singular_test_configs.disabled_assert"
+    assert sorted(unique_id for unique_id in manifest["nodes"] if unique_id.startswith("test.")) == [test_id]
+    assert list(manifest["disabled"]) == [disabled_id]
+
+    test_node = manifest["nodes"][test_id]
+    assert test_node["description"] == "patched singular test"
+    assert test_node["patch_path"] == "singular_test_configs://tests/schema.yml"
+    assert test_node["tags"] == ["singular_yaml", "nightly"]
+    assert test_node["config"]["enabled"] is True
+    assert test_node["config"]["tags"] == ["singular_yaml", "nightly"]
+    assert test_node["config"]["where"] == "status = 'checked'"
+    assert test_node["config"]["limit"] == 1
+    assert test_node["config"]["severity"] == "Warn"
+    assert test_node["config"]["warn_if"] == "> 0"
+    assert test_node["config"]["error_if"] == "> 10"
+    assert "test_metadata" not in test_node
+    assert "column_name" not in test_node
+    assert "attached_node" not in test_node
+
+    disabled_test = manifest["disabled"][disabled_id][0]
+    assert disabled_test["config"]["enabled"] is False
+    assert disabled_test["config"]["tags"] == ["disabled_yaml"]
+    assert disabled_test["depends_on"]["nodes"] == []
+
+    list_result = subprocess.run(
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:singular_yaml", "--output", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert list_result.returncode == 0, list_result.stderr
+    assert json.loads(list_result.stdout) == [
+        {"unique_id": test_id, "resource_type": "test", "name": "assert_customers"}
+    ]
+
+    compile_target = tmp_path / "compile-target"
+    compile_result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(compile_target), "--select", "tag:singular_yaml"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    assert "Compiled 0 model(s) and 1 test(s)" in compile_result.stdout
+    compiled_sql = (compile_target / "compiled" / "singular_test_configs" / "tests" / "assert_customers.sql").read_text()
+    assert compiled_sql.strip() == 'select * from "main"."customers" where customer_id > 0;'
+    compiled_manifest = json.loads((compile_target / "manifest.json").read_text())
+    compiled_test = compiled_manifest["nodes"][test_id]
+    assert compiled_test["compiled"] is True
+    assert compiled_test["config"]["where"] == "status = 'checked'"
+    assert compiled_test["config"]["limit"] == 1
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for singular SQL test config execution coverage")
+def test_singular_sql_test_yaml_configs_drive_test_and_build_statuses(tmp_path: Path):
+    project = tmp_path / "singular_test_configs"
+    write_singular_test_config_project(project, severity="warn", error_if="> 10")
+    target = tmp_path / "warn-target"
+
+    build_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert build_result.returncode == 0, build_result.stderr
+    assert "Built 1 model(s) and 1 test(s)" in build_result.stdout
+    assert_run_results_schema_slice(target / "run_results.json")
+    warn_results = json.loads((target / "run_results.json").read_text())
+    assert [item["unique_id"] for item in warn_results["results"]] == [
+        "model.singular_test_configs.customers",
+        "test.singular_test_configs.assert_customers",
+    ]
+    assert [item["status"] for item in warn_results["results"]] == ["success", "warn"]
+    warn_test = warn_results["results"][1]
+    assert warn_test["failures"] == 1
+    assert warn_test["message"] == "Got 1 result, configured to warn if > 0"
+    assert "dbt_internal_test where status = 'checked'" in warn_test["compiled_code"]
+    assert warn_test["compiled_code"].endswith("limit 1")
+
+    test_result = subprocess.run(
+        [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "tag:singular_yaml"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert test_result.returncode == 0, test_result.stderr
+    assert "Tested 1 test(s)" in test_result.stdout
+    test_results = json.loads((target / "run_results.json").read_text())
+    assert [item["status"] for item in test_results["results"]] == ["warn"]
+    assert test_results["results"][0]["message"] == "Got 1 result, configured to warn if > 0"
+
+    write_singular_test_config_project(project, severity="error", error_if="> 0")
+    fail_target = tmp_path / "fail-target"
+    fail_result = subprocess.run(
+        [DXT, "build", "--project-dir", str(project), "--target-path", str(fail_target), "--select", "customers+"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert fail_result.returncode == 1
+    assert "1 test(s) failed with 1 failure row(s)" in fail_result.stdout
+    assert "one or more tests failed" in fail_result.stderr
+    fail_results = json.loads((fail_target / "run_results.json").read_text())
+    assert [item["status"] for item in fail_results["results"]] == ["success", "fail"]
+    assert fail_results["results"][1]["message"] == "Got 1 result, configured to fail if > 0"
 
 
 def test_compile_writes_selected_generic_test_artifacts_without_duckdb(tmp_path: Path):

@@ -265,6 +265,16 @@ pub const UnmatchedModelProperty = struct {
     patch_path: []const u8,
 };
 
+pub const SingularTestProperty = struct {
+    package_name: []const u8,
+    name: []const u8,
+    patch_path: []const u8,
+    description: []const u8 = "",
+    enabled: ?bool = null,
+    tags: std.ArrayList([]const u8) = .empty,
+    config: GenericTestConfig = .{},
+};
+
 pub const MacroProperty = struct {
     package_name: []const u8,
     name: []const u8,
@@ -356,8 +366,14 @@ pub const SingularTestNode = struct {
     alias: []const u8,
     path: []const u8,
     original_file_path: []const u8,
+    patch_path: ?[]const u8 = null,
     raw_code: []const u8,
+    description: []const u8 = "",
+    doc_blocks: std.ArrayList([]const u8) = .empty,
+    tags: std.ArrayList([]const u8) = .empty,
+    config: GenericTestConfig = .{},
     enabled: bool = true,
+    inline_enabled: bool = false,
     compiled: bool = false,
     compiled_code: ?[]const u8 = null,
     compiled_path: ?[]const u8 = null,
@@ -386,6 +402,7 @@ pub const Graph = struct {
     docs: std.ArrayList(DocBlock) = .empty,
     macros: std.ArrayList(MacroDef) = .empty,
     model_properties: std.ArrayList(ModelProperty) = .empty,
+    singular_test_properties: std.ArrayList(SingularTestProperty) = .empty,
     macro_properties: std.ArrayList(MacroProperty) = .empty,
     unmatched_model_properties: std.ArrayList(UnmatchedModelProperty) = .empty,
     unmatched_macro_properties: std.ArrayList(UnmatchedMacroProperty) = .empty,
@@ -415,6 +432,9 @@ pub const Graph = struct {
         for (self.model_properties.items) |*property| {
             deinitModelProperty(self.allocator, property);
         }
+        for (self.singular_test_properties.items) |*property| {
+            deinitSingularTestProperty(self.allocator, property);
+        }
         for (self.macro_properties.items) |*property| {
             deinitMacroProperty(self.allocator, property);
         }
@@ -430,6 +450,7 @@ pub const Graph = struct {
         self.docs.deinit(self.allocator);
         self.macros.deinit(self.allocator);
         self.model_properties.deinit(self.allocator);
+        self.singular_test_properties.deinit(self.allocator);
         self.macro_properties.deinit(self.allocator);
         self.unmatched_model_properties.deinit(self.allocator);
         self.unmatched_macro_properties.deinit(self.allocator);
@@ -501,10 +522,16 @@ pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTe
 }
 
 pub fn deinitSingularTestNode(allocator: std.mem.Allocator, test_node: *SingularTestNode) void {
+    test_node.doc_blocks.deinit(allocator);
+    test_node.tags.deinit(allocator);
     test_node.refs.deinit(allocator);
     test_node.source_refs.deinit(allocator);
     test_node.depends_on.deinit(allocator);
     test_node.macro_depends_on.deinit(allocator);
+}
+
+fn deinitSingularTestProperty(allocator: std.mem.Allocator, property: *SingularTestProperty) void {
+    property.tags.deinit(allocator);
 }
 
 pub fn deinitSourceDef(allocator: std.mem.Allocator, source: *SourceDef) void {

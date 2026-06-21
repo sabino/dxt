@@ -221,6 +221,7 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
                 .selector = try pathBackedOutputSelector(allocator, test_node.package_name, test_node.path),
                 .alias = test_node.alias,
                 .config_materialized = "test",
+                .config_tags = test_node.tags.items,
                 .has_config_tags = true,
                 .config_enabled = test_node.enabled,
                 .has_config_enabled = true,
@@ -460,6 +461,12 @@ fn matchesSingularTestSelectorIntersection(graph: *const Graph, test_node: *cons
 
 fn matchesSingularTestSelectorTerm(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8) bool {
     if (matchesSelectorPattern(value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id) or matchesSingularTestFqnPattern(value, test_node)) return true;
+    if (std.mem.startsWith(u8, value, "tag:")) {
+        const tag = value["tag:".len..];
+        for (test_node.tags.items) |test_tag| {
+            if (matchesSelectorPattern(tag, test_tag)) return true;
+        }
+    }
     if (matchesSingularDependencyNameOrFqnSelector(graph, test_node, value)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
@@ -1216,6 +1223,7 @@ test "singular test selectors match type path file and graph expansion" {
         .original_file_path = "tests/assert_customers.sql",
         .raw_code = "select * from {{ ref('customers') }} where customer_id is null",
     });
+    try graph.singular_tests.items[0].tags.append(allocator, "singular");
     try graph.singular_tests.items[0].depends_on.append(allocator, "model.demo.customers");
     try graph.singular_tests.append(allocator, .{
         .package_name = "demo",
@@ -1241,6 +1249,9 @@ test "singular test selectors match type path file and graph expansion" {
 
     const by_path = try selectResources(allocator, &graph, "test", "path:tests", null);
     try std.testing.expectEqual(@as(usize, 1), by_path.len);
+
+    const by_tag = try selectResources(allocator, &graph, "test", "tag:singular", null);
+    try std.testing.expectEqual(@as(usize, 1), by_tag.len);
 
     const by_child_expansion = try selectResources(allocator, &graph, "test", "customers+", null);
     try std.testing.expectEqual(@as(usize, 1), by_child_expansion.len);
