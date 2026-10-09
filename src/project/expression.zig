@@ -109,6 +109,11 @@ pub fn integerValue(allocator: std.mem.Allocator, number: anytype) !Value {
     return .{ .integer = try std.fmt.allocPrint(allocator, "{d}", .{number}) };
 }
 
+pub fn checkedAttribute(value: Value, name: []const u8) !Value {
+    if (value == .undefined or value == .conditional_undefined) return error.UndefinedJinjaValue;
+    return value.attribute(name);
+}
+
 pub fn integerIndex(value: Value) !i64 {
     return switch (value) {
         .integer => |number| std.fmt.parseInt(i64, number, 10) catch return error.JinjaIndexError,
@@ -354,7 +359,7 @@ const Parser = struct {
                 if (self.take("(")) {
                     const args = try self.arguments();
                     if (self.active) value = try self.method(value, attribute, args);
-                } else if (self.active) value = value.attribute(attribute);
+                } else if (self.active) value = try checkedAttribute(value, attribute);
             } else if (with_filters and self.take("is")) {
                 const negate = self.take("not");
                 const test_name = try self.name();
@@ -506,7 +511,13 @@ const Parser = struct {
         }
         if (!self.active) return .none;
         const host = self.host orelse return .undefined;
-        return try host.resolve(host.context, path, self.allocator);
+        const resolved = try host.resolve(host.context, path, self.allocator);
+        if (resolved == .undefined and std.mem.indexOfScalar(u8, path, '.') != null) {
+            var parts = std.mem.splitScalar(u8, path, '.');
+            var receiver = try host.resolve(host.context, parts.next().?, self.allocator);
+            while (parts.next()) |attribute| receiver = try checkedAttribute(receiver, attribute);
+        }
+        return resolved;
     }
 
     fn method(self: *Parser, receiver: Value, method_name: []const u8, args: []const Argument) !Value {
@@ -1371,6 +1382,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
     });
     if (std.mem.eql(u8, name, "string")) return .{ .string = try value.text(allocator) };
     if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "float")) {
+        if (value == .undefined or value == .conditional_undefined) return error.UndefinedJinjaValue;
         if (std.mem.eql(u8, name, "int")) {
             const fallback = argument(args, "default", 0, .{ .integer = "0" });
             if (integerText(value)) |number| return .{ .integer = number };
