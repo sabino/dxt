@@ -248,7 +248,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             return .ok;
         }
         const rt = runtime orelse return .usage;
-        var options = parseOptions(rt.allocator, args[2..], stderr, .analysis, rt.global_options) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, rt.io, args[2..], stderr, .analysis, rt.global_options) catch |err| return commandError(err, stderr);
         if (options.output != .text and options.output != .json) {
             try stderr.writeAll("error: native SQL analysis supports --output text or json\n");
             return .usage;
@@ -1479,11 +1479,11 @@ test "analysis options preserve text defaults independently from list selectors"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var stderr: Io.Writer.Allocating = .init(arena.allocator());
-    const analysis = try parseOptions(arena.allocator(), &.{}, &stderr.writer, .analysis, null);
-    const listed = try parseOptions(arena.allocator(), &.{}, &stderr.writer, .list, null);
+    const analysis = try parseOptions(arena.allocator(), std.testing.io, &.{}, &stderr.writer, .analysis, null);
+    const listed = try parseOptions(arena.allocator(), std.testing.io, &.{}, &stderr.writer, .list, null);
     try std.testing.expect(analysis.output == .text);
     try std.testing.expect(listed.output == .selector);
-    const selected = try parseOptions(arena.allocator(), &.{ "--output", "json", "--select", "final" }, &stderr.writer, .analysis, null);
+    const selected = try parseOptions(arena.allocator(), std.testing.io, &.{ "--output", "json", "--select", "final" }, &stderr.writer, .analysis, null);
     try std.testing.expect(selected.output == .json);
     try std.testing.expectEqualStrings("final", selected.select.?);
 }
