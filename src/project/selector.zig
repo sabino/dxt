@@ -294,7 +294,24 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
 pub fn selectExecutionResourcesWithContext(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8, context: SelectionContext) ![]SelectedResource {
     var execution_context = context;
     execution_context.execution_only = true;
-    return selectResourcesWithContext(allocator, graph, resource_type, select, exclude, execution_context);
+    const selected = try selectResourcesWithContext(allocator, graph, resource_type, select, exclude, execution_context);
+    var count: usize = 0;
+    for (selected) |item| {
+        if (emptySqlResource(graph, item.unique_id)) continue;
+        selected[count] = item;
+        count += 1;
+    }
+    return allocator.realloc(selected, count);
+}
+
+/// Core excludes empty SQL after evaluating selection criteria, so a criterion
+/// matching an empty file does not itself produce an unmatched warning.
+fn emptySqlResource(graph: *const Graph, id: []const u8) bool {
+    for (graph.nodes.items) |node| if (std.mem.eql(u8, node.unique_id, id)) {
+        return !std.mem.eql(u8, node.resource_type, "seed") and std.mem.trim(u8, node.raw_code, " \t\r\n").len == 0;
+    };
+    for (graph.singular_tests.items) |node| if (std.mem.eql(u8, node.unique_id, id)) return std.mem.trim(u8, node.raw_code, " \t\r\n").len == 0;
+    return false;
 }
 
 pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8, context: SelectionContext) ![]SelectedResource {

@@ -76,7 +76,12 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 counts.tests += 1;
             }
         }
-        if (row.node != null and std.mem.eql(u8, row.node.?.materialized, "ephemeral")) {
+        // Core CompileTask retains ephemeral rows only for an explicit CLI
+        // selection. Default compilation and DocsGenerateTask still compile
+        // those nodes, but omit them from run_results.
+        if (row.node != null and std.mem.eql(u8, row.node.?.materialized, "ephemeral") and
+            (!std.mem.eql(u8, options.which, "compile") or options.select == null))
+        {
             freeResult(runtime.allocator, row);
             transferred = index + 1;
             continue;

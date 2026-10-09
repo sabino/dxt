@@ -293,9 +293,13 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
-    const selected = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
-
     const target_dir = try targetDir(runtime, options);
+    _ = try writeManifest(runtime, &graph, target_dir);
+    try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
+    const candidates = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
+    const selected = try commandSelection(runtime.allocator, candidates, .compile);
+    if (selected.len == 0) return finishEmptySelection(runtime, target_dir, stderr);
+
     try project_defer.apply(runtime, &graph, options, selected, target_dir);
     var compile_rows: std.ArrayList(run_results.NodeResult) = .empty;
     defer {
@@ -540,29 +544,27 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
+    const target_dir = try targetDir(runtime, options);
+    _ = try writeManifest(runtime, &graph, target_dir);
+    try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
     const selection_context = selection_state.context();
     const selected_models = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "model", selection.select, selection.exclude, selection_context);
-    if (selected_models.len == 0 and selection.select != null) {
-        const selected_any = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
-        if (selected_any.len != 0) return error.UnsupportedRunSelection;
-    }
+    if (selected_models.len == 0) return finishEmptySelection(runtime, target_dir, stderr);
 
     const execution_order = try selectedModelExecutionOrder(runtime, &graph, selected_models);
     defer runtime.allocator.free(execution_order);
-    if (execution_order.len == 0) return error.UnsupportedRunSelection;
     try validateRunMaterializations(&graph, execution_order);
 
-    const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected_models, target_dir);
+    if (execution_order.len == 0) return executeEphemeralSelection(runtime, options, &graph, selected_models, target_dir, stdout, stderr);
     if (try concurrent_runner.requested(runtime, options, &graph)) {
         const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
         defer runtime.allocator.free(db_path);
         const manifest_path = try writeManifest(runtime, &graph, target_dir);
         return executeConcurrentCommand(runtime, options, &graph, selected_models, target_dir, manifest_path, db_path, stdout, stderr, "Run");
     }
-    const compile_result = try compileSelectedModels(runtime, &graph, selected_models, target_dir, false, false);
+    _ = try compileSelectedModels(runtime, &graph, selected_models, target_dir, false, false);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
-    if (compile_result.count == 0) return error.UnsupportedRunSelection;
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
     var executed: std.ArrayList(run_results.NodeResult) = .empty;
@@ -601,11 +603,14 @@ pub fn snapshotRun(runtime: Runtime, options: Options, stdout: *Io.Writer, stder
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
+    const target_dir = try targetDir(runtime, options);
+    _ = try writeManifest(runtime, &graph, target_dir);
+    try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
     const selected = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "snapshot", selection.select, selection.exclude, selection_state.context());
+    if (selected.len == 0) return finishEmptySelection(runtime, target_dir, stderr);
     const ordered = try selectedModelExecutionOrder(runtime, &graph, selected);
     defer runtime.allocator.free(ordered);
     for (ordered) |node| try snapshot_runner.validateExecution(&graph, node);
-    const target_dir = try targetDir(runtime, options);
     if (try concurrent_runner.requested(runtime, options, &graph)) {
         const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
         defer runtime.allocator.free(db_path);
@@ -646,22 +651,18 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
+    const target_dir = try targetDir(runtime, options);
+    _ = try writeManifest(runtime, &graph, target_dir);
+    try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
     const selection_context = selection_state.context();
     const selected_seeds = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "seed", selection.select, selection.exclude, selection_context);
-    if (selected_seeds.len == 0) {
-        if (selection.select != null) {
-            const selected_any = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
-            if (selected_any.len != 0) return error.UnsupportedSeedSelection;
-        }
-        return error.UnsupportedSeedSelection;
-    }
+    if (selected_seeds.len == 0) return finishEmptySelection(runtime, target_dir, stderr);
 
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb") and !std.mem.eql(u8, graph.adapter_type, "postgres")) return error.UnsupportedSeedAdapterExecution;
     const seed_nodes = try selectedSeedExecutionOrder(runtime, &graph, selected_seeds);
     defer runtime.allocator.free(seed_nodes);
     try validateSeedExecution(&graph, seed_nodes);
 
-    const target_dir = try targetDir(runtime, options);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
     if (try concurrent_runner.requested(runtime, options, &graph)) {
@@ -699,16 +700,13 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
+    const target_dir = try targetDir(runtime, options);
+    _ = try writeManifest(runtime, &graph, target_dir);
+    try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
     const selection_context = selection_state.context();
     const selected = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "test", selection.select, selection.exclude, selection_context);
     const selected_unit_tests = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "unit_test", selection.select, selection.exclude, selection_context);
-    if (selected.len == 0 and selected_unit_tests.len == 0) {
-        if (selection.select != null) {
-            const selected_any = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
-            if (selected_any.len != 0) return error.UnsupportedTestExecution;
-        }
-        return error.UnsupportedTestSelection;
-    }
+    if (selected.len == 0 and selected_unit_tests.len == 0) return finishEmptySelection(runtime, target_dir, stderr);
 
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb") and !std.mem.eql(u8, graph.adapter_type, "postgres")) return error.UnsupportedTestExecution;
     const test_nodes = try selectedDataTestExecutionOrder(runtime, &graph, selected);
@@ -718,7 +716,6 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     defer runtime.allocator.free(unit_test_nodes);
     try validateUnitTestExecution(runtime, &graph, unit_test_nodes);
 
-    const target_dir = try targetDir(runtime, options);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
     if (try concurrent_runner.requested(runtime, options, &graph)) {
@@ -762,9 +759,17 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
-    const selected = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
-
     const target_dir = try targetDir(runtime, options);
+    _ = try writeManifest(runtime, &graph, target_dir);
+    try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
+    // Core BuildTask evaluates the full graph, the graph without unit tests,
+    // and its final queue independently; each evaluates explicit criteria.
+    try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
+    try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
+    const candidates = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
+    const selected = try commandSelection(runtime.allocator, candidates, .build);
+    if (selected.len == 0) return finishEmptySelection(runtime, target_dir, stderr);
+
     try project_defer.apply(runtime, &graph, options, selected, target_dir);
     if (try concurrent_runner.requested(runtime, options, &graph)) {
         const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
@@ -1234,7 +1239,7 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
     for (graph.unit_tests.items) |*node| if (node.enabled and selectionContains(selected, node.unique_id)) {
         try resources.append(runtime.allocator, .{ .unit = node });
     };
-    if (resources.items.len == 0) return error.UnsupportedBuildSelection;
+    if (resources.items.len == 0) return executeEphemeralSelection(runtime, options, graph, selected, target_dir, stdout, stderr);
     try validateConcurrentResources(runtime, graph, resources.items, label);
     const cache_ids = try runtime.allocator.alloc([]const u8, selected.len);
     defer runtime.allocator.free(cache_ids);
@@ -2230,6 +2235,51 @@ fn writeRunResults(runtime: Runtime, target_dir: []const u8, results: []const ru
     const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
     const run_results_json = try run_results.renderRunResultsForRuntime(runtime, results);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
+}
+
+fn finishEmptySelection(runtime: Runtime, target_dir: []const u8, stderr: *Io.Writer) !void {
+    try @import("project/selection_warnings.zig").nothingToDo(runtime, stderr);
+    if (!cli_options.writeJson(runtime)) return;
+    const path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
+    defer runtime.allocator.free(path);
+    const artifact = try run_results.renderEmptyRunResultsForRuntime(runtime);
+    defer runtime.allocator.free(artifact);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = path, .data = artifact });
+}
+
+fn commandSelection(allocator: std.mem.Allocator, candidates: []const selector.SelectedResource, command: enum { build, compile }) ![]selector.SelectedResource {
+    var selected: std.ArrayList(selector.SelectedResource) = .empty;
+    errdefer selected.deinit(allocator);
+    for (candidates) |item| {
+        const kind = item.resource_type;
+        if (std.mem.eql(u8, kind, "model") or std.mem.eql(u8, kind, "seed") or std.mem.eql(u8, kind, "snapshot") or std.mem.eql(u8, kind, "test") or
+            (command == .compile and std.mem.eql(u8, kind, "analysis")) or
+            (command == .build and (std.mem.eql(u8, kind, "unit_test") or std.mem.eql(u8, kind, "exposure") or std.mem.eql(u8, kind, "saved_query")))) try selected.append(allocator, item);
+    }
+    return selected.toOwnedSlice(allocator);
+}
+
+/// Selecting an ephemeral model is real work in Core: compile it and open the
+/// execution connection, but never record a materialization result or emit the
+/// warning reserved for an empty graph queue.
+fn executeEphemeralSelection(runtime: Runtime, options: Options, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    const db_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
+    defer runtime.allocator.free(db_path);
+    var session = try @import("project/adapter.zig").openSession(runtime, graph, db_path);
+    defer session.deinit();
+    var rows: std.ArrayList(run_results.NodeResult) = .empty;
+    defer {
+        deinitRunResults(runtime.allocator, rows.items);
+        rows.deinit(runtime.allocator);
+    }
+    _ = compileWithHost(runtime, options, graph, selected, target_dir, &rows, stderr) catch |err| {
+        _ = try writeManifest(runtime, graph, target_dir);
+        try writeRunResults(runtime, target_dir, rows.items);
+        return err;
+    };
+    _ = try writeManifest(runtime, graph, target_dir);
+    try writeRunResults(runtime, target_dir, &.{});
+    try stdout.writeAll("Completed selected ephemeral model compilation\n");
 }
 
 fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.NodeResult) void {

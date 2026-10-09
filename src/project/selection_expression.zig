@@ -5,6 +5,7 @@ const std = @import("std");
 pub const Expression = struct {
     kind: enum { leaf, union_set, intersection, difference },
     value: ?[]const u8 = null,
+    unmatched_criterion: ?[]const u8 = null,
     indirect_selection: ?[]const u8 = null,
     children: std.ArrayList(*Expression) = .empty,
 
@@ -25,6 +26,7 @@ pub const Expression = struct {
         const result = try create(allocator, self.kind, self.indirect_selection);
         errdefer result.destroy(allocator);
         if (self.value) |value| result.value = try allocator.dupe(u8, value);
+        if (self.unmatched_criterion) |value| result.unmatched_criterion = try allocator.dupe(u8, value);
         for (self.children.items) |child| {
             const copied = try child.clone(allocator);
             result.children.append(allocator, copied) catch |err| {
@@ -37,6 +39,7 @@ pub const Expression = struct {
 
     pub fn destroy(self: *Expression, allocator: std.mem.Allocator) void {
         if (self.value) |value| allocator.free(value);
+        if (self.unmatched_criterion) |value| allocator.free(value);
         for (self.children.items) |child| child.destroy(allocator);
         self.children.deinit(allocator);
         allocator.destroy(self);
@@ -54,6 +57,7 @@ pub fn parseCli(allocator: std.mem.Allocator, value: ?[]const u8) !*Expression {
     while (clauses.next()) |clause| {
         const intersection = try Expression.create(allocator, .intersection, null);
         errdefer intersection.destroy(allocator);
+        intersection.unmatched_criterion = try allocator.dupe(u8, clause);
         var terms = std.mem.splitScalar(u8, clause, ',');
         while (terms.next()) |term| {
             const child = try Expression.leaf(allocator, term, null);

@@ -502,6 +502,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         return .failure;
     }
     switch (err) {
+        error.SelectionWarningAsError => return .usage,
         error.InvalidWarnErrorOptions, error.ConflictingWarnErrorOptionKeys => {
             stderr.print("error: invalid warn-error-options policy: {s}\n", .{@errorName(err)}) catch {};
             return .failure;

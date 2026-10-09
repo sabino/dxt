@@ -154,6 +154,10 @@ pub fn renderRunResultsForRuntime(runtime: Runtime, results: []const NodeResult)
     return renderRunResultsWithContext(runtime.allocator, results, runtime.invocation_options, runtime.invocation);
 }
 
+pub fn renderEmptyRunResultsForRuntime(runtime: Runtime) ![]const u8 {
+    return renderRunResultsWithElapsed(runtime.allocator, &.{}, runtime.invocation_options, runtime.invocation, 0);
+}
+
 pub fn renderRunResultsWithInvocation(allocator: std.mem.Allocator, results: []const NodeResult, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
     return renderRunResultsWithContext(allocator, results, null, metadata);
 }
@@ -163,6 +167,10 @@ pub fn renderRunResultsWithArgs(allocator: std.mem.Allocator, results: []const N
 }
 
 fn renderRunResultsWithContext(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
+    return renderRunResultsWithElapsed(allocator, results, options, metadata, if (metadata) |value| value.elapsed() else 0);
+}
+
+fn renderRunResultsWithElapsed(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options, metadata: ?*const @import("invocation.zig").Metadata, elapsed: f64) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
@@ -175,7 +183,7 @@ fn renderRunResultsWithContext(allocator: std.mem.Allocator, results: []const No
         if (index != 0) try writer.writeAll(",");
         try writeResult(writer, result);
     }
-    try writer.print("\n  ],\n  \"elapsed_time\": {d},\n  \"args\": ", .{if (metadata) |value| value.elapsed() else @as(f64, 0)});
+    try writer.print("\n  ],\n  \"elapsed_time\": {d},\n  \"args\": ", .{elapsed});
     try writeArgs(writer, allocator, options);
     try writer.writeAll("\n}\n");
     return try out.toOwnedSlice();

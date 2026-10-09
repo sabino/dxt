@@ -115,7 +115,7 @@ fn displayedEvent(allocator: std.mem.Allocator, line: []const u8) !?DisplayedEve
     if (name != .string) return null;
     const printed = std.mem.eql(u8, name.string, "PrintEvent");
     const primary = std.mem.eql(u8, name.string, "SeedSampleTable");
-    if (!primary and !printed and !std.mem.startsWith(u8, name.string, "JinjaLog")) return null;
+    if (!primary and !printed and !std.mem.startsWith(u8, name.string, "JinjaLog") and !std.mem.eql(u8, name.string, "NothingToDo") and !std.mem.eql(u8, name.string, "NoNodesForSelectionCriteria") and !std.mem.eql(u8, name.string, "MainEncounteredError")) return null;
     const data = parsed.value.object.get("data") orelse return null;
     if (data != .object) return null;
     const message = data.object.get("msg") orelse data.object.get("message") orelse return null;
