@@ -124,7 +124,7 @@ pub fn execute(runtime: types.Runtime, options: types.Options, graph: *const typ
     defer allocator.free(sql);
     var body = CloneBody{ .sql = sql, .allocator = allocator };
     errdefer if (body.outcome) |outcome| outcome.deinit(allocator);
-    try @import("materialization_runtime.zig").executeWithBody(runtime, db_path, graph, node, .{ .context = &body, .execute = CloneBody.execute });
+    try @import("materialization_runtime.zig").executeWithBody(runtime, db_path, graph, node, .{ .context = &body, .execute = CloneBody.execute, .materialized = "view" });
     return body.outcome orelse return error.InvalidAdapterResponse;
 }
 
