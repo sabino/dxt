@@ -21,6 +21,7 @@ pub const Value = union(enum) {
     callable: []const u8,
 
     pub fn truthy(self: Value) bool {
+        if (integerProtocol(self)) |number| return !std.mem.eql(u8, number, "0");
         if (sequences.truthy(self)) |result| return result;
         if (self == .object) if (sequence(self)) |items| return items.len != 0;
         return switch (self) {
@@ -120,6 +121,7 @@ pub fn checkedAttribute(value: Value, name: []const u8) !Value {
 }
 
 pub fn integerIndex(value: Value) !i64 {
+    if (integerProtocol(value)) |number| return std.fmt.parseInt(i64, number, 10) catch return error.JinjaIndexError;
     return switch (value) {
         .integer => |number| std.fmt.parseInt(i64, number, 10) catch return error.JinjaIndexError,
         .boolean => |number| @intFromBool(number),
@@ -128,6 +130,7 @@ pub fn integerIndex(value: Value) !i64 {
 }
 
 pub fn numericFloat(value: Value) !f64 {
+    if (integerProtocol(value)) |number| return numericFloat(.{ .integer = number });
     return switch (value) {
         .integer => |number| blk: {
             const converted = std.fmt.parseFloat(f64, number) catch return error.JinjaNumericOverflow;
@@ -333,6 +336,7 @@ const Parser = struct {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
             if (operand == .boolean) break :blk try integerValue(self.allocator, @as(u8, @intFromBool(operand.boolean)));
+            if (integerProtocol(operand)) |number| break :blk .{ .integer = number };
             if (operand != .integer and operand != .number and operand != .complex) return error.JinjaTypeError;
             break :blk operand;
         } else try self.atom();
@@ -873,7 +877,12 @@ fn rank(op: []const u8) u8 {
 fn numeric(v: Value) !f64 {
     return numericFloat(v);
 }
+pub fn integerProtocol(value: Value) ?[]const u8 {
+    const marker = value.attribute("__dxt_integer");
+    return if (marker == .string) marker.string else null;
+}
 fn integerText(v: Value) ?[]const u8 {
+    if (integerProtocol(v)) |number| return number;
     return switch (v) {
         .integer => |n| n,
         .boolean => |b| if (b) "1" else "0",
@@ -939,7 +948,7 @@ pub fn equalValues(a: Value, b: Value) bool {
         }
         return true;
     }
-    if ((a == .integer or a == .number or a == .boolean) and (b == .integer or b == .number or b == .boolean)) return (numericOrder(std.heap.page_allocator, a, b) catch return false) == .eq;
+    if ((integerText(a) != null or a == .number) and (integerText(b) != null or b == .number)) return (numericOrder(std.heap.page_allocator, a, b) catch return false) == .eq;
     if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
     return switch (a) {
         .undefined, .conditional_undefined, .none => true,
@@ -1038,6 +1047,16 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     return .{ .number = if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else return error.InvalidJinjaExpression };
 }
 fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
+    if (value == .object) {
+        const names = value.attribute("__dxt_string_index");
+        if (names == .object and key == .string) return names.attribute(key.string);
+        const indexed = value.attribute("__dxt_indexed");
+        if (indexed == .list and key != .string) {
+            const i = try integerIndex(key);
+            if (i < 0 or i >= indexed.list.len) return .undefined;
+            return indexed.list[@intCast(i)];
+        }
+    }
     if (value == .object and key == .string) return value.attribute(key.string);
     if (value == .object) if (sequence(value)) |items| return try indexValue(allocator, .{ .list = items }, key);
     var i = integerIndex(key) catch return .undefined;
@@ -1139,8 +1158,8 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "undefined")) return value == .undefined or value == .conditional_undefined;
     if (std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "None")) return value == .none;
     if (std.mem.eql(u8, name, "string")) return value == .string;
-    if (std.mem.eql(u8, name, "number")) return value == .integer or value == .number or value == .boolean or value == .complex;
-    if (std.mem.eql(u8, name, "integer")) return value == .integer;
+    if (std.mem.eql(u8, name, "number")) return integerText(value) != null or value == .number or value == .complex;
+    if (std.mem.eql(u8, name, "integer")) return value == .integer or integerProtocol(value) != null;
     if (std.mem.eql(u8, name, "float")) return value == .number;
     if (std.mem.eql(u8, name, "boolean")) return value == .boolean;
     if (std.mem.eql(u8, name, "true")) return value == .boolean and value.boolean;

@@ -35,6 +35,7 @@ fn newline(w: *std.Io.Writer, indent: []const u8, depth: usize) !void {
 }
 fn write(a: std.mem.Allocator, w: *std.Io.Writer, value: Value, indent: ?[]const u8, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (expression.integerProtocol(value)) |number| return w.writeAll(number);
     switch (value) {
         .none => try w.writeAll("null"),
         .boolean => |v| try w.writeAll(if (v) "true" else "false"),

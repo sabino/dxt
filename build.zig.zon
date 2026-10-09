@@ -12,6 +12,7 @@
         "vendor/libpg_query",
         "vendor/tree-sitter",
         "vendor/tree-sitter-python",
+        "vendor/pcre2",
         "vendor/dbt-docs",
         "vendor/dbt-includes",
         "vendor/unicode",

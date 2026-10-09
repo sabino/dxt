@@ -25,6 +25,26 @@ pub fn zip(a: std.mem.Allocator, inputs: []const Value) !Value {
     return .{ .object = entries };
 }
 
+pub fn iterator(a: std.mem.Allocator, values: []const Value) !Value {
+    const entries = try expression.allocateEntries(a, 3);
+    entries[0] = .{ .key = "__dxt_sequence_kind", .value = .{ .string = "iterator" } };
+    entries[1] = .{ .key = "__dxt_sequence_source", .value = .{ .list = values } };
+    entries[2] = .{ .key = "__dxt_sequence_cursor", .value = .{ .integer = "0" } };
+    return .{ .object = entries };
+}
+
+fn nextIterator(a: std.mem.Allocator, value: Value) !?Value {
+    const source = value.attribute("__dxt_sequence_source");
+    if (source != .list) return error.JinjaTypeError;
+    const index: usize = @intCast(try expression.integerIndex(value.attribute("__dxt_sequence_cursor")));
+    if (index >= source.list.len) return null;
+    for (@constCast(value.object)) |*entry| if (std.mem.eql(u8, entry.key, "__dxt_sequence_cursor")) {
+        entry.value = try expression.integerValue(a, index + 1);
+        break;
+    };
+    return source.list[index];
+}
+
 fn viewItems(a: std.mem.Allocator, value: Value, name: []const u8) ![]const Value {
     const source = value.attribute("__dxt_sequence_source");
     if (source != .object) return error.JinjaTypeError;
@@ -42,6 +62,11 @@ fn viewItems(a: std.mem.Allocator, value: Value, name: []const u8) ![]const Valu
 
 pub fn items(a: std.mem.Allocator, value: Value) !?[]const Value {
     const name = kind(value) orelse return null;
+    if (std.mem.eql(u8, name, "iterator")) {
+        var values: std.ArrayList(Value) = .empty;
+        while (try nextIterator(a, value)) |item| try values.append(a, item);
+        return try values.toOwnedSlice(a);
+    }
     if (!std.mem.eql(u8, name, "zip")) return try viewItems(a, value, name);
     var rows: std.ArrayList(Value) = .empty;
     errdefer rows.deinit(a);
@@ -63,6 +88,9 @@ fn nextZip(a: std.mem.Allocator, value: Value, depth: usize) anyerror!?Value {
         if (kind(input)) |input_kind| if (std.mem.eql(u8, input_kind, "zip")) {
             field.* = (try nextZip(a, input, depth + 1)) orelse return null;
             continue;
+        } else if (std.mem.eql(u8, input_kind, "iterator")) {
+            field.* = (try nextIterator(a, input)) orelse return null;
+            continue;
         };
         const values = try expression.iterableValues(a, input);
         const index: usize = @intCast(@max(0, try expression.integerIndex(cursor.*)));
@@ -75,20 +103,20 @@ fn nextZip(a: std.mem.Allocator, value: Value, depth: usize) anyerror!?Value {
 
 pub fn text(a: std.mem.Allocator, value: Value) !?[]const u8 {
     const name = kind(value) orelse return null;
-    if (std.mem.eql(u8, name, "zip")) return error.JinjaTypeError;
+    if (std.mem.eql(u8, name, "zip") or std.mem.eql(u8, name, "iterator")) return error.JinjaTypeError;
     const values = try viewItems(a, value, name);
     return try std.fmt.allocPrint(a, "dict_{s}({s})", .{ name, try (Value{ .list = values }).text(a) });
 }
 
 pub fn length(value: Value) !?usize {
     const name = kind(value) orelse return null;
-    if (std.mem.eql(u8, name, "zip")) return error.JinjaTypeError;
+    if (std.mem.eql(u8, name, "zip") or std.mem.eql(u8, name, "iterator")) return error.JinjaTypeError;
     const source = value.attribute("__dxt_sequence_source");
     return if (source == .object) source.object.len else error.JinjaTypeError;
 }
 
 pub fn truthy(value: Value) ?bool {
     const name = kind(value) orelse return null;
-    if (std.mem.eql(u8, name, "zip")) return true;
+    if (std.mem.eql(u8, name, "zip") or std.mem.eql(u8, name, "iterator")) return true;
     return (length(value) catch 0 orelse 0) != 0;
 }

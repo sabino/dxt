@@ -25,6 +25,7 @@ pub fn toExpression(allocator: std.mem.Allocator, value: std.json.Value) anyerro
 }
 
 pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) anyerror!std.json.Value {
+    if (expression.integerProtocol(value)) |number| return fromExpression(allocator, .{ .integer = number });
     return switch (value) {
         .none => .null,
         .undefined, .conditional_undefined, .callable, .complex => error.InvalidConfiguration,

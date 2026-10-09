@@ -46,6 +46,22 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=gnu11", b.fmt("-ffile-prefix-map={s}=.", .{b.build_root.path orelse "."}) },
     });
 
+    // General native regular expressions back the dbt modules.re context.
+    // The UTF-8 engine and Unicode 15 tables are static; no plugin or runtime
+    // interpreter is needed by installed binaries.
+    const regex = b.addLibrary(.{
+        .name = "dxt_pcre2",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .strip = optimize != .Debug, .link_libc = true }),
+    });
+    regex.root_module.addIncludePath(b.path("vendor/pcre2/src"));
+    regex.root_module.addCSourceFiles(.{
+        .files = @import("vendor/pcre2/sources.zig").files,
+        .flags = &.{ "-std=gnu99", "-DHAVE_CONFIG_H", "-DPCRE2_CODE_UNIT_WIDTH=8", "-DPCRE2_STATIC", "-DSUPPORT_PCRE2_8", "-DSUPPORT_UNICODE", "-DHAVE_MEMMOVE", "-DHAVE_STDLIB_H", "-DHAVE_STRING_H", "-DHAVE_STDINT_H", "-DHAVE_INTTYPES_H", "-DHAVE_LIMITS_H", "-DHAVE_STRERROR", b.fmt("-ffile-prefix-map={s}=.", .{b.build_root.path orelse "."}) },
+    });
+    mod.addIncludePath(b.path("vendor/pcre2/src"));
+    mod.linkLibrary(regex);
+
     const exe = b.addExecutable(.{
         .name = "dxt",
         .root_module = b.createModule(.{

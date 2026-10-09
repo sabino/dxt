@@ -345,6 +345,7 @@ fn refreshImplicitSql(allocator: std.mem.Allocator, original: RelationDef, chang
 }
 
 pub fn call(allocator: std.mem.Allocator, adapter_type: []const u8, name: []const u8, args: []const Argument) !?Value {
+    if (try @import("regex_context.zig").call(allocator, name, args, null)) |value| return value;
     if (try @import("timestamp_context.zig").call(allocator, name, args)) |value| return value;
     if (try callColumn(allocator, adapter_type, name, args)) |value| return value;
     if (std.mem.eql(u8, name, "api.Relation.add_ephemeral_prefix") or std.mem.eql(u8, name, "adapter.Relation.add_ephemeral_prefix")) {
