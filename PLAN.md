@@ -62,6 +62,16 @@ compiler, options and root command routing are integrated sequentially by
 cherry-pick. Worker modules remain isolated and must bring native, CLI and
 source-grounded oracle evidence before integration.
 
+Integration now sequences compile/docs durable results and Core-readable retry
+arguments, threaded native jobs and lazy database-backed compilation, semantic
+resources/query planning, shared-YAML snapshots, stateful environments,
+cross-database movement, then the remaining property/materialization surface.
+The SQL-analysis worker owns focused native dialect parsing, typed logical IR,
+lineage, source diagnostics and dependency-aware caches, with narrow hooks for
+namespaced `analyze`/`explain` commands after the other command-routing commits.
+The supervisor owns the developer cold/warm performance budget and public
+package-heavy project validation. These additions retain dbt artifact schemas.
+
 The initial adapter certification scope is DuckDB and PostgreSQL, as confirmed
 by the user. Remaining dbt adapters are a subsequent certification scope, with
 their own drivers and live warehouse targets; they must not be advertised as

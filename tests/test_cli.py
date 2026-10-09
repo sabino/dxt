@@ -1833,7 +1833,7 @@ def assert_profile_target_context_outputs(target: Path, command_name: str) -> No
     if command_name == "docs generate":
         assert (target / "catalog.json").exists()
     else:
-        assert not (target / "run_results.json").exists()
+        assert_run_results_schema_slice(target / "run_results.json")
 
 
 def test_compile_docs_run_and_build_render_profile_target_and_this_context(tmp_path: Path):
@@ -1902,6 +1902,8 @@ def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
         assert [item["status"] for item in run_results["results"]] == ["success", "error", "skipped"]
         assert run_results["results"][1]["message"] == "DuckDB execution failed"
         assert run_results["results"][2]["message"] is None
+    elif command_name == "compile":
+        assert_run_results_schema_slice(target / "run_results.json")
     else:
         assert not (target / "run_results.json").exists()
 
@@ -2057,16 +2059,18 @@ def test_compile_docs_run_and_build_resolve_cli_vars(tmp_path: Path):
     ).read_text()
 
 
-def test_compile_rejects_selection_without_models(tmp_path: Path):
+def test_compile_nonexecutable_source_selection_writes_empty_results(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
+    target = tmp_path / "target"
     result = subprocess.run(
-        [DXT, "compile", "--project-dir", str(project), "--select", "source:raw.payments"],
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "source:raw.payments"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "compile currently supports only selected SQL model or supported generic or singular SQL test resources" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    assert json.loads((target / "run_results.json").read_text())["results"] == []
 
 
 def test_compile_uses_selected_node_package_for_compiled_path(tmp_path: Path):
@@ -12246,11 +12250,10 @@ def test_snapshot_execution_commands_support_resource_filtering(tmp_path: Path, 
     result = snapshot_cli(project, target, command, "--select", "customers history region assert_history")
     assert result.returncode == 0, result.stderr
     assert (target / "manifest.json").exists()
-    if command in {"build", "run", "seed", "test", "snapshot"}:
+    if command in {"compile", "docs generate", "build", "run", "seed", "test", "snapshot"}:
+        assert_run_results_schema_slice(target / "run_results.json")
         results = json.loads((target / "run_results.json").read_text())["results"]
         assert results and all(row["status"] in {"success", "pass"} for row in results)
-    else:
-        assert not (target / "run_results.json").exists()
     assert duckdb_scalar(project / "warehouse.duckdb", "select count(*) from archive.history") == "2"
 
 

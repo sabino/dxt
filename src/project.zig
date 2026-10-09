@@ -68,7 +68,7 @@ pub fn clone(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
 pub fn retry(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     const target_dir = try targetDir(runtime, options);
     var plan = try commands.prepareRetry(runtime, options, target_dir);
-    const supported = std.mem.eql(u8, plan.options.which, "run") or std.mem.eql(u8, plan.options.which, "seed") or std.mem.eql(u8, plan.options.which, "test") or std.mem.eql(u8, plan.options.which, "build") or std.mem.eql(u8, plan.options.which, "clone") or std.mem.eql(u8, plan.options.which, "run-operation") or std.mem.eql(u8, plan.options.which, "snapshot");
+    const supported = std.mem.eql(u8, plan.options.which, "run") or std.mem.eql(u8, plan.options.which, "seed") or std.mem.eql(u8, plan.options.which, "test") or std.mem.eql(u8, plan.options.which, "build") or std.mem.eql(u8, plan.options.which, "clone") or std.mem.eql(u8, plan.options.which, "run-operation") or std.mem.eql(u8, plan.options.which, "snapshot") or std.mem.eql(u8, plan.options.which, "compile") or std.mem.eql(u8, plan.options.which, "generate");
     if (!supported) return error.UnsupportedRetryCommand;
     var invocation = runtime;
     invocation.invocation_options = &plan.options;
@@ -83,6 +83,8 @@ pub fn retry(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     if (std.mem.eql(u8, plan.options.which, "build")) return buildPreflight(invocation, plan.options, stdout, stderr);
     if (std.mem.eql(u8, plan.options.which, "snapshot")) return snapshotRun(invocation, plan.options, stdout, stderr);
     if (std.mem.eql(u8, plan.options.which, "clone")) return clone(invocation, plan.options, stdout, stderr);
+    if (std.mem.eql(u8, plan.options.which, "compile")) return compile(invocation, plan.options, stdout, stderr);
+    if (std.mem.eql(u8, plan.options.which, "generate")) return docsGenerate(invocation, plan.options, stdout, stderr);
     return runOperation(invocation, plan.options, stdout, stderr);
 }
 
@@ -250,13 +252,23 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
 
     const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected, target_dir);
-    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, true, true);
-    if (selected.len != 0 and !compile_result.saw_model and !compile_result.saw_snapshot and !compile_result.saw_analysis and !compile_result.saw_generic_test and !compile_result.saw_singular_test) return error.UnsupportedCompileSelection;
+    var compile_rows: std.ArrayList(run_results.NodeResult) = .empty;
+    defer {
+        deinitRunResults(runtime.allocator, compile_rows.items);
+        compile_rows.deinit(runtime.allocator);
+    }
+    const compile_result = compileSelectedModelsWithResults(runtime, &graph, selected, target_dir, true, true, &compile_rows) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        _ = try writeManifest(runtime, &graph, target_dir);
+        try writeRunResults(runtime, target_dir, compile_rows.items);
+        return error.ExecutionFailure;
+    };
 
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
+    try writeRunResults(runtime, target_dir, compile_rows.items);
     if (compile_result.snapshot_count != 0) {
         try stdout.print("Compiled {d} model(s), {d} snapshot(s), {d} analysis(es), and {d} test(s) into {s}\n", .{
             compile_result.count, compile_result.snapshot_count, compile_result.analysis_count, compile_result.test_count, util.normalizeForDisplay(compile_result.compiled_base),
@@ -292,12 +304,23 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected, target_dir);
-    const compile_result = if (options.docs_compile) try compileSelectedModels(runtime, &graph, selected, target_dir, false, false) else CompileResult{ .count = 0, .saw_model = false, .compiled_base = "" };
+    var compile_rows: std.ArrayList(run_results.NodeResult) = .empty;
+    defer {
+        deinitRunResults(runtime.allocator, compile_rows.items);
+        compile_rows.deinit(runtime.allocator);
+    }
+    const compile_result = if (options.docs_compile) compileSelectedModelsWithResults(runtime, &graph, selected, target_dir, true, true, &compile_rows) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        _ = try writeManifest(runtime, &graph, target_dir);
+        try writeRunResults(runtime, target_dir, compile_rows.items);
+        return error.ExecutionFailure;
+    } else CompileResult{ .count = 0, .saw_model = false, .compiled_base = "" };
 
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
+    if (options.docs_compile) try writeRunResults(runtime, target_dir, compile_rows.items);
 
     var catalog_entries: catalog.CatalogEntries = .{};
     defer catalog.deinitCatalogEntries(runtime.allocator, &catalog_entries);
@@ -1956,6 +1979,35 @@ fn targetDir(runtime: Runtime, options: Options) ![]const u8 {
 }
 
 fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, include_singular_tests: bool, include_analyses: bool) !CompileResult {
+    return compileSelectedModelsWithResults(runtime, graph, selected, target_dir, include_singular_tests, include_analyses, null);
+}
+
+fn recordCompilation(runtime: Runtime, rows: ?*std.ArrayList(run_results.NodeResult), started: i96, result: run_results.NodeResult) !void {
+    const destination = rows orelse return;
+    const clock = @import("project/execution_clock.zig");
+    const compiled = clock.now(runtime.io);
+    var row = result;
+    row.compile_started_at = started;
+    row.compile_completed_at = compiled;
+    if (std.mem.eql(u8, row.status, "success")) {
+        row.execution_started_at = compiled;
+        row.execution_completed_at = clock.now(runtime.io);
+    }
+    row.execution_time = @as(f64, @floatFromInt(@max(0, (row.execution_completed_at orelse compiled) - started))) / std.time.ns_per_s;
+    try destination.append(runtime.allocator, row);
+}
+
+fn recordCompileError(runtime: Runtime, rows: ?*std.ArrayList(run_results.NodeResult), started: i96, result: run_results.NodeResult, err: anyerror) !void {
+    if (rows == null) return;
+    var row = result;
+    row.status = "error";
+    row.compiled_override = false;
+    row.message = try std.fmt.allocPrint(runtime.allocator, "Compilation failed: {s}", .{@errorName(err)});
+    try recordCompilation(runtime, rows, started, row);
+}
+
+fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, include_singular_tests: bool, include_analyses: bool, compile_rows: ?*std.ArrayList(run_results.NodeResult)) !CompileResult {
+    const clock = @import("project/execution_clock.zig");
     if (graph.database_path == null and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
         for (graph.nodes.items) |node| {
             if (node.enabled and std.mem.eql(u8, node.resource_type, "snapshot")) {
@@ -1977,10 +2029,14 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
     var saw_selected_generic_test = false;
     var saw_selected_singular_test = false;
     for (graph.nodes.items) |*node| {
+        if (node.enabled and std.mem.eql(u8, node.resource_type, "seed") and selectionContains(selected, node.unique_id)) {
+            try recordCompilation(runtime, compile_rows, clock.now(runtime.io), .{ .node = node });
+            continue;
+        }
         if (!node.enabled or (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "snapshot"))) continue;
         if (!selectionContains(selected, node.unique_id)) continue;
         if (std.mem.eql(u8, node.resource_type, "snapshot")) saw_selected_snapshot = true else saw_selected_model = true;
-        if (std.mem.eql(u8, node.materialized, "ephemeral")) continue;
+        if (std.mem.eql(u8, node.materialized, "ephemeral") and compile_rows == null) continue;
 
         if (std.mem.eql(u8, node.materialized, "incremental") and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
             try incremental_config.validate(node.incremental);
@@ -1988,7 +2044,11 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
             defer runtime.allocator.free(incremental_db_path);
             node.runtime_is_incremental = try incremental.isIncremental(runtime, incremental_db_path, graph, node);
         }
-        var compiled_model = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, node);
+        const started = clock.now(runtime.io);
+        var compiled_model = compiler.compileModelWithInjectedCtes(runtime.allocator, graph, node) catch |err| {
+            try recordCompileError(runtime, compile_rows, started, .{ .node = node }, err);
+            return err;
+        };
         errdefer compiled_model.deinit(runtime.allocator);
         const artifact_path = if (node.snapshot_yaml_definition) try std.fmt.allocPrint(runtime.allocator, "{s}/{s}.sql", .{ node.original_file_path, node.name }) else node.original_file_path;
         const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, node.package_name, artifact_path });
@@ -1996,7 +2056,7 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
             try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
         }
         try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = compiled_model.compiled_code });
-        const relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
+        const relation_name = if (std.mem.eql(u8, node.materialized, "ephemeral")) null else try compiler.relationNameForNode(runtime.allocator, graph, node);
         node.compiled = true;
         node.compiled_code = compiled_model.compiled_code;
         node.extra_ctes = compiled_model.extra_ctes;
@@ -2004,6 +2064,7 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         compiled_model.extra_ctes = .empty;
         node.compiled_path = util.normalizeForDisplay(compiled_path);
         node.relation_name = relation_name;
+        if (!std.mem.eql(u8, node.materialized, "ephemeral")) try recordCompilation(runtime, compile_rows, started, .{ .node = node });
         if (std.mem.eql(u8, node.resource_type, "snapshot")) compiled_snapshot_count += 1 else compiled_count += 1;
     }
 
@@ -2013,7 +2074,11 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
             if (!selectionContains(selected, node.unique_id)) continue;
             saw_selected_analysis = true;
 
-            const compiled_code = try compiler.compileModel(runtime.allocator, graph, node);
+            const started = clock.now(runtime.io);
+            const compiled_code = compiler.compileModel(runtime.allocator, graph, node) catch |err| {
+                try recordCompileError(runtime, compile_rows, started, .{ .node = node }, err);
+                return err;
+            };
             const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, node.package_name, node.path });
             if (std.fs.path.dirname(compiled_path)) |parent| {
                 try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
@@ -2022,6 +2087,7 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
             node.compiled = true;
             node.compiled_code = compiled_code;
             node.compiled_path = util.normalizeForDisplay(compiled_path);
+            try recordCompilation(runtime, compile_rows, started, .{ .node = node, .compiled_code = compiled_code });
             compiled_analysis_count += 1;
         }
     }
@@ -2034,9 +2100,10 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
                 validateGenericTestExecution(test_node) catch return error.UnsupportedCompileSelection;
             }
 
-            const compiled_code = compiler.compileGenericTest(runtime.allocator, graph, test_node) catch |err| switch (err) {
-                error.UnsupportedTestExecution => return error.UnsupportedCompileSelection,
-                else => return err,
+            const started = clock.now(runtime.io);
+            const compiled_code = compiler.compileGenericTest(runtime.allocator, graph, test_node) catch |err| {
+                try recordCompileError(runtime, compile_rows, started, .{ .test_node = test_node }, err);
+                return if (err == error.UnsupportedTestExecution) error.UnsupportedCompileSelection else err;
             };
             const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, test_node.package_name, test_node.path });
             if (std.fs.path.dirname(compiled_path)) |parent| {
@@ -2046,13 +2113,18 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
             test_node.compiled = true;
             test_node.compiled_code = compiled_code;
             test_node.compiled_path = util.normalizeForDisplay(compiled_path);
+            try recordCompilation(runtime, compile_rows, started, .{ .test_node = test_node, .compiled_code = compiled_code });
             compiled_test_count += 1;
         }
         for (graph.singular_tests.items) |*test_node| {
             if (!test_node.enabled or !selectionContains(selected, test_node.unique_id)) continue;
             saw_selected_singular_test = true;
 
-            const compiled_code = try compiler.compileSingularTest(runtime.allocator, graph, test_node);
+            const started = clock.now(runtime.io);
+            const compiled_code = compiler.compileSingularTest(runtime.allocator, graph, test_node) catch |err| {
+                try recordCompileError(runtime, compile_rows, started, .{ .singular_test_node = test_node }, err);
+                return err;
+            };
             const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, test_node.package_name, test_node.original_file_path });
             if (std.fs.path.dirname(compiled_path)) |parent| {
                 try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
@@ -2061,6 +2133,7 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
             test_node.compiled = true;
             test_node.compiled_code = compiled_code;
             test_node.compiled_path = util.normalizeForDisplay(compiled_path);
+            try recordCompilation(runtime, compile_rows, started, .{ .singular_test_node = test_node, .compiled_code = compiled_code });
             compiled_test_count += 1;
         }
     }

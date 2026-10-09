@@ -25,6 +25,7 @@ pub const NodeResult = struct {
     owns_compiled_code: bool = false,
     relation_name: ?[]const u8 = null,
     owns_relation_name: bool = false,
+    compiled_override: ?bool = null,
     thread_number: u16 = 1,
     execution_started_at: ?i96 = null,
     execution_completed_at: ?i96 = null,
@@ -174,8 +175,10 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
     try writer.writeAll("{\"which\":");
     try json.string(writer, opts.which);
     inline for (.{ "profile", "target", "state", "defer_state", "selector" }) |key| {
-        try writer.print(",\"{s}\":", .{key});
-        if (@field(opts, key)) |value| try json.string(writer, value) else try writer.writeAll("null");
+        if (@field(opts, key)) |value| {
+            try writer.print(",\"{s}\":", .{key});
+            try json.string(writer, value);
+        }
     }
     inline for (.{ "select", "exclude" }) |key| {
         try writer.print(",\"{s}\":", .{key});
@@ -197,15 +200,18 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
     }
     try writer.writeAll(",\"vars\":");
     try writeMapping(writer, allocator, opts.vars);
-    try writer.writeAll(",\"threads\":");
     if (opts.threads) |value| {
+        try writer.writeAll(",\"threads\":");
         const threads = std.fmt.parseInt(u32, value, 10) catch return error.InvalidOption;
         if (threads == 0) return error.InvalidOption;
         try writer.print("{d}", .{threads});
-    } else try writer.writeAll("null");
+    }
     try writer.print(",\"full_refresh\":{s}", .{if (opts.full_refresh) "true" else "false"});
     try writer.print(",\"defer\":{s},\"favor_state\":{s},\"indirect_selection\":", .{ if (opts.defer_enabled) "true" else "false", if (opts.favor_state) "true" else "false" });
     try json.string(writer, opts.indirect_selection);
+    if (std.mem.eql(u8, opts.which, "generate")) {
+        try writer.print(",\"static\":{s},\"compile\":{s}", .{ if (opts.docs_static) "true" else "false", if (opts.docs_compile) "true" else "false" });
+    }
     if (std.mem.eql(u8, opts.which, "run-operation")) {
         try writer.writeAll(",\"macro\":");
         if (opts.command_name) |value| try json.string(writer, value) else try writer.writeAll("null");
@@ -272,7 +278,9 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     try json.string(writer, resultUniqueId(result));
     try writer.writeAll(", \"compiled\": ");
     const skipped = std.mem.eql(u8, result.status, "skipped");
-    if (result.operation_id != null) {
+    if (result.compiled_override) |compiled| {
+        try writer.writeAll(if (compiled) "true" else "false");
+    } else if (result.operation_id != null) {
         try writer.writeAll("false");
     } else if (skipped) {
         if (result.test_node != null or result.singular_test_node != null) {

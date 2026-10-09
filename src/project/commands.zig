@@ -308,6 +308,12 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
     const which = try allocator.dupe(u8, which_value.string);
     var options = current;
     options.which = which;
+    if (std.mem.eql(u8, which, "generate")) inline for (.{ .{ "compile", "docs_compile" }, .{ "static", "docs_static" } }) |field| {
+        if (args.get(field[0])) |value| {
+            if (value != .bool) return error.MalformedRunResultsArtifact;
+            @field(options, field[1]) = value.bool;
+        }
+    };
     inline for (.{ "profile", "target", "state", "defer_state", "select", "selector", "exclude" }) |field| {
         if (args.get(field)) |value| @field(options, field) = try optionText(allocator, value, std.mem.eql(u8, field, "select") or std.mem.eql(u8, field, "exclude"));
     }

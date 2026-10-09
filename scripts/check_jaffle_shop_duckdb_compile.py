@@ -6,6 +6,7 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from validate_dbt_artifacts import assert_artifact
 
 from check_jaffle_shop_duckdb_build import copy_public_project, load_json
 from check_jaffle_shop_duckdb_parse import (
@@ -36,8 +37,10 @@ def run_compile_gate(dxt: Path, project_dir: Path, target_dir: Path) -> Path:
     if not manifest_path.exists():
         raise GateError(f"compile did not write manifest: {manifest_path}")
     run_results_path = target_dir / "run_results.json"
-    if run_results_path.exists():
-        raise GateError(f"compile should not write run_results: {run_results_path}")
+    assert_artifact(run_results_path)
+    results = load_json(run_results_path)["results"]
+    if not results or any(row["status"] != "success" for row in results):
+        raise GateError("compile must record successful results for selected executable resources")
     return manifest_path
 
 
