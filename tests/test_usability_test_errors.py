@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import shutil
 import subprocess
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,46 @@ pytestmark = pytest.mark.skipif(DUCKDB is None, reason="DuckDB CLI is required")
 @pytest.fixture(scope="module", autouse=True)
 def native_binary():
     subprocess.run(["zig", "build"], cwd=ROOT, check=True)
+
+
+@pytest.fixture
+def core_runner(monkeypatch: pytest.MonkeyPatch):
+    main = pytest.importorskip("dbt.cli.main", reason="optional pinned dbt Core error oracle")
+    pytest.importorskip("dbt.adapters.duckdb", reason="optional pinned dbt DuckDB error oracle")
+    assert version("dbt-core") == "1.10.5"
+    assert version("dbt-duckdb") == "1.9.6"
+    monkeypatch.setenv("DBT_SEND_ANONYMOUS_USAGE_STATS", "false")
+    import dbt_common.events.base_types as events
+    import google.protobuf.json_format as protobuf
+    original = protobuf.MessageToJson
+    parameters = inspect.signature(original).parameters
+    options = ("always_print_fields_with_no_presence", "including_default_value_fields")
+    supported = next(option for option in options if option in parameters)
+
+    def compatible(message, *args, **kwargs):
+        for option in options:
+            if option != supported and option in kwargs:
+                value = kwargs.pop(option)
+                kwargs.setdefault(supported, value)
+        return original(message, *args, **kwargs)
+
+    monkeypatch.setattr(protobuf, "MessageToJson", compatible)
+    monkeypatch.setattr(events, "MessageToJson", compatible)
+    return main.dbtRunner()
+
+
+def write_profile(directory: Path, database: Path) -> None:
+    directory.mkdir()
+    (directory / "profiles.yml").write_text(
+        "error_outcomes:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n"
+        f"      path: {database}\n      schema: main\n      threads: 1\n"
+    )
+
+
+def validate_core_artifact_schema(target: Path) -> None:
+    from dbt.artifacts.schemas.run import RunResultsArtifact
+
+    RunResultsArtifact.validate(json.loads((target / "run_results.json").read_text()))
 
 
 def write_project(project: Path, files: dict[str, str]) -> None:
@@ -146,6 +188,11 @@ def test_build_sql_error_blocks_descendants_and_continues_independent_models(tmp
     child_tests = [row for key, row in rows.items() if key.startswith("test.") and "child" in key]
     assert len(child_tests) == 1
     assert child_tests[0]["status"] == "skipped"
+    for row in [rows["model.error_outcomes.child"], child_tests[0]]:
+        assert row["compiled"] is False
+        assert row["compiled_code"] is None
+    assert rows["model.error_outcomes.child"]["relation_name"] == '"main"."child"'
+    assert child_tests[0]["relation_name"] is None
     database = target / "dxt.duckdb"
     assert query(database, "select count(*) from duckdb_tables() where table_name = 'child'") == "0"
     assert query(database, "select id from zz_independent") == "9"
@@ -233,3 +280,75 @@ def test_truncated_duckdb_error_output_is_sanitized_and_durable(tmp_path: Path):
     assert rows["test.error_outcomes.zz_independent"]["status"] == "pass"
     assert "private_engine_error" not in (target / "run_results.json").read_text()
     assert "private_engine_error" not in outcome.stdout + outcome.stderr
+
+
+@pytest.mark.parametrize("kind", ["generic", "singular"])
+def test_core_1105_build_error_and_skip_outcomes_oracle(tmp_path: Path, kind: str, core_runner):
+    project, native_target, core_target = tmp_path / "project", tmp_path / "native", tmp_path / "core"
+    write_project(project, build_error_files(kind))
+    native_profiles, core_profiles = tmp_path / "native-profiles", tmp_path / "core-profiles"
+    write_profile(native_profiles, tmp_path / "native.duckdb")
+    write_profile(core_profiles, tmp_path / "core.duckdb")
+    native = run_dxt(project, native_target, "build", "--profiles-dir", str(native_profiles))
+    assert native.returncode == 1, native.stdout + native.stderr
+    core = core_runner.invoke([
+        "--quiet", "--no-use-colors", "build", "--project-dir", str(project),
+        "--profiles-dir", str(core_profiles), "--target-path", str(core_target),
+        "--log-path", str(tmp_path / "core-logs"), "--no-partial-parse",
+    ])
+    assert not core.success
+    assert core.exception is None, core.exception
+    native_rows, core_rows = results(native_target), results(core_target)
+    validate_core_artifact_schema(native_target)
+    validate_core_artifact_schema(core_target)
+    native_manifest = json.loads((native_target / "manifest.json").read_text())
+    core_manifest = json.loads((core_target / "manifest.json").read_text())
+    assert {key: row["status"] for key, row in native_rows.items()} == {key: row["status"] for key, row in core_rows.items()}
+    for key, oracle in core_rows.items():
+        if oracle["status"] in ("error", "skipped"):
+            native_row = native_rows[key]
+            for field in ("failures", "compiled", "adapter_response"):
+                assert native_row[field] == oracle[field]
+            if oracle["status"] == "skipped":
+                for field in ("message", "compiled_code"):
+                    assert native_row[field] is None
+                    assert oracle[field] is None
+                # Each runner retains its parsed physical relation identity.
+                # Core includes the named DuckDB catalog; dxt uses two parts.
+                if key.startswith("model."):
+                    assert native_row["relation_name"] == native_manifest["nodes"][key]["relation_name"]
+                    assert oracle["relation_name"] == core_manifest["nodes"][key]["relation_name"]
+                else:
+                    assert native_row["relation_name"] == oracle["relation_name"]
+            else:
+                assert_error(native_row)
+
+
+def test_core_1105_unit_sql_error_outcomes_oracle(tmp_path: Path, core_runner):
+    project, native_target, core_target = tmp_path / "project", tmp_path / "native", tmp_path / "core"
+    write_project(project, unit_error_files())
+    native_profiles, core_profiles = tmp_path / "native-profiles", tmp_path / "core-profiles"
+    write_profile(native_profiles, tmp_path / "native.duckdb")
+    write_profile(core_profiles, tmp_path / "core.duckdb")
+    native_setup = run_dxt(project, native_target, "run", "--profiles-dir", str(native_profiles))
+    assert native_setup.returncode == 0, native_setup.stdout + native_setup.stderr
+    native = run_dxt(project, native_target, "test", "--profiles-dir", str(native_profiles), "--select", "test_type:unit")
+    assert native.returncode == 1, native.stdout + native.stderr
+    common = [
+        "--project-dir", str(project), "--profiles-dir", str(core_profiles),
+        "--target-path", str(core_target), "--log-path", str(tmp_path / "core-logs"),
+    ]
+    setup = core_runner.invoke(["--quiet", "--no-use-colors", "run", *common])
+    assert setup.success, setup.exception
+    core = core_runner.invoke(["--quiet", "--no-use-colors", "test", *common, "--select", "test_type:unit"])
+    assert not core.success
+    assert core.exception is None, core.exception
+    native_rows, core_rows = results(native_target), results(core_target)
+    validate_core_artifact_schema(native_target)
+    validate_core_artifact_schema(core_target)
+    assert {key: row["status"] for key, row in native_rows.items()} == {key: row["status"] for key, row in core_rows.items()}
+    key = "unit_test.error_outcomes.orders.invalid_cast"
+    assert_error(native_rows[key], unit=True)
+    for field in ("failures", "compiled", "compiled_code", "adapter_response", "relation_name"):
+        assert native_rows[key][field] == core_rows[key][field]
+    assert query(tmp_path / "native.duckdb", "select id from orders") == "1"

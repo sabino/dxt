@@ -2236,7 +2236,8 @@ def test_run_writes_skipped_run_results_for_blocked_selected_descendants(tmp_pat
     assert [item["status"] for item in run_results["results"]] == ["error", "skipped"]
     assert run_results["results"][0]["message"] == "DuckDB execution failed"
     assert run_results["results"][1]["message"] is None
-    assert run_results["results"][1]["compiled"] is True
+    assert run_results["results"][1]["compiled"] is False
+    assert run_results["results"][1]["compiled_code"] is None
     assert run_results["results"][1]["relation_name"] == '"main"."orders"'
 
     query = subprocess.run(
@@ -2666,7 +2667,8 @@ def test_build_writes_skipped_run_results_for_blocked_selected_descendants(tmp_p
     assert [item["status"] for item in run_results["results"]] == ["error", "skipped"]
     assert run_results["results"][0]["message"] == "DuckDB execution failed"
     assert run_results["results"][1]["message"] is None
-    assert run_results["results"][1]["compiled"] is True
+    assert run_results["results"][1]["compiled"] is False
+    assert run_results["results"][1]["compiled_code"] is None
 
 
 def test_build_rejects_unsupported_model_materialization_before_duckdb(tmp_path: Path):
@@ -4531,10 +4533,20 @@ def test_test_command_does_not_build_missing_parent_relation(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "DuckDB execution failed" in result.stderr
+    assert result.returncode == 1
+    assert "one or more tests failed" in result.stderr
     assert (target / "manifest.json").exists()
-    assert not (target / "run_results.json").exists()
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [row["unique_id"] for row in run_results["results"]] == [
+        "test.build_model_tests.not_null_customers_customer_id.5c9bf9911d",
+        "test.build_model_tests.unique_customers_customer_id.c5af1ff4b1",
+    ]
+    assert [row["status"] for row in run_results["results"]] == ["error", "error"]
+    assert all(row["message"] == "DuckDB execution failed" for row in run_results["results"])
+    assert all(row["failures"] is None for row in run_results["results"])
+    assert all(row["compiled"] is True for row in run_results["results"])
+    assert all(row["compiled_code"] is not None for row in run_results["results"])
 
     if (target / "dxt.duckdb").exists():
         query = subprocess.run(
@@ -5824,8 +5836,8 @@ seeds:
     assert [item["status"] for item in run_results["results"]] == ["error", "skipped", "skipped", "skipped"]
     assert run_results["results"][0]["message"] == "DuckDB execution failed"
     assert [item["message"] for item in run_results["results"][1:]] == [None, None, None]
-    assert run_results["results"][1]["compiled"] is True
-    assert run_results["results"][1]["compiled_code"].strip().startswith("select")
+    assert all(item["compiled"] is False for item in run_results["results"][1:])
+    assert all(item["compiled_code"] is None for item in run_results["results"][1:])
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 table-level generic-test build slice")

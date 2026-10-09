@@ -147,7 +147,14 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     try writer.writeAll(", \"unique_id\": ");
     try json.string(writer, resultUniqueId(result));
     try writer.writeAll(", \"compiled\": ");
-    if (result.unit_test_node != null and std.mem.eql(u8, result.status, "error")) {
+    const skipped = std.mem.eql(u8, result.status, "skipped");
+    if (skipped) {
+        if (result.test_node != null or result.singular_test_node != null) {
+            try writer.writeAll("false");
+        } else if (result.node) |node| {
+            try writer.writeAll(if (isCompiledResultNode(node)) "false" else "null");
+        } else try writer.writeAll("null");
+    } else if (result.unit_test_node != null and std.mem.eql(u8, result.status, "error")) {
         try writer.writeAll("null");
     } else if (result.test_node != null or result.singular_test_node != null or result.unit_test_node != null or result.compiled_code != null) {
         try writer.writeAll("true");
@@ -157,7 +164,9 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
         try writer.writeAll("null");
     } else try writer.writeAll("null");
     try writer.writeAll(", \"compiled_code\": ");
-    if (result.compiled_code) |compiled_code| {
+    if (skipped) {
+        try writer.writeAll("null");
+    } else if (result.compiled_code) |compiled_code| {
         try json.string(writer, compiled_code);
     } else if (result.node) |node| if (isCompiledResultNode(node) and node.compiled_code != null) {
         const compiled_code = node.compiled_code.?;
@@ -374,7 +383,7 @@ test "run-results writer emits compiled model error result" {
     try std.testing.expectEqualStrings("\"main\".\"orders\"", result.get("relation_name").?.string);
 }
 
-test "run-results writer emits compiled model skipped result" {
+test "run-results writer omits compiled model fields for skipped execution" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -405,8 +414,8 @@ test "run-results writer emits compiled model skipped result" {
     try std.testing.expectEqual(.null, result.get("message").?);
     try std.testing.expectEqual(.null, result.get("failures").?);
     try std.testing.expectEqualStrings("model.demo.orders", result.get("unique_id").?.string);
-    try std.testing.expectEqual(true, result.get("compiled").?.bool);
-    try std.testing.expectEqualStrings("select * from \"main\".\"customers\"", result.get("compiled_code").?.string);
+    try std.testing.expectEqual(false, result.get("compiled").?.bool);
+    try std.testing.expectEqual(.null, result.get("compiled_code").?);
     try std.testing.expectEqualStrings("\"main\".\"orders\"", result.get("relation_name").?.string);
 }
 
@@ -450,6 +459,43 @@ test "run-results writer emits generic test pass and fail statuses" {
     try std.testing.expectEqual(true, result.get("compiled").?.bool);
     try std.testing.expectEqualStrings("select 1 as failures", result.get("compiled_code").?.string);
     try std.testing.expectEqualStrings("\"dbt_test__audit\".\"not_null_customers_customer_id\"", result.get("relation_name").?.string);
+}
+
+test "skipped data and unit test rows never expose preflight compiled SQL" {
+    const allocator = std.testing.allocator;
+    const generic = GenericTestNode{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_orders_id.abc",
+        .name = "not_null_orders_id",
+        .alias = "not_null_orders_id",
+        .path = "not_null_orders_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "id",
+    };
+    const unit = UnitTestDef{
+        .package_name = "demo",
+        .unique_id = "unit_test.demo.orders.skipped",
+        .name = "skipped",
+        .path = "schema.yml",
+        .original_file_path = "models/schema.yml",
+    };
+    const rendered = try renderRunResults(allocator, &.{
+        .{ .test_node = &generic, .status = "skipped", .compiled_code = "preflight data SQL" },
+        .{ .unit_test_node = &unit, .status = "skipped", .compiled_code = "preflight unit SQL" },
+    });
+    defer allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+    const rows = parsed.value.object.get("results").?.array.items;
+    try std.testing.expectEqual(false, rows[0].object.get("compiled").?.bool);
+    try std.testing.expectEqual(.null, rows[1].object.get("compiled").?);
+    for (rows) |row| {
+        try std.testing.expectEqual(.null, row.object.get("compiled_code").?);
+        try std.testing.expectEqual(.null, row.object.get("failures").?);
+        try std.testing.expectEqual(.null, row.object.get("message").?);
+    }
 }
 
 test "run-results writer preserves mixed model and generic test order" {
