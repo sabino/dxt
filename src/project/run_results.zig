@@ -15,6 +15,7 @@ const clock = @import("execution_clock.zig");
 pub const LogMessage = struct {
     message: []const u8,
     level: []const u8,
+    is_print: bool = false,
 };
 
 pub const NodeResult = struct {
