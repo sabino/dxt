@@ -153,6 +153,10 @@ pub const OperationHost = struct {
             },
             else => return err,
         };
+        if (self.session) |*session| {
+            if (runtime.cancellation_token) |token| session.setCancellationToken(token);
+            if (runtime.session_observer) |observer| observer.changed(observer.context, session);
+        }
     }
 
     fn currentSession(self: *OperationHost) ?*adapter.Session {
@@ -179,6 +183,7 @@ pub const OperationHost = struct {
     }
 
     pub fn deinit(self: *OperationHost) void {
+        if (self.session != null) if (self.runtime.session_observer) |observer| observer.changed(observer.context, null);
         self.rollback() catch {};
         if (self.session) |*session| session.deinit();
         if (self.owned_pool) |pool| {

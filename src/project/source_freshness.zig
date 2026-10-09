@@ -16,6 +16,10 @@ pub const CheckResult = struct {
     snapshotted_at: ?[]const u8 = null,
     age_seconds: f64 = 0,
     error_message: ?[]const u8 = null,
+    thread_number: u16 = 1,
+    execution_started_at: ?i96 = null,
+    execution_completed_at: ?i96 = null,
+    execution_time: f64 = 0,
 };
 
 pub const SourceStatusRow = struct {
@@ -268,7 +272,11 @@ fn writeResult(writer: *Io.Writer, result: CheckResult) !void {
     try json.string(writer, result.status);
     try writer.writeAll(", \"criteria\": ");
     try writeCriteria(writer, freshness);
-    try writer.writeAll(", \"adapter_response\": {}, \"timing\": [{\"name\": \"execute\", \"started_at\": null, \"completed_at\": null}], \"thread_id\": \"Thread-1\", \"execution_time\": 0.0}");
+    try writer.writeAll(", \"adapter_response\": {}, \"timing\": [{\"name\": \"execute\", \"started_at\": ");
+    try @import("execution_clock.zig").writeTimestamp(writer, result.execution_started_at);
+    try writer.writeAll(", \"completed_at\": ");
+    try @import("execution_clock.zig").writeTimestamp(writer, result.execution_completed_at);
+    try writer.print("}}], \"thread_id\": \"Thread-{d}\", \"execution_time\": {d}}}", .{ result.thread_number, result.execution_time });
 }
 
 fn writeCriteria(writer: *Io.Writer, threshold: FreshnessThreshold) !void {

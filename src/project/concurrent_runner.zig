@@ -47,6 +47,8 @@ pub const Summary = struct {
     total_failures: u64 = 0,
 };
 
+const Mode = enum { execute, compile };
+
 const State = enum { pending, running, finished, done };
 const Shared = struct { mutex: std.Io.Mutex = .init, changed: std.Io.Condition = .init };
 const Job = struct {
@@ -65,6 +67,7 @@ const Job = struct {
     execute: Execute,
     project_dir: []const u8,
     database_path: []const u8,
+    mode: Mode,
 
     fn work(self: *Job) void {
         const start = clock.now(self.runtime.io);
@@ -89,8 +92,24 @@ const Job = struct {
         self.shared.changed.signal(runtime.io);
     }
 
+    fn sessionChanged(raw: *anyopaque, session: ?*adapter.Session) void {
+        const self: *Job = @ptrCast(@alignCast(raw));
+        self.shared.mutex.lockUncancelable(self.runtime.io);
+        defer self.shared.mutex.unlock(self.runtime.io);
+        self.active_session = session;
+        if (self.cancel_requested.load(.acquire)) if (session) |active| active.cancel() catch {};
+    }
+
     fn perform(self: *Job, runtime_base: types.Runtime, graph: *types.Graph) !results.NodeResult {
-        var session = try adapter.openSession(runtime_base, graph, if (self.resource == .unit) ":memory:" else self.database_path);
+        if (self.mode == .compile) {
+            var runtime = runtime_base;
+            runtime.adapter_session = null;
+            runtime.cancellation_token = &self.cancel_requested;
+            runtime.session_observer = .{ .context = self, .changed = sessionChanged };
+            if (self.cancel_requested.load(.acquire)) return error.AdapterQueryCancelled;
+            return self.execute(runtime, graph, self.resource, self.database_path, self.project_dir);
+        }
+        var session = if (self.resource == .unit) try adapter.openUnitSession(runtime_base, graph) else try adapter.openSession(runtime_base, graph, self.database_path);
         defer session.deinit();
         self.shared.mutex.lockUncancelable(runtime_base.io);
         const cancel_requested = self.cancel_requested.load(.acquire);
@@ -124,25 +143,33 @@ pub fn parseThreadCount(value: []const u8) !u16 {
 }
 
 pub fn requested(runtime: types.Runtime, options: types.Options, graph: *const types.Graph) !bool {
-    if (try threadCount(options, graph) > 1 or options.fail_fast or options.log_format == .json or std.mem.eql(u8, graph.adapter_type, "postgres")) return true;
+    if (try threadCount(options, graph) > 1 or options.fail_fast or options.log_format == .json or std.mem.eql(u8, graph.adapter_type, "postgres") or (graph.database_path != null and std.mem.eql(u8, graph.database_path.?, ":memory:"))) return true;
     return if (runtime.duckdb_pool) |pool| try pool.available() else false;
 }
 
 pub fn run(runtime: types.Runtime, graph: *const types.Graph, options: types.Options, resources: []const Resource, database_path: []const u8, execute: Execute, events: *std.Io.Writer) !Summary {
+    return runMode(runtime, graph, options, resources, database_path, execute, events, .execute);
+}
+
+pub fn runCompilation(runtime: types.Runtime, graph: *const types.Graph, options: types.Options, resources: []const Resource, database_path: []const u8, execute: Execute, events: *std.Io.Writer) !Summary {
+    return runMode(runtime, graph, options, resources, database_path, execute, events, .compile);
+}
+
+fn runMode(runtime: types.Runtime, graph: *const types.Graph, options: types.Options, resources: []const Resource, database_path: []const u8, execute: Execute, events: *std.Io.Writer, mode: Mode) !Summary {
     const count = try threadCount(options, graph);
-    if (std.mem.eql(u8, graph.adapter_type, "duckdb")) {
+    if (mode == .execute and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
         const pool = runtime.duckdb_pool orelse return error.NativeDuckDbPoolRequired;
         if (!try pool.available()) return error.NativeDuckDbLibraryNotFound;
     }
     var shared: Shared = .{};
     const jobs = try runtime.allocator.alloc(Job, resources.len);
     defer runtime.allocator.free(jobs);
-    for (resources, jobs) |resource, *job| job.* = .{ .resource = resource, .arena = .init(std.heap.smp_allocator), .shared = &shared, .runtime = runtime, .graph = graph, .execute = execute, .project_dir = options.project_dir, .database_path = database_path };
+    for (resources, jobs) |resource, *job| job.* = .{ .resource = resource, .arena = .init(std.heap.smp_allocator), .shared = &shared, .runtime = runtime, .graph = graph, .execute = execute, .project_dir = options.project_dir, .database_path = database_path, .mode = mode };
     defer for (jobs) |*job| {
         job.prerequisites.deinit(runtime.allocator);
         job.arena.deinit();
     };
-    try wirePrerequisites(runtime.allocator, graph, jobs);
+    try wirePrerequisites(runtime.allocator, graph, jobs, mode);
     var rows: std.ArrayList(results.NodeResult) = .empty;
     errdefer {
         for (rows.items) |row| freeResult(runtime.allocator, row);
@@ -182,12 +209,13 @@ pub fn run(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
                 return err;
             };
             try emitEvent(runtime, options, events, "NodeFinished", job.resource.id(), output.status, output.thread_number, output.execution_time);
+            if (output.log_output) |messages| try emitMessages(runtime, options, events, job.resource.id(), output.thread_number, messages);
             if (failed(output)) {
-                if (job.resource == .node) summary.had_execution_error = true else {
+                if (mode == .compile or job.resource == .node) summary.had_execution_error = true else {
                     summary.failed_tests += 1;
                     summary.total_failures += output.failures orelse 0;
                 }
-                try addBlockers(runtime.allocator, graph, job.resource, &blocked);
+                if (mode == .execute) try addBlockers(runtime.allocator, graph, job.resource, &blocked) else try appendUnique(runtime.allocator, &blocked, job.resource.id());
                 if (options.fail_fast and !stop) {
                     stop = true;
                     cancelJobs(runtime.io, jobs);
@@ -296,7 +324,7 @@ fn addBlockers(allocator: std.mem.Allocator, graph: *const types.Graph, resource
     try appendUnique(allocator, blocked, resource.id());
 }
 
-fn wirePrerequisites(allocator: std.mem.Allocator, graph: *const types.Graph, jobs: []Job) !void {
+fn wirePrerequisites(allocator: std.mem.Allocator, graph: *const types.Graph, jobs: []Job, mode: Mode) !void {
     for (jobs, 0..) |*job, index| {
         const physical = try scheduler.physicalDependencies(allocator, graph, job.resource.dependencies());
         defer allocator.free(physical);
@@ -313,6 +341,7 @@ fn wirePrerequisites(allocator: std.mem.Allocator, graph: *const types.Graph, jo
                 if (other_index != index and std.mem.eql(u8, dependency, other.resource.id())) try appendEdge(allocator, &job.prerequisites, other_index);
             };
         };
+        if (mode == .compile) continue;
         for (jobs, 0..) |other, other_index| {
             if (other_index == index) continue;
             if (other.resource.unitTarget(graph)) |unit_target| {
@@ -355,8 +384,14 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
     output.owns_relation_name = false;
     output.compiled_ctes = &.{};
     output.owns_compiled_ctes = false;
+    output.log_output = null;
+    output.owns_log_output = false;
     errdefer freeResult(allocator, output);
     if (source.message) |value| output.message = try allocator.dupe(u8, value);
+    if (source.log_output) |value| {
+        output.log_output = try allocator.dupe(u8, value);
+        output.owns_log_output = true;
+    }
     if (source.owns_compiled_code) if (source.compiled_code) |value| {
         output.compiled_code = try allocator.dupe(u8, value);
         output.owns_compiled_code = true;
@@ -385,6 +420,29 @@ fn freeResult(allocator: std.mem.Allocator, output: results.NodeResult) void {
     if (output.message) |value| allocator.free(value);
     if (output.owns_compiled_code) if (output.compiled_code) |value| allocator.free(value);
     if (output.owns_relation_name) if (output.relation_name) |value| allocator.free(value);
+    if (output.owns_log_output) if (output.log_output) |value| allocator.free(value);
+}
+
+fn emitMessages(runtime: types.Runtime, options: types.Options, writer: *std.Io.Writer, id: []const u8, worker: u16, messages: []const u8) !void {
+    if (options.log_format != .json) {
+        try writer.writeAll(messages);
+        try writer.flush();
+        return;
+    }
+    var lines = std.mem.splitScalar(u8, messages, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        try writer.writeAll("{\"data\":{\"unique_id\":");
+        try std.json.Stringify.value(id, .{}, writer);
+        try writer.writeAll(",\"msg\":");
+        try std.json.Stringify.value(line, .{}, writer);
+        try writer.print("}},\"info\":{{\"name\":\"JinjaLog\",\"level\":\"info\",\"thread\":\"Thread-{d}\",\"ts\":", .{worker});
+        try clock.writeTimestamp(writer, clock.now(runtime.io));
+        try writer.writeAll(",\"invocation_id\":");
+        if (runtime.invocation) |invocation| try std.json.Stringify.value(&invocation.id, .{}, writer) else try writer.writeAll("null");
+        try writer.writeAll("}}\n");
+    }
+    try writer.flush();
 }
 
 pub fn emitEvent(runtime: types.Runtime, options: types.Options, writer: *std.Io.Writer, name: []const u8, id: []const u8, status: []const u8, worker: u16, execution_time: f64) !void {

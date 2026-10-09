@@ -822,7 +822,7 @@ fn isOptionLike(arg: []const u8) bool {
 }
 
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
-    if (equals(arg, "--fail-fast") and (mode == .build or mode == .seed or mode == .test_command or mode == .retry)) return true;
+    if (equals(arg, "--fail-fast") and (mode == .build or mode == .seed or mode == .test_command or mode == .retry or mode == .compile or mode == .docs_generate)) return true;
     if (mode != .common_only and mode != .clean and mode != .docs_serve and mode != .init and mode != .debug and mode != .operation and mode != .clone and mode != .retry and (equals(arg, "--defer") or equals(arg, "--no-defer") or equals(arg, "--favor-state") or equals(arg, "--no-favor-state"))) return true;
     if ((mode == .build or mode == .compile or mode == .clone) and equals(arg, "--full-refresh")) return true;
     if (mode == .init and equals(arg, "--skip-profile-setup")) return true;
@@ -871,7 +871,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
 
 fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !void {
     try writer.writeAll("  --log-format <text|json>\n");
-    if (mode == .build or mode == .seed or mode == .test_command) try writer.writeAll("  --fail-fast\n");
+    if (mode == .build or mode == .seed or mode == .test_command or equals(command, "compile") or equals(command, "docs generate")) try writer.writeAll("  --fail-fast\n");
     try writer.print("Usage: dxt {s} [options]\n\n", .{command});
     if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "seed") or equals(command, "snapshot") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
         if (equals(command, "docs serve")) {

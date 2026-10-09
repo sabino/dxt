@@ -173,7 +173,37 @@ pub const Pool = struct {
         var connection: Handle = null;
         if (api.duckdb_connect(database.?.handle, &connection) != 0) return error.NativeDuckDbConnectionFailed;
         database.?.references += 1;
-        return .{ .api = api, .handle = connection, .allocator = self.allocator, .readonly = readonly, .pool = self, .database = database.?, .memory = std.mem.eql(u8, path, ":memory:") };
+        return .{ .api = api, .handle = connection, .allocator = self.allocator, .readonly = readonly, .pool = self, .database = database.?, .memory = std.mem.eql(u8, path, ":memory:"), .isolated_memory = std.mem.eql(u8, path, ":memory:") };
+    }
+
+    /// A project uses one invocation-local in-memory database across its
+    /// worker connections. Unit fixtures continue to use acquire(":memory:").
+    pub fn acquireSharedMemory(self: *Pool, scope: []const u8, readonly: bool) !?Connection {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (!try self.load()) return null;
+        const key = try std.fmt.allocPrint(self.allocator, "memory:{s}", .{scope});
+        defer self.allocator.free(key);
+        var database: ?*Database = null;
+        for (self.databases.items) |candidate| if (std.mem.eql(u8, candidate.path, key)) {
+            database = candidate;
+            break;
+        };
+        if (database == null) {
+            var handle = try self.openHandle(":memory:", false);
+            errdefer self.library.?.api.duckdb_close(&handle);
+            const created = try self.allocator.create(Database);
+            errdefer self.allocator.destroy(created);
+            const owned_key = try self.allocator.dupe(u8, key);
+            errdefer self.allocator.free(owned_key);
+            created.* = .{ .path = owned_key, .handle = handle, .readonly = false };
+            try self.databases.append(self.allocator, created);
+            database = created;
+        }
+        var connection: Handle = null;
+        if (self.library.?.api.duckdb_connect(database.?.handle, &connection) != 0) return error.NativeDuckDbConnectionFailed;
+        database.?.references += 1;
+        return .{ .api = &self.library.?.api, .handle = connection, .allocator = self.allocator, .readonly = readonly, .pool = self, .database = database.?, .memory = true, .isolated_memory = false, .shared_memory_scope = scope };
     }
 
     fn openHandle(self: *Pool, path: []const u8, readonly: bool) !Handle {
@@ -223,6 +253,8 @@ pub const Connection = struct {
     pool: *Pool,
     database: *Database,
     memory: bool,
+    isolated_memory: bool = false,
+    shared_memory_scope: ?[]const u8 = null,
     binding_readonly: bool = false,
     // Raw SQL diagnostics are memory-only. Public formatters must redact
     // connection paths and secret values before publishing their projection.
@@ -233,7 +265,7 @@ pub const Connection = struct {
         self.clearError();
         if (self.handle == null) return;
         self.api.duckdb_disconnect(&self.handle);
-        self.pool.release(self.database, self.memory);
+        self.pool.release(self.database, self.isolated_memory);
     }
 
     pub fn cancel(self: *Connection) void {

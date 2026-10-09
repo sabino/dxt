@@ -29,11 +29,13 @@ fn quoteString(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
 }
 
 pub fn relationKind(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node) !RelationKind {
-    const file = std.Io.Dir.cwd().openFile(runtime.io, db_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return .missing,
-        else => return err,
-    };
-    file.close(runtime.io);
+    if (!std.mem.eql(u8, db_path, ":memory:")) {
+        const file = std.Io.Dir.cwd().openFile(runtime.io, db_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return .missing,
+            else => return err,
+        };
+        file.close(runtime.io);
+    }
     const schema = try compiler.relationSchemaForNode(runtime.allocator, graph, node);
     defer runtime.allocator.free(schema);
     const schema_literal = try quoteString(runtime.allocator, schema);

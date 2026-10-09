@@ -73,7 +73,7 @@ pub fn parseAdapterIdentityTextWithEnvironment(allocator: std.mem.Allocator, tex
     const adapter = values.get(output, "type") orelse return error.MissingProfileType;
     const normalized_adapter_type = try normalizeAdapterType(allocator, resource.string(adapter) catch return error.MissingProfileType);
     const target_schema = if (values.get(output, "schema")) |v| try allocator.dupe(u8, resource.string(v) catch return error.MissingProfileSchema) else if (std.mem.eql(u8, normalized_adapter_type, "duckdb")) try allocator.dupe(u8, "main") else return error.MissingProfileSchema;
-    const path = if (std.mem.eql(u8, normalized_adapter_type, "duckdb")) if (values.get(output, "path")) |v| try allocator.dupe(u8, resource.string(v) catch return error.MissingProfileDatabasePath) else null else null;
+    const path = if (std.mem.eql(u8, normalized_adapter_type, "duckdb")) if (values.get(output, "path")) |v| try allocator.dupe(u8, resource.string(v) catch return error.MissingProfileDatabasePath) else try allocator.dupe(u8, ":memory:") else null;
     const threads: u16 = if (values.get(output, "threads")) |v| blk: {
         const count = if (v == .integer) v.integer else if (v == .string) try std.fmt.parseInt(i64, v.string, 10) else return error.InvalidProfileThreads;
         if (count < 1 or count > 65535) return error.InvalidProfileThreads;

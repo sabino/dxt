@@ -35,6 +35,8 @@ pub const NodeResult = struct {
     adapter_response: ?AdapterResponse = null,
     compiled_ctes: []const types.ExtraCte = &.{},
     owns_compiled_ctes: bool = false,
+    log_output: ?[]const u8 = null,
+    owns_log_output: bool = false,
 };
 
 pub const AdapterResponse = struct {

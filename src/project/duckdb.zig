@@ -53,6 +53,7 @@ pub fn deinitFreshnessQueryResult(allocator: std.mem.Allocator, result: Freshnes
 
 pub fn databasePath(allocator: std.mem.Allocator, target_dir: []const u8, graph: *const Graph) ![]const u8 {
     if (graph.database_path) |configured_path| {
+        if (std.mem.eql(u8, configured_path, ":memory:")) return try allocator.dupe(u8, configured_path);
         if (isUnsupportedConnectionPath(configured_path)) return error.UnsupportedDuckDbPath;
         if (std.fs.path.isAbsolute(configured_path)) return try allocator.dupe(u8, configured_path);
         const base = graph.database_path_base orelse ".";
@@ -66,8 +67,7 @@ pub fn isSupportedMaterialization(value: []const u8) bool {
 }
 
 fn isUnsupportedConnectionPath(value: []const u8) bool {
-    return std.mem.eql(u8, value, ":memory:") or
-        std.mem.startsWith(u8, value, "md:") or
+    return std.mem.startsWith(u8, value, "md:") or
         std.mem.startsWith(u8, value, "motherduck:");
 }
 
@@ -1489,7 +1489,7 @@ test "databasePath resolves configured relative path from profile base" {
     try std.testing.expectEqualStrings("profiles/warehouse.duckdb", resolved);
 }
 
-test "databasePath rejects unsupported connection strings for CLI backend" {
+test "databasePath preserves memory identity and rejects remote connection strings" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1500,6 +1500,10 @@ test "databasePath rejects unsupported connection strings for CLI backend" {
     };
     defer graph.deinit();
 
+    const memory_path = try databasePath(allocator, "target", &graph);
+    defer allocator.free(memory_path);
+    try std.testing.expectEqualStrings(":memory:", memory_path);
+    graph.database_path = "md:demo";
     try std.testing.expectError(error.UnsupportedDuckDbPath, databasePath(allocator, "target", &graph));
 }
 

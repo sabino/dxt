@@ -39,6 +39,12 @@ pub const Session = union(enum) {
             inline else => |*connection| try connection.execute(sql),
         }
     }
+    pub fn beginReadOnly(self: *Session) !void {
+        switch (self.*) {
+            .duckdb => |*connection| try connection.enterReadOnlySession(),
+            .postgres => |*connection| try connection.execute("begin transaction read only"),
+        }
+    }
     pub fn begin(self: *Session) !void {
         switch (self.*) {
             inline else => |*connection| try connection.begin(),
@@ -95,6 +101,14 @@ pub fn nativeDuckDbQuery(runtime: Runtime, path: []const u8, sql: []const u8, re
             else => {},
         };
     }
+    if (readonly and std.mem.eql(u8, path, ":memory:")) if (runtime.adapter_session) |session| switch (session.*) {
+        .duckdb => |*held| if (held.shared_memory_scope) |scope| {
+            var connection = (try held.pool.acquireSharedMemory(scope, true)) orelse return error.NativeDuckDbLibraryNotFound;
+            defer connection.deinit();
+            return try connection.query(sql);
+        },
+        else => {},
+    };
     var temporary_pool = DuckDBPool.init(runtime.allocator, runtime.io, runtime.environment);
     defer temporary_pool.deinit();
     const pool = runtime.duckdb_pool orelse &temporary_pool;
@@ -106,7 +120,8 @@ pub fn nativeDuckDbQuery(runtime: Runtime, path: []const u8, sql: []const u8, re
 pub fn openSession(runtime: Runtime, graph: *const Graph, db_path: []const u8) !Session {
     if (std.mem.eql(u8, graph.adapter_type, "duckdb")) {
         const pool = runtime.duckdb_pool orelse return error.NativeDuckDbPoolRequired;
-        return .{ .duckdb = (try pool.acquire(db_path, false)) orelse return error.NativeDuckDbLibraryNotFound };
+        const connection = if (std.mem.eql(u8, db_path, ":memory:")) try pool.acquireSharedMemory(if (runtime.invocation) |invocation| &invocation.id else graph.project_name, false) else try pool.acquire(db_path, false);
+        return .{ .duckdb = connection orelse return error.NativeDuckDbLibraryNotFound };
     }
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
         const conninfo = graph.connection_info orelse return error.MissingPostgresConnection;
@@ -116,9 +131,22 @@ pub fn openSession(runtime: Runtime, graph: *const Graph, db_path: []const u8) !
     return error.UnsupportedAdapterExecution;
 }
 
+pub fn openUnitSession(runtime: Runtime, graph: *const Graph) !Session {
+    if (std.mem.eql(u8, graph.adapter_type, "duckdb")) {
+        const pool = runtime.duckdb_pool orelse return error.NativeDuckDbPoolRequired;
+        return .{ .duckdb = (try pool.acquire(":memory:", false)) orelse return error.NativeDuckDbLibraryNotFound };
+    }
+    return openSession(runtime, graph, ":memory:");
+}
+
 pub fn queryForGraph(runtime: Runtime, graph: *const Graph, db_path: []const u8, sql: []const u8) !QueryResult {
     if (runtime.adapter_session) |session| return try session.query(sql);
     if (std.mem.eql(u8, graph.adapter_type, "duckdb")) {
+        if (std.mem.eql(u8, db_path, ":memory:")) {
+            var session = try openSession(runtime, graph, db_path);
+            defer session.deinit();
+            return try session.query(sql);
+        }
         if (try nativeDuckDbQuery(runtime, db_path, sql, false)) |native| return native;
         return try cliDuckDbQuery(runtime, db_path, sql, false);
     }

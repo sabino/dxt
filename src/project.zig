@@ -293,7 +293,7 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
         deinitRunResults(runtime.allocator, compile_rows.items);
         compile_rows.deinit(runtime.allocator);
     }
-    const compile_result = compileWithHost(runtime, &graph, selected, target_dir, &compile_rows, stdout) catch |err| {
+    const compile_result = compileWithHost(runtime, options, &graph, selected, target_dir, &compile_rows, stderr) catch |err| {
         if (err == error.OutOfMemory) return err;
         _ = try writeManifest(runtime, &graph, target_dir);
         try writeRunResults(runtime, target_dir, compile_rows.items);
@@ -345,7 +345,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
         deinitRunResults(runtime.allocator, compile_rows.items);
         compile_rows.deinit(runtime.allocator);
     }
-    const compile_result = if (options.docs_compile) compileWithHost(runtime, &graph, selected, target_dir, &compile_rows, stdout) catch |err| {
+    const compile_result = if (options.docs_compile) compileWithHost(runtime, options, &graph, selected, target_dir, &compile_rows, stderr) catch |err| {
         if (err == error.OutOfMemory) return err;
         _ = try writeManifest(runtime, &graph, target_dir);
         try writeRunResults(runtime, target_dir, compile_rows.items);
@@ -421,49 +421,63 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
     }
 
     if (runnable_count != 0) {
-        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedSourceFreshnessAdapter;
+        if (!std.mem.eql(u8, graph.adapter_type, "duckdb") and !std.mem.eql(u8, graph.adapter_type, "postgres")) return error.UnsupportedSourceFreshnessAdapter;
         const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
         defer runtime.allocator.free(db_path);
 
-        for (graph.sources.items) |*source| {
-            if (!selectionContains(selected_sources, source.unique_id)) continue;
-            if (!source_freshness.isRunnableSource(source)) continue;
-            if (source_freshness.unsupportedExecutionReason(source)) |message| {
-                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, message);
-                had_failure = true;
-                continue;
-            }
-            source_freshness.validateThreshold(source.freshness.?) catch {
-                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires complete freshness thresholds");
-                had_failure = true;
-                continue;
+        if (try concurrent_runner.requested(runtime, options, &graph)) {
+            var candidates: std.ArrayList(*const SourceDef) = .empty;
+            defer candidates.deinit(runtime.allocator);
+            for (graph.sources.items) |*source| if (source.enabled and selectionContains(selected_sources, source.unique_id) and source_freshness.isRunnableSource(source)) {
+                try candidates.append(runtime.allocator, source);
             };
-            if (source.loaded_at_field == null and source.loaded_at_query == null) {
-                try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, source_freshness.unsupported_metadata_freshness_message);
-                had_failure = true;
-                continue;
-            }
-            const query_result = duckdb.querySourceFreshness(runtime, db_path, source) catch |err| switch (err) {
-                error.DuckDbCliNotFound => return error.DuckDbCliNotFound,
-                else => {
-                    const message = try formatSourceFreshnessError(runtime.allocator, err);
-                    try appendOwnedSourceFreshnessRuntimeError(runtime.allocator, &results, source, message);
+            had_failure = try @import("project/freshness_runner.zig").run(runtime, &graph, options, candidates.items, db_path, &results, stderr);
+        } else {
+            for (graph.sources.items) |*source| {
+                if (!selectionContains(selected_sources, source.unique_id)) continue;
+                if (!source_freshness.isRunnableSource(source)) continue;
+                if (source_freshness.unsupportedExecutionReason(source)) |message| {
+                    try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, message);
                     had_failure = true;
                     continue;
-                },
-            };
-            const status = try source_freshness.statusForAge(query_result.age_seconds, source.freshness.?);
-            if (std.mem.eql(u8, status, "error")) had_failure = true;
-            results.append(runtime.allocator, .{
-                .source = source,
-                .status = status,
-                .max_loaded_at = query_result.max_loaded_at,
-                .snapshotted_at = query_result.snapshotted_at,
-                .age_seconds = query_result.age_seconds,
-            }) catch |err| {
-                duckdb.deinitFreshnessQueryResult(runtime.allocator, query_result);
-                return err;
-            };
+                }
+                source_freshness.validateThreshold(source.freshness.?) catch {
+                    try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, "source freshness currently requires complete freshness thresholds");
+                    had_failure = true;
+                    continue;
+                };
+                if (source.loaded_at_field == null and source.loaded_at_query == null) {
+                    try appendSourceFreshnessRuntimeError(runtime.allocator, &results, source, source_freshness.unsupported_metadata_freshness_message);
+                    had_failure = true;
+                    continue;
+                }
+                const started = execution_clock.now(runtime.io);
+                const monotonic = std.Io.Timestamp.now(runtime.io, .awake);
+                const query_result = duckdb.querySourceFreshness(runtime, db_path, source) catch |err| switch (err) {
+                    error.DuckDbCliNotFound => return error.DuckDbCliNotFound,
+                    else => {
+                        const message = try formatSourceFreshnessError(runtime.allocator, err);
+                        try appendOwnedSourceFreshnessRuntimeError(runtime.allocator, &results, source, message);
+                        had_failure = true;
+                        continue;
+                    },
+                };
+                const status = try source_freshness.statusForAge(query_result.age_seconds, source.freshness.?);
+                if (std.mem.eql(u8, status, "error")) had_failure = true;
+                results.append(runtime.allocator, .{
+                    .source = source,
+                    .status = status,
+                    .max_loaded_at = query_result.max_loaded_at,
+                    .snapshotted_at = query_result.snapshotted_at,
+                    .age_seconds = query_result.age_seconds,
+                    .execution_started_at = started,
+                    .execution_completed_at = execution_clock.now(runtime.io),
+                    .execution_time = @as(f64, @floatFromInt(monotonic.durationTo(std.Io.Timestamp.now(runtime.io, .awake)).nanoseconds)) / std.time.ns_per_s,
+                }) catch |err| {
+                    duckdb.deinitFreshnessQueryResult(runtime.allocator, query_result);
+                    return err;
+                };
+            }
         }
     }
 
@@ -1182,6 +1196,7 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
         try resources.append(runtime.allocator, .{ .unit = node });
     };
     if (resources.items.len == 0) return error.UnsupportedBuildSelection;
+    try validateConcurrentResources(runtime, graph, resources.items, label);
     // Core creates relation schemas before launching independent resources.
     // This also avoids concurrent schema creation catalog conflicts in DuckDB.
     var needs_schemas = false;
@@ -1228,30 +1243,56 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
     }
     _ = try writeManifest(runtime, graph, target_dir);
     try writeRunResults(runtime, target_dir, summary.rows);
-    if (summary.had_execution_error) return failExecution(runtime, target_dir, manifest_path, db_path, summary.rows, stdout, label);
-    try printConcurrentSummary(stdout, resources.items, label);
+    if (summary.had_execution_error) {
+        if (summary.failed_tests != 0) try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ summary.failed_tests, summary.total_failures });
+        return failExecution(runtime, target_dir, manifest_path, db_path, summary.rows, stdout, label);
+    }
+    try printConcurrentSummary(stdout, summary.rows, label);
     try stdout.print(" against {s}; wrote artifacts into {s}\n", .{ util.normalizeForDisplay(db_path), util.normalizeForDisplay(manifest_path) });
-    if (summary.failed_tests != 0) return error.TestFailure;
+    if (summary.failed_tests != 0) {
+        try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ summary.failed_tests, summary.total_failures });
+        return error.TestFailure;
+    }
 }
 
-fn printConcurrentSummary(stdout: *Io.Writer, resources: []const concurrent_runner.Resource, label: []const u8) !void {
+fn validateConcurrentResources(runtime: Runtime, graph: *const Graph, resources: []const concurrent_runner.Resource, label: []const u8) !void {
+    for (resources) |resource| switch (resource) {
+        .node => |node| {
+            if (std.mem.eql(u8, node.resource_type, "seed")) {
+                if (!std.mem.eql(u8, node.materialized, "seed")) return error.UnsupportedSeedExecution;
+            } else if (std.mem.eql(u8, node.resource_type, "snapshot")) {
+                try snapshot_runner.validateExecution(graph, node);
+            } else {
+                if (!duckdb.isSupportedMaterialization(node.materialized)) {
+                    if (std.mem.eql(u8, label, "Build")) return error.UnsupportedBuildModelMaterialization;
+                    return error.UnsupportedModelMaterialization;
+                }
+                if (std.mem.eql(u8, node.materialized, "incremental") and std.mem.eql(u8, graph.adapter_type, "duckdb")) try incremental_config.validate(node.incremental);
+            }
+        },
+        .generic => |node| try validateGenericTestExecution(node),
+        .unit => |node| try duckdb.validateUnitTestExecution(runtime.allocator, graph, node),
+        .singular => {},
+    };
+}
+
+fn printConcurrentSummary(stdout: *Io.Writer, rows: []const run_results.NodeResult, label: []const u8) !void {
     var models: usize = 0;
     var seeds: usize = 0;
     var tests: usize = 0;
     var source_tests = true;
-    for (resources) |resource| switch (resource) {
-        .node => |node| {
+    for (rows) |row| {
+        if (std.mem.eql(u8, row.status, "skipped")) continue;
+        if (row.node) |node| {
             if (std.mem.eql(u8, node.resource_type, "seed")) seeds += 1 else models += 1;
-        },
-        .generic => |node| {
+        } else if (row.test_node) |node| {
             tests += 1;
             if (node.attached_source_unique_id == null) source_tests = false;
-        },
-        .singular, .unit => {
+        } else {
             tests += 1;
             source_tests = false;
-        },
-    };
+        }
+    }
     if (std.mem.eql(u8, label, "Run")) return stdout.print("Ran {d} model(s)", .{models});
     if (std.mem.eql(u8, label, "Seed")) return stdout.print("Seeded {d} seed(s)", .{seeds});
     if (std.mem.eql(u8, label, "Test")) return stdout.print("Tested {d} test(s)", .{tests});
@@ -1283,6 +1324,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
             row.message = try runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource compilation failed");
             row.compile_started_at = compilation_started;
             row.compile_completed_at = execution_clock.now(runtime.io);
+            try captureResourceLogs(runtime.allocator, &row, output.written());
             return row;
         };
         const compilation_completed = execution_clock.now(runtime.io);
@@ -1303,6 +1345,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
         row.compile_started_at = compilation_started;
         row.compile_completed_at = compilation_completed;
         row.compiled_ctes = node.extra_ctes.items;
+        try captureResourceLogs(runtime.allocator, &row, output.written());
         return row;
     }
     switch (resource) {
@@ -1317,7 +1360,15 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
         },
         .node => unreachable,
     }
-    return rows.items[0];
+    var row = rows.items[0];
+    try captureResourceLogs(runtime.allocator, &row, output.written());
+    return row;
+}
+
+fn captureResourceLogs(allocator: std.mem.Allocator, row: *run_results.NodeResult, messages: []const u8) !void {
+    if (messages.len == 0) return;
+    row.log_output = try allocator.dupe(u8, messages);
+    row.owns_log_output = true;
 }
 
 fn compileConcurrentNode(runtime: Runtime, graph: *const Graph, node: *Node, db_path: []const u8) !void {
@@ -2107,6 +2158,7 @@ fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.N
             if (result.relation_name) |relation_name| allocator.free(relation_name);
         }
         if (result.message) |message| allocator.free(message);
+        if (result.owns_log_output) if (result.log_output) |messages| allocator.free(messages);
     }
 }
 
@@ -2226,18 +2278,9 @@ fn targetDir(runtime: Runtime, options: Options) ![]const u8 {
     return try pathJoin(runtime.allocator, &.{ options.project_dir, target_path });
 }
 
-fn compileWithHost(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, rows: *std.ArrayList(run_results.NodeResult), stdout: *Io.Writer) !CompileResult {
-    const db_path = duckdb.databasePath(runtime.allocator, target_dir, graph) catch |err| switch (err) {
-        error.UnsupportedDuckDbPath => try runtime.allocator.dupe(u8, graph.database_path orelse return err),
-        else => return err,
-    };
-    defer runtime.allocator.free(db_path);
-    var host = try commands.OperationHost.initLazy(runtime, graph, db_path, stdout);
-    defer host.deinit();
-    const previous = graph.execution_hooks;
-    graph.execution_hooks = host.host();
-    defer graph.execution_hooks = previous;
-    return compileSelectedModelsWithResults(runtime, graph, selected, target_dir, true, true, rows);
+fn compileWithHost(runtime: Runtime, options: Options, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, rows: *std.ArrayList(run_results.NodeResult), stdout: *Io.Writer) !CompileResult {
+    const parallel = try @import("project/concurrent_compiler.zig").compile(runtime, graph, options, selected, target_dir, rows, stdout);
+    return .{ .count = parallel.models, .snapshot_count = parallel.snapshots, .analysis_count = parallel.analyses, .test_count = parallel.tests, .saw_model = parallel.models != 0, .compiled_base = parallel.compiled_base };
 }
 
 fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, include_singular_tests: bool, include_analyses: bool) !CompileResult {

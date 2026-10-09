@@ -9,7 +9,14 @@ pub const Runtime = struct {
     invocation: ?*const @import("invocation.zig").Metadata = null,
     duckdb_pool: ?*@import("native_duckdb.zig").Pool = null,
     adapter_session: ?*@import("adapter.zig").Session = null,
+    cancellation_token: ?*const std.atomic.Value(bool) = null,
+    session_observer: ?SessionObserver = null,
     invocation_options: ?*const Options = null,
+};
+
+pub const SessionObserver = struct {
+    context: *anyopaque,
+    changed: *const fn (*anyopaque, ?*@import("adapter.zig").Session) void,
 };
 
 pub const Options = struct {

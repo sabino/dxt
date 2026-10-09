@@ -871,8 +871,8 @@ def test_compile_injects_ephemeral_ctes_and_manifest_fields(tmp_path: Path):
     assert "Compiled 2 model(s)" in result.stdout
 
     compiled_root = target / "compiled" / "ephemeral_cte" / "models"
-    assert not (compiled_root / "base_ephemeral.sql").exists()
-    assert not (compiled_root / "filtered_ephemeral.sql").exists()
+    assert (compiled_root / "base_ephemeral.sql").exists()
+    assert (compiled_root / "filtered_ephemeral.sql").exists()
     one_level_sql = (compiled_root / "final_one_level.sql").read_text()
     chain_sql = (compiled_root / "final_chain.sql").read_text()
     assert one_level_sql.count("__dbt__cte__base_ephemeral as") == 1
@@ -890,7 +890,11 @@ def test_compile_injects_ephemeral_ctes_and_manifest_fields(tmp_path: Path):
     assert_manifest_schema_slice(manifest_path)
     assert manifest["nodes"]["model.ephemeral_cte.base_ephemeral"]["config"]["materialized"] == "ephemeral"
     assert manifest["nodes"]["model.ephemeral_cte.filtered_ephemeral"]["config"]["materialized"] == "ephemeral"
-    assert "compiled" not in manifest["nodes"]["model.ephemeral_cte.base_ephemeral"]
+    ephemeral = manifest["nodes"]["model.ephemeral_cte.base_ephemeral"]
+    assert ephemeral["compiled"] is True
+    assert ephemeral["compiled_code"] == (compiled_root / "base_ephemeral.sql").read_text()
+    rows = json.loads((target / "run_results.json").read_text())["results"]
+    assert all(not row["unique_id"].endswith("_ephemeral") for row in rows)
     final_one = manifest["nodes"]["model.ephemeral_cte.final_one_level"]
     final_chain = manifest["nodes"]["model.ephemeral_cte.final_chain"]
     assert final_one["extra_ctes_injected"] is True
@@ -11586,9 +11590,11 @@ def test_source_freshness_checks_selected_duckdb_source_and_writes_sources_json(
         "filter": None,
     }
     assert result_row["adapter_response"] == {}
-    assert result_row["timing"] == [{"name": "execute", "started_at": None, "completed_at": None}]
+    assert result_row["timing"][0]["name"] == "execute"
+    assert result_row["timing"][0]["started_at"].endswith("Z")
+    assert result_row["timing"][0]["completed_at"] >= result_row["timing"][0]["started_at"]
     assert result_row["thread_id"] == "Thread-1"
-    assert result_row["execution_time"] == 0.0
+    assert result_row["execution_time"] > 0
     assert str(project) not in sources_path.read_text()
     assert (target / "manifest.json").exists()
 
