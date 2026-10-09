@@ -1439,6 +1439,18 @@ fn attributeValue(allocator: std.mem.Allocator, value: Value, attribute: Value) 
 }
 
 fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
+    inline for (.{ "defined", "undefined", "none", "None", "string", "number", "integer", "float", "boolean", "true", "false", "mapping", "iterable", "sequence", "callable", "odd", "even" }) |test_name| {
+        if (std.mem.eql(u8, name, test_name) and args.len != 0) return error.InvalidJinjaArguments;
+    }
+    for (args) |arg| if (arg.name) |keyword| {
+        if (std.mem.eql(u8, name, "sameas")) {
+            if (!std.mem.eql(u8, keyword, "other")) return error.InvalidJinjaArguments;
+        } else if (std.mem.eql(u8, name, "divisibleby")) {
+            if (!std.mem.eql(u8, keyword, "num")) return error.InvalidJinjaArguments;
+        } else if (std.mem.eql(u8, name, "in")) {
+            if (!std.mem.eql(u8, keyword, "seq")) return error.InvalidJinjaArguments;
+        } else return error.InvalidJinjaArguments;
+    };
     if (std.mem.eql(u8, name, "defined")) return !isUndefined(value);
     if (std.mem.eql(u8, name, "undefined")) return isUndefined(value);
     if (std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "None")) return value == .none;
@@ -1945,6 +1957,8 @@ test "named tests accept conventional unparenthesized primary and postfix argume
     try std.testing.expect((try evaluate(a, "2 is divisibleby 2 and 2 is even", null)).boolean);
     try std.testing.expectEqualStrings("2", (try evaluate(a, "1 is equalto 1 + 1", null)).integer);
     try std.testing.expectError(error.InvalidJinjaExpression, evaluate(a, "1 is odd is boolean", null));
+    try std.testing.expectError(error.InvalidJinjaArguments, evaluate(a, "1 is defined 2", null));
+    try std.testing.expectError(error.InvalidJinjaArguments, evaluate(a, "1 is eq(other=1)", null));
 }
 
 test "parse undefined captures mutable alias names and stable subscript call identity" {
