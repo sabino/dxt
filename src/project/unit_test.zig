@@ -46,15 +46,20 @@ pub fn validateUnitTest(allocator: std.mem.Allocator, graph: *const Graph, unit_
 
 pub fn renderUnitTestSql(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !PlannedUnitTestSql {
     try validateUnitTest(allocator, graph, unit_test);
-    const model_node = try modelNodeForUnitTest(graph, unit_test);
+    // All fixture relations belong to the isolated unit connection. Preserve
+    // the target context used by macros while rendering local relation names.
+    var fixture_graph = graph.*;
+    fixture_graph.unit_fixture_relations = true;
+    fixture_graph.deferred_relations = .empty;
+    const model_node = try modelNodeForUnitTest(&fixture_graph, unit_test);
 
-    var compiled_model = try compiler.compileModelWithInjectedCtes(allocator, graph, model_node);
+    var compiled_model = try compiler.compileModelWithInjectedCtes(allocator, &fixture_graph, model_node);
     defer compiled_model.deinit(allocator);
 
     var setup: std.ArrayList(u8) = .empty;
     defer setup.deinit(allocator);
     for (unit_test.given.items) |fixture| {
-        var resolved = try resolveFixtureInput(allocator, graph, unit_test, fixture.input.?);
+        var resolved = try resolveFixtureInput(allocator, &fixture_graph, unit_test, fixture.input.?);
         defer resolved.deinit(allocator);
         const fixture_sql = try renderInputFixtureSql(allocator, resolved, fixture);
         defer allocator.free(fixture_sql);

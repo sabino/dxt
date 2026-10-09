@@ -787,7 +787,7 @@ pub fn relationNameForNode(allocator: std.mem.Allocator, graph: *const Graph, no
     const schema = try relationSchemaForNode(allocator, graph, node);
     defer allocator.free(schema);
     const identifier = relationIdentifierForNode(node);
-    return renderRelation(allocator, .{ .database = relationDatabaseForNode(graph, node), .schema = schema, .identifier = identifier });
+    return renderRelation(allocator, .{ .database = if (graph.unit_fixture_relations) null else relationDatabaseForNode(graph, node), .schema = schema, .identifier = identifier });
 }
 
 fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {

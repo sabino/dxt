@@ -641,6 +641,7 @@ pub const SemanticTimeSpine = struct {
 };
 
 pub const Graph = struct {
+    unit_fixture_relations: bool = false,
     invocation: ?*const @import("invocation.zig").Metadata = null,
     command_options: Options = .{},
     allocator: std.mem.Allocator,

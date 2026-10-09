@@ -6,7 +6,7 @@ const query_adapter = @import("freshness_adapter.zig");
 const clock = @import("execution_clock.zig");
 const runner = @import("concurrent_runner.zig");
 
-const Shared = struct { mutex: std.Io.Mutex = .init, changed: std.Io.Condition = .init, next: usize = 0 };
+const Shared = struct { mutex: std.Io.Mutex = .init, changed: std.Io.Condition = .init, next: usize = 0, stop: bool = false, fail_fast: bool = false };
 const State = enum { pending, running, finished, done };
 
 const Job = struct {
@@ -16,6 +16,9 @@ const Job = struct {
     database_path: []const u8,
     worker: u16,
     arena: std.heap.ArenaAllocator,
+    shared: *Shared,
+    active_session: ?*adapter.Session = null,
+    cancel_requested: std.atomic.Value(bool) = .init(false),
     state: State = .pending,
     started_event: bool = false,
     output: ?freshness.CheckResult = null,
@@ -42,6 +45,16 @@ const Job = struct {
         if (source.loaded_at_field == null and source.loaded_at_query == null) return self.failure(base, freshness.unsupported_metadata_freshness_message);
         var session = try adapter.openSession(base, self.graph, self.database_path);
         defer session.deinit();
+        self.shared.mutex.lockUncancelable(base.io);
+        self.active_session = &session;
+        self.shared.mutex.unlock(base.io);
+        defer {
+            self.shared.mutex.lockUncancelable(base.io);
+            self.active_session = null;
+            self.shared.mutex.unlock(base.io);
+        }
+        session.setCancellationToken(&self.cancel_requested);
+        if (self.cancel_requested.load(.acquire)) return error.AdapterQueryCancelled;
         try session.beginReadOnly();
         var runtime = base;
         runtime.adapter_session = &session;
@@ -64,7 +77,7 @@ const Worker = struct {
     fn work(self: *Worker) void {
         while (true) {
             self.shared.mutex.lockUncancelable(self.runtime.io);
-            if (self.shared.next == self.jobs.len) {
+            if (self.shared.stop or self.shared.next == self.jobs.len) {
                 self.shared.mutex.unlock(self.runtime.io);
                 return;
             }
@@ -78,6 +91,12 @@ const Worker = struct {
             job.work();
             self.shared.mutex.lockUncancelable(self.runtime.io);
             job.state = .finished;
+            // Core's GraphRunnableTask checks status "error" for fail-fast.
+            // Source SQL errors have status "runtime error" and continue.
+            if (self.shared.fail_fast and std.mem.eql(u8, job.output.?.status, "error")) {
+                self.shared.stop = true;
+                cancelJobs(self.jobs);
+            }
             self.shared.changed.signal(self.runtime.io);
             self.shared.mutex.unlock(self.runtime.io);
         }
@@ -90,13 +109,19 @@ pub fn run(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
     const threads = try runner.threadCount(options, graph);
     const jobs = try runtime.allocator.alloc(Job, sources.len);
     defer runtime.allocator.free(jobs);
-    for (sources, jobs) |source, *job| job.* = .{ .runtime = runtime, .graph = graph, .source = source, .database_path = database_path, .worker = 0, .arena = .init(std.heap.smp_allocator) };
+    var shared: Shared = .{ .fail_fast = options.fail_fast };
+    for (sources, jobs) |source, *job| job.* = .{ .runtime = runtime, .graph = graph, .source = source, .database_path = database_path, .worker = 0, .arena = .init(std.heap.smp_allocator), .shared = &shared };
     defer for (jobs) |*job| job.arena.deinit();
-    var shared: Shared = .{};
     const workers = try runtime.allocator.alloc(Worker, @min(threads, jobs.len));
     defer runtime.allocator.free(workers);
     for (workers, 0..) |*worker, index| worker.* = .{ .runtime = runtime, .shared = &shared, .jobs = jobs, .number = @intCast(index + 1) };
-    defer for (workers) |*worker| if (worker.thread) |thread| thread.join();
+    defer {
+        shared.mutex.lockUncancelable(runtime.io);
+        shared.stop = true;
+        cancelJobs(jobs);
+        shared.mutex.unlock(runtime.io);
+        for (workers) |*worker| if (worker.thread) |thread| thread.join();
+    }
     for (workers) |*worker| worker.thread = try std.Thread.spawn(.{}, Worker.work, .{worker});
     var failure = false;
     var completed: usize = 0;
@@ -105,26 +130,53 @@ pub fn run(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
     while (completed < jobs.len) {
         var changed = false;
         for (jobs) |*job| {
+            if (job.state == .pending and shared.stop) {
+                try runner.emitEvent(runtime, options, events, "NodeFinished", job.source.unique_id, "skipped", 1, 0);
+                job.state = .done;
+                completed += 1;
+                changed = true;
+            }
             if (job.state == .pending or job.state == .done) continue;
             if (!job.started_event) {
                 try runner.emitEvent(runtime, options, events, "NodeStart", job.source.unique_id, "started", job.worker, 0);
                 job.started_event = true;
             }
             if (job.state != .finished) continue;
-            const result = try transferResult(runtime.allocator, job.output.?);
-            destination.append(runtime.allocator, result) catch |err| {
-                freshness.deinitResults(runtime.allocator, &.{result});
-                return err;
-            };
+            const result = job.output.?;
+            // Core omits cancelled and unstarted source checks from sources.
+            // Events retain their completion and measured cancellation time.
+            if (!job.cancel_requested.load(.acquire)) {
+                const owned_result = try transferResult(runtime.allocator, result);
+                destination.append(runtime.allocator, owned_result) catch |err| {
+                    freshness.deinitResults(runtime.allocator, &.{owned_result});
+                    return err;
+                };
+            }
             try runner.emitEvent(runtime, options, events, "NodeFinished", job.source.unique_id, result.status, job.worker, result.execution_time);
             if (std.mem.eql(u8, result.status, "error") or std.mem.eql(u8, result.status, "runtime error")) failure = true;
             job.state = .done;
             completed += 1;
             changed = true;
         }
-        if (completed != jobs.len and !changed) try shared.changed.wait(runtime.io, &shared.mutex);
+        if (completed != jobs.len and !changed) {
+            if (shared.stop) {
+                cancelJobs(jobs);
+                shared.mutex.unlock(runtime.io);
+                const pause = std.Io.sleep(runtime.io, .fromMilliseconds(10), .awake);
+                shared.mutex.lockUncancelable(runtime.io);
+                try pause;
+            } else try shared.changed.wait(runtime.io, &shared.mutex);
+        }
     }
     return failure;
+}
+
+fn cancelJobs(jobs: []Job) void {
+    for (jobs) |*job| {
+        if (job.state != .running) continue;
+        job.cancel_requested.store(true, .release);
+        if (job.active_session) |session| session.cancel() catch {};
+    }
 }
 
 fn transferResult(allocator: std.mem.Allocator, source: freshness.CheckResult) !freshness.CheckResult {
