@@ -69,6 +69,31 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
     }
 
     const command = args[1];
+    if (equals(command, "plan") or equals(command, "apply") or equals(command, "environment") or equals(command, "intervals") or equals(command, "audit") or equals(command, "promote") or equals(command, "rollback")) {
+        if (hasHelp(args[2..])) {
+            try stdout.print("Usage: dxt {s} [--project-dir PATH] [--target NAME] [--environment NAME] [--from-environment NAME] [--plan PATH] [--workflow-config PATH] [--start UTC] [--end UTC] [--restate]\n\nNative dxt planning uses immutable model versions, isolated environment views, UTC half-open intervals and blocking test audits.\n", .{command});
+            return .ok;
+        }
+        const rt = runtime orelse return .usage;
+        var remaining: std.ArrayList([]const u8) = .empty;
+        defer remaining.deinit(rt.allocator);
+        var workflow_options: project.WorkflowOptions = .{};
+        var index: usize = 2;
+        while (index < args.len) : (index += 1) {
+            const arg = args[index];
+            if (equals(arg, "--restate")) {
+                workflow_options.restate = true;
+            } else if (equals(arg, "--environment") or equals(arg, "--from-environment") or equals(arg, "--plan") or equals(arg, "--workflow-config") or equals(arg, "--start") or equals(arg, "--end")) {
+                if (index + 1 >= args.len or isOptionLike(args[index + 1])) return commandError(error.InvalidOption, stderr);
+                index += 1;
+                const value = args[index];
+                if (equals(arg, "--environment")) workflow_options.environment = value else if (equals(arg, "--from-environment")) workflow_options.from_environment = value else if (equals(arg, "--plan")) workflow_options.plan_file = value else if (equals(arg, "--workflow-config")) workflow_options.config_file = value else if (equals(arg, "--start")) workflow_options.start = value else workflow_options.end = value;
+            } else try remaining.append(rt.allocator, arg);
+        }
+        const options = parseOptions(rt.allocator, remaining.items, stderr, .compile) catch |err| return commandError(err, stderr);
+        project.workflow(rt, command, options, workflow_options, stdout) catch |err| return commandError(err, stderr);
+        return .ok;
+    }
     if (equals(command, "-h") or equals(command, "--help")) {
         try printRootHelp(stdout);
         return .ok;
@@ -367,7 +392,23 @@ fn printExtraCommandHelp(command: []const u8, writer: *Io.Writer) !void {
 
 fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
     switch (err) {
+        error.WorkflowExecutionFailure => {
+            stderr.writeAll("error: native workflow execution failed; the environment was not promoted\n") catch {};
+            return .failure;
+        },
         error.InvalidPackageDeclaration => stderr.writeAll("error: invalid package declaration; use local, git/private with revision, tarball/name, or package/version entries\n") catch {},
+        error.WorkflowAuditFailure => {
+            stderr.writeAll("error: blocking workflow audits failed; the environment was not promoted\n") catch {};
+            return .failure;
+        },
+        error.WorkflowPlanMissing => stderr.writeAll("error: workflow plan artifact is missing; run dxt plan first or use --plan\n") catch {},
+        error.WorkflowPlanModified => stderr.writeAll("error: workflow plan content does not match its fingerprint\n") catch {},
+        error.WorkflowProjectChanged => stderr.writeAll("error: project changed after planning; create a new plan\n") catch {},
+        error.WorkflowStalePlan => stderr.writeAll("error: the environment changed after planning; create a new plan\n") catch {},
+        error.WorkflowEnvironmentMissing => stderr.writeAll("error: workflow environment does not exist\n") catch {},
+        error.WorkflowRollbackMissing => stderr.writeAll("error: workflow environment has no previous revision\n") catch {},
+        error.WorkflowIntervalStartRequired => stderr.writeAll("error: interval models require --start or a configured start\n") catch {},
+        error.WorkflowIntervalEndRequired => stderr.writeAll("error: interval models require --end in UTC\n") catch {},
         error.MultiplePackageDeclarations => stderr.writeAll("error: declare dependencies in either packages.yml or dependencies.yml, not both\n") catch {},
         error.UnsupportedProjectDependency => stderr.writeAll("error: project dependencies require a remote service; use local, Git, or Hub packages\n") catch {},
         error.PackageVersionConflict => stderr.writeAll("error: package version constraints conflict or no compatible version exists\n") catch {},
@@ -799,6 +840,13 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  source freshness Check freshness for supported DuckDB sources.
         \\  docs generate    Generate supported docs artifacts.
         \\  docs serve       Serve generated docs artifacts from the target directory.
+        \\  plan             Explain native model-version changes and missing intervals.
+        \\  apply            Execute a native plan and audit before switching environment views.
+        \\  environment      Inspect persisted native environment versions.
+        \\  intervals        Inspect processed UTC model intervals.
+        \\  audit            Recheck the current environment's blocking tests.
+        \\  promote          Point an environment at another audited environment's versions.
+        \\  rollback         Restore the previous environment revision without rebuilding.
         \\
     );
 }

@@ -27,6 +27,7 @@ const source_freshness = @import("project/source_freshness.zig");
 const state_artifacts = @import("project/state.zig");
 const project_defer = @import("project/defer.zig");
 const types = @import("project/types.zig");
+const workflow_engine = @import("project/workflow.zig");
 const util = @import("project/util.zig");
 
 const execution_failure_message = "DuckDB execution failed";
@@ -37,6 +38,34 @@ pub const Output = types.Output;
 pub const debug = commands.debug;
 pub const initProject = commands.initProject;
 pub const validateSelectorSyntax = selector.validateSelectorSyntax;
+pub const WorkflowOptions = workflow_engine.Options;
+
+pub fn workflow(runtime: Runtime, command: []const u8, options: Options, workflow_options: WorkflowOptions, stdout: *Io.Writer) !void {
+    var arena = std.heap.ArenaAllocator.init(runtime.allocator);
+    defer arena.deinit();
+    var scoped = runtime;
+    scoped.allocator = arena.allocator();
+    var workflow_common = options;
+    var workflow_vars: std.json.Value = .{ .object = .empty };
+    if (options.vars) |raw| {
+        var document = try @import("project/yaml.zig").parse(scoped.allocator, raw);
+        defer document.deinit();
+        if (document.value != .object) return error.InvalidVarsYaml;
+        workflow_vars = try @import("project/config_value.zig").clone(scoped.allocator, document.value);
+    }
+    for ([_][]const u8{ "dxt_start", "dxt_end" }, [_][]const u8{ "__DXT_INTERVAL_START__", "__DXT_INTERVAL_END__" }) |name, marker| {
+        if (workflow_vars.object.contains(name)) return error.WorkflowReservedVariable;
+        try workflow_vars.object.put(scoped.allocator, name, .{ .string = marker });
+    }
+    workflow_common.vars = try std.json.Stringify.valueAlloc(scoped.allocator, workflow_vars, .{});
+    var graph = try project_loader.loadGraph(scoped, workflow_common, loader_callbacks);
+    defer graph.deinit();
+    try resolveDependencies(&graph);
+    workflow_engine.execute(scoped, &graph, workflow_common, workflow_options, try targetDir(scoped, options), command, stdout) catch |err| switch (err) {
+        error.DuckDbExecutionFailed, error.PostgresExecutionFailed => return error.WorkflowExecutionFailure,
+        else => return err,
+    };
+}
 
 pub fn runOperation(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);

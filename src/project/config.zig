@@ -1034,7 +1034,8 @@ fn modelPathConfigMatches(config_path: []const u8, model_path: []const u8) bool 
     if (!std.mem.startsWith(u8, model_path, config_path)) return false;
     if (model_path.len == config_path.len) return true;
     if (model_path[config_path.len] == '/') return true;
-    return std.mem.eql(u8, model_path[config_path.len..], ".sql");
+    const suffix = model_path[config_path.len..];
+    return std.mem.eql(u8, suffix, ".sql") or std.mem.eql(u8, suffix, ".csv");
 }
 
 fn modelPathConfigDepth(config_path: []const u8) usize {
