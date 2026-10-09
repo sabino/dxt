@@ -90,6 +90,12 @@ pub fn build(allocator: std.mem.Allocator, graph: *const Graph, request: Query) 
         try w.print("{s} AS (\n{s}\n)", .{ cte.name, cte.sql });
     }
     try w.print("\nSELECT * FROM {s}", .{combined});
+    var final_filters: std.ArrayList([]const u8) = .empty;
+    for (query.group_by) |group| if (std.mem.startsWith(u8, group, "metric_time__")) {
+        if (query.start_time) |start| try final_filters.append(a, try std.fmt.allocPrint(a, "{s}>={s}", .{ try ident(a, group), try ctx.boundSql(start, false) }));
+        if (query.end_time) |end| try final_filters.append(a, try std.fmt.allocPrint(a, "{s}<{s}", .{ try ident(a, group), try ctx.boundSql(end, true) }));
+    };
+    try writePredicates(w, final_filters.items);
     if (query.order_by.len != 0) {
         try w.writeAll(" ORDER BY ");
         for (query.order_by, 0..) |order, i| {
@@ -119,7 +125,7 @@ pub fn build(allocator: std.mem.Allocator, graph: *const Graph, request: Query) 
     try values.put(a, &logical, "relations", ctx.relations);
     try values.put(a, &logical, "joins", ctx.joins);
     try values.put(a, &logical, "movement", .{ .array = std.json.Array.init(a) });
-    return .{ .arena = arena, .sql = sql, .logical = logical };
+    return .{ .arena = arena, .sql = sql, .logical = try values.clone(a, logical) };
 }
 fn stringArray(a: std.mem.Allocator, items: []const []const u8) !Value {
     var result: Value = .{ .array = std.json.Array.init(a) };
@@ -141,7 +147,15 @@ fn builderName(a: std.mem.Allocator, name: []const u8) ![]const u8 {
     var descending = false;
     if (std.mem.indexOf(u8, name, ".descending(")) |at| {
         base = name[0..at];
-        descending = true;
+        const args_start = at + ".descending(".len;
+        if (!std.mem.endsWith(u8, name, ")")) return error.InvalidMetricQuery;
+        var argument = std.mem.trim(u8, name[args_start .. name.len - 1], " \t\r\n");
+        if (std.mem.startsWith(u8, argument, "descending=")) argument = std.mem.trim(u8, argument["descending=".len..], " \t\r\n");
+        if (argument.len == 0) descending = true else {
+            const flag = try expression.evaluate(a, argument, .{ .context = &host, .resolve = NameHost.resolve, .call = NameHost.call });
+            if (flag != .boolean) return error.InvalidMetricQuery;
+            descending = flag.boolean;
+        }
     }
     const result = try expression.evaluate(a, base, .{ .context = &host, .resolve = NameHost.resolve, .call = NameHost.call });
     if (result != .string) return error.InvalidMetricQuery;
@@ -171,6 +185,7 @@ const Context = struct {
     ctes: std.ArrayList(Cte) = .empty,
     relations: Value,
     joins: Value,
+    time_windows: std.ArrayList(Value) = .empty,
 
     fn add(self: *Context, sql: []const u8) ![]const u8 {
         const name = try std.fmt.allocPrint(self.allocator, "metric_{d}", .{self.ctes.items.len});
@@ -203,8 +218,10 @@ const Context = struct {
             try filters.appendSlice(a, extra);
             try filters.append(a, field(resource.data, "filter"));
             try filters.append(a, field(input_metric, "filter"));
-            var cte = try self.compileMetric(target, filters.items, depth + 1);
             const offset = field(input_metric, "offset_window");
+            if (offset != .null) try self.time_windows.append(a, offset);
+            var cte = try self.compileMetric(target, filters.items, depth + 1);
+            if (offset != .null) _ = self.time_windows.pop();
             const offset_grain = text(input_metric, "offset_to_grain");
             if (offset != .null or offset_grain != null) cte = try self.offsetMetric(cte, target.name, offset, offset_grain);
             try outputs.append(a, .{ .name = target.name, .cte = cte });
@@ -281,6 +298,23 @@ const Context = struct {
         }
         return self.add(try out.toOwnedSlice());
     }
+    fn boundSql(self: *Context, raw: []const u8, end: bool) ![]const u8 {
+        const a = self.allocator;
+        var grain: []const u8 = "day";
+        for (self.query.group_by) |group| if (std.mem.startsWith(u8, group, "metric_time__")) {
+            grain = group["metric_time__".len..];
+            break;
+        };
+        var sql = try std.fmt.allocPrint(a, "DATE_TRUNC('{s}',CAST({s} AS TIMESTAMP))", .{ grain, try sqlText(a, raw) });
+        if (end) sql = try std.fmt.allocPrint(a, "({s} + INTERVAL '{s}')", .{ sql, if (eq(grain, "quarter")) "3 month" else try std.fmt.allocPrint(a, "1 {s}", .{grain}) });
+        for (self.time_windows.items) |window| {
+            const count = field(window, "count");
+            const unit = text(window, "granularity") orelse return error.InvalidMetricWindow;
+            if (count != .integer or !sem.grainValid(unit)) return error.InvalidMetricWindow;
+            sql = try std.fmt.allocPrint(a, "({s} - INTERVAL '{d} {s}')", .{ sql, count.integer * @as(i64, if (eq(unit, "quarter")) 3 else 1), if (eq(unit, "quarter")) "month" else unit });
+        }
+        return sql;
+    }
     fn offsetMetric(self: *Context, cte: []const u8, metric_name: []const u8, window: Value, to_grain: ?[]const u8) ![]const u8 {
         const a = self.allocator;
         var out: std.Io.Writer.Allocating = .init(a);
@@ -294,7 +328,7 @@ const Context = struct {
                     const count = field(window, "count");
                     const grain = text(window, "granularity") orelse return error.InvalidMetricWindow;
                     if (count != .integer or !sem.grainValid(grain)) return error.InvalidMetricWindow;
-                    try w.print("{s}{s} + INTERVAL '{d} {s}'{s} AS {s},", .{ if (grainRank(group["metric_time__".len..]) >= grainRank("day")) "CAST(" else "", try ident(a, group), count.integer, grain, if (grainRank(group["metric_time__".len..]) >= grainRank("day")) " AS DATE)" else "", try ident(a, group) });
+                    try w.print("{s}{s} + INTERVAL '{d} {s}'{s} AS {s},", .{ if (grainRank(group["metric_time__".len..]) >= grainRank("day")) "CAST(" else "", try ident(a, group), count.integer * @as(i64, if (eq(grain, "quarter")) 3 else 1), if (eq(grain, "quarter")) "month" else grain, if (grainRank(group["metric_time__".len..]) >= grainRank("day")) " AS DATE)" else "", try ident(a, group) });
                 } else {
                     const grain = to_grain orelse return error.InvalidMetricGrain;
                     if (!sem.grainValid(grain)) return error.InvalidMetricGrain;
@@ -332,13 +366,15 @@ const Context = struct {
         try source.filters(&predicates, field(measure_input, "filter"));
         for (extra) |filter| try source.filters(&predicates, filter);
         var cumulative_join: ?[]const u8 = null;
+        var cumulative_period: ?[]const u8 = null;
         if (cumulative) {
             const time_index = metric_time_index orelse return error.MissingMetricTimeGroup;
             const grain = self.query.group_by[time_index]["metric_time__".len..];
             const params = field(field(metric_resource.data, "type_params"), "cumulative_type_params");
             const spine = try self.timeSpine();
-            const metric_time = try source.resolveDimension(try std.fmt.allocPrint(a, "metric_time__{s}", .{grain}));
-            groups.items[time_index] = try std.fmt.allocPrint(a, "DATE_TRUNC('{s}',sp.{s})", .{ grain, try ident(a, spine.column) });
+            const metric_time = try source.time();
+            groups.items[time_index] = try std.fmt.allocPrint(a, "sp.{s}", .{try ident(a, spine.column)});
+            if (grainRank(grain) > grainRank("day")) cumulative_period = text(params, "period_agg") orelse "first";
             var join: std.Io.Writer.Allocating = .init(a);
             try join.writer.print(" INNER JOIN {s} sp ON {s} <= sp.{s}", .{ spine.relation, metric_time, try ident(a, spine.column) });
             const window = field(params, "window");
@@ -354,8 +390,8 @@ const Context = struct {
             cumulative_join = try join.toOwnedSlice();
         }
         const time_expr = if (cumulative) groups.items[metric_time_index.?] else try source.time();
-        if (self.query.start_time) |start| try predicates.append(a, try std.fmt.allocPrint(a, "{s} >= CAST({s} AS TIMESTAMP)", .{ time_expr, try sqlText(a, start) }));
-        if (self.query.end_time) |end| try predicates.append(a, try std.fmt.allocPrint(a, "{s} <= CAST({s} AS TIMESTAMP)", .{ time_expr, try sqlText(a, end) }));
+        if (self.query.start_time) |start| try predicates.append(a, try std.fmt.allocPrint(a, "{s} >= {s}", .{ time_expr, try self.boundSql(start, false) }));
+        if (self.query.end_time) |end| try predicates.append(a, try std.fmt.allocPrint(a, "{s} < {s}", .{ time_expr, try self.boundSql(end, true) }));
         const aggregate = try aggregation(a, self.graph.adapter_type, measure, try qualify(a, "s", text(measure, "expr") orelse name));
         var out: std.Io.Writer.Allocating = .init(a);
         const w = &out.writer;
@@ -376,9 +412,36 @@ const Context = struct {
             }
         }
         const base = try self.add(try out.toOwnedSlice());
+        if (cumulative_period) |period| return self.reaggregateCumulative(base, metric_resource.name, metric_time_index.?, period);
         const join_spine = field(measure_input, "join_to_timespine");
         if (join_spine == .bool and join_spine.bool and !cumulative) return self.fillTimeSpine(base, metric_resource.name, measure_input, metric_time_index orelse return error.MissingMetricTimeGroup);
         return base;
+    }
+    fn reaggregateCumulative(self: *Context, base: []const u8, metric_name: []const u8, time_index: usize, period: []const u8) ![]const u8 {
+        const a = self.allocator;
+        if (!eq(period, "first") and !eq(period, "last") and !eq(period, "average")) return error.InvalidMetricQuery;
+        const time_name = self.query.group_by[time_index];
+        const grain = time_name["metric_time__".len..];
+        var projected: std.Io.Writer.Allocating = .init(a);
+        var partitions: std.Io.Writer.Allocating = .init(a);
+        for (self.query.group_by, 0..) |group, i| {
+            const group_sql = if (i == time_index) try std.fmt.allocPrint(a, "DATE_TRUNC('{s}',{s})", .{ grain, try ident(a, group) }) else try ident(a, group);
+            if (i != 0) try partitions.writer.writeByte(',');
+            try partitions.writer.writeAll(group_sql);
+            try projected.writer.print("{s} AS {s},", .{ group_sql, try ident(a, group) });
+        }
+        var out: std.Io.Writer.Allocating = .init(a);
+        if (eq(period, "average")) {
+            try out.writer.print("SELECT {s}AVG({s}) AS {s} FROM {s} GROUP BY {s}", .{ projected.written(), try ident(a, metric_name), try ident(a, metric_name), base, partitions.written() });
+            return self.add(try out.toOwnedSlice());
+        }
+        try out.writer.print("SELECT {s}{s},ROW_NUMBER() OVER (PARTITION BY {s} ORDER BY {s} {s}) AS __dxt_period_rank FROM {s}", .{ projected.written(), try ident(a, metric_name), partitions.written(), try ident(a, time_name), if (eq(period, "last")) "DESC" else "ASC", base });
+        const ranked = try self.add(try out.toOwnedSlice());
+        var selected: std.Io.Writer.Allocating = .init(a);
+        try selected.writer.writeAll("SELECT ");
+        for (self.query.group_by) |group| try selected.writer.print("{s},", .{try ident(a, group)});
+        try selected.writer.print("{s} FROM {s} WHERE __dxt_period_rank=1", .{ try ident(a, metric_name), ranked });
+        return self.add(try selected.toOwnedSlice());
     }
     fn timeSpine(self: *Context) !struct { relation: []const u8, column: []const u8 } {
         const a = self.allocator;
@@ -422,8 +485,8 @@ const Context = struct {
         try w.print(" LEFT JOIN {s} b ON b.{s}=sp.t", .{ base, try ident(a, group) });
         for (self.query.group_by, 0..) |dimension, i| if (i != time_index) try w.print(" AND b.{s} IS NOT DISTINCT FROM d.{s}", .{ try ident(a, dimension), try ident(a, dimension) });
         var predicates: std.ArrayList([]const u8) = .empty;
-        if (self.query.start_time) |start| try predicates.append(a, try std.fmt.allocPrint(a, "sp.t>=CAST({s} AS TIMESTAMP)", .{try sqlText(a, start)}));
-        if (self.query.end_time) |end| try predicates.append(a, try std.fmt.allocPrint(a, "sp.t<=CAST({s} AS TIMESTAMP)", .{try sqlText(a, end)}));
+        if (self.query.start_time) |start| try predicates.append(a, try std.fmt.allocPrint(a, "sp.t>={s}", .{try self.boundSql(start, false)}));
+        if (self.query.end_time) |end| try predicates.append(a, try std.fmt.allocPrint(a, "sp.t<{s}", .{try self.boundSql(end, true)}));
         try writePredicates(w, predicates.items);
         return self.add(try out.toOwnedSlice());
     }
@@ -448,8 +511,8 @@ const Context = struct {
         try base_source.filters(&base_filters, field(resource.data, "filter"));
         try base_source.filters(&base_filters, field(base_input, "filter"));
         for (extra) |filter| try base_source.filters(&base_filters, filter);
-        if (self.query.start_time) |start| try base_filters.append(a, try std.fmt.allocPrint(a, "{s}>=CAST({s} AS TIMESTAMP)", .{ base_time, try sqlText(a, start) }));
-        if (self.query.end_time) |end| try base_filters.append(a, try std.fmt.allocPrint(a, "{s}<=CAST({s} AS TIMESTAMP)", .{ base_time, try sqlText(a, end) }));
+        if (self.query.start_time) |start| try base_filters.append(a, try std.fmt.allocPrint(a, "{s}>={s}", .{ base_time, try self.boundSql(start, false) }));
+        if (self.query.end_time) |end| try base_filters.append(a, try std.fmt.allocPrint(a, "{s}<{s}", .{ base_time, try self.boundSql(end, true) }));
         var conversion_filters: std.ArrayList([]const u8) = .empty;
         try converted_source.filters(&conversion_filters, field(conversion_input, "filter"));
         var base_sql: std.Io.Writer.Allocating = .init(a);
@@ -749,8 +812,11 @@ fn testGraph(a: std.mem.Allocator) !Graph {
 test "metric logical plan validates joins and owns its SQL and relational IR" {
     const a = std.testing.allocator;
     var graph = try testGraph(a);
-    defer graph.deinit();
-    var plan = try build(a, &graph, .{ .metrics = &.{ "revenue", "doubled" }, .group_by = &.{"customer__country"} });
+    var plan = build(a, &graph, .{ .metrics = &.{ "revenue", "doubled" }, .group_by = &.{"customer__country"} }) catch |err| {
+        graph.deinit();
+        return err;
+    };
+    graph.deinit();
     defer plan.deinit();
     try std.testing.expect(std.mem.indexOf(u8, plan.sql, "LEFT JOIN") != null);
     try std.testing.expectEqualStrings("many_to_one", text(list(field(plan.logical, "joins"))[0], "cardinality").?);

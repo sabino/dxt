@@ -325,6 +325,22 @@ def metricflow_sql(project: Path, metrics: list[str], groups: list[str], where: 
 
 
 METRIC_EXTENSION = """
+  - name: rolling_revenue_last
+    label: Rolling Revenue Last
+    type: cumulative
+    type_params:
+      measure: order_amount
+      cumulative_type_params:
+        window: 7 days
+        period_agg: last
+  - name: rolling_revenue_average
+    label: Rolling Revenue Average
+    type: cumulative
+    type_params:
+      measure: order_amount
+      cumulative_type_params:
+        window: 7 days
+        period_agg: average
   - name: paid_revenue
     label: Paid Revenue
     type: simple
@@ -377,6 +393,9 @@ def metric_project(path):
     (['paid_revenue'], ['customer__country'], None),
     (['revenue'], ['customer__country'], ["{{ Dimension('order_key__status') }} = 'paid'"]),
     (['rolling_revenue'], ['metric_time__day'], None),
+    (['rolling_revenue'], ['metric_time__month'], None),
+    (['rolling_revenue_last'], ['metric_time__month'], None),
+    (['rolling_revenue_average'], ['metric_time__month'], None),
     (['complete_revenue'], ['metric_time__day'], None),
     (['revenue_change'], ['metric_time__day'], None),
     (['paid_conversion'], ['metric_time__day'], None),
@@ -504,3 +523,40 @@ def test_postgres_native_metric_execution_and_atomic_saved_export(tmp_path, core
                 assert cursor.fetchall() == expected
                 cursor.execute("select table_type from information_schema.tables where table_schema='reporting' and table_name='daily_revenue_export'")
                 assert cursor.fetchone() == ('VIEW',)
+
+
+@pytest.mark.parametrize('metric,grain,start,end', [
+    ('revenue_change', 'day', '2024-01-02', '2024-01-03'),
+    ('revenue', 'month', '2024-01-03', '2024-01-08'),
+    ('rolling_revenue', 'day', '2024-01-03', '2024-01-08'),
+    ('rolling_revenue_last', 'month', '2024-01-03', '2024-01-08'),
+])
+def test_metricflow_time_ranges_offsets_and_period_alignment(tmp_path, core_runner, metric, grain, start, end):
+    from test_usability_commands import query
+    project = metric_project(tmp_path / 'metric')
+    assert invoke_core(core_runner, project, 'parse').success
+    assert run_dxt(project, 'build').returncode == 0
+    group = f'metric_time__{grain}'
+    sql = metricflow_sql(project, [metric], [group], order_by=[group], start_time=start, end_time=end)
+    expected = query(project / 'warehouse.duckdb', sql)
+    result = run_dxt(project, 'metric', 'query', '--metrics', metric, '--group-by', group,
+                     '--order-by', group, '--start-time', start, '--end-time', end)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == expected
+
+
+@pytest.mark.parametrize('descending', [True, False])
+def test_saved_query_order_builder_honors_boolean(tmp_path, core_runner, descending):
+    from test_usability_commands import query
+    project = metric_project(tmp_path / 'metric')
+    properties = project / 'models/semantic.yml'
+    properties.write_text(properties.read_text().replace(
+        'order_by: ["TimeDimension(\'metric_time\', \'day\')"]',
+        f'order_by: ["Metric(\'revenue\').descending({descending})"]'))
+    assert invoke_core(core_runner, project, 'parse').success
+    assert run_dxt(project, 'build').returncode == 0
+    sql = metricflow_sql(project, ['revenue'], ['metric_time__day'], order_by=['-revenue' if descending else 'revenue'], limit=10)
+    expected = query(project / 'warehouse.duckdb', sql)
+    result = run_dxt(project, 'metric', 'query', '--saved-query', 'daily_revenue')
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == expected
