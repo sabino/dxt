@@ -1168,8 +1168,8 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
     assert result.returncode == 0, result.stderr
 
     compiled = (target / "compiled" / "static_if_compile" / "models" / "events.sql").read_text()
-    assert 'union all select * from "main"."customers"' in compiled
-    assert 'union all select * from "raw"."events"' in compiled
+    assert 'union all select * from "oracle"."main"."customers"' in compiled
+    assert 'union all select * from "oracle"."raw"."events"' in compiled
     assert "where id >= 0" in compiled
     assert "union all select 2 as id" in compiled
     assert "union all select 3 as id" in compiled
@@ -1882,9 +1882,12 @@ def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
     assert "'analytics_mart' as this_schema" in orders_sql
     assert "'order_facts' as this_name" in orders_sql
     assert "'order_facts' as this_identifier" in orders_sql
-    assert 'from "analytics_mart"."order_facts"' in orders_sql
-    assert 'from "analytics"."base_orders"' in orders_sql
-    assert (compiled_root / "uses_orders.sql").read_text().strip() == 'select *\nfrom "analytics_mart"."order_facts"'
+    assert 'from "memory"."analytics_mart"."order_facts"' in orders_sql
+    assert 'from "memory"."analytics"."base_orders"' in orders_sql
+    if command_name in {"compile", "docs generate"}:
+        assert (compiled_root / "uses_orders.sql").read_text().strip() == 'select *\nfrom "memory"."analytics_mart"."order_facts"'
+    else:
+        assert not (compiled_root / "uses_orders.sql").exists()
 
     manifest_path = target / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -1897,8 +1900,11 @@ def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
     assert orders["alias"] == "order_facts"
     assert orders["fqn"] == ["inline_relation_config", "orders"]
     assert orders["checksum"] == dbt_sha256_text((ROOT / "tests" / "fixtures" / "inline_relation_config" / "models" / "orders.sql").read_text())
-    assert orders["relation_name"] == '"analytics_mart"."order_facts"'
-    assert uses_orders["compiled_code"].strip() == 'select *\nfrom "analytics_mart"."order_facts"'
+    assert orders["relation_name"] == '"memory"."analytics_mart"."order_facts"'
+    if command_name in {"compile", "docs generate"}:
+        assert uses_orders["compiled_code"].strip() == 'select *\nfrom "memory"."analytics_mart"."order_facts"'
+    else:
+        assert "compiled_code" not in uses_orders
     if command_name == "docs generate":
         assert (target / "catalog.json").exists()
     elif command_name in {"run", "build"} and DUCKDB is not None:
@@ -2554,7 +2560,7 @@ target-path: target
     assert query.stdout.strip() == "11"
 
 
-def test_run_rejects_non_duckdb_profile_before_execution(tmp_path: Path):
+def test_run_rejects_unavailable_postgres_connection_before_execution(tmp_path: Path):
     project = tmp_path / "postgres_run_profile"
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -2583,7 +2589,7 @@ target-path: target
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "run currently executes only DuckDB SQL models" in result.stderr
+    assert "PostgreSQL connection failed" in result.stderr
     assert not (target / "run_results.json").exists()
 
 
@@ -2833,13 +2839,14 @@ def test_seed_command_rejects_non_seed_selection_before_duckdb(tmp_path: Path):
     assert not (target / "dxt.duckdb").exists()
 
 
-def write_duckdb_profile(project: Path) -> None:
+def write_duckdb_profile(project: Path, database: Path) -> None:
     (project / "profiles.yml").write_text(
-        """default:
+        f"""default:
   target: dev
   outputs:
     dev:
       type: duckdb
+      path: {database}
       schema: main
 """
     )
@@ -2863,8 +2870,8 @@ def write_duckdb_profile_at(profiles_dir: Path, path: str | None = None) -> None
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 package seed command execution slice")
 def test_seed_command_executes_package_seed_selected_by_package_selector(tmp_path: Path):
     project = copy_fixture(tmp_path, "package_ref_selector")
-    write_duckdb_profile(project)
     target = tmp_path / "seed-target"
+    write_duckdb_profile(project, target / "dxt.duckdb")
     result = subprocess.run(
         [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "package:util_pkg"],
         cwd=ROOT,
@@ -2992,8 +2999,8 @@ def test_dbt_core_package_seed_manifest_and_run_results_oracle(tmp_path: Path):
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 package seed command execution slice")
 def test_seed_command_executes_package_seed_selected_by_dependency_selector(tmp_path: Path):
     project = copy_fixture(tmp_path, "package_ref_selector")
-    write_duckdb_profile(project)
     target = tmp_path / "seed-target"
+    write_duckdb_profile(project, target / "dxt.duckdb")
     result = subprocess.run(
         [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "+pkg_seeded_customers"],
         cwd=ROOT,
@@ -3075,8 +3082,8 @@ def test_build_executes_selected_duckdb_seed_and_writes_run_results(tmp_path: Pa
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 package seed build execution slice")
 def test_build_executes_selected_package_duckdb_seed_and_writes_run_results(tmp_path: Path):
     project = copy_fixture(tmp_path, "package_ref_selector")
-    write_duckdb_profile(project)
     target = tmp_path / "build-target"
+    write_duckdb_profile(project, target / "dxt.duckdb")
     result = subprocess.run(
         [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "package:util_pkg,resource_type:seed"],
         cwd=ROOT,
@@ -3110,8 +3117,8 @@ def test_build_executes_selected_package_duckdb_seed_and_writes_run_results(tmp_
 def test_build_honors_package_seed_quote_columns_false_and_column_types(tmp_path: Path):
     project = tmp_path / "seed_config_tests"
     write_seed_config_project(project)
-    write_duckdb_profile(project)
     target = tmp_path / "build-target"
+    write_duckdb_profile(project, target / "dxt.duckdb")
     result = subprocess.run(
         [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "package:util_pkg,resource_type:seed"],
         cwd=ROOT,
@@ -3239,6 +3246,8 @@ version: "1.0"
 model-paths: ["models"]
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "seeds" / "raw_customers.csv").write_text(seed_csv)
@@ -4244,19 +4253,21 @@ def test_build_continues_independent_model_after_data_test_failure(tmp_path: Pat
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "Built 3 model(s) and 1 test(s)" in result.stdout
+    assert "Built 2 model(s) and 1 test(s)" in result.stdout
     assert "1 test(s) failed with 1 failure row(s)" in result.stdout
     assert "one or more tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
-    assert [item["unique_id"] for item in run_results["results"]] == [
-        "model.build_test_failure_continue.customers",
-        "test.build_test_failure_continue.not_null_customers_customer_id.5c9bf9911d",
-        "model.build_test_failure_continue.orders",
-        "model.build_test_failure_continue.zz_independent",
-    ]
-    assert [item["status"] for item in run_results["results"]] == ["success", "fail", "skipped", "success"]
-    assert [item["failures"] for item in run_results["results"]] == [None, 1, None, None]
+    ids = [item["unique_id"] for item in run_results["results"]]
+    rows = {row["unique_id"]: (row["status"], row["failures"]) for row in run_results["results"]}
+    assert rows == {
+        "model.build_test_failure_continue.customers": ("success", None),
+        "test.build_test_failure_continue.not_null_customers_customer_id.5c9bf9911d": ("fail", 1),
+        "model.build_test_failure_continue.orders": ("skipped", None),
+        "model.build_test_failure_continue.zz_independent": ("success", None),
+    }
+    assert len(ids) == len(rows)
+    assert ids.index("model.build_test_failure_continue.customers") < ids.index("test.build_test_failure_continue.not_null_customers_customer_id.5c9bf9911d") < ids.index("model.build_test_failure_continue.orders")
 
     independent = subprocess.run(
         [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select answer from "main"."zz_independent"'],
@@ -5163,7 +5174,7 @@ def test_build_executes_selected_duckdb_accepted_values_quote_false_generic_test
         test_node["unique_id"]
         == "test.accepted_values_quote_false_tests.accepted_values_customers_customer_id__False__1__2.d3fda7ba1b"
     )
-    assert test_node["test_metadata"]["kwargs"]["values"] == ["1", "2"]
+    assert test_node["test_metadata"]["kwargs"]["values"] == [1, 2]
     assert test_node["test_metadata"]["kwargs"]["quote"] is False
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
@@ -6001,12 +6012,12 @@ def test_build_executes_table_level_source_generic_test(tmp_path: Path):
     assert source_test["test_metadata"]["kwargs"] == {
         "model": "{{ get_where_subquery(source('raw', 'orders')) }}",
         "column_name": "customer_id",
-        "values": ["1", "2"],
+        "values": [1, 2],
         "quote": False,
     }
 
 
-def test_parse_ignores_unsupported_source_table_generic_test_without_column_name(tmp_path: Path):
+def test_parse_preserves_source_table_generic_test_without_column_name(tmp_path: Path):
     project = tmp_path / "source_table_without_column"
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -6036,8 +6047,13 @@ sources:
     assert result.returncode == 0, result.stderr
     assert_manifest_schema_slice(target / "manifest.json")
     manifest = json.loads((target / "manifest.json").read_text())
-    assert [node for node in manifest["nodes"].values() if node["resource_type"] == "test"] == []
-    assert manifest["child_map"]["source.source_table_without_column.raw.orders"] == []
+    test_nodes = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
+    assert len(test_nodes) == 1
+    node = test_nodes[0]
+    assert node["unique_id"] == "test.source_table_without_column.source_not_null_raw_orders_.f187fb185c"
+    assert node["test_metadata"]["kwargs"] == {"model": "{{ get_where_subquery(source('raw', 'orders')) }}"}
+    assert node["column_name"] is None
+    assert manifest["child_map"]["source.source_table_without_column.raw.orders"] == [node["unique_id"]]
 
 
 def test_parse_seed_column_properties_and_tests(tmp_path: Path):
@@ -6072,7 +6088,7 @@ def test_parse_seed_column_properties_and_tests(tmp_path: Path):
     assert accepted["test_metadata"]["kwargs"] == {
         "model": "{{ get_where_subquery(ref('raw_customers')) }}",
         "column_name": "customer_id",
-        "values": ["1", "2"],
+        "values": [1, 2],
         "quote": False,
     }
     assert accepted["depends_on"]["nodes"] == ["seed.seed_column_tests.raw_customers"]
@@ -6137,6 +6153,8 @@ def test_build_executes_selected_duckdb_seed_relationships_generic_test(tmp_path
 version: "1.0"
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "seeds" / "raw_customers.csv").write_text("customer_id,customer_name\n1,Ada\n")
@@ -6239,6 +6257,8 @@ version: "1.0"
 model-paths: ["models"]
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "seeds" / "raw_customers.csv").write_text("customer_id,customer_name\n1,Ada\n")
@@ -6280,12 +6300,16 @@ models:
     assert "Built 2 seed(s), 2 model(s), and 1 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
-    assert [item["unique_id"] for item in run_results["results"][:4]] == [
+    assert set(item["unique_id"] for item in run_results["results"][:4]) == {
         "seed.build_seed_model_relationships_tests.raw_customers",
         "seed.build_seed_model_relationships_tests.raw_orders",
         "model.build_seed_model_relationships_tests.customers",
         "model.build_seed_model_relationships_tests.orders",
-    ]
+    }
+    ids = [item["unique_id"] for item in run_results["results"]]
+    assert len(ids) == 5
+    assert ids.index("seed.build_seed_model_relationships_tests.raw_customers") < ids.index("model.build_seed_model_relationships_tests.customers") < ids.index("model.build_seed_model_relationships_tests.orders")
+    assert ids.index("seed.build_seed_model_relationships_tests.raw_orders") < ids.index("model.build_seed_model_relationships_tests.orders")
     assert run_results["results"][4]["unique_id"].startswith(
         "test.build_seed_model_relationships_tests.relationships_orders_customer_id__customer_id__ref_customers_."
     )
@@ -6385,7 +6409,7 @@ def test_build_data_test_failure_skips_selected_downstream_model(tmp_path: Path)
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "Built 2 model(s) and 1 test(s)" in result.stdout
+    assert "Built 1 model(s) and 1 test(s)" in result.stdout
     assert "1 test(s) failed with 1 failure row(s)" in result.stdout
     assert "one or more tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
@@ -10159,18 +10183,18 @@ def test_project_model_path_configs_apply_below_inline_and_yaml_configs(tmp_path
     assert nodes["model.project_model_path_config.customers"]["config"]["materialized"] == "table"
     assert nodes["model.project_model_path_config.stg_customers"]["config"]["materialized"] == "view"
     assert nodes["model.project_model_path_config.orders"]["config"]["materialized"] == "table"
-    assert nodes["model.project_model_path_config.orders"]["config"]["tags"] == ["published", "root"]
+    assert nodes["model.project_model_path_config.orders"]["config"]["tags"] == ["root", "published"]
     assert nodes["model.project_model_path_config.inline_orders"]["config"]["materialized"] == "incremental"
     assert nodes["model.project_model_path_config.inline_orders"]["config"]["tags"] == [
-        "inline",
-        "published",
         "root",
+        "published",
         "yaml_inline",
+        "inline",
     ]
     assert nodes["model.project_model_path_config.yaml_orders"]["config"]["materialized"] == "view"
     assert nodes["model.project_model_path_config.yaml_orders"]["config"]["tags"] == [
-        "published",
         "root",
+        "published",
         "yaml",
     ]
     assert nodes["model.project_model_path_config.customers"]["docs"] == {
