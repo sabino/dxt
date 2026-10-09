@@ -109,12 +109,6 @@ pub fn build(allocator: std.mem.Allocator, graph: *const Graph, request: Query) 
         try w.print("{s} AS (\n{s}\n)", .{ cte.name, cte.sql });
     }
     try w.print("\nSELECT * FROM {s}", .{combined});
-    var final_filters: std.ArrayList([]const u8) = .empty;
-    for (query.group_by) |group| if (std.mem.startsWith(u8, group, "metric_time__")) {
-        if (query.start_time) |start| try final_filters.append(a, try std.fmt.allocPrint(a, "{s}>={s}", .{ try ident(a, group), try ctx.boundSql(start, false) }));
-        if (query.end_time) |end| try final_filters.append(a, try std.fmt.allocPrint(a, "{s}<{s}", .{ try ident(a, group), try ctx.boundSql(end, true) }));
-    };
-    try writePredicates(w, final_filters.items);
     if (query.order_by.len != 0) {
         try w.writeAll(" ORDER BY ");
         for (query.order_by, 0..) |order, i| {
@@ -208,6 +202,7 @@ const Context = struct {
     relations: Value,
     joins: Value,
     time_windows: std.ArrayList(Value) = .empty,
+    time_to_grains: std.ArrayList([]const u8) = .empty,
     bindings: std.ArrayList(RelationBinding) = .empty,
     columns: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty,
 
@@ -324,10 +319,12 @@ const Context = struct {
             try filters.append(a, field(resource.data, "filter"));
             try filters.append(a, field(input_metric, "filter"));
             const offset = field(input_metric, "offset_window");
+            const offset_grain = text(input_metric, "offset_to_grain");
             if (offset != .null) try self.time_windows.append(a, offset);
+            if (offset_grain) |grain| try self.time_to_grains.append(a, grain);
             var cte = try self.compileMetric(target, filters.items, depth + 1);
             if (offset != .null) _ = self.time_windows.pop();
-            const offset_grain = text(input_metric, "offset_to_grain");
+            if (offset_grain != null) _ = self.time_to_grains.pop();
             if (offset != .null or offset_grain != null) cte = try self.offsetMetric(cte, target.name, offset, offset_grain);
             try outputs.append(a, .{ .name = target.name, .cte = cte });
         }
@@ -418,9 +415,24 @@ const Context = struct {
             if (count != .integer or !sem.grainValid(unit)) return error.InvalidMetricWindow;
             sql = try std.fmt.allocPrint(a, "({s} - INTERVAL '{d} {s}')", .{ sql, count.integer * @as(i64, if (eq(unit, "quarter")) 3 else 1), if (eq(unit, "quarter")) "month" else unit });
         }
+        if (!end) for (self.time_to_grains.items) |unit| {
+            if (!sem.grainValid(unit)) return error.InvalidMetricGrain;
+            sql = try std.fmt.allocPrint(a, "DATE_TRUNC('{s}',{s})", .{ unit, sql });
+        };
         return sql;
     }
+    fn inclusiveEnd(self: *Context, raw: []const u8) ![]const u8 {
+        const a = self.allocator;
+        var grain: []const u8 = "day";
+        for (self.query.group_by) |group| if (std.mem.startsWith(u8, group, "metric_time__")) {
+            grain = group["metric_time__".len..];
+            break;
+        };
+        const last = try std.fmt.allocPrint(a, "({s} - INTERVAL '1 microsecond')", .{try self.boundSql(raw, true)});
+        return if (grainRank(grain) >= grainRank("day")) std.fmt.allocPrint(a, "CAST({s} AS DATE)", .{last}) else last;
+    }
     fn offsetMetric(self: *Context, cte: []const u8, metric_name: []const u8, window: Value, to_grain: ?[]const u8) ![]const u8 {
+        if (window == .null) return self.offsetToGrain(cte, metric_name, to_grain orelse return error.InvalidMetricGrain);
         const a = self.allocator;
         var out: std.Io.Writer.Allocating = .init(a);
         const w = &out.writer;
@@ -443,10 +455,51 @@ const Context = struct {
         }
         if (!time_found) return error.MissingMetricTimeGroup;
         try w.print("{s} FROM {s}", .{ try ident(a, metric_name), cte });
+        const shifted = try self.add(try out.toOwnedSlice());
+        var filters: std.ArrayList([]const u8) = .empty;
+        for (self.query.group_by) |group| if (std.mem.startsWith(u8, group, "metric_time__")) {
+            if (self.query.start_time) |start| try filters.append(a, try std.fmt.allocPrint(a, "{s}>={s}", .{ try ident(a, group), try self.boundSql(start, false) }));
+            if (self.query.end_time) |end| try filters.append(a, try std.fmt.allocPrint(a, "{s}<{s}", .{ try ident(a, group), try self.boundSql(end, true) }));
+        };
+        if (filters.items.len == 0) return shifted;
+        var bounded: std.Io.Writer.Allocating = .init(a);
+        try bounded.writer.print("SELECT * FROM {s}", .{shifted});
+        try writePredicates(&bounded.writer, filters.items);
+        return self.add(try bounded.toOwnedSlice());
+    }
+    fn offsetToGrain(self: *Context, cte: []const u8, metric_name: []const u8, grain: []const u8) ![]const u8 {
+        if (!sem.grainValid(grain)) return error.InvalidMetricGrain;
+        const a = self.allocator;
+        var time_group: ?[]const u8 = null;
+        for (self.query.group_by) |group| if (std.mem.startsWith(u8, group, "metric_time__")) {
+            time_group = group;
+            break;
+        };
+        const time_name = time_group orelse return error.MissingMetricTimeGroup;
+        const query_grain = time_name["metric_time__".len..];
+        const spine = try self.timeSpine();
+        var out: std.Io.Writer.Allocating = .init(a);
+        try out.writer.writeAll("SELECT ");
+        for (self.query.group_by) |group| if (eq(group, time_name)) {
+            try out.writer.print("sp.t AS {s},", .{try ident(a, group)});
+        } else try out.writer.print("b.{s},", .{try ident(a, group)});
+        try out.writer.print("b.{s} FROM (SELECT DISTINCT DATE_TRUNC('{s}',{s}) AS t FROM {s}) sp INNER JOIN {s} b ON b.{s}=DATE_TRUNC('{s}',sp.t)", .{ try ident(a, metric_name), query_grain, try ident(a, spine.column), spine.relation, cte, try ident(a, time_name), grain });
+        var filters: std.ArrayList([]const u8) = .empty;
+        if (self.query.start_time) |start| try filters.append(a, try std.fmt.allocPrint(a, "sp.t>={s}", .{try self.boundSql(start, false)}));
+        if (self.query.end_time) |end| try filters.append(a, try std.fmt.allocPrint(a, "sp.t<{s}", .{try self.boundSql(end, true)}));
+        try writePredicates(&out.writer, filters.items);
         return self.add(try out.toOwnedSlice());
     }
     fn compileMeasure(self: *Context, metric_resource: *const Resource, measure_input: Value, extra: []const Value, cumulative: bool) ![]const u8 {
         const a = self.allocator;
+        if (cumulative) {
+            const params = field(field(metric_resource.data, "type_params"), "cumulative_type_params");
+            var time_group = false;
+            for (self.query.group_by) |group| if (std.mem.startsWith(u8, group, "metric_time__")) {
+                time_group = true;
+            };
+            if (!time_group and field(params, "window") == .null and field(params, "grain_to_date") == .null) return self.compileMeasure(metric_resource, measure_input, extra, false);
+        }
         const name = text(measure_input, "name") orelse return error.InvalidMetricQuery;
         var model: ?*const Resource = null;
         var measure: Value = .null;
@@ -477,7 +530,7 @@ const Context = struct {
             const grain = self.query.group_by[time_index]["metric_time__".len..];
             const params = field(field(metric_resource.data, "type_params"), "cumulative_type_params");
             const spine = try self.timeSpine();
-            const metric_time = try source.time();
+            const metric_time = try source.resolveDimension(try std.fmt.allocPrint(a, "metric_time__{s}", .{try source.minimumTimeGrain()}));
             groups.items[time_index] = try std.fmt.allocPrint(a, "sp.{s}", .{try ident(a, spine.column)});
             if (grainRank(grain) > grainRank("day")) cumulative_period = text(params, "period_agg") orelse "first";
             var join: std.Io.Writer.Allocating = .init(a);
@@ -487,17 +540,18 @@ const Context = struct {
                 const count = field(window, "count");
                 const granularity = text(window, "granularity") orelse return error.InvalidMetricWindow;
                 if (count != .integer or count.integer < 0 or !sem.grainValid(granularity)) return error.InvalidMetricWindow;
-                try join.writer.print(" AND {s} > sp.{s} - INTERVAL '{d} {s}'", .{ metric_time, try ident(a, spine.column), count.integer, granularity });
+                try join.writer.print(" AND {s} > sp.{s} - INTERVAL '{d} {s}'", .{ metric_time, try ident(a, spine.column), count.integer * @as(i64, if (eq(granularity, "quarter")) 3 else 1), if (eq(granularity, "quarter")) "month" else granularity });
             } else if (text(params, "grain_to_date")) |granularity| {
                 if (!sem.grainValid(granularity)) return error.InvalidMetricGrain;
                 try join.writer.print(" AND {s} >= DATE_TRUNC('{s}',sp.{s})", .{ metric_time, granularity, try ident(a, spine.column) });
             }
             cumulative_join = try join.toOwnedSlice();
         }
-        const time_expr = if (cumulative) groups.items[metric_time_index.?] else if (self.query.start_time != null or self.query.end_time != null) try source.time() else "";
+        const time_expr = if (cumulative) groups.items[metric_time_index.?] else if (self.query.start_time != null or self.query.end_time != null) try source.resolveDimension(try std.fmt.allocPrint(a, "metric_time__{s}", .{try source.minimumTimeGrain()})) else "";
         if (self.query.start_time) |start| try predicates.append(a, try std.fmt.allocPrint(a, "{s} >= {s}", .{ time_expr, try self.boundSql(start, false) }));
-        if (self.query.end_time) |end| try predicates.append(a, try std.fmt.allocPrint(a, "{s} < {s}", .{ time_expr, try self.boundSql(end, true) }));
-        const aggregate = try aggregation(a, self.graph.adapter_type, measure, try self.qualifyFor(source_model, "s", text(measure, "expr") orelse name));
+        if (self.query.end_time) |end| try predicates.append(a, try std.fmt.allocPrint(a, "{s} <= {s}", .{ time_expr, try self.inclusiveEnd(end) }));
+        const measure_expr = try self.qualifyFor(source_model, "s", text(measure, "expr") orelse name);
+        const aggregate = try aggregation(a, self.graph.adapter_type, measure, measure_expr);
         var out: std.Io.Writer.Allocating = .init(a);
         const w = &out.writer;
         try w.writeAll("SELECT ");
@@ -516,11 +570,61 @@ const Context = struct {
                 try w.writeAll(group);
             }
         }
-        const base = try self.add(try out.toOwnedSlice());
+        const base = if (field(measure, "non_additive_dimension") != .null) try self.nonAdditive(&source, metric_resource.name, measure_input, groups.items, predicates.items, cumulative_join, measure_expr) else try self.add(try out.toOwnedSlice());
         if (cumulative_period) |period| return self.reaggregateCumulative(base, metric_resource.name, metric_time_index.?, period);
         const join_spine = field(measure_input, "join_to_timespine");
         if (join_spine == .bool and join_spine.bool and !cumulative) return self.fillTimeSpine(base, metric_resource.name, measure_input, metric_time_index orelse return error.MissingMetricTimeGroup);
         return base;
+    }
+    fn nonAdditive(self: *Context, source: *Source, metric_name: []const u8, input: Value, groups: []const []const u8, predicates: []const []const u8, cumulative_join: ?[]const u8, measure_expr: []const u8) ![]const u8 {
+        const a = self.allocator;
+        const params = field(source.measure, "non_additive_dimension");
+        const nonadd_time = try source.resolveDimension(text(params, "name") orelse return error.InvalidMetricQuery);
+        const choice = text(params, "window_choice") orelse return error.InvalidMetricQuery;
+        if (!eq(choice, "min") and !eq(choice, "max")) return error.InvalidMetricQuery;
+        var partitions: std.ArrayList([]const u8) = .empty;
+        for (self.query.group_by, groups) |name, sql| if (std.mem.startsWith(u8, name, "metric_time__")) try partitions.append(a, sql);
+        var windows: std.ArrayList([]const u8) = .empty;
+        for (list(field(params, "window_groupings"))) |group| {
+            const sql = try source.resolveDimension(sem.string(group) orelse return error.InvalidMetricQuery);
+            try windows.append(a, sql);
+            try partitions.append(a, sql);
+        }
+        var rows: std.Io.Writer.Allocating = .init(a);
+        const w = &rows.writer;
+        try w.writeAll("SELECT ");
+        for (groups, 0..) |group, i| try w.print("{s} AS __dxt_group_{d},", .{ group, i });
+        for (windows.items, 0..) |window, i| try w.print("{s} AS __dxt_window_{d},", .{ window, i });
+        try w.print("{s} AS __dxt_value,{s} AS __dxt_nonadd,{s}({s}) OVER (", .{ measure_expr, nonadd_time, choice, nonadd_time });
+        if (partitions.items.len != 0) {
+            try w.writeAll("PARTITION BY ");
+            for (partitions.items, 0..) |partition, i| {
+                if (i != 0) try w.writeByte(',');
+                try w.writeAll(partition);
+            }
+        }
+        try w.print(") AS __dxt_chosen FROM {s} s{s}", .{ try self.relationFor(source.model), source.joins.items });
+        if (cumulative_join) |join| try w.writeAll(join);
+        try writePredicates(w, predicates);
+        const selected = try self.add(try rows.toOwnedSlice());
+        var out: std.Io.Writer.Allocating = .init(a);
+        try out.writer.writeAll("SELECT ");
+        for (self.query.group_by, 0..) |name, i| try out.writer.print("__dxt_group_{d} AS {s},", .{ i, try ident(a, name) });
+        const aggregate = try aggregation(a, self.graph.adapter_type, source.measure, "__dxt_value");
+        const fill = field(input, "fill_nulls_with");
+        if (fill != .null) try out.writer.print("COALESCE({s},{s}) AS {s}", .{ aggregate, try std.json.Stringify.valueAlloc(a, fill, .{}), try ident(a, metric_name) }) else try out.writer.print("{s} AS {s}", .{ aggregate, try ident(a, metric_name) });
+        try out.writer.print(" FROM {s} WHERE __dxt_nonadd=__dxt_chosen", .{selected});
+        // Core joins selector grouping keys with ordinary equality; null entity
+        // keys do not match a selector group and must not contribute balances.
+        for (windows.items, 0..) |_, i| try out.writer.print(" AND __dxt_window_{d} IS NOT NULL", .{i});
+        if (groups.len != 0) {
+            try out.writer.writeAll(" GROUP BY ");
+            for (groups, 0..) |_, i| {
+                if (i != 0) try out.writer.writeByte(',');
+                try out.writer.print("__dxt_group_{d}", .{i});
+            }
+        }
+        return self.add(try out.toOwnedSlice());
     }
     fn reaggregateCumulative(self: *Context, base: []const u8, metric_name: []const u8, time_index: usize, period: []const u8) ![]const u8 {
         const a = self.allocator;
@@ -650,7 +754,7 @@ const Context = struct {
             const count = field(window, "count");
             const grain = text(window, "granularity") orelse return error.InvalidMetricWindow;
             if (count != .integer or count.integer < 0 or !sem.grainValid(grain)) return error.InvalidMetricWindow;
-            try joined.writer.print(" AND b.event_time>c.event_time-INTERVAL '{d} {s}'", .{ count.integer, grain });
+            try joined.writer.print(" AND b.event_time>c.event_time-INTERVAL '{d} {s}'", .{ count.integer * @as(i64, if (eq(grain, "quarter")) 3 else 1), if (eq(grain, "quarter")) "month" else grain });
         }
         for (list(field(params, "constant_properties")), 0..) |_, i| try joined.writer.print(" AND b.p{d}=c.p{d}", .{ i, i });
         const matched = try self.add(try joined.toOwnedSlice());
@@ -683,6 +787,11 @@ const Source = struct {
     measure: Value,
     joins: std.ArrayList(u8) = .empty,
     joined: std.ArrayList(struct { model: *const Resource, alias: []const u8, source_alias: []const u8, entity: []const u8 }) = .empty,
+    fn minimumTimeGrain(self: *const Source) ![]const u8 {
+        const name = text(self.measure, "agg_time_dimension") orelse text(field(self.model.data, "defaults"), "agg_time_dimension") orelse return error.MissingAggregationTimeDimension;
+        for (list(field(self.model.data, "dimensions"))) |dimension| if (eq(text(dimension, "name").?, name)) return text(field(dimension, "type_params"), "time_granularity") orelse return error.InvalidMetricGrain;
+        return error.MissingAggregationTimeDimension;
+    }
     fn time(self: *Source) ![]const u8 {
         const name = text(self.measure, "agg_time_dimension") orelse text(field(self.model.data, "defaults"), "agg_time_dimension") orelse return error.MissingAggregationTimeDimension;
         for (list(field(self.model.data, "dimensions"))) |dimension| if (eq(text(dimension, "name").?, name)) return self.context.qualifyFor(self.model, "s", text(dimension, "expr") orelse name);

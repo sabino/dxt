@@ -794,3 +794,81 @@ def test_metric_cross_database_duckdb_to_postgres_exact_decimal_export(tmp_path,
                 assert cursor.fetchall() == [('US', expected)]
                 cursor.execute("select data_type from information_schema.columns where table_schema='reporting' and table_name='daily_revenue_export' and column_name='revenue'")
                 assert cursor.fetchone() == ('numeric',)
+
+
+def edge_metric_project(path):
+    project = metric_project(path)
+    properties = project / 'models/semantic.yml'
+    source = properties.read_text().replace('      - name: paid_count\n', '''      - name: current_balance
+        agg: sum
+        expr: amount
+        non_additive_dimension:
+          name: ordered_at
+          window_choice: max
+          window_groupings: [customer]
+      - name: total_balance
+        agg: sum
+        expr: amount
+        non_additive_dimension:
+          name: ordered_at
+          window_choice: max
+      - name: paid_count
+''')
+    source = source.replace('saved_queries:\n', '''  - name: current_balance
+    label: Current Balance
+    type: simple
+    type_params: {measure: current_balance}
+  - name: total_balance
+    label: Total Balance
+    type: simple
+    type_params: {measure: total_balance}
+  - name: all_time_revenue
+    label: All Time Revenue
+    type: cumulative
+    type_params: {measure: order_amount}
+  - name: month_start_revenue
+    label: Month Start Revenue
+    type: derived
+    type_params:
+      expr: prior
+      metrics: [{name: revenue, alias: prior, offset_to_grain: month}]
+saved_queries:
+''')
+    properties.write_text(source)
+    orders = project / 'models/orders.sql'
+    source = orders.read_text().replace("(5,NULL,0,'cancelled',date '2024-01-09'))", "(5,NULL,0,'cancelled',date '2024-01-09'),\n      (6,1,7,'paid',date '2024-01-04'))")
+    orders.write_text(source)
+    return project
+
+
+@pytest.mark.parametrize('metric,groups,start,end', [
+    ('current_balance', [], None, None),
+    ('total_balance', [], None, None),
+    ('current_balance', ['customer__country'], None, None),
+    ('current_balance', ['order_key__status'], None, None),
+    ('current_balance', ['metric_time__day'], None, None),
+    ('current_balance', ['metric_time__month'], None, None),
+    ('current_balance', ['metric_time__month', 'customer__country'], None, None),
+    ('current_balance', [], '2024-01-01', '2024-01-03'),
+    ('all_time_revenue', [], None, None),
+    ('all_time_revenue', ['customer__country'], None, None),
+    ('all_time_revenue', ['metric_time__day'], None, None),
+    ('month_start_revenue', ['metric_time__day'], None, None),
+    ('month_start_revenue', ['metric_time__day', 'customer__country'], None, None),
+    ('month_start_revenue', ['metric_time__day'], '2024-01-08', '2024-01-09'),
+])
+def test_metricflow_nonadditive_balances_all_time_and_grain_offsets(tmp_path, core_runner, metric, groups, start, end):
+    from test_usability_commands import query
+    project = edge_metric_project(tmp_path / 'metric')
+    assert invoke_core(core_runner, project, 'parse').success
+    assert run_dxt(project, 'build').returncode == 0
+    sql = metricflow_sql(project, [metric], groups, start_time=start, end_time=end)
+    expected = query(project / 'warehouse.duckdb', sql)
+    flags = ['--metrics', metric]
+    if groups:
+        flags += ['--group-by', ','.join(groups)]
+    if start:
+        flags += ['--start-time', start, '--end-time', end]
+    result = run_dxt(project, 'metric', 'query', *flags)
+    assert result.returncode == 0, result.stderr
+    assert canonical_rows(json.loads(result.stdout)) == canonical_rows(expected)
