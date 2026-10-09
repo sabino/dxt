@@ -172,6 +172,7 @@ pub fn apply(allocator: std.mem.Allocator, node: *types.Node) !void {
         var it = v.object.iterator();
         while (it.next()) |entry| try node.seed_column_types.append(allocator, .{ .name = entry.key_ptr.*, .data_type = try string(entry.value_ptr.*) });
     }
+    if (node.snapshot_config != null) try @import("snapshot.zig").applyJsonConfig(allocator, config, node);
 }
 
 pub fn string(value: std.json.Value) ![]const u8 {

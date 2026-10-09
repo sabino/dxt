@@ -853,7 +853,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
                 if (value == .boolean) try raw.appendSlice(allocator, if (value.boolean) "true" else "false") else try raw.appendSlice(allocator, try native_expr.repr(value, allocator));
                 count += 1;
             }
-            if (node.snapshot_config != null) try snapshot.parseConfig(context.allocator, raw.items, node) else try jinja.parseConfig(context.allocator, raw.items, node);
+            try jinja.parseConfig(context.allocator, raw.items, node);
         }
         return .{ .string = "" };
     }

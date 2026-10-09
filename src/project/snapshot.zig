@@ -391,7 +391,7 @@ test "typed snapshot config rebuild retains native values and clears nullable ov
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    var node = types.Node{ .resource_type = "snapshot", .package_name = "demo", .unique_id = "snapshot.demo.history", .name = "history", .path = "history.sql", .original_file_path = "snapshots/history.sql", .raw_code = "", .snapshot_config = .{} };
+    var node = types.Node{ .resource_type = "snapshot", .package_name = "demo", .unique_id = "snapshot.demo.history", .name = "history", .path = "history.sql", .original_file_path = "snapshots/history.sql", .raw_code = "", .materialized = "snapshot", .snapshot_config = .{} };
     defer types.deinitNode(allocator, &node);
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"strategy\":\"check\",\"unique_key\":[\"id\",\"tenant\"],\"check_cols\":\"all\",\"hard_deletes\":\"new_record\",\"snapshot_meta_column_names\":{\"dbt_valid_to\":\"valid_to\",\"dbt_is_deleted\":null},\"meta\":{\"nested\":[true,null]}}", .{});
     defer parsed.deinit();
@@ -411,6 +411,7 @@ test "typed snapshot config rebuild retains native values and clears nullable ov
 
 pub fn validateConfig(node: *const types.Node) !void {
     if (!node.enabled) return;
+    if (!std.mem.eql(u8, node.materialized, "snapshot")) return error.InvalidSnapshotConfig;
     const config = node.snapshot_config.?;
     if (config.hard_deletes != null and config.invalidate_hard_deletes != null) return error.InvalidSnapshotConfig;
     if (config.hard_deletes) |mode| {
