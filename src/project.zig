@@ -15,6 +15,7 @@ const selector_config = @import("project/selector_config.zig");
 const manifest = @import("project/manifest.zig");
 const run_results = @import("project/run_results.zig");
 const selector = @import("project/selector.zig");
+const scheduler = @import("project/scheduler.zig");
 const source_freshness = @import("project/source_freshness.zig");
 const state_artifacts = @import("project/state.zig");
 const types = @import("project/types.zig");
@@ -400,7 +401,7 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     defer blocked.deinit(runtime.allocator);
     var had_failure = false;
     for (execution_order) |node| {
-        if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &executed)) {
+        if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &graph, &blocked, node, &executed)) {
             continue;
         }
         if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
@@ -458,7 +459,7 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     }
     for (seed_nodes, 0..) |node, index| {
         if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
-            try appendSkippedAfterExecutionFailure(runtime.allocator, selected_seeds, seed_nodes[index + 1 ..], &.{}, node.unique_id, &executed);
+            try appendSkippedAfterExecutionFailure(runtime.allocator, &graph, selected_seeds, seed_nodes[index + 1 ..], &.{}, node.unique_id, &executed);
             return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Seed");
         }
     }
@@ -551,6 +552,11 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     const selected_kinds = classifyBuildSelection(selected);
     if (selected_kinds.total == 0) return error.UnsupportedBuildSelection;
+    if (selected_kinds.unit_test != 0 and selected_kinds.test_resource + selected_kinds.unit_test != selected_kinds.total and
+        selected_kinds.seed + selected_kinds.model + selected_kinds.source + selected_kinds.test_resource + selected_kinds.unit_test == selected_kinds.total)
+    {
+        return buildWithUnitTests(runtime, options, &graph, selected, target_dir, manifest_path, stdout);
+    }
     if (selected_kinds.seed == selected_kinds.total) {
         if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedSeedAdapterExecution;
         const seed_nodes = try selectedSeedExecutionOrder(runtime, &graph, selected);
@@ -567,7 +573,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         defer blocked.deinit(runtime.allocator);
         var had_failure = false;
         for (seed_nodes) |node| {
-            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &executed)) continue;
+            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &graph, &blocked, node, &executed)) continue;
             if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
                 try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
                 had_failure = true;
@@ -610,28 +616,28 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         var had_execution_failure = false;
         var test_failures = GenericTestExecutionSummary{};
         for (seed_nodes) |node| {
-            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &executed)) {
-                try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &graph, &blocked, node, &executed)) {
+                try appendSkippedBlockedDataTests(runtime.allocator, &graph, selected, test_nodes, executed_tests, blocked.items, &executed);
                 continue;
             }
             if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
                 try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
                 had_execution_failure = true;
-                try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                try appendSkippedBlockedDataTests(runtime.allocator, &graph, selected, test_nodes, executed_tests, blocked.items, &executed);
                 continue;
             }
             try executed_node_ids.append(runtime.allocator, node.unique_id);
             var failed_test_blockers: std.ArrayList([]const u8) = .empty;
             defer failed_test_blockers.deinit(runtime.allocator);
-            const test_summary = try appendReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed, &failed_test_blockers);
+            const test_summary = try appendReadyDataTestResults(runtime, db_path, &graph, selected, test_nodes, executed_tests, executed_node_ids.items, &executed, &failed_test_blockers);
             if (test_summary.failed_tests != 0) {
                 try appendBlockedRoots(runtime.allocator, &blocked, failed_test_blockers.items);
                 test_failures.failed_tests += test_summary.failed_tests;
                 test_failures.total_failures += test_summary.total_failures;
             }
         }
-        try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
-        const test_summary = try appendRemainingReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed);
+        try appendSkippedBlockedDataTests(runtime.allocator, &graph, selected, test_nodes, executed_tests, blocked.items, &executed);
+        const test_summary = try appendRemainingReadyDataTestResults(runtime, db_path, &graph, selected, test_nodes, executed_tests, executed_node_ids.items, &executed);
         test_failures.failed_tests += test_summary.failed_tests;
         test_failures.total_failures += test_summary.total_failures;
         if (had_execution_failure) return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
@@ -734,28 +740,28 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         var had_execution_failure = false;
         var test_failures = GenericTestExecutionSummary{};
         for (execution_order) |node| {
-            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &executed)) {
-                try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &graph, &blocked, node, &executed)) {
+                try appendSkippedBlockedDataTests(runtime.allocator, &graph, selected, test_nodes, executed_tests, blocked.items, &executed);
                 continue;
             }
             if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
                 try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
                 had_execution_failure = true;
-                try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                try appendSkippedBlockedDataTests(runtime.allocator, &graph, selected, test_nodes, executed_tests, blocked.items, &executed);
                 continue;
             }
             try executed_node_ids.append(runtime.allocator, node.unique_id);
             var failed_test_blockers: std.ArrayList([]const u8) = .empty;
             defer failed_test_blockers.deinit(runtime.allocator);
-            const test_summary = try appendReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed, &failed_test_blockers);
+            const test_summary = try appendReadyDataTestResults(runtime, db_path, &graph, selected, test_nodes, executed_tests, executed_node_ids.items, &executed, &failed_test_blockers);
             if (test_summary.failed_tests != 0) {
                 try appendBlockedRoots(runtime.allocator, &blocked, failed_test_blockers.items);
                 test_failures.failed_tests += test_summary.failed_tests;
                 test_failures.total_failures += test_summary.total_failures;
             }
         }
-        try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
-        const test_summary = try appendRemainingReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed);
+        try appendSkippedBlockedDataTests(runtime.allocator, &graph, selected, test_nodes, executed_tests, blocked.items, &executed);
+        const test_summary = try appendRemainingReadyDataTestResults(runtime, db_path, &graph, selected, test_nodes, executed_tests, executed_node_ids.items, &executed);
         test_failures.failed_tests += test_summary.failed_tests;
         test_failures.total_failures += test_summary.total_failures;
         if (had_execution_failure) return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
@@ -802,15 +808,15 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         var had_execution_failure = false;
         var test_failures = GenericTestExecutionSummary{};
         for (execution_order) |node| {
-            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &executed)) {
-                try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+            if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &graph, &blocked, node, &executed)) {
+                try appendSkippedBlockedDataTests(runtime.allocator, &graph, selected, test_nodes, executed_tests, blocked.items, &executed);
                 continue;
             }
             if (std.mem.eql(u8, node.resource_type, "seed")) {
                 if (!try executeSeedAppendingResult(runtime, db_path, options.project_dir, &graph, node, &executed)) {
                     try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
                     had_execution_failure = true;
-                    try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                    try appendSkippedBlockedDataTests(runtime.allocator, &graph, selected, test_nodes, executed_tests, blocked.items, &executed);
                     continue;
                 }
                 seed_count += 1;
@@ -818,7 +824,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
                 if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &executed)) {
                     try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
                     had_execution_failure = true;
-                    try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
+                    try appendSkippedBlockedDataTests(runtime.allocator, &graph, selected, test_nodes, executed_tests, blocked.items, &executed);
                     continue;
                 }
                 model_count += 1;
@@ -826,15 +832,15 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             try executed_node_ids.append(runtime.allocator, node.unique_id);
             var failed_test_blockers: std.ArrayList([]const u8) = .empty;
             defer failed_test_blockers.deinit(runtime.allocator);
-            const test_summary = try appendReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed, &failed_test_blockers);
+            const test_summary = try appendReadyDataTestResults(runtime, db_path, &graph, selected, test_nodes, executed_tests, executed_node_ids.items, &executed, &failed_test_blockers);
             if (test_summary.failed_tests != 0) {
                 try appendBlockedRoots(runtime.allocator, &blocked, failed_test_blockers.items);
                 test_failures.failed_tests += test_summary.failed_tests;
                 test_failures.total_failures += test_summary.total_failures;
             }
         }
-        try appendSkippedBlockedDataTests(runtime.allocator, selected, test_nodes, executed_tests, blocked.items, &executed);
-        const test_summary = try appendRemainingReadyDataTestResults(runtime, db_path, &graph, test_nodes, executed_tests, executed_node_ids.items, &executed);
+        try appendSkippedBlockedDataTests(runtime.allocator, &graph, selected, test_nodes, executed_tests, blocked.items, &executed);
+        const test_summary = try appendRemainingReadyDataTestResults(runtime, db_path, &graph, selected, test_nodes, executed_tests, executed_node_ids.items, &executed);
         test_failures.failed_tests += test_summary.failed_tests;
         test_failures.total_failures += test_summary.total_failures;
         if (had_execution_failure) return failExecution(runtime, target_dir, manifest_path, db_path, executed.items, stdout, "Build");
@@ -863,6 +869,125 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     if (selected_kinds.model != 0) return error.UnsupportedModelExecution;
     if (selected_kinds.test_resource != 0) return error.UnsupportedTestExecution;
     return error.UnsupportedBuildSelection;
+}
+
+/// Unit tests gate their model, whereas data tests gate its descendants after
+/// materialization. Keep both gates in the same ordered physical resource loop.
+fn buildWithUnitTests(runtime: Runtime, options: Options, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, manifest_path: []const u8, stdout: *Io.Writer) !void {
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedBuildAdapterExecution;
+    const nodes = try scheduler.orderNodes(runtime.allocator, graph, selected, true);
+    defer runtime.allocator.free(nodes);
+    try validateSeedModelBuildExecution(graph, nodes);
+    const data_tests = try selectedDataTestExecutionOrder(runtime, graph, selected);
+    defer runtime.allocator.free(data_tests);
+    try validateDataTestExecution(data_tests);
+    const unit_tests = try selectedUnitTestExecutionOrder(runtime, graph, selected);
+    defer runtime.allocator.free(unit_tests);
+    try validateUnitTestExecution(runtime, graph, unit_tests);
+
+    const db_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
+    var results: std.ArrayList(run_results.NodeResult) = .empty;
+    defer {
+        deinitRunResults(runtime.allocator, results.items);
+        results.deinit(runtime.allocator);
+    }
+    var completed: std.ArrayList([]const u8) = .empty;
+    defer completed.deinit(runtime.allocator);
+    var blocked: std.ArrayList([]const u8) = .empty;
+    defer blocked.deinit(runtime.allocator);
+    const done_data = try runtime.allocator.alloc(bool, data_tests.len);
+    defer runtime.allocator.free(done_data);
+    @memset(done_data, false);
+    const done_units = try runtime.allocator.alloc(bool, unit_tests.len);
+    defer runtime.allocator.free(done_units);
+    @memset(done_units, false);
+
+    var failed_tests = GenericTestExecutionSummary{};
+    var had_execution_failure = false;
+    // An explicitly selected unit can gate downstream models even when its
+    // own model uses an existing relation and is outside the selection.
+    for (unit_tests, 0..) |unit_test, index| {
+        for (graph.nodes.items) |*target_node| {
+            if (!scheduler.unitTargetsNode(unit_test, target_node)) continue;
+            if (selectionContains(selected, target_node.unique_id)) break;
+            if (containsUniqueId(blocked.items, target_node.unique_id) or
+                try scheduler.blockedBy(runtime.allocator, graph, target_node.depends_on.items, blocked.items))
+            {
+                try results.append(runtime.allocator, .{ .unit_test_node = unit_test, .status = "skipped" });
+            } else {
+                const summary = try appendOneUnitTestResult(runtime, db_path, graph, unit_test, &results);
+                failed_tests.failed_tests += summary.failed_tests;
+                failed_tests.total_failures += summary.total_failures;
+                if (summary.failed_tests != 0) try appendUniqueString(runtime.allocator, &blocked, target_node.unique_id);
+            }
+            done_units[index] = true;
+            break;
+        }
+    }
+    for (nodes) |node| {
+        const node_blocked = containsUniqueId(blocked.items, node.unique_id) or
+            try scheduler.blockedBy(runtime.allocator, graph, node.depends_on.items, blocked.items);
+        for (unit_tests, 0..) |unit_test, index| {
+            if (done_units[index] or !scheduler.unitTargetsNode(unit_test, node)) continue;
+            if (node_blocked or containsUniqueId(blocked.items, node.unique_id)) {
+                try results.append(runtime.allocator, .{ .unit_test_node = unit_test, .status = "skipped" });
+            } else {
+                const summary = try appendOneUnitTestResult(runtime, db_path, graph, unit_test, &results);
+                failed_tests.failed_tests += summary.failed_tests;
+                failed_tests.total_failures += summary.total_failures;
+                if (summary.failed_tests != 0) try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
+            }
+            done_units[index] = true;
+        }
+
+        if (node_blocked or containsUniqueId(blocked.items, node.unique_id)) {
+            try results.append(runtime.allocator, .{ .node = node, .status = "skipped" });
+            try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
+        } else {
+            const success = if (std.mem.eql(u8, node.resource_type, "seed"))
+                try executeSeedAppendingResult(runtime, db_path, options.project_dir, graph, node, &results)
+            else
+                try executeModelAppendingResult(runtime, db_path, graph, node, &results);
+            if (success) {
+                try completed.append(runtime.allocator, node.unique_id);
+            } else {
+                try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
+                had_execution_failure = true;
+            }
+        }
+        try appendSkippedBlockedDataTests(runtime.allocator, graph, selected, data_tests, done_data, blocked.items, &results);
+        var failed_roots: std.ArrayList([]const u8) = .empty;
+        defer failed_roots.deinit(runtime.allocator);
+        const data_summary = try appendReadyDataTestResults(runtime, db_path, graph, selected, data_tests, done_data, completed.items, &results, &failed_roots);
+        failed_tests.failed_tests += data_summary.failed_tests;
+        failed_tests.total_failures += data_summary.total_failures;
+        try appendBlockedRoots(runtime.allocator, &blocked, failed_roots.items);
+    }
+    // Explicitly selected units whose target model is not selected still run
+    // against fixtures, independent of whether its target relation exists.
+    for (unit_tests, 0..) |unit_test, index| {
+        if (done_units[index]) continue;
+        if (try scheduler.blockedBy(runtime.allocator, graph, unit_test.depends_on.items, blocked.items)) {
+            try results.append(runtime.allocator, .{ .unit_test_node = unit_test, .status = "skipped" });
+        } else {
+            const summary = try appendOneUnitTestResult(runtime, db_path, graph, unit_test, &results);
+            failed_tests.failed_tests += summary.failed_tests;
+            failed_tests.total_failures += summary.total_failures;
+        }
+        done_units[index] = true;
+    }
+    try appendSkippedBlockedDataTests(runtime.allocator, graph, selected, data_tests, done_data, blocked.items, &results);
+    const remaining = try appendRemainingReadyDataTestResults(runtime, db_path, graph, selected, data_tests, done_data, completed.items, &results);
+    failed_tests.failed_tests += remaining.failed_tests;
+    failed_tests.total_failures += remaining.total_failures;
+
+    if (had_execution_failure) return failExecution(runtime, target_dir, manifest_path, db_path, results.items, stdout, "Build");
+    try writeRunResults(runtime, target_dir, results.items);
+    try stdout.print("Built {d} resource(s) against {s}; wrote artifacts into {s}\n", .{ results.items.len, util.normalizeForDisplay(db_path), util.normalizeForDisplay(manifest_path) });
+    if (failed_tests.failed_tests != 0) {
+        try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ failed_tests.failed_tests, failed_tests.total_failures });
+        return error.TestFailure;
+    }
 }
 
 fn resolveSelection(runtime: Runtime, options: Options) !selector_config.ResolvedSelection {
@@ -968,55 +1093,11 @@ fn classifyBuildSelection(selected: []const selector.SelectedResource) BuildSele
 }
 
 fn selectedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource) ![]*Node {
-    const selected_count = countSelectedGraphModels(graph, selected);
-    var remaining = try runtime.allocator.alloc(bool, graph.nodes.items.len);
-    defer runtime.allocator.free(remaining);
-    @memset(remaining, false);
-    for (graph.nodes.items, 0..) |*node, index| {
-        remaining[index] = isExecutableModelNode(node) and selectionContains(selected, node.unique_id);
-    }
-
-    var ordered: std.ArrayList(*Node) = .empty;
-    errdefer ordered.deinit(runtime.allocator);
-    while (ordered.items.len < selected_count) {
-        var progressed = false;
-        for (graph.nodes.items, 0..) |*node, index| {
-            if (!remaining[index]) continue;
-            if (!selectedModelDependenciesExecuted(graph, selected, ordered.items, node)) continue;
-            try ordered.append(runtime.allocator, node);
-            remaining[index] = false;
-            progressed = true;
-        }
-        if (!progressed) return error.CyclicModelDependency;
-    }
-    return try ordered.toOwnedSlice(runtime.allocator);
+    return try scheduler.orderNodes(runtime.allocator, graph, selected, false);
 }
 
 fn selectedSeedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource) ![]*Node {
-    const selected_count = countSelectedGraphSeeds(graph, selected) + countSelectedGraphModels(graph, selected);
-    var remaining = try runtime.allocator.alloc(bool, graph.nodes.items.len);
-    defer runtime.allocator.free(remaining);
-    @memset(remaining, false);
-    for (graph.nodes.items, 0..) |*node, index| {
-        remaining[index] = node.enabled and
-            (std.mem.eql(u8, node.resource_type, "seed") or isExecutableModelNode(node)) and
-            selectionContains(selected, node.unique_id);
-    }
-
-    var ordered: std.ArrayList(*Node) = .empty;
-    errdefer ordered.deinit(runtime.allocator);
-    while (ordered.items.len < selected_count) {
-        var progressed = false;
-        for (graph.nodes.items, 0..) |*node, index| {
-            if (!remaining[index]) continue;
-            if (!selectedSeedModelDependenciesExecuted(graph, selected, ordered.items, node)) continue;
-            try ordered.append(runtime.allocator, node);
-            remaining[index] = false;
-            progressed = true;
-        }
-        if (!progressed) return error.CyclicModelDependency;
-    }
-    return try ordered.toOwnedSlice(runtime.allocator);
+    return try scheduler.orderNodes(runtime.allocator, graph, selected, true);
 }
 
 fn validateRunMaterializations(nodes: []const *Node) !void {
@@ -1183,6 +1264,7 @@ fn appendExecutionErrorResult(allocator: std.mem.Allocator, executed: *std.Array
 
 fn appendSkippedAfterExecutionFailure(
     allocator: std.mem.Allocator,
+    graph: *const Graph,
     selected: []const selector.SelectedResource,
     remaining_nodes: []const *Node,
     test_nodes: []const DataTestRef,
@@ -1195,7 +1277,7 @@ fn appendSkippedAfterExecutionFailure(
 
     for (remaining_nodes) |node| {
         if (!selectionContains(selected, node.unique_id)) continue;
-        if (!dependsOnAnyBlocked(node.depends_on.items, blocked.items)) continue;
+        if (!try scheduler.blockedBy(allocator, graph, node.depends_on.items, blocked.items)) continue;
         try executed.append(allocator, .{
             .node = node,
             .status = "skipped",
@@ -1205,7 +1287,7 @@ fn appendSkippedAfterExecutionFailure(
 
     for (test_nodes) |test_node| {
         if (!selectionContains(selected, test_node.uniqueId())) continue;
-        if (!testDependsOnAnyBlocked(test_node, blocked.items)) continue;
+        if (!try testDependsOnAnyBlocked(allocator, graph, test_node, blocked.items)) continue;
         switch (test_node) {
             .generic => |generic| try executed.append(allocator, .{ .test_node = generic, .status = "skipped" }),
             .singular => |singular| try executed.append(allocator, .{ .singular_test_node = singular, .status = "skipped" }),
@@ -1216,11 +1298,12 @@ fn appendSkippedAfterExecutionFailure(
 
 fn appendSkippedIfNodeDependsOnBlocked(
     allocator: std.mem.Allocator,
+    graph: *const Graph,
     blocked: *std.ArrayList([]const u8),
     node: *const Node,
     executed: *std.ArrayList(run_results.NodeResult),
 ) !bool {
-    if (!dependsOnAnyBlocked(node.depends_on.items, blocked.items)) return false;
+    if (!try scheduler.blockedBy(allocator, graph, node.depends_on.items, blocked.items)) return false;
     try executed.append(allocator, .{
         .node = node,
         .status = "skipped",
@@ -1231,6 +1314,7 @@ fn appendSkippedIfNodeDependsOnBlocked(
 
 fn appendSkippedAfterDataTestFailure(
     allocator: std.mem.Allocator,
+    graph: *const Graph,
     selected: []const selector.SelectedResource,
     remaining_nodes: []const *Node,
     test_nodes: []const DataTestRef,
@@ -1246,7 +1330,7 @@ fn appendSkippedAfterDataTestFailure(
 
     for (remaining_nodes) |node| {
         if (!selectionContains(selected, node.unique_id)) continue;
-        if (!dependsOnAnyBlocked(node.depends_on.items, blocked.items)) continue;
+        if (!try scheduler.blockedBy(allocator, graph, node.depends_on.items, blocked.items)) continue;
         try executed.append(allocator, .{
             .node = node,
             .status = "skipped",
@@ -1257,7 +1341,7 @@ fn appendSkippedAfterDataTestFailure(
     for (test_nodes, 0..) |test_node, index| {
         if (executed_tests[index]) continue;
         if (!selectionContains(selected, test_node.uniqueId())) continue;
-        if (!testDependsOnAnyBlocked(test_node, blocked.items)) continue;
+        if (!try testDependsOnAnyBlocked(allocator, graph, test_node, blocked.items)) continue;
         switch (test_node) {
             .generic => |generic| try executed.append(allocator, .{ .test_node = generic, .status = "skipped" }),
             .singular => |singular| try executed.append(allocator, .{ .singular_test_node = singular, .status = "skipped" }),
@@ -1266,8 +1350,8 @@ fn appendSkippedAfterDataTestFailure(
     }
 }
 
-fn testDependsOnAnyBlocked(test_node: DataTestRef, blocked: []const []const u8) bool {
-    if (dependsOnAnyBlocked(test_node.dependsOn(), blocked)) return true;
+fn testDependsOnAnyBlocked(allocator: std.mem.Allocator, graph: *const Graph, test_node: DataTestRef, blocked: []const []const u8) !bool {
+    if (try scheduler.blockedBy(allocator, graph, test_node.dependsOn(), blocked)) return true;
     switch (test_node) {
         .generic => |generic| {
             if (generic.attached_node) |attached_node| {
@@ -1278,13 +1362,6 @@ fn testDependsOnAnyBlocked(test_node: DataTestRef, blocked: []const []const u8) 
             }
         },
         .singular => {},
-    }
-    return false;
-}
-
-fn dependsOnAnyBlocked(depends_on: []const []const u8, blocked: []const []const u8) bool {
-    for (depends_on) |dependency| {
-        if (containsUniqueId(blocked, dependency)) return true;
     }
     return false;
 }
@@ -1336,6 +1413,7 @@ fn appendReadyDataTestResults(
     runtime: Runtime,
     db_path: []const u8,
     graph: *const Graph,
+    selected: []const selector.SelectedResource,
     test_nodes: []const DataTestRef,
     executed_tests: []bool,
     completed_nodes: []const []const u8,
@@ -1345,7 +1423,7 @@ fn appendReadyDataTestResults(
     var summary: GenericTestExecutionSummary = .{};
     for (test_nodes, 0..) |test_ref, index| {
         if (executed_tests[index]) continue;
-        if (!dataTestDependenciesCompleted(test_ref, completed_nodes)) continue;
+        if (!try scheduler.dependenciesCompleted(runtime.allocator, graph, test_ref.dependsOn(), selected, completed_nodes)) continue;
         const result = try appendOneDataTestResult(runtime, db_path, graph, test_ref, executed);
         executed_tests[index] = true;
         if (result.failed_tests != 0) {
@@ -1361,6 +1439,7 @@ fn appendRemainingReadyDataTestResults(
     runtime: Runtime,
     db_path: []const u8,
     graph: *const Graph,
+    selected: []const selector.SelectedResource,
     test_nodes: []const DataTestRef,
     executed_tests: []bool,
     completed_nodes: []const []const u8,
@@ -1369,7 +1448,7 @@ fn appendRemainingReadyDataTestResults(
     var summary: GenericTestExecutionSummary = .{};
     for (test_nodes, 0..) |test_ref, index| {
         if (executed_tests[index]) continue;
-        if (!dataTestDependenciesCompleted(test_ref, completed_nodes)) continue;
+        if (!try scheduler.dependenciesCompleted(runtime.allocator, graph, test_ref.dependsOn(), selected, completed_nodes)) continue;
         const result = try appendOneDataTestResult(runtime, db_path, graph, test_ref, executed);
         executed_tests[index] = true;
         summary.failed_tests += result.failed_tests;
@@ -1570,14 +1649,6 @@ fn evaluateTestThreshold(failures: u64, condition: []const u8) !bool {
     return error.UnsupportedTestExecution;
 }
 
-fn dataTestDependenciesCompleted(test_ref: DataTestRef, completed_nodes: []const []const u8) bool {
-    for (test_ref.dependsOn()) |dependency| {
-        if (!std.mem.startsWith(u8, dependency, "model.") and !std.mem.startsWith(u8, dependency, "seed.")) continue;
-        if (!containsUniqueId(completed_nodes, dependency)) return false;
-    }
-    return true;
-}
-
 fn appendDataTestBlockedRoots(allocator: std.mem.Allocator, blocked_roots: *std.ArrayList([]const u8), test_ref: DataTestRef) !void {
     switch (test_ref) {
         .generic => |generic| {
@@ -1607,6 +1678,7 @@ fn appendBlockedRoots(allocator: std.mem.Allocator, blocked: *std.ArrayList([]co
 
 fn appendSkippedBlockedDataTests(
     allocator: std.mem.Allocator,
+    graph: *const Graph,
     selected: []const selector.SelectedResource,
     test_nodes: []const DataTestRef,
     executed_tests: []bool,
@@ -1616,7 +1688,8 @@ fn appendSkippedBlockedDataTests(
     for (test_nodes, 0..) |test_node, index| {
         if (executed_tests[index]) continue;
         if (!selectionContains(selected, test_node.uniqueId())) continue;
-        if (!testDependsOnAnyBlocked(test_node, blocked)) continue;
+        if (!try testDependsOnAnyBlocked(allocator, graph, test_node, blocked)) continue;
+        if (try scheduler.blockedParentPending(allocator, graph, test_node.dependsOn(), selected, blocked)) continue;
         switch (test_node) {
             .generic => |generic| try executed.append(allocator, .{ .test_node = generic, .status = "skipped" }),
             .singular => |singular| try executed.append(allocator, .{ .singular_test_node = singular, .status = "skipped" }),
@@ -1648,19 +1721,6 @@ fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.N
     }
 }
 
-fn countSelectedGraphModels(graph: *const Graph, selected: []const selector.SelectedResource) usize {
-    var count: usize = 0;
-    for (graph.nodes.items) |*node| {
-        if (!isExecutableModelNode(node)) continue;
-        if (selectionContains(selected, node.unique_id)) count += 1;
-    }
-    return count;
-}
-
-fn isExecutableModelNode(node: *const Node) bool {
-    return node.enabled and std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.materialized, "ephemeral");
-}
-
 fn countSelectedGraphSeeds(graph: *const Graph, selected: []const selector.SelectedResource) usize {
     var count: usize = 0;
     for (graph.nodes.items) |node| {
@@ -1687,44 +1747,6 @@ fn countSelectedUnitTests(graph: *const Graph, selected: []const selector.Select
         if (unit_test.enabled and selectionContains(selected, unit_test.unique_id)) count += 1;
     }
     return count;
-}
-
-fn selectedModelDependenciesExecuted(graph: *const Graph, selected: []const selector.SelectedResource, executed: []const *Node, node: *const Node) bool {
-    for (node.depends_on.items) |dependency| {
-        if (!std.mem.startsWith(u8, dependency, "model.")) continue;
-        if (!selectionContains(selected, dependency)) continue;
-        if (findGraphNodeByUniqueId(graph, dependency)) |dependency_node| {
-            if (std.mem.eql(u8, dependency_node.materialized, "ephemeral")) continue;
-        }
-        if (!executedContains(executed, dependency)) return false;
-    }
-    return true;
-}
-
-fn selectedSeedModelDependenciesExecuted(graph: *const Graph, selected: []const selector.SelectedResource, executed: []const *Node, node: *const Node) bool {
-    for (node.depends_on.items) |dependency| {
-        if (!std.mem.startsWith(u8, dependency, "model.") and !std.mem.startsWith(u8, dependency, "seed.")) continue;
-        if (!selectionContains(selected, dependency)) continue;
-        if (findGraphNodeByUniqueId(graph, dependency)) |dependency_node| {
-            if (std.mem.eql(u8, dependency_node.resource_type, "model") and std.mem.eql(u8, dependency_node.materialized, "ephemeral")) continue;
-        }
-        if (!executedContains(executed, dependency)) return false;
-    }
-    return true;
-}
-
-fn findGraphNodeByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Node {
-    for (graph.nodes.items) |*node| {
-        if (std.mem.eql(u8, node.unique_id, unique_id)) return node;
-    }
-    return null;
-}
-
-fn executedContains(executed: []const *Node, unique_id: []const u8) bool {
-    for (executed) |node| {
-        if (std.mem.eql(u8, node.unique_id, unique_id)) return true;
-    }
-    return false;
 }
 
 fn formatTestThresholdMessage(allocator: std.mem.Allocator, failures: u64, kind: []const u8, condition: []const u8) ![]const u8 {
@@ -2082,7 +2104,7 @@ test "appendSkippedAfterExecutionFailure records selected blocked descendants on
 
     var executed: std.ArrayList(run_results.NodeResult) = .empty;
     defer executed.deinit(allocator);
-    try appendSkippedAfterExecutionFailure(allocator, &selected, &remaining, &tests, "model.demo.customers", &executed);
+    try appendSkippedAfterExecutionFailure(allocator, &graph, &selected, &remaining, &tests, "model.demo.customers", &executed);
 
     try std.testing.expectEqual(@as(usize, 3), executed.items.len);
     try std.testing.expectEqualStrings("model.demo.orders", executed.items[0].node.?.unique_id);
@@ -2122,7 +2144,7 @@ test "appendSkippedAfterExecutionFailure honors post-exclude selected set" {
 
     var executed: std.ArrayList(run_results.NodeResult) = .empty;
     defer executed.deinit(allocator);
-    try appendSkippedAfterExecutionFailure(allocator, &selected, &remaining, &.{}, "model.demo.customers", &executed);
+    try appendSkippedAfterExecutionFailure(allocator, &graph, &selected, &remaining, &.{}, "model.demo.customers", &executed);
 
     try std.testing.expectEqual(@as(usize, 0), executed.items.len);
 }
@@ -2165,8 +2187,8 @@ test "appendSkippedIfNodeDependsOnBlocked records one blocked model" {
     var executed: std.ArrayList(run_results.NodeResult) = .empty;
     defer executed.deinit(allocator);
 
-    try std.testing.expect(try appendSkippedIfNodeDependsOnBlocked(allocator, &blocked, &graph.nodes.items[1], &executed));
-    try std.testing.expect(!try appendSkippedIfNodeDependsOnBlocked(allocator, &blocked, &graph.nodes.items[2], &executed));
+    try std.testing.expect(try appendSkippedIfNodeDependsOnBlocked(allocator, &graph, &blocked, &graph.nodes.items[1], &executed));
+    try std.testing.expect(!try appendSkippedIfNodeDependsOnBlocked(allocator, &graph, &blocked, &graph.nodes.items[2], &executed));
     try std.testing.expectEqual(@as(usize, 1), executed.items.len);
     try std.testing.expectEqualStrings("model.demo.orders", executed.items[0].node.?.unique_id);
     try std.testing.expectEqualStrings("skipped", executed.items[0].status);
@@ -2220,7 +2242,7 @@ test "appendSkippedBlockedDataTests records selected tests blocked by skipped no
 
     var executed: std.ArrayList(run_results.NodeResult) = .empty;
     defer executed.deinit(allocator);
-    try appendSkippedBlockedDataTests(allocator, &selected, &tests, &executed_tests, &blocked, &executed);
+    try appendSkippedBlockedDataTests(allocator, &graph, &selected, &tests, &executed_tests, &blocked, &executed);
 
     try std.testing.expectEqual(@as(usize, 1), executed.items.len);
     try std.testing.expectEqualStrings("test.demo.not_null_orders_order_id.def", executed.items[0].test_node.?.unique_id);
@@ -2298,7 +2320,7 @@ test "appendSkippedAfterDataTestFailure skips selected downstream nodes and unex
 
     var executed: std.ArrayList(run_results.NodeResult) = .empty;
     defer executed.deinit(allocator);
-    try appendSkippedAfterDataTestFailure(allocator, &selected, &remaining, &tests, &executed_tests, &blocked_roots, &executed);
+    try appendSkippedAfterDataTestFailure(allocator, &graph, &selected, &remaining, &tests, &executed_tests, &blocked_roots, &executed);
 
     try std.testing.expectEqual(@as(usize, 2), executed.items.len);
     try std.testing.expectEqualStrings("model.demo.orders", executed.items[0].node.?.unique_id);
@@ -2329,8 +2351,8 @@ test "dataTestDependenciesCompleted waits for selected seed and model dependenci
     const only_seed_done = [_][]const u8{"seed.demo.raw_orders"};
     const all_done = [_][]const u8{ "seed.demo.raw_orders", "model.demo.orders" };
 
-    try std.testing.expect(!dataTestDependenciesCompleted(test_ref, &only_seed_done));
-    try std.testing.expect(dataTestDependenciesCompleted(test_ref, &all_done));
+    try std.testing.expect(!try scheduler.dependenciesCompleted(allocator, &graph, test_ref.dependsOn(), null, &only_seed_done));
+    try std.testing.expect(try scheduler.dependenciesCompleted(allocator, &graph, test_ref.dependsOn(), null, &all_done));
 }
 
 test "parseModelPropertiesFromText records accepted_values quote false" {
