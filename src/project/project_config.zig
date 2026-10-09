@@ -32,6 +32,7 @@ pub fn parseWithTarget(runtime: types.Runtime, text: []const u8, cli_vars: []con
         try values.put(allocator, &rendered, key, value);
     }
     config.rendered_project = rendered;
+    try @import("version_requirements.zig").validateProject(allocator, rendered, if (runtime.global_options) |options| options.version_check else true);
     config.name = try duplicateString(allocator, values.get(rendered, "name") orelse return error.InvalidProjectName);
     if (config.name.len == 0) return error.InvalidProjectName;
     if (values.get(rendered, "profile")) |v| config.profile_name = try duplicateString(allocator, v);

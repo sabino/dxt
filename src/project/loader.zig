@@ -61,7 +61,9 @@ pub fn graphDefaultTarget(runtime: Runtime, project_dir: []const u8) ![]const u8
 }
 
 /// Connection diagnostics deliberately do not parse model SQL or packages.
-pub fn loadConnectionGraph(runtime: Runtime, options: Options) !Graph {
+pub fn loadConnectionGraph(base_runtime: Runtime, options: Options) !Graph {
+    var runtime = base_runtime;
+    runtime.global_options = &options;
     var config = try loadProjectConfig(runtime, options.project_dir);
     defer deinitProjectConfig(runtime.allocator, &config);
     var graph = Graph{ .allocator = runtime.allocator, .environment = runtime.environment, .invocation = runtime.invocation, .command_options = options, .project_name = config.name };
@@ -79,7 +81,9 @@ pub fn loadConnectionGraph(runtime: Runtime, options: Options) !Graph {
     return graph;
 }
 
-pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Graph {
+pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) !Graph {
+    var runtime = base_runtime;
+    runtime.global_options = &options;
     var cli_vars: std.ArrayList(types.VarEntry) = .empty;
     defer types.deinitVars(runtime.allocator, &cli_vars);
     if (options.vars) |text| try parseVarsText(runtime.allocator, text, &cli_vars);

@@ -820,7 +820,13 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         return .{ .list = values };
     }
     if (std.mem.eql(u8, path, "execute")) return .{ .boolean = context.parse_node == null };
-    if (std.mem.eql(u8, path, "flags.FULL_REFRESH")) return .{ .boolean = context.graph.full_refresh };
+    if (std.mem.eql(u8, path, "dbt_version")) return .{ .string = @import("invocation.zig").compatible_core };
+    if (std.mem.eql(u8, path, "flags") or std.mem.startsWith(u8, path, "flags.")) {
+        const flags = try flagsValue(allocator, context.graph);
+        if (std.mem.eql(u8, path, "flags")) return flags;
+        for (flags.object) |entry| if (std.mem.eql(u8, entry.key, path[6..])) return entry.value;
+        return .undefined;
+    }
     if (std.mem.eql(u8, path, "model.name")) return .{ .string = context.node.name };
     if (std.mem.eql(u8, path, "model.unique_id")) return .{ .string = context.node.unique_id };
     if (std.mem.eql(u8, path, "model.config.materialized")) return .{ .string = context.node.materialized };
@@ -833,6 +839,46 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     }
     if (context.graph.execution_hooks) |hooks| return try hooks.resolve(hooks.context, path, allocator);
     return .undefined;
+}
+
+fn flagsValue(allocator: std.mem.Allocator, graph: *const Graph) !native_expr.Value {
+    const json = try std.json.Stringify.valueAlloc(allocator, graph.command_options, .{});
+    const document = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    var entries: std.ArrayList(native_expr.Entry) = .empty;
+    var it = document.value.object.iterator();
+    while (it.next()) |entry| {
+        var exposed = false;
+        for ([_][]const u8{ "warn_error", "warn_error_options", "write_json", "use_colors", "profiles_dir", "log_format", "version_check", "fail_fast", "indirect_selection", "quiet", "target_path", "log_path", "which", "full_refresh", "store_failures", "debug" }) |key| if (std.mem.eql(u8, key, entry.key_ptr.*)) {
+            exposed = true;
+            break;
+        };
+        if (!exposed) continue;
+        const name = try std.ascii.allocUpperString(allocator, entry.key_ptr.*);
+        const value = if (std.mem.eql(u8, name, "FULL_REFRESH")) native_expr.Value{ .boolean = graph.full_refresh } else try valueFromJson(allocator, entry.value_ptr.*);
+        try entries.append(allocator, .{ .key = name, .value = value });
+    }
+    for ([_]native_expr.Entry{
+        .{ .key = "NO_PRINT", .value = .none },
+        .{ .key = "STORE_FAILURES", .value = .none },
+        .{ .key = "STATIC_PARSER", .value = .{ .boolean = true } },
+        .{ .key = "PARTIAL_PARSE", .value = .{ .boolean = true } },
+        .{ .key = "USE_EXPERIMENTAL_PARSER", .value = .{ .boolean = false } },
+        .{ .key = "SEND_ANONYMOUS_USAGE_STATS", .value = .{ .boolean = false } },
+        .{ .key = "LOG_CACHE_EVENTS", .value = .{ .boolean = false } },
+        .{ .key = "CACHE_SELECTED_ONLY", .value = .{ .boolean = false } },
+        .{ .key = "INTROSPECT", .value = .{ .boolean = true } },
+        .{ .key = "EMPTY", .value = .{ .boolean = false } },
+        .{ .key = "PRINTER_WIDTH", .value = .{ .number = 80 } },
+        .{ .key = "DEBUG", .value = .{ .boolean = graph.command_options.log_level == .debug } },
+    }) |default| {
+        var present = false;
+        for (entries.items) |entry| if (std.mem.eql(u8, entry.key, default.key)) {
+            present = true;
+            break;
+        };
+        if (!present) try entries.append(allocator, default);
+    }
+    return .{ .object = try entries.toOwnedSlice(allocator) };
 }
 
 fn upsertConfigArgument(allocator: std.mem.Allocator, values: *std.ArrayList(native_expr.Entry), key: []const u8, value: native_expr.Value) !void {

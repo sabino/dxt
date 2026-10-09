@@ -414,3 +414,29 @@ def test_source_yaml_freshness_replaces_project_thresholds(tmp_path, configurati
     manifests = pair.invoke("parse")
     actual, expected = [m["sources"]["source.configuration_fixture.raw.events"] for m in manifests]
     assert actual["freshness"] == expected["freshness"]
+
+
+@pytest.mark.parametrize("requirement, flags, success", [(">=1.5.0,<2.0.0", [], True), ("=1.10.5", [], True), (">=1.11.0", [], False), (">=1.11.0", ["--no-version-check"], True), ("bad", ["--no-version-check"], False)])
+def test_project_required_core_version_matches_pinned_core(tmp_path, configuration_oracle, requirement, flags, success):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.append_project(f"require-dbt-version: '{requirement}'\n")
+    pair.write("models/marts/rendered.sql", "select 1 as id")
+    pair.invoke("parse", flags=flags, success=success)
+
+
+def test_installed_package_required_core_version_is_checked(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write("dbt_packages/util_pkg/dbt_project.yml", "name: util_pkg\nversion: '1.0'\nrequire-dbt-version: '>=1.11.0'\n")
+    pair.write("dbt_packages/util_pkg/models/upstream.sql", "select 1 as id")
+    pair.invoke("parse", success=False)
+    pair.invoke("parse", flags=["--no-version-check"])
+
+
+@pytest.mark.parametrize("flags", [[], ["--no-print", "--no-version-check", "--threads", "2"]])
+def test_jinja_flags_and_core_version_use_effective_command_options(tmp_path, configuration_oracle, flags):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write("models/marts/rendered.sql", "{{ config(meta={'no_print': flags.NO_PRINT, 'version_check': flags.VERSION_CHECK, 'core': dbt_version}) }} select '{{ flags.FULL_REFRESH }}' as full_refresh, '{{ flags.FAIL_FAST }}' as fail_fast")
+    manifests = pair.invoke(flags=flags)
+    actual, expected = [m["nodes"]["model.configuration_fixture.rendered"] for m in manifests]
+    assert actual["compiled_code"] == expected["compiled_code"]
+    assert actual["config"]["meta"] == expected["config"]["meta"]

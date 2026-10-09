@@ -115,6 +115,7 @@ pub const OperationHost = struct {
     db_path: []const u8,
     stdout: *std.Io.Writer,
     stored: std.ArrayList(StoredValue) = .empty,
+    log_events: ?*std.ArrayList(results.LogMessage) = null,
     session: ?adapter.Session = null,
     borrowed_session: ?*adapter.Session = null,
     owned_pool: ?*adapter.DuckDBPool = null,
@@ -203,7 +204,28 @@ pub const OperationHost = struct {
         const self: *OperationHost = @ptrCast(@alignCast(raw));
         if (std.mem.eql(u8, name, "log") or std.mem.eql(u8, name, "print")) {
             const message = argument(args, "msg", 0) orelse return error.InvalidJinjaArguments;
-            try self.stdout.print("{s}\n", .{try message.text(allocator)});
+            const is_print = std.mem.eql(u8, name, "print");
+            if (is_print and !self.graph.command_options.print_enabled) return .{ .string = "" };
+            const info: expression.Value = argument(args, "info", 1) orelse .{ .boolean = false };
+            const level = if (is_print or info.truthy()) "info" else "debug";
+            const text = try message.text(allocator);
+            if (self.log_events) |events| {
+                const owned = try self.runtime.allocator.dupe(u8, text);
+                errdefer self.runtime.allocator.free(owned);
+                try events.append(self.runtime.allocator, .{ .message = owned, .level = level, .is_print = is_print });
+            } else {
+                try self.stdout.writeAll("{\"data\":{\"msg\":");
+                try std.json.Stringify.value(text, .{}, self.stdout);
+                try self.stdout.writeAll("},\"info\":{\"name\":");
+                try std.json.Stringify.value(if (is_print) "PrintEvent" else "JinjaLog", .{}, self.stdout);
+                try self.stdout.writeAll(",\"level\":");
+                try std.json.Stringify.value(level, .{}, self.stdout);
+                try self.stdout.writeAll(",\"thread\":\"MainThread\",\"ts\":");
+                try @import("execution_clock.zig").writeTimestamp(self.stdout, @import("execution_clock.zig").now(self.runtime.io));
+                try self.stdout.writeAll(",\"invocation_id\":");
+                if (self.runtime.invocation) |invocation| try std.json.Stringify.value(&invocation.id, .{}, self.stdout) else try self.stdout.writeAll("null");
+                try self.stdout.writeAll("}}\n");
+            }
             return .{ .string = "" };
         }
         if (std.mem.startsWith(u8, name, "dxt.values.")) {
@@ -568,4 +590,33 @@ test "operation args parse nested YAML with native owned documents" {
     try std.testing.expect(value.object.get("flags").?.object.get("enabled").?.bool);
     try std.testing.expectEqualStrings("Ada", value.object.get("names").?.array.items[0].string);
     try std.testing.expectError(error.InvalidOperationArgs, parseArgs(allocator, "[]"));
+}
+
+test "operation host preserves typed debug info and authored print events" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    var events: std.ArrayList(results.LogMessage) = .empty;
+    defer events.deinit(allocator);
+    var context = try OperationHost.initLazy(.{ .allocator = allocator, .io = std.testing.io }, &graph, ":memory:", &output.writer);
+    defer context.deinit();
+    context.log_events = &events;
+    const host = context.host();
+    const args = [_]expression.Argument{.{ .value = .{ .string = "message" } }};
+    _ = try host.call(host.context, "log", &args, allocator);
+    _ = try host.call(host.context, "print", &args, allocator);
+    graph.command_options.print_enabled = false;
+    _ = try host.call(host.context, "print", &args, allocator);
+    const info_args = [_]expression.Argument{ args[0], .{ .name = "info", .value = .{ .boolean = true } } };
+    _ = try host.call(host.context, "log", &info_args, allocator);
+    try std.testing.expectEqual(@as(usize, 3), events.items.len);
+    try std.testing.expectEqualStrings("debug", events.items[0].level);
+    try std.testing.expect(!events.items[0].is_print);
+    try std.testing.expect(events.items[1].is_print);
+    try std.testing.expectEqualStrings("info", events.items[2].level);
+    try std.testing.expectEqual(@as(usize, 0), output.written().len);
 }
