@@ -7,7 +7,14 @@ const compiler = @import("compiler.zig");
 /// Reuses the scheduler's held adapter session. The caller owns transaction and
 /// cancellation policy; results have the same ownership as DuckDB freshness.
 pub fn querySourceFreshness(runtime: types.Runtime, graph: *const types.Graph, db_path: []const u8, source: *const types.SourceDef) !duckdb.FreshnessQueryResult {
-    const sql = try renderSql(runtime.allocator, graph.adapter_type, source);
+    var rendered_source = source.*;
+    var query: ?[]const u8 = null;
+    defer if (query) |text| runtime.allocator.free(text);
+    if (source.loaded_at_query) |raw_query| {
+        query = try compiler.renderSourceExpression(runtime.allocator, graph, source, raw_query);
+        rendered_source.loaded_at_query = query;
+    }
+    const sql = try renderSql(runtime.allocator, graph.adapter_type, &rendered_source);
     defer runtime.allocator.free(sql);
     var result = try adapter.queryForGraph(runtime, graph, db_path, sql);
     defer result.deinit(runtime.allocator);

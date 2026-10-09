@@ -52,8 +52,8 @@ class ConfigurationPair:
 
     def invoke(self, command="compile", flags=(), success=True):
         actual, expected = self.projects
-        result = subprocess.run([DXT, command, "--project-dir", str(actual), "--profiles-dir", str(actual), *flags], text=True, capture_output=True, cwd=ROOT)
-        reference = self.oracle.invoke([command, "--project-dir", str(expected), "--profiles-dir", str(expected), "--no-partial-parse", "--quiet", *flags])
+        result = subprocess.run([DXT, *command.split(), "--project-dir", str(actual), "--profiles-dir", str(actual), *flags], text=True, capture_output=True, cwd=ROOT)
+        reference = self.oracle.invoke([*command.split(), "--project-dir", str(expected), "--profiles-dir", str(expected), "--no-partial-parse", "--quiet", *flags])
         from dbt.adapters.factory import reset_adapters
         from dbt.adapters.duckdb.connections import DuckDBConnectionManager
         reset_adapters()
@@ -374,3 +374,41 @@ def test_model_version_columns_default_inheritance_and_explicit_replacement(tmp_
         assert actual["columns"] == expected["columns"]
     actual, expected = [{uid: n["test_metadata"] for uid, n in m["nodes"].items() if n["resource_type"] == "test"} for m in manifests]
     assert actual == expected
+
+
+def test_source_config_partial_thresholds_and_deferred_loaded_at_query(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.append_project("vars: {minimum_id: 0}\n")
+    pair.write("models/properties.yml", """sources:
+  - name: raw
+    schema: main
+    config:
+      loaded_at_field: loaded_at
+      freshness: {warn_after: {count: 1, period: hour}, error_after: {count: 1, period: day}}
+    tables:
+      - name: events
+        config:
+          loaded_at_query: "select max(loaded_at) from {{ this }} where id > {{ var('minimum_id') }}"
+          freshness: {warn_after: {count: 3, period: hour}}
+""")
+    manifests = pair.invoke("parse")
+    actual, expected = [m["sources"]["source.configuration_fixture.raw.events"] for m in manifests]
+    for key in ["loaded_at_field", "loaded_at_query", "freshness", "config"]:
+        assert actual[key] == expected[key], key
+    import duckdb
+    for project in pair.projects:
+        with duckdb.connect(str(project / "warehouse.duckdb")) as connection:
+            connection.execute("create table events as select 1 as id, current_timestamp - interval '2 hours' as loaded_at")
+    pair.invoke("source freshness")
+    actual_result, expected_result = [json.loads((p / "target/sources.json").read_text())["results"][0] for p in pair.projects]
+    assert actual_result["status"] == expected_result["status"] == "pass"
+    assert actual_result["criteria"] == expected_result["criteria"]
+
+
+def test_source_yaml_freshness_replaces_project_thresholds(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.append_project("sources: {configuration_fixture: {raw: {+freshness: {warn_after: {count: 3, period: hour}}}}}\n")
+    pair.write("models/properties.yml", "sources: [{name: raw, tables: [{name: events, loaded_at_field: loaded_at, freshness: {error_after: {count: 2, period: day}}}]}]\n")
+    manifests = pair.invoke("parse")
+    actual, expected = [m["sources"]["source.configuration_fixture.raw.events"] for m in manifests]
+    assert actual["freshness"] == expected["freshness"]

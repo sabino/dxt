@@ -215,6 +215,20 @@ pub fn compileModel(allocator: std.mem.Allocator, graph: *const Graph, node: *co
     return try compileModelBody(allocator, graph, node);
 }
 
+/// Source freshness SQL is rendered at execution, when `this` is the source
+/// relation and variables/macros have their normal package scope.
+pub fn renderSourceExpression(allocator: std.mem.Allocator, graph: *const Graph, source: *const SourceDef, text: []const u8) ![]const u8 {
+    var source_graph = graph.*;
+    source_graph.target_schema = sourceSchemaName(source);
+    var node = Node{ .resource_type = "source", .package_name = source.package_name, .unique_id = source.unique_id, .name = sourceIdentifier(source), .path = "", .original_file_path = source.original_file_path, .raw_code = text };
+    defer types.deinitNode(allocator, &node);
+    const relation = try relationNameForSource(allocator, source);
+    defer allocator.free(relation);
+    node.relation_name = relation;
+    if (sourceDatabaseName(source)) |database| try @import("config_value.zig").put(allocator, &node.effective_config, "database", .{ .string = database });
+    return try compileModel(allocator, &source_graph, &node);
+}
+
 /// Render with execute=false to discover dependencies through real expression,
 /// scope and macro semantics, including macros returning a list of ref names.
 pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
@@ -769,6 +783,7 @@ pub fn relationNameForRefNode(allocator: std.mem.Allocator, graph: *const Graph,
 }
 
 pub fn relationNameForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
+    if (std.mem.eql(u8, node.resource_type, "source")) if (node.relation_name) |relation| return try allocator.dupe(u8, relation);
     const schema = try relationSchemaForNode(allocator, graph, node);
     defer allocator.free(schema);
     const identifier = relationIdentifierForNode(node);
@@ -3393,4 +3408,17 @@ test "static extraction fallback applies literal and macro hooks once" {
     try std.testing.expectEqual(@as(usize, 1), values.get(node.inline_config, "pre-hook").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 1), values.get(node.inline_config, "post-hook").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 1), node.tags.items.len);
+}
+
+test "source expressions render source this identity and package variables" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .target_schema = "analytics" };
+    defer graph.deinit();
+    try graph.vars.append(allocator, .{ .name = "minimum", .value = "2", .typed_value = .{ .integer = 2 } });
+    const source = SourceDef{ .package_name = "demo", .unique_id = "source.demo.raw.events", .source_name = "raw", .table_name = "events", .original_file_path = "sources.yml", .database = "warehouse", .schema_name = "landing", .identifier = "event_rows", .quoting = .{ .identifier = false } };
+    const result = try renderSourceExpression(allocator, &graph, &source, "select max(loaded_at) from {{ this }} where id > {{ var('minimum') }} and '{{ this.schema }}' = 'landing'");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("select max(loaded_at) from \"warehouse\".\"landing\".event_rows where id > 2 and 'landing' = 'landing'", result);
 }

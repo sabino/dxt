@@ -207,7 +207,7 @@ fn renderResourceBlock(context: *render.Context, value: std.json.Value) anyerror
     var it = value.object.iterator();
     while (it.next()) |entry| {
         const key = std.mem.trimStart(u8, entry.key_ptr.*, "+ ");
-        var item = if (std.mem.eql(u8, key, "pre-hook") or std.mem.eql(u8, key, "post-hook") or std.mem.eql(u8, key, "pre_hook") or std.mem.eql(u8, key, "post_hook") or std.mem.eql(u8, key, "vars")) try values.clone(context.runtime.allocator, entry.value_ptr.*) else try renderResourceBlock(context, entry.value_ptr.*);
+        var item = if (std.mem.eql(u8, key, "pre-hook") or std.mem.eql(u8, key, "post-hook") or std.mem.eql(u8, key, "pre_hook") or std.mem.eql(u8, key, "post_hook") or std.mem.eql(u8, key, "vars") or std.mem.eql(u8, key, "loaded_at_query")) try values.clone(context.runtime.allocator, entry.value_ptr.*) else try renderResourceBlock(context, entry.value_ptr.*);
         defer values.deinit(context.runtime.allocator, &item);
         try values.put(context.runtime.allocator, &output, entry.key_ptr.*, item);
     }

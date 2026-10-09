@@ -9,7 +9,10 @@ const renderer = @import("config_render.zig");
 pub fn parse(runtime: types.Runtime, document: std.json.Value, path: []const u8, package: []const u8, graph: *types.Graph) !void {
     const sources = values.get(document, "sources") orelse return;
     if (sources != .array) return error.InvalidSourceConfiguration;
-    var context = renderer.Context{ .runtime = runtime, .vars = graph.vars.items, .target = graph.target_context, .package_name = package };
+    var fallback_target: std.json.Value = .null;
+    defer values.deinit(runtime.allocator, &fallback_target);
+    if (graph.target_context == .null) try values.put(runtime.allocator, &fallback_target, "schema", .{ .string = graph.target_schema });
+    var context = renderer.Context{ .runtime = runtime, .vars = graph.vars.items, .target = if (graph.target_context == .null) fallback_target else graph.target_context, .package_name = package };
     for (sources.array.items) |source| {
         const source_name = try string(values.get(source, "name") orelse return error.InvalidSourceConfiguration);
         const tables = values.get(source, "tables") orelse continue;
@@ -54,6 +57,7 @@ pub fn parse(runtime: types.Runtime, document: std.json.Value, path: []const u8,
                     @field(node.quoting, key) = value;
                 };
             }
+            if (values.get(authored, "freshness")) |freshness| try values.put(runtime.allocator, &node.effective_config, "freshness", freshness);
             try merge(runtime.allocator, &node.effective_config, authored);
             if (values.get(node.effective_config, "enabled")) |v| node.enabled = try resource.boolean(v);
             if (values.get(node.effective_config, "freshness")) |v| {
@@ -62,7 +66,6 @@ pub fn parse(runtime: types.Runtime, document: std.json.Value, path: []const u8,
             }
             if (values.get(node.effective_config, "loaded_at_field")) |v| node.loaded_at_field = try optionalString(v);
             if (values.get(node.effective_config, "loaded_at_query")) |v| node.loaded_at_query = try optionalString(v);
-            if (node.loaded_at_field != null and node.loaded_at_query != null) return error.InvalidSourceConfiguration;
             if (values.get(node.effective_config, "database")) |v| node.database = try optionalString(v);
             if (values.get(node.effective_config, "schema")) |v| node.schema_name = try optionalString(v);
             if (values.get(node.effective_config, "identifier")) |v| node.identifier = try optionalString(v);
@@ -96,14 +99,17 @@ pub fn parse(runtime: types.Runtime, document: std.json.Value, path: []const u8,
 
 fn collect(context: *renderer.Context, item: std.json.Value, target: *std.json.Value) !void {
     const allocator = context.runtime.allocator;
-    var config = try context.render(values.get(item, "config") orelse .null);
+    const raw_config = values.get(item, "config") orelse .null;
+    const raw_field = values.get(item, "loaded_at_field") orelse values.get(raw_config, "loaded_at_field") orelse .null;
+    const raw_query = values.get(item, "loaded_at_query") orelse values.get(raw_config, "loaded_at_query") orelse .null;
+    if (raw_field != .null and raw_query != .null) return error.InvalidSourceConfiguration;
+    var config = try renderConfig(context, raw_config);
     defer values.deinit(allocator, &config);
     try merge(allocator, target, config);
     for ([_][]const u8{ "meta", "tags", "freshness", "loaded_at_field", "loaded_at_query", "enabled", "event_time" }) |key| if (values.get(item, key)) |v| {
-        var rendered = try context.render(v);
+        var rendered = if (std.mem.eql(u8, key, "loaded_at_query")) try values.clone(allocator, v) else try context.render(v);
         defer values.deinit(allocator, &rendered);
         if (std.mem.eql(u8, key, "loaded_at_field")) try values.put(allocator, target, "loaded_at_query", .null);
-        if (std.mem.eql(u8, key, "loaded_at_query") and rendered != .null) try values.put(allocator, target, "loaded_at_field", .null);
         if (std.mem.eql(u8, key, "freshness")) {
             var merged = if (values.get(target.*, key)) |existing| try values.clone(allocator, existing) else @as(std.json.Value, .null);
             defer values.deinit(allocator, &merged);
@@ -115,12 +121,35 @@ fn collect(context: *renderer.Context, item: std.json.Value, target: *std.json.V
     };
 }
 
+fn renderConfig(context: *renderer.Context, config: std.json.Value) !std.json.Value {
+    if (config == .null) return .null;
+    if (config != .object) return error.InvalidSourceConfiguration;
+    var rendered: std.json.Value = .null;
+    errdefer values.deinit(context.runtime.allocator, &rendered);
+    var it = config.object.iterator();
+    while (it.next()) |entry| {
+        var value = if (std.mem.eql(u8, entry.key_ptr.*, "loaded_at_query")) try values.clone(context.runtime.allocator, entry.value_ptr.*) else try context.render(entry.value_ptr.*);
+        defer values.deinit(context.runtime.allocator, &value);
+        try values.put(context.runtime.allocator, &rendered, entry.key_ptr.*, value);
+    }
+    return rendered;
+}
+
 fn merge(allocator: std.mem.Allocator, target: *std.json.Value, config: std.json.Value) !void {
     if (config == .null) return;
     if (config != .object) return error.InvalidSourceConfiguration;
     var it = config.object.iterator();
     while (it.next()) |entry| {
-        if (std.mem.eql(u8, entry.key_ptr.*, "tags")) try values.put(allocator, target, entry.key_ptr.*, entry.value_ptr.*) else try resource.mergeField(allocator, target, entry.key_ptr.*, entry.value_ptr.*);
+        if (std.mem.eql(u8, entry.key_ptr.*, "tags")) {
+            try values.put(allocator, target, entry.key_ptr.*, entry.value_ptr.*);
+        } else if (std.mem.eql(u8, entry.key_ptr.*, "freshness")) {
+            var merged = if (values.get(target.*, "freshness")) |existing| try values.clone(allocator, existing) else @as(std.json.Value, .null);
+            defer values.deinit(allocator, &merged);
+            if (entry.value_ptr.* == .null) try values.put(allocator, target, "freshness", .null) else {
+                try values.overlay(allocator, &merged, entry.value_ptr.*);
+                try values.put(allocator, target, "freshness", merged);
+            }
+        } else try resource.mergeField(allocator, target, entry.key_ptr.*, entry.value_ptr.*);
     }
 }
 
