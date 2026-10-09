@@ -936,7 +936,6 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
                 break :blk resolved;
             }
             const resolved = findMacroIdByPackageAndName(graph, package_name, call.name);
-            if (resolved == null and hasMacroPackage(graph, package_name)) return error.UnresolvedMacro;
             break :blk resolved;
         } else findMacroIdForUnqualifiedMacroDependency(graph, current_package, call.name);
         if (macro_id) |resolved_macro_id| {
@@ -1898,7 +1897,7 @@ test "sql scanner resolves vars inside ref and source calls" {
     try std.testing.expectEqualStrings("payments", node.source_refs.items[0].table_name);
 }
 
-test "macro scanner records known dependencies skips self and rejects missing known package macros" {
+test "macro scanner records known dependencies and tolerates unresolved calls in unused definitions" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1924,7 +1923,8 @@ test "macro scanner records known dependencies skips self and rejects missing kn
     try std.testing.expectEqualStrings("macro.demo.format_id", macro_depends_on.items[0]);
     try std.testing.expectEqualStrings("macro.pkg.star", macro_depends_on.items[1]);
 
-    try std.testing.expectError(error.UnresolvedMacro, scanMacroSqlForKnownMacroCalls(allocator, "{{ pkg.missing() }}", &graph, current_macro, &macro_depends_on));
+    try scanMacroSqlForKnownMacroCalls(allocator, "{{ pkg.missing() }}", &graph, current_macro, &macro_depends_on);
+    try std.testing.expectEqual(@as(usize, 2), macro_depends_on.items.len);
 }
 
 test "macro scanner uses package root and dbt macro namespace order" {
