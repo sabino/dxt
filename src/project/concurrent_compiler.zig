@@ -67,7 +67,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 node.compiled_path = compiled_path;
                 try compiler.recordPythonScaffoldDependency(runtime.allocator, graph, node);
                 if (row.relation_name) |relation| node.relation_name = try runtime.allocator.dupe(u8, relation);
-                for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
+                try compiler.appendCteCopies(runtime.allocator, &node.extra_ctes, row.compiled_ctes);
                 if (std.mem.eql(u8, node.resource_type, "analysis")) counts.analyses += 1 else if (std.mem.eql(u8, node.resource_type, "snapshot")) counts.snapshots += 1 else if (node.hook_index == null and !std.mem.eql(u8, node.materialized, "ephemeral")) counts.models += 1;
             } else if (row.test_node) |original| {
                 const node = @constCast(original);
@@ -75,14 +75,14 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
                 node.compiled_path = compiled_path;
                 try compiler.recordGenericCompilationDependency(runtime.allocator, graph, node);
-                for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
+                try compiler.appendCteCopies(runtime.allocator, &node.extra_ctes, row.compiled_ctes);
                 counts.tests += 1;
             } else if (row.singular_test_node) |original| {
                 const node = @constCast(original);
                 node.compiled = true;
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
                 node.compiled_path = compiled_path;
-                for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
+                try compiler.appendCteCopies(runtime.allocator, &node.extra_ctes, row.compiled_ctes);
                 counts.tests += 1;
             }
         }

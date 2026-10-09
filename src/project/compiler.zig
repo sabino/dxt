@@ -215,6 +215,34 @@ pub const CompiledModel = struct {
     }
 };
 
+/// CTE IDs borrow graph storage; SQL is copied into the destination's ownership.
+pub fn appendCteCopies(allocator: std.mem.Allocator, destination: *std.ArrayList(ExtraCte), originals: []const ExtraCte) !void {
+    for (originals) |cte| {
+        const sql = try allocator.dupe(u8, cte.sql);
+        errdefer allocator.free(sql);
+        try destination.append(allocator, .{ .id = cte.id, .sql = sql });
+    }
+}
+
+fn cteCopyAllocationFailures(allocator: std.mem.Allocator) !void {
+    var copies: std.ArrayList(ExtraCte) = .empty;
+    defer {
+        for (copies.items) |cte| allocator.free(cte.sql);
+        copies.deinit(allocator);
+    }
+    const originals = [_]ExtraCte{
+        .{ .id = "model.demo.base", .sql = " base as (select 1)" },
+        .{ .id = "model.demo.value", .sql = " value as (select * from base)" },
+    };
+    try appendCteCopies(allocator, &copies, &originals);
+    try std.testing.expectEqual(@as(usize, 2), copies.items.len);
+    try std.testing.expectEqualStrings(originals[1].sql, copies.items[1].sql);
+}
+
+test "compiled CTE collection cleans up each allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, cteCopyAllocationFailures, .{});
+}
+
 const EphemeralCompileState = struct {
     allocator: std.mem.Allocator,
     graph: *const Graph,

@@ -2691,6 +2691,11 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
                 try recordCompileError(runtime, compile_rows, started, .{ .test_node = test_node }, err);
                 return if (err == error.UnsupportedTestExecution) error.UnsupportedCompileSelection else err;
             };
+            var pending_compilation = true;
+            errdefer if (pending_compilation) {
+                var owned = compiled;
+                owned.deinit(runtime.allocator);
+            };
             const compiled_code = compiled.compiled_code;
             const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, test_node.package_name, test_node.path });
             if (std.fs.path.dirname(compiled_path)) |parent| {
@@ -2701,6 +2706,7 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
             test_node.compiled_code = compiled_code;
             test_node.compiled_path = util.normalizeForDisplay(compiled_path);
             test_node.extra_ctes = compiled.extra_ctes;
+            pending_compilation = false;
             try compiler.recordGenericCompilationDependency(runtime.allocator, graph, test_node);
             try recordCompilation(runtime, compile_rows, started, .{ .test_node = test_node, .compiled_code = compiled_code });
             compiled_test_count += 1;
@@ -2714,6 +2720,11 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
                 try recordCompileError(runtime, compile_rows, started, .{ .singular_test_node = test_node }, err);
                 return err;
             };
+            var pending_compilation = true;
+            errdefer if (pending_compilation) {
+                var owned = compiled;
+                owned.deinit(runtime.allocator);
+            };
             const compiled_code = compiled.compiled_code;
             const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, test_node.package_name, test_node.original_file_path });
             if (std.fs.path.dirname(compiled_path)) |parent| {
@@ -2724,6 +2735,7 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
             test_node.compiled_code = compiled_code;
             test_node.compiled_path = util.normalizeForDisplay(compiled_path);
             test_node.extra_ctes = compiled.extra_ctes;
+            pending_compilation = false;
             try recordCompilation(runtime, compile_rows, started, .{ .singular_test_node = test_node, .compiled_code = compiled_code });
             compiled_test_count += 1;
         }
