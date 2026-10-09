@@ -34,6 +34,14 @@ pub fn parseReplacement(allocator: std.mem.Allocator, name: []const u8) !?Value 
 }
 
 pub fn call(allocator: std.mem.Allocator, graph: *const types.Graph, state: *State, executor: Executor, name: []const u8, args: []const Argument) !?Value {
+    if (is(name, "verify_database") and std.mem.eql(u8, graph.adapter_type, "postgres")) {
+        const database = argument(args, "database", 0);
+        const expected = @import("config_value.zig").get(graph.target_context, "database") orelse return error.MissingPostgresDatabase;
+        if (database != .string or expected != .string) return error.InvalidJinjaArguments;
+        const unquoted = if (std.mem.startsWith(u8, database.string, "\"")) std.mem.trim(u8, database.string, "\"") else database.string;
+        if (!std.ascii.eqlIgnoreCase(unquoted, expected.string)) return error.UnexpectedDatabaseReference;
+        return .{ .string = "" };
+    }
     if (is(name, "get_columns_in_relation")) {
         const relation = try relationArg(args, "relation", 0);
         return try executor.render(executor.context, allocator, "get_columns_in_relation", &.{.{ .name = "relation", .value = relation }});

@@ -393,7 +393,10 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     defer catalog.deinitCatalogEntries(runtime.allocator, &catalog_entries);
     if (!options.docs_empty_catalog) if (duckdb.databasePath(runtime.allocator, target_dir, &graph)) |db_path| {
         defer runtime.allocator.free(db_path);
-        catalog_entries = try duckdb.collectCatalogEntries(runtime, db_path, &graph, selected);
+        catalog_entries = if (std.mem.eql(u8, graph.adapter_type, "postgres"))
+            try @import("project/postgres_catalog.zig").collect(runtime, db_path, &graph, selected, stdout)
+        else
+            try duckdb.collectCatalogEntries(runtime, db_path, &graph, selected);
     } else |err| switch (err) {
         error.UnsupportedDuckDbPath => {},
         else => return err,

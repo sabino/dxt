@@ -677,3 +677,83 @@ def test_native_statement_result_consumption_matches_core(tmp_path, configuratio
         # result with explicit store_result to test this provider contract.
         pair.write('models/marts/query.sql', "{% if execute %}{% set table = run_query('select 1 as id') %}{% do store_result('main', response={}, agate_table=table) %}{% set first = load_result('main') %}{% set second = load_result('main') %}select {{ second.data[0][0] }} as id{% else %}select 0{% endif %}")
     pair.invoke('compile', success=success)
+
+
+@pytest.mark.parametrize('materialized', ['table', 'view', 'materialized_view'])
+def test_postgres_docs_catalog_matches_actual_relations_and_comments(tmp_path, configuration_oracle, request, materialized):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, 'postgres')
+    pair.write('models/marts/catalog_entry.sql', "{{ config(materialized='" + materialized + "') }}select 1::integer as id, 'hello'::varchar(24) as label")
+    pair.invoke('run')
+    import psycopg2
+    server = request.getfixturevalue('configuration_postgres')
+    with psycopg2.connect(server.get_uri()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute('comment on ' + ('materialized view' if materialized == 'materialized_view' else materialized) + ' main.catalog_entry is %s', ("Revenue owner's table",))
+            cursor.execute('comment on column main.catalog_entry.label is %s', ('Customer label',))
+    pair.write('models/sources.yml', "version: 2\nsources:\n  - name: warehouse\n    schema: main\n    tables:\n      - name: same_relation\n        identifier: catalog_entry\n")
+    pair.invoke('docs generate')
+    actual, expected = [json.loads((project / 'target/catalog.json').read_text()) for project in pair.projects]
+    assert actual['errors'] == expected['errors']
+    assert actual['nodes'] == expected['nodes']
+    assert actual['sources'] == expected['sources']
+    entry = actual['nodes']['model.configuration_fixture.catalog_entry']
+    assert entry['metadata']['comment'] == "Revenue owner's table"
+    assert entry['metadata']['owner']
+    assert entry['columns']['label']['comment'] == 'Customer label'
+
+
+def test_postgres_docs_catalog_uses_project_adapter_dispatch(tmp_path, configuration_oracle, request):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, 'postgres')
+    pair.write('models/marts/catalog_entry.sql', "{{ config(materialized='table') }}select 1::integer as id")
+    pair.invoke('run')
+    pair.write('macros/catalog.sql', """{% macro postgres__get_catalog_relations(information_schema, relations) %}
+{% set relations = relations | list %}
+{% call statement('catalog', fetch_result=true) %}
+select '{{ information_schema.database }}' as table_database,
+       '{{ relations[0].schema }}' as table_schema,
+       '{{ relations[0].identifier }}' as table_name,
+       'BASE TABLE' as table_type, 'Dispatched comment' as table_comment,
+       'id' as column_name, 1 as column_index, 'integer' as column_type,
+       'Dispatched column' as column_comment, 'Dispatched owner' as table_owner
+{% endcall %}{{ return(load_result('catalog').table) }}{% endmacro %}
+""")
+    pair.invoke('docs generate')
+    actual, expected = [json.loads((project / 'target/catalog.json').read_text()) for project in pair.projects]
+    assert actual['nodes'] == expected['nodes']
+    assert actual['nodes']['model.configuration_fixture.catalog_entry']['metadata']['owner'] == 'Dispatched owner'
+
+
+def test_postgres_docs_catalog_rejects_other_database(tmp_path, configuration_oracle, request):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, 'postgres')
+    pair.write('models/marts/catalog_entry.sql', "{{ config(materialized='table') }}select 1::integer as id")
+    pair.invoke('run')
+    pair.write('models/sources.yml', "version: 2\nsources:\n  - name: other_database\n    database: unsupported_database\n    schema: main\n    tables:\n      - name: catalog_entry\n")
+    pair.invoke('docs generate', success=False)
+
+
+def test_postgres_catalog_respects_authored_dispatch(tmp_path, configuration_oracle, request):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, 'postgres')
+    pair.write('models/marts/catalog_entry.sql', "{{ config(materialized='table') }}select 1::integer as id")
+    pair.invoke('run')
+    pair.write('macros/catalog.sql', """{% macro postgres__get_catalog_relations(information_schema, relations) %}
+{% call statement('catalog_override', fetch_result=true, auto_begin=false) %}
+select '{{ information_schema.database }}' as table_database, '{{ relations[0].schema }}' as table_schema,
+ '{{ relations[0].identifier }}' as table_name, 'BASE TABLE' as table_type,
+ 'Authored catalog metadata' as table_comment, 'id' as column_name, 1 as column_index,
+ 'integer' as column_type, 'Authored column metadata' as column_comment, 'Authored owner' as table_owner
+{% endcall %}{{ return(load_result('catalog_override').table) }}{% endmacro %}""")
+    pair.invoke('docs generate')
+    actual, expected = [json.loads((project / 'target/catalog.json').read_text()) for project in pair.projects]
+    assert actual['nodes'] == expected['nodes']
+    assert actual['nodes']['model.configuration_fixture.catalog_entry']['metadata']['owner'] == 'Authored owner'
+
+
+def test_postgres_catalog_rejects_unavailable_source_database(tmp_path, configuration_oracle, request):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, 'postgres')
+    pair.write('models/sources.yml', "version: 2\nsources:\n  - name: warehouse\n    database: unavailable_database\n    schema: main\n    tables:\n      - name: missing\n")
+    pair.invoke('docs generate', success=False)
