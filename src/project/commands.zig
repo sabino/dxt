@@ -129,6 +129,7 @@ pub const OperationHost = struct {
     current_node: ?*const types.Node = null,
     adapter_state: @import("adapter_context.zig").State = .{},
     last_response: expression.Value = .none,
+    warned: std.ArrayList([]const u8) = .empty,
 
     /// Construct the context without connecting. Offline compilation remains
     /// available; the first database callback opens or borrows a session.
@@ -215,6 +216,7 @@ pub const OperationHost = struct {
             self.runtime.allocator.destroy(pool);
         }
         self.stored.deinit(self.runtime.allocator);
+        self.warned.deinit(self.runtime.allocator);
         self.adapter_state.deinit(self.values.allocator());
         self.values.deinit();
     }
@@ -226,6 +228,18 @@ pub const OperationHost = struct {
 
     fn call(raw: *anyopaque, name: []const u8, args: []const expression.Argument, allocator: std.mem.Allocator) anyerror!expression.Value {
         const self: *OperationHost = @ptrCast(@alignCast(raw));
+        if (std.mem.eql(u8, name, "adapter.warn_once")) {
+            const message = argument(args, "msg", 0) orelse return error.InvalidJinjaArguments;
+            if (args.len != 1 or message != .string) return error.InvalidJinjaArguments;
+            for (self.warned.items) |text| if (std.mem.eql(u8, text, message.string)) return .{ .string = "" };
+            try self.warned.append(self.runtime.allocator, try self.values.allocator().dupe(u8, message.string));
+            if (self.log_events) |events| {
+                const text = try self.runtime.allocator.dupe(u8, message.string);
+                errdefer self.runtime.allocator.free(text);
+                try events.append(self.runtime.allocator, .{ .message = text, .level = "warn" });
+            } else try self.stdout.print("warning: {s}\n", .{message.string});
+            return .{ .string = "" };
+        }
         if (try @import("adapter_context.zig").call(self.values.allocator(), self.graph, &self.adapter_state, .{ .context = self, .render = renderAdapterMacro }, name, args)) |value| return value;
         if (std.mem.eql(u8, name, "adapter.get_column_schema_from_query")) {
             const sql = argument(args, "sql", 0) orelse return error.InvalidJinjaArguments;

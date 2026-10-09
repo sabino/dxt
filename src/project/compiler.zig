@@ -1003,7 +1003,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         return if (path.len == 5) model else @import("context_values.zig").attribute(model, path[6..]);
     }
     if (std.mem.eql(u8, path, "config") or std.mem.startsWith(u8, path, "config.")) {
-        const config = try @import("context_values.zig").config(allocator, context.node);
+        const config = try configProxy(allocator, context);
         return if (path.len == 6) config else @import("context_values.zig").attribute(config, path[7..]);
     }
     if (std.mem.eql(u8, path, "this") or std.mem.startsWith(u8, path, "this.")) {
@@ -1087,6 +1087,15 @@ fn upsertConfigArgument(allocator: std.mem.Allocator, values: *std.ArrayList(nat
     try values.append(allocator, .{ .key = key, .value = value });
 }
 
+fn configProxy(allocator: std.mem.Allocator, context: *CompileContext) !native_expr.Value {
+    const methods = try native_expr.allocateEntries(allocator, 4);
+    inline for (.{ "get", "require", "persist_relation_docs", "persist_column_docs" }, 0..) |name, index| {
+        methods[index] = .{ .key = name, .value = .{ .callable = "config." ++ name } };
+    }
+    _ = context;
+    return .{ .object = methods };
+}
+
 fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
     const root_end = std.mem.indexOfScalar(u8, name, '.') orelse name.len;
@@ -1104,6 +1113,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         if (mutation.original) |original| for (context.bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original, mutation.replacement.?, 0);
         return mutation.result;
     }
+    if (try @import("grants_context.zig").call(allocator, name, args)) |value| return value;
     if (try dbt_context.call(allocator, context.graph.adapter_type, name, args)) |value| return value;
     if (std.mem.eql(u8, name, "adapter.type")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
@@ -1111,10 +1121,20 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     if (std.mem.eql(u8, name, "config.get") or std.mem.eql(u8, name, "config.require")) {
         if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
+        if (context.parse_node != null) return .{ .string = "" };
         const value = (try @import("context_values.zig").config(allocator, context.node)).attribute(args[0].value.string);
         if (value != .undefined) return value;
         if (args.len == 2) return args[1].value;
         return if (std.mem.eql(u8, name, "config.require")) error.RequiredConfigurationMissing else .none;
+    }
+    if (std.mem.eql(u8, name, "config.persist_relation_docs") or std.mem.eql(u8, name, "config.persist_column_docs")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        if (context.parse_node != null) return .{ .boolean = false };
+        const config = try @import("context_values.zig").config(allocator, context.node);
+        const docs = config.attribute("persist_docs");
+        if (docs != .object) return error.PersistDocsValueTypeError;
+        const value = docs.attribute(if (std.mem.eql(u8, name, "config.persist_relation_docs")) "relation" else "columns");
+        return if (value == .undefined) .{ .boolean = false } else value;
     }
     // The expression lexer resolves direct dotted calls through the host;
     // object methods bound by a macro therefore need their immutable callable
