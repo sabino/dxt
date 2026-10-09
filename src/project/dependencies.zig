@@ -95,7 +95,8 @@ pub fn printHelp(writer: *std.Io.Writer) !void {
 pub fn install(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     var arena = std.heap.ArenaAllocator.init(runtime.allocator);
     defer arena.deinit();
-    const rt: Runtime = .{ .allocator = arena.allocator(), .io = runtime.io, .environment = runtime.environment };
+    var rt = runtime;
+    rt.allocator = arena.allocator();
     const root = try Dir.cwd().realPathFileAlloc(rt.io, options.project_dir, rt.allocator);
     const root_config = try config.loadProjectConfig(rt, root);
     const vars = if (options.vars) |text| blk: {

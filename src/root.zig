@@ -142,15 +142,36 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             try stderr.writeAll("error: runtime I/O is required for deps\n");
             return .usage;
         };
-        var options = dependencies.parseOptions(args[2..], stderr) catch |err| return commandError(err, stderr);
-        if (rt.global_options) |globals| {
-            var explicit_project = false;
-            for (args[2..]) |arg| if (equals(arg, "--project-dir")) {
-                explicit_project = true;
-            };
-            if (!explicit_project) options.project_dir = globals.project_dir;
+        var dependency_args: std.ArrayList([]const u8) = .empty;
+        defer dependency_args.deinit(rt.allocator);
+        var common_args: std.ArrayList([]const u8) = .empty;
+        defer common_args.deinit(rt.allocator);
+        var index: usize = 2;
+        while (index < args.len) : (index += 1) {
+            const arg = args[index];
+            if (equals(arg, "--offline") or equals(arg, "--upgrade") or equals(arg, "--lock") or equals(arg, "--registry-url")) {
+                try dependency_args.append(rt.allocator, arg);
+                if (equals(arg, "--registry-url")) {
+                    index += 1;
+                    if (index >= args.len) return commandError(error.InvalidOption, stderr);
+                    try dependency_args.append(rt.allocator, args[index]);
+                }
+            } else {
+                try common_args.append(rt.allocator, arg);
+                if (requiresValue(arg, .deps)) {
+                    index += 1;
+                    if (index >= args.len) return commandError(error.InvalidOption, stderr);
+                    try common_args.append(rt.allocator, args[index]);
+                }
+            }
         }
-        dependencies.install(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        const common_options = parseOptions(rt.allocator, rt.io, common_args.items, stderr, .deps, rt.global_options) catch |err| return commandError(err, stderr);
+        var options = dependencies.parseOptions(dependency_args.items, stderr) catch |err| return commandError(err, stderr);
+        options.project_dir = common_options.project_dir;
+        options.vars = common_options.vars;
+        var invocation = rt;
+        invocation.global_options = &common_options;
+        dependencies.install(invocation, options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
 
@@ -410,6 +431,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
 }
 
 const OptionMode = enum {
+    deps,
     analysis,
     common_only,
     common_and_select,
@@ -883,6 +905,7 @@ fn validateSelector(value: []const u8) !void {
 
 fn requiresValue(arg: []const u8, mode: OptionMode) bool {
     if ((mode == .build or mode == .common_and_select) and (equals(arg, "--sample") or equals(arg, "--event-time-start") or equals(arg, "--event-time-end"))) return true;
+    if (mode == .deps) return equals(arg, "--project-dir") or equals(arg, "--profiles-dir") or equals(arg, "--profile") or equals(arg, "--target") or equals(arg, "--vars") or equals(arg, "--state") or equals(arg, "--defer-state") or equals(arg, "--indirect-selection");
     if (equals(arg, "--log-format")) return true;
     if (mode == .init) return equals(arg, "--project-dir") or equals(arg, "--profiles-dir");
     if (mode == .debug) return equals(arg, "--project-dir") or equals(arg, "--profiles-dir") or equals(arg, "--profile") or equals(arg, "--target");
@@ -904,7 +927,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
         .common_and_select, .compile, .docs_generate, .list, .analysis, .seed, .test_command, .build, .source_freshness, .clone => {
             if (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude")) return true;
         },
-        .common_only, .clean, .docs_serve, .debug, .init, .operation, .retry => {},
+        .common_only, .clean, .docs_serve, .debug, .init, .operation, .retry, .deps => {},
     }
 
     if ((mode == .list or mode == .analysis) and (equals(arg, "--resource-type") or equals(arg, "--output"))) {
@@ -918,7 +941,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
 }
 
 fn isSelectorOption(arg: []const u8, mode: OptionMode) bool {
-    return mode != .common_only and mode != .clean and mode != .docs_serve and mode != .debug and mode != .init and mode != .operation and mode != .retry and (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude") or ((mode == .list or mode == .analysis) and equals(arg, "--models")));
+    return mode != .deps and mode != .common_only and mode != .clean and mode != .docs_serve and mode != .debug and mode != .init and mode != .operation and mode != .retry and (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude") or ((mode == .list or mode == .analysis) and equals(arg, "--models")));
 }
 
 fn isOptionLike(arg: []const u8) bool {
@@ -926,6 +949,7 @@ fn isOptionLike(arg: []const u8) bool {
 }
 
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
+    if (mode == .deps and (equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast"))) return true;
     if ((mode == .build or mode == .compile or mode == .common_and_select) and (equals(arg, "--empty") or equals(arg, "--no-empty"))) return true;
     if (mode == .docs_generate and equals(arg, "--empty-catalog")) return true;
     if ((equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast")) and (mode == .build or mode == .seed or mode == .test_command or mode == .retry or mode == .compile or mode == .docs_generate or mode == .source_freshness)) return true;

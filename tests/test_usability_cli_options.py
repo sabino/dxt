@@ -349,3 +349,24 @@ def test_core_sample_validation_and_explicit_override_of_environment(tmp_path, d
             assert result.returncode == 2, (engine, value, result.stdout, result.stderr)
         invoke(engine, ['-q', 'run', '--project-dir', root, '-s', 'a', '--sample', '''{start: '2024-01-01', end: '2024-01-02'}'''], root,
                environment(duckdb_environment, DBT_SAMPLE='invalid'))
+
+
+def test_core_deps_accepts_profile_globals_without_loading_a_profile(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    package = tmp_path / 'package'
+    package.mkdir()
+    (package / 'dbt_project.yml').write_text("name: local_pkg\nversion: '1.0'\nconfig-version: 2\n")
+    (root / 'packages.yml').write_text("packages:\n  - local: ../package\n")
+    (root / 'profiles.yml').unlink()
+    for engine in ['dxt', 'core']:
+        invoke(engine, ['-q', '--profile', 'unused', '--target', 'unused', 'deps', '--project-dir', root,
+                        '--profiles-dir', tmp_path / 'no-profiles', '--state', tmp_path / 'no-state'], root, environment(duckdb_environment))
+        assert (root / 'dbt_packages/local_pkg/dbt_project.yml').exists()
+        assert (root / 'package-lock.yml').exists()
+    with (root / 'dbt_project.yml').open('a') as stream:
+        stream.write("require-dbt-version: ['>=99.0.0']\n")
+    for engine in ['dxt', 'core']:
+        args = ['-q', 'deps', '--project-dir', root, '--profiles-dir', tmp_path / 'no-profiles']
+        result = invoke(engine, args, root, environment(duckdb_environment), ok=False)
+        assert result.returncode == 2
+        invoke(engine, ['--no-version-check', *args], root, environment(duckdb_environment))
