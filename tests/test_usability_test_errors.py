@@ -272,7 +272,7 @@ def test_truncated_duckdb_error_output_is_sanitized_and_durable(tmp_path: Path):
         f"os.execv({DUCKDB!r}, [{DUCKDB!r}, *sys.argv[1:]])\n"
     )
     stub.chmod(0o755)
-    env = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
+    env = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"], "DXT_DUCKDB_BACKEND": "cli"}
     outcome = run_dxt(project, target, "test", env=env)
     assert outcome.returncode == 1, outcome.stdout + outcome.stderr
     rows = results(target)

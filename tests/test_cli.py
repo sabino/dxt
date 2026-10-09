@@ -2404,7 +2404,7 @@ target-path: target
 """
     )
     (project / "models" / "events.sql").write_text(
-        """{{ config(materialized='incremental') }}
+        """{{ config(materialized='unregistered_materialization') }}
 select 1 as id
 {% if is_incremental() %}
 where id > 0
@@ -2419,7 +2419,7 @@ where id > 0
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "run currently supports only table and view model materializations" in result.stderr
+    assert "unsupported model materialization" in result.stderr
     assert not (target / "run_results.json").exists()
 
 
@@ -2434,7 +2434,7 @@ target-path: target
 """
     )
     (project / "models" / "a_table.sql").write_text("{{ config(materialized='table') }}\nselect 1 as id\n")
-    (project / "models" / "z_incremental.sql").write_text("{{ config(materialized='incremental') }}\nselect 2 as id\n")
+    (project / "models" / "z_incremental.sql").write_text("{{ config(materialized='unregistered_materialization') }}\nselect 2 as id\n")
     target = tmp_path / "run-target"
     result = subprocess.run(
         [DXT, "run", "--project-dir", str(project), "--target-path", str(target)],
@@ -2443,7 +2443,7 @@ target-path: target
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "run currently supports only table and view model materializations" in result.stderr
+    assert "unsupported model materialization" in result.stderr
     assert not (target / "dxt.duckdb").exists()
     assert not (target / "run_results.json").exists()
 
@@ -2702,7 +2702,7 @@ target-path: target
 """
     )
     (project / "models" / "events.sql").write_text(
-        "{{ config(materialized='incremental') }}\nselect 1 as id\n"
+        "{{ config(materialized='unregistered_materialization') }}\nselect 1 as id\n"
     )
     target = tmp_path / "build-target"
     result = subprocess.run(
@@ -2712,8 +2712,8 @@ target-path: target
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "build currently supports only table and view model materializations" in result.stderr
-    assert "run currently supports only table and view model materializations" not in result.stderr
+    assert "unsupported build model materialization" in result.stderr
+    assert "unsupported model materialization" not in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
