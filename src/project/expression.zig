@@ -81,6 +81,10 @@ pub const Value = union(enum) {
     }
 
     pub fn attribute(self: Value, name: []const u8) Value {
+        if (floatProtocol(self) != null) {
+            if (std.mem.eql(u8, name, "real")) return self;
+            if (std.mem.eql(u8, name, "imag")) return .{ .number = 0 };
+        }
         return switch (self) {
             .complex => |v| if (std.mem.eql(u8, name, "real")) .{ .number = v.real } else if (std.mem.eql(u8, name, "imag")) .{ .number = v.imaginary } else .undefined,
             .object => |entries| blk: {
@@ -156,6 +160,30 @@ pub fn floatProtocol(value: Value) ?f64 {
         if (entry.typed_key == null and std.mem.eql(u8, entry.key, "__dxt_float") and entry.value == .number) return entry.value.number;
     };
     return null;
+}
+
+test "dictionary literals preserve first equal key and tuple lookup" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dictionary = try evaluate(a, "{true:'first',1:'second',1.0:'third',(2,3):'pair'}", null);
+    try std.testing.expectEqual(@as(usize, 2), dictionary.object.len);
+    try std.testing.expect(entryKey(dictionary.object[0]) == .boolean);
+    try std.testing.expectEqualStrings("third", (try mappingGet(dictionary, .{ .integer = "1" })).string);
+    try std.testing.expectEqualStrings("pair", (try evaluate(a, "{(2,3):'pair'}[(2.0,3)]", null)).string);
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "{[]:1}", null));
+}
+
+test "NaN scalar equality and container identity follow separate Python rules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nan = try floatValue(a, std.math.nan(f64));
+    const other = try floatValue(a, std.math.nan(f64));
+    try std.testing.expect(!equalValues(nan, nan));
+    try std.testing.expect(equalValues(.{ .tuple = &.{nan} }, .{ .tuple = &.{nan} }));
+    try std.testing.expect(!equalValues(.{ .list = &.{nan} }, .{ .list = &.{other} }));
+    try std.testing.expectEqualStrings("nan", try nan.text(a));
 }
 
 pub fn checkedAttribute(value: Value, name: []const u8) !Value {
@@ -696,7 +724,7 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
         if (std.mem.eql(u8, name_, "count")) {
             if (args.len != 1) return error.InvalidJinjaArguments;
             var count: usize = 0;
-            for (receiver_values) |value| if (equal(value, args[0].value)) {
+            for (receiver_values) |value| if (equalMember(value, args[0].value)) {
                 count += 1;
             };
             return try integerValue(allocator, count);
@@ -710,7 +738,7 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
             if (stop < 0) stop += length;
             start = std.math.clamp(start, 0, length);
             stop = std.math.clamp(stop, 0, length);
-            for (receiver_values[@intCast(start)..@intCast(@max(start, stop))], @as(usize, @intCast(start))..) |value, index| if (equal(value, args[0].value)) return try integerValue(allocator, index);
+            for (receiver_values[@intCast(start)..@intCast(@max(start, stop))], @as(usize, @intCast(start))..) |value, index| if (equalMember(value, args[0].value)) return try integerValue(allocator, index);
             return error.JinjaValueNotFound;
         }
     }
@@ -981,6 +1009,10 @@ fn numericOrder(a: std.mem.Allocator, left: Value, right: Value) !std.math.Order
 fn equal(a: Value, b: Value) bool {
     return equalValues(a, b);
 }
+fn equalMember(a: Value, b: Value) bool {
+    if (floatProtocol(a)) |number| if (std.math.isNan(number) and mapping_keys.keyEqual(a, b)) return true;
+    return equalValues(a, b);
+}
 pub fn equalValues(a: Value, b: Value) bool {
     if (a == .complex or b == .complex) {
         if (a == .complex and b == .complex) return a.complex.real == b.complex.real and a.complex.imaginary == b.complex.imaginary;
@@ -998,7 +1030,7 @@ pub fn equalValues(a: Value, b: Value) bool {
         if (source_a != .object or source_b != .object or source_a.object.len != source_b.object.len) return false;
         for (source_a.object) |entry| {
             const item = (mappingEntry(source_b, entryKey(entry)) catch return false) orelse return false;
-            if (std.mem.eql(u8, kind_a, "items") and !equal(entry.value, item.value)) return false;
+            if (std.mem.eql(u8, kind_a, "items") and !equalMember(entry.value, item.value)) return false;
         }
         return true;
     }
@@ -1015,28 +1047,29 @@ pub fn equalValues(a: Value, b: Value) bool {
         .list, .tuple => |values| blk: {
             const other = sequence(b).?;
             if (values.len != other.len) break :blk false;
-            for (values, other) |x, y| if (!equal(x, y)) break :blk false;
+            for (values, other) |x, y| if (!equalMember(x, y)) break :blk false;
             break :blk true;
         },
         .object => |entries| blk: {
             if (entries.len != b.object.len) break :blk false;
             for (entries) |entry| {
                 const other = (mappingEntry(b, entryKey(entry)) catch break :blk false) orelse break :blk false;
-                if (!equal(entry.value, other.value)) break :blk false;
+                if (!equalMember(entry.value, other.value)) break :blk false;
             }
             break :blk true;
         },
     };
 }
 fn contains(allocator: std.mem.Allocator, container: Value, item: Value) !bool {
+    if (container.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError;
     if (sequences.kind(container) != null) {
-        for (try iterableValues(allocator, container)) |value| if (equal(value, item)) return true;
+        for (try iterableValues(allocator, container)) |value| if (equalMember(value, item)) return true;
         return false;
     }
     return switch (container) {
         .string => |s| if (item == .string) std.mem.indexOf(u8, s, item.string) != null else error.JinjaTypeError,
         .list, .tuple => |values| blk: {
-            for (values) |v| if (equal(v, item)) break :blk true;
+            for (values) |v| if (equalMember(v, item)) break :blk true;
             break :blk false;
         },
         .object => (try mappingEntry(container, item)) != null,
@@ -1225,6 +1258,7 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "sameas")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
         const other = args[0].value;
+        if (floatProtocol(value)) |number| if (std.math.isNan(number)) return mapping_keys.keyEqual(value, other);
         if (std.meta.activeTag(value) != std.meta.activeTag(other)) return false;
         return switch (value) {
             .object => |entries| entries.ptr == other.object.ptr,

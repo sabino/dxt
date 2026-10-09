@@ -42,7 +42,7 @@ pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) any
         },
         .object => |entries| blk: {
             var object: std.json.ObjectMap = .empty;
-            for (entries) |entry| try object.put(allocator, try allocator.dupe(u8, entry.key), try fromExpression(allocator, entry.value));
+            for (entries) |entry| try object.put(allocator, try allocator.dupe(u8, try @import("mapping_keys.zig").jsonKey(allocator, expression.entryKey(entry))), try fromExpression(allocator, entry.value));
             break :blk .{ .object = object };
         },
     };
