@@ -133,6 +133,16 @@ pub fn undefinedValue(allocator: std.mem.Allocator, name: ?[]const u8) !Value {
     const captured = try captureUndefined(allocator, name);
     return .{ .ordinary_undefined = captured.capture_undefined };
 }
+/// Jinja checks the callable's pass-argument attribute before invocation.
+/// dbt CaptureUndefined exposes that probe by mutating the called cell name.
+pub fn callUndefined(value: Value) !Value {
+    if (value == .capture_undefined) {
+        const cell = value.capture_undefined;
+        cell.name = try cell.allocator.dupe(u8, "jinja_pass_arg");
+        return value;
+    }
+    return if (isUndefined(value)) error.UndefinedJinjaValue else error.JinjaTypeError;
+}
 pub fn isUndefined(value: Value) bool {
     return value == .undefined or value == .conditional_undefined or value == .ordinary_undefined or value == .capture_undefined;
 }
@@ -500,7 +510,7 @@ const Parser = struct {
 
     fn unaryFiltered(self: *Parser, with_filters: bool) anyerror!Value {
         if (self.take("not")) return .{ .boolean = !(try self.binary(3)).truthy() };
-        var value: Value = if (self.take("-")) blk: {
+        const value: Value = if (self.take("-")) blk: {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
             if (complexProtocol(operand)) |number| break :blk try complexValue(self.allocator, .{ .real = -number.real, .imaginary = -number.imaginary });
@@ -515,11 +525,19 @@ const Parser = struct {
             if (operand != .integer and floatProtocol(operand) == null and complexProtocol(operand) == null) return error.JinjaTypeError;
             break :blk operand;
         } else try self.atom();
+        return self.postfix(value, with_filters);
+    }
+
+    fn postfix(self: *Parser, primary: Value, with_filters: bool) anyerror!Value {
+        var value = primary;
         while (true) {
             if (self.take("(")) {
                 const args = try self.arguments();
                 if (self.active) {
-                    if (value == .capture_undefined) continue;
+                    if (value == .capture_undefined) {
+                        value = try callUndefined(value);
+                        continue;
+                    }
                     if (isUndefined(value)) return error.UndefinedJinjaValue;
                     const function = callableName(value) orelse return error.JinjaTypeError;
                     const host = self.host orelse return error.UnsupportedJinjaCall;
@@ -557,7 +575,7 @@ const Parser = struct {
             } else if (with_filters and self.take("is")) {
                 const negate = self.take("not");
                 const test_name = try self.name();
-                const args = if (self.take("(")) try self.arguments() else &.{};
+                const args = try self.testArguments();
                 if (self.active) {
                     const result = try testValue(test_name, value, args);
                     value = .{ .boolean = if (negate) !result else result };
@@ -572,6 +590,23 @@ const Parser = struct {
             } else break;
         }
         return value;
+    }
+
+    fn testArguments(self: *Parser) anyerror![]const Argument {
+        if (self.take("(")) return try self.arguments();
+        self.space();
+        if (self.index == self.input.len) return &.{};
+        const next = self.input[self.index];
+        if (std.ascii.isAlphabetic(next) or next == '_') {
+            const start = self.index;
+            const token = try self.name();
+            self.index = start;
+            if (std.mem.eql(u8, token, "and") or std.mem.eql(u8, token, "or") or std.mem.eql(u8, token, "else")) return &.{};
+            if (std.mem.eql(u8, token, "is")) return error.InvalidJinjaExpression;
+        } else if (!std.ascii.isDigit(next) and next != '\'' and next != '"' and next != '[' and next != '{') return &.{};
+        const arguments_ = try self.allocator.alloc(Argument, 1);
+        arguments_[0] = .{ .value = try self.postfix(try self.atom(), false) };
+        return arguments_;
     }
 
     fn atom(self: *Parser) anyerror!Value {
@@ -702,6 +737,9 @@ const Parser = struct {
                 if (try builtin(self.allocator, path, args)) |value| return value;
             }
             const host = self.host orelse return error.UnsupportedJinjaCall;
+            const callee = try host.resolve(host.context, path, self.allocator);
+            if (callee == .capture_undefined) return try callUndefined(callee);
+            if (callee == .ordinary_undefined) return error.UndefinedJinjaValue;
             if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| {
                 const receiver = try host.resolve(host.context, path[0..dot], self.allocator);
                 if (receiver == .capture_undefined or receiver == .object or receiver == .list or receiver == .tuple or receiver == .string or receiver == .complex) return try self.method(receiver, path[dot + 1 ..], args);
@@ -728,7 +766,7 @@ const Parser = struct {
     fn method(self: *Parser, receiver: Value, method_name: []const u8, args: []const Argument) !Value {
         if (receiver == .capture_undefined) {
             const bound = try checkedAttribute(receiver, method_name);
-            if (bound == .capture_undefined) return bound;
+            if (bound == .capture_undefined) return try callUndefined(bound);
             return error.JinjaTypeError;
         }
         if (isUndefined(receiver)) return error.UndefinedJinjaValue;
@@ -1278,7 +1316,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     }
     return try floatValue(allocator, if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else return error.InvalidJinjaExpression);
 }
-fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
+pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
     if (value == .capture_undefined) return value;
     if (isUndefined(value)) return error.UndefinedJinjaValue;
     if (sets.isSet(value)) return .undefined;
@@ -1896,13 +1934,26 @@ test "ordinary undefined renders and iterates but rejects attribute arithmetic a
     try std.testing.expectError(error.JinjaTypeError, evaluate(a, "none|list", null));
 }
 
+test "named tests accept conventional unparenthesized primary and postfix arguments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evaluate(a, "1 is equalto 1", null)).boolean);
+    try std.testing.expect((try evaluate(a, "1 is not equalto 2", null)).boolean);
+    try std.testing.expect((try evaluate(a, "'x' is in ['x']", null)).boolean);
+    try std.testing.expect((try evaluate(a, "'x' is equalto 'X'.lower()", null)).boolean);
+    try std.testing.expect((try evaluate(a, "2 is divisibleby 2 and 2 is even", null)).boolean);
+    try std.testing.expectEqualStrings("2", (try evaluate(a, "1 is equalto 1 + 1", null)).integer);
+    try std.testing.expectError(error.InvalidJinjaExpression, evaluate(a, "1 is odd is boolean", null));
+}
+
 test "parse undefined captures mutable alias names and stable subscript call identity" {
     const Fixture = struct {
         fn resolve(_: *anyopaque, _: []const u8, _: std.mem.Allocator) !Value {
             return .undefined;
         }
         fn call(_: *anyopaque, name: []const u8, _: []const Argument, a: std.mem.Allocator) !Value {
-            return captureUndefined(a, name);
+            return callUndefined(try captureUndefined(a, name));
         }
     };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1920,7 +1971,9 @@ test "parse undefined captures mutable alias names and stable subscript call ide
     try std.testing.expectEqualStrings("field", (try evaluate(a, "missing.field.name", host)).string);
     try std.testing.expectEqualStrings("missing", (try evaluate(a, "(missing)[1].name", host)).string);
     try std.testing.expectEqualStrings("missing", (try evaluate(a, "(missing)[:2].name", host)).string);
-    try std.testing.expectEqualStrings("missing", (try evaluate(a, "(missing)().name", host)).string);
+    try std.testing.expectEqualStrings("jinja_pass_arg", (try evaluate(a, "(missing)().name", host)).string);
+    try std.testing.expectEqualStrings("jinja_pass_arg", (try evaluate(a, "missing().name", host)).string);
+    try std.testing.expectEqualStrings("jinja_pass_arg", (try evaluate(a, "missing.field.call().name", host)).string);
     try std.testing.expectEqualStrings("", try (try evaluate(a, "missing.field.call()", host)).text(a));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "missing + 1", host));
     try std.testing.expect(isUndefined(try checkedAttribute(original, "__reduce__")));
