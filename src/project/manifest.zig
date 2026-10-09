@@ -465,7 +465,7 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
 
     try writer.writeAll(",\"database\":");
     const snapshot_config = node.snapshot_config;
-    try writeNullableString(writer, if (snapshot_config) |config| config.target_database orelse databaseNameForGraph(graph) else databaseNameForGraph(graph));
+    try writeNullableString(writer, compiler.relationDatabaseForNode(graph, node) orelse databaseNameForGraph(graph));
     try writer.writeAll(",\"schema\":");
     try json.string(writer, if (snapshot_config) |config| config.target_schema orelse schema_name else schema_name);
     try writer.writeAll(",\"alias\":");
@@ -513,6 +513,7 @@ fn writeTestNodeIdentityFields(
 }
 
 fn databaseNameForGraph(graph: *const Graph) ?[]const u8 {
+    if (@import("config_value.zig").get(graph.target_context, "database")) |database| if (database == .string) return database.string;
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return null;
     const configured_path = graph.database_path orelse return "memory";
     const trimmed = std.mem.trim(u8, configured_path, " \t\r\n");

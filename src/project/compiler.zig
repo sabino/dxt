@@ -1,4 +1,5 @@
 const std = @import("std");
+const dbt_context = @import("dbt_context.zig");
 const jinja = @import("jinja.zig");
 const snapshot = @import("snapshot.zig");
 const resolve = @import("resolve.zig");
@@ -282,6 +283,14 @@ pub fn renderOperation(runtime: types.Runtime, graph: *const Graph, macro_name: 
     while (iterator.next()) |entry| try args.append(allocator, .{ .name = entry.key_ptr.*, .value = try valueFromJson(allocator, entry.value_ptr.*) });
     const result = try callExpressionValue(&context, macro_name, args.items, allocator);
     return try runtime.allocator.dupe(u8, if (result == .none) "" else try result.text(allocator));
+}
+
+/// Materializations and incremental strategies receive actual typed adapter
+/// values. The result owns its storage independently of this render frame.
+pub fn renderMacroForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, macro_name: []const u8, args: []const native_expr.Argument) !native_expr.Value {
+    var context = CompileContext.init(allocator, graph, node);
+    defer context.deinit();
+    return try dbt_context.cloneValue(allocator, try callExpressionValue(&context, macro_name, args, context.value_arena.allocator()));
 }
 
 fn valueFromJson(allocator: std.mem.Allocator, value: std.json.Value) anyerror!native_expr.Value {
@@ -799,6 +808,40 @@ pub fn relationNameForNode(allocator: std.mem.Allocator, graph: *const Graph, no
     return renderRelation(allocator, .{ .database = if (graph.unit_fixture_relations) null else relationDatabaseForNode(graph, node), .schema = schema, .identifier = identifier });
 }
 
+pub fn relationValueForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, input: bool) !native_expr.Value {
+    const ephemeral = input and std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, node.materialized, "ephemeral");
+    var definition = dbt_context.RelationDef{
+        .adapter_type = graph.adapter_type,
+        .database = if (graph.unit_fixture_relations or ephemeral) null else relationDatabaseForNode(graph, node),
+        .schema = if (ephemeral) null else try relationSchemaForNode(allocator, graph, node),
+        .identifier = if (ephemeral) try ephemeralCteName(allocator, node) else relationIdentifierForNode(node),
+        .relation_type = if (ephemeral) "cte" else null,
+    };
+    if (ephemeral) definition.quote_policy.identifier = false;
+    if (input and !ephemeral) definition.base_sql = try relationNameForRefNode(allocator, graph, node) else if (std.mem.eql(u8, node.resource_type, "source")) definition.base_sql = node.relation_name;
+    return try dbt_context.relationValue(allocator, definition);
+}
+
+pub fn relationValueForSource(allocator: std.mem.Allocator, graph: *const Graph, current: *const Node, source: *const SourceDef) !native_expr.Value {
+    const base = try relationNameForSource(allocator, source);
+    return try dbt_context.relationValue(allocator, .{
+        .adapter_type = graph.adapter_type,
+        .database = sourceDatabaseName(source),
+        .schema = sourceSchemaName(source),
+        .identifier = sourceIdentifier(source),
+        .quote_policy = .{ .database = source.quoting.database orelse true, .schema = source.quoting.schema orelse true, .identifier = source.quoting.identifier orelse true },
+        .base_sql = base,
+        .rendered_sql = try @import("input_relations.zig").render(allocator, graph, current, source.effective_config, sourceIdentifier(source), base),
+    });
+}
+
+pub fn relationValueForInputNode(allocator: std.mem.Allocator, graph: *const Graph, current: *const Node, target: *const Node) !native_expr.Value {
+    var definition = try dbt_context.relationFromValue(allocator, try relationValueForNode(allocator, graph, target, true));
+    const base = try dbt_context.renderRelation(allocator, definition);
+    definition.rendered_sql = try @import("input_relations.zig").render(allocator, graph, current, target.effective_config, definition.identifier orelse target.name, base);
+    return try dbt_context.relationValue(allocator, definition);
+}
+
 fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
     // Dispatch returns a callable macro in dbt's context. Preserve its existing
     // namespace resolution while ordinary expressions use native typed values.
@@ -839,8 +882,13 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     if (std.mem.eql(u8, path, "model.name")) return .{ .string = context.node.name };
     if (std.mem.eql(u8, path, "model.unique_id")) return .{ .string = context.node.unique_id };
     if (std.mem.eql(u8, path, "model.config.materialized")) return .{ .string = context.node.materialized };
-    if (std.mem.eql(u8, path, "this")) return .{ .string = try relationNameForNode(allocator, context.graph, context.node) };
-    if (std.mem.startsWith(u8, path, "this.")) return .{ .string = try renderThisAttribute(allocator, context.graph, context.node, path[5..]) };
+    if (std.mem.eql(u8, path, "this") or std.mem.startsWith(u8, path, "this.")) {
+        var value = try relationValueForNode(allocator, context.graph, context.node, false);
+        if (path.len == 4) return value;
+        var attributes = std.mem.splitScalar(u8, path[5..], '.');
+        while (attributes.next()) |attribute| value = value.attribute(attribute);
+        return value;
+    }
     if (std.mem.eql(u8, path, "target") and context.graph.target_context != .null) return try valueFromJson(allocator, context.graph.target_context);
     if (std.mem.startsWith(u8, path, "target.")) {
         if (@import("config_value.zig").get(context.graph.target_context, path[7..])) |value| return try valueFromJson(allocator, value);
@@ -903,6 +951,29 @@ fn upsertConfigArgument(allocator: std.mem.Allocator, values: *std.ArrayList(nat
 fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
     if (try @import("bundled_macros.zig").callColumn(allocator, name, args)) |value| return value;
+    if (try dbt_context.call(allocator, context.graph.adapter_type, name, args)) |value| return value;
+    // The expression lexer resolves direct dotted calls through the host;
+    // object methods bound by a macro therefore need their immutable callable
+    // payload resolved before ordinary package namespace lookup.
+    if (std.mem.startsWith(u8, name, "this.")) {
+        const method = try resolveExpressionValue(context, name, allocator);
+        if (method == .callable) return (try dbt_context.call(allocator, context.graph.adapter_type, method.callable, args)) orelse error.UnsupportedRelationMethod;
+    }
+    if (std.mem.indexOfScalar(u8, name, '.')) |dot| {
+        var index = context.bindings.items.len;
+        while (index > 0) {
+            index -= 1;
+            const binding = context.bindings.items[index];
+            if (std.mem.eql(u8, binding.name, name[0..dot])) {
+                const method = try resolveExpressionValue(context, name, allocator);
+                if (method == .callable) {
+                    if (try dbt_context.call(allocator, context.graph.adapter_type, method.callable, args)) |value| return value;
+                    return try callExpressionValue(context, method.callable, args, allocator);
+                }
+                break;
+            }
+        }
+    }
     if (std.mem.eql(u8, name, "__dxt_caller") or std.mem.eql(u8, name, "caller")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         return try resolveExpressionValue(context, "__dxt_caller_sql", allocator);
@@ -982,23 +1053,22 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         const dep = try refFromArguments(context.allocator, args);
         if (context.parse_node) |node| {
             try node.refs.append(context.allocator, dep);
-            return .{ .string = "__dxt_parse_relation__" };
+            return try relationValueForNode(allocator, context.graph, context.node, false);
         }
         const unique_id = try resolve.resolveRefDependency(context.graph, context.node.package_name, dep);
         const target = findNodeByUniqueId(context.graph, unique_id) orelse return error.UnresolvedRef;
-        const relation = if (std.mem.eql(u8, target.resource_type, "model") and std.mem.eql(u8, target.materialized, "ephemeral")) try ephemeralCteName(allocator, target) else try relationNameForRefNode(allocator, context.graph, target);
-        return .{ .string = relation };
+        return try relationValueForInputNode(allocator, context.graph, context.node, target);
     }
     if (std.mem.eql(u8, name, "source")) {
         if (args.len != 2 or args[0].name != null or args[1].name != null or args[0].value != .string or args[1].value != .string) return error.InvalidJinjaArguments;
         const dep = SourceDep{ .source_name = try context.allocator.dupe(u8, args[0].value.string), .table_name = try context.allocator.dupe(u8, args[1].value.string) };
         if (context.parse_node) |node| {
             try node.source_refs.append(context.allocator, dep);
-            return .{ .string = "__dxt_parse_relation__" };
+            return try relationValueForNode(allocator, context.graph, context.node, false);
         }
         const unique_id = try resolve.resolveSourceDependency(context.graph, context.node.package_name, dep);
         const source = findSourceByUniqueId(context.graph, unique_id) orelse return error.UnresolvedSource;
-        return .{ .string = try relationNameForSource(allocator, source) };
+        return try relationValueForSource(allocator, context.graph, context.node, source);
     }
     var macro_id: ?[]const u8 = null;
     if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {

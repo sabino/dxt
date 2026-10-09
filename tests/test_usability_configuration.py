@@ -478,3 +478,54 @@ def test_upstream_sql_macros_compile_and_execute_unchanged(tmp_path, configurati
         with duckdb.connect(str(project / 'warehouse.duckdb'), read_only=True) as connection:
             rows.append(connection.execute('select * from main.bundled').fetchall())
     assert rows[0] == rows[1]
+
+
+@pytest.mark.parametrize('expression', [
+    "r",
+    "r.render()",
+    "r.include(database=false)",
+    "r.quote(identifier=false)",
+    "r.incorporate(path={'schema': 'other', 'identifier': 'changed'}, type='view')",
+    "r.replace_path(identifier='changed').identifier",
+    "r.without_identifier()",
+    "r.incorporate(type='view').is_view",
+    "r.matches(schema='Main', identifier='Thing')",
+    "r.information_schema('columns')",
+    "r.information_schema().schema",
+])
+def test_native_relation_factories_and_nested_methods_match_core(tmp_path, configuration_oracle, expression):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/relations.sql', "{% set r = api.Relation.create(database='warehouse', schema='Main', identifier='Thing', type='table') %}\nselect '{{ " + expression + " }}' as value\n")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.relations']['compiled_code'] == expected['nodes']['model.configuration_fixture.relations']['compiled_code']
+
+
+def test_native_this_ref_source_relations_return_through_macros(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/parent.sql', '{{ config(materialized="table") }}\nselect 1 as id\n')
+    pair.write('models/schema.yml', "version: 2\nsources:\n  - name: raw\n    schema: main\n    tables:\n      - name: parent\n")
+    pair.write('macros/relocated.sql', "{% macro relocated(relation) %}{{ return(relation.incorporate(path={'identifier': 'parent'})) }}{% endmacro %}")
+    pair.write('models/marts/relations.sql', "{% set dependency = ref('parent') %}{% set incoming = source('raw', 'parent') %}\nselect '{{ this.identifier }}' as model_name, '{{ dependency.type }}' as kind, '{{ incoming.schema }}' as source_schema from {{ relocated(this).include(database=false) }}\n")
+    actual, expected = pair.invoke('run')
+    assert actual['nodes']['model.configuration_fixture.relations']['compiled_code'] == expected['nodes']['model.configuration_fixture.relations']['compiled_code']
+    assert sorted(actual['nodes']['model.configuration_fixture.relations']['depends_on']['nodes']) == sorted(expected['nodes']['model.configuration_fixture.relations']['depends_on']['nodes'])
+
+
+@pytest.mark.parametrize('expression', ['r.matches()', "r.matches(identifier='thing')"])
+def test_native_relation_invalid_and_approximate_matching_fails_like_core(tmp_path, configuration_oracle, expression):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/relations.sql', "{% set r = api.Relation.create(schema='Main', identifier='Thing') %}\nselect '{{ " + expression + " }}' as value\n")
+    pair.invoke('compile', success=False)
+
+
+@pytest.mark.parametrize('authored_database', [None, 'analytics'])
+def test_postgres_resource_database_identity_matches_core(tmp_path, configuration_oracle, authored_database):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('profiles.yml', 'configuration_fixture:\n  target: dev\n  outputs:\n    dev: {type: postgres, host: localhost, port: 1, dbname: configuration_fixture, schema: main, user: fixture, password: fixture, threads: 1}\n')
+    inline = '{{ config(database="' + authored_database + '") }}\n' if authored_database else ''
+    pair.write('models/marts/identity.sql', inline + 'select 1 as id\n')
+    pair.write('models/schema.yml', 'version: 2\nsources: [{name: raw, schema: landing, tables: [{name: orders}]}]\n')
+    actual, expected = pair.invoke('parse')
+    for manifest in [actual, expected]:
+        assert manifest['nodes']['model.configuration_fixture.identity']['database'] == (authored_database or 'configuration_fixture')
+        assert manifest['sources']['source.configuration_fixture.raw.orders']['database'] == 'configuration_fixture'
