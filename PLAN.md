@@ -31,6 +31,33 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 
 ## Operating Loop
 
+### Full Usability Implementation Campaign
+
+PR #219 is merged. The user has authorized completing the replacement roadmap,
+including its proposed features, from fresh main on `feat/full-usability`.
+The previous snapshot slice's stop boundary is historical and does not constrain
+this campaign. Implement and verify the roadmap in dependency order; never
+label a planned or unverified feature complete.
+
+Wave one uses isolated worktrees: scheduler/ephemeral ancestry and mixed unit
+builds; durable test error rows; incremental materializations; snapshot
+materializations; state/freshness selectors; package dependency installation.
+The supervisor owns CLI integration, Jinja/compiler improvements and this plan.
+Shared `project.zig`, types, root/main, compiler and integration-test edits are
+sequenced by cherry-pick: scheduler, errors, incremental, snapshots, selectors,
+dependencies, then supervisor integration. Workers keep new logic in focused
+modules, add native/CLI and pinned Core evidence, and do not edit docs or PLAN.
+Later waves cover remaining configuration/macros, adapter certification,
+commands/artifacts, semantic/static-analysis/stateful/cross-database features.
+
+Validation uses the current pinned Core/adapter contract, repeated-run and
+failure fixtures, full applicable schemas, public projects, native tests,
+runtime/safety scans and release builds. Inspect every failed gate before
+continuing; never replace implementation with accepted-but-ignored arguments,
+empty artifacts, canned results or Python product code. Cloud adapter
+certification requires declared targets and usable warehouse connections;
+continue independent native work while those requirements are clarified.
+
 ### Active Snapshot Foundation Slice
 
 Issue #213 is the next read-only dbt compatibility slice: discover legacy SQL
