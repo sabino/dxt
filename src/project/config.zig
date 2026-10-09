@@ -184,6 +184,7 @@ fn appendJsonVarValue(allocator: std.mem.Allocator, vars: *std.ArrayList(VarEntr
 }
 
 fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !ProjectConfig {
+    try rejectProjectSnapshotConfigs(text);
     var config = ProjectConfig{ .name = "" };
     errdefer {
         deinitProjectConfig(allocator, &config);
@@ -300,6 +301,7 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
                     try parseInlineStringList(allocator, kv.value, &config.analysis_paths);
                 }
             } else if (std.mem.eql(u8, kv.key, "snapshot-paths")) {
+                config.snapshot_paths_set = true;
                 if (std.mem.trim(u8, kv.value, " \t").len == 0) {
                     read_snapshot_path_block = true;
                 } else {
@@ -340,6 +342,9 @@ fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !Proje
     }
     if (!config.test_paths_set) {
         try config.test_paths.append(allocator, "tests");
+    }
+    if (!config.snapshot_paths_set) {
+        try config.snapshot_paths.append(allocator, "snapshots");
     }
     if (config.analysis_paths.items.len == 0) {
         try config.analysis_paths.append(allocator, "analyses");
@@ -1003,7 +1008,8 @@ test "project config parser applies defaults for omitted paths" {
     try std.testing.expectEqualStrings("tests", config.test_paths.items[0]);
     try std.testing.expectEqual(@as(usize, 1), config.analysis_paths.items.len);
     try std.testing.expectEqualStrings("analyses", config.analysis_paths.items[0]);
-    try std.testing.expectEqual(@as(usize, 0), config.snapshot_paths.items.len);
+    try std.testing.expectEqual(@as(usize, 1), config.snapshot_paths.items.len);
+    try std.testing.expectEqualStrings("snapshots", config.snapshot_paths.items[0]);
     try std.testing.expectEqual(@as(usize, 0), config.function_paths.items.len);
     try std.testing.expect(!config.clean_targets_set);
     try std.testing.expectEqual(@as(usize, 0), config.clean_targets.items.len);
@@ -1454,4 +1460,34 @@ test "project seed docs application targets package seeds only" {
     try std.testing.expectEqualStrings("#445566", graph.nodes.items[0].docs.node_color.?);
     try std.testing.expect(!graph.nodes.items[1].docs.configured);
     try std.testing.expect(!graph.nodes.items[2].docs.configured);
+}
+
+fn rejectProjectSnapshotConfigs(text: []const u8) !void {
+    var in_snapshots = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripYamlComment(raw_line);
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        if (leadingSpaces(line) == 0) {
+            in_snapshots = false;
+            if (splitKeyValue(trimmed)) |kv| {
+                if (std.mem.eql(u8, kv.key, "snapshots")) {
+                    const value = std.mem.trim(u8, kv.value, " \t\r");
+                    if (value.len == 0) in_snapshots = true else if (!std.mem.eql(u8, value, "{}") and !std.mem.eql(u8, value, "null")) return error.UnsupportedProjectSnapshotConfig;
+                }
+            }
+        } else if (in_snapshots) return error.UnsupportedProjectSnapshotConfig;
+    }
+}
+
+test "snapshot paths honor an explicit empty list and project snapshot inheritance fails closed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var config = try parseProjectConfigText(allocator, "name: demo\nsnapshot-paths: []\nsnapshots: {}\n");
+    defer deinitProjectConfig(allocator, &config);
+    try std.testing.expect(config.snapshot_paths_set);
+    try std.testing.expectEqual(@as(usize, 0), config.snapshot_paths.items.len);
+    try std.testing.expectError(error.UnsupportedProjectSnapshotConfig, parseProjectConfigText(allocator, "name: demo\nsnapshots:\n  demo:\n    +enabled: false\n"));
 }

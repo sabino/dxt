@@ -224,6 +224,7 @@ fn validateSelectorMethod(part: []const u8) !void {
 fn isSupportedResourceType(value: []const u8) bool {
     return std.mem.eql(u8, value, "model") or
         std.mem.eql(u8, value, "analysis") or
+        std.mem.eql(u8, value, "snapshot") or
         std.mem.eql(u8, value, "seed") or
         std.mem.eql(u8, value, "source") or
         std.mem.eql(u8, value, "exposure") or
@@ -277,7 +278,7 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
                 .search_name = node.name,
                 .path = node.path,
                 .original_file_path = node.original_file_path,
-                .selector = try pathBackedOutputSelector(allocator, node.package_name, node.path),
+                .selector = try nodeOutputSelector(allocator, node),
                 .alias = node.config_alias orelse node.name,
                 .config_materialized = node.materialized,
                 .config_tags = node.tags.items,
@@ -404,6 +405,13 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
     return try selected.toOwnedSlice(allocator);
 }
 
+fn nodeOutputSelector(allocator: std.mem.Allocator, node: *const Node) ![]const u8 {
+    const path_selector = try pathBackedOutputSelector(allocator, node.package_name, node.path);
+    if (!std.mem.eql(u8, node.resource_type, "snapshot")) return path_selector;
+    defer allocator.free(path_selector);
+    return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ path_selector, node.name });
+}
+
 fn pathBackedOutputSelector(allocator: std.mem.Allocator, package_name: []const u8, path: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -484,7 +492,7 @@ fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []cons
     }
     if (std.mem.startsWith(u8, value, "config.materialized:")) {
         const materialized = value["config.materialized:".len..];
-        return (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "analysis")) and std.mem.eql(u8, materialized, node.materialized);
+        return (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "analysis") or std.mem.eql(u8, node.resource_type, "snapshot")) and std.mem.eql(u8, materialized, node.materialized);
     }
     return false;
 }
@@ -896,6 +904,14 @@ fn matchesUniqueIdFqnPattern(pattern: []const u8, unique_id: []const u8) bool {
 }
 
 fn matchesNodeFqnPattern(pattern: []const u8, node: *const Node) bool {
+    if (std.mem.eql(u8, node.resource_type, "snapshot")) {
+        var buffer: [4096]u8 = undefined;
+        var len: usize = 0;
+        if (!appendFqnSlice(&buffer, &len, node.package_name) or !appendFqnByte(&buffer, &len, '.')) return false;
+        const unscoped_start = len;
+        if (!appendFqnPath(&buffer, &len, node.path) or !appendFqnByte(&buffer, &len, '.') or !appendFqnSlice(&buffer, &len, node.name)) return false;
+        return matchesFqnCandidate(pattern, buffer[0..len]) or matchesFqnCandidate(pattern, buffer[unscoped_start..len]);
+    }
     return matchesPathBackedFqnPattern(pattern, node.package_name, node.path);
 }
 
@@ -1694,4 +1710,24 @@ test "selector terms parse dbt plus depth operators" {
 
     const invalid_depth = parseSelectorTerm("999999999999999999999999999999+orders");
     try std.testing.expect(!invalid_depth.valid);
+}
+
+test "snapshot file and block FQN selects separate nodes and expands dependencies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{ .package_name = "demo", .unique_id = "model.demo.base", .name = "base", .path = "base.sql", .original_file_path = "models/base.sql", .raw_code = "select 1" });
+    try graph.nodes.append(allocator, .{ .resource_type = "snapshot", .package_name = "demo", .unique_id = "snapshot.demo.history", .name = "history", .path = "nested/many.sql", .original_file_path = "snapshots/nested/many.sql", .raw_code = "select 1", .materialized = "snapshot" });
+    try graph.nodes.append(allocator, .{ .resource_type = "snapshot", .package_name = "demo", .unique_id = "snapshot.demo.other", .name = "other", .path = "nested/many.sql", .original_file_path = "snapshots/nested/many.sql", .raw_code = "select 2", .materialized = "snapshot" });
+    try graph.nodes.items[1].depends_on.append(allocator, "model.demo.base");
+    const selected = try selectResources(allocator, &graph, "snapshot", "demo.nested.many.history", null);
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+    try std.testing.expectEqualStrings("snapshot.demo.history", selected[0].unique_id);
+    try std.testing.expectEqualStrings("demo.nested.many.history", selected[0].selector);
+    const expanded = try selectResources(allocator, &graph, null, "+demo.nested.many.history", null);
+    try std.testing.expectEqual(@as(usize, 2), expanded.len);
+    const snapshots = try selectResources(allocator, &graph, null, "config.materialized:snapshot", null);
+    try std.testing.expectEqual(@as(usize, 2), snapshots.len);
 }

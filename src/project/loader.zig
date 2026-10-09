@@ -3,6 +3,7 @@ const project_config = @import("config.zig");
 const project_fs = @import("fs.zig");
 const project_parse = @import("parse.zig");
 const project_profile = @import("profile.zig");
+const snapshot = @import("snapshot.zig");
 const project_resolve = @import("resolve.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
@@ -174,6 +175,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     }
     applyProjectSeedDocs(&graph, config.name, config.seed_docs);
     try loadSingularTests(runtime, options.project_dir, config.name, config.test_paths.items, callbacks, &graph);
+    try loadSnapshots(runtime, options.project_dir, config.name, config.snapshot_paths.items, callbacks, &graph);
 
     try rejectDuplicateMacroProperties(&graph);
     try applyMacroProperties(&graph);
@@ -184,6 +186,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     try rejectDuplicateAnalyses(&graph);
     try rejectDuplicateModels(&graph);
     try rejectDuplicateSeeds(&graph);
+    try project_resolve.rejectDuplicateSnapshots(&graph);
     try rejectDuplicateSingularTests(&graph);
     try rejectDuplicateDocs(&graph);
     try rejectDuplicateExposures(&graph);
@@ -366,6 +369,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
         applyProjectSeedDocs(graph, package_config.name, package_config.seed_docs);
         try loadSingularTests(runtime, package_dir, package_config.name, package_config.test_paths.items, callbacks, graph);
         try callbacks.apply_singular_test_properties(graph, package_config.name);
+        try loadSnapshots(runtime, package_dir, package_config.name, package_config.snapshot_paths.items, callbacks, graph);
     }
 }
 
@@ -403,4 +407,28 @@ fn isSingularTestSqlPath(test_root: []const u8, relative_path: []const u8) bool 
         !std.mem.startsWith(u8, path, "generic\\") and
         !std.mem.startsWith(u8, path, "fixtures/") and
         !std.mem.startsWith(u8, path, "fixtures\\");
+}
+
+fn loadSnapshots(runtime: Runtime, project_dir: []const u8, package_name: []const u8, snapshot_paths: []const []const u8, callbacks: Callbacks, graph: *Graph) !void {
+    for (snapshot_paths) |snapshot_path| {
+        var sql_files: std.ArrayList([]const u8) = .empty;
+        defer sql_files.deinit(runtime.allocator);
+        var yaml_files: std.ArrayList([]const u8) = .empty;
+        defer yaml_files.deinit(runtime.allocator);
+        var md_files: std.ArrayList([]const u8) = .empty;
+        defer md_files.deinit(runtime.allocator);
+        const root = try pathJoin(runtime.allocator, &.{ project_dir, snapshot_path });
+        discoverProjectFiles(runtime, root, snapshot_path, &sql_files, &yaml_files, &md_files) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        sortStrings(sql_files.items);
+        sortStrings(yaml_files.items);
+        for (yaml_files.items) |yaml_path| {
+            try callbacks.parse_yaml_properties(runtime, project_dir, snapshot_path, yaml_path, package_name, graph);
+        }
+        for (sql_files.items) |sql_path| {
+            try snapshot.parseFile(runtime, project_dir, snapshot_path, sql_path, package_name, graph);
+        }
+    }
 }

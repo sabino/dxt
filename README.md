@@ -52,9 +52,14 @@ Run a small parse/list/compile flow:
 ./zig-out/bin/dxt parse --project-dir tests/fixtures/model_ref --target-path target-dxt
 ./zig-out/bin/dxt ls --project-dir tests/fixtures/model_ref --output json
 ./zig-out/bin/dxt ls --project-dir tests/fixtures/model_ref --output json --output-keys unique_id name
+./zig-out/bin/dxt parse --project-dir tests/fixtures/snapshot_sql --target-path target-dxt
+./zig-out/bin/dxt ls --project-dir tests/fixtures/snapshot_sql --select resource_type:snapshot --output selector
 ./zig-out/bin/dxt compile --project-dir tests/fixtures/compile_basic --target-path target-dxt
 ./zig-out/bin/dxt compile --project-dir tests/fixtures/generic_test_arguments --target-path target-dxt --select test_type:generic
 ```
+
+Legacy SQL snapshots currently support `parse` and `ls` for the documented
+literal config subset. Snapshot compilation and execution remain planned.
 
 Run the current DuckDB execution slices:
 
@@ -80,6 +85,7 @@ embedded DuckDB or another native adapter boundary, not Python runtime calls.
 | --- | --- |
 | [Primer](docs/PRIMER.md) | Product goals, current workflow, architecture map, and development loop. |
 | [Compatibility Matrix](docs/COMPATIBILITY.md) | Truthful current support vs planned dbt surfaces. |
+| [dbt Replacement Roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) | Remaining correctness gaps, Core parity release gates, and proposed feature sequencing. |
 | [Architecture](docs/ARCHITECTURE.md) | Module ownership, execution flow, and Mermaid diagrams. |
 | [Agent OS](docs/AGENT_OS.md) | Multidisciplinary agent-team operating model plus local autonomous Codex worker loop across GitHub Issues, Projects, PRs, and worktrees. |
 | [Agent Protocols](docs/AGENT_PROTOCOLS.md) | Public-safe issue/PR comment formats, role nudges, handoffs, and reflection protocol. |
@@ -98,11 +104,14 @@ embedded DuckDB or another native adapter boundary, not Python runtime calls.
 | Runtime | Zig product runtime | Broader native adapter ABI and runner |
 | Adapter | DuckDB through a Zig-owned external CLI backend | Embedded DuckDB, Postgres, cloud adapters, cross-database planner |
 | Artifacts | `manifest.json`, `run_results.json`, `catalog.json`, `sources.json` slices | fuller dbt schemas, `semantic_manifest.json`, parse cache/state artifacts |
-| dbt resources | models, analyses in parse/list/compile, seeds, sources with schema/freshness/identifier slices, exposures, docs, macros, supported generic tests in compile and the DuckDB subset, singular SQL tests in compile and the DuckDB subset, unit-test manifest/list artifacts, and the first DuckDB dict-fixture unit-test execution subset | snapshots, fuller analysis configs/tests, full singular-test configs/patches, broader unit-test fixtures/overrides, semantic models, metrics, saved queries |
+| dbt resources | models, analyses in parse/list/compile, legacy SQL snapshots in parse/list, seeds, sources with schema/freshness/identifier slices, exposures, docs, macros, supported generic tests in compile and the DuckDB subset, singular SQL tests in compile and the DuckDB subset, unit-test manifest/list artifacts, and the first DuckDB dict-fixture unit-test execution subset | snapshot compilation/execution and YAML definitions, fuller analysis configs/tests, full singular-test configs/patches, broader unit-test fixtures/overrides, semantic models, metrics, saved queries |
 | Jinja | literal, narrow scalar var-backed, and static loop-var `ref`/`source`, `doc`, inline `config`, static list `set` + simple `for`, narrow static `if`/`elif` with simple supported comparisons, selected `target`/`this` context | full parse/runtime context, macro execution, dispatch, filters, database-backed `execute`, adapter introspection |
-| Selectors and listing | names/FQN, tags, paths/files, packages, resource types, sources, exposures, unit tests, config materialization, `*`/`?`/bracket-class wildcards, `+` and `@` graph expansion, excludes, `ls` `json`/`name`/`path`/`selector` output formats, and narrow compact-JSON resource/config/identity/dependency `--output-keys` including `alias`, `identifier`, `tags`, `config.materialized`, `config.tags`, `config.enabled`, `config.docs.show`, `depends_on.nodes`, and `depends_on.macros` | YAML selectors, state/defer/result/source-status selectors, full dbt JSON and arbitrary nested `--output-keys` |
+| Selectors and listing | names/FQN, tags, paths/files, packages, resource types, sources, exposures, unit tests, config materialization, wildcards, `+` and `@` graph expansion, excludes, scalar YAML aliases and narrow union/intersection/exclude composition, `state:new`, supported `result:*` statuses, dxt source-status extensions, `ls` output formats and narrow resource/config/identity/dependency `--output-keys` | Broader YAML composition, state comparison/defer, Core `source_status:fresher`, full dbt JSON and arbitrary nested `--output-keys` |
 
-See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the detailed matrix.
+See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the detailed matrix and
+[the replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) for the work needed
+before claiming drop-in parity, including the proposed semantic, static
+analysis, stateful planning, and cross-database features.
 
 ## System Map
 
@@ -189,6 +198,14 @@ python scripts/check_jaffle_shop_duckdb_build.py
 python scripts/check_jaffle_shop_duckdb_run.py
 python scripts/check_jaffle_shop_duckdb_docs.py
 python scripts/check_dbt_core_m1_oracle.py
+```
+
+The snapshot oracle has a dedicated CI gate. To reproduce its pinned Core and
+adapter contract locally:
+
+```sh
+python -m pip install -r requirements-dev.txt -r requirements-oracle.txt
+DBT_SEND_ANONYMOUS_USAGE_STATS=false pytest -q tests/test_cli.py::test_snapshot_dbt_core_1105_oracle
 ```
 
 The Jaffle scripts use public fixtures and may clone their pinned refs by

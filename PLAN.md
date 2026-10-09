@@ -31,6 +31,53 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 
 ## Operating Loop
 
+### Active Snapshot Foundation Slice
+
+Issue #213 is the next read-only dbt compatibility slice: discover legacy SQL
+snapshot blocks, add Snapshot nodes to Manifest v12 and the shared selector
+graph, and reject execution until snapshot materialization exists. The parser
+worker owns snapshot parsing, loader/config/type/graph integration, manifest
+fields, command preflight, native tests, and focused CLI fixtures in an isolated
+branch. The supervisor owns this plan, the compatibility roadmap, README,
+CHANGELOG, and compatibility matrix; these documentation changes integrate
+after the worker commit. No other runtime slice runs concurrently.
+
+Final full-suite verification exposed pre-existing stale expectations and dbt
+oracle harness incompatibilities on main. A separate harness worker owns
+test-only fixes in `tests/test_cli.py` after the snapshot worker commits;
+snapshot runtime ownership is complete. Ground changed expectations in the
+pinned Core oracle, preserve assertions, and do not weaken checks to hide
+product incompatibilities. Integrate the harness commit before final gates.
+The supervisor also owns a dedicated pinned snapshot-oracle CI gate and
+developer-only oracle requirements so the new full Snapshot schema comparison
+cannot silently skip in normal CI.
+The harness oracle confirmed two source generic-test ID failures are real
+pre-existing artifact gaps, not stale expectations. A second isolated worker
+owns the `project.zig` source generic-test metadata call and `parse.zig` native
+hash regressions: synthesized source node names must hash the original test
+metadata, retaining all arguments and the original built-in/custom name.
+Preserve the CLI oracle expectations, integrate after the
+completed snapshot runtime commits, and rerun the full native/CLI gates.
+
+Implementation, source grounding, and the replacement audit are complete on
+`compat/snapshot-foundation`. The integrated tree passes 315 native tests,
+279 Python integration/oracle tests (three existing selector-oracle skips),
+the pinned Snapshot schema/Core oracle, Debug and ReleaseSafe builds, all six
+public Jaffle gates (parse/list/compile/build/run/docs), and runtime-boundary
+and public-safety scans. The skips cover pre-existing selector fixtures that
+Core rejects; they do not count as parity evidence. Publish this verified
+slice through a PR; the roadmap remains the contract for full replacement.
+
+Ground the supported literal snapshot configs and block/path semantics in dbt
+Core sources and compare a synthetic fixture with dbt Core. Validate native
+tests, parse/list/graph selection, disabled snapshots, explicit unsupported
+execution errors, Manifest v12 snapshot schema fields, the public Jaffle
+parse/list/compile ladder, and runtime-boundary/public-safety scans. Stop before
+snapshot execution, broad Jinja, YAML snapshot definitions, custom strategies,
+or adapter-specific materializations. Full dbt replacement and the proposed
+semantic/cross-database features remain subsequent milestones, enumerated in
+the compatibility roadmap.
+
 Each development loop must:
 
 1. Read this plan and current repo state.
@@ -343,17 +390,28 @@ Every compatibility slice must record:
 - Stop conditions that keep mechanical extractions separate from behavior
   changes and prevent Python from crossing into product runtime behavior.
 
-Immediate source-grounded queue, refreshed on 2026-06-17 in
-`.agent/research/dbt-upstream-reference-map.md`:
+Immediate source-grounded queue, refreshed on 2026-10-09 after the public
+Jaffle command gates, state:new, custom generic execution, and dict-fixture
+unit-test execution slices shipped:
 
-1. Selector parity for remaining `file:` edge cases and wider
-   selector/listing parity.
-2. Parse/compile `execute` boundary and static `{% if %}` handling.
-3. Read-only unit-test artifact parsing for newer Jaffle-style projects.
-4. Broader source config parity beyond resolved relation identity:
-   project-level source config, metadata freshness, and source-status selectors.
-5. Command-surface hardening for `ls`, `compile`, `run`, `build`, and
-   `docs generate` against the current public fixture ladder.
+1. Finish issue #213's snapshot parse/list/Manifest foundation, keeping
+   snapshot execution explicitly unsupported.
+2. Fix physical dependency readiness and failure propagation through ephemeral
+   chains before widening the current run/build support claim.
+3. Preserve Run Results error rows and independent continuation for built-in
+   generic and singular test SQL execution failures.
+4. Schedule selected unit tests before their models in mixed seed/model/test
+   builds, with deterministic blocking and rollback.
+5. Implement accepted thread/full-refresh options or reject unsupported
+   semantics; then ground incremental first-run/rerun/schema-change behavior.
+6. Expand the native Jinja/macro context, configuration, package and state/defer
+   contracts through scoped oracle-backed slices.
+
+The complete dependency ladder and acceptance gates for Core replacement,
+semantic resources, Fusion-style analysis, SQLMesh-inspired stateful planning,
+and cross-database execution are in
+`docs/DBT_REPLACEMENT_ROADMAP.md`. Historical research maps remain source
+references, not stronger claims about the current implementation.
 
 Each item must remain a Zig product-runtime slice with native tests first and
 Python/dbt oracle coverage only for CLI, filesystem, fixture, or artifact
@@ -1429,22 +1487,20 @@ Exit criteria:
 
 ## Current Status
 
-- Issue #187 is the active Manifest v12 node identity/checksum slice. Branch
-  `agent/issue-187-artifact-manifest-v12-node-identity-and-checksum` owns
-  `src/project/manifest.zig`, the seed raw-content load in `src/project.zig`,
-  the pinned Manifest v12 schema slice, focused CLI/schema assertions, and the
-  dbt Core M1 oracle comparison for node `database`, `schema`, `alias`, `fqn`,
-  and `checksum` fields. The slice is limited to currently supported model,
-  analysis, seed, generic data-test, singular data-test, and disabled-node
-  artifact shapes.
-- Issue #180 is the active store-failures implementation slice. Branch
-  `agent/issue-180-compat-store-failures-config-for-duckdb-data-tes` owns the
-  current data-test `store_failures` config, manifest/run-results shape, and
-  DuckDB audit-table execution path for supported generic and singular data
-  tests. A concurrent #181 source-config branch is also editing
-  `src/project/parse.zig` and `src/project/types.zig`; #180 is limited to the
-  test-config fields and must rebase before final validation if #181 lands
-  first.
+- Issue #213 adds the read-only SQL snapshot foundation: default/configured
+  root and installed-package discovery, named blocks, literal configs, disabled
+  nodes, static dependencies, Manifest v12 fields and shared selectors. The
+  source map and pinned Core oracle contract are documented in
+  `.agent/research/m1-snapshot-parse-list.md`. Snapshot compilation/execution,
+  YAML snapshot definitions/properties and project snapshot config inheritance
+  remain explicit follow-up boundaries.
+
+- The Manifest node identity/checksum (#187), store-failures (#180), source
+  config (#181), public Jaffle command ladder, state:new and supported custom
+  generic/unit execution slices are shipped. Their earlier ownership notes
+  are historical; issue #213 is the active snapshot foundation described
+  above. Broader replacement gates are tracked in
+  `docs/DBT_REPLACEMENT_ROADMAP.md`.
 - M0 is complete as the Zig `0.16.0` runtime scaffold.
 - GitHub-backed agent coordination now has repo-local issue forms, label/project
   manifests, seed issue definitions, project-scoped specialist roles,

@@ -1,0 +1,4 @@
+name: snapshot_sql
+version: '1.0'
+config-version: 2
+profile: snapshot_sql

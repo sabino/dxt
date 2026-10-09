@@ -3686,3 +3686,98 @@ test "genericTestUniqueId hashes explicit accepted_values quote flag like dbt" {
     const unique_id = try genericTestUniqueId(allocator, "demo", "accepted_values_customers_customer_id__False__1__2", test_def, "customers", "customer_id");
     try std.testing.expectEqualStrings("test.demo.accepted_values_customers_customer_id__False__1__2.d3fda7ba1b", unique_id);
 }
+
+test "genericTestUniqueId hashes source relationships metadata like dbt Core" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const test_def = GenericTestDef{
+        .name = "relationships",
+        .relationship_to = "ref('customers')",
+        .relationship_field = "customer_id",
+    };
+    const model_kwarg = "{{ get_where_subquery(source('raw', 'orders')) }}";
+    var source_test_def = test_def;
+    source_test_def.name = "source_relationships";
+    const names = try synthesizeGenericTestNames(allocator, source_test_def, "raw_orders", "customer_id");
+    try std.testing.expectEqualStrings("source_relationships_raw_orders_customer_id__customer_id__ref_customers_", names.full);
+    try std.testing.expectEqualStrings("source_relationships_raw_order_8c30d56dac3d54f4441e780eb728bb72", names.compiled);
+
+    // dbt Core 1.10.5 GenericTestParser.create_test_node hashes the original name
+    // and every kwarg after recursively stringifying and sorting the metadata.
+    const metadata = try genericTestMetadataRepr(allocator, test_def, model_kwarg, "customer_id");
+    try std.testing.expectEqualStrings(
+        "{'kwargs': {'column_name': 'customer_id', 'field': 'customer_id', 'model': \"{{ get_where_subquery(source('raw', 'orders')) }}\", 'to': \"ref('customers')\"}, 'name': 'relationships', 'namespace': 'None'}",
+        metadata,
+    );
+    const unique_id = try genericTestUniqueIdForModelKwarg(allocator, "source_relationship_tests", names.full, test_def, model_kwarg, "customer_id");
+    try std.testing.expectEqualStrings("test.source_relationship_tests.source_relationships_raw_orders_customer_id__customer_id__ref_customers_.3e4b1c44ba", unique_id);
+}
+
+test "genericTestUniqueId hashes source accepted values metadata like dbt Core" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var values: std.ArrayList([]const u8) = .empty;
+    defer values.deinit(allocator);
+    try values.append(allocator, "1");
+    try values.append(allocator, "2");
+    const test_def = GenericTestDef{
+        .name = "accepted_values",
+        .accepted_values = values,
+        .accepted_values_quote = false,
+    };
+    const model_kwarg = "{{ get_where_subquery(source('raw', 'orders')) }}";
+    var source_test_def = test_def;
+    source_test_def.name = "source_accepted_values";
+    const names = try synthesizeGenericTestNames(allocator, source_test_def, "raw_orders", "customer_id");
+    try std.testing.expectEqualStrings("source_accepted_values_raw_orders_customer_id__False__1__2", names.full);
+    try std.testing.expectEqualStrings(names.full, names.compiled);
+
+    // Core stringifies numeric accepted values and the boolean quote flag for hashing.
+    const metadata = try genericTestMetadataRepr(allocator, test_def, model_kwarg, "customer_id");
+    try std.testing.expectEqualStrings(
+        "{'kwargs': {'column_name': 'customer_id', 'model': \"{{ get_where_subquery(source('raw', 'orders')) }}\", 'quote': 'False', 'values': ['1', '2']}, 'name': 'accepted_values', 'namespace': 'None'}",
+        metadata,
+    );
+    const unique_id = try genericTestUniqueIdForModelKwarg(allocator, "table_level_generic_tests", names.full, test_def, model_kwarg, "customer_id");
+    try std.testing.expectEqualStrings("test.table_level_generic_tests.source_accepted_values_raw_orders_customer_id__False__1__2.8cc42f6023", unique_id);
+}
+
+test "genericTestUniqueId preserves source not null and unique metadata names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const cases = [_]struct { metadata_name: []const u8, node_test_name: []const u8, expected_id: []const u8 }{
+        .{ .metadata_name = "not_null", .node_test_name = "source_not_null", .expected_id = "test.demo.source_not_null_raw_orders_customer_id.3962c6ab03" },
+        .{ .metadata_name = "unique", .node_test_name = "source_unique", .expected_id = "test.demo.source_unique_raw_orders_customer_id.e04a496ee0" },
+    };
+    const model_kwarg = "{{ get_where_subquery(source('raw', 'orders')) }}";
+    for (cases) |case| {
+        const names = try synthesizeGenericTestNames(allocator, .{ .name = case.node_test_name }, "raw_orders", "customer_id");
+        const unique_id = try genericTestUniqueIdForModelKwarg(allocator, "demo", names.full, .{ .name = case.metadata_name }, model_kwarg, "customer_id");
+        try std.testing.expectEqualStrings(case.expected_id, unique_id);
+    }
+}
+
+test "genericTestUniqueId retains literal custom source prefixed metadata names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // A custom macro named source_not_null has its own metadata identity.
+    const test_def = GenericTestDef{ .name = "source_not_null" };
+    const model_kwarg = "{{ get_where_subquery(source('raw', 'orders')) }}";
+    const names = try synthesizeGenericTestNames(allocator, .{ .name = "source_source_not_null" }, "raw_orders", "customer_id");
+    try std.testing.expectEqualStrings("source_source_not_null_raw_orders_customer_id", names.full);
+    const metadata = try genericTestMetadataRepr(allocator, test_def, model_kwarg, "customer_id");
+    try std.testing.expectEqualStrings(
+        "{'kwargs': {'column_name': 'customer_id', 'model': \"{{ get_where_subquery(source('raw', 'orders')) }}\"}, 'name': 'source_not_null', 'namespace': 'None'}",
+        metadata,
+    );
+    const unique_id = try genericTestUniqueIdForModelKwarg(allocator, "demo", names.full, test_def, model_kwarg, "customer_id");
+    try std.testing.expectEqualStrings("test.demo.source_source_not_null_raw_orders_customer_id.c1f40f239d", unique_id);
+}

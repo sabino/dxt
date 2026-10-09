@@ -31,6 +31,10 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
         return .ok;
     }
 
+    if (equals(command, "snapshot")) {
+        return commandError(error.UnsupportedSnapshotExecution, stderr);
+    }
+
     if (equals(command, "parse")) {
         if (hasHelp(args[2..])) {
             try printCommandHelp(command, stdout, .project_selection);
@@ -220,6 +224,15 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.InvalidProjectName => stderr.writeAll("error: dbt_project.yml must define a non-empty name\n") catch {},
         error.DuplicateModelName => stderr.writeAll("error: duplicate model name in supported M1 parser subset\n") catch {},
         error.DuplicateAnalysisName => stderr.writeAll("error: duplicate analysis name in supported M1 parser subset\n") catch {},
+        error.UnsupportedSnapshotRefCollision => stderr.writeAll("error: ref to a snapshot sharing a name with a model or seed is not supported\n") catch {},
+        error.DuplicateSnapshotName => stderr.writeAll("error: duplicate snapshot block name in a package\n") catch {},
+        error.MalformedSnapshotBlock => stderr.writeAll("error: malformed SQL snapshot block\n") catch {},
+        error.InvalidSnapshotConfig => stderr.writeAll("error: SQL snapshot requires a unique_key and a valid timestamp or check strategy configuration\n") catch {},
+        error.UnsupportedProjectSnapshotConfig => stderr.writeAll("error: project snapshot config inheritance is not supported; use literal SQL snapshot config calls\n") catch {},
+        error.UnsupportedSnapshotConfig => stderr.writeAll("error: unsupported SQL snapshot config; only the documented literal config subset is supported\n") catch {},
+        error.UnsupportedSnapshotDefinition => stderr.writeAll("error: SQL snapshots support only named blocks with literal config, ref, and source calls\n") catch {},
+        error.UnsupportedSnapshotYaml => stderr.writeAll("error: YAML snapshot definitions and properties are not supported; use literal SQL snapshot blocks\n") catch {},
+        error.UnsupportedSnapshotExecution => stderr.writeAll("error: snapshot resources currently support parse and ls only; snapshot compilation and execution are not supported\n") catch {},
         error.DuplicateSeedName => stderr.writeAll("error: duplicate seed name in supported M1 parser subset\n") catch {},
         error.DuplicateDocName => stderr.writeAll("error: duplicate docs block name in supported M1 parser subset\n") catch {},
         error.DuplicateExposureName => stderr.writeAll("error: duplicate exposure name in supported M1 parser subset\n") catch {},
@@ -234,7 +247,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedJinja => stderr.writeAll("error: unsupported or malformed Jinja in M1 parser subset\n") catch {},
         error.MalformedDocsBlock => stderr.writeAll("error: malformed docs block in M1 parser subset\n") catch {},
         error.MalformedMacroBlock => stderr.writeAll("error: malformed macro block in M1 parser subset\n") catch {},
-        error.DisabledRef => stderr.writeAll("error: ref targets a disabled model in the M1 parser subset\n") catch {},
+        error.DisabledRef => stderr.writeAll("error: ref targets a disabled model, seed, or snapshot in the M1 parser subset\n") catch {},
         error.UnresolvedRef => stderr.writeAll("error: unresolved ref in supported M1 parser subset\n") catch {},
         error.UnresolvedSource => stderr.writeAll("error: unresolved source in supported M1 parser subset\n") catch {},
         error.UnresolvedDoc => stderr.writeAll("error: unresolved doc reference in supported M1 parser subset\n") catch {},
@@ -253,7 +266,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedCleanPath => stderr.writeAll("error: clean-targets must contain non-empty project-relative paths\n") catch {},
         error.UnsupportedCleanOutsideProject => stderr.writeAll("error: clean refuses absolute paths or paths outside the project\n") catch {},
         error.UnsupportedCleanSourcePath => stderr.writeAll("error: clean refuses to remove model, seed, or macro source paths\n") catch {},
-        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, analysis, seed, source, exposure, test, or unit_test in the M1 parser subset\n") catch {},
+        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, analysis, snapshot, seed, source, exposure, test, or unit_test in the M1 parser subset\n") catch {},
         error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
         error.MissingSourceStatusState => stderr.writeAll("error: source_status selectors require --state pointing to a directory containing sources.json\n") catch {},
         error.MissingSourcesArtifact => stderr.writeAll("error: --state must point to a directory containing sources.json for source_status selectors\n") catch {},
@@ -407,7 +420,7 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
                 if (port == 0) return error.InvalidDocsServePort;
                 options.docs_port = port;
             } else if (equals(arg, "--resource-type")) {
-                if (!equals(value, "model") and !equals(value, "analysis") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "exposure") and !equals(value, "test") and !equals(value, "unit_test")) return error.UnsupportedResourceType;
+                if (!equals(value, "model") and !equals(value, "analysis") and !equals(value, "snapshot") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "exposure") and !equals(value, "test") and !equals(value, "unit_test")) return error.UnsupportedResourceType;
                 options.resource_type = value;
             } else if (equals(arg, "--output")) {
                 if (equals(value, "text")) {

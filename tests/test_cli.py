@@ -6,6 +6,7 @@ import json
 import hashlib
 import shutil
 import importlib.util
+import inspect
 import copy
 import socket
 import time
@@ -28,6 +29,30 @@ assert SCHEMA_SPEC is not None
 assert SCHEMA_SPEC.loader is not None
 schema_validator = importlib.util.module_from_spec(SCHEMA_SPEC)
 SCHEMA_SPEC.loader.exec_module(schema_validator)
+
+
+@pytest.fixture(autouse=True)
+def disable_dbt_telemetry(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("DBT_SEND_ANONYMOUS_USAGE_STATS", "false")
+
+
+def dbt_protobuf_json_compat(message_to_json):
+    """Keep dbt's default-field option compatible with protobuf 4 and 5+."""
+    parameters = inspect.signature(message_to_json).parameters
+    default_field_options = (
+        "always_print_fields_with_no_presence",
+        "including_default_value_fields",
+    )
+    supported_option = next(option for option in default_field_options if option in parameters)
+
+    def compatible_message_to_json(message, *args, **kwargs):
+        for option in default_field_options:
+            if option != supported_option and option in kwargs:
+                value = kwargs.pop(option)
+                kwargs.setdefault(supported_option, value)
+        return message_to_json(message, *args, **kwargs)
+
+    return compatible_message_to_json
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -330,10 +355,7 @@ where {{ column_name }} < 0
         original_message_to_json = protobuf_json_format.MessageToJson
         original_event_message_to_json = dbt_event_base_types.MessageToJson
 
-        def compatible_message_to_json(message, *args, always_print_fields_with_no_presence=None, **kwargs):
-            if always_print_fields_with_no_presence is not None and "including_default_value_fields" not in kwargs:
-                kwargs["including_default_value_fields"] = always_print_fields_with_no_presence
-            return original_message_to_json(message, *args, **kwargs)
+        compatible_message_to_json = dbt_protobuf_json_compat(original_message_to_json)
 
         protobuf_json_format.MessageToJson = compatible_message_to_json
         dbt_event_base_types.MessageToJson = compatible_message_to_json
@@ -479,10 +501,7 @@ where {{ column_name }} = 0
         original_message_to_json = protobuf_json_format.MessageToJson
         original_event_message_to_json = dbt_event_base_types.MessageToJson
 
-        def compatible_message_to_json(message, *args, always_print_fields_with_no_presence=None, **kwargs):
-            if always_print_fields_with_no_presence is not None and "including_default_value_fields" not in kwargs:
-                kwargs["including_default_value_fields"] = always_print_fields_with_no_presence
-            return original_message_to_json(message, *args, **kwargs)
+        compatible_message_to_json = dbt_protobuf_json_compat(original_message_to_json)
 
         protobuf_json_format.MessageToJson = compatible_message_to_json
         dbt_event_base_types.MessageToJson = compatible_message_to_json
@@ -641,10 +660,7 @@ where {{ column_name }} = 0
         original_message_to_json = protobuf_json_format.MessageToJson
         original_event_message_to_json = dbt_event_base_types.MessageToJson
 
-        def compatible_message_to_json(message, *args, always_print_fields_with_no_presence=None, **kwargs):
-            if always_print_fields_with_no_presence is not None and "including_default_value_fields" not in kwargs:
-                kwargs["including_default_value_fields"] = always_print_fields_with_no_presence
-            return original_message_to_json(message, *args, **kwargs)
+        compatible_message_to_json = dbt_protobuf_json_compat(original_message_to_json)
 
         protobuf_json_format.MessageToJson = compatible_message_to_json
         dbt_event_base_types.MessageToJson = compatible_message_to_json
@@ -1165,10 +1181,7 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
         original_message_to_json = protobuf_json_format.MessageToJson
         original_event_message_to_json = dbt_event_base_types.MessageToJson
 
-        def compatible_message_to_json(message, *args, always_print_fields_with_no_presence=None, **kwargs):
-            if always_print_fields_with_no_presence is not None and "including_default_value_fields" not in kwargs:
-                kwargs["including_default_value_fields"] = always_print_fields_with_no_presence
-            return original_message_to_json(message, *args, **kwargs)
+        compatible_message_to_json = dbt_protobuf_json_compat(original_message_to_json)
 
         protobuf_json_format.MessageToJson = compatible_message_to_json
         dbt_event_base_types.MessageToJson = compatible_message_to_json
@@ -2892,10 +2905,7 @@ def test_dbt_core_package_seed_manifest_and_run_results_oracle(tmp_path: Path):
     original_message_to_json = protobuf_json_format.MessageToJson
     original_event_message_to_json = dbt_event_base_types.MessageToJson
 
-    def compatible_message_to_json(message, *args, always_print_fields_with_no_presence=None, **kwargs):
-        if always_print_fields_with_no_presence is not None and "including_default_value_fields" not in kwargs:
-            kwargs["including_default_value_fields"] = always_print_fields_with_no_presence
-        return original_message_to_json(message, *args, **kwargs)
+    compatible_message_to_json = dbt_protobuf_json_compat(original_message_to_json)
 
     protobuf_json_format.MessageToJson = compatible_message_to_json
     dbt_event_base_types.MessageToJson = compatible_message_to_json
@@ -2916,8 +2926,7 @@ def test_dbt_core_package_seed_manifest_and_run_results_oracle(tmp_path: Path):
     finally:
         protobuf_json_format.MessageToJson = original_message_to_json
         dbt_event_base_types.MessageToJson = original_event_message_to_json
-    if not dbt_result.success:
-        pytest.skip(f"dbt Core package seed oracle unavailable: {dbt_result.exception!r}")
+    assert dbt_result.success, dbt_result.exception
 
     dxt_manifest = json.loads((dxt_target / "manifest.json").read_text())
     dbt_manifest = json.loads((dbt_target / "manifest.json").read_text())
@@ -4351,7 +4360,7 @@ def test_parse_emits_generic_test_config_for_model_seed_and_source_tests(tmp_pat
     assert sorted(tests) == [
         "test.generic_test_config_tests.not_null_customers_customer_id.5c9bf9911d",
         "test.generic_test_config_tests.not_null_raw_customers_customer_id.ad2454198a",
-        "test.generic_test_config_tests.source_not_null_raw_orders_customer_id.bbc5804683",
+        "test.generic_test_config_tests.source_not_null_raw_orders_customer_id.3962c6ab03",
     ]
     model_test = tests["test.generic_test_config_tests.not_null_customers_customer_id.5c9bf9911d"]
     assert model_test["database"] == "memory"
@@ -4376,7 +4385,7 @@ def test_parse_emits_generic_test_config_for_model_seed_and_source_tests(tmp_pat
     assert seed_config["error_if"] == "> 2"
     assert seed_config["store_failures"] is None
 
-    source_config = tests["test.generic_test_config_tests.source_not_null_raw_orders_customer_id.bbc5804683"]["config"]
+    source_config = tests["test.generic_test_config_tests.source_not_null_raw_orders_customer_id.3962c6ab03"]["config"]
     assert source_config["where"] == "status = 'checked'"
     assert source_config["limit"] == 3
     assert source_config["severity"] == "warn"
@@ -5844,13 +5853,14 @@ def test_build_executes_table_level_model_and_seed_generic_tests(tmp_path: Path)
     assert_manifest_schema_slice(target / "manifest.json")
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
+    # Ready seed tests run before their selected downstream models.
     assert [item["unique_id"] for item in run_results["results"]] == [
         "seed.table_level_generic_tests.raw_customers",
+        "test.table_level_generic_tests.unique_raw_customers_customer_id.4be8a71a17",
         "model.table_level_generic_tests.customers",
         "test.table_level_generic_tests.not_null_customers_customer_id.5c9bf9911d",
-        "test.table_level_generic_tests.unique_raw_customers_customer_id.4be8a71a17",
     ]
-    assert [item["status"] for item in run_results["results"]] == ["success", "success", "pass", "pass"]
+    assert [item["status"] for item in run_results["results"]] == ["success", "pass", "success", "pass"]
     manifest = json.loads((target / "manifest.json").read_text())
     model_test = manifest["nodes"]["test.table_level_generic_tests.not_null_customers_customer_id.5c9bf9911d"]
     seed_test = manifest["nodes"]["test.table_level_generic_tests.unique_raw_customers_customer_id.4be8a71a17"]
@@ -6686,7 +6696,7 @@ def test_dbt_core_unit_test_status_oracle(tmp_path: Path, capsys: pytest.Capture
                 "  outputs:",
                 "    dev:",
                 "      type: duckdb",
-                "      path: oracle.duckdb",
+                f"      path: {tmp_path / 'oracle.duckdb'}",
                 "      schema: main",
             ]
         )
@@ -9073,7 +9083,7 @@ def test_dbt_core_file_selector_basename_stem_and_literal_wildcard_oracle(
                 "  outputs:",
                 "    dev:",
                 "      type: duckdb",
-                "      path: oracle.duckdb",
+                f"      path: {tmp_path / 'oracle.duckdb'}",
                 "      schema: main",
             ]
         )
@@ -9189,7 +9199,7 @@ def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys:
                 "  outputs:",
                 "    dev:",
                 "      type: duckdb",
-                "      path: oracle.duckdb",
+                f"      path: {tmp_path / 'oracle.duckdb'}",
                 "      schema: main",
             ]
         )
@@ -9729,7 +9739,7 @@ def test_dbt_core_result_selector_oracle(tmp_path: Path, capsys: pytest.CaptureF
                 "  outputs:",
                 "    dev:",
                 "      type: duckdb",
-                "      path: oracle.duckdb",
+                f"      path: {tmp_path / 'oracle.duckdb'}",
                 "      schema: main",
             ]
         )
@@ -9834,7 +9844,7 @@ def test_dbt_core_state_new_selector_oracle(tmp_path: Path, capsys: pytest.Captu
                 "  outputs:",
                 "    dev:",
                 "      type: duckdb",
-                "      path: oracle.duckdb",
+                f"      path: {tmp_path / 'oracle.duckdb'}",
                 "      schema: main",
             ]
         )
@@ -9911,7 +9921,9 @@ def test_dbt_core_state_new_selector_oracle(tmp_path: Path, capsys: pytest.Captu
     assert dxt_ids == dbt_ids
 
 
-def test_dbt_core_source_status_selector_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+def test_dbt_core_source_status_fresher_and_dxt_status_extension_oracle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     try:
         has_dbt_core = importlib.util.find_spec("dbt.cli.main") is not None
         has_dbt_duckdb = importlib.util.find_spec("dbt.adapters.duckdb") is not None
@@ -9937,7 +9949,7 @@ def test_dbt_core_source_status_selector_oracle(tmp_path: Path, capsys: pytest.C
                 "  outputs:",
                 "    dev:",
                 "      type: duckdb",
-                "      path: oracle.duckdb",
+                f"      path: {tmp_path / 'oracle.duckdb'}",
                 "      schema: main",
             ]
         )
@@ -9964,37 +9976,49 @@ def test_dbt_core_source_status_selector_oracle(tmp_path: Path, capsys: pytest.C
     )
     assert dxt_result.returncode == 0, dxt_result.stderr
     dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+    assert dxt_ids == ["source.source_ref.raw.customers"]
 
     dbt_target = tmp_path / "dbt-target"
     dbt_target.mkdir()
     shutil.copy(state_dir / "sources.json", dbt_target / "sources.json")
-    dbt_result = dbtRunner().invoke(
-        [
-            "ls",
-            "--project-dir",
-            str(project),
-            "--profiles-dir",
-            str(project),
-            "--target-path",
-            str(dbt_target),
-            "--state",
-            str(state_dir),
-            "--select",
-            "source_status:warn",
-            "--output",
-            "json",
-        ]
-    )
-    dbt_stdout = capsys.readouterr().out
-    dbt_ids = sorted(
-        json.loads(line)["unique_id"]
-        for line in dbt_stdout.splitlines()
-        if line.strip().startswith("{")
-    )
-    if not dbt_result.success and not dbt_ids:
-        pytest.skip(f"dbt Core source_status status oracle unavailable: {dbt_result.exception!r}")
 
-    assert dxt_ids == dbt_ids
+    def dbt_selected_ids(selector: str) -> list[str]:
+        capsys.readouterr()
+        dbt_result = dbtRunner().invoke(
+            [
+                "ls",
+                "--project-dir",
+                str(project),
+                "--profiles-dir",
+                str(project),
+                "--target-path",
+                str(dbt_target),
+                "--state",
+                str(state_dir),
+                "--select",
+                selector,
+                "--output",
+                "json",
+            ]
+        )
+        dbt_stdout = capsys.readouterr().out
+        assert dbt_result.success, dbt_result.exception
+        return sorted(
+            json.loads(line)["unique_id"]
+            for line in dbt_stdout.splitlines()
+            if line.strip().startswith("{")
+        )
+
+    # Core only selects source_status:fresher; named freshness statuses are
+    # dxt extensions and must not be mistaken for a Core parity contract.
+    assert dbt_selected_ids("source_status:warn") == []
+    assert dbt_selected_ids("source_status:fresher") == []
+
+    current_sources = json.loads((dbt_target / "sources.json").read_text())
+    current_sources["results"][0]["max_loaded_at"] = "2026-06-17T13:00:00Z"
+    (dbt_target / "sources.json").write_text(json.dumps(current_sources), encoding="utf-8")
+    assert dbt_selected_ids("source_status:warn") == []
+    assert dbt_selected_ids("source_status:fresher") == ["source.source_ref.raw.customers"]
 
 
 def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
@@ -10589,18 +10613,18 @@ def test_ls_graph_plus_selectors(tmp_path: Path):
 def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     project = copy_fixture(tmp_path, "single_model")
     unsupported_type = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "snapshot"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "function"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert unsupported_type.returncode == 2
-    assert "--resource-type supports only model, analysis, seed, source, exposure, test, or unit_test" in unsupported_type.stderr
+    assert "--resource-type supports only model, analysis, snapshot, seed, source, exposure, test, or unit_test" in unsupported_type.stderr
 
     for selector in [
         "state:modified",
         "config.schema:audit",
-        "resource_type:snapshot",
+        "resource_type:function",
         "tag:nightly,",
         "config.materialized:",
         "package:",
@@ -12008,3 +12032,291 @@ def test_subcommand_help_exits_successfully():
     assert result.returncode == 0
     assert "Usage: dxt parse" in result.stdout
     assert result.stderr == ""
+
+
+def snapshot_cli(project: Path, target: Path, command: str = "parse", *flags: str):
+    return subprocess.run(
+        [DXT, *command.split(), "--project-dir", str(project),
+         *(["--profiles-dir", str(project)] if (project / "profiles.yml").exists() else []),
+         *([] if command == "ls" else ["--target-path", str(target)]), *flags],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+
+
+def assert_snapshot_schema_required_fields(node: dict):
+    # The dependency-free validator checks required fields; the pinned dbt oracle
+    # below uses jsonschema to enforce the full published Snapshot branch.
+    schema = json.loads((ROOT / "tests/schemas/dbt_manifest_v12_snapshot.schema.json").read_text())
+    errors = schema_validator.validate_value(node, schema, schema)
+    assert not errors, errors
+
+
+def test_snapshot_parse_preserves_dbt_block_identity_configs_and_graph(tmp_path: Path):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    target = tmp_path / "snapshot-target"
+    result = snapshot_cli(project, target)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert_manifest_schema_slice(manifest_path)
+    timestamp = manifest["nodes"]["snapshot.snapshot_sql.customer_history"]
+    check = manifest["nodes"]["snapshot.snapshot_sql.source_history"]
+    package = manifest["nodes"]["snapshot.util_pkg.package_history"]
+    disabled = manifest["disabled"]["snapshot.snapshot_sql.disabled_history"][0]
+    for node in (timestamp, check, package, disabled):
+        assert_snapshot_schema_required_fields(node)
+        assert node["config"]["materialized"] == "snapshot"
+        assert "compiled" not in node
+    sql = (project / "snapshots/nested/multi_history.sql").read_text()
+    assert timestamp["raw_code"] == sql.split("{% snapshot customer_history %}")[1].split("{% endsnapshot %}")[0]
+    assert timestamp["path"] == "nested/multi_history.sql"
+    assert timestamp["original_file_path"] == "snapshots/nested/multi_history.sql"
+    assert timestamp["fqn"] == ["snapshot_sql", "nested", "multi_history", "customer_history"]
+    assert timestamp["checksum"] == {"name": "sha256", "checksum": hashlib.sha256(sql.strip().encode()).hexdigest()}
+    assert check["checksum"] == disabled["checksum"] == timestamp["checksum"]
+    assert timestamp["database"] == "archive"
+    assert timestamp["schema"] == "history"
+    assert timestamp["config"]["strategy"] == "timestamp"
+    assert timestamp["config"]["unique_key"] == "customer_id"
+    assert timestamp["config"]["updated_at"] == "updated_at"
+    assert timestamp["config"]["invalidate_hard_deletes"] is True
+    assert timestamp["refs"] == [{"name": "customers", "package": None, "version": None}]
+    assert timestamp["depends_on"]["nodes"] == ["model.snapshot_sql.customers"]
+    assert check["config"]["unique_key"] == ["customer_id", "region"]
+    assert check["config"]["check_cols"] == ["name", "region"]
+    assert check["alias"] == "raw_history"
+    assert check["sources"] == [["raw", "customers"]]
+    assert check["depends_on"]["nodes"] == ["source.snapshot_sql.raw.customers"]
+    assert package["depends_on"]["nodes"] == ["model.util_pkg.pkg_customers"]
+    assert package["fqn"] == ["util_pkg", "pkg_history", "package_history"]
+    assert manifest["parent_map"][timestamp["unique_id"]] == ["model.snapshot_sql.customers"]
+    assert manifest["child_map"][timestamp["unique_id"]] == ["model.snapshot_sql.current_customers"]
+    assert disabled["config"]["enabled"] is False
+    assert disabled["config"]["strategy"] is None
+    assert disabled["depends_on"]["nodes"] == []
+    assert disabled["unique_id"] not in manifest["parent_map"]
+    assert not (target / "run_results.json").exists()
+
+
+@pytest.mark.parametrize("selector,expected", [
+    ("resource_type:snapshot", {"customer_history", "source_history", "package_history"}),
+    ("config.materialized:snapshot", {"customer_history", "source_history", "package_history"}),
+    ("tag:nightly", {"customer_history"}),
+    ("file:multi_history.sql", {"customer_history", "source_history"}),
+    ("path:snapshots/nested", {"customer_history", "source_history"}),
+    ("snapshot_sql.nested.multi_history.source_history", {"source_history"}),
+    ("package:util_pkg,resource_type:snapshot", {"package_history"}),
+    ("+customer_history", {"customers", "customer_history"}),
+    ("customer_history+", {"customer_history", "current_customers"}),
+])
+def test_snapshot_shared_selectors(tmp_path: Path, selector: str, expected: set[str]):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    result = snapshot_cli(project, tmp_path / "target", "ls", "--select", selector, "--output", "name")
+    assert result.returncode == 0, result.stderr
+    assert set(result.stdout.splitlines()) == expected
+
+
+def test_snapshot_ls_selector_output_round_trips_each_block(tmp_path: Path):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    result = snapshot_cli(project, tmp_path / "target", "ls", "--resource-type", "snapshot", "--output", "selector")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["snapshot_sql.nested.multi_history.customer_history", "snapshot_sql.nested.multi_history.source_history", "util_pkg.pkg_history.package_history"]
+    for selector in result.stdout.splitlines():
+        selected = snapshot_cli(project, tmp_path / "target", "ls", "--select", selector, "--output", "name")
+        assert selected.returncode == 0, selected.stderr
+        assert selected.stdout.strip() == selector.split(".")[-1]
+    excluded = snapshot_cli(project, tmp_path / "target", "ls", "--resource-type", "snapshot", "--exclude", "tag:audit", "--output", "name")
+    assert set(excluded.stdout.splitlines()) == {"customer_history", "package_history"}
+
+
+def test_snapshot_custom_paths_replace_default_and_empty_paths_disable_discovery(tmp_path: Path):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    (project / "custom_history").mkdir()
+    shutil.move(str(project / "snapshots/nested/multi_history.sql"), project / "custom_history/multi_history.sql")
+    (project / "snapshots/ignored.sql").write_text("{% snapshot ignored %}malformed and missing config{% endsnapshot %}")
+    (project / "dbt_project.yml").write_text((project / "dbt_project.yml").read_text() + "snapshot-paths:\n  - custom_history\n")
+    result = snapshot_cli(project, tmp_path / "custom-target")
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((tmp_path / "custom-target/manifest.json").read_text())
+    assert manifest["nodes"]["snapshot.snapshot_sql.customer_history"]["original_file_path"] == "custom_history/multi_history.sql"
+    assert manifest["nodes"]["snapshot.snapshot_sql.customer_history"]["fqn"] == ["snapshot_sql", "multi_history", "customer_history"]
+    (project / "models/current_customers.sql").unlink()
+    (project / "dbt_project.yml").write_text("name: snapshot_sql\nversion: '1.0'\nconfig-version: 2\nprofile: snapshot_sql\nsnapshot-paths: []\n")
+    result = snapshot_cli(project, tmp_path / "empty-target")
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((tmp_path / "empty-target/manifest.json").read_text())
+    assert [n["unique_id"] for n in manifest["nodes"].values() if n["resource_type"] == "snapshot"] == ["snapshot.util_pkg.package_history"]
+
+
+@pytest.mark.parametrize("body,diagnostic", [
+    ("{% snapshot bad %}select 1", "malformed SQL snapshot block"),
+    ("{% snapshot bad %}{{ ref('x'}", "malformed SQL snapshot block"),
+    ("{% snapshot bad %}{% snapshot nested %}{% endsnapshot %}", "malformed SQL snapshot block"),
+    ("{% endsnapshot %}", "malformed SQL snapshot block"),
+    ("{% snapshot bad name %}select 1{% endsnapshot %}", "malformed SQL snapshot block"),
+    ("{% snapshot bad %}{{ config(strategy='timestamp', unique_key='id') }}select 1{% endsnapshot %}", "valid timestamp or check strategy"),
+    ("{% snapshot bad %}{{ config(strategy='check', unique_key='id', check_cols='id') }}{% endsnapshot %}", "valid timestamp or check strategy"),
+    ("{% snapshot bad %}{{ config(strategy=var('strategy')) }}{% endsnapshot %}", "unsupported SQL snapshot config"),
+    ("{% snapshot bad %}{% if execute %}select 1{% endif %}{% endsnapshot %}", "only named blocks"),
+    ("{% snapshot bad %}{{ config(enabled=false, unknown='value') }}{% endsnapshot %}", "unsupported SQL snapshot config"),
+    ("{% snapshot bad %}{{ config(enabled=false, enabled=true) }}{% endsnapshot %}", "unsupported SQL snapshot config"),
+    ("{% snapshot bad %}{{ config(enabled=false, unique_key=['id']) }}{{ config(unique_key=var('key')) }}{% endsnapshot %}", "unsupported SQL snapshot config"),
+])
+def test_snapshot_malformed_and_unsupported_blocks_fail_closed(tmp_path: Path, body: str, diagnostic: str):
+    project = copy_fixture(tmp_path, "single_model")
+    (project / "snapshots").mkdir()
+    (project / "snapshots/bad.sql").write_text(body)
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target)
+    assert result.returncode == 2
+    assert diagnostic in result.stderr
+    assert str(tmp_path) not in result.stderr
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("command", ["compile", "build", "run", "seed", "test", "docs generate", "snapshot"])
+def test_snapshot_execution_commands_fail_before_writing_or_running_sql(tmp_path: Path, command: str):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target, command, "--select", "customers customer_history")
+    assert result.returncode == 2
+    assert "snapshot resources currently support parse and ls only" in result.stderr
+    assert not target.exists()
+
+
+def test_snapshot_yaml_properties_are_explicitly_unsupported(tmp_path: Path):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    (project / "snapshots/schema.yml").write_text("version: 2\nsnapshots:\n  - name: customer_history\n    description: history\n")
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target)
+    assert result.returncode == 2
+    assert "YAML snapshot definitions and properties are not supported" in result.stderr
+    assert not target.exists()
+
+
+def test_snapshot_disabled_reference_and_duplicate_names_fail_closed(tmp_path: Path):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    (project / "models/current_customers.sql").write_text("select * from {{ ref('disabled_history') }}")
+    result = snapshot_cli(project, tmp_path / "disabled-target")
+    assert result.returncode == 2
+    assert "disabled" in result.stderr
+    (project / "models/current_customers.sql").unlink()
+    (project / "snapshots/duplicate.sql").write_text("{% snapshot customer_history %}{{ config(strategy='check', unique_key='id', check_cols='all') }}select 1{% endsnapshot %}")
+    result = snapshot_cli(project, tmp_path / "duplicate-target")
+    assert result.returncode == 2
+    assert "duplicate snapshot block name" in result.stderr
+
+
+def test_snapshot_dbt_core_1105_oracle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("DBT_SEND_ANONYMOUS_USAGE_STATS", "false")
+    pytest.importorskip("dbt.cli.main", reason="optional dbt Core snapshot oracle requires dbt-core and dbt-duckdb")
+    from dbt.cli.main import dbtRunner
+    import jsonschema
+    from importlib.metadata import version
+    assert version("dbt-core") == "1.10.5"
+    assert version("dbt-duckdb") == "1.9.6"
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    common = ["--project-dir", str(project), "--profiles-dir", str(project), "--no-partial-parse", "--quiet"]
+    oracle = dbtRunner().invoke(["parse", *common, "--target-path", "target-oracle"])
+    assert oracle.success, oracle.exception
+    actual_result = snapshot_cli(project, tmp_path / "dxt-target")
+    assert actual_result.returncode == 0, actual_result.stderr
+    expected = json.loads((project / "target-oracle/manifest.json").read_text())
+    actual = json.loads((tmp_path / "dxt-target/manifest.json").read_text())
+    snapshot_ids = {key for key, node in expected["nodes"].items() if node["resource_type"] == "snapshot"}
+    assert snapshot_ids == {key for key, node in actual["nodes"].items() if node["resource_type"] == "snapshot"}
+    identity_keys = ["unique_id", "name", "resource_type", "package_name", "path", "original_file_path", "database", "schema", "alias", "fqn", "checksum", "raw_code", "refs", "sources", "depends_on"]
+    config_keys = ["enabled", "materialized", "tags", "docs", "strategy", "unique_key", "target_schema", "target_database", "updated_at", "check_cols"]
+    for key in snapshot_ids:
+        observed, wanted = actual["nodes"][key], expected["nodes"][key]
+        assert {k: observed[k] for k in identity_keys} == {k: wanted[k] for k in identity_keys}
+        assert {k: observed["config"][k] for k in config_keys} == {k: wanted["config"][k] for k in config_keys}
+        assert_snapshot_schema_required_fields(observed)
+        jsonschema.validate(observed, json.loads((ROOT / "tests/schemas/dbt_manifest_v12_snapshot.schema.json").read_text()))
+    key = "snapshot.snapshot_sql.disabled_history"
+    assert {k: actual["disabled"][key][0][k] for k in identity_keys} == {k: expected["disabled"][key][0][k] for k in identity_keys}
+    jsonschema.validate(actual["disabled"][key][0], json.loads((ROOT / "tests/schemas/dbt_manifest_v12_snapshot.schema.json").read_text()))
+    listed = dbtRunner().invoke(["ls", *common, "--resource-type", "snapshot", "--output", "selector", "--target-path", "target-oracle"])
+    assert listed.success, listed.exception
+    actual_list = snapshot_cli(project, tmp_path / "dxt-target", "ls", "--resource-type", "snapshot", "--output", "selector")
+    assert actual_list.returncode == 0, actual_list.stderr
+    assert sorted(actual_list.stdout.splitlines()) == sorted(listed.result)
+
+
+@pytest.mark.parametrize("command", ["run", "seed", "test"])
+@pytest.mark.skipif(DUCKDB is None, reason="DuckDB CLI is required")
+def test_snapshot_default_commands_filter_to_unrelated_executable_resources(tmp_path: Path, command: str):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    (project / "models/current_customers.sql").unlink()
+    (project / "profiles.yml").write_text((project / "profiles.yml").read_text().replace("':memory:'", "warehouse.duckdb"))
+    (project / "seeds").mkdir()
+    (project / "seeds/seed_customers.csv").write_text("customer_id\n1\n")
+    (project / "tests").mkdir()
+    (project / "tests/always_pass.sql").write_text("select 1 as failure where false")
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target, command)
+    assert result.returncode == 0, result.stderr
+    results = json.loads((target / "run_results.json").read_text())["results"]
+    assert results
+    assert all(not row["unique_id"].startswith("snapshot.") for row in results)
+    assert all(row["status"] in {"success", "pass"} for row in results)
+
+
+def test_snapshot_project_config_inheritance_is_explicitly_unsupported(tmp_path: Path):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    (project / "dbt_project.yml").write_text((project / "dbt_project.yml").read_text() + "snapshots:\n  snapshot_sql:\n    +enabled: false\n")
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target)
+    assert result.returncode == 2
+    assert "project snapshot config inheritance is not supported" in result.stderr
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("command,resource", [("compile", "current_customers"), ("run", "current_customers"), ("test", "assert_history")])
+def test_snapshot_consumers_fail_before_compilation_or_execution(tmp_path: Path, command: str, resource: str):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    (project / "tests").mkdir()
+    (project / "tests/assert_history.sql").write_text("select * from {{ ref('customer_history') }} where false")
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target, command, "--select", resource)
+    assert result.returncode == 2
+    assert "snapshot resources currently support parse and ls only" in result.stderr
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("resource_type", ["model", "seed"])
+def test_snapshot_colliding_refable_names_are_explicitly_unsupported(tmp_path: Path, resource_type: str):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    if resource_type == "model":
+        (project / "models/customer_history.sql").write_text("select 1 as customer_id")
+    else:
+        (project / "seeds").mkdir()
+        (project / "seeds/customer_history.csv").write_text("customer_id\n1\n")
+    result = snapshot_cli(project, tmp_path / "target")
+    assert result.returncode == 2
+    assert "ref to a snapshot sharing a name with a model or seed is not supported" in result.stderr
+    assert not (tmp_path / "target").exists()
+
+
+def test_snapshot_default_test_rejects_singular_consumer(tmp_path: Path):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    (project / "tests").mkdir()
+    (project / "tests/assert_history.sql").write_text("select * from {{ ref('customer_history') }} where false")
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target, "test")
+    assert result.returncode == 2
+    assert "snapshot resources currently support parse and ls only" in result.stderr
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("command", ["compile", "run"])
+def test_snapshot_consumer_via_unselected_ephemeral_parent_fails_closed(tmp_path: Path, command: str):
+    project = copy_fixture(tmp_path, "snapshot_sql")
+    (project / "models/ephemeral_history.sql").write_text("{{ config(materialized='ephemeral') }}\nselect * from {{ ref('customer_history') }}")
+    (project / "models/final_history.sql").write_text("select * from {{ ref('ephemeral_history') }}")
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target, command, "--select", "final_history")
+    assert result.returncode == 2
+    assert "snapshot resources currently support parse and ls only" in result.stderr
+    assert not target.exists()
