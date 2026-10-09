@@ -1216,6 +1216,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         return .{ .list = values };
     }
     if (context.documentation_block) return if (std.mem.indexOfScalar(u8, path, '.') == null) .conditional_undefined else error.UndefinedJinjaValue;
+    if (@import("base_context.zig").callable(path)) return .{ .callable = path };
     if (try @import("regex_context.zig").resolve(allocator, path)) |value| return value;
     if (context.documentation) {
         if (@import("doc_context.zig").baseCallable(path)) return .{ .callable = path };
@@ -1369,6 +1370,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         if (try @import("doc_context.zig").call(allocator, context.graph, context.node.package_name, name, args)) |value| return value;
         if (!@import("doc_context.zig").allowsCall(name)) return error.UnresolvedMacro;
     }
+    if (try @import("base_context.zig").call(allocator, name, args)) |value| return value;
     if (try @import("bundled_macros.zig").callColumn(allocator, name, args)) |value| return value;
     if (try @import("container_methods.zig").call(allocator, name, args)) |mutation| {
         if (mutation.original) |original| for (context.bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original, mutation.replacement.?, 0);
