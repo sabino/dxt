@@ -372,7 +372,7 @@ fn normalizeMetric(a: std.mem.Allocator, data: *Value, raw: Value, config: Value
     try put(a, data, "metrics", .{ .array = std.json.Array.init(a) });
 }
 fn normalizeSavedQuery(a: std.mem.Allocator, data: *Value, raw: Value, config: Value, graph: *const Graph) !void {
-    var query = try defaults(a, "{\"metrics\":[],\"group_by\":[],\"where\":null,\"order_by\":null,\"limit\":null}");
+    var query = try defaults(a, "{\"metrics\":[],\"group_by\":[],\"where\":null,\"order_by\":[],\"limit\":null}");
     defer values.deinit(a, &query);
     try values.overlay(a, &query, field(raw, "query_params"));
     if (list(field(query, "metrics")).len == 0) return error.InvalidSemanticResource;

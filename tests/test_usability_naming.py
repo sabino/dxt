@@ -187,6 +187,7 @@ def test_core_saved_query_export_generators_preserve_explicit_schema_and_alias(t
     pair.write('models/customers.sql', "select 1 as id, 'US' as country")
     pair.write('models/metricflow_time_spine.sql', "select date '2024-01-01' as date_day")
     semantic = yaml.safe_load(SEMANTIC_YAML)
+    del semantic['saved_queries'][0]['query_params']['order_by']
     semantic['saved_queries'][0]['exports'] = [
         {'name': 'generated', 'config': {'export_as': 'table'}},
         {'name': 'explicit', 'config': {'export_as': 'view', 'schema': 'ignored', 'schema_name': 'reporting', 'alias': 'kept', 'database': 'ignored_database'}},
