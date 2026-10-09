@@ -8,6 +8,19 @@ const expression = @import("expression.zig");
 const Value = expression.Value;
 const Anchor = struct { pointer: usize, name: ?[:0]const u8 = null, emitted: bool = false };
 
+fn yamlOrder(a: std.mem.Allocator, lhs: Value, rhs: Value) anyerror!std.math.Order {
+    const scalars = @import("yaml_values.zig");
+    if (scalars.isHashable(lhs) or scalars.isHashable(rhs)) return scalars.order(lhs, rhs);
+    if (lhs == .tuple and rhs == .tuple) {
+        for (0..@min(lhs.tuple.len, rhs.tuple.len)) |i| {
+            if (@import("mapping_keys.zig").keyEqual(lhs.tuple[i], rhs.tuple[i])) continue;
+            return yamlOrder(a, lhs.tuple[i], rhs.tuple[i]);
+        }
+        return std.math.order(lhs.tuple.len, rhs.tuple.len);
+    }
+    return @import("mapping_keys.zig").jsonOrder(a, lhs, rhs);
+}
+
 pub fn dump(a: std.mem.Allocator, input: Value, sorted: bool) ![]const u8 {
     var context = Dumper{ .a = a, .sorted = sorted };
     defer context.anchors.deinit(a);
@@ -74,10 +87,25 @@ const Dumper = struct {
 
     fn entries(self: *Dumper, input: Value) ![]const expression.Entry {
         const result = try self.a.dupe(expression.Entry, input.object);
-        if (self.sorted) @import("mapping_keys.zig").sortJsonKeys(self.a, result) catch |err| switch (err) {
-            error.JinjaTypeError => @memcpy(result, input.object),
-            else => return err,
-        };
+        if (self.sorted) {
+            var failure: ?anyerror = null;
+            const Context = struct {
+                a: std.mem.Allocator,
+                failure: *?anyerror,
+                fn less(ctx: @This(), lhs: expression.Entry, rhs: expression.Entry) bool {
+                    const order = yamlOrder(ctx.a, expression.entryKey(lhs), expression.entryKey(rhs)) catch |err| {
+                        ctx.failure.* = err;
+                        return false;
+                    };
+                    return order == .lt;
+                }
+            };
+            std.sort.block(expression.Entry, result, Context{ .a = self.a, .failure = &failure }, Context.less);
+            if (failure) |err| switch (err) {
+                error.JinjaTypeError => @memcpy(result, input.object),
+                else => return err,
+            };
+        }
         return result;
     }
 
@@ -94,7 +122,7 @@ const Dumper = struct {
             try self.anchors.append(self.a, .{ .pointer = identity });
         }
         if (expression.integerProtocol(input) != null or expression.floatProtocol(input) != null) return;
-        if (input.attribute("__dxt_yaml_timestamp") != .undefined or input.attribute("__dxt_binary") != .undefined) return;
+        if (@import("yaml_values.zig").isHashable(input)) return;
         if (@import("set_context.zig").items(input)) |members| {
             for (members) |member| try self.count(member, depth + 1);
             return;
@@ -148,9 +176,7 @@ const Dumper = struct {
             };
             return self.scalar(name, "tag:yaml.org,2002:float", text, c.YAML_PLAIN_SCALAR_STYLE, true, false);
         }
-        const timestamp = input.attribute("__dxt_yaml_timestamp");
-        if (timestamp == .string) {
-            const rendered = if (timestamp.string.len > 10) try std.fmt.allocPrint(self.a, "{s} {s}", .{ timestamp.string[0..10], timestamp.string[11..] }) else timestamp.string;
+        if (@import("yaml_values.zig").timestampText(input)) |rendered| {
             return self.scalar(name, "tag:yaml.org,2002:timestamp", rendered, c.YAML_PLAIN_SCALAR_STYLE, true, false);
         }
         const binary = input.attribute("__dxt_binary");

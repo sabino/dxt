@@ -21,6 +21,27 @@ pub fn isHashable(value: Value) bool {
     return value.attribute("__dxt_binary") == .string or timestamp(value) != null;
 }
 
+pub fn timestampText(value: Value) ?[]const u8 {
+    if (timestamp(value) == null) return null;
+    const rendered = value.attribute("__dxt_rendered");
+    return if (rendered == .string) rendered.string else null;
+}
+
+pub fn order(lhs: Value, rhs: Value) !std.math.Order {
+    const lhs_bytes = lhs.attribute("__dxt_binary");
+    const rhs_bytes = rhs.attribute("__dxt_binary");
+    if (lhs_bytes == .string or rhs_bytes == .string) {
+        if (lhs_bytes != .string or rhs_bytes != .string) return error.JinjaTypeError;
+        return std.mem.order(u8, lhs_bytes.string, rhs_bytes.string);
+    }
+    const left = timestamp(lhs) orelse return error.JinjaTypeError;
+    const right = timestamp(rhs) orelse return error.JinjaTypeError;
+    if (left.date != right.date or (left.offset == null) != (right.offset == null)) return error.JinjaTypeError;
+    const lhs_instant = left.ns - @as(i96, left.offset orelse 0) * std.time.ns_per_min;
+    const rhs_instant = right.ns - @as(i96, right.offset orelse 0) * std.time.ns_per_min;
+    return std.math.order(lhs_instant, rhs_instant);
+}
+
 pub fn nan(a: std.mem.Allocator) !Value {
     const result = try expression.floatValue(a, std.math.nan(f64));
     for (@constCast(result.object)) |*entry| {
@@ -51,17 +72,21 @@ pub fn binary(a: std.mem.Allocator, encoded: []const u8) !Value {
     const members = try expression.allocateValues(a, bytes.len);
     for (bytes, members) |byte, *member| member.* = try expression.integerValue(a, byte);
     var out: std.Io.Writer.Allocating = .init(a);
-    try out.writer.writeAll("b'");
-    for (bytes) |byte| switch (byte) {
-        '\'' => try out.writer.writeAll("\\'"),
+    const quote: u8 = if (std.mem.indexOfScalar(u8, bytes, '\'') != null and std.mem.indexOfScalar(u8, bytes, '"') == null) '"' else '\'';
+    try out.writer.writeByte('b');
+    try out.writer.writeByte(quote);
+    for (bytes) |byte| if (byte == quote) {
+        try out.writer.writeByte('\\');
+        try out.writer.writeByte(byte);
+    } else switch (byte) {
         '\\' => try out.writer.writeAll("\\\\"),
         '\n' => try out.writer.writeAll("\\n"),
         '\r' => try out.writer.writeAll("\\r"),
         '\t' => try out.writer.writeAll("\\t"),
-        32...38, 40...91, 93...126 => try out.writer.writeByte(byte),
+        32...91, 93...126 => try out.writer.writeByte(byte),
         else => try out.writer.print("\\x{x:0>2}", .{byte}),
     };
-    try out.writer.writeByte('\'');
+    try out.writer.writeByte(quote);
     const entries = try expression.allocateEntries(a, 5);
     entries[0] = .{ .key = "__dxt_binary", .value = .{ .string = bytes } };
     entries[1] = .{ .key = "__dxt_iterable", .value = .{ .list = members } };

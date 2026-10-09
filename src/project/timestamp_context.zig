@@ -29,10 +29,9 @@ pub fn fromYaml(a: std.mem.Allocator, canonical: []const u8) !Value {
     var ns = @as(i96, seconds) * std.time.ns_per_s;
     if (canonical.len > 19 and canonical[19] == '.') ns += @as(i96, try std.fmt.parseInt(u32, canonical[20..26], 10)) * std.time.ns_per_us;
     const original = if (canonical.len == 10) try datetimeValue(a, ns, true, null) else try configuredValue(a, ns, canonical);
-    const entries = try expression.allocateEntries(a, original.object.len + 2);
+    const entries = try expression.allocateEntries(a, original.object.len + 1);
     @memcpy(entries[0..original.object.len], original.object);
     entries[original.object.len] = .{ .key = "__dxt_yaml_timestamp", .value = .{ .string = canonical } };
-    entries[original.object.len + 1] = .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } };
     return .{ .object = entries };
 }
 
@@ -55,6 +54,32 @@ fn datetimeValue(a: std.mem.Allocator, epoch_ns: i96, date_only: bool, utc_offse
     const rendered = if (date_only) try a.dupe(u8, label[0..10]) else try isoformat(a, epoch_ns, " ", "auto", utc_offset);
     var entries: std.ArrayList(expression.Entry) = .empty;
     try entries.append(a, .{ .key = "__dxt_rendered", .value = .{ .string = rendered } });
+    try entries.append(a, .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } });
+    var representation: std.Io.Writer.Allocating = .init(a);
+    try representation.writer.writeAll(if (date_only) "datetime.date(" else "datetime.datetime(");
+    for ([_][2]usize{ .{ 0, 4 }, .{ 5, 7 }, .{ 8, 10 } }, 0..) |span, i| {
+        if (i != 0) try representation.writer.writeAll(", ");
+        try representation.writer.print("{d}", .{try std.fmt.parseInt(u32, label[span[0]..span[1]], 10)});
+    }
+    if (!date_only) {
+        const hour = try std.fmt.parseInt(u32, label[11..13], 10);
+        const minute = try std.fmt.parseInt(u32, label[14..16], 10);
+        const second = try std.fmt.parseInt(u32, label[17..19], 10);
+        try representation.writer.print(", {d}, {d}", .{ hour, minute });
+        if (second != 0 or micros != 0) try representation.writer.print(", {d}", .{second});
+        if (micros != 0) try representation.writer.print(", {d}", .{micros});
+        if (utc_offset) |offset| {
+            if (offset == 0) try representation.writer.writeAll(", tzinfo=datetime.timezone.utc") else {
+                const days = @divFloor(offset * 60, 86400);
+                const seconds = @mod(offset * 60, 86400);
+                try representation.writer.writeAll(", tzinfo=datetime.timezone(datetime.timedelta(");
+                if (days != 0) try representation.writer.print("days={d}, ", .{days});
+                try representation.writer.print("seconds={d}))", .{seconds});
+            }
+        }
+    }
+    try representation.writer.writeByte(')');
+    try entries.append(a, .{ .key = "__dxt_repr", .value = .{ .string = try representation.toOwnedSlice() } });
     inline for (.{ .{ "year", 0, 4 }, .{ "month", 5, 7 }, .{ "day", 8, 10 }, .{ "hour", 11, 13 }, .{ "minute", 14, 16 }, .{ "second", 17, 19 } }) |field| {
         if (!date_only or field[1] < 10) try entries.append(a, .{ .key = field[0], .value = try expression.integerValue(a, try std.fmt.parseInt(u64, label[field[1]..field[2]], 10)) });
     }
