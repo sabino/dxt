@@ -123,6 +123,7 @@ pub const OperationHost = struct {
     session: ?adapter.Session = null,
     borrowed_session: ?*adapter.Session = null,
     owned_pool: ?*adapter.DuckDBPool = null,
+    respect_introspect: bool = true,
     values: std.heap.ArenaAllocator,
 
     transaction_open: bool = false,
@@ -144,8 +145,22 @@ pub const OperationHost = struct {
         return self;
     }
 
+    /// Core's direct SQL task acquires an explicit connection independently
+    /// from the compile runner's INTROSPECT context.
+    pub fn initDirect(runtime: Runtime, graph: *const types.Graph, db_path: []const u8, stdout: *std.Io.Writer) !OperationHost {
+        var self = try initLazy(runtime, graph, db_path, stdout);
+        errdefer self.deinit();
+        self.respect_introspect = false;
+        try self.ensureSession();
+        return self;
+    }
+
     fn ensureSession(self: *OperationHost) !void {
         if (self.currentSession() != null) return;
+        // Core BaseRunner enters no connection_named context for compile/show
+        // when INTROSPECT is false. Pure rendering works; SQL callbacks cannot
+        // automatically acquire a warehouse connection in that context.
+        if (self.respect_introspect and !self.graph.command_options.introspect and (std.mem.eql(u8, self.graph.command_options.which, "compile") or std.mem.eql(u8, self.graph.command_options.which, "show"))) return error.IntrospectionConnectionNotAcquired;
         const runtime = self.runtime;
         if (self.runtime.duckdb_pool == null and std.mem.eql(u8, self.graph.adapter_type, "duckdb")) {
             const pool = try runtime.allocator.create(adapter.DuckDBPool);

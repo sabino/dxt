@@ -1262,7 +1262,10 @@ fn flagsValue(allocator: std.mem.Allocator, graph: *const Graph) !native_expr.Va
         };
         if (!exposed) continue;
         const name = try std.ascii.allocUpperString(allocator, entry.key_ptr.*);
-        const value = if (std.mem.eql(u8, name, "FULL_REFRESH")) native_expr.Value{ .boolean = graph.full_refresh } else if (std.mem.eql(u8, name, "INTROSPECT") and !std.mem.eql(u8, graph.command_options.which, "compile") and !std.mem.eql(u8, graph.command_options.which, "show")) native_expr.Value.none else try valueFromJson(allocator, entry.value_ptr.*);
+        const available = @import("cli_options.zig").commandHasFlag(graph.command_options.which, name);
+        // Core FLAGS_DEFAULTS includes these three keys even when the command
+        // has no decorator. EMPTY has no global default and remains None.
+        const value = if (std.mem.eql(u8, name, "FULL_REFRESH")) native_expr.Value{ .boolean = available and graph.full_refresh } else if (std.mem.eql(u8, name, "STORE_FAILURES")) native_expr.Value{ .boolean = available and graph.command_options.store_failures } else if (std.mem.eql(u8, name, "INTROSPECT")) native_expr.Value{ .boolean = !available or graph.command_options.introspect } else if (std.mem.eql(u8, name, "EMPTY") and !available) native_expr.Value.none else try valueFromJson(allocator, entry.value_ptr.*);
         try entries.append(allocator, .{ .key = name, .value = value });
     }
     for ([_]native_expr.Entry{
@@ -1421,7 +1424,10 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     if (std.mem.eql(u8, name, "is_incremental")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
-        return .{ .boolean = (context.execute_override orelse (context.parse_node == null)) and context.node.runtime_is_incremental };
+        // Loaded projects invoke the real macro and acquire relation metadata
+        // only when the authored template calls it. Synthetic API graphs have
+        // no bundled macros and retain their supplied execution state.
+        if (resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.current_macro_package orelse context.node.package_name, name) == null) return .{ .boolean = (context.execute_override orelse (context.parse_node == null)) and context.node.runtime_is_incremental };
     }
     if (std.mem.eql(u8, name, "var") or std.mem.eql(u8, name, "env_var")) {
         if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;

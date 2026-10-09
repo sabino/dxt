@@ -7,8 +7,6 @@ const selector = @import("selector.zig");
 const results = @import("run_results.zig");
 const clock = @import("execution_clock.zig");
 const duckdb = @import("duckdb.zig");
-const incremental = @import("incremental.zig");
-const incremental_config = @import("incremental_config.zig");
 
 pub const Counts = struct {
     models: usize = 0,
@@ -185,15 +183,11 @@ fn compileResource(runtime: types.Runtime, graph_readonly: *const types.Graph, r
     return row;
 }
 
-fn render(runtime: types.Runtime, graph: *const types.Graph, resource: runner.Resource, database_path: []const u8, row: *results.NodeResult) !void {
+fn render(runtime: types.Runtime, graph: *const types.Graph, resource: runner.Resource, _: []const u8, row: *results.NodeResult) !void {
     switch (resource) {
         .node => |original| {
             if (std.mem.eql(u8, original.resource_type, "seed")) return;
-            var node = original.*;
-            if (std.mem.eql(u8, node.materialized, "incremental")) {
-                try incremental_config.validateForAdapter(graph.adapter_type, node.incremental);
-                node.runtime_is_incremental = try incremental.isIncremental(runtime, database_path, graph, &node);
-            }
+            const node = original.*;
             const compiled = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, &node);
             row.compiled_code = compiled.compiled_code;
             row.owns_compiled_code = true;

@@ -207,7 +207,7 @@ pub fn showDirect(runtime: types.Runtime, options: types.Options, graph: *types.
     const sql = options.inline_direct orelse return error.MissingCompiledSql;
     const path = try @import("duckdb.zig").databasePath(runtime.allocator, options.project_dir, graph);
     defer runtime.allocator.free(path);
-    var host = try @import("commands.zig").OperationHost.init(runtime, graph, path, stdout);
+    var host = try @import("commands.zig").OperationHost.initDirect(runtime, graph, path, stdout);
     defer host.deinit();
     var table = try host.queryResult(sql);
     defer table.deinit(runtime.allocator);

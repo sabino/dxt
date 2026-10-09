@@ -902,6 +902,7 @@ fn parseOptions(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
             } else if (equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast")) {
                 options.fail_fast = equals(arg, "--fail-fast");
             } else if (equals(arg, "--full-refresh")) {
+                if (!@import("project/cli_options.zig").commandHasFlag(options.which, "FULL_REFRESH")) return error.UnsupportedCommandOption;
                 options.full_refresh = true;
             } else if (equals(arg, "--empty") or equals(arg, "--no-empty")) {
                 if (!equals(options.which, "run") and !equals(options.which, "build") and !equals(options.which, "compile") and !equals(options.which, "snapshot")) return error.UnsupportedCommandOption;
@@ -1024,7 +1025,7 @@ fn isFlag(arg: []const u8, mode: OptionMode) bool {
     if (mode == .docs_generate and equals(arg, "--empty-catalog")) return true;
     if ((equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast")) and (mode == .build or mode == .seed or mode == .test_command or mode == .retry or mode == .compile or mode == .show or mode == .docs_generate or mode == .source_freshness)) return true;
     if (mode != .common_only and mode != .clean and mode != .docs_serve and mode != .init and mode != .debug and mode != .operation and mode != .clone and mode != .retry and (equals(arg, "--defer") or equals(arg, "--no-defer") or equals(arg, "--favor-state") or equals(arg, "--no-favor-state"))) return true;
-    if ((mode == .build or mode == .compile or mode == .seed or mode == .clone) and equals(arg, "--full-refresh")) return true;
+    if ((mode == .build or mode == .compile or mode == .show or mode == .seed or mode == .clone or mode == .retry) and equals(arg, "--full-refresh")) return true;
     if (mode == .init and equals(arg, "--skip-profile-setup")) return true;
     if (mode == .docs_serve and (equals(arg, "--browser") or equals(arg, "--no-browser") or equals(arg, "--no-open"))) return true;
     if (mode == .docs_generate and (equals(arg, "--static") or equals(arg, "--compile") or equals(arg, "--no-compile"))) return true;

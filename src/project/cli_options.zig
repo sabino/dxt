@@ -7,6 +7,16 @@ pub const input_relations = @import("input_relations.zig");
 
 pub const Prepared = struct { args: []const []const u8, options: types.Options };
 
+/// Pinned Core cli/main.py decorators determine whether command-line and
+/// environment values apply. cli/flags.py supplies separate macro defaults.
+pub fn commandHasFlag(command: []const u8, flag: []const u8) bool {
+    if (eq(flag, "FULL_REFRESH")) return eq(command, "build") or eq(command, "compile") or eq(command, "show") or eq(command, "run") or eq(command, "retry") or eq(command, "clone") or eq(command, "seed");
+    if (eq(flag, "STORE_FAILURES")) return eq(command, "build") or eq(command, "test");
+    if (eq(flag, "EMPTY")) return eq(command, "build") or eq(command, "compile") or eq(command, "run") or eq(command, "snapshot");
+    if (eq(flag, "INTROSPECT")) return eq(command, "compile") or eq(command, "show");
+    return true;
+}
+
 pub fn prepare(runtime: types.Runtime, args: []const []const u8) !Prepared {
     const a = runtime.allocator;
     var expanded: std.ArrayList([]const u8) = .empty;
@@ -121,15 +131,15 @@ fn defaults(runtime: types.Runtime, command: ?[]const u8) !types.Options {
     options.defer_enabled = try environmentBool(runtime, "DBT_DEFER", false);
     options.favor_state = try environmentBool(runtime, "DBT_FAVOR_STATE", false);
     options.fail_fast = try environmentBool(runtime, "DBT_FAIL_FAST", false);
-    if (eq(options.which, "run") or eq(options.which, "build") or eq(options.which, "seed") or eq(options.which, "compile")) options.full_refresh = try environmentBool(runtime, "DBT_FULL_REFRESH", false);
-    if (eq(options.which, "run") or eq(options.which, "build") or eq(options.which, "snapshot") or eq(options.which, "compile")) options.empty = try environmentBool(runtime, "DBT_EMPTY", false);
+    if (commandHasFlag(options.which, "FULL_REFRESH")) options.full_refresh = try environmentBool(runtime, "DBT_FULL_REFRESH", false);
+    if (commandHasFlag(options.which, "EMPTY")) options.empty = try environmentBool(runtime, "DBT_EMPTY", false);
     if (eq(options.which, "run") or eq(options.which, "build")) {
         options.sample = environment(runtime, "DBT_SAMPLE");
         options.event_time_start = environment(runtime, "DBT_EVENT_TIME_START");
         options.event_time_end = environment(runtime, "DBT_EVENT_TIME_END");
     }
     options.quiet = try environmentBool(runtime, "DBT_QUIET", false);
-    if (eq(options.which, "test") or eq(options.which, "build")) options.store_failures = try environmentBool(runtime, "DBT_STORE_FAILURES", false);
+    if (commandHasFlag(options.which, "STORE_FAILURES")) options.store_failures = try environmentBool(runtime, "DBT_STORE_FAILURES", false);
     options.debug = try environmentBool(runtime, "DBT_DEBUG", false);
     options.single_threaded = try environmentBool(runtime, "DBT_SINGLE_THREADED", false);
     options.populate_cache = try environmentBool(runtime, "DBT_POPULATE_CACHE", true);
@@ -139,7 +149,7 @@ fn defaults(runtime: types.Runtime, command: ?[]const u8) !types.Options {
     options.partial_parse_file_diff = try environmentBool(runtime, "DBT_PARTIAL_PARSE_FILE_DIFF", true);
     options.partial_parse_file_path = environment(runtime, "DBT_PARTIAL_PARSE_FILE_PATH");
     options.static_parser = try environmentBool(runtime, "DBT_STATIC_PARSER", true);
-    if (eq(options.which, "compile") or eq(options.which, "show")) options.introspect = try environmentBool(runtime, "DBT_INTROSPECT", true);
+    if (commandHasFlag(options.which, "INTROSPECT")) options.introspect = try environmentBool(runtime, "DBT_INTROSPECT", true);
     options.write_json = try environmentBool(runtime, "DBT_WRITE_JSON", true);
     options.warn_error = try environmentBool(runtime, "DBT_WARN_ERROR", false);
     options.version_check = try environmentBool(runtime, "DBT_VERSION_CHECK", true);
