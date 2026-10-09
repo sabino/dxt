@@ -97,7 +97,7 @@ jobs:
       - name: Version consistency
         run: |
           test "$(./zig-out/bin/dxt version)" = "${{ steps.version.outputs.version }}"
-          grep -q ".version = \"${{ steps.version.outputs.version }}\"" build.zig.zon
+          rg -q ".version = \"${{ steps.version.outputs.version }}\"" build.zig.zon
 
   package:
     name: package ${{ matrix.target }}
@@ -146,6 +146,9 @@ jobs:
           cp zig-out/bin/dxt "dist/${name}/dxt"
           cp README.md CHANGELOG.md SECURITY.md "dist/${name}/"
           cp -R docs "dist/${name}/docs"
+          mkdir -p "dist/${name}/docs/licenses"
+          cp vendor/libyaml/LICENSE "dist/${name}/docs/licenses/libyaml-LICENSE"
+          cp vendor/libyaml/UPSTREAM "dist/${name}/docs/licenses/libyaml-UPSTREAM"
           test ! -f LICENSE || cp LICENSE "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           tar -tzf "dist/${name}.tar.gz"

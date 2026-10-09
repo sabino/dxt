@@ -68,11 +68,10 @@ EXPECTED_COLUMNS = {
 def validate_catalog_schema(path: Path) -> None:
     schema_validator = load_schema_validator()
     data = load_json(path)
-    schema = schema_validator.load_json(CATALOG_SCHEMA)
-    errors = schema_validator.validate_manifest(data, schema)
+    errors = schema_validator.validate_artifact(data)
     if errors:
         formatted = "\n".join(f"  - {error}" for error in errors)
-        raise GateError(f"catalog schema slice validation failed:\n{formatted}")
+        raise GateError(f"complete upstream Catalog schema validation failed:\n{formatted}")
 
 
 def prepare_relations(dxt: Path, project_dir: Path, target_dir: Path) -> None:

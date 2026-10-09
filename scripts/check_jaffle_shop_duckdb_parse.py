@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DXT = ROOT / "zig-out" / "bin" / "dxt"
 DEFAULT_REPO_URL = "https://github.com/dbt-labs/jaffle_shop_duckdb.git"
 DEFAULT_REF = "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb"
-SCHEMA_VALIDATOR_PATH = ROOT / "scripts" / "validate_manifest_schema.py"
+SCHEMA_VALIDATOR_PATH = ROOT / "scripts" / "validate_dbt_artifacts.py"
 
 EXPECTED_MODELS = [
     "model.jaffle_shop.customers",
@@ -179,11 +179,10 @@ def assert_no_absolute_paths(value: Any, *, key: str = "$", project_dir: Path) -
 def validate_manifest_shape(manifest_path: Path, project_dir: Path) -> None:
     schema_validator = load_schema_validator()
     manifest = load_manifest(manifest_path)
-    schema = schema_validator.load_json(schema_validator.DEFAULT_SCHEMA)
-    errors = schema_validator.validate_manifest(manifest, schema)
+    errors = schema_validator.validate_artifact(manifest)
     if errors:
         formatted = "\n".join(f"  - {error}" for error in errors)
-        raise GateError(f"manifest schema slice validation failed:\n{formatted}")
+        raise GateError(f"complete upstream Manifest schema validation failed:\n{formatted}")
 
     assert_equal("project name", manifest["metadata"]["project_name"], "jaffle_shop")
     assert_equal("manifest schema version", manifest["metadata"]["dbt_schema_version"], "https://schemas.getdbt.com/dbt/manifest/v12.json")

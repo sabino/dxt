@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const mod = b.addModule("dxt", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .optimize = optimize,
         .link_libc = true,
     });
     // libyaml handles YAML token syntax. The native Zig yaml module owns the
@@ -46,6 +47,9 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run Zig tests");
     test_step.dependOn(&run_mod_tests.step);
+
+    const install_tests = b.addInstallArtifact(mod_tests, .{});
+    b.step("test-binary", "Build the developer native test binary").dependOn(&install_tests.step);
 
     // Developer-only black-box oracle; excluded from ordinary product installs.
     const yaml_oracle = b.addExecutable(.{

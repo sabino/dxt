@@ -50,6 +50,26 @@ modules, add native/CLI and pinned Core evidence, and do not edit docs or PLAN.
 Later waves cover remaining configuration/macros, adapter certification,
 commands/artifacts, semantic/static-analysis/stateful/cross-database features.
 
+Wave three assigns configuration/property parsing, bundled macros and PostgreSQL
+resource execution to the configuration worker; threaded scheduling, cancellation
+and structured logs to the adapter worker; semantic resources and MetricFlow
+planning to the command worker; shared-YAML snapshots followed by SQL analysis to
+the snapshot worker; durable environment/interval planning to the state worker;
+and dependency transports followed by cross-database movement to the YAML worker.
+The supervisor owns complete artifact validation, CI/release packaging, public
+project gates, docs browsing and performance verification. Shared types, loader,
+compiler, options and root command routing are integrated sequentially by
+cherry-pick. Worker modules remain isolated and must bring native, CLI and
+source-grounded oracle evidence before integration.
+
+The initial adapter certification scope is DuckDB and PostgreSQL, as confirmed
+by the user. Remaining dbt adapters are a subsequent certification scope, with
+their own drivers and live warehouse targets; they must not be advertised as
+working merely because profiles parse. Compatibility checks use dbt Core 1.10.5,
+dbt-duckdb 1.9.6, dbt-postgres 1.9.1 and MetricFlow 0.208.1. Full artifact schema
+checks use the pinned upstream schema classes, which produce the published
+schemas, and run in mandatory CI alongside native driver fixtures.
+
 After its scheduling commit, the scheduler worker owns the focused native
 DuckDB/Postgres adapter contract in a second isolated worktree. Shared backend
 integration follows test-error, incremental and snapshot commits. Threaded

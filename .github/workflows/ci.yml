@@ -71,7 +71,7 @@ jobs:
   integration:
     name: test py${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -88,17 +88,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-oracle.txt
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Install test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
 
       - name: Print tool versions
         run: |
@@ -141,8 +141,8 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Install pinned oracle dependencies
-        run: python -m pip install -r requirements-dev.txt -r requirements-oracle.txt
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
 
       - name: Compare SQL snapshots with dbt Core and the full Snapshot schema
         run: pytest -q tests/test_cli.py::test_snapshot_dbt_core_1105_oracle
@@ -152,7 +152,7 @@ jobs:
     # public Jaffle parse, ls, compile, DuckDB build/run, and docs-generate gates.
     name: public jaffle parse gate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -167,6 +167,9 @@ jobs:
         uses: mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
+
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
 
       - name: Fetch public Jaffle fixture
         run: |
@@ -183,18 +186,6 @@ jobs:
       - name: Run public Jaffle compile gate
         run: python scripts/check_jaffle_shop_duckdb_compile.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
 
-      - name: Install DuckDB CLI
-        run: |
-          mkdir -p "$RUNNER_TEMP/duckdb"
-          curl --fail --location --show-error \
-            --output "$RUNNER_TEMP/duckdb_cli.zip" \
-            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip"
-          echo "${DUCKDB_CLI_SHA256}  $RUNNER_TEMP/duckdb_cli.zip" | sha256sum --check -
-          unzip -q "$RUNNER_TEMP/duckdb_cli.zip" -d "$RUNNER_TEMP/duckdb"
-          chmod +x "$RUNNER_TEMP/duckdb/duckdb"
-          echo "$RUNNER_TEMP/duckdb" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/duckdb/duckdb" --version
-
       - name: Run public Jaffle build gate
         run: python scripts/check_jaffle_shop_duckdb_build.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
 
@@ -203,3 +194,11 @@ jobs:
 
       - name: Run public Jaffle docs gate
         run: python scripts/check_jaffle_shop_duckdb_docs.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
+
+      - name: Verify public Jaffle CLI compatibility backend
+        env:
+          DXT_DUCKDB_BACKEND: cli
+        run: |
+          python scripts/check_jaffle_shop_duckdb_build.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
+          python scripts/check_jaffle_shop_duckdb_run.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
+          python scripts/check_jaffle_shop_duckdb_docs.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"

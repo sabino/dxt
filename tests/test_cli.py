@@ -29,6 +29,10 @@ DUCKDB = shutil.which("duckdb")
 SCHEMA_SPEC = importlib.util.spec_from_file_location("validate_manifest_schema", SCHEMA_VALIDATOR_PATH)
 assert SCHEMA_SPEC is not None
 assert SCHEMA_SPEC.loader is not None
+ARTIFACT_SPEC = importlib.util.spec_from_file_location("validate_dbt_artifacts", ROOT / "scripts" / "validate_dbt_artifacts.py")
+assert ARTIFACT_SPEC is not None and ARTIFACT_SPEC.loader is not None
+artifact_validator = importlib.util.module_from_spec(ARTIFACT_SPEC)
+ARTIFACT_SPEC.loader.exec_module(artifact_validator)
 schema_validator = importlib.util.module_from_spec(SCHEMA_SPEC)
 SCHEMA_SPEC.loader.exec_module(schema_validator)
 
@@ -6898,31 +6902,19 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
 
 
 def assert_manifest_schema_slice(manifest_path: Path) -> None:
-    manifest = json.loads(manifest_path.read_text())
-    schema = schema_validator.load_json(schema_validator.DEFAULT_SCHEMA)
-    errors = schema_validator.validate_manifest(manifest, schema)
-    assert errors == []
+    artifact_validator.assert_artifact(manifest_path)
 
 
 def assert_catalog_schema_slice(catalog_path: Path) -> None:
-    catalog = json.loads(catalog_path.read_text())
-    schema = schema_validator.load_json(CATALOG_SCHEMA)
-    errors = schema_validator.validate_manifest(catalog, schema)
-    assert errors == []
+    artifact_validator.assert_artifact(catalog_path)
 
 
 def assert_run_results_schema_slice(run_results_path: Path) -> None:
-    run_results = json.loads(run_results_path.read_text())
-    schema = schema_validator.load_json(RUN_RESULTS_SCHEMA)
-    errors = schema_validator.validate_manifest(run_results, schema)
-    assert errors == []
+    artifact_validator.assert_artifact(run_results_path)
 
 
 def assert_sources_schema_slice(sources_path: Path) -> None:
-    sources = json.loads(sources_path.read_text())
-    schema = schema_validator.load_json(SOURCES_SCHEMA)
-    errors = schema_validator.validate_manifest(sources, schema)
-    assert errors == []
+    artifact_validator.assert_artifact(sources_path)
 
 
 def write_sources_state(state_dir: Path, rows: dict[str, str]) -> Path:
