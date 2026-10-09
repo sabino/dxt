@@ -46,4 +46,17 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run Zig tests");
     test_step.dependOn(&run_mod_tests.step);
+
+    // Developer-only black-box oracle; excluded from ordinary product installs.
+    const yaml_oracle = b.addExecutable(.{
+        .name = "dxt-yaml-oracle",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/yaml_oracle.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "dxt", .module = mod }},
+        }),
+    });
+    const oracle_install = b.addInstallArtifact(yaml_oracle, .{});
+    b.step("yaml-oracle", "Build the developer YAML conformance oracle").dependOn(&oracle_install.step);
 }

@@ -212,6 +212,9 @@ const Parser = struct {
     }
 
     fn scalar(self: *Parser, text: []const u8, explicit_tag: ?[]const u8, plain: bool, key_position: bool) !Node {
+        // YAML's non-specific ! tag requests implicit resolution even on a
+        // quoted scalar, as the pinned Core SafeLoader does.
+        if (explicit_tag != null and eq(explicit_tag.?, "!")) return self.scalar(text, null, true, key_position);
         const tag = explicit_tag orelse if (plain) implicitTag(text) else "str";
         if (isTag(tag, "merge") or isTag(tag, "value")) {
             if (!key_position) return error.YamlUnsupportedTag;
