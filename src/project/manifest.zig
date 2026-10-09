@@ -945,19 +945,29 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
         try writer.writeAll(",\"column_name\":");
         try json.string(writer, column_name);
     }
-    if (test_node.accepted_values.items.len != 0) {
+    if (test_node.arguments == .object) {
+        var iterator = test_node.arguments.object.iterator();
+        while (iterator.next()) |entry| {
+            if (std.mem.eql(u8, entry.key_ptr.*, "model") or std.mem.eql(u8, entry.key_ptr.*, "column_name")) continue;
+            try writer.writeAll(",");
+            try json.string(writer, entry.key_ptr.*);
+            try writer.writeAll(":");
+            try std.json.Stringify.value(entry.value_ptr.*, .{}, writer);
+        }
+    }
+    if (test_node.arguments != .object and test_node.accepted_values.items.len != 0) {
         try writer.writeAll(",\"values\":");
         try json.stringArray(writer, test_node.accepted_values.items);
     }
-    if (test_node.accepted_values_quote) |quote| {
+    if (if (test_node.arguments == .object) null else test_node.accepted_values_quote) |quote| {
         try writer.writeAll(",\"quote\":");
         try writer.writeAll(if (quote) "true" else "false");
     }
-    if (test_node.relationship_to.len != 0) {
+    if (test_node.arguments != .object and test_node.relationship_to.len != 0) {
         try writer.writeAll(",\"to\":");
         try json.string(writer, test_node.relationship_to);
     }
-    if (test_node.relationship_field.len != 0) {
+    if (test_node.arguments != .object and test_node.relationship_field.len != 0) {
         try writer.writeAll(",\"field\":");
         try json.string(writer, test_node.relationship_field);
     }

@@ -224,6 +224,7 @@ pub const ColumnDef = struct {
 
 pub const GenericTestDef = struct {
     name: []const u8,
+    arguments: std.json.Value = .null,
     namespace: ?[]const u8 = null,
     column_name: ?[]const u8 = null,
     accepted_values: std.ArrayList([]const u8) = .empty,
@@ -449,6 +450,7 @@ pub const GenericTestNode = struct {
     original_file_path: []const u8,
     raw_code: []const u8,
     test_name: []const u8,
+    arguments: std.json.Value = .null,
     test_namespace: ?[]const u8 = null,
     column_name: ?[]const u8 = null,
     argument_column_name: ?[]const u8 = null,
@@ -651,6 +653,7 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
 }
 
 pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
+    config_value.deinit(allocator, &test_node.arguments);
     test_node.accepted_values.deinit(allocator);
     test_node.refs.deinit(allocator);
     test_node.source_refs.deinit(allocator);
@@ -736,6 +739,7 @@ fn deinitMacroProperty(allocator: std.mem.Allocator, property: *MacroProperty) v
 
 fn deinitGenericTestDefs(allocator: std.mem.Allocator, tests: *std.ArrayList(GenericTestDef)) void {
     for (tests.items) |*test_def| {
+        config_value.deinit(allocator, &test_def.arguments);
         test_def.accepted_values.deinit(allocator);
     }
     tests.deinit(allocator);

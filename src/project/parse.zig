@@ -134,6 +134,7 @@ pub fn appendGenericTestDef(allocator: std.mem.Allocator, tests: *std.ArrayList(
 pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTestDef), source: GenericTestDef) !void {
     var cloned = GenericTestDef{
         .name = source.name,
+        .arguments = try @import("config_value.zig").clone(graph.allocator, source.arguments),
         .namespace = source.namespace,
         .column_name = source.column_name,
         .accepted_values_quote = source.accepted_values_quote,
@@ -141,7 +142,10 @@ pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTes
         .relationship_field = source.relationship_field,
         .config = source.config,
     };
-    errdefer cloned.accepted_values.deinit(graph.allocator);
+    errdefer {
+        cloned.accepted_values.deinit(graph.allocator);
+        @import("config_value.zig").deinit(graph.allocator, &cloned.arguments);
+    }
     for (source.accepted_values.items) |value| {
         try cloned.accepted_values.append(graph.allocator, value);
     }
@@ -2068,16 +2072,36 @@ pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: Generi
     defer if (test_def.namespace != null) allocator.free(synthetic_name);
 
     const argument_name = if (std.mem.startsWith(u8, test_def.name, "source_")) test_def.name["source_".len..] else test_def.name;
-    if (column_name) |column| try clean_args.append(allocator, try cleanTestNamePart(allocator, column));
-    if (std.mem.eql(u8, argument_name, "relationships")) {
-        try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_field));
-        try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_to));
-    } else if (std.mem.eql(u8, argument_name, "accepted_values")) {
-        if (test_def.accepted_values_quote) |quote| {
-            try clean_args.append(allocator, try cleanTestNamePart(allocator, if (quote) "True" else "False"));
+    if (test_def.arguments == .object) {
+        const metadata = @import("test_metadata.zig");
+        var kwargs = try metadata.arguments(allocator, test_def.arguments, null, column_name);
+        defer @import("config_value.zig").deinit(allocator, &kwargs);
+        const keys = try metadata.sortedKeys(allocator, kwargs.object);
+        defer allocator.free(keys);
+        for (keys) |key| {
+            if (std.mem.eql(u8, key, "model")) continue;
+            const value = kwargs.object.get(key).?;
+            switch (value) {
+                .array => |array| for (array.items) |item| try appendTypedTestNamePart(allocator, &clean_args, item),
+                .object => |object| {
+                    var iterator = object.iterator();
+                    while (iterator.next()) |entry| try appendTypedTestNamePart(allocator, &clean_args, entry.value_ptr.*);
+                },
+                else => try appendTypedTestNamePart(allocator, &clean_args, value),
+            }
         }
-        for (test_def.accepted_values.items) |value| {
-            try clean_args.append(allocator, try cleanTestNamePart(allocator, value));
+    } else {
+        if (column_name) |column| try clean_args.append(allocator, try cleanTestNamePart(allocator, column));
+        if (std.mem.eql(u8, argument_name, "relationships")) {
+            try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_field));
+            try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_to));
+        } else if (std.mem.eql(u8, argument_name, "accepted_values")) {
+            if (test_def.accepted_values_quote) |quote| {
+                try clean_args.append(allocator, try cleanTestNamePart(allocator, if (quote) "True" else "False"));
+            }
+            for (test_def.accepted_values.items) |value| {
+                try clean_args.append(allocator, try cleanTestNamePart(allocator, value));
+            }
         }
     }
 
@@ -2097,6 +2121,12 @@ pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: Generi
     return .{ .full = full, .compiled = compiled };
 }
 
+fn appendTypedTestNamePart(allocator: std.mem.Allocator, parts: *std.ArrayList([]const u8), value: std.json.Value) !void {
+    const text = try @import("test_metadata.zig").scalarText(allocator, value);
+    defer allocator.free(text);
+    try parts.append(allocator, try cleanTestNamePart(allocator, text));
+}
+
 pub fn genericTestUniqueId(allocator: std.mem.Allocator, package_name: []const u8, name: []const u8, test_def: GenericTestDef, model_name: []const u8, column_name: ?[]const u8) ![]const u8 {
     const model_kwarg = try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
     defer allocator.free(model_kwarg);
@@ -2114,6 +2144,17 @@ pub fn genericTestUniqueIdForModelKwarg(allocator: std.mem.Allocator, package_na
 }
 
 fn genericTestMetadataRepr(allocator: std.mem.Allocator, test_def: GenericTestDef, model_kwarg: []const u8, column_name: ?[]const u8) ![]const u8 {
+    if (test_def.arguments == .object) {
+        const metadata = @import("test_metadata.zig");
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        const temporary = arena.allocator();
+        var value = std.json.Value{ .object = .empty };
+        try value.object.put(temporary, "kwargs", try metadata.arguments(temporary, test_def.arguments, model_kwarg, column_name));
+        try value.object.put(temporary, "name", .{ .string = test_def.name });
+        try value.object.put(temporary, "namespace", if (test_def.namespace) |namespace| .{ .string = namespace } else .null);
+        return try metadata.hashableRepr(allocator, value);
+    }
     const namespace = test_def.namespace orelse "None";
     if (std.mem.eql(u8, test_def.name, "accepted_values")) {
         const values = try pythonReprStringList(allocator, test_def.accepted_values.items);

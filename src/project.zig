@@ -1226,7 +1226,7 @@ fn validateUnitTestExecution(runtime: Runtime, graph: *const Graph, nodes: []con
 }
 
 fn validateGenericTestExecution(test_node: *const GenericTestNode) !void {
-    if (genericTestNodeColumnName(test_node) == null) return error.UnsupportedTestExecution;
+    if (isBuiltInGenericTestName(test_node.test_name) and genericTestNodeColumnName(test_node) == null) return error.UnsupportedTestExecution;
     if (std.mem.eql(u8, test_node.test_name, "accepted_values")) {
         if (test_node.accepted_values.items.len == 0) return error.UnsupportedTestExecution;
         return;
@@ -1812,7 +1812,7 @@ test "classifyGenericTestResult follows severity and threshold config" {
     try std.testing.expect(!try evaluateTestThreshold(3, "< 3"));
 }
 
-test "validateGenericTestExecution allows custom column tests and rejects missing columns" {
+test "validateGenericTestExecution allows custom column and table tests" {
     const custom = GenericTestNode{
         .package_name = "demo",
         .unique_id = "test.demo.positive_amount_orders_amount.abc",
@@ -1838,7 +1838,7 @@ test "validateGenericTestExecution allows custom column tests and rejects missin
         .test_name = "positive_amount",
         .attached_node = "model.demo.orders",
     };
-    try std.testing.expectError(error.UnsupportedTestExecution, validateGenericTestExecution(&table_level_custom));
+    try validateGenericTestExecution(&table_level_custom);
 }
 
 fn appendSourceFreshnessRuntimeError(allocator: std.mem.Allocator, results: *std.ArrayList(source_freshness.CheckResult), source: *const SourceDef, message: []const u8) !void {
@@ -3347,6 +3347,7 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
         .original_file_path = node.patch_path orelse node.original_file_path,
         .raw_code = raw_code,
         .test_name = test_def.name,
+        .arguments = try @import("project/config_value.zig").clone(graph.allocator, test_def.arguments),
         .test_namespace = test_def.namespace,
         .column_name = column_name,
         .argument_column_name = effective_column_name,
@@ -3395,6 +3396,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
     defer graph.allocator.free(source_model_kwarg);
     const source_test_def = GenericTestDef{
         .name = source_test_name,
+        .arguments = test_def.arguments,
         .namespace = test_def.namespace,
         .column_name = test_def.column_name,
         .accepted_values = test_def.accepted_values,
@@ -3428,6 +3430,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .original_file_path = source.original_file_path,
         .raw_code = raw_code,
         .test_name = test_def.name,
+        .arguments = try @import("project/config_value.zig").clone(graph.allocator, test_def.arguments),
         .test_namespace = test_def.namespace,
         .column_name = column_name,
         .argument_column_name = effective_column_name,
@@ -3559,6 +3562,7 @@ fn columnCustomGenericTestDef(graph: *const Graph, package_name: []const u8, tes
 
     return GenericTestDef{
         .name = macro_test_name,
+        .arguments = test_def.arguments,
         .namespace = if (namespace_parts) |parts| parts.namespace else null,
         .column_name = test_def.column_name,
         .accepted_values_quote = test_def.accepted_values_quote,

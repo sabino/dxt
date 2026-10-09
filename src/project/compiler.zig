@@ -446,14 +446,14 @@ pub fn compileSingularTest(allocator: std.mem.Allocator, graph: *const Graph, te
 }
 
 pub fn compileGenericTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
-    const column_name = genericTestNodeColumnName(test_node) orelse return error.UnsupportedTestExecution;
     const is_not_null = std.mem.eql(u8, test_node.test_name, "not_null");
     const is_unique = std.mem.eql(u8, test_node.test_name, "unique");
     const is_accepted_values = std.mem.eql(u8, test_node.test_name, "accepted_values");
     const is_relationships = std.mem.eql(u8, test_node.test_name, "relationships");
     if (!is_not_null and !is_unique and !is_accepted_values and !is_relationships) {
-        return try compileCustomGenericTest(allocator, graph, test_node, column_name);
+        return try compileCustomGenericTest(allocator, graph, test_node, genericTestNodeColumnName(test_node));
     }
+    const column_name = genericTestNodeColumnName(test_node) orelse return error.UnsupportedTestExecution;
     if (is_accepted_values and test_node.accepted_values.items.len == 0) return error.UnsupportedTestExecution;
     if (is_relationships and (test_node.relationship_to.len == 0 or test_node.relationship_field.len == 0)) return error.UnsupportedTestExecution;
 
@@ -502,23 +502,36 @@ pub fn compileGenericTest(allocator: std.mem.Allocator, graph: *const Graph, tes
     return try applyGenericTestLimit(allocator, sql, test_node.config.limit);
 }
 
-fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode, column_name: []const u8) ![]const u8 {
+fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode, column_name: ?[]const u8) ![]const u8 {
     const macro = findCustomGenericTestMacro(graph, test_node) orelse return error.UnsupportedTestExecution;
-    var block = try parseGenericTestMacroBlock(allocator, macro);
-    defer block.params.deinit(allocator);
-    if (block.params.items.len != 2 or
-        !std.mem.eql(u8, block.params.items[0], "model") or
-        !std.mem.eql(u8, block.params.items[1], "column_name"))
-    {
-        return error.UnsupportedCustomGenericTest;
-    }
-
     const relation_name = try genericTestRelationName(allocator, graph, test_node);
     defer allocator.free(relation_name);
     const model_sql = try genericTestModelSql(allocator, relation_name, test_node.config.where);
     defer allocator.free(model_sql);
 
-    const sql = try renderCustomGenericTestBody(allocator, macro.macro_sql, block.body.start, block.body.end, model_sql, column_name);
+    const node = Node{ .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test" };
+    var context = CompileContext.init(allocator, graph, &node);
+    defer context.deinit();
+    const arena = context.value_arena.allocator();
+    var args: std.ArrayList(native_expr.Argument) = .empty;
+    if (test_node.arguments == .object) {
+        var iterator = test_node.arguments.object.iterator();
+        while (iterator.next()) |entry| {
+            if (std.mem.eql(u8, entry.key_ptr.*, "model") or std.mem.eql(u8, entry.key_ptr.*, "column_name")) continue;
+            var value = try valueFromJson(arena, entry.value_ptr.*);
+            if (value == .string and std.mem.indexOf(u8, value.string, "{{") != null) {
+                var rendered: std.ArrayList(u8) = .empty;
+                defer rendered.deinit(allocator);
+                try renderRange(&context, value.string, 0, value.string.len, &rendered);
+                value = .{ .string = try arena.dupe(u8, rendered.items) };
+            }
+            try args.append(arena, .{ .name = entry.key_ptr.*, .value = value });
+        }
+    }
+    try args.append(arena, .{ .name = "model", .value = .{ .string = model_sql } });
+    if (column_name) |column| try args.append(arena, .{ .name = "column_name", .value = .{ .string = column } });
+    const result = try renderMacroValue(&context, macro, args.items);
+    const sql = try allocator.dupe(u8, try result.text(arena));
     return try applyGenericTestLimit(allocator, sql, test_node.config.limit);
 }
 
@@ -955,7 +968,12 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     }
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(context.allocator);
-    const body_end = findEndMacroTag(macro.macro_sql, open_end + 2) orelse return error.UnsupportedJinja;
+    const body_end = if (std.mem.startsWith(u8, declaration, "data_test "))
+        findEndGenericTestTag(macro.macro_sql, open_end + 2, "enddata_test") orelse return error.UnsupportedJinja
+    else if (std.mem.startsWith(u8, declaration, "test "))
+        findEndGenericTestTag(macro.macro_sql, open_end + 2, "endtest") orelse return error.UnsupportedJinja
+    else
+        findEndMacroTag(macro.macro_sql, open_end + 2) orelse return error.UnsupportedJinja;
     try renderRange(context, macro.macro_sql, afterTag(macro.macro_sql, open_end + 2, body_end), body_end, &out);
     return context.returned orelse .{ .string = try allocator.dupe(u8, out.items) };
 }
@@ -2423,7 +2441,7 @@ test "compileGenericTest renders seed custom generic test body" {
     try std.testing.expect(std.mem.indexOf(u8, compiled, "where amount = 0") != null);
 }
 
-test "compileGenericTest rejects unsupported custom generic test body" {
+test "compileGenericTest renders custom generic test control flow" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2446,9 +2464,9 @@ test "compileGenericTest rejects unsupported custom generic test body" {
         .path = "custom_tests.sql",
         .original_file_path = "macros/custom_tests.sql",
         .macro_sql =
-        \\{% data_test positive_amount(model, column_name) %}
-        \\{% if true %}
-        \\select {{ column_name }} from {{ model }}
+        \\{% data_test positive_amount(model, column_name, minimum=0) %}
+        \\{% if minimum >= 2 %}
+        \\select {{ column_name }} from {{ model }} where {{ column_name }} <= {{ minimum }}
         \\{% endif %}
         \\{% enddata_test %}
         ,
@@ -2462,13 +2480,16 @@ test "compileGenericTest rejects unsupported custom generic test body" {
         .original_file_path = "models/schema.yml",
         .raw_code = "{{ test_positive_amount(**_dbt_generic_test_kwargs) }}",
         .test_name = "positive_amount",
+        .arguments = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "{\"minimum\":2}", .{}),
         .column_name = "amount",
         .attached_node = "model.demo.orders",
     });
     try graph.tests.items[0].depends_on.append(allocator, "model.demo.orders");
     try graph.tests.items[0].macro_depends_on.append(allocator, "macro.demo.test_positive_amount");
 
-    try std.testing.expectError(error.UnsupportedCustomGenericTest, compileGenericTest(allocator, &graph, &graph.tests.items[0]));
+    const compiled = try compileGenericTest(allocator, &graph, &graph.tests.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("\n\nselect amount from \"main\".\"orders\" where amount <= 2\n\n", compiled);
 }
 
 test "compileModel rejects dynamic ref" {

@@ -538,7 +538,7 @@ where {{ column_name }} = 0
             assert "{%" not in dbt_node["compiled_code"]
 
 
-def test_compile_rejects_unsupported_custom_generic_test_body(tmp_path: Path):
+def test_compile_renders_custom_generic_test_control_flow(tmp_path: Path):
     project = copy_fixture(tmp_path, "custom_generic_test_compile")
     (project / "macros" / "custom_tests.sql").write_text(
         """{% test positive_amount(model, column_name) %}
@@ -555,8 +555,11 @@ select {{ column_name }} from {{ model }}
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "custom generic test compilation currently supports only model, seed, or source column test blocks" in result.stderr
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((target / "manifest.json").read_text())
+    compiled = next(node["compiled_code"] for node in manifest["nodes"].values() if node["resource_type"] == "test")
+    assert 'select amount from "main"."orders"' in compiled
+    assert "{%" not in compiled and "{{" not in compiled
 
 
 def statuses_by_generic_test_name(target: Path) -> dict[str, str]:
@@ -810,7 +813,7 @@ from {{ model }}
     assert "missing_discount" in error_row["compiled_code"]
 
 
-def test_test_rejects_unsupported_custom_generic_test_body_before_run_results(tmp_path: Path):
+def test_test_records_custom_generic_control_flow_missing_relation_error(tmp_path: Path):
     project = copy_fixture(tmp_path, "custom_generic_test_compile")
     (project / "macros" / "custom_tests.sql").write_text(
         """{% test positive_amount(model, column_name) %}
@@ -827,9 +830,12 @@ select {{ column_name }} from {{ model }}
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "custom generic test compilation currently supports only model, seed, or source column test blocks" in result.stderr
-    assert not (target / "run_results.json").exists()
+    assert result.returncode == 1, result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    row = json.loads((target / "run_results.json").read_text())["results"][0]
+    assert row["status"] == "error"
+    assert row["failures"] is None
+    assert 'select amount from "main"."orders"' in row["compiled_code"]
 
 
 def test_compile_injects_ephemeral_ctes_and_manifest_fields(tmp_path: Path):
