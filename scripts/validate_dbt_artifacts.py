@@ -40,8 +40,26 @@ def validate_artifact(artifact):
     return list(validator.iter_errors(artifact))
 
 
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate artifact JSON key: {key!r}")
+        result[key] = value
+    return result
+
+
+def reject_nonfinite(value):
+    raise ValueError(f"Invalid artifact JSON number: {value}")
+
+
+def read_artifact(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"),
+                      object_pairs_hook=unique_object, parse_constant=reject_nonfinite)
+
+
 def assert_artifact(path):
-    errors = validate_artifact(json.loads(Path(path).read_text(encoding="utf-8")))
+    errors = validate_artifact(read_artifact(path))
     if errors:
         details = "\n".join(f"{'.'.join(map(str, error.absolute_path))}: {error.message}" for top in errors for error in focused_errors(top))
         raise AssertionError(f"{Path(path).name} fails its complete upstream artifact schema:\n{details}")

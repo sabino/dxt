@@ -69,7 +69,7 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         .{ .key = "event_time_start", .value = try @import("timestamp_context.zig").value(allocator, batch.start) },
         .{ .key = "event_time_end", .value = try @import("timestamp_context.zig").value(allocator, batch.end) },
     }) };
-    return .{ .object = try allocator.dupe(expression.Entry, &.{
+    var result: Value = .{ .object = try allocator.dupe(expression.Entry, &.{
         .{ .key = "name", .value = .{ .string = node.name } },
         .{ .key = "unique_id", .value = .{ .string = node.unique_id } },
         .{ .key = "resource_type", .value = .{ .string = node.resource_type } },
@@ -92,6 +92,13 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         .{ .key = "latest_version", .value = try values.toExpression(allocator, node.latest_version) },
         .{ .key = "batch", .value = batch_value },
     }) };
+    if (node.hook_index) |index| {
+        const fields = try allocator.alloc(expression.Entry, result.object.len + 1);
+        @memcpy(fields[0..result.object.len], result.object);
+        fields[result.object.len] = .{ .key = "index", .value = try expression.integerValue(allocator, index) };
+        result = .{ .object = fields };
+    }
+    return result;
 }
 
 fn fqn(allocator: std.mem.Allocator, node: *const types.Node) !Value {

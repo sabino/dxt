@@ -51,7 +51,8 @@ pub fn load(runtime: types.Runtime, graph: *types.Graph) !void {
 fn less(graph: *const types.Graph, left: *types.Node, right: *types.Node) bool {
     const root_package_lhs = std.mem.eql(u8, left.package_name, graph.project_name);
     const root_package_rhs = std.mem.eql(u8, right.package_name, graph.project_name);
-    if (root_package_lhs != root_package_rhs) return !root_package_lhs;
+    // Core 1.10.5 BiggestName.__lt__ returns true, placing root hooks first.
+    if (root_package_lhs != root_package_rhs) return root_package_lhs;
     const package_order = std.mem.order(u8, left.package_name, right.package_name);
     if (package_order != .eq) return package_order == .lt;
     return left.hook_index.? < right.hook_index.?;
@@ -104,15 +105,9 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, session: *adapter.Sessio
         local_graph.execution_hooks = host.host();
         const started = std.Io.Timestamp.now(runtime.io, .awake);
         row.compile_started_at = clock.now(runtime.io);
-        const compiled = compiler.renderTextForNode(runtime.allocator, &local_graph, node, node.raw_code) catch |err| {
-            row.status = "error";
-            row.compiled_override = false;
-            row.compile_completed_at = clock.now(runtime.io);
-            row.message = try runtime.allocator.dupe(u8, @import("compile_diagnostics.zig").message(err) orelse @errorName(err));
-            failed = true;
-            try destination.append(runtime.allocator, row);
-            continue;
-        };
+        // Core treats hook compilation errors as task errors before appending
+        // an execution row. SQL execution errors use the row policy below.
+        const compiled = try compiler.renderTextForNode(runtime.allocator, &local_graph, node, node.raw_code);
         row.compile_completed_at = clock.now(runtime.io);
         // A compile-time run_query may open a transaction. Project hook SQL
         // itself must execute outside it, as Core clear_transaction requires.
@@ -171,25 +166,31 @@ fn endContext(a: std.mem.Allocator, graph: *const types.Graph, rows: []const res
             if (manifest.value.object.get("nodes").?.object.get(id)) |node| try values.put(a, &result, "node", node);
             try projected.array.append(result);
         }
-        if (operation or row.node == null or !std.mem.eql(u8, row.status, "success") or std.mem.eql(u8, row.node.?.materialized, "ephemeral")) continue;
-        const node = row.node.?;
-        const schema = try compiler.relationSchemaForNode(a, graph, node);
-        defer a.free(schema);
+        if (operation or std.mem.eql(u8, row.status, "error") or std.mem.eql(u8, row.status, "fail") or std.mem.eql(u8, row.status, "skipped")) continue;
+        const id = serialized.object.get("unique_id").?.string;
+        const node = manifest.value.object.get("nodes").?.object.get(id) orelse continue;
+        const resource = values.get(node, "resource_type").?.string;
+        const relational = if (std.mem.eql(u8, resource, "test")) blk: {
+            const configured = values.get(values.get(node, "config") orelse .null, "store_failures");
+            break :blk (configured != null and configured.? == .bool and configured.?.bool) or graph.command_options.store_failures;
+        } else std.mem.eql(u8, resource, "model") or std.mem.eql(u8, resource, "seed") or std.mem.eql(u8, resource, "snapshot");
+        if (!relational) continue;
+        const schema = values.get(node, "schema").?.string;
         var found = false;
         for (schemas.array.items) |item| if (std.mem.eql(u8, item.string, schema)) {
             found = true;
             break;
         };
         if (!found) try schemas.array.append(try values.clone(a, .{ .string = schema }));
-        const database = compiler.relationDatabaseForNode(graph, node) orelse if (values.get(graph.target_context, "database")) |name| name.string else "";
+        const database = values.get(node, "database") orelse .null;
         found = false;
-        for (database_schemas.array.items) |item| if (std.mem.eql(u8, item.array.items[0].string, database) and std.mem.eql(u8, item.array.items[1].string, schema)) {
+        for (database_schemas.array.items) |item| if (sameDatabase(item.array.items[0], database) and std.mem.eql(u8, item.array.items[1].string, schema)) {
             found = true;
             break;
         };
         if (!found) {
             var pair: std.json.Value = .{ .array = std.json.Array.init(a) };
-            try pair.array.append(try values.clone(a, .{ .string = database }));
+            try pair.array.append(try values.clone(a, database));
             try pair.array.append(try values.clone(a, .{ .string = schema }));
             try database_schemas.array.append(pair);
         }
@@ -200,17 +201,39 @@ fn endContext(a: std.mem.Allocator, graph: *const types.Graph, rows: []const res
     return context;
 }
 
+fn sameDatabase(lhs: std.json.Value, rhs: std.json.Value) bool {
+    if (lhs == .null and rhs == .null) return true;
+    return lhs == .string and rhs == .string and std.mem.eql(u8, lhs.string, rhs.string);
+}
+
 pub fn resolve(a: std.mem.Allocator, context: std.json.Value, path: []const u8) !expression.Value {
     const dot = std.mem.indexOfScalar(u8, path, '.');
     const base = path[0 .. dot orelse path.len];
     const json_value = values.get(context, base) orelse return .undefined;
     var value = try values.toExpression(a, json_value);
     if (std.mem.eql(u8, base, "database_schemas") and value == .list) {
-        for (@constCast(value.list)) |*pair| pair.* = .{ .tuple = pair.list };
+        for (@constCast(value.list)) |*pair| {
+            const items = pair.list;
+            pair.* = .{ .tuple = items };
+        }
     }
     if (dot) |position| {
         var attributes = std.mem.splitScalar(u8, path[position + 1 ..], '.');
         while (attributes.next()) |attribute| value = value.attribute(attribute);
     }
     return value;
+}
+
+test "end-hook database schema pairs remain tuples with multiple successful schemas" {
+    const a = std.testing.allocator;
+    const document = try std.json.parseFromSlice(std.json.Value, a, "{\"database_schemas\":[[\"warehouse\",\"main\"],[null,\"audit\"]]}", .{});
+    defer document.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const result = try resolve(arena.allocator(), document.value, "database_schemas");
+    try std.testing.expectEqual(@as(usize, 2), result.list.len);
+    try std.testing.expectEqualStrings("warehouse", result.list[0].tuple[0].string);
+    try std.testing.expectEqualStrings("main", result.list[0].tuple[1].string);
+    try std.testing.expect(result.list[1].tuple[0] == .none);
+    try std.testing.expectEqualStrings("audit", result.list[1].tuple[1].string);
 }

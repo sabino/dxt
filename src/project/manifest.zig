@@ -917,7 +917,6 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try json.string(writer, node.name);
     if (node.hook_index) |index| {
         try writer.print(",\"index\":{d},\"contract\":{{\"enforced\":false,\"alias_types\":true,\"checksum\":null}}", .{index});
-        if (!node.compiled) try writer.writeAll(",\"relation_name\":null");
     }
     if (std.mem.eql(u8, node.resource_type, "model")) {
         try writer.writeAll(",\"access\":");

@@ -113,8 +113,8 @@ def test_root_help_uses_canonical_name():
     result = subprocess.run([DXT, "--help"], cwd=ROOT, check=True, text=True, capture_output=True)
     assert "Data eXecution & Transformation" in result.stdout
     assert "Data Transformation eXecutor" not in result.stdout
-    assert "Load supported selected DuckDB CSV seeds." in result.stdout
-    assert "Execute supported selected DuckDB seeds, models, and tests." in result.stdout
+    assert "Load selected CSV seeds into DuckDB or PostgreSQL." in result.stdout
+    assert "Build seeds, models, snapshots, unit tests and data tests." in result.stdout
     assert "Preflight selected seeds, models, and tests without running SQL." not in result.stdout
     assert result.stderr == ""
 
@@ -190,7 +190,7 @@ def test_compile_writes_compiled_sql_and_manifest_fields(tmp_path: Path):
     assert orders["compiled_path"].endswith("/compiled/compile_basic/models/orders.sql")
     assert orders["relation_name"] == '"main"."orders"'
     assert orders["extra_ctes"] == []
-    assert orders["extra_ctes_injected"] is False
+    assert orders["extra_ctes_injected"] is True
 
 
 def test_compile_select_limits_compiled_models_but_keeps_graph_context(tmp_path: Path):
@@ -976,8 +976,8 @@ def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
     assert analysis["refs"] == [{"name": "customers", "package": None, "version": None}]
     assert analysis["sources"] == [["raw", "payments"]]
     assert analysis["depends_on"]["nodes"] == [
-        "model.analysis_basic.customers",
         "source.analysis_basic.raw.payments",
+        "model.analysis_basic.customers",
     ]
 
     ls_result = subprocess.run(
@@ -1198,8 +1198,8 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
     manifest = json.loads((target / "manifest.json").read_text())
     events = manifest["nodes"]["model.static_if_compile.events"]
     assert events["depends_on"]["nodes"] == [
-        "model.static_if_compile.customers",
         "source.static_if_compile.raw.events",
+        "model.static_if_compile.customers",
     ]
     assert events["refs"] == [{"name": "customers", "package": None, "version": None}]
     assert events["sources"] == [["raw", "events"]]
@@ -1274,8 +1274,8 @@ def test_parse_time_context_keeps_execute_false_boundary_and_static_dependencies
     assert parsed["config"]["materialized"] == "table"
     assert parsed["config"]["tags"] == ["parse_time"]
     assert parsed["depends_on"]["nodes"] == [
-        "model.parse_time_context.customers",
         "source.parse_time_context.raw.events",
+        "model.parse_time_context.customers",
     ]
     assert parsed["refs"] == [{"name": "customers", "package": None, "version": None}]
     assert parsed["sources"] == [["raw", "events"]]
@@ -3143,6 +3143,8 @@ def test_build_executes_selected_package_duckdb_seed_and_writes_run_results(tmp_
 def test_build_honors_package_seed_quote_columns_false_and_column_types(tmp_path: Path):
     project = tmp_path / "seed_config_tests"
     write_seed_config_project(project)
+    # Core leaves unquoted CSV names unchanged; provide a valid SQL identifier.
+    (project / "dbt_packages/util_pkg/seeds/raw_pkg_orders.csv").write_text("order_id,amount\n1,10.50\n")
     target = tmp_path / "build-target"
     write_duckdb_profile(project, target / "dxt.duckdb")
     result = subprocess.run(
@@ -3182,7 +3184,7 @@ def test_build_honors_package_seed_quote_columns_false_and_column_types(tmp_path
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed build execution slice")
-def test_build_replaces_existing_view_with_seed_table(tmp_path: Path):
+def test_build_rejects_existing_view_as_seed_and_preserves_it(tmp_path: Path):
     project = copy_fixture(tmp_path, "seed_ref")
     target = tmp_path / "build-target"
     target.mkdir()
@@ -3200,16 +3202,18 @@ def test_build_replaces_existing_view_with_seed_table(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, result.stderr
+    rows = json.loads((target / "run_results.json").read_text())["results"]
+    assert [(row["unique_id"], row["status"]) for row in rows] == [("seed.seed_ref.raw_customers", "error")]
 
     query = subprocess.run(
-        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select id, name from "main"."raw_customers"'],
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select id from "main"."raw_customers"'],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert query.returncode == 0, query.stderr
-    assert query.stdout.strip() == "1,Ada"
+    assert query.stdout.strip() == "0"
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed+model build execution slice")
@@ -4833,7 +4837,7 @@ def test_compile_writes_selected_singular_sql_test_artifacts_without_duckdb(tmp_
     assert test_node["compiled_code"] == compiled_sql
     assert test_node["compiled_path"].endswith("/compiled/singular_tests/tests/assert_customers.sql")
     assert test_node["extra_ctes"] == []
-    assert test_node["extra_ctes_injected"] is False
+    assert test_node["extra_ctes_injected"] is True
     assert "test_metadata" not in test_node
     assert "column_name" not in test_node
     assert "attached_node" not in test_node
@@ -5046,7 +5050,7 @@ def test_compile_writes_selected_generic_test_artifacts_without_duckdb(tmp_path:
     assert len(test_nodes) == 5
     assert all(node["compiled"] is True for node in test_nodes)
     assert all(node["extra_ctes"] == [] for node in test_nodes)
-    assert all(node["extra_ctes_injected"] is False for node in test_nodes)
+    assert all(node["extra_ctes_injected"] is True for node in test_nodes)
 
     accepted_values = next(node for node in test_nodes if node["name"].startswith("accepted_values_orders_status__"))
     assert "with all_values as" in accepted_values["compiled_code"]
@@ -8535,10 +8539,10 @@ def test_parse_and_ls_resolve_static_loop_ref_and_source_dependencies(tmp_path: 
     ]
     assert looped["sources"] == [["raw", "events"], ["raw", "payments"]]
     assert looped["depends_on"]["nodes"] == [
-        "model.static_loop_deps.customers",
-        "model.static_loop_deps.orders",
         "source.static_loop_deps.raw.events",
         "source.static_loop_deps.raw.payments",
+        "model.static_loop_deps.customers",
+        "model.static_loop_deps.orders",
     ]
     assert manifest["parent_map"]["model.static_loop_deps.looped"] == [
         "model.static_loop_deps.customers",

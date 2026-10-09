@@ -1317,7 +1317,11 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
             for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
         }
     }
-    const end_failed = try @import("project/hook_operations.zig").run(runtime, graph, &preparation, db_path, target_dir, "on-run-end", &task_rows, stderr, if (start_failed and graph.skip_nodes_if_on_run_start_fails) &.{} else null);
+    const end_failed = @import("project/hook_operations.zig").run(runtime, graph, &preparation, db_path, target_dir, "on-run-end", &task_rows, stderr, if (start_failed and graph.skip_nodes_if_on_run_start_fails) &.{} else null) catch |err| {
+        _ = try writeManifest(runtime, graph, target_dir);
+        try writeRunResults(runtime, target_dir, task_rows.items);
+        return err;
+    };
     summary.had_execution_error = summary.had_execution_error or start_failed or end_failed;
     summary.rows = task_rows.items;
     _ = try writeManifest(runtime, graph, target_dir);
@@ -2305,7 +2309,11 @@ fn executeEphemeralSelection(runtime: Runtime, options: Options, graph: *Graph, 
         try writeRunResults(runtime, target_dir, rows.items);
         return err;
     };
-    const end_failed = try @import("project/hook_operations.zig").run(runtime, graph, &session, db_path, target_dir, "on-run-end", &rows, stderr, if (start_failed and graph.skip_nodes_if_on_run_start_fails) &.{} else null);
+    const end_failed = @import("project/hook_operations.zig").run(runtime, graph, &session, db_path, target_dir, "on-run-end", &rows, stderr, if (start_failed and graph.skip_nodes_if_on_run_start_fails) &.{} else null) catch |err| {
+        _ = try writeManifest(runtime, graph, target_dir);
+        try writeRunResults(runtime, target_dir, rows.items);
+        return err;
+    };
     _ = try writeManifest(runtime, graph, target_dir);
     try writeRunResults(runtime, target_dir, rows.items);
     if (start_failed or end_failed) return error.ExecutionFailure;
