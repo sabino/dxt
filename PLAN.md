@@ -103,6 +103,10 @@ The supervisor now owns native group definitions, model access validation and
 selection in focused group_access.zig plus narrow graph/parser/artifact hooks.
 The configuration worker retains adapter contexts, catalog, contracts and hooks;
 the CLI and adapter workers coordinate parser-cache persistence and controls.
+The supervisor also owns the complete resource config projection shared by the
+manifest and macro context. Model, seed, snapshot and test defaults, typed extra
+fields and normalized hooks are compared in full against pinned Core; shared
+configuration merge/execution changes remain with the configuration worker.
 
 The developer performance harness compares complete artifacts and every compiled
 model before enforcing cold/warm budgets. Its first 250-model, three-repetition

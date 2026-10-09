@@ -940,40 +940,11 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try writeDocsConfig(writer, node.docs);
     try writer.writeAll(",\"columns\":");
     try writeColumns(writer, node.columns.items);
-    try writer.writeAll(",\"config\":{\"enabled\":");
-    try writer.writeAll(if (node.enabled) "true" else "false");
-    try writer.writeAll(",\"materialized\":");
-    try json.string(writer, node.materialized);
-    try writer.writeAll(",\"tags\":");
-    try json.stringArray(writer, node.tags.items);
-    try writer.writeAll(",\"docs\":");
-    try writeDocsConfig(writer, node.docs);
-    if (std.mem.eql(u8, node.materialized, "incremental")) {
-        try writer.writeAll(",\"unique_key\":");
-        try writeSnapshotColumns(writer, node.incremental.unique_key);
-        try writer.writeAll(",\"incremental_strategy\":");
-        try json.nullableString(writer, node.incremental.strategy);
-        try writer.writeAll(",\"on_schema_change\":");
-        try json.string(writer, node.incremental.on_schema_change orelse "ignore");
-        try writer.writeAll(",\"full_refresh\":");
-        if (node.incremental.full_refresh) |value| try writer.writeAll(if (value) "true" else "false") else try writer.writeAll("null");
-        if (node.incremental.configured.predicates) {
-            try writer.writeAll(",\"incremental_predicates\":");
-            if (node.incremental.predicates_null) try writer.writeAll("null") else try json.stringArray(writer, node.incremental.predicates.items);
-        }
-    }
-    if (node.persist_docs) |docs| {
-        try writer.writeAll(",\"persist_docs\":");
-        try writePersistDocs(writer, docs);
-    }
-    if (node.snapshot_config) |config| {
-        try writeSnapshotConfig(writer, &node, config);
-        try writer.writeAll(",\"meta\":");
-        if (node.snapshot_meta_json) |value| try writeJsonValue(writer, value) else try writeMetaObject(writer, node.meta.items);
-    }
-    if (node.snapshot_config == null and @import("config_value.zig").get(node.effective_config, "meta") == null) try writer.writeAll(",\"meta\":{}");
-    try writeAdditionalConfig(writer, &node);
-    try writer.writeAll("},\"depends_on\":{\"macros\":");
+    try writer.writeAll(",\"config\":");
+    var canonical_config = try @import("canonical_manifest_config.zig").node(allocator, &node);
+    defer @import("config_value.zig").deinit(allocator, &canonical_config);
+    try std.json.Stringify.value(canonical_config, .{}, writer);
+    try writer.writeAll(",\"depends_on\":{\"macros\":");
     try json.stringArray(writer, node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, node.depends_on.items);
@@ -1091,29 +1062,6 @@ fn writeUnrenderedNodeConfig(writer: *Io.Writer, graph: *const Graph, node: *con
     try writer.writeAll("}");
 }
 
-fn writeAdditionalConfig(writer: *Io.Writer, node: *const Node) !void {
-    if (node.effective_config != .object) return;
-    var it = node.effective_config.object.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        var emitted = false;
-        for ([_][]const u8{ "enabled", "materialized", "tags", "docs", "persist_docs" }) |known| if (std.mem.eql(u8, key, known)) {
-            emitted = true;
-        };
-        if (std.mem.eql(u8, node.materialized, "incremental")) for ([_][]const u8{ "unique_key", "incremental_strategy", "on_schema_change", "full_refresh", "incremental_predicates" }) |known| {
-            if (std.mem.eql(u8, key, known)) emitted = true;
-        };
-        if (node.snapshot_config != null) for ([_][]const u8{ "meta", "strategy", "unique_key", "target_schema", "target_database", "updated_at", "check_cols", "invalidate_hard_deletes", "hard_deletes", "dbt_valid_to_current", "snapshot_meta_column_names" }) |known| {
-            if (std.mem.eql(u8, key, known)) emitted = true;
-        };
-        if (emitted) continue;
-        try writer.writeAll(",");
-        try json.string(writer, key);
-        try writer.writeAll(":");
-        try std.json.Stringify.value(entry.value_ptr.*, .{}, writer);
-    }
-}
-
 fn writeExtraCtes(writer: *Io.Writer, extra_ctes: []const types.ExtraCte) !void {
     try writer.writeAll("[");
     for (extra_ctes, 0..) |extra_cte, index| {
@@ -1154,17 +1102,11 @@ fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const
     try json.stringArray(writer, node.doc_blocks.items);
     try writer.writeAll(",\"columns\":");
     try writeColumns(writer, node.columns.items);
-    try writer.writeAll(",\"config\":{\"enabled\":");
-    try writer.writeAll(if (node.enabled) "true" else "false");
-    try writer.writeAll(",\"materialized\":\"seed\",\"tags\":");
-    try json.stringArray(writer, node.tags.items);
+    try writer.writeAll(",\"config\":");
+    var canonical_config = try @import("canonical_manifest_config.zig").node(allocator, &node);
+    defer @import("config_value.zig").deinit(allocator, &canonical_config);
+    try std.json.Stringify.value(canonical_config, .{}, writer);
     try writer.writeAll(",\"docs\":");
-    try writeDocsConfig(writer, node.docs);
-    try writer.writeAll(",\"quote_columns\":");
-    try writeNullableBool(writer, node.quote_columns);
-    try writer.writeAll(",\"column_types\":");
-    try writeSeedColumnTypes(writer, node.seed_column_types.items);
-    try writer.writeAll("},\"docs\":");
     try writeDocsConfig(writer, node.docs);
     try writer.writeAll(",\"depends_on\":{\"macros\":");
     try json.stringArray(writer, node.macro_depends_on.items);
@@ -1343,41 +1285,17 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     } else {
         try writer.writeAll("null");
     }
-    try writer.writeAll("},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":");
-    try json.string(writer, test_node.config.severity);
-    try writer.writeAll(",\"fail_calc\":");
-    try json.string(writer, test_node.config.fail_calc);
-    try writer.writeAll(",\"warn_if\":");
-    try json.string(writer, test_node.config.warn_if);
-    try writer.writeAll(",\"error_if\":");
-    try json.string(writer, test_node.config.error_if);
-    try writer.writeAll(",\"schema\":");
-    try json.string(writer, test_node.config.schema orelse "dbt_test__audit");
-    try writer.writeAll(",\"alias\":");
-    try writeNullableString(writer, test_node.config.alias);
-    try writer.writeAll(",\"database\":");
-    try writeNullableString(writer, test_node.config.database);
-    try writer.writeAll(",\"where\":");
-    if (test_node.config.where) |where_sql| {
-        try json.string(writer, where_sql);
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"limit\":");
-    if (test_node.config.limit) |limit| {
-        try writer.print("{d}", .{limit});
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"store_failures\":");
-    if (audits.configuredStore(test_node.config)) |store_failures| {
-        try writer.writeAll(if (store_failures) "true" else "false");
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"store_failures_as\":");
-    try writeNullableString(writer, audits.configuredKind(test_node.config));
-    try writer.writeAll(",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
+    try writer.writeAll("},\"config\":");
+    var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, true, &.{}, .null);
+    defer @import("config_value.zig").deinit(allocator, &canonical_config);
+    if (test_node.attached_node) |identifier| for (graph.nodes.items) |attached| {
+        if (std.mem.eql(u8, attached.unique_id, identifier)) {
+            if (@import("config_value.zig").get(attached.effective_config, "group")) |group| try @import("config_value.zig").put(allocator, &canonical_config, "group", group);
+            break;
+        }
+    };
+    try std.json.Stringify.value(canonical_config, .{}, writer);
+    try writer.writeAll(",\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, test_node.depends_on.items);
@@ -1426,45 +1344,11 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     try json.stringArray(writer, test_node.doc_blocks.items);
     try writer.writeAll(",\"tags\":");
     try json.stringArray(writer, test_node.tags.items);
-    try writer.writeAll(",\"config\":{\"enabled\":");
-    try writer.writeAll(if (test_node.enabled) "true" else "false");
-    try writer.writeAll(",\"materialized\":\"test\",\"severity\":");
-    try json.string(writer, test_node.config.severity);
-    try writer.writeAll(",\"fail_calc\":");
-    try json.string(writer, test_node.config.fail_calc);
-    try writer.writeAll(",\"warn_if\":");
-    try json.string(writer, test_node.config.warn_if);
-    try writer.writeAll(",\"error_if\":");
-    try json.string(writer, test_node.config.error_if);
-    try writer.writeAll(",\"schema\":");
-    try json.string(writer, test_node.config.schema orelse "dbt_test__audit");
-    try writer.writeAll(",\"alias\":");
-    try writeNullableString(writer, test_node.config.alias);
-    try writer.writeAll(",\"database\":");
-    try writeNullableString(writer, test_node.config.database);
-    try writer.writeAll(",\"where\":");
-    if (test_node.config.where) |where_sql| {
-        try json.string(writer, where_sql);
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"limit\":");
-    if (test_node.config.limit) |limit| {
-        try writer.print("{d}", .{limit});
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"store_failures\":");
-    if (audits.configuredStore(test_node.config)) |store_failures| {
-        try writer.writeAll(if (store_failures) "true" else "false");
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"store_failures_as\":");
-    try writeNullableString(writer, audits.configuredKind(test_node.config));
-    try writer.writeAll(",\"tags\":");
-    try json.stringArray(writer, test_node.tags.items);
-    try writer.writeAll(",\"meta\":{}},\"depends_on\":{\"macros\":");
+    try writer.writeAll(",\"config\":");
+    var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values);
+    defer @import("config_value.zig").deinit(allocator, &canonical_config);
+    try std.json.Stringify.value(canonical_config, .{}, writer);
+    try writer.writeAll(",\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, test_node.depends_on.items);
@@ -2578,47 +2462,6 @@ fn writeSnapshotColumns(writer: *Io.Writer, columns: ?types.SnapshotColumns) !vo
             .list => |list| try json.stringArray(writer, list.items),
         }
     } else try writer.writeAll("null");
-}
-
-fn writeSnapshotConfig(writer: *Io.Writer, node: *const Node, config: types.SnapshotConfig) !void {
-    try writer.writeAll(",\"strategy\":");
-    try writeNullableString(writer, config.strategy);
-    try writer.writeAll(",\"unique_key\":");
-    try writeSnapshotColumns(writer, config.unique_key);
-    try writer.writeAll(",\"target_schema\":");
-    try writeNullableString(writer, config.target_schema);
-    try writer.writeAll(",\"target_database\":");
-    try writeNullableString(writer, config.target_database);
-    try writer.writeAll(",\"updated_at\":");
-    try writeNullableString(writer, config.updated_at);
-    try writer.writeAll(",\"check_cols\":");
-    try writeSnapshotColumns(writer, config.check_cols);
-    if (config.invalidate_hard_deletes) |value| {
-        try writer.writeAll(",\"invalidate_hard_deletes\":");
-        try writer.writeAll(if (value) "true" else "false");
-    }
-    if (config.hard_deletes) |value| {
-        try writer.writeAll(",\"hard_deletes\":");
-        try json.string(writer, value);
-    }
-    try writer.writeAll(",\"dbt_valid_to_current\":");
-    try writeNullableString(writer, config.dbt_valid_to_current);
-    try writer.writeAll(",\"snapshot_meta_column_names\":{");
-    inline for (.{ "dbt_scd_id", "dbt_updated_at", "dbt_valid_from", "dbt_valid_to", "dbt_is_deleted" }, 0..) |key, index| {
-        if (index != 0) try writer.writeAll(",");
-        try json.string(writer, key);
-        try writer.writeAll(":");
-        if (config.meta_columns_fields & (@as(u5, 1) << index) != 0) try json.string(writer, @field(config.meta_columns, key)) else try writer.writeAll("null");
-    }
-    try writer.writeAll("}");
-    if (node.config_schema) |value| {
-        try writer.writeAll(",\"schema\":");
-        try json.string(writer, value);
-    }
-    if (node.config_alias) |value| {
-        try writer.writeAll(",\"alias\":");
-        try json.string(writer, value);
-    }
 }
 
 test "snapshot manifest identity retains file checksum and block FQN" {
