@@ -135,6 +135,8 @@ jobs:
         uses: ./.github/actions/setup-oracles
       - name: Build release-safe binary
         run: zig build -Doptimize=ReleaseSafe
+      - name: Verify an extracted binary without subprocess fallbacks
+        run: python scripts/check_install.py
       - name: Certify compiled SQL and cold/warm budgets against Core
         run: python scripts/check_performance.py --report .agent/runs/performance.json
       - name: Upload measured performance

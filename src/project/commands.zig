@@ -466,7 +466,10 @@ fn cloneOne(runtime: Runtime, options: Options, graph: *const types.Graph, node:
     if (std.mem.eql(u8, node.resource_type, "model")) {
         node.compiled = false;
         node.compiled_code = null;
-        node.relation_name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ try compiler.quoteIdentifier(allocator, database), target });
+        node.relation_name = if (compiler.relationDatabaseForNode(graph, node) != null)
+            try allocator.dupe(u8, target)
+        else
+            try std.fmt.allocPrint(allocator, "{s}.{s}", .{ try compiler.quoteIdentifier(allocator, database), target });
     }
     const prior = prior_value orelse return;
     if (prior != .object) return error.MalformedStateManifestArtifact;
