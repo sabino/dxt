@@ -247,7 +247,7 @@ fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []
 }
 
 fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, callbacks: Callbacks, graph: *Graph) !void {
-    const packages_dir = try pathJoin(runtime.allocator, &.{ project_dir, "dbt_packages" });
+    const packages_dir = try @import("dependencies.zig").installPath(runtime, project_dir);
     var package_dirs: std.ArrayList([]const u8) = .empty;
     defer package_dirs.deinit(runtime.allocator);
 
@@ -269,7 +269,7 @@ fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, callbac
 }
 
 fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, callbacks: Callbacks, graph: *Graph) !void {
-    const packages_dir = try pathJoin(runtime.allocator, &.{ project_dir, "dbt_packages" });
+    const packages_dir = try @import("dependencies.zig").installPath(runtime, project_dir);
     var package_dirs: std.ArrayList([]const u8) = .empty;
     defer package_dirs.deinit(runtime.allocator);
 

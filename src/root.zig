@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const project = @import("project.zig");
+const dependencies = @import("project/dependencies.zig");
 
 pub const version = "0.0.0";
 pub const Runtime = project.Runtime;
@@ -28,6 +29,20 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
     }
     if (equals(command, "version")) {
         try stdout.print("{s}\n", .{version});
+        return .ok;
+    }
+
+    if (equals(command, "deps")) {
+        if (hasHelp(args[2..])) {
+            try dependencies.printHelp(stdout);
+            return .ok;
+        }
+        const rt = runtime orelse {
+            try stderr.writeAll("error: runtime I/O is required for deps\n");
+            return .usage;
+        };
+        const options = dependencies.parseOptions(args[2..], stderr) catch |err| return commandError(err, stderr);
+        dependencies.install(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
 
@@ -227,6 +242,32 @@ const HelpMode = enum {
 
 fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
     switch (err) {
+        error.InvalidPackageDeclaration => stderr.writeAll("error: invalid package declaration; use local, git/revision, or package/version entries\n") catch {},
+        error.MultiplePackageDeclarations => stderr.writeAll("error: declare dependencies in either packages.yml or dependencies.yml, not both\n") catch {},
+        error.UnsupportedProjectDependency => stderr.writeAll("error: project dependencies require a remote service; use local, Git, or Hub packages\n") catch {},
+        error.PackageVersionConflict => stderr.writeAll("error: package version constraints conflict or no compatible version exists\n") catch {},
+        error.PackageDependencyCycle => stderr.writeAll("error: package dependency graph contains a cycle\n") catch {},
+        error.DuplicatePackageName => stderr.writeAll("error: dependencies contain duplicate project names or depend on the root project\n") catch {},
+        error.PackageResolutionLimit => stderr.writeAll("error: package resolution exceeded the dependency graph limit\n") catch {},
+        error.MissingLocalPackage => stderr.writeAll("error: local package directory does not exist\n") catch {},
+        error.InvalidLocalPackage => stderr.writeAll("error: local package source overlaps the project or generated dependency directories\n") catch {},
+        error.InvalidPackageProject => stderr.writeAll("error: package must contain dbt_project.yml with a valid matching project name\n") catch {},
+        error.InvalidPackagesInstallPath => stderr.writeAll("error: packages-install-path must be a safe project-relative generated directory\n") catch {},
+        error.InvalidPackageSubdirectory => stderr.writeAll("error: package subdirectory must be a safe relative path\n") catch {},
+        error.InvalidPackageVersion => stderr.writeAll("error: invalid semantic package version or constraint\n") catch {},
+        error.InvalidPackageRevision => stderr.writeAll("error: Git package revision does not resolve to a commit\n") catch {},
+        error.InvalidPackageLock => stderr.writeAll("error: package-lock.yml is malformed\n") catch {},
+        error.InvalidPackageRegistry => stderr.writeAll("error: invalid package Hub metadata or download URL\n") catch {},
+        error.InvalidPackageArchive => stderr.writeAll("error: package archive must contain a dbt project\n") catch {},
+        error.UnsafePackageArchive => stderr.writeAll("error: package archive contains unsafe paths, links, or special files\n") catch {},
+        error.PackageOfflineCacheMiss => stderr.writeAll("error: offline package cache is incomplete; run deps online first\n") catch {},
+        error.PackageOfflineUpgrade => stderr.writeAll("error: deps --offline cannot be combined with --upgrade\n") catch {},
+        error.PackageNetworkFailed => stderr.writeAll("error: package download failed; check registry availability and network access\n") catch {},
+        error.GitPackageFailed => stderr.writeAll("error: Git package transport failed; check repository access\n") catch {},
+        error.PackageInstallFailed => stderr.writeAll("error: package installation failed; existing installed packages were preserved\n") catch {},
+        error.PackageTransportNotFound => stderr.writeAll("error: deps requires git, curl, tar, and cp transport tools\n") catch {},
+        error.UnsupportedPackageJinja => stderr.writeAll("error: package declarations support literal values and env_var calls only\n") catch {},
+        error.MissingPackageEnvironmentVariable => stderr.writeAll("error: required package environment variable is missing\n") catch {},
         error.MissingProjectFile => stderr.writeAll("error: missing dbt_project.yml\n") catch {},
         error.InvalidProjectName => stderr.writeAll("error: dbt_project.yml must define a non-empty name\n") catch {},
         error.DuplicateModelName => stderr.writeAll("error: duplicate model name in supported M1 parser subset\n") catch {},
@@ -540,6 +581,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  parse            Parse a supported dbt project subset and emit manifest artifacts.
         \\  ls               List resources from the supported parser graph.
         \\  clean            Delete configured generated project artifacts.
+        \\  deps             Resolve and install local, Git, and Hub package dependencies.
         \\  compile          Compile supported dbt SQL/Jinja without executing.
         \\  run              Execute supported selected DuckDB SQL models.
         \\  snapshot         Maintain selected DuckDB timestamp and check snapshots.
