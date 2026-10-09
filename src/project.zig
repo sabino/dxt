@@ -157,6 +157,13 @@ const loader_callbacks = project_loader.Callbacks{
     .resolve_macro_dependencies = resolveMacroDependencies,
 };
 
+pub fn metricQuery(runtime: Runtime, options: Options, query: @import("project/metric_plan.zig").Query, stdout: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
+    defer graph.deinit();
+    try resolveDependencies(&graph);
+    try @import("project/metric_command.zig").execute(runtime, &graph, options, query, stdout);
+}
+
 pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
     defer graph.deinit();
@@ -246,7 +253,7 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
-    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
+    const selected = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
 
     const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected, target_dir);
@@ -298,7 +305,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
-    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
+    const selected = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
 
     const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected, target_dir);
@@ -359,9 +366,9 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
-    const selected_sources = try selector.selectResourcesWithContext(runtime.allocator, &graph, "source", selection.select, selection.exclude, selection_context);
+    const selected_sources = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "source", selection.select, selection.exclude, selection_context);
     if (selected_sources.len == 0 and selection.select != null) {
-        const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
+        const selected_any = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
         if (selected_any.len != 0) return error.UnsupportedSourceFreshnessSelection;
     }
 
@@ -451,9 +458,9 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
-    const selected_models = try selector.selectResourcesWithContext(runtime.allocator, &graph, "model", selection.select, selection.exclude, selection_context);
+    const selected_models = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "model", selection.select, selection.exclude, selection_context);
     if (selected_models.len == 0 and selection.select != null) {
-        const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
+        const selected_any = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
         if (selected_any.len != 0) return error.UnsupportedRunSelection;
     }
 
@@ -505,7 +512,7 @@ pub fn snapshotRun(runtime: Runtime, options: Options, stdout: *Io.Writer, stder
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
-    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, "snapshot", selection.select, selection.exclude, selection_state.context());
+    const selected = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "snapshot", selection.select, selection.exclude, selection_state.context());
     const ordered = try selectedModelExecutionOrder(runtime, &graph, selected);
     defer runtime.allocator.free(ordered);
     for (ordered) |node| try snapshot_runner.validateExecution(&graph, node);
@@ -545,10 +552,10 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
-    const selected_seeds = try selector.selectResourcesWithContext(runtime.allocator, &graph, "seed", selection.select, selection.exclude, selection_context);
+    const selected_seeds = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "seed", selection.select, selection.exclude, selection_context);
     if (selected_seeds.len == 0) {
         if (selection.select != null) {
-            const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
+            const selected_any = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
             if (selected_any.len != 0) return error.UnsupportedSeedSelection;
         }
         return error.UnsupportedSeedSelection;
@@ -594,11 +601,11 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
-    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, "test", selection.select, selection.exclude, selection_context);
-    const selected_unit_tests = try selector.selectResourcesWithContext(runtime.allocator, &graph, "unit_test", selection.select, selection.exclude, selection_context);
+    const selected = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "test", selection.select, selection.exclude, selection_context);
+    const selected_unit_tests = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "unit_test", selection.select, selection.exclude, selection_context);
     if (selected.len == 0 and selected_unit_tests.len == 0) {
         if (selection.select != null) {
-            const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
+            const selected_any = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
             if (selected_any.len != 0) return error.UnsupportedTestExecution;
         }
         return error.UnsupportedTestSelection;
@@ -649,7 +656,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
-    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
+    const selected = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
 
     const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected, target_dir);

@@ -16,6 +16,7 @@ const ExposureDef = types.ExposureDef;
 const UnitTestDef = types.UnitTestDef;
 
 pub const SelectionContext = struct {
+    execution_only: bool = false,
     allowed_ids: ?[]const []const u8 = null,
     source_status_index: ?*const source_freshness.SourceStatusIndex = null,
     result_status_index: ?*const run_results.ResultStatusIndex = null,
@@ -285,6 +286,12 @@ pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resour
     return try selectResourcesWithContext(allocator, graph, resource_type, select, exclude, .{});
 }
 
+pub fn selectExecutionResourcesWithContext(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8, context: SelectionContext) ![]SelectedResource {
+    var execution_context = context;
+    execution_context.execution_only = true;
+    return selectResourcesWithContext(allocator, graph, resource_type, select, exclude, execution_context);
+}
+
 pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8, context: SelectionContext) ![]SelectedResource {
     var owned_expression: ?*SelectionExpression = null;
     defer if (owned_expression) |expression| expression.destroy(allocator);
@@ -431,6 +438,7 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
         }
     }
     for (graph.semantic_resources.items) |*resource| {
+        if (context.execution_only) continue;
         if (!resource.enabled or !matchesResourceType(resource_type, resource.resource_type) or !evaluateExpression(graph, resource.unique_id, expression, context).direct) continue;
         try selected.append(allocator, .{
             .unique_id = resource.unique_id,

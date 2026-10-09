@@ -83,6 +83,21 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
         return .ok;
     }
 
+    if (equals(command, "metric")) {
+        if (args.len < 3 or hasHelp(args[2..])) {
+            try stdout.writeAll("Usage: dxt metric <query|explain|export> --metrics <names> [--group-by <dimensions>] [--where <SQL>] [--order-by <names>] [--limit <rows>] [--start-time <timestamp>] [--end-time <timestamp>] [--saved-query <name>] [--project-dir <path>] [--profiles-dir <path>] [--target <name>]\n");
+            return .ok;
+        }
+        const mode = args[2];
+        if (!equals(mode, "query") and !equals(mode, "explain") and !equals(mode, "export")) return commandError(error.InvalidMetricQuery, stderr);
+        const rt = runtime orelse return .usage;
+        const parsed = @import("project/metric_command.zig").parse(rt.allocator, args[3..], equals(mode, "explain"), equals(mode, "export")) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, parsed.common, stderr, .common_only) catch |err| return commandError(err, stderr);
+        options.which = "metric";
+        project.metricQuery(commandRuntime(rt, &options), options, parsed.query, stdout) catch |err| return commandError(err, stderr);
+        return .ok;
+    }
+
     if (equals(command, "snapshot")) {
         if (hasHelp(args[2..])) {
             try printCommandHelp(command, stdout, .build);
@@ -444,6 +459,13 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingRetryCommand => stderr.writeAll("error: prior run_results.json must include args.which\n") catch {},
         error.UnsupportedRetryCommand => stderr.writeAll("error: previous command cannot be retried by this executable\n") catch {},
         error.MissingCloneState => stderr.writeAll("error: clone requires --state containing manifest.json\n") catch {},
+        error.InvalidMetricQuery => stderr.writeAll("error: metric query requires metric names or a saved query and valid query parameters\n") catch {},
+        error.MetricFanoutJoin => stderr.writeAll("error: metric join would fan out measures; the destination entity must be primary or unique\n") catch {},
+        error.InvalidMetricGrain => stderr.writeAll("error: metric time grain is invalid or finer than its source dimension\n") catch {},
+        error.MetricExecutionFailure => {
+            stderr.writeAll("error: metric query execution failed\n") catch {};
+            return .failure;
+        },
         error.OperationFailure => {
             stderr.writeAll("error: operation failed\n") catch {};
             return .failure;

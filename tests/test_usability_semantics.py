@@ -295,3 +295,156 @@ saved-queries:
     for key in ['semantic_models', 'metrics', 'saved_queries', 'disabled']:
         assert normalize(actual_manifest[key]) == normalize(expected_manifest[key])
     assert normalize(actual_semantic) == normalize(expected_semantic)
+
+
+def metricflow_sql(project: Path, metrics: list[str], groups: list[str], where: list[str] | None = None,
+                   order_by: list[str] | None = None, limit: int | None = None,
+                   start_time: str | None = None, end_time: str | None = None):
+    from importlib.metadata import version
+    from datetime import datetime
+    from metricflow_semantics.model.dbt_manifest_parser import parse_manifest_from_dbt_generated_manifest
+    from metricflow_semantics.model.semantic_manifest_lookup import SemanticManifestLookup
+    from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest
+    from metricflow.protocols.sql_client import SqlEngine
+    from metricflow.sql.render.duckdb_renderer import DuckDbSqlPlanRenderer
+    assert version('metricflow') == '0.208.1'
+    class SqlClient:
+        sql_engine_type = SqlEngine.DUCKDB
+        sql_plan_renderer = DuckDbSqlPlanRenderer()
+        def render_bind_parameter_key(self, key):
+            return '?'
+    manifest = parse_manifest_from_dbt_generated_manifest((project / 'target/semantic_manifest.json').read_text())
+    engine = MetricFlowEngine(SemanticManifestLookup(manifest), SqlClient())
+    request = MetricFlowQueryRequest.create_with_random_request_id(
+        metric_names=metrics, group_by_names=groups, where_constraints=where, order_by_names=order_by,
+        limit=limit, time_constraint_start=datetime.fromisoformat(start_time) if start_time else None,
+        time_constraint_end=datetime.fromisoformat(end_time) if end_time else None,
+    )
+    return engine.explain(request).sql_statement.sql
+
+
+METRIC_EXTENSION = """
+  - name: paid_revenue
+    label: Paid Revenue
+    type: simple
+    type_params:
+      measure: order_amount
+    filter: "{{ Dimension('order__status') }} = 'paid'"
+  - name: complete_revenue
+    label: Complete Revenue
+    type: simple
+    type_params:
+      measure:
+        name: order_amount
+        join_to_timespine: true
+        fill_nulls_with: 0
+  - name: revenue_change
+    label: Revenue Change
+    type: derived
+    type_params:
+      expr: current_revenue - previous_revenue
+      metrics:
+        - name: revenue
+          alias: current_revenue
+        - name: revenue
+          alias: previous_revenue
+          offset_window: 1 day
+"""
+
+
+def metric_project(path):
+    project = semantic_project(path, SEMANTIC_YAML.replace('saved_queries:\n', METRIC_EXTENSION + 'saved_queries:\n').replace('name: order\n', 'name: order_key\n').replace('entity: order\n', 'entity: order_key\n').replace('order__', 'order_key__'))
+    (project / 'models/orders.sql').write_text("""select * from (values
+      (1,1,10,'paid',date '2024-01-01'),
+      (2,1,20,'cancelled',date '2024-01-01'),
+      (3,2,5,'paid',date '2024-01-03'),
+      (4,3,NULL,'paid',date '2024-01-08'),
+      (5,NULL,0,'cancelled',date '2024-01-09')) t(id,customer_id,amount,status,ordered_at)
+    """)
+    (project / 'models/customers.sql').write_text("select * from (values(1,'US'),(2,'UK'),(3,NULL)) t(id,country)")
+    (project / 'models/metricflow_time_spine.sql').write_text("select cast(generate_series as date) as date_day from generate_series(date '2024-01-01',date '2024-01-10',interval 1 day)")
+    return project
+
+
+@pytest.mark.parametrize('metrics,groups,where', [
+    (['revenue'], [], None),
+    (['revenue', 'orders'], [], None),
+    (['revenue', 'average_order', 'doubled_revenue'], ['customer__country'], None),
+    (['revenue'], ['metric_time__day'], None),
+    (['revenue'], ['metric_time__month'], None),
+    (['revenue'], ['order_key__status'], None),
+    (['paid_revenue'], ['customer__country'], None),
+    (['revenue'], ['customer__country'], ["{{ Dimension('order_key__status') }} = 'paid'"]),
+    (['rolling_revenue'], ['metric_time__day'], None),
+    (['complete_revenue'], ['metric_time__day'], None),
+    (['revenue_change'], ['metric_time__day'], None),
+    (['paid_conversion'], ['metric_time__day'], None),
+])
+def test_metricflow_02081_query_execution_results(tmp_path, core_runner, metrics, groups, where):
+    from test_usability_commands import query
+    project = metric_project(tmp_path / 'metric')
+    core = invoke_core(core_runner, project, 'parse')
+    assert core.success, core.exception
+    build = run_dxt(project, 'build')
+    assert build.returncode == 0, build.stderr
+    oracle_sql = metricflow_sql(project, metrics, groups, where)
+    expected = query(project / 'warehouse.duckdb', oracle_sql)
+    args = ['--metrics', ','.join(metrics)]
+    if groups:
+        args += ['--group-by', ','.join(groups)]
+    if where:
+        args += ['--where', where[0]]
+    result = run_dxt(project, 'metric', 'query', *args)
+    assert result.returncode == 0, result.stderr
+    actual = json.loads(result.stdout)
+    key = lambda row: json.dumps(row, sort_keys=True)
+    assert sorted(actual, key=key) == sorted(expected, key=key)
+    assert json.loads((project / 'target/metric_results.json').read_text()) == actual
+    plan = json.loads((project / 'target/metric_plan.json').read_text())
+    assert plan['strategy'] == 'single_engine_pushdown'
+    assert plan['movement'] == []
+    assert plan['metrics'] == metrics
+    if 'customer__country' in groups:
+        assert all(join['cardinality'] == 'many_to_one' for join in plan['joins'])
+
+
+def test_metricflow_query_order_limit_timerange_and_saved_export(tmp_path, core_runner):
+    from test_usability_commands import query
+    project = metric_project(tmp_path / 'metric')
+    assert invoke_core(core_runner, project, 'parse').success
+    assert run_dxt(project, 'build').returncode == 0
+    sql = metricflow_sql(project, ['revenue'], ['metric_time__day'], order_by=['-revenue'], limit=2,
+                         start_time='2024-01-01', end_time='2024-01-03')
+    expected = query(project / 'warehouse.duckdb', sql)
+    result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue', '--group-by', 'metric_time__day',
+                     '--order-by=-revenue', '--limit', '2', '--start-time', '2024-01-01', '--end-time', '2024-01-03')
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == expected
+    result = run_dxt(project, 'metric', 'query', '--saved-query', 'daily_revenue')
+    assert result.returncode == 0, result.stderr
+    result = run_dxt(project, 'metric', 'export', '--saved-query', 'daily_revenue')
+    assert result.returncode == 0, result.stderr
+    assert query(project / 'warehouse.duckdb', 'select * from reporting.daily_revenue_export order by metric_time__day') == json.loads((project / 'target/metric_results.json').read_text())
+
+
+def test_metric_explain_validates_joins_without_opening_database(tmp_path):
+    project = metric_project(tmp_path / 'metric')
+    result = run_dxt(project, 'metric', 'explain', '--metrics', 'revenue', '--group-by', 'customer__country')
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan['joins'][0]['entity'] == 'customer'
+    assert not (project / 'warehouse.duckdb').exists()
+    yml = (project / 'models/semantic.yml').read_text().replace("name: customers\n    model: ref('customers')\n    entities:\n      - name: customer\n        type: primary", "name: customers\n    model: ref('customers')\n    entities:\n      - name: customer\n        type: foreign\n      - name: customer_record\n        type: primary\n        expr: id")
+    (project / 'models/semantic.yml').write_text(yml)
+    result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue', '--group-by', 'customer__country')
+    assert result.returncode == 2, result.stderr
+    assert 'fan out' in result.stderr
+    assert not (project / 'warehouse.duckdb').exists()
+
+
+def test_metric_invalid_dimension_and_grain_fail_before_warehouse(tmp_path):
+    project = metric_project(tmp_path / 'metric')
+    for group in ['customer__absent', 'metric_time__hour', 'order_key__status__day']:
+        result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue', '--group-by', group)
+        assert result.returncode == 2, result.stderr
+        assert not (project / 'warehouse.duckdb').exists()
