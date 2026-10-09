@@ -7,6 +7,7 @@ const unicode = @import("expression_unicode.zig");
 /// arena; values can cross macro returns without borrowing a temporary frame.
 pub const Value = union(enum) {
     undefined,
+    conditional_undefined,
     none,
     boolean: bool,
     integer: []const u8,
@@ -21,7 +22,7 @@ pub const Value = union(enum) {
         if (sequences.truthy(self)) |result| return result;
         if (self == .object) if (sequence(self)) |items| return items.len != 0;
         return switch (self) {
-            .undefined, .none => false,
+            .undefined, .conditional_undefined, .none => false,
             .boolean => |v| v,
             .number => |v| v != 0,
             .integer => |v| !std.mem.eql(u8, v, "0"),
@@ -35,6 +36,7 @@ pub const Value = union(enum) {
     pub fn text(self: Value, allocator: std.mem.Allocator) anyerror![]const u8 {
         return switch (self) {
             .undefined => error.UndefinedJinjaValue,
+            .conditional_undefined => "",
             .callable => error.JinjaTypeError,
             .none => "None",
             .boolean => |v| if (v) "True" else "False",
@@ -144,7 +146,7 @@ pub fn evaluate(allocator: std.mem.Allocator, input: []const u8, host: ?Host) !V
         const else_at = topLevelKeyword(remainder, "else");
         const condition = try evaluate(allocator, remainder[0 .. else_at orelse remainder.len], host);
         if (condition.truthy()) return try evaluate(allocator, input[0..condition_at], host);
-        return if (else_at) |position| try evaluate(allocator, remainder[position + 4 ..], host) else .undefined;
+        return if (else_at) |position| try evaluate(allocator, remainder[position + 4 ..], host) else .conditional_undefined;
     }
     var parser = Parser{ .allocator = allocator, .input = input, .host = host };
     const value = try parser.binary(0);
@@ -911,7 +913,7 @@ pub fn equalValues(a: Value, b: Value) bool {
     if ((a == .integer or a == .number or a == .boolean) and (b == .integer or b == .number or b == .boolean)) return (numericOrder(std.heap.page_allocator, a, b) catch return false) == .eq;
     if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
     return switch (a) {
-        .undefined, .none => true,
+        .undefined, .conditional_undefined, .none => true,
         .string => |s| std.mem.eql(u8, s, b.string),
         .number => |n| n == b.number,
         .integer => |n| std.mem.eql(u8, n, b.integer),
@@ -1048,7 +1050,7 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
 pub fn iterableValues(allocator: std.mem.Allocator, value: Value) anyerror![]const Value {
     if (try sequences.items(allocator, value)) |items| return items;
     if (sequence(value)) |items| return items;
-    if (value == .undefined or value == .none) return &.{};
+    if (value == .undefined or value == .conditional_undefined or value == .none) return &.{};
     if (value == .object) {
         const result = try allocateValues(allocator, value.object.len);
         for (value.object, result) |entry, *v| v.* = .{ .string = entry.key };
@@ -1097,8 +1099,8 @@ fn attributeValue(allocator: std.mem.Allocator, value: Value, attribute: Value) 
 }
 
 fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
-    if (std.mem.eql(u8, name, "defined")) return value != .undefined;
-    if (std.mem.eql(u8, name, "undefined")) return value == .undefined;
+    if (std.mem.eql(u8, name, "defined")) return value != .undefined and value != .conditional_undefined;
+    if (std.mem.eql(u8, name, "undefined")) return value == .undefined or value == .conditional_undefined;
     if (std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "None")) return value == .none;
     if (std.mem.eql(u8, name, "string")) return value == .string;
     if (std.mem.eql(u8, name, "number")) return value == .integer or value == .number or value == .boolean;
@@ -1358,10 +1360,11 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
     if (std.mem.eql(u8, name, "default") or std.mem.eql(u8, name, "d")) {
         if (args.len > 2) return error.InvalidJinjaArguments;
         const replacement = argument(args, "default_value", 0, .{ .string = "" });
-        return if (value == .undefined or (argument(args, "boolean", 1, .{ .boolean = false }).truthy() and !value.truthy())) replacement else value;
+        return if (value == .undefined or value == .conditional_undefined or (argument(args, "boolean", 1, .{ .boolean = false }).truthy() and !value.truthy())) replacement else value;
     }
     if (std.mem.eql(u8, name, "length") or std.mem.eql(u8, name, "count")) return try integerValue(allocator, switch (value) {
         .string => |v| try unicode.count(v),
+        .conditional_undefined => 0,
         .list, .tuple => |v| v.len,
         .object => |v| if (try sequences.length(value)) |length| length else if (sequence(value)) |items| items.len else v.len,
         else => return error.JinjaTypeError,
@@ -1523,4 +1526,17 @@ test "integer and float identities, tuples and consuming zip remain typed" {
     const iterator = try sequences.zip(a, &.{.{ .list = &.{.{ .integer = "1" }} }});
     try std.testing.expectEqual(@as(usize, 1), (try iterableValues(a, iterator)).len);
     try std.testing.expectEqual(@as(usize, 0), (try iterableValues(a, iterator)).len);
+}
+
+test "omitted conditional alternatives preserve Jinja plain Undefined" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const missing = try evaluate(a, "'x' if false", null);
+    try std.testing.expect(missing == .conditional_undefined);
+    try std.testing.expectEqualStrings("", try missing.text(a));
+    try std.testing.expect((try evaluate(a, "('x' if false) is undefined", null)).boolean);
+    try std.testing.expectEqualStrings("fallback", try (try evaluate(a, "('x' if false)|default('fallback')", null)).text(a));
+    try std.testing.expectEqualStrings("0", (try evaluate(a, "('x' if false)|length", null)).integer);
+    try std.testing.expectError(error.UndefinedJinjaValue, (try evaluate(a, "authored_missing", null)).text(a));
 }

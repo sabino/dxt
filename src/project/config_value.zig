@@ -27,7 +27,7 @@ pub fn toExpression(allocator: std.mem.Allocator, value: std.json.Value) anyerro
 pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) anyerror!std.json.Value {
     return switch (value) {
         .none => .null,
-        .undefined, .callable => error.InvalidConfiguration,
+        .undefined, .conditional_undefined, .callable => error.InvalidConfiguration,
         .boolean => |v| .{ .bool = v },
         .integer => |v| if (std.fmt.parseInt(i64, v, 10)) |number| .{ .integer = number } else |_| .{ .number_string = try allocator.dupe(u8, v) },
         .number => |v| .{ .float = v },
