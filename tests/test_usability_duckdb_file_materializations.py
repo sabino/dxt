@@ -161,3 +161,34 @@ def test_external_missing_parent_is_a_transactional_error(tmp_path):
     for project in projects:
         assert not (project / "missing").exists()
         assert query(project, "duckdb", "select table_name from information_schema.tables where table_name='history'") == []
+
+
+@pytest.mark.parametrize("parameters", ["none", "false", "0"])
+def test_table_function_falsy_parameters_create_a_zero_argument_macro(tmp_path, parameters):
+    projects = pair_at(tmp_path)
+    for project in projects:
+        model(project, "select 1 as id", "table_function", ",parameters="+parameters)
+    run_pair(projects)
+    assert [query(project, "duckdb", "select * from history()") for project in projects] == [[(1,)], [(1,)]]
+
+
+@pytest.mark.parametrize("materialized", ["external", "table_function"])
+def test_file_materialization_inner_hook_failure_restores_file_or_macro(tmp_path, materialized):
+    projects = pair_at(tmp_path)
+    for project in projects:
+        config = f",location='{project / 'history.parquet'}'" if materialized == "external" else ""
+        model(project, "select 1 as id", materialized, config+",pre_hook=\"create table if not exists events(id integer)\",post_hook=\"insert into events select id from {{ this }}"+("()" if materialized == "table_function" else "")+"\"")
+    run_pair(projects)
+    for project in projects:
+        config = f",location='{project / 'history.parquet'}'" if materialized == "external" else ""
+        model(project, "select 2 as id", materialized, config+",pre_hook=\"insert into events values(99)\",post_hook=\"select * from missing_hook_relation\"")
+    original = (projects[0] / "history.parquet").read_bytes() if materialized == "external" else None
+    run_pair(projects, success=False)
+    for project in projects:
+        assert query(project, "duckdb", "select * from events") == [(1,)]
+    if materialized == "external":
+        # Files are not transactional in Core; native restores publication too.
+        assert (projects[0] / "history.parquet").read_bytes() == original
+        assert query(projects[0], "duckdb", "select * from history") == [(1,)]
+    else:
+        assert [query(project, "duckdb", "select * from history()") for project in projects] == [[(1,)], [(1,)]]

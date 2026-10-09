@@ -5,6 +5,7 @@ const compiler = @import("compiler.zig");
 const postgres = @import("postgres_materialization.zig");
 const results = @import("run_results.zig");
 const types = @import("types.zig");
+const selector = @import("selector.zig");
 
 pub const Outcome = struct {
     message: []const u8 = "No-op",
@@ -18,6 +19,44 @@ pub const Outcome = struct {
         }
     }
 };
+
+// Core prepares selected destination schemas before running resource hooks,
+// including resources that ultimately have no prior state relation to clone.
+pub fn prepareSchemas(runtime: types.Runtime, graph: *const types.Graph, selected: []const selector.SelectedResource, db_path: []const u8) !void {
+    const a = runtime.allocator;
+    var any_chosen = false;
+    for (graph.nodes.items) |*node| if (chosenNode(node, selected)) {
+        any_chosen = true;
+        break;
+    };
+    if (!any_chosen) return;
+    if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
+        var current = try adapter.queryForGraph(runtime, graph, db_path, "select current_database()");
+        defer current.deinit(a);
+        const actual = current.firstScalar() orelse return error.InvalidAdapterIntrospection;
+        // Reject all invalid catalogs before any destination schema is created.
+        for (graph.nodes.items) |*node| {
+            if (!chosenNode(node, selected)) continue;
+            if (compiler.relationDatabaseForNode(graph, node)) |database| if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, database, "\""), actual)) return error.InvalidPostgresDatabaseReference;
+        }
+    }
+    for (graph.nodes.items) |*node| {
+        if (!chosenNode(node, selected)) continue;
+        const schema = try compiler.relationSchemaForNode(a, graph, node);
+        defer a.free(schema);
+        const quoted = try adapter.quoteIdentifier(a, schema);
+        defer a.free(quoted);
+        const sql = try std.fmt.allocPrint(a, "create schema if not exists {s}", .{quoted});
+        defer a.free(sql);
+        try adapter.executeForGraph(runtime, graph, db_path, sql);
+    }
+}
+
+fn chosenNode(node: *const types.Node, selected: []const selector.SelectedResource) bool {
+    if (!node.enabled or std.mem.eql(u8, node.materialized, "ephemeral")) return false;
+    for (selected) |resource| if (std.mem.eql(u8, resource.unique_id, node.unique_id)) return true;
+    return false;
+}
 
 pub fn execute(runtime: types.Runtime, options: types.Options, graph: *const types.Graph, node: *types.Node, prior_value: ?std.json.Value, db_path: []const u8) !Outcome {
     const allocator = runtime.allocator;
@@ -48,13 +87,24 @@ pub fn execute(runtime: types.Runtime, options: types.Options, graph: *const typ
         var current = try adapter.queryForGraph(runtime, graph, db_path, "select current_database()");
         defer current.deinit(allocator);
         const actual_database = current.firstScalar() orelse return error.InvalidAdapterIntrospection;
-        if (database_value == .string and !std.ascii.eqlIgnoreCase(database_value.string, actual_database)) return error.InvalidPostgresDatabaseReference;
         if (compiler.relationDatabaseForNode(graph, node)) |database| {
             if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, database, "\""), actual_database)) return error.InvalidPostgresDatabaseReference;
         }
     }
-    // A destination that is already the source requires no replacement.
-    if (std.mem.eql(u8, schema, schema_value.string) and std.mem.eql(u8, compiler.relationIdentifierForNode(node), alias_value.string)) return .{};
+    const physical_value = prior.object.get("relation_name") orelse .null;
+    if (physical_value != .null and physical_value != .string) return error.MalformedStateManifestArtifact;
+    const same_database = std.mem.eql(u8, graph.adapter_type, "postgres") or database_value == .null or
+        std.mem.eql(u8, database_value.string, compiler.relationDatabaseForNode(graph, node) orelse std.fs.path.stem(std.fs.path.basename(db_path)));
+    // A destination that is already the physical source requires no replacement.
+    // Core uses relation_name for SQL, even when separate metadata differs.
+    const target_schema = try compiler.quoteIdentifier(allocator, schema);
+    defer allocator.free(target_schema);
+    const target_identifier = try compiler.quoteIdentifier(allocator, compiler.relationIdentifierForNode(node));
+    defer allocator.free(target_identifier);
+    const unqualified_target = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ target_schema, target_identifier });
+    defer allocator.free(unqualified_target);
+    if ((physical_value == .string and (std.mem.eql(u8, physical_value.string, target) or (same_database and std.mem.eql(u8, physical_value.string, unqualified_target)))) or
+        (physical_value == .null and same_database and std.mem.eql(u8, schema, schema_value.string) and std.mem.eql(u8, compiler.relationIdentifierForNode(node), alias_value.string))) return .{};
     const kind = try existingKind(runtime, graph, db_path, schema, compiler.relationIdentifierForNode(node), compiler.relationDatabaseForNode(graph, node));
     defer if (kind) |value| allocator.free(value);
     if (kind != null and !options.full_refresh) return .{};
@@ -62,7 +112,9 @@ pub fn execute(runtime: types.Runtime, options: types.Options, graph: *const typ
     defer allocator.free(prior_schema);
     const prior_alias = try compiler.quoteIdentifier(allocator, alias_value.string);
     defer allocator.free(prior_alias);
-    const source = if (database_value == .string) blk: {
+    const source = if (physical_value == .string and physical_value.string.len != 0)
+        try allocator.dupe(u8, physical_value.string)
+    else if (database_value == .string) blk: {
         const database = try compiler.quoteIdentifier(allocator, database_value.string);
         defer allocator.free(database);
         break :blk try std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{ database, prior_schema, prior_alias });
@@ -70,22 +122,34 @@ pub fn execute(runtime: types.Runtime, options: types.Options, graph: *const typ
     defer allocator.free(source);
     const sql = try std.fmt.allocPrint(allocator, "select * from {s}", .{source});
     defer allocator.free(sql);
-    if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
+    var body = CloneBody{ .sql = sql, .allocator = allocator };
+    errdefer if (body.outcome) |outcome| outcome.deinit(allocator);
+    try @import("materialization_runtime.zig").executeWithBody(runtime, db_path, graph, node, .{ .context = &body, .execute = CloneBody.execute });
+    return body.outcome orelse return error.InvalidAdapterResponse;
+}
+
+const CloneBody = struct {
+    sql: []const u8,
+    allocator: std.mem.Allocator,
+    outcome: ?Outcome = null,
+
+    fn execute(raw: *anyopaque, runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, db_path: []const u8, policy: @import("duckdb.zig").ExecutionPolicy) anyerror!void {
+        const self: *CloneBody = @ptrCast(@alignCast(raw));
+        // The artifact keeps its uncompiled state node while only the physical
+        // body uses the prior relation as a view query.
         var view = node.*;
         view.materialized = "view";
-        var response = try postgres.executeReturningWithPolicy(runtime, graph, &view, sql, .{});
-        defer response.deinit(allocator);
-        return try postgresOutcome(allocator, &response);
+        view.compiled_code = self.sql;
+        if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
+            var response = try postgres.executeReturningWithPolicy(runtime, graph, &view, self.sql, policy);
+            defer response.deinit(runtime.allocator);
+            self.outcome = try postgresOutcome(self.allocator, &response);
+        } else {
+            try @import("duckdb.zig").executeModelWithPolicy(runtime, db_path, graph, &view, policy);
+            self.outcome = .{ .message = "OK", .response = .{ .message = "OK" } };
+        }
     }
-    const quoted_schema = try compiler.quoteIdentifier(allocator, schema);
-    defer allocator.free(quoted_schema);
-    const drop = if (kind) |value| try std.fmt.allocPrint(allocator, "drop {s} {s};\n", .{ if (std.mem.eql(u8, value, "view")) "view" else "table", target }) else try allocator.dupe(u8, "");
-    defer allocator.free(drop);
-    const create = try std.fmt.allocPrint(allocator, "begin;\ncreate schema if not exists {s};\n{s}create view {s} as {s};\ncommit;", .{ quoted_schema, drop, target, sql });
-    defer allocator.free(create);
-    try adapter.executeForGraph(runtime, graph, db_path, create);
-    return .{ .message = "OK", .response = .{ .message = "OK" } };
-}
+};
 
 fn existingKind(runtime: types.Runtime, graph: *const types.Graph, db_path: []const u8, schema: []const u8, identifier: []const u8, database: ?[]const u8) !?[]const u8 {
     const allocator = runtime.allocator;

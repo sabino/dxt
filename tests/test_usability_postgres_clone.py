@@ -118,3 +118,78 @@ def test_postgres_clone_failure_preserves_target_and_independent_results(tmp_pat
         assert pair.query(project, "select * from independent") == [(9,)]
         manifest = json.loads((project / "target/manifest.json").read_text())
         assert manifest["nodes"]["model.materialization_contract.customers"].get("compiled", False) is False
+
+
+def test_postgres_clone_hooks_execute_once_and_failed_inner_hook_is_atomic(tmp_path, postgres_server):
+    pair = Pair(tmp_path, postgres_server)
+    pair.build()
+    for project in pair.projects:
+        (project / "models/customers.sql").write_text("""{{ config(materialized='table',
+pre_hook=[{'sql': "create table if not exists {{ target.schema }}.events(label varchar)", 'transaction': false}, "insert into {{ target.schema }}.events values('inner-pre')"],
+post_hook=["insert into {{ target.schema }}.events select 'inner-post:' || cast(id as varchar) from {{ this }}", {'sql': "insert into {{ target.schema }}.events values('outside-post')", 'transaction': false}]) }}
+select 999 as id
+""")
+    pair.clone()
+    pair.results()
+    for project in pair.projects:
+        assert pair.query(project, "select * from customers") == [(7,)]
+        assert pair.query(project, "select label from events order by label") == [("inner-post:7",), ("inner-pre",), ("outside-post",)]
+    pair.clone()
+    pair.results()
+    for project in pair.projects:
+        assert pair.query(project, "select count(*) from events") == [(3,)]
+        pair.query(project, "drop view customers; create table customers as select 99 as id")
+        assert pair.query(project, "select * from customers") == [(99,)]
+        path = project / "models/customers.sql"
+        path.write_text(path.read_text().replace("insert into {{ target.schema }}.events select 'inner-post:' || cast(id as varchar) from {{ this }}", "select * from missing_hook_relation"))
+    pair.clone("--full-refresh", success=False)
+    # Core's deferred-schema cache miss opens a transaction before the outside
+    # hook's raw COMMIT, but leaves its logical transaction flag set. Its SQL
+    # log contains no subsequent BEGIN, so this failure commits the swap and
+    # inner-pre separately. Native deliberately restores both atomically.
+    assert pair.query(pair.projects[0], "select * from customers") == [(99,)]
+    assert pair.query(pair.projects[0], "select count(*) from events") == [(3,)]
+    assert pair.query(pair.projects[1], "select * from customers") == [(7,)]
+    assert pair.query(pair.projects[1], "select count(*) from events") == [(4,)]
+    assert pair.query(pair.projects[1], "select * from customers__dbt_backup") == [(99,)]
+
+
+def test_postgres_clone_uses_current_catalog_when_prior_metadata_names_another_database(tmp_path, postgres_server):
+    pair = Pair(tmp_path, postgres_server)
+    pair.build()
+    for project, engine in zip(pair.projects, ("dxt", "dbt")):
+        manifest = project / "state/manifest.json"
+        value = json.loads(manifest.read_text())
+        value["nodes"]["model.materialization_contract.customers"]["database"] = "foreign_catalog"
+        manifest.write_text(json.dumps(value))
+        result = pair.invoke(project, engine, "clone", "--state", str(project / "state"))
+        successful(result)
+        assert pair.query(project, "select * from customers") == [(7,)]
+    pair.results()
+
+
+def test_postgres_clone_missing_state_resource_still_prepares_selected_schema(tmp_path, postgres_server):
+    pair = Pair(tmp_path, postgres_server)
+    pair.build()
+    for project in pair.projects:
+        (project / "models/new.sql").write_text("select 99 as id")
+    pair.clone("--select", "new")
+    assert pair.results()["model.materialization_contract.new"]["message"] == "No-op"
+    for project in pair.projects:
+        assert pair.query(project, f"select schema_name from information_schema.schemata where schema_name='{project.name}'") == [(project.name,)]
+
+
+def test_postgres_clone_uses_physical_relation_name_from_state(tmp_path, postgres_server):
+    pair = Pair(tmp_path, postgres_server)
+    for project in pair.projects:
+        (project / "models/independent.sql").write_text("select 9 as id")
+    pair.build()
+    for project in pair.projects:
+        path = project / "state/manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["nodes"]["model.materialization_contract.customers"]["relation_name"] = manifest["nodes"]["model.materialization_contract.independent"]["relation_name"]
+        path.write_text(json.dumps(manifest))
+    pair.clone("--select", "customers")
+    pair.results()
+    for project in pair.projects:
+        assert pair.query(project, "select * from customers") == [(9,)]

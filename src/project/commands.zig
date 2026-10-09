@@ -651,6 +651,7 @@ pub fn cloneRelations(runtime: Runtime, options: Options, graph: *types.Graph, s
     if (nodes != .object) return error.MalformedStateManifestArtifact;
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb") and !std.mem.eql(u8, graph.adapter_type, "postgres")) return error.UnsupportedAdapterExecution;
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
+    try clone_materialization.prepareSchemas(runtime, graph, selected, db_path);
     var rows: std.ArrayList(results.NodeResult) = .empty;
     defer rows.deinit(runtime.allocator);
     var outcomes: std.ArrayList(clone_materialization.Outcome) = .empty;
