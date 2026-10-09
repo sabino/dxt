@@ -90,6 +90,6 @@ fn write(allocator: std.mem.Allocator, writer: *std.Io.Writer, value: expression
             }
             try writer.writeByte('}');
         },
-        .undefined, .conditional_undefined, .complex, .callable => return error.JinjaTypeError,
+        .undefined, .conditional_undefined, .capture_undefined, .complex, .callable => return error.JinjaTypeError,
     }
 }

@@ -10,6 +10,14 @@ pub fn cloneValue(allocator: std.mem.Allocator, value: Value) anyerror!Value {
         .string => |text| .{ .string = try allocator.dupe(u8, text) },
         .integer => |text| .{ .integer = try allocator.dupe(u8, text) },
         .callable => |name| .{ .callable = try allocator.dupe(u8, name) },
+        .capture_undefined => |original| blk: {
+            const copied = try allocator.create(expression.CaptureUndefined);
+            copied.* = original.*;
+            copied.allocator = allocator;
+            copied.name = if (original.name) |name| try allocator.dupe(u8, name) else null;
+            copied.hint = if (original.hint) |hint| try allocator.dupe(u8, hint) else null;
+            break :blk .{ .capture_undefined = copied };
+        },
         .list, .tuple => |items| blk: {
             const copied = try expression.allocateValues(allocator, items.len);
             for (items, copied) |item, *copy| copy.* = try cloneValue(allocator, item);
@@ -478,4 +486,18 @@ test "macro value cloning preserves tuple keys and NaN key identity" {
     try std.testing.expectEqualStrings("nan", (try expression.mappingGet(copied, nan)).string);
     const another_nan = try expression.floatValue(allocator, std.math.nan(f64));
     try std.testing.expect((try expression.mappingGet(copied, another_nan)) == .undefined);
+}
+
+test "capture Undefined cloning owns payload and preserves scalar identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const original = try expression.captureUndefined(allocator, "missing");
+    original.capture_undefined.hint = "context";
+    const copied = try cloneValue(allocator, original);
+    try std.testing.expect(copied.capture_undefined != original.capture_undefined);
+    try std.testing.expectEqual(original.capture_undefined.identity, copied.capture_undefined.identity);
+    try std.testing.expectEqualStrings("missing", copied.capture_undefined.name.?);
+    try std.testing.expectEqualStrings("context", copied.capture_undefined.hint.?);
+    try std.testing.expectError(error.JinjaTypeError, @import("context_json.zig").stringify(allocator, copied));
 }

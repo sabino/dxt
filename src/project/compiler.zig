@@ -190,7 +190,7 @@ const CompileContext = struct {
     }
 
     fn host(self: *CompileContext) native_expr.Host {
-        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue };
+        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue, .capture_undefined = self.parse_node != null };
     }
 
     fn evaluate(self: *CompileContext, span: []const u8) !native_expr.Value {
@@ -1205,7 +1205,11 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         const binding = context.bindings.items[index];
         if (std.mem.eql(u8, binding.name, name)) {
             var value = binding.value;
-            while (parts.next()) |attribute| value = value.attribute(attribute);
+            while (parts.next()) |attribute| {
+                if (value == .undefined and context.parse_node != null) value = try native_expr.captureUndefined(allocator, binding.name);
+                value = try native_expr.checkedAttribute(value, attribute);
+                if (value == .undefined and context.parse_node != null) value = try native_expr.captureUndefined(allocator, attribute);
+            }
             return value;
         }
     }
@@ -1251,7 +1255,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         var value = try relationValueForNode(allocator, context.graph, context.node, false);
         if (path.len == 4) return value;
         var attributes = std.mem.splitScalar(u8, path[5..], '.');
-        while (attributes.next()) |attribute| value = value.attribute(attribute);
+        while (attributes.next()) |attribute| value = try native_expr.checkedAttribute(value, attribute);
         return value;
     }
     if (std.mem.eql(u8, path, "target") and context.graph.target_context != .null) return try valueFromJson(allocator, context.graph.target_context);
@@ -1361,6 +1365,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         binding_index -= 1;
         if (!std.mem.eql(u8, context.bindings.items[binding_index].name, name[0..root_end])) continue;
         const bound = try resolveExpressionValue(context, name, allocator);
+        if (bound == .capture_undefined) return bound;
         const callable = native_expr.callableName(bound);
         if (callable) |function| if (!std.mem.eql(u8, function, name)) return try callExpressionValue(context, function, args, allocator);
         if (root_end == name.len and callable == null) return error.JinjaTypeError;
@@ -1577,8 +1582,12 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
                 forwarded[args.len] = .{ .name = "caller_sql", .value = try resolveExpressionValue(context, "__dxt_caller_sql", allocator) };
                 return try hooks.call(hooks.context, name, forwarded, allocator);
             }
-            return try hooks.call(hooks.context, name, args, allocator);
+            return hooks.call(hooks.context, name, args, allocator) catch |err| {
+                if (err == error.UnresolvedMacro and context.parse_node != null) return try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name);
+                return err;
+            };
         }
+        if (context.parse_node != null) return try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name);
         return error.UnresolvedMacro;
     }
     const macro = findMacroByUniqueId(context.graph, macro_id.?) orelse return error.UnresolvedMacro;
@@ -4270,4 +4279,19 @@ test "compiler rejects positional config dictionaries with nonstring keys" {
     var node = Node{ .unique_id = "model.fixture.keys", .package_name = "fixture", .name = "keys", .path = "keys.sql", .original_file_path = "models/keys.sql", .raw_code = "" };
     try std.testing.expectError(error.InvalidJinjaArguments, scanMacroDependencies(allocator, &graph, &node, "invalid_config", &.{}));
     try std.testing.expectError(error.InvalidJinjaArguments, scanDependencies(allocator, "{{ config ( {1: 'table'}) }}select 1", &node, &graph));
+}
+
+test "compiler parse context captures unknown calls and bound Undefined attributes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "fixture" };
+    defer graph.deinit();
+    var node = Node{ .unique_id = "model.fixture.capture", .package_name = "fixture", .name = "capture", .path = "capture.sql", .original_file_path = "models/capture.sql", .raw_code = "" };
+    try scanDependencies(allocator, "{% set captured = missing %}{{ config(tags=[captured().next.name]) }}select 1", &node, &graph);
+    try std.testing.expectEqualStrings("next", @import("config_value.zig").get(node.inline_config, "tags").?.array.items[0].string);
+    node.raw_code = "{{ missing }}select 1";
+    try std.testing.expectEqualStrings("select 1", try compileModel(allocator, &graph, &node));
+    node.raw_code = "{% set captured = missing %}{{ captured.deep }}";
+    try std.testing.expectError(error.UndefinedJinjaValue, compileModel(allocator, &graph, &node));
 }
