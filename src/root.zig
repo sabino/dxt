@@ -20,6 +20,49 @@ pub const ExitCode = enum(u8) {
 };
 
 pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, runtime: ?Runtime) !ExitCode {
+    const rt = runtime orelse return runCommand(args, stdout, stderr, runtime);
+    var json_logs = false;
+    for (args, 0..) |arg, index| if (equals(arg, "--log-format") and index + 1 < args.len) {
+        json_logs = equals(args[index + 1], "json");
+    };
+    if (!json_logs or args.len < 2 or hasHelp(args[1..])) return runCommand(args, stdout, stderr, runtime);
+    const events = @import("project/concurrent_runner.zig");
+    const options = project.Options{ .log_format = .json };
+    const started = std.Io.Timestamp.now(rt.io, .awake);
+    try events.emitEvent(rt, options, stderr, "CommandStart", args[1], "started", 0, 0);
+    var diagnostics: Io.Writer.Allocating = .init(rt.allocator);
+    defer diagnostics.deinit();
+    const code = runCommand(args, stdout, &diagnostics.writer, runtime) catch |err| {
+        try emitBufferedDiagnostics(rt, stderr, diagnostics.written());
+        try events.emitEvent(rt, options, stderr, "CommandFinished", args[1], "error", 0, @as(f64, @floatFromInt(started.durationTo(std.Io.Timestamp.now(rt.io, .awake)).nanoseconds)) / std.time.ns_per_s);
+        return err;
+    };
+    try emitBufferedDiagnostics(rt, stderr, diagnostics.written());
+    try events.emitEvent(rt, options, stderr, "CommandFinished", args[1], if (code == .ok) "success" else "error", 0, @as(f64, @floatFromInt(started.durationTo(std.Io.Timestamp.now(rt.io, .awake)).nanoseconds)) / std.time.ns_per_s);
+    return code;
+}
+
+fn emitBufferedDiagnostics(runtime: Runtime, writer: *Io.Writer, text: []const u8) !void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (line[0] == '{') {
+            try writer.print("{s}\n", .{line});
+            continue;
+        }
+        try writer.writeAll("{\"data\":{\"message\":");
+        try std.json.Stringify.value(line, .{}, writer);
+        try writer.writeAll("},\"info\":{\"name\":\"Diagnostic\",\"level\":");
+        try std.json.Stringify.value(if (std.mem.startsWith(u8, line, "error:")) "error" else "info", .{}, writer);
+        try writer.writeAll(",\"thread\":\"MainThread\",\"ts\":");
+        try @import("project/execution_clock.zig").writeTimestamp(writer, @import("project/execution_clock.zig").now(runtime.io));
+        try writer.writeAll(",\"invocation_id\":");
+        if (runtime.invocation) |invocation| try std.json.Stringify.value(&invocation.id, .{}, writer) else try writer.writeAll("null");
+        try writer.writeAll("}}\n");
+    }
+}
+
+fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, runtime: ?Runtime) !ExitCode {
     if (args.len <= 1) {
         try printRootHelp(stdout);
         return .ok;
@@ -444,6 +487,8 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.NativeDuckDbAbiMismatch => stderr.writeAll("error: native DuckDB library does not provide the required C API\n") catch {},
         error.NativeDuckDbConnectionFailed => stderr.writeAll("error: native DuckDB connection failed\n") catch {},
         error.NativeDuckDbReadOnlyConnection => stderr.writeAll("error: DuckDB connection permits read-only queries\n") catch {},
+        error.InvalidThreadCount => stderr.writeAll("error: --threads must be an integer between 1 and 256\n") catch {},
+        error.InvalidLogFormat => stderr.writeAll("error: --log-format must be text or json\n") catch {},
         error.InvalidDuckDbBackend => stderr.writeAll("error: DXT_DUCKDB_BACKEND must be auto, native, or cli\n") catch {},
         error.NativePostgresLibraryNotFound => stderr.writeAll("error: native PostgreSQL library unavailable; install libpq or set DXT_POSTGRES_LIBRARY\n") catch {},
         error.NativePostgresAbiMismatch => stderr.writeAll("error: native PostgreSQL library does not provide the required libpq API\n") catch {},
@@ -589,8 +634,11 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
                 if (mode == .common_only or mode == .clean or mode == .docs_serve) return error.UnsupportedCommandOption;
                 if (!equals(value, "eager") and !equals(value, "cautious") and !equals(value, "buildable") and !equals(value, "empty")) return error.UnsupportedIndirectSelection;
                 options.indirect_selection = value;
+            } else if (equals(arg, "--log-format")) {
+                if (equals(value, "json")) options.log_format = .json else if (equals(value, "text")) options.log_format = .text else return error.InvalidLogFormat;
             } else if (equals(arg, "--threads")) {
                 if (mode == .common_only or mode == .clean) return error.UnsupportedCommandOption;
+                _ = try @import("project/concurrent_runner.zig").parseThreadCount(value);
                 options.threads = value;
             } else if (equals(arg, "--target-path")) {
                 options.target_path = value;
@@ -627,7 +675,9 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             continue;
         }
         if (isFlag(arg, mode)) {
-            if (equals(arg, "--full-refresh")) {
+            if (equals(arg, "--fail-fast")) {
+                options.fail_fast = true;
+            } else if (equals(arg, "--full-refresh")) {
                 options.full_refresh = true;
             } else if (equals(arg, "--defer") or equals(arg, "--no-defer")) {
                 options.defer_enabled = equals(arg, "--defer");
@@ -670,6 +720,7 @@ fn validateSelector(value: []const u8) !void {
 }
 
 fn requiresValue(arg: []const u8, mode: OptionMode) bool {
+    if (equals(arg, "--log-format")) return true;
     if (mode == .init) return equals(arg, "--project-dir") or equals(arg, "--profiles-dir");
     if (mode == .debug) return equals(arg, "--project-dir") or equals(arg, "--profiles-dir") or equals(arg, "--profile") or equals(arg, "--target");
     if (mode == .operation and (equals(arg, "--state") or equals(arg, "--defer-state") or equals(arg, "--indirect-selection"))) return false;
@@ -712,6 +763,7 @@ fn isOptionLike(arg: []const u8) bool {
 }
 
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
+    if (equals(arg, "--fail-fast") and (mode == .build or mode == .seed or mode == .test_command or mode == .retry)) return true;
     if (mode != .common_only and mode != .clean and mode != .docs_serve and mode != .init and mode != .debug and mode != .operation and mode != .clone and mode != .retry and (equals(arg, "--defer") or equals(arg, "--no-defer") or equals(arg, "--favor-state") or equals(arg, "--no-favor-state"))) return true;
     if ((mode == .build or mode == .compile or mode == .clone) and equals(arg, "--full-refresh")) return true;
     if (mode == .init and equals(arg, "--skip-profile-setup")) return true;
@@ -752,6 +804,8 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
 }
 
 fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !void {
+    try writer.writeAll("  --log-format <text|json>\n");
+    if (mode == .build or mode == .seed or mode == .test_command) try writer.writeAll("  --fail-fast\n");
     try writer.print("Usage: dxt {s} [options]\n\n", .{command});
     if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "seed") or equals(command, "snapshot") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
         if (equals(command, "docs serve")) {

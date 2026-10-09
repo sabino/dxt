@@ -103,6 +103,12 @@ pub const Pool = struct {
         };
     }
 
+    pub fn available(self: *Pool) !bool {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        return try self.load();
+    }
+
     fn loadUncached(self: *Pool) !bool {
         if (self.environment) |environment| {
             if (environment.get("DXT_DUCKDB_BACKEND")) |backend| {
@@ -221,6 +227,7 @@ pub const Connection = struct {
     // Raw SQL diagnostics are memory-only. Public formatters must redact
     // connection paths and secret values before publishing their projection.
     last_error: ?[]const u8 = null,
+    cancellation_token: ?*const std.atomic.Value(bool) = null,
 
     pub fn deinit(self: *Connection) void {
         self.clearError();
@@ -238,6 +245,7 @@ pub const Connection = struct {
     }
 
     pub fn query(self: *Connection, sql: []const u8) !QueryResult {
+        if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
         self.clearError();
         if (self.readonly) {
             var begin_result = try self.queryStatements("begin transaction read only", false);
@@ -266,6 +274,7 @@ pub const Connection = struct {
         var output: QueryResult = .{};
         errdefer output.deinit(self.allocator);
         for (0..count) |index| {
+            if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
             var prepared: Handle = null;
             defer self.api.duckdb_destroy_prepare(&prepared);
             if (self.api.duckdb_prepare_extracted_statement(self.handle, extracted, index, &prepared) != 0) {
@@ -275,6 +284,7 @@ pub const Connection = struct {
             const statement_type = self.api.duckdb_prepared_statement_type(prepared);
             if (self.binding_readonly and (statement_type == 10 or statement_type == 25 or statement_type == 26)) return error.NativeDuckDbReadOnlyConnection;
             if (readonly and statement_type != 1 and statement_type != 4) return error.NativeDuckDbReadOnlyConnection;
+            if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
             var raw: CResult = .{};
             defer self.api.duckdb_destroy_result(&raw);
             if (self.api.duckdb_execute_prepared(prepared, &raw) != 0) {

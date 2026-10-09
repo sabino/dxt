@@ -19,6 +19,11 @@ pub const Session = union(enum) {
     duckdb: DuckDBConnection,
     postgres: PostgresConnection,
 
+    pub fn setCancellationToken(self: *Session, token: *const std.atomic.Value(bool)) void {
+        switch (self.*) {
+            inline else => |*connection| connection.cancellation_token = token,
+        }
+    }
     pub fn deinit(self: *Session) void {
         switch (self.*) {
             inline else => |*connection| connection.deinit(),
@@ -84,9 +89,9 @@ pub const Session = union(enum) {
 };
 
 pub fn nativeDuckDbQuery(runtime: Runtime, path: []const u8, sql: []const u8, readonly: bool) !?QueryResult {
-    if (!readonly and !std.mem.eql(u8, path, ":memory:")) {
+    if (!readonly) {
         if (runtime.adapter_session) |session| switch (session.*) {
-            .duckdb => |*connection| return try connection.query(sql),
+            .duckdb => |*connection| if (connection.memory == std.mem.eql(u8, path, ":memory:")) return try connection.query(sql),
             else => {},
         };
     }

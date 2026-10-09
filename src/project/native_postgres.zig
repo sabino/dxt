@@ -31,6 +31,7 @@ const Api = struct {
 };
 
 pub const Connection = struct {
+    cancellation_token: ?*const std.atomic.Value(bool) = null,
     allocator: std.mem.Allocator,
     library: std.DynLib,
     api: Api,
@@ -65,6 +66,7 @@ pub const Connection = struct {
     }
 
     pub fn query(self: *Connection, sql: []const u8) !QueryResult {
+        if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
         if (std.mem.indexOfScalar(u8, sql, 0) != null) return error.InvalidSqlText;
         const sql_z = try self.allocator.dupeZ(u8, sql);
         defer self.allocator.free(sql_z);

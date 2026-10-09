@@ -21,6 +21,8 @@ const manifest = @import("project/manifest.zig");
 const run_results = @import("project/run_results.zig");
 const selector = @import("project/selector.zig");
 const scheduler = @import("project/scheduler.zig");
+const concurrent_runner = @import("project/concurrent_runner.zig");
+const execution_clock = @import("project/execution_clock.zig");
 const source_freshness = @import("project/source_freshness.zig");
 const state_artifacts = @import("project/state.zig");
 const project_defer = @import("project/defer.zig");
@@ -471,6 +473,12 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected_models, target_dir);
+    if (try concurrent_runner.requested(runtime, options, &graph)) {
+        const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+        defer runtime.allocator.free(db_path);
+        const manifest_path = try writeManifest(runtime, &graph, target_dir);
+        return executeConcurrentCommand(runtime, options, &graph, selected_models, target_dir, manifest_path, db_path, stdout, stderr, "Run");
+    }
     const compile_result = try compileSelectedModels(runtime, &graph, selected_models, target_dir, false, false);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     if (compile_result.count == 0) return error.UnsupportedRunSelection;
@@ -517,6 +525,12 @@ pub fn snapshotRun(runtime: Runtime, options: Options, stdout: *Io.Writer, stder
     defer runtime.allocator.free(ordered);
     for (ordered) |node| try snapshot_runner.validateExecution(&graph, node);
     const target_dir = try targetDir(runtime, options);
+    if (try concurrent_runner.requested(runtime, options, &graph)) {
+        const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+        defer runtime.allocator.free(db_path);
+        const manifest_path = try writeManifest(runtime, &graph, target_dir);
+        return executeConcurrentCommand(runtime, options, &graph, selected, target_dir, manifest_path, db_path, stdout, stderr, "Snapshot");
+    }
     _ = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
@@ -569,6 +583,9 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     const target_dir = try targetDir(runtime, options);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+    if (try concurrent_runner.requested(runtime, options, &graph)) {
+        return executeConcurrentCommand(runtime, options, &graph, selected_seeds, target_dir, manifest_path, db_path, stdout, stderr, "Seed");
+    }
     var executed: std.ArrayList(run_results.NodeResult) = .empty;
     defer {
         deinitRunResults(runtime.allocator, executed.items);
@@ -622,6 +639,13 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     const target_dir = try targetDir(runtime, options);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+    if (try concurrent_runner.requested(runtime, options, &graph)) {
+        const combined = try runtime.allocator.alloc(selector.SelectedResource, selected.len + selected_unit_tests.len);
+        defer runtime.allocator.free(combined);
+        @memcpy(combined[0..selected.len], selected);
+        @memcpy(combined[selected.len..], selected_unit_tests);
+        return executeConcurrentCommand(runtime, options, &graph, combined, target_dir, manifest_path, db_path, stdout, stderr, "Test");
+    }
     var executed: std.ArrayList(run_results.NodeResult) = .empty;
     defer {
         deinitRunResults(runtime.allocator, executed.items);
@@ -660,6 +684,12 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
 
     const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected, target_dir);
+    if (try concurrent_runner.requested(runtime, options, &graph)) {
+        const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+        defer runtime.allocator.free(db_path);
+        const manifest_path = try writeManifest(runtime, &graph, target_dir);
+        return executeConcurrentCommand(runtime, options, &graph, selected, target_dir, manifest_path, db_path, stdout, stderr, "Build");
+    }
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     const selected_kinds = classifyBuildSelection(selected);
@@ -1102,6 +1132,173 @@ fn buildWithUnitTests(runtime: Runtime, options: Options, graph: *Graph, selecte
         try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ failed_tests.failed_tests, failed_tests.total_failures });
         return error.TestFailure;
     }
+}
+
+fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, manifest_path: []const u8, db_path: []const u8, stdout: *Io.Writer, stderr: *Io.Writer, label: []const u8) !void {
+    var resources: std.ArrayList(concurrent_runner.Resource) = .empty;
+    defer resources.deinit(runtime.allocator);
+    for (graph.nodes.items) |*node| {
+        if (!node.enabled or !selectionContains(selected, node.unique_id) or std.mem.eql(u8, node.materialized, "ephemeral")) continue;
+        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot")) return error.UnsupportedBuildSelection;
+        if (!std.mem.eql(u8, node.resource_type, "seed") and node.relation_name == null) node.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
+        try resources.append(runtime.allocator, .{ .node = node });
+    }
+    for (graph.tests.items) |*node| if (selectionContains(selected, node.unique_id)) {
+        try resources.append(runtime.allocator, .{ .generic = node });
+    };
+    for (graph.singular_tests.items) |*node| if (node.enabled and selectionContains(selected, node.unique_id)) {
+        try resources.append(runtime.allocator, .{ .singular = node });
+    };
+    for (graph.unit_tests.items) |*node| if (node.enabled and selectionContains(selected, node.unique_id)) {
+        try resources.append(runtime.allocator, .{ .unit = node });
+    };
+    if (resources.items.len == 0) return error.UnsupportedBuildSelection;
+    // Core creates relation schemas before launching independent resources.
+    // This also avoids concurrent schema creation catalog conflicts in DuckDB.
+    var needs_schemas = false;
+    for (resources.items) |resource| if (resource == .node) {
+        needs_schemas = true;
+    };
+    if (needs_schemas) {
+        var preparation = try @import("project/adapter.zig").openSession(runtime, graph, db_path);
+        defer preparation.deinit();
+        for (resources.items) |resource| if (resource == .node) {
+            const schema = try compiler.relationSchemaForNode(runtime.allocator, graph, resource.node);
+            defer runtime.allocator.free(schema);
+            const quoted = try compiler.quoteIdentifier(runtime.allocator, schema);
+            defer runtime.allocator.free(quoted);
+            const sql = try std.fmt.allocPrint(runtime.allocator, "create schema if not exists {s}", .{quoted});
+            defer runtime.allocator.free(sql);
+            try preparation.execute(sql);
+        };
+    }
+    const summary = try concurrent_runner.run(runtime, graph, options, resources.items, db_path, executeConcurrentResource, stderr);
+    defer runtime.allocator.free(summary.rows);
+    defer deinitRunResults(runtime.allocator, summary.rows);
+    // Publish each job's final compilation only after its arena has transferred
+    // ownership. Skipped nodes keep their parsed relation identity.
+    for (summary.rows) |row| {
+        if (row.node) |original| {
+            const node = @constCast(original);
+            if (row.compiled_code) |sql| {
+                node.compiled_code = try runtime.allocator.dupe(u8, sql);
+                node.compiled = true;
+                const artifact_path = if (node.snapshot_yaml_definition) try std.fmt.allocPrint(runtime.allocator, "{s}/{s}.sql", .{ node.original_file_path, node.name }) else node.original_file_path;
+                defer if (node.snapshot_yaml_definition) runtime.allocator.free(artifact_path);
+                const compiled_path = try pathJoin(runtime.allocator, &.{ target_dir, "compiled", node.package_name, artifact_path });
+                node.compiled_path = compiled_path;
+                if (std.fs.path.dirname(compiled_path)) |parent| try Io.Dir.cwd().createDirPath(runtime.io, parent);
+                try Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = sql });
+            }
+            if (row.relation_name) |relation| {
+                if (node.relation_name) |old| runtime.allocator.free(old);
+                node.relation_name = try runtime.allocator.dupe(u8, relation);
+            }
+            for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
+        }
+    }
+    _ = try writeManifest(runtime, graph, target_dir);
+    try writeRunResults(runtime, target_dir, summary.rows);
+    if (summary.had_execution_error) return failExecution(runtime, target_dir, manifest_path, db_path, summary.rows, stdout, label);
+    try printConcurrentSummary(stdout, resources.items, label);
+    try stdout.print(" against {s}; wrote artifacts into {s}\n", .{ util.normalizeForDisplay(db_path), util.normalizeForDisplay(manifest_path) });
+    if (summary.failed_tests != 0) return error.TestFailure;
+}
+
+fn printConcurrentSummary(stdout: *Io.Writer, resources: []const concurrent_runner.Resource, label: []const u8) !void {
+    var models: usize = 0;
+    var seeds: usize = 0;
+    var tests: usize = 0;
+    var source_tests = true;
+    for (resources) |resource| switch (resource) {
+        .node => |node| {
+            if (std.mem.eql(u8, node.resource_type, "seed")) seeds += 1 else models += 1;
+        },
+        .generic => |node| {
+            tests += 1;
+            if (node.attached_source_unique_id == null) source_tests = false;
+        },
+        .singular, .unit => {
+            tests += 1;
+            source_tests = false;
+        },
+    };
+    if (std.mem.eql(u8, label, "Run")) return stdout.print("Ran {d} model(s)", .{models});
+    if (std.mem.eql(u8, label, "Seed")) return stdout.print("Seeded {d} seed(s)", .{seeds});
+    if (std.mem.eql(u8, label, "Test")) return stdout.print("Tested {d} test(s)", .{tests});
+    if (std.mem.eql(u8, label, "Snapshot")) return stdout.print("Snapshotted {d} snapshot(s)", .{models});
+    if (seeds != 0 and models != 0) return stdout.print("Built {d} seed(s), {d} model(s), and {d} test(s)", .{ seeds, models, tests });
+    if (models != 0) return stdout.print("Built {d} model(s) and {d} test(s)", .{ models, tests });
+    if (seeds != 0) {
+        if (tests != 0) return stdout.print("Built {d} seed(s) and {d} test(s)", .{ seeds, tests });
+        return stdout.print("Built {d} seed(s)", .{seeds});
+    }
+    return stdout.print("Built {d} {s}test(s)", .{ tests, if (source_tests) "source " else "" });
+}
+
+fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, resource: concurrent_runner.Resource, db_path: []const u8, project_dir: []const u8) !run_results.NodeResult {
+    var graph = graph_readonly.*;
+    var output: Io.Writer.Allocating = .init(runtime.allocator);
+    defer output.deinit();
+    var host = try commands.OperationHost.init(runtime, &graph, db_path, &output.writer);
+    defer host.deinit();
+    graph.execution_hooks = host.host();
+    var rows: std.ArrayList(run_results.NodeResult) = .empty;
+    defer rows.deinit(runtime.allocator);
+    if (resource == .node) {
+        const original = resource.node;
+        var node = original.*;
+        const compilation_started = execution_clock.now(runtime.io);
+        compileConcurrentNode(runtime, &graph, &node, db_path) catch |err| {
+            var row = resource.result("error");
+            row.message = try runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource compilation failed");
+            row.compile_started_at = compilation_started;
+            row.compile_completed_at = execution_clock.now(runtime.io);
+            return row;
+        };
+        const compilation_completed = execution_clock.now(runtime.io);
+        try host.commit();
+        const execution = if (std.mem.eql(u8, node.resource_type, "seed")) executeSeedAppendingResult(runtime, db_path, project_dir, &graph, &node, &rows) else executeModelAppendingResult(runtime, db_path, &graph, &node, &rows);
+        _ = execution catch |err| blk: {
+            var row = resource.result("error");
+            row.message = try runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource execution failed");
+            try rows.append(runtime.allocator, row);
+            break :blk false;
+        };
+        var row = rows.items[0];
+        row.node = original;
+        row.compiled_code = node.compiled_code;
+        row.owns_compiled_code = node.compiled_code != null;
+        row.relation_name = node.relation_name;
+        row.owns_relation_name = node.relation_name != null;
+        row.compile_started_at = compilation_started;
+        row.compile_completed_at = compilation_completed;
+        row.compiled_ctes = node.extra_ctes.items;
+        return row;
+    }
+    switch (resource) {
+        .generic => |node| {
+            _ = try appendOneDataTestResult(runtime, db_path, &graph, .{ .generic = @constCast(node) }, &rows);
+        },
+        .singular => |node| {
+            _ = try appendOneDataTestResult(runtime, db_path, &graph, .{ .singular = @constCast(node) }, &rows);
+        },
+        .unit => |node| {
+            _ = try appendOneUnitTestResult(runtime, db_path, &graph, node, &rows);
+        },
+        .node => unreachable,
+    }
+    return rows.items[0];
+}
+
+fn compileConcurrentNode(runtime: Runtime, graph: *const Graph, node: *Node, db_path: []const u8) !void {
+    if (std.mem.eql(u8, node.resource_type, "seed")) return;
+    if (std.mem.eql(u8, node.materialized, "incremental")) node.runtime_is_incremental = try incremental.isIncremental(runtime, db_path, graph, node);
+    const compiled = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, node);
+    node.compiled = true;
+    node.compiled_code = compiled.compiled_code;
+    node.extra_ctes = compiled.extra_ctes;
+    node.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
 }
 
 fn resolveSelection(runtime: Runtime, options: Options) !selector_config.ResolvedSelection {
@@ -1613,7 +1810,7 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
         if (execution.relation_name) |relation_name| runtime.allocator.free(relation_name);
     }
     if (execution.execution_error) {
-        const message = try runtime.allocator.dupe(u8, execution_failure_message);
+        const message = try runtime.allocator.dupe(u8, if (execution.execution_cancelled) "Database query cancelled" else execution_failure_message);
         errdefer runtime.allocator.free(message);
         switch (test_ref) {
             .generic => |test_node| try executed.append(runtime.allocator, .{
@@ -1622,6 +1819,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
                 .message = message,
                 .compiled_code = execution.compiled_code,
                 .owns_compiled_code = true,
+                .compile_started_at = execution.compile_started_at,
+                .compile_completed_at = execution.compile_completed_at,
                 .relation_name = execution.relation_name,
                 .owns_relation_name = execution.relation_name != null,
             }),
@@ -1631,6 +1830,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
                 .message = message,
                 .compiled_code = execution.compiled_code,
                 .owns_compiled_code = true,
+                .compile_started_at = execution.compile_started_at,
+                .compile_completed_at = execution.compile_completed_at,
                 .relation_name = execution.relation_name,
                 .owns_relation_name = execution.relation_name != null,
             }),
@@ -1653,6 +1854,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .failures = execution.failures,
             .compiled_code = execution.compiled_code,
             .owns_compiled_code = true,
+            .compile_started_at = execution.compile_started_at,
+            .compile_completed_at = execution.compile_completed_at,
             .relation_name = execution.relation_name,
             .owns_relation_name = execution.relation_name != null,
         }),
@@ -1663,6 +1866,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .failures = execution.failures,
             .compiled_code = execution.compiled_code,
             .owns_compiled_code = true,
+            .compile_started_at = execution.compile_started_at,
+            .compile_completed_at = execution.compile_completed_at,
             .relation_name = execution.relation_name,
             .owns_relation_name = execution.relation_name != null,
         }),
@@ -1681,10 +1886,12 @@ fn appendOneUnitTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
 fn appendUnitTestExecutionResult(allocator: std.mem.Allocator, unit_test: *const UnitTestDef, execution: duckdb.UnitTestExecutionResult, executed: *std.ArrayList(run_results.NodeResult)) !GenericTestExecutionSummary {
     errdefer allocator.free(execution.compiled_code);
     if (execution.execution_error) {
-        const message = try allocator.dupe(u8, execution_failure_message);
+        const message = try allocator.dupe(u8, if (execution.execution_cancelled) "Database query cancelled" else execution_failure_message);
         errdefer allocator.free(message);
         try executed.append(allocator, .{
             .unit_test_node = unit_test,
+            .compile_started_at = execution.compile_started_at,
+            .compile_completed_at = execution.compile_completed_at,
             .status = "error",
             .message = message,
         });
@@ -1704,6 +1911,8 @@ fn appendUnitTestExecutionResult(allocator: std.mem.Allocator, unit_test: *const
         .failures = execution.failures,
         .compiled_code = execution.compiled_code,
         .owns_compiled_code = true,
+        .compile_started_at = execution.compile_started_at,
+        .compile_completed_at = execution.compile_completed_at,
     });
     return .{
         .failed_tests = if (classification.fails_command) 1 else 0,
@@ -1857,6 +2066,10 @@ fn writeRunResults(runtime: Runtime, target_dir: []const u8, results: []const ru
 
 fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.NodeResult) void {
     for (results) |result| {
+        if (result.owns_compiled_ctes) {
+            for (result.compiled_ctes) |cte| allocator.free(cte.sql);
+            allocator.free(result.compiled_ctes);
+        }
         if (result.owns_compiled_code) {
             if (result.compiled_code) |compiled_code| allocator.free(compiled_code);
         }

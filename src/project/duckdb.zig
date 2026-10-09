@@ -1,4 +1,5 @@
 const std = @import("std");
+const clock = @import("execution_clock.zig");
 const adapter = @import("adapter.zig");
 const catalog = @import("catalog.zig");
 const incremental = @import("incremental.zig");
@@ -23,12 +24,18 @@ pub const GenericTestExecutionResult = struct {
     failures: u64,
     relation_name: ?[]const u8 = null,
     execution_error: bool = false,
+    execution_cancelled: bool = false,
+    compile_started_at: ?i96 = null,
+    compile_completed_at: ?i96 = null,
 };
 
 pub const UnitTestExecutionResult = struct {
     compiled_code: []const u8,
     failures: u64,
     execution_error: bool = false,
+    execution_cancelled: bool = false,
+    compile_started_at: ?i96 = null,
+    compile_completed_at: ?i96 = null,
 };
 
 pub const queryJson = adapter.queryJson;
@@ -84,35 +91,39 @@ pub fn executeSeed(runtime: Runtime, db_path: []const u8, project_dir: []const u
 }
 
 pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const GenericTestNode) !GenericTestExecutionResult {
+    const compilation_started = clock.now(runtime.io);
     const compiled_sql = try renderGenericTestSql(runtime.allocator, graph, test_node);
     errdefer runtime.allocator.free(compiled_sql);
     const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
     defer runtime.allocator.free(execution_sql);
+    const compilation_completed = clock.now(runtime.io);
     const failures = queryGenericTestFailures(runtime, db_path, execution_sql) catch |err| switch (err) {
-        error.DuckDbExecutionFailed => return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
         else => return err,
     };
     const relation_name = syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures) catch |err| switch (err) {
-        error.DuckDbExecutionFailed => return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
         else => return err,
     };
-    return .{ .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
+    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
 }
 
 pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const SingularTestNode) !GenericTestExecutionResult {
+    const compilation_started = clock.now(runtime.io);
     const compiled_sql = try renderSingularTestSql(runtime.allocator, graph, test_node);
     errdefer runtime.allocator.free(compiled_sql);
     const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
     defer runtime.allocator.free(execution_sql);
+    const compilation_completed = clock.now(runtime.io);
     const failures = queryGenericTestFailures(runtime, db_path, execution_sql) catch |err| switch (err) {
-        error.DuckDbExecutionFailed => return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
         else => return err,
     };
     const relation_name = syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures) catch |err| switch (err) {
-        error.DuckDbExecutionFailed => return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
         else => return err,
     };
-    return .{ .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
+    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
 }
 
 pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !void {
@@ -120,17 +131,19 @@ pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Gra
 }
 
 pub fn executeUnitTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, unit_test: *const UnitTestDef) !UnitTestExecutionResult {
+    const compilation_started = clock.now(runtime.io);
     // Supported dict fixtures construct every relation in an isolated connection.
     // Failed SQL must never replace or alter relations in the target database.
     _ = db_path;
     const planned = try unit_test_plan.renderUnitTestSql(runtime.allocator, graph, unit_test);
     defer runtime.allocator.free(planned.execution_sql);
     errdefer runtime.allocator.free(planned.compiled_code);
+    const compilation_completed = clock.now(runtime.io);
     const failures = queryUnitTestFailures(runtime, ":memory:", planned.execution_sql) catch |err| switch (err) {
-        error.DuckDbExecutionFailed => return .{ .compiled_code = planned.compiled_code, .failures = 0, .execution_error = true },
+        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = planned.compiled_code, .failures = 0, .execution_error = true },
         else => return err,
     };
-    return .{ .compiled_code = planned.compiled_code, .failures = failures };
+    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = planned.compiled_code, .failures = failures };
 }
 
 fn syncTestFailureRelation(runtime: Runtime, db_path: []const u8, config: types.GenericTestConfig, alias: []const u8, compiled_sql: []const u8, failures: u64) !?[]const u8 {

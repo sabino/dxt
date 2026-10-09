@@ -33,6 +33,8 @@ pub const NodeResult = struct {
     compile_started_at: ?i96 = null,
     compile_completed_at: ?i96 = null,
     adapter_response: ?AdapterResponse = null,
+    compiled_ctes: []const types.ExtraCte = &.{},
+    owns_compiled_ctes: bool = false,
 };
 
 pub const AdapterResponse = struct {
