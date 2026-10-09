@@ -12,6 +12,11 @@ const UnitTestDef = types.UnitTestDef;
 const Runtime = types.Runtime;
 const clock = @import("execution_clock.zig");
 
+pub const LogMessage = struct {
+    message: []const u8,
+    level: []const u8,
+};
+
 pub const NodeResult = struct {
     operation_id: ?[]const u8 = null,
     node: ?*const Node = null,
@@ -37,6 +42,8 @@ pub const NodeResult = struct {
     owns_compiled_ctes: bool = false,
     log_output: ?[]const u8 = null,
     owns_log_output: bool = false,
+    log_events: []const LogMessage = &.{},
+    owns_log_events: bool = false,
 };
 
 pub const AdapterResponse = struct {
