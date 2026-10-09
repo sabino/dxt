@@ -18,6 +18,13 @@ def native_binary():
 
 
 EXPRESSIONS = [
+    "2 ** 3 ** 2",
+    "-2 ** 2",
+    "3 * 2 ** 3 + 1",
+    "2 ** -1",
+    "2 ** (3 ** 2)",
+    "2 ** 3 | int",
+    "0 ** -1 if false else 8",
     "['A','B'] | map('lower') | list",
     "[[1,2],[3,4]] | map(attribute=0) | list",
     "[{'name':'Ada'},{}] | map(attribute='name',default='missing') | list",
@@ -106,7 +113,7 @@ def test_native_expression_matches_core(tmp_path, core_runner, expression):
     contracts.assert_artifact(root / "native/run_results.json")
 
 
-@pytest.mark.parametrize("expression", ["[1,2][::0]", "[1,'a'] | sort", "[1,2] | map() | list", "[1,2].index(9)", "'abc'.index('z')", "{}.get('x', default=1)", "'abc'.split(foo=1)", "'abc'.split(',',sep=',')", "'abc'.split('')"])
+@pytest.mark.parametrize("expression", ["0 ** -1", "[1,2][::0]", "[1,'a'] | sort", "[1,2] | map() | list", "[1,2].index(9)", "'abc'.index('z')", "{}.get('x', default=1)", "'abc'.split(foo=1)", "'abc'.split(',',sep=',')", "'abc'.split('')"])
 def test_invalid_collection_expression_fails_like_core(tmp_path, core_runner, expression):
     root = tmp_path / "project"
     write_project(root, expression)

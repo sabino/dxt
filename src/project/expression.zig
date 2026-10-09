@@ -234,7 +234,7 @@ const Parser = struct {
     }
 
     fn readOperator(self: *Parser) ?[]const u8 {
-        for ([_][]const u8{ "or", "and", "not in", "in", "is", "==", "!=", "<=", ">=", "<", ">", "~", "+", "-", "//", "*", "/", "%" }) |op| {
+        for ([_][]const u8{ "or", "and", "not in", "in", "is", "==", "!=", "<=", ">=", "<", ">", "~", "+", "-", "//", "**", "*", "/", "%" }) |op| {
             if (self.take(op)) return op;
         }
         return null;
@@ -730,6 +730,7 @@ fn rank(op: []const u8) u8 {
     if (std.mem.eql(u8, op, "and")) return 2;
     if (std.mem.eql(u8, op, "is") or std.mem.eql(u8, op, "in") or std.mem.eql(u8, op, "not in") or std.mem.indexOfScalar(u8, "=!<>", op[0]) != null) return 3;
     if (std.mem.eql(u8, op, "~") or std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-")) return 4;
+    if (std.mem.eql(u8, op, "**")) return 6;
     return 5;
 }
 fn numeric(v: Value) !f64 {
@@ -784,6 +785,12 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     }
     const x = try numeric(a);
     const y = try numeric(b);
+    if (std.mem.eql(u8, op, "**")) {
+        if (x == 0 and y < 0) return error.JinjaDivisionByZero;
+        const powered = std.math.pow(f64, x, y);
+        if (std.math.isNan(powered)) return error.JinjaTypeError;
+        return .{ .number = powered };
+    }
     if ((std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "//") or std.mem.eql(u8, op, "%")) and y == 0) return error.JinjaDivisionByZero;
     return .{ .number = if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else if (std.mem.eql(u8, op, "//")) @floor(x / y) else if (std.mem.eql(u8, op, "%")) x - @floor(x / y) * y else return error.InvalidJinjaExpression };
 }
@@ -1202,4 +1209,18 @@ test "collection expressions preserve ordering, missing values and lazy branches
     try std.testing.expect((try evaluate(a, "{} is mapping and [1,2] is sequence and 3 is odd", null)).boolean);
     try std.testing.expectError(error.InvalidJinjaArguments, evaluate(a, "[1,2][::0]", null));
     try std.testing.expectError(error.JinjaTypeError, evaluate(a, "[1,'a'] | sort", null));
+}
+
+// Jinja's parse_pow loop is deliberately left associative and binds below
+// unary signs; matching Python's different exponent precedence changes macros.
+test "power follows Core Jinja precedence, associativity and lazy evaluation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(f64, 64), (try evaluate(a, "2 ** 3 ** 2", null)).number);
+    try std.testing.expectEqual(@as(f64, 4), (try evaluate(a, "-2 ** 2", null)).number);
+    try std.testing.expectEqual(@as(f64, 24), (try evaluate(a, "3 * 2 ** 3", null)).number);
+    try std.testing.expectEqual(@as(f64, 0.5), (try evaluate(a, "2 ** -1", null)).number);
+    try std.testing.expect(!(try evaluate(a, "false and 0 ** -1", null)).truthy());
+    try std.testing.expectError(error.JinjaDivisionByZero, evaluate(a, "0 ** -1", null));
 }

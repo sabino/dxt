@@ -614,9 +614,9 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedSourceFreshnessAdapter => stderr.writeAll("error: source freshness currently supports only DuckDB sources\n") catch {},
         error.UnsupportedSourceFreshnessSelection => stderr.writeAll("error: source freshness currently supports only selected source resources\n") catch {},
         error.UnsupportedSourceFreshness => stderr.writeAll("error: source freshness currently requires loaded_at_field or loaded_at_query and complete freshness thresholds\n") catch {},
-        error.UnsupportedModelMaterialization => stderr.writeAll("error: unsupported model materialization; DuckDB supports table, view, and incremental\n") catch {},
+        error.UnsupportedModelMaterialization => stderr.writeAll("error: unsupported model materialization for the selected adapter\n") catch {},
         error.UnsupportedIncrementalStrategy => stderr.writeAll("error: dbt-duckdb incremental strategies supported: append, delete+insert, default\n") catch {},
-        error.UnsupportedBuildModelMaterialization => stderr.writeAll("error: unsupported build model materialization; DuckDB supports table, view, and incremental\n") catch {},
+        error.UnsupportedBuildModelMaterialization => stderr.writeAll("error: unsupported build model materialization for the selected adapter\n") catch {},
         error.UnsupportedDuckDbPath => stderr.writeAll("error: this DuckDB execution slice supports only local DuckDB database file paths\n") catch {},
         error.CyclicModelDependency => stderr.writeAll("error: selected model graph contains a cycle\n") catch {},
         error.DuckDbCliNotFound => stderr.writeAll("error: DuckDB execution requires libduckdb or the duckdb CLI on PATH\n") catch {},
@@ -664,7 +664,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
             stderr.writeAll("error: one or more source freshness checks failed\n") catch {};
             return .failure;
         },
-        error.UnsupportedModelExecution => stderr.writeAll("error: model execution requires a DuckDB adapter and materialization runner; not implemented yet\n") catch {},
+        error.UnsupportedModelExecution => stderr.writeAll("error: model execution is unavailable for the selected adapter\n") catch {},
         error.UnsupportedSeedExecution => stderr.writeAll("error: seed/build currently executes only DuckDB CSV seeds with supported quote_columns and column_types settings\n") catch {},
         error.UnsupportedTestExecution => stderr.writeAll("error: test/build currently executes only selected DuckDB singular SQL tests, supported custom generic column tests, and model/seed/source not_null/unique/accepted_values/relationships column tests\n") catch {},
         error.UnsupportedUnitTestExecution => stderr.writeAll("error: unit test execution currently supports only dict row fixtures for literal ref/source inputs and expected rows\n") catch {},
