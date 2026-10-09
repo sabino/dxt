@@ -162,6 +162,10 @@ jobs:
           cp vendor/libpg_query/LICENSE "dist/${name}/docs/licenses/libpg_query-LICENSE"
           cp vendor/libpg_query/THIRD_PARTY_LICENSES.txt "dist/${name}/docs/licenses/libpg_query-THIRD_PARTY_LICENSES.txt"
           cp vendor/libpg_query/provenance.json "dist/${name}/docs/licenses/libpg_query-provenance.json"
+          cp vendor/dbt-includes/provenance.json "dist/${name}/docs/licenses/dbt-includes-provenance.json"
+          for package in dbt dbt_duckdb dbt_postgres; do
+            cp "vendor/dbt-includes/${package}/LICENSE" "dist/${name}/docs/licenses/${package}-LICENSE"
+          done
           test ! -f LICENSE || cp LICENSE "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           tar -tzf "dist/${name}.tar.gz"
