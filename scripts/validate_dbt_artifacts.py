@@ -43,8 +43,19 @@ def validate_artifact(artifact):
 def assert_artifact(path):
     errors = validate_artifact(json.loads(Path(path).read_text(encoding="utf-8")))
     if errors:
-        details = "\n".join(f"{'.'.join(map(str, error.absolute_path))}: {error.message}" for error in errors)
+        details = "\n".join(f"{'.'.join(map(str, error.absolute_path))}: {error.message}" for top in errors for error in focused_errors(top))
         raise AssertionError(f"{Path(path).name} fails its complete upstream artifact schema:\n{details}")
+
+
+def focused_errors(error):
+    """Report the resource's union branch while validating the entire contract."""
+    resource = error.instance.get("resource_type") if isinstance(error.instance, dict) else None
+    branches = error.schema.get(error.validator, []) if error.validator in {"anyOf", "oneOf"} else []
+    matching = [i for i, branch in enumerate(branches)
+                if resource is not None and branch.get("properties", {}).get("resource_type", {}).get("const") == resource]
+    if matching:
+        return [leaf for child in error.context if child.schema_path[0] in matching for leaf in focused_errors(child)]
+    return [error]
 
 
 def main():

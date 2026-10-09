@@ -998,8 +998,8 @@ fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const
     try writeSeedColumnTypes(writer, node.seed_column_types.items);
     try writer.writeAll("},\"docs\":");
     try writeDocsConfig(writer, node.docs);
-    try writer.writeAll(",\"depends_on\":{\"macros\":[],\"nodes\":");
-    try json.stringArray(writer, node.depends_on.items);
+    try writer.writeAll(",\"depends_on\":{\"macros\":");
+    try json.stringArray(writer, node.macro_depends_on.items);
     try writer.writeAll("}}");
 }
 
