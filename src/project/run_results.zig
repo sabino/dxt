@@ -257,6 +257,11 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
     try json.string(writer, @tagName(opts.log_format));
     try writer.print(",\"quiet\":{s},\"write_json\":{s},\"warn_error\":{s},\"version_check\":{s}", .{ if (opts.quiet) "true" else "false", if (opts.write_json) "true" else "false", if (opts.warn_error) "true" else "false", if (opts.version_check) "true" else "false" });
     try writer.print(",\"debug\":{s}", .{if (opts.debug) "true" else "false"});
+    if (opts.single_threaded) try writer.writeAll(",\"single_threaded\":true");
+    if (opts.record_timing_info) |path| {
+        try writer.writeAll(",\"record_timing_info\":");
+        try json.string(writer, path);
+    }
     try writer.print(",\"use_colors\":{s},\"use_colors_file\":{s},\"print\":{s}", .{ if (opts.use_colors) "true" else "false", if (opts.use_colors_file) "true" else "false", if (opts.print_enabled) "true" else "false" });
     try writer.writeAll(",\"warn_error_options\":");
     try writeMapping(writer, allocator, opts.warn_error_options);
@@ -307,7 +312,9 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
         if (has_timing) try writer.writeAll(", ");
         try writeTiming(writer, "execute", result.execution_started_at, result.execution_completed_at);
     }
-    try writer.print("], \"thread_id\": \"Thread-{d}\", \"execution_time\": {d}, \"adapter_response\": {{", .{ result.thread_number, result.execution_time });
+    try writer.writeAll("], \"thread_id\": ");
+    if (result.thread_number == 0) try writer.writeAll("\"MainThread\"") else try writer.print("\"Thread-{d}\"", .{result.thread_number});
+    try writer.print(", \"execution_time\": {d}, \"adapter_response\": {{", .{result.execution_time});
     if (result.adapter_response) |response| {
         var fields: usize = 0;
         if (response.message) |message| {

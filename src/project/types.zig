@@ -13,6 +13,7 @@ pub const Runtime = struct {
     session_observer: ?SessionObserver = null,
     invocation_options: ?*const Options = null,
     global_options: ?*const Options = null,
+    timing_profile: ?*@import("timing_profile.zig").Registry = null,
 };
 
 pub const SessionObserver = struct {
@@ -41,6 +42,8 @@ pub const Options = struct {
     indirect_selection: []const u8 = "eager",
     threads: ?[]const u8 = null,
     fail_fast: bool = false,
+    single_threaded: bool = false,
+    record_timing_info: ?[]const u8 = null,
     populate_cache: bool = true,
     cache_selected_only: bool = false,
     log_cache_events: bool = false,
@@ -683,6 +686,7 @@ pub const Graph = struct {
     log_collector: ?*std.ArrayList(@import("run_results.zig").LogMessage) = null,
     invocation: ?*const @import("invocation.zig").Metadata = null,
     command_options: Options = .{},
+    timing_profile: ?*@import("timing_profile.zig").Registry = null,
     allocator: std.mem.Allocator,
     environment: ?*const std.process.Environ.Map = null,
     execution_hooks: ?@import("expression.zig").Host = null,

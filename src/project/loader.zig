@@ -67,7 +67,7 @@ pub fn loadConnectionGraph(base_runtime: Runtime, options: Options) !Graph {
     runtime.global_options = &options;
     var config = try loadProjectConfig(runtime, options.project_dir);
     defer deinitProjectConfig(runtime.allocator, &config);
-    var graph = Graph{ .allocator = runtime.allocator, .environment = runtime.environment, .invocation = runtime.invocation, .command_options = options, .project_name = config.name };
+    var graph = Graph{ .allocator = runtime.allocator, .environment = runtime.environment, .invocation = runtime.invocation, .command_options = options, .timing_profile = runtime.timing_profile, .project_name = config.name };
     errdefer graph.deinit();
     const identity = (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) orelse return error.MissingProfileFile;
     graph.adapter_type = identity.adapter_type;
@@ -83,6 +83,8 @@ pub fn loadConnectionGraph(base_runtime: Runtime, options: Options) !Graph {
 }
 
 pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) !Graph {
+    const timing = try @import("timing_profile.zig").start(base_runtime.timing_profile, .{ .filename = @src().file, .line = @src().line, .function = "loadGraph" });
+    defer timing.finish();
     var runtime = base_runtime;
     runtime.global_options = &options;
     var cli_vars: std.ArrayList(types.VarEntry) = .empty;
@@ -96,6 +98,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         .environment = runtime.environment,
         .invocation = runtime.invocation,
         .command_options = options,
+        .timing_profile = runtime.timing_profile,
         .project_name = config.name,
         .validate_macro_args = config.validate_macro_args,
         .require_generic_test_arguments_property = config.require_generic_test_arguments_property,

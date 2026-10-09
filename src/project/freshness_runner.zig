@@ -24,6 +24,8 @@ const Job = struct {
     output: ?freshness.CheckResult = null,
 
     fn work(self: *Job) void {
+        const timing = @import("timing_profile.zig").start(self.runtime.timing_profile, .{ .filename = @src().file, .line = @src().line, .function = "FreshnessJob.work" }) catch @import("timing_profile.zig").Span{};
+        defer timing.finish();
         var runtime = self.runtime;
         runtime.allocator = self.arena.allocator();
         const started = clock.now(runtime.io);
@@ -112,7 +114,7 @@ pub fn run(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
     var shared: Shared = .{ .fail_fast = options.fail_fast };
     for (sources, jobs) |source, *job| job.* = .{ .runtime = runtime, .graph = graph, .source = source, .database_path = database_path, .worker = 0, .arena = .init(std.heap.smp_allocator), .shared = &shared };
     defer for (jobs) |*job| job.arena.deinit();
-    const workers = try runtime.allocator.alloc(Worker, @min(threads, jobs.len));
+    const workers = try runtime.allocator.alloc(Worker, if (options.single_threaded) 0 else @min(threads, jobs.len));
     defer runtime.allocator.free(workers);
     for (workers, 0..) |*worker, index| worker.* = .{ .runtime = runtime, .shared = &shared, .jobs = jobs, .number = @intCast(index + 1) };
     defer {
@@ -123,6 +125,15 @@ pub fn run(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
         for (workers) |*worker| if (worker.thread) |thread| thread.join();
     }
     for (workers) |*worker| worker.thread = try std.Thread.spawn(.{}, Worker.work, .{worker});
+    if (options.single_threaded) for (jobs) |*job| {
+        if (shared.stop) break;
+        job.state = .running;
+        job.started_event = true;
+        try runner.emitEvent(runtime, options, events, "NodeStart", job.source.unique_id, "started", 0, 0);
+        job.work();
+        job.state = .finished;
+        if (shared.fail_fast and std.mem.eql(u8, job.output.?.status, "error")) shared.stop = true;
+    };
     var failure = false;
     var completed: usize = 0;
     shared.mutex.lockUncancelable(runtime.io);
@@ -131,7 +142,7 @@ pub fn run(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
         var changed = false;
         for (jobs) |*job| {
             if (job.state == .pending and shared.stop) {
-                try runner.emitEvent(runtime, options, events, "NodeFinished", job.source.unique_id, "skipped", 1, 0);
+                try runner.emitEvent(runtime, options, events, "NodeFinished", job.source.unique_id, "skipped", if (options.single_threaded) 0 else 1, 0);
                 job.state = .done;
                 completed += 1;
                 changed = true;

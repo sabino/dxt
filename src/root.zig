@@ -33,13 +33,26 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
     scoped.allocator = arena.allocator();
     const prepared = @import("project/cli_options.zig").prepare(scoped, args) catch |err| return commandError(err, stderr);
     scoped.global_options = &prepared.options;
+    var timing_profile = @import("project/timing_profile.zig").Registry.init(std.heap.smp_allocator, scoped.io);
+    defer timing_profile.deinit();
+    const profiling = prepared.options.record_timing_info != null and prepared.args.len > 1 and !hasHelp(prepared.args[1..]) and !equals(prepared.args[1], "version") and !equals(prepared.args[1], "--version");
+    if (profiling) scoped.timing_profile = &timing_profile;
+    const timing = try @import("project/timing_profile.zig").start(scoped.timing_profile, .{ .filename = @src().file, .line = @src().line, .function = "runCommand" });
     // Serving is long lived and must publish its listening address immediately.
-    if (prepared.args.len > 2 and equals(prepared.args[1], "docs") and equals(prepared.args[2], "serve")) return runCommand(prepared.args, stdout, stderr, scoped);
+    if (prepared.args.len > 2 and equals(prepared.args[1], "docs") and equals(prepared.args[2], "serve")) {
+        const result = runCommand(prepared.args, stdout, stderr, scoped);
+        timing.finish();
+        if (profiling) try timing_profile.write(prepared.options.record_timing_info.?);
+        return result;
+    }
     var output: Io.Writer.Allocating = .init(scoped.allocator);
     defer output.deinit();
     var diagnostics: Io.Writer.Allocating = .init(scoped.allocator);
     defer diagnostics.deinit();
-    const code = try runPrepared(prepared.args, &output.writer, &diagnostics.writer, scoped);
+    const result = runPrepared(prepared.args, &output.writer, &diagnostics.writer, scoped);
+    timing.finish();
+    if (profiling) try timing_profile.write(prepared.options.record_timing_info.?);
+    const code = try result;
     try @import("project/cli_logs.zig").finish(scoped, prepared.options, prepared.args, stdout, stderr, output.written(), diagnostics.written());
     return code;
 }

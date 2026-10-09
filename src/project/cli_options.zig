@@ -20,7 +20,7 @@ pub fn prepare(runtime: types.Runtime, args: []const []const u8) !Prepared {
                 continue;
             }
         }
-        if (arg.len > 2 and arg[0] == '-' and arg[1] != '-' and (arg[1] == 's' or arg[1] == 'm' or arg[1] == 't')) {
+        if (arg.len > 2 and arg[0] == '-' and arg[1] != '-' and (arg[1] == 's' or arg[1] == 'm' or arg[1] == 't' or arg[1] == 'r')) {
             try expanded.append(a, alias(arg[0..2]));
             try expanded.append(a, arg[2..]);
         } else try expanded.append(a, alias(arg));
@@ -116,6 +116,7 @@ fn defaults(runtime: types.Runtime, command: ?[]const u8) !types.Options {
     options.quiet = try environmentBool(runtime, "DBT_QUIET", false);
     if (eq(options.which, "test") or eq(options.which, "build")) options.store_failures = try environmentBool(runtime, "DBT_STORE_FAILURES", false);
     options.debug = try environmentBool(runtime, "DBT_DEBUG", false);
+    options.single_threaded = try environmentBool(runtime, "DBT_SINGLE_THREADED", false);
     options.write_json = try environmentBool(runtime, "DBT_WRITE_JSON", true);
     options.warn_error = try environmentBool(runtime, "DBT_WARN_ERROR", false);
     options.version_check = try environmentBool(runtime, "DBT_VERSION_CHECK", true);
@@ -134,11 +135,11 @@ fn defaults(runtime: types.Runtime, command: ?[]const u8) !types.Options {
 
 fn universal(options: *types.Options, args: []const []const u8, index: *usize) !bool {
     const arg = args[index.*];
-    if (eq(arg, "--quiet") or eq(arg, "--no-quiet")) options.quiet = eq(arg, "--quiet") else if (eq(arg, "--use-colors") or eq(arg, "--no-use-colors")) options.use_colors = eq(arg, "--use-colors") else if (eq(arg, "--use-colors-file") or eq(arg, "--no-use-colors-file")) options.use_colors_file = eq(arg, "--use-colors-file") else if (eq(arg, "--print") or eq(arg, "--no-print")) options.print_enabled = eq(arg, "--print") else if (eq(arg, "--write-json") or eq(arg, "--no-write-json")) options.write_json = eq(arg, "--write-json") else if (eq(arg, "--version-check") or eq(arg, "--no-version-check")) options.version_check = eq(arg, "--version-check") else if (eq(arg, "--warn-error") or eq(arg, "--no-warn-error")) options.warn_error = eq(arg, "--warn-error") else if (eq(arg, "--debug") or eq(arg, "--no-debug")) options.debug = eq(arg, "--debug") else if (eq(arg, "--log-format") or eq(arg, "--log-format-file") or eq(arg, "--log-level") or eq(arg, "--log-level-file") or eq(arg, "--log-path") or eq(arg, "--log-file-max-bytes") or eq(arg, "--warn-error-options")) {
+    if (eq(arg, "--quiet") or eq(arg, "--no-quiet")) options.quiet = eq(arg, "--quiet") else if (eq(arg, "--use-colors") or eq(arg, "--no-use-colors")) options.use_colors = eq(arg, "--use-colors") else if (eq(arg, "--use-colors-file") or eq(arg, "--no-use-colors-file")) options.use_colors_file = eq(arg, "--use-colors-file") else if (eq(arg, "--print") or eq(arg, "--no-print")) options.print_enabled = eq(arg, "--print") else if (eq(arg, "--write-json") or eq(arg, "--no-write-json")) options.write_json = eq(arg, "--write-json") else if (eq(arg, "--version-check") or eq(arg, "--no-version-check")) options.version_check = eq(arg, "--version-check") else if (eq(arg, "--warn-error") or eq(arg, "--no-warn-error")) options.warn_error = eq(arg, "--warn-error") else if (eq(arg, "--debug") or eq(arg, "--no-debug")) options.debug = eq(arg, "--debug") else if (eq(arg, "--single-threaded") or eq(arg, "--no-single-threaded")) options.single_threaded = eq(arg, "--single-threaded") else if (eq(arg, "--log-format") or eq(arg, "--log-format-file") or eq(arg, "--log-level") or eq(arg, "--log-level-file") or eq(arg, "--log-path") or eq(arg, "--log-file-max-bytes") or eq(arg, "--warn-error-options") or eq(arg, "--record-timing-info")) {
         index.* += 1;
         if (index.* >= args.len) return error.InvalidOption;
         const value = args[index.*];
-        if (eq(arg, "--log-format")) options.log_format = try logFormat(value) else if (eq(arg, "--log-format-file")) options.log_format_file = try fileFormat(value) else if (eq(arg, "--log-level")) options.log_level = try logLevel(value) else if (eq(arg, "--log-level-file")) options.log_level_file = try logLevel(value) else if (eq(arg, "--log-path")) options.log_path = value else if (eq(arg, "--log-file-max-bytes")) options.log_file_max_bytes = try std.fmt.parseInt(u64, value, 10) else options.warn_error_options = value;
+        if (eq(arg, "--log-format")) options.log_format = try logFormat(value) else if (eq(arg, "--log-format-file")) options.log_format_file = try fileFormat(value) else if (eq(arg, "--log-level")) options.log_level = try logLevel(value) else if (eq(arg, "--log-level-file")) options.log_level_file = try logLevel(value) else if (eq(arg, "--log-path")) options.log_path = value else if (eq(arg, "--log-file-max-bytes")) options.log_file_max_bytes = try std.fmt.parseInt(u64, value, 10) else if (eq(arg, "--record-timing-info")) options.record_timing_info = value else options.warn_error_options = value;
     } else return false;
     return true;
 }
@@ -284,6 +285,7 @@ fn alias(value: []const u8) []const u8 {
     if (eq(value, "-x")) return "--fail-fast";
     if (eq(value, "-q")) return "--quiet";
     if (eq(value, "-d")) return "--debug";
+    if (eq(value, "-r")) return "--record-timing-info";
     if (eq(value, "-V") or eq(value, "-v")) return "--version";
     if (eq(value, "-h")) return "--help";
     return value;
@@ -302,7 +304,7 @@ fn commandHint(args: []const []const u8) ?[]const u8 {
     return null;
 }
 fn universalValue(arg: []const u8) bool {
-    for ([_][]const u8{ "--log-format", "--log-format-file", "--log-level", "--log-level-file", "--log-path", "--log-file-max-bytes", "--warn-error-options" }) |name| if (eq(arg, name)) return true;
+    for ([_][]const u8{ "--log-format", "--log-format-file", "--log-level", "--log-level-file", "--log-path", "--log-file-max-bytes", "--warn-error-options", "--record-timing-info" }) |name| if (eq(arg, name)) return true;
     return false;
 }
 fn splitTypes(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
@@ -316,11 +318,11 @@ fn globalFlag(arg: []const u8) bool {
 }
 fn globalKey(arg: []const u8) ?[]const u8 {
     if (globalValue(arg)) return arg;
-    for ([_][]const u8{ "quiet", "use-colors", "use-colors-file", "print", "write-json", "warn-error", "version-check", "debug", "defer", "favor-state", "fail-fast" }) |name| {
+    for ([_][]const u8{ "quiet", "use-colors", "use-colors-file", "print", "write-json", "warn-error", "version-check", "debug", "defer", "favor-state", "fail-fast", "single-threaded" }) |name| {
         if (std.mem.startsWith(u8, arg, "--") and eq(arg[2..], name)) return name;
         if (std.mem.startsWith(u8, arg, "--no-") and eq(arg[5..], name)) return name;
     }
-    for ([_][]const u8{ "--log-format", "--log-format-file", "--log-level", "--log-level-file", "--log-path", "--log-file-max-bytes", "--warn-error-options" }) |name| if (eq(arg, name)) return name;
+    for ([_][]const u8{ "--log-format", "--log-format-file", "--log-level", "--log-level-file", "--log-path", "--log-file-max-bytes", "--warn-error-options", "--record-timing-info" }) |name| if (eq(arg, name)) return name;
     return null;
 }
 fn valueOption(arg: []const u8) bool {

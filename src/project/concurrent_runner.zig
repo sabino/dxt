@@ -68,8 +68,11 @@ const Job = struct {
     project_dir: []const u8,
     database_path: []const u8,
     mode: Mode,
+    single_threaded: bool,
 
     fn work(self: *Job) void {
+        const timing = @import("timing_profile.zig").start(self.runtime.timing_profile, .{ .filename = @src().file, .line = @src().line, .function = "Job.work" }) catch @import("timing_profile.zig").Span{};
+        defer timing.finish();
         const start = clock.now(self.runtime.io);
         const monotonic_start = std.Io.Clock.awake.now(self.runtime.io);
         var runtime = self.runtime;
@@ -81,7 +84,7 @@ const Job = struct {
             failure.message = runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource execution failed") catch null;
             break :blk failure;
         };
-        output.thread_number = self.worker_number;
+        output.thread_number = if (self.single_threaded) 0 else self.worker_number;
         output.execution_started_at = output.compile_completed_at orelse start;
         output.execution_completed_at = clock.now(runtime.io);
         output.execution_time = @as(f64, @floatFromInt(monotonic_start.durationTo(std.Io.Clock.awake.now(runtime.io)).nanoseconds)) / std.time.ns_per_s;
@@ -143,7 +146,7 @@ pub fn parseThreadCount(value: []const u8) !u16 {
 }
 
 pub fn requested(runtime: types.Runtime, options: types.Options, graph: *const types.Graph) !bool {
-    if (try threadCount(options, graph) > 1 or options.fail_fast or options.log_format == .json or std.mem.eql(u8, graph.adapter_type, "postgres") or (graph.database_path != null and std.mem.eql(u8, graph.database_path.?, ":memory:"))) return true;
+    if (try threadCount(options, graph) > 1 or options.single_threaded or options.fail_fast or options.log_format == .json or std.mem.eql(u8, graph.adapter_type, "postgres") or (graph.database_path != null and std.mem.eql(u8, graph.database_path.?, ":memory:"))) return true;
     return if (runtime.duckdb_pool) |pool| try pool.available() else false;
 }
 
@@ -156,7 +159,8 @@ pub fn runCompilation(runtime: types.Runtime, graph: *const types.Graph, options
 }
 
 fn runMode(runtime: types.Runtime, graph: *const types.Graph, options: types.Options, resources: []const Resource, database_path: []const u8, execute: Execute, events: *std.Io.Writer, mode: Mode) !Summary {
-    const count = try threadCount(options, graph);
+    const configured_count = try threadCount(options, graph);
+    const count: u16 = if (options.single_threaded) 1 else configured_count;
     if (mode == .execute and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
         const pool = runtime.duckdb_pool orelse return error.NativeDuckDbPoolRequired;
         if (!try pool.available()) return error.NativeDuckDbLibraryNotFound;
@@ -164,7 +168,7 @@ fn runMode(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
     var shared: Shared = .{};
     const jobs = try runtime.allocator.alloc(Job, resources.len);
     defer runtime.allocator.free(jobs);
-    for (resources, jobs) |resource, *job| job.* = .{ .resource = resource, .arena = .init(std.heap.smp_allocator), .shared = &shared, .runtime = runtime, .graph = graph, .execute = execute, .project_dir = options.project_dir, .database_path = database_path, .mode = mode };
+    for (resources, jobs) |resource, *job| job.* = .{ .resource = resource, .arena = .init(std.heap.smp_allocator), .shared = &shared, .runtime = runtime, .graph = graph, .execute = execute, .project_dir = options.project_dir, .database_path = database_path, .mode = mode, .single_threaded = options.single_threaded };
     defer for (jobs) |*job| {
         job.prerequisites.deinit(runtime.allocator);
         job.arena.deinit();
@@ -197,7 +201,7 @@ fn runMode(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
         var changed = false;
         for (jobs) |*job| {
             if (job.state != .finished) continue;
-            job.thread.?.join();
+            if (job.thread) |thread| thread.join();
             job.thread = null;
             occupied[job.worker_number - 1] = false;
             active -= 1;
@@ -228,9 +232,10 @@ fn runMode(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
             if (job.state != .pending) continue;
             if (!prerequisitesDone(jobs, job.prerequisites.items)) continue;
             if (!stop and !try jobBlocked(runtime.allocator, graph, job, jobs, blocked.items)) continue;
-            const output = job.resource.result("skipped");
+            var output = job.resource.result("skipped");
+            if (options.single_threaded) output.thread_number = 0;
             try rows.append(runtime.allocator, output);
-            try emitEvent(runtime, options, events, "NodeFinished", job.resource.id(), "skipped", 1, 0);
+            try emitEvent(runtime, options, events, "NodeFinished", job.resource.id(), "skipped", output.thread_number, 0);
             job.output = output;
             job.state = .done;
             completed += 1;
@@ -246,10 +251,17 @@ fn runMode(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
                 occupied[index] = true;
                 break;
             };
-            try emitEvent(runtime, options, events, "NodeStart", job.resource.id(), "started", job.worker_number, 0);
+            try emitEvent(runtime, options, events, "NodeStart", job.resource.id(), "started", if (options.single_threaded) 0 else job.worker_number, 0);
             job.state = .running;
-            job.thread = try std.Thread.spawn(.{}, Job.work, .{job});
             active += 1;
+            if (options.single_threaded) {
+                // Core invokes the runner directly on MainThread. Releasing
+                // the supervisor lock allows session observation and completion
+                // to use the same path as worker-thread execution.
+                shared.mutex.unlock(runtime.io);
+                job.work();
+                shared.mutex.lockUncancelable(runtime.io);
+            } else job.thread = try std.Thread.spawn(.{}, Job.work, .{job});
             changed = true;
         };
         if (completed == jobs.len) break;
@@ -460,7 +472,9 @@ pub fn emitLogMessages(runtime: types.Runtime, writer: *std.Io.Writer, id: []con
         try std.json.Stringify.value(if (entry.is_print) "PrintEvent" else if (std.mem.eql(u8, entry.level, "debug")) "JinjaLogDebug" else "JinjaLogInfo", .{}, writer);
         try writer.writeAll(",\"level\":");
         try std.json.Stringify.value(entry.level, .{}, writer);
-        try writer.print(",\"thread\":\"Thread-{d}\",\"ts\":", .{worker});
+        try writer.writeAll(",\"thread\":");
+        if (worker == 0) try writer.writeAll("\"MainThread\"") else try writer.print("\"Thread-{d}\"", .{worker});
+        try writer.writeAll(",\"ts\":");
         try clock.writeTimestamp(writer, clock.now(runtime.io));
         try writer.writeAll(",\"invocation_id\":");
         if (runtime.invocation) |invocation| try std.json.Stringify.value(&invocation.id, .{}, writer) else try writer.writeAll("null");
@@ -482,7 +496,9 @@ fn emitMessages(runtime: types.Runtime, options: types.Options, writer: *std.Io.
         try std.json.Stringify.value(id, .{}, writer);
         try writer.writeAll(",\"msg\":");
         try std.json.Stringify.value(line, .{}, writer);
-        try writer.print("}},\"info\":{{\"name\":\"JinjaLog\",\"level\":\"info\",\"thread\":\"Thread-{d}\",\"ts\":", .{worker});
+        try writer.writeAll("},\"info\":{\"name\":\"JinjaLog\",\"level\":\"info\",\"thread\":");
+        if (worker == 0) try writer.writeAll("\"MainThread\"") else try writer.print("\"Thread-{d}\"", .{worker});
+        try writer.writeAll(",\"ts\":");
         try clock.writeTimestamp(writer, clock.now(runtime.io));
         try writer.writeAll(",\"invocation_id\":");
         if (runtime.invocation) |invocation| try std.json.Stringify.value(&invocation.id, .{}, writer) else try writer.writeAll("null");

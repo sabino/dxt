@@ -276,7 +276,10 @@ fn writeResult(writer: *Io.Writer, result: CheckResult) !void {
     try @import("execution_clock.zig").writeTimestamp(writer, result.execution_started_at);
     try writer.writeAll(", \"completed_at\": ");
     try @import("execution_clock.zig").writeTimestamp(writer, result.execution_completed_at);
-    try writer.print("}}], \"thread_id\": \"Thread-{d}\", \"execution_time\": {d}}}", .{ result.thread_number, result.execution_time });
+    try writer.writeAll("}], \"thread_id\": ");
+    if (result.thread_number == 0) try writer.writeAll("\"MainThread\"") else try writer.print("\"Thread-{d}\"", .{result.thread_number});
+    try writer.print(", \"execution_time\": {d}", .{result.execution_time});
+    try writer.writeByte('}');
 }
 
 fn writeCriteria(writer: *Io.Writer, threshold: FreshnessThreshold) !void {

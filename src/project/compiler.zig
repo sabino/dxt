@@ -345,6 +345,8 @@ pub fn compileModelWithInjectedCtes(allocator: std.mem.Allocator, graph: *const 
 }
 
 fn compileModelBody(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
+    const timing = try @import("timing_profile.zig").start(graph.timing_profile, .{ .filename = @src().file, .line = @src().line, .function = "compileModelBody" });
+    defer timing.finish();
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
 
@@ -1178,6 +1180,8 @@ fn refFromArguments(allocator: std.mem.Allocator, args: []const native_expr.Argu
 const MacroParameter = struct { name: []const u8, default: ?[]const u8 = null };
 
 fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []const native_expr.Argument) anyerror!native_expr.Value {
+    const timing = try @import("timing_profile.zig").start(context.graph.timing_profile, .{ .filename = @src().file, .line = @src().line, .function = "renderMacroValue" });
+    defer timing.finish();
     if (context.macro_render_depth >= max_macro_render_depth) return error.JinjaExpressionDepthExceeded;
     const allocator = context.value_arena.allocator();
     const open_start = std.mem.indexOf(u8, macro.macro_sql, "{%") orelse return error.UnsupportedJinja;

@@ -476,6 +476,14 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
     const which = try allocator.dupe(u8, which_value.string);
     var options = current;
     options.which = which;
+    if (args.get("record_timing_info")) |value| {
+        if (value != .string and value != .null) return error.MalformedRunResultsArtifact;
+        options.record_timing_info = if (value == .string) try allocator.dupe(u8, value.string) else null;
+    }
+    if (args.get("single_threaded")) |value| {
+        if (value != .bool) return error.MalformedRunResultsArtifact;
+        options.single_threaded = value.bool;
+    }
     if (args.get("show")) |value| {
         if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
         options.seed_show = value == .bool and value.bool;
