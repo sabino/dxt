@@ -308,7 +308,7 @@ fn printExtraCommandHelp(command: []const u8, writer: *Io.Writer) !void {
 
 fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
     switch (err) {
-        error.InvalidPackageDeclaration => stderr.writeAll("error: invalid package declaration; use local, git/revision, or package/version entries\n") catch {},
+        error.InvalidPackageDeclaration => stderr.writeAll("error: invalid package declaration; use local, git/private with revision, tarball/name, or package/version entries\n") catch {},
         error.MultiplePackageDeclarations => stderr.writeAll("error: declare dependencies in either packages.yml or dependencies.yml, not both\n") catch {},
         error.UnsupportedProjectDependency => stderr.writeAll("error: project dependencies require a remote service; use local, Git, or Hub packages\n") catch {},
         error.PackageVersionConflict => stderr.writeAll("error: package version constraints conflict or no compatible version exists\n") catch {},
@@ -332,7 +332,9 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.GitPackageFailed => stderr.writeAll("error: Git package transport failed; check repository access\n") catch {},
         error.PackageInstallFailed => stderr.writeAll("error: package installation failed; existing installed packages were preserved\n") catch {},
         error.PackageTransportNotFound => stderr.writeAll("error: deps requires git, curl, tar, and cp transport tools\n") catch {},
-        error.UnsupportedPackageJinja => stderr.writeAll("error: package declarations support literal values and env_var calls only\n") catch {},
+        error.InvalidPackageVariables => stderr.writeAll("error: deps --vars must be a YAML mapping\n") catch {},
+        error.InvalidPackageProvider => stderr.writeAll("error: private package provider must be github, gitlab, or bitbucket\n") catch {},
+        error.PackageRegistryRedirectCycle => stderr.writeAll("error: package Hub redirect contains a cycle or exceeds the redirect limit\n") catch {},
         error.MissingPackageEnvironmentVariable => stderr.writeAll("error: required package environment variable is missing\n") catch {},
         error.MissingProjectFile => stderr.writeAll("error: missing dbt_project.yml\n") catch {},
         error.InvalidProjectName => stderr.writeAll("error: dbt_project.yml must define a non-empty name\n") catch {},

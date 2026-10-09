@@ -5,22 +5,27 @@ const types = @import("types.zig");
 const util = @import("util.zig");
 const config = @import("config.zig");
 const json = @import("json.zig");
+const yaml = @import("yaml.zig");
+const package_render = @import("package_render.zig");
 const Dir = std.Io.Dir;
 const Runtime = types.Runtime;
 
 pub const Options = struct {
     project_dir: []const u8 = ".",
     registry_url: ?[]const u8 = null,
+    vars: ?[]const u8 = null,
     offline: bool = false,
     upgrade: bool = false,
     lock_only: bool = false,
 };
 
-const Kind = enum { local, git, registry };
+const Kind = enum { local, git, registry, tarball, private };
 const Spec = struct {
     kind: Kind,
     source: []const u8,
     unrendered_source: ?[]const u8 = null,
+    provider: ?[]const u8 = null,
+    hash_text: ?[]const u8 = null,
     constraints: std.ArrayList([]const u8) = .empty,
     revision: ?[]const u8 = null,
     subdirectory: ?[]const u8 = null,
@@ -54,13 +59,13 @@ pub fn parseOptions(args: []const []const u8, stderr: *std.Io.Writer) !Options {
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (eq(arg, "--offline")) options.offline = true else if (eq(arg, "--upgrade")) options.upgrade = true else if (eq(arg, "--lock")) options.lock_only = true else if (eq(arg, "--project-dir") or eq(arg, "--registry-url")) {
+        if (eq(arg, "--offline")) options.offline = true else if (eq(arg, "--upgrade")) options.upgrade = true else if (eq(arg, "--lock")) options.lock_only = true else if (eq(arg, "--project-dir") or eq(arg, "--registry-url") or eq(arg, "--vars")) {
             index += 1;
             if (index == args.len or args[index].len == 0 or std.mem.startsWith(u8, args[index], "--")) {
                 try stderr.print("error: option `{s}` requires a value\n", .{arg});
                 return error.InvalidOption;
             }
-            if (eq(arg, "--project-dir")) options.project_dir = args[index] else options.registry_url = args[index];
+            if (eq(arg, "--project-dir")) options.project_dir = args[index] else if (eq(arg, "--vars")) options.vars = args[index] else options.registry_url = args[index];
         } else {
             try stderr.print("error: unsupported deps option `{s}`\n", .{arg});
             return error.InvalidOption;
@@ -74,10 +79,11 @@ pub fn printHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\Usage: dxt deps [options]
         \\
-        \\Resolve packages.yml or dependencies.yml and install locked local, Git and Hub packages.
+        \\Resolve packages.yml or dependencies.yml and install locked local, Git, tarball and Hub packages.
         \\
         \\Options:
         \\  --project-dir <path>
+        \\  --vars <yaml>           Variables for packages.yml Jinja rendering.
         \\  --upgrade              Resolve versions again instead of retaining existing pins.
         \\  --lock                 Write package-lock.yml without changing installed packages.
         \\  --offline              Use local sources and previously downloaded packages only.
@@ -92,8 +98,14 @@ pub fn install(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stder
     const rt: Runtime = .{ .allocator = arena.allocator(), .io = runtime.io, .environment = runtime.environment };
     const root = try Dir.cwd().realPathFileAlloc(rt.io, options.project_dir, rt.allocator);
     const root_config = try config.loadProjectConfig(rt, root);
-    const destination = try installPath(rt, root);
-    const declarations = try loadDeclarations(rt, root);
+    const vars = if (options.vars) |text| blk: {
+        var document = try yaml.parse(rt.allocator, text);
+        defer document.deinit();
+        if (document.value != .object) return error.InvalidPackageVariables;
+        break :blk try package_render.clone(rt.allocator, document.value);
+    } else std.json.Value.null;
+    const destination = try installPathWithVars(rt, root, vars);
+    const declarations = try loadDeclarationsWithVars(rt, root, vars, stderr);
     const hash = try declarationHash(rt.allocator, declarations.specs.items);
     const lock_path = try join(rt, &.{ root, "package-lock.yml" });
     const cached_lock = try optionalRead(rt, lock_path);
@@ -104,7 +116,7 @@ pub fn install(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stder
                 // A stale lock can contain env_var expressions that are no longer required.
                 // Check its hash before rendering or validating those package definitions.
                 if (eq(previous_hash, hash)) {
-                    const locked = parseDeclaration(rt, text) catch return error.InvalidPackageLock;
+                    const locked = parseDeclarationWithVars(rt, text, vars, true, null) catch return error.InvalidPackageLock;
                     pins = locked.specs.items;
                 }
             }
@@ -113,7 +125,7 @@ pub fn install(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stder
     const cache = try join(rt, &.{ root, ".dxt-deps", "cache" });
     try Dir.cwd().createDirPath(rt.io, cache);
     const registry = options.registry_url orelse if (runtime.environment) |environment| environment.get("DBT_PACKAGE_HUB_URL") orelse "https://hub.getdbt.com" else "https://hub.getdbt.com";
-    var solver: Solver = .{ .runtime = rt, .options = options, .root = root, .root_name = root_config.name, .cache = cache, .registry = std.mem.trimEnd(u8, registry, "/"), .pins = pins, .stderr = stderr, .fetched = std.StringHashMap(void).init(rt.allocator) };
+    var solver: Solver = .{ .runtime = rt, .options = options, .root = root, .root_name = root_config.name, .cache = cache, .registry = std.mem.trimEnd(u8, registry, "/"), .pins = pins, .vars = vars, .stderr = stderr, .fetched = std.StringHashMap(void).init(rt.allocator) };
     var requirements: std.ArrayList(Requirement) = .empty;
     for (declarations.specs.items) |spec| try requirements.append(rt.allocator, try solver.requirement(spec, root, null));
     const resolved = try solver.solve(requirements.items, &.{}, 0) orelse return switch (solver.failure) {
@@ -158,13 +170,20 @@ pub fn install(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stder
 
 /// Shared with the loader so custom installation directories participate in parse/compile.
 pub fn installPath(runtime: Runtime, project_dir: []const u8) ![]const u8 {
+    return installPathWithVars(runtime, project_dir, .null);
+}
+
+pub fn installPathWithVars(runtime: Runtime, project_dir: []const u8, vars: std.json.Value) ![]const u8 {
     const text = (try optionalRead(runtime, try join(runtime, &.{ project_dir, "dbt_project.yml" }))) orelse return error.MissingProjectFile;
     var path: []const u8 = "dbt_packages";
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw| {
-        if (util.leadingSpaces(raw) != 0) continue;
-        const kv = util.splitKeyValue(std.mem.trim(u8, util.stripYamlComment(raw), " \r\t")) orelse continue;
-        if (eq(kv.key, "packages-install-path")) path = try scalar(runtime, kv.value);
+    var document = try yaml.parse(runtime.allocator, text);
+    defer document.deinit();
+    if (document.value != .object) return error.InvalidProjectConfig;
+    if (document.value.object.get("packages-install-path")) |value| {
+        var renderer = package_render.Context.init(runtime, vars);
+        const rendered = try renderer.render(value);
+        if (rendered != .string) return error.InvalidPackagesInstallPath;
+        path = rendered.string;
     }
     if (!safeRelativePath(path)) return error.InvalidPackagesInstallPath;
     var first_segment = std.mem.splitScalar(u8, path, '/');
@@ -204,6 +223,7 @@ const Solver = struct {
     cache: []const u8,
     registry: []const u8,
     pins: []const Spec,
+    vars: std.json.Value,
     stderr: *std.Io.Writer,
     failure: Failure = .conflict,
     steps: usize = 0,
@@ -220,6 +240,8 @@ const Solver = struct {
             if (eq(source, self.root)) return error.PackageDependencyCycle;
             if (containsPath(try join(self.runtime, &.{ self.root, ".dxt-deps" }), source)) return error.InvalidLocalPackage;
         }
+        if (spec.kind == .registry) source = (try self.registryInfo(source)).canonical;
+        if (spec.kind == .private) source = try self.gitSource(spec);
         const key = try std.fmt.allocPrint(self.runtime.allocator, "{s}:{s}:{s}", .{ @tagName(spec.kind), source, spec.subdirectory orelse "" });
         return .{ .spec = spec, .base = base, .key = key, .parent = parent };
     }
@@ -267,8 +289,8 @@ const Solver = struct {
             try next_requirements.appendSlice(self.runtime.allocator, requirements);
             const children = if (package.metadata) |metadata| blk: {
                 if (metadata.object.get("packages")) |packages_value| break :blk try parseJsonSpecs(self.runtime, packages_value);
-                break :blk (try loadDeclarations(self.runtime, package.directory)).specs;
-            } else (try loadDeclarations(self.runtime, package.directory)).specs;
+                break :blk (try loadDeclarationsWithVars(self.runtime, package.directory, self.vars, self.stderr)).specs;
+            } else (try loadDeclarationsWithVars(self.runtime, package.directory, self.vars, self.stderr)).specs;
             for (children.items) |child| try next_requirements.append(self.runtime.allocator, try self.requirement(child, package.directory, request.key));
             if (try self.solve(next_requirements.items, next_assigned, depth + 1)) |solution| return solution;
         }
@@ -277,7 +299,7 @@ const Solver = struct {
 
     fn matches(self: *Solver, request: Requirement, package: Resolved) !bool {
         if (request.spec.kind == .registry) return try satisfiesAll(package.version.?, request.spec.constraints.items);
-        if (request.spec.kind == .git) {
+        if (gitLike(request.spec.kind)) {
             const revision = request.spec.revision orelse "HEAD";
             if (eq(revision, package.requirement.spec.revision orelse "HEAD") or eq(revision, package.version.?)) return true;
             const repo = try self.gitRepository(request);
@@ -330,6 +352,43 @@ const Solver = struct {
     }
 
     fn registryMetadata(self: *Solver, source: []const u8) !std.json.Value {
+        return (try self.registryInfo(source)).metadata;
+    }
+
+    fn registryInfo(self: *Solver, original: []const u8) !struct { canonical: []const u8, metadata: std.json.Value } {
+        var source = original;
+        var seen = std.StringHashMap(void).init(self.runtime.allocator);
+        while (seen.count() < 32) {
+            if (seen.contains(source)) return error.PackageRegistryRedirectCycle;
+            try seen.put(source, {});
+            const metadata = try self.registryResponse(source);
+            if (metadata.object.contains("redirectnamespace") or metadata.object.contains("redirectname")) {
+                var pieces = std.mem.splitScalar(u8, source, '/');
+                const old_namespace = pieces.next().?;
+                const old_name = pieces.next().?;
+                const namespace = try metadataString(metadata, "redirectnamespace") orelse try metadataString(metadata, "namespace") orelse old_namespace;
+                const name = try metadataString(metadata, "redirectname") orelse try metadataString(metadata, "name") orelse old_name;
+                const canonical = try std.fmt.allocPrint(self.runtime.allocator, "{s}/{s}", .{ namespace, name });
+                if (!validRegistryName(canonical)) return error.InvalidPackageRegistry;
+                if (!eq(source, canonical)) {
+                    const warning_key = try std.fmt.allocPrint(self.runtime.allocator, "redirect:{s}", .{source});
+                    if (!self.fetched.contains(warning_key)) {
+                        try self.stderr.print("warning: package {s} was renamed to {s}\n", .{ source, canonical });
+                        try self.fetched.put(warning_key, {});
+                    }
+                    // Hub normally embeds version metadata in redirect responses.
+                    // Follow a metadata-only redirect as well, with cycle checks.
+                    if (metadata.object.get("versions")) |versions| if (versions == .object) return .{ .canonical = canonical, .metadata = metadata };
+                    source = canonical;
+                    continue;
+                }
+            }
+            return .{ .canonical = source, .metadata = metadata };
+        }
+        return error.PackageRegistryRedirectCycle;
+    }
+
+    fn registryResponse(self: *Solver, source: []const u8) !std.json.Value {
         if (!validRegistryName(source)) return error.InvalidPackageDeclaration;
         const url = try std.fmt.allocPrint(self.runtime.allocator, "{s}/api/v1/{s}.json", .{ self.registry, source });
         const path = try self.cachePath("metadata", url, ".json");
@@ -352,7 +411,7 @@ const Solver = struct {
                 directory = try Dir.cwd().realPathFileAlloc(self.runtime.io, try rootedPath(self.runtime, self.root, request.spec.source), self.runtime.allocator);
                 if (containsPath(directory, self.root)) return error.InvalidLocalPackage;
             },
-            .git => {
+            .git, .private => {
                 const requested_revision = request.spec.revision orelse "HEAD";
                 if (self.pin(request) == null and request.spec.warn_unpinned != false and (eq(requested_revision, "HEAD") or eq(requested_revision, "main") or eq(requested_revision, "master"))) {
                     const warning_key = try std.fmt.allocPrint(self.runtime.allocator, "warning:{s}", .{request.key});
@@ -390,6 +449,12 @@ const Solver = struct {
                 directory = try self.cachePath("registry-tree", tarball.string, "");
                 if (!exists(self.runtime, try join(self.runtime, &.{ directory, ".dxt-complete" }))) try self.extract(archive, directory, true);
             },
+            .tarball => {
+                const archive = try self.cachePath("archive", request.spec.source, ".tar.gz");
+                if (!exists(self.runtime, archive) or self.options.upgrade) try self.download(request.spec.source, archive);
+                directory = try self.cachePath("tarball-tree", request.spec.source, "");
+                if (self.options.upgrade or !exists(self.runtime, try join(self.runtime, &.{ directory, ".dxt-complete" }))) try self.extract(archive, directory, true);
+            },
         }
         const package_config = config.loadProjectConfig(self.runtime, directory) catch |err| switch (err) {
             error.MissingProjectFile => return error.InvalidPackageProject,
@@ -401,15 +466,24 @@ const Solver = struct {
     }
 
     fn gitRepository(self: *Solver, request: Requirement) ![]const u8 {
-        const path = try self.cachePath("git", request.spec.source, "");
+        const git_source = try self.gitSource(request.spec);
+        const path = try self.cachePath("git", git_source, "");
         if (!exists(self.runtime, path)) {
             if (self.options.offline) return error.PackageOfflineCacheMiss;
             errdefer removeTree(self.runtime, path) catch {};
-            var source = request.spec.source;
+            var source = git_source;
             if (!std.mem.containsAtLeast(u8, source, 1, ":") and !std.fs.path.isAbsolute(source)) source = try join(self.runtime, &.{ self.root, source });
             _ = try self.command(&.{ "git", "clone", "--no-checkout", "--", source, path }, error.GitPackageFailed);
         } else if (self.options.upgrade) _ = try self.command(&.{ "git", "-C", path, "fetch", "--tags", "--force", "origin" }, error.GitPackageFailed);
         return path;
+    }
+
+    fn gitSource(self: *Solver, spec: Spec) ![]const u8 {
+        if (spec.kind != .private or std.mem.containsAtLeast(u8, spec.source, 1, ":") or std.fs.path.isAbsolute(spec.source) or std.mem.startsWith(u8, spec.source, ".")) return spec.source;
+        const provider = spec.provider orelse "github";
+        const host = if (eq(provider, "github")) "github.com" else if (eq(provider, "gitlab")) "gitlab.com" else if (eq(provider, "bitbucket")) "bitbucket.org" else return error.InvalidPackageProvider;
+        if (!safeRelativePath(spec.source) or !std.mem.containsAtLeast(u8, spec.source, 1, "/")) return error.InvalidPackageDeclaration;
+        return try std.fmt.allocPrint(self.runtime.allocator, "https://{s}/{s}{s}", .{ host, spec.source, if (std.mem.endsWith(u8, spec.source, ".git")) "" else ".git" });
     }
 
     fn gitCommit(self: *Solver, repository: []const u8, revision: []const u8) ![]const u8 {
@@ -470,7 +544,7 @@ const Solver = struct {
     }
 
     fn command(self: *Solver, argv: []const []const u8, failure: anyerror) ![]const u8 {
-        const result = std.process.run(self.runtime.allocator, self.runtime.io, .{ .argv = argv, .stdout_limit = .limited(16 * 1024 * 1024), .stderr_limit = .limited(64 * 1024) }) catch |err| switch (err) {
+        const result = std.process.run(self.runtime.allocator, self.runtime.io, .{ .argv = argv, .environ_map = self.runtime.environment, .stdout_limit = .limited(16 * 1024 * 1024), .stderr_limit = .limited(64 * 1024) }) catch |err| switch (err) {
             error.FileNotFound => return error.PackageTransportNotFound,
             else => return err,
         };
@@ -486,142 +560,67 @@ const Solver = struct {
     }
 };
 
-fn loadDeclarations(runtime: Runtime, directory: []const u8) !Declaration {
+fn loadDeclarationsWithVars(runtime: Runtime, directory: []const u8, vars: std.json.Value, stderr: *std.Io.Writer) !Declaration {
     const packages = try optionalRead(runtime, try join(runtime, &.{ directory, "packages.yml" }));
     const dependencies = try optionalRead(runtime, try join(runtime, &.{ directory, "dependencies.yml" }));
     if (packages != null and dependencies != null) return error.MultiplePackageDeclarations;
-    return try parseDeclaration(runtime, packages orelse dependencies orelse "packages: []\n");
+    // Core deliberately keeps dependencies.yml static.
+    var diagnostic: yaml.Diagnostic = .{};
+    return parseDeclarationWithVars(runtime, packages orelse dependencies orelse "packages: []\n", vars, dependencies == null, &diagnostic) catch |err| {
+        if (diagnostic.message.len != 0) try stderr.print("error: invalid YAML in {s} at line {d}, column {d}: {s}\n", .{ if (packages != null) "packages.yml" else "dependencies.yml", diagnostic.line, diagnostic.column, diagnostic.message });
+        return err;
+    };
 }
 
 fn lockHash(runtime: Runtime, text: []const u8) !?[]const u8 {
-    const trimmed = std.mem.trim(u8, text, " \t\r\n");
-    if (trimmed.len != 0 and trimmed[0] == '{') {
-        const parsed = std.json.parseFromSlice(std.json.Value, runtime.allocator, trimmed, .{ .allocate = .alloc_always }) catch return error.InvalidPackageLock;
-        if (parsed.value != .object) return error.InvalidPackageLock;
-        const value = parsed.value.object.get("sha1_hash") orelse return null;
-        if (value != .string) return error.InvalidPackageLock;
-        return value.string;
-    }
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw| {
-        if (util.leadingSpaces(raw) != 0) continue;
-        const kv = util.splitKeyValue(std.mem.trim(u8, util.stripYamlComment(raw), " \t\r")) orelse continue;
-        if (eq(kv.key, "sha1_hash")) return try util.dupTrimmedScalar(runtime.allocator, kv.value);
-    }
-    return null;
+    var document = yaml.parse(runtime.allocator, text) catch return error.InvalidPackageLock;
+    defer document.deinit();
+    if (document.value != .object) return error.InvalidPackageLock;
+    const value = document.value.object.get("sha1_hash") orelse return null;
+    if (value != .string) return error.InvalidPackageLock;
+    return try runtime.allocator.dupe(u8, value.string);
 }
 
 fn parseDeclaration(runtime: Runtime, text: []const u8) !Declaration {
-    const trimmed = std.mem.trim(u8, text, " \t\r\n");
-    if (trimmed.len != 0 and trimmed[0] == '{') {
-        const parsed = std.json.parseFromSlice(std.json.Value, runtime.allocator, trimmed, .{ .allocate = .alloc_always }) catch return error.InvalidPackageDeclaration;
-        if (parsed.value != .object) return error.InvalidPackageDeclaration;
-        if (parsed.value.object.get("projects")) |projects| if (projects != .array or projects.array.items.len != 0) return error.UnsupportedProjectDependency;
-        var declaration: Declaration = .{};
-        if (parsed.value.object.get("packages")) |value| declaration.specs = try parseJsonSpecs(runtime, value);
-        if (parsed.value.object.get("sha1_hash")) |value| {
-            if (value != .string) return error.InvalidPackageLock;
-            declaration.hash = value.string;
-        }
-        return declaration;
-    }
-    var result: Declaration = .{};
-    var current: ?Spec = null;
-    var current_indent: usize = 0;
-    var version_indent: ?usize = null;
-    var in_packages = false;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trimEnd(u8, util.stripYamlComment(raw), " \t\r");
-        const item = std.mem.trimStart(u8, line, " ");
-        if (item.len == 0 or eq(item, "---")) continue;
-        if (std.mem.indexOfScalar(u8, line, '\t') != null) return error.InvalidPackageDeclaration;
-        const indent = util.leadingSpaces(line);
-        if (indent == 0 and !std.mem.startsWith(u8, item, "- ")) {
-            if (current) |package| {
-                try validateSpec(package);
-                try result.specs.append(runtime.allocator, package);
-                current = null;
-            }
-            const kv = util.splitKeyValue(item) orelse return error.InvalidPackageDeclaration;
-            in_packages = eq(kv.key, "packages");
-            version_indent = null;
-            if (in_packages) {
-                if (kv.value.len != 0 and !eq(kv.value, "[]")) return error.InvalidPackageDeclaration;
-            } else if (eq(kv.key, "sha1_hash")) result.hash = try scalar(runtime, kv.value) else if (eq(kv.key, "projects")) {
-                if (!eq(kv.value, "[]")) return error.UnsupportedProjectDependency;
-            } else return error.InvalidPackageDeclaration;
-            continue;
-        }
-        if (!in_packages) return error.InvalidPackageDeclaration;
-        if (std.mem.startsWith(u8, item, "- ")) {
-            if (version_indent) |version_level| {
-                if (indent > version_level) {
-                    try current.?.constraints.append(runtime.allocator, try scalar(runtime, item[2..]));
-                    continue;
-                }
-            }
-            if (current) |package| {
-                try validateSpec(package);
-                try result.specs.append(runtime.allocator, package);
-            }
-            current_indent = indent;
-            version_indent = null;
-            const kv = util.splitKeyValue(item[2..]) orelse return error.InvalidPackageDeclaration;
-            current = try startSpec(runtime, kv.key, kv.value);
-            if (eq(kv.key, "version") and kv.value.len == 0) version_indent = indent + 2;
-        } else {
-            if (current == null or indent <= current_indent) return error.InvalidPackageDeclaration;
-            const kv = util.splitKeyValue(item) orelse return error.InvalidPackageDeclaration;
-            if (eq(kv.key, "version") and kv.value.len == 0) {
-                current.?.version_list = true;
-                version_indent = indent;
-            } else {
-                version_indent = null;
-                try setField(runtime, &current.?, kv.key, kv.value);
-            }
-        }
-    }
-    if (current) |package| {
-        try validateSpec(package);
-        try result.specs.append(runtime.allocator, package);
-    }
-    return result;
+    return parseDeclarationWithVars(runtime, text, .null, true, null);
 }
 
-fn startSpec(runtime: Runtime, key: []const u8, value: []const u8) !Spec {
-    var spec: Spec = .{ .kind = .local, .source = "" };
-    try setField(runtime, &spec, key, value);
-    return spec;
-}
-
-fn setField(runtime: Runtime, spec: *Spec, key: []const u8, value: []const u8) !void {
-    if (eq(key, "local") or eq(key, "git") or eq(key, "package")) {
-        if (spec.source.len != 0) return error.InvalidPackageDeclaration;
-        spec.kind = if (eq(key, "local")) .local else if (eq(key, "git")) .git else .registry;
-        spec.source = try scalar(runtime, value);
-        spec.unrendered_source = try util.dupTrimmedScalar(runtime.allocator, value);
-    } else if (eq(key, "version")) {
-        if (spec.constraints.items.len != 0) return error.InvalidPackageDeclaration;
-        spec.version_list = value.len == 0 or std.mem.startsWith(u8, value, "[");
-        if (value.len == 0) return;
-        try util.parseInlineStringList(runtime.allocator, value, &spec.constraints);
-    } else if (eq(key, "revision")) spec.revision = try scalar(runtime, value) else if (eq(key, "subdirectory")) spec.subdirectory = try scalar(runtime, value) else if (eq(key, "name")) spec.name = try scalar(runtime, value) else if (eq(key, "install_prerelease")) {
-        spec.prerelease = try boolean(value);
-        spec.prerelease_set = true;
-    } else if (eq(key, "warn-unpinned")) spec.warn_unpinned = try boolean(value) else return error.InvalidPackageDeclaration;
+fn parseDeclarationWithVars(runtime: Runtime, text: []const u8, vars: std.json.Value, render: bool, diagnostic: ?*yaml.Diagnostic) !Declaration {
+    var document = yaml.parseWithDiagnostics(runtime.allocator, text, diagnostic) catch return error.InvalidPackageDeclaration;
+    defer document.deinit();
+    if (document.value == .null) return .{};
+    if (document.value != .object) return error.InvalidPackageDeclaration;
+    if (document.value.object.get("projects")) |projects| if (projects != .array or projects.array.items.len != 0) return error.UnsupportedProjectDependency;
+    var declaration: Declaration = .{};
+    if (document.value.object.get("packages")) |value| declaration.specs = try parseSpecsWithVars(runtime, value, vars, render);
+    if (document.value.object.get("sha1_hash")) |value| {
+        if (value != .string) return error.InvalidPackageLock;
+        declaration.hash = try runtime.allocator.dupe(u8, value.string);
+    }
+    var fields = document.value.object.iterator();
+    while (fields.next()) |field| if (!eq(field.key_ptr.*, "packages") and !eq(field.key_ptr.*, "projects") and !eq(field.key_ptr.*, "sha1_hash")) return error.InvalidPackageDeclaration;
+    return declaration;
 }
 
 fn parseJsonSpecs(runtime: Runtime, value: std.json.Value) !std.ArrayList(Spec) {
+    return parseSpecsWithVars(runtime, value, .null, true);
+}
+
+fn parseSpecsWithVars(runtime: Runtime, value: std.json.Value, vars: std.json.Value, render: bool) !std.ArrayList(Spec) {
     if (value != .array) return error.InvalidPackageDeclaration;
     var result: std.ArrayList(Spec) = .empty;
-    for (value.array.items) |entry| {
-        if (entry != .object) return error.InvalidPackageDeclaration;
+    for (value.array.items) |raw_entry| {
+        if (raw_entry != .object) return error.InvalidPackageDeclaration;
+        var renderer = package_render.Context.init(runtime, vars);
+        const entry = if (render) try renderer.render(raw_entry) else try package_render.clone(runtime.allocator, raw_entry);
         var package: ?Spec = null;
-        for ([_][]const u8{ "local", "git", "package" }) |key| {
+        for ([_]Kind{ .local, .git, .registry, .tarball, .private }) |kind| {
+            const key = sourceKey(kind);
             if (entry.object.get(key)) |source| {
                 if (source != .string or package != null) return error.InvalidPackageDeclaration;
-                package = try startSpec(runtime, key, source.string);
+                const original = raw_entry.object.get(key).?;
+                if (original != .string) return error.InvalidPackageDeclaration;
+                package = .{ .kind = kind, .source = source.string, .unrendered_source = try runtime.allocator.dupe(u8, original.string) };
             }
         }
         if (package == null) return error.InvalidPackageDeclaration;
@@ -629,52 +628,88 @@ fn parseJsonSpecs(runtime: Runtime, value: std.json.Value) !std.ArrayList(Spec) 
         while (iterator.next()) |field| {
             const key = field.key_ptr.*;
             const item = field.value_ptr.*;
-            if (eq(key, "local") or eq(key, "git") or eq(key, "package")) continue;
+            if (eq(key, sourceKey(package.?.kind))) continue;
             if (eq(key, "version")) {
                 package.?.version_list = item == .array;
                 try jsonConstraints(runtime, item, &package.?.constraints);
-            } else if (item == .string) try setField(runtime, &package.?, key, item.string) else if (item == .bool) try setField(runtime, &package.?, key, if (item.bool) "true" else "false") else return error.InvalidPackageDeclaration;
+            } else if (eq(key, "revision")) package.?.revision = try optionalNumericScalar(runtime.allocator, item) else if (eq(key, "subdirectory")) package.?.subdirectory = try optionalString(item) else if (eq(key, "provider")) package.?.provider = try optionalString(item) else if (eq(key, "name")) package.?.name = try optionalString(item) else if (eq(key, "install_prerelease")) {
+                if (item != .bool and item != .null) return error.InvalidPackageDeclaration;
+                package.?.prerelease = item == .bool and item.bool;
+                package.?.prerelease_set = true;
+            } else if (eq(key, "warn-unpinned")) {
+                if (item != .bool and item != .null) return error.InvalidPackageDeclaration;
+                package.?.warn_unpinned = if (item == .bool) item.bool else null;
+            } else if (eq(key, "unrendered")) {
+                if (item != .object) return error.InvalidPackageDeclaration;
+            } else return error.InvalidPackageDeclaration;
         }
         try validateSpec(package.?);
+        var normalized = try package_render.clone(runtime.allocator, entry);
+        if (normalized.object.get("name")) |name| {
+            if (name == .null) _ = normalized.object.swapRemove("name");
+        }
+        if (gitLike(package.?.kind)) {
+            for ([_][]const u8{ "revision", "subdirectory", "warn-unpinned" }) |key| if (!normalized.object.contains(key)) try normalized.object.put(runtime.allocator, key, .null);
+            if (package.?.kind == .private and !normalized.object.contains("provider")) try normalized.object.put(runtime.allocator, "provider", .null);
+        }
+        if (package.?.kind == .registry and !normalized.object.contains("install_prerelease")) try normalized.object.put(runtime.allocator, "install_prerelease", .{ .bool = false });
+        try normalized.object.put(runtime.allocator, "unrendered", try package_render.clone(runtime.allocator, raw_entry));
+        var hash_output: std.Io.Writer.Allocating = .init(runtime.allocator);
+        try writePythonJson(runtime.allocator, &hash_output.writer, normalized);
+        package.?.hash_text = try hash_output.toOwnedSlice();
         try result.append(runtime.allocator, package.?);
     }
     return result;
 }
 
-fn jsonConstraints(runtime: Runtime, value: std.json.Value, out: *std.ArrayList([]const u8)) !void {
+fn optionalString(value: std.json.Value) !?[]const u8 {
+    return if (value == .null) null else if (value == .string) value.string else error.InvalidPackageDeclaration;
+}
+
+fn optionalNumericScalar(allocator: std.mem.Allocator, value: std.json.Value) !?[]const u8 {
+    return switch (value) {
+        .null => null,
+        .string => |text| text,
+        .integer => |number| try std.fmt.allocPrint(allocator, "{d}", .{number}),
+        .float => |number| try pythonFloat(allocator, number),
+        .number_string => |text| text,
+        else => error.InvalidPackageDeclaration,
+    };
+}
+
+fn jsonConstraints(runtime: Runtime, value: std.json.Value, out: *std.ArrayList([]const u8)) anyerror!void {
     switch (value) {
-        .string => try out.append(runtime.allocator, value.string),
-        .array => for (value.array.items) |item| try jsonConstraints(runtime, item, out),
+        .array => for (value.array.items) |item| {
+            if (item == .array or item == .null) return error.InvalidPackageDeclaration;
+            try jsonConstraints(runtime, item, out);
+        },
         .null => {},
-        else => return error.InvalidPackageDeclaration,
+        else => try out.append(runtime.allocator, (try optionalNumericScalar(runtime.allocator, value)).?),
     }
+}
+
+fn gitLike(kind: Kind) bool {
+    return kind == .git or kind == .private;
+}
+
+fn metadataString(value: std.json.Value, key: []const u8) !?[]const u8 {
+    const item = value.object.get(key) orelse return null;
+    if (item == .null) return null;
+    if (item != .string) return error.InvalidPackageRegistry;
+    return if (item.string.len == 0) null else item.string;
 }
 
 fn validateSpec(spec: Spec) !void {
     if (spec.source.len == 0 or spec.source[0] == '-' or std.mem.containsAtLeast(u8, spec.source, 1, "\n")) return error.InvalidPackageDeclaration;
     if (spec.kind == .registry and (spec.constraints.items.len == 0 or !validRegistryName(spec.source))) return error.InvalidPackageDeclaration;
     if (spec.kind != .registry and (spec.constraints.items.len != 0 or spec.prerelease_set)) return error.InvalidPackageDeclaration;
-    if (spec.kind != .git and (spec.revision != null or spec.subdirectory != null or spec.warn_unpinned != null)) return error.InvalidPackageDeclaration;
+    if (!gitLike(spec.kind) and (spec.revision != null or spec.subdirectory != null or spec.warn_unpinned != null)) return error.InvalidPackageDeclaration;
+    if (spec.kind != .private and spec.provider != null) return error.InvalidPackageDeclaration;
+    if (spec.kind == .private) if (spec.provider) |provider| if (!eq(provider, "github") and !eq(provider, "gitlab") and !eq(provider, "bitbucket")) return error.InvalidPackageProvider;
+    if (spec.kind == .tarball and spec.name == null) return error.InvalidPackageDeclaration;
     if (spec.subdirectory) |subdirectory| if (!safeRelativePath(subdirectory)) return error.InvalidPackageSubdirectory;
     if (spec.name) |name| if (!validProjectName(name)) return error.InvalidPackageDeclaration;
     for (spec.constraints.items) |constraint| _ = try satisfies("1.10.5", constraint);
-}
-
-fn scalar(runtime: Runtime, value: []const u8) ![]const u8 {
-    const result = try util.dupTrimmedScalar(runtime.allocator, value);
-    if (std.mem.containsAtLeast(u8, result, 1, "{{")) {
-        const expression = std.mem.trim(u8, result, " \t");
-        if (!std.mem.startsWith(u8, expression, "{{") or !std.mem.endsWith(u8, expression, "}}")) return error.UnsupportedPackageJinja;
-        const call = std.mem.trim(u8, expression[2 .. expression.len - 2], " \t");
-        if (!std.mem.startsWith(u8, call, "env_var(") or !std.mem.endsWith(u8, call, ")")) return error.UnsupportedPackageJinja;
-        var arguments = std.mem.splitScalar(u8, call[8 .. call.len - 1], ',');
-        const name = try util.dupTrimmedScalar(runtime.allocator, arguments.next().?);
-        const fallback = if (arguments.next()) |default| try util.dupTrimmedScalar(runtime.allocator, default) else null;
-        if (arguments.next() != null) return error.UnsupportedPackageJinja;
-        return if (runtime.environment) |environment| environment.get(name) orelse fallback orelse return error.MissingPackageEnvironmentVariable else fallback orelse return error.MissingPackageEnvironmentVariable;
-    }
-    if (result.len == 0 or result[0] == '[' or result[0] == '{' or result[0] == '*' or result[0] == '&') return error.InvalidPackageDeclaration;
-    return result;
 }
 
 const SemVersion = struct {
@@ -779,11 +814,7 @@ fn visitCycle(index: usize, states: []u8, requirements: []const Requirement, ass
 
 fn declarationHash(allocator: std.mem.Allocator, specs: []const Spec) ![]const u8 {
     var entries: std.ArrayList([]const u8) = .empty;
-    for (specs) |spec| {
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        try renderHashSpec(&out.writer, spec);
-        try entries.append(allocator, try out.toOwnedSlice());
-    }
+    for (specs) |spec| try entries.append(allocator, spec.hash_text orelse return error.InvalidPackageDeclaration);
     util.sortStrings(entries.items);
     const text = try std.mem.join(allocator, "\n", entries.items);
     var digest: [20]u8 = undefined;
@@ -791,84 +822,77 @@ fn declarationHash(allocator: std.mem.Allocator, specs: []const Spec) ![]const u
     return try allocator.dupe(u8, &std.fmt.bytesToHex(digest, .lower));
 }
 
-fn renderHashSpec(writer: *std.Io.Writer, spec: Spec) !void {
-    try writer.writeAll("{");
-    if (spec.kind == .registry) try writer.print("\"install_prerelease\": {s}, ", .{if (spec.prerelease) "true" else "false"});
-    if (spec.kind == .registry) {
-        if (spec.name) |name| {
-            try writer.writeAll("\"name\": ");
-            try json.string(writer, name);
-            try writer.writeAll(", ");
-        }
+// Core's fingerprint uses json.dumps(sort_keys=True), including ASCII escapes,
+// Python's float spelling, and a space after each comma and colon.
+fn writePythonJson(allocator: std.mem.Allocator, writer: *std.Io.Writer, value: std.json.Value) anyerror!void {
+    switch (value) {
+        .null => try writer.writeAll("null"),
+        .bool => |v| try json.boolValue(writer, v),
+        .integer => |v| try writer.print("{d}", .{v}),
+        .number_string => |v| try writer.writeAll(v),
+        .float => |v| try writer.writeAll(try pythonFloat(allocator, v)),
+        .string => |v| try pythonString(writer, v),
+        .array => |items| {
+            try writer.writeByte('[');
+            for (items.items, 0..) |item, i| {
+                if (i != 0) try writer.writeAll(", ");
+                try writePythonJson(allocator, writer, item);
+            }
+            try writer.writeByte(']');
+        },
+        .object => |map| {
+            const keys = try allocator.dupe([]const u8, map.keys());
+            util.sortStrings(keys);
+            try writer.writeByte('{');
+            for (keys, 0..) |key, i| {
+                if (i != 0) try writer.writeAll(", ");
+                try pythonString(writer, key);
+                try writer.writeAll(": ");
+                try writePythonJson(allocator, writer, map.get(key).?);
+            }
+            try writer.writeByte('}');
+        },
     }
-    try writer.print("\"{s}\": ", .{sourceKey(spec.kind)});
-    try json.string(writer, spec.source);
-    if (spec.name != null and spec.kind != .registry) {
-        try writer.writeAll(", \"name\": ");
-        try json.string(writer, spec.name.?);
-    }
-    if (spec.kind == .git) {
-        try writer.writeAll(", \"revision\": ");
-        try json.nullableString(writer, spec.revision);
-        try writer.writeAll(", \"subdirectory\": ");
-        try json.nullableString(writer, spec.subdirectory);
-    }
-    try writer.writeAll(", \"unrendered\": ");
-    try renderRawSpec(writer, spec);
-    if (spec.kind == .registry) {
-        try writer.writeAll(", \"version\": ");
-        try renderConstraints(writer, spec);
-    }
-    if (spec.kind == .git) {
-        try writer.writeAll(", \"warn-unpinned\": ");
-        if (spec.warn_unpinned) |warning| try json.boolValue(writer, warning) else try writer.writeAll("null");
-    }
-    try writer.writeAll("}");
 }
 
-fn renderRawSpec(writer: *std.Io.Writer, spec: Spec) !void {
-    try writer.writeAll("{");
-    if (spec.prerelease_set) try writer.print("\"install_prerelease\": {s}, ", .{if (spec.prerelease) "true" else "false"});
-    if (spec.kind == .registry) {
-        if (spec.name) |name| {
-            try writer.writeAll("\"name\": ");
-            try json.string(writer, name);
-            try writer.writeAll(", ");
+fn pythonString(writer: *std.Io.Writer, text: []const u8) !void {
+    try writer.writeByte('"');
+    var iterator = (try std.unicode.Utf8View.init(text)).iterator();
+    while (iterator.nextCodepoint()) |codepoint| {
+        switch (codepoint) {
+            '"', '\\' => {
+                try writer.writeByte('\\');
+                try writer.writeByte(@intCast(codepoint));
+            },
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            8 => try writer.writeAll("\\b"),
+            12 => try writer.writeAll("\\f"),
+            else => if (codepoint < 32 or codepoint >= 127) {
+                if (codepoint <= 0xffff) try writer.print("\\u{x:0>4}", .{codepoint}) else {
+                    const supplementary = codepoint - 0x10000;
+                    try writer.print("\\u{x:0>4}\\u{x:0>4}", .{ 0xd800 + (supplementary >> 10), 0xdc00 + (supplementary & 0x3ff) });
+                }
+            } else try writer.writeByte(@intCast(codepoint)),
         }
     }
-    try writer.print("\"{s}\": ", .{sourceKey(spec.kind)});
-    try json.string(writer, spec.unrendered_source orelse spec.source);
-    if (spec.name != null and spec.kind != .registry) {
-        try writer.writeAll(", \"name\": ");
-        try json.string(writer, spec.name.?);
-    }
-    if (spec.revision) |revision| {
-        try writer.writeAll(", \"revision\": ");
-        try json.string(writer, revision);
-    }
-    if (spec.subdirectory) |subdirectory| {
-        try writer.writeAll(", \"subdirectory\": ");
-        try json.string(writer, subdirectory);
-    }
-    if (spec.kind == .registry) {
-        try writer.writeAll(", \"version\": ");
-        try renderConstraints(writer, spec);
-    }
-    if (spec.warn_unpinned) |warning| {
-        try writer.writeAll(", \"warn-unpinned\": ");
-        try json.boolValue(writer, warning);
-    }
-    try writer.writeAll("}");
+    try writer.writeByte('"');
 }
 
-fn renderConstraints(writer: *std.Io.Writer, spec: Spec) !void {
-    if (!spec.version_list) return json.string(writer, spec.constraints.items[0]);
-    try writer.writeAll("[");
-    for (spec.constraints.items, 0..) |constraint, index| {
-        if (index != 0) try writer.writeAll(", ");
-        try json.string(writer, constraint);
+fn pythonFloat(allocator: std.mem.Allocator, number: f64) ![]const u8 {
+    if (std.math.isNan(number)) return "NaN";
+    if (std.math.isInf(number)) return if (number < 0) "-Infinity" else "Infinity";
+    const magnitude = @abs(number);
+    if (magnitude != 0 and (magnitude >= 1e16 or magnitude < 1e-4)) {
+        const scientific = try std.fmt.allocPrint(allocator, "{e}", .{number});
+        const exponent_at = std.mem.indexOfScalar(u8, scientific, 'e').?;
+        const exponent = try std.fmt.parseInt(i32, scientific[exponent_at + 1 ..], 10);
+        return try std.fmt.allocPrint(allocator, "{s}e{s}{d:0>2}", .{ scientific[0..exponent_at], if (exponent < 0) "-" else "+", @abs(exponent) });
     }
-    try writer.writeAll("]");
+    const decimal = try std.fmt.allocPrint(allocator, "{d}", .{number});
+    if (std.mem.indexOfScalar(u8, decimal, '.') == null) return try std.fmt.allocPrint(allocator, "{s}.0", .{decimal});
+    return decimal;
 }
 
 fn renderLock(allocator: std.mem.Allocator, root: []const u8, resolved: []const Resolved, hash: []const u8) ![]const u8 {
@@ -883,12 +907,16 @@ fn renderLock(allocator: std.mem.Allocator, root: []const u8, resolved: []const 
         try out.writer.writeAll("\n    name: ");
         try json.string(&out.writer, package.name);
         if (package.version) |version| {
-            try out.writer.print("\n    {s}: ", .{if (spec.kind == .git) "revision" else "version"});
+            try out.writer.print("\n    {s}: ", .{if (gitLike(spec.kind)) "revision" else "version"});
             try json.string(&out.writer, version);
         }
         if (spec.subdirectory) |subdirectory| {
             try out.writer.writeAll("\n    subdirectory: ");
             try json.string(&out.writer, subdirectory);
+        }
+        if (spec.provider) |provider| {
+            try out.writer.writeAll("\n    provider: ");
+            try json.string(&out.writer, provider);
         }
         try out.writer.writeAll("\n");
     }
@@ -967,13 +995,9 @@ fn sourceKey(kind: Kind) []const u8 {
         .local => "local",
         .git => "git",
         .registry => "package",
+        .tarball => "tarball",
+        .private => "private",
     };
-}
-
-fn boolean(raw: []const u8) !bool {
-    if (eq(raw, "true")) return true;
-    if (eq(raw, "false")) return false;
-    return error.InvalidPackageDeclaration;
 }
 
 fn optionalRead(runtime: Runtime, path: []const u8) !?[]const u8 {

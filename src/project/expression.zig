@@ -469,6 +469,21 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
     return null;
 }
 fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []const Argument) !Value {
+    if (std.mem.eql(u8, name, "as_text")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        return .{ .string = try value.text(allocator) };
+    }
+    if (std.mem.eql(u8, name, "as_native") or std.mem.eql(u8, name, "as_bool") or std.mem.eql(u8, name, "as_number")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        const converted = if (value == .string) blk: {
+            const text_value = std.mem.trim(u8, value.string, " \t\r\n");
+            if (std.mem.eql(u8, text_value, "true") or std.mem.eql(u8, text_value, "false") or std.mem.eql(u8, text_value, "none") or std.mem.eql(u8, text_value, "null")) break :blk value;
+            break :blk evaluate(allocator, text_value, null) catch value;
+        } else value;
+        if (std.mem.eql(u8, name, "as_bool") and converted != .boolean) return error.JinjaTypeError;
+        if (std.mem.eql(u8, name, "as_number") and converted != .number) return error.JinjaTypeError;
+        return if (converted == .undefined) value else converted;
+    }
     if (std.mem.eql(u8, name, "default") or std.mem.eql(u8, name, "d")) {
         if (args.len > 2) return error.InvalidJinjaArguments;
         const replacement: Value = if (args.len > 0) args[0].value else .{ .string = "" };
