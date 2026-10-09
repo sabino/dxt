@@ -392,7 +392,7 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
     try writer.writeAll(",\"alias\":");
     try json.string(writer, alias);
     try writer.writeAll(",\"fqn\":");
-    try writeFqnFromPath(writer, node.package_name, node.path, node.name, if (snapshot_config != null) node.name else null);
+    try writeFqnFromPath(writer, node.package_name, node.snapshot_fqn_path orelse node.path, node.name, if (snapshot_config != null and !node.snapshot_yaml_definition) node.name else null);
     try writer.writeAll(",\"checksum\":");
     try writeSha256Checksum(writer, if (node.snapshot_file_code) |file_code| std.mem.trim(u8, file_code, " \t\r\n\x0b\x0c") else node.raw_code);
 }
@@ -767,6 +767,10 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try json.string(writer, node.raw_code);
     try writer.writeAll(",\"description\":");
     try json.string(writer, node.description);
+    if (node.snapshot_config != null) {
+        try writer.writeAll(",\"meta\":");
+        if (node.snapshot_meta_json) |value| try writeJsonValue(writer, value) else try writeMetaObject(writer, node.meta.items);
+    }
     try writer.writeAll(",\"doc_blocks\":");
     try json.stringArray(writer, node.doc_blocks.items);
     try writer.writeAll(",\"docs\":");
@@ -799,7 +803,11 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
         try writer.writeAll(",\"persist_docs\":");
         try writePersistDocs(writer, docs);
     }
-    if (node.snapshot_config) |config| try writeSnapshotConfig(writer, &node, config);
+    if (node.snapshot_config) |config| {
+        try writeSnapshotConfig(writer, &node, config);
+        try writer.writeAll(",\"meta\":");
+        if (node.snapshot_meta_json) |value| try writeJsonValue(writer, value) else try writeMetaObject(writer, node.meta.items);
+    }
     try writer.writeAll("},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
@@ -993,7 +1001,17 @@ fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
         try json.string(writer, column.name);
         try writer.writeAll(",\"description\":");
         try json.string(writer, column.description);
-        try writer.writeAll(",\"meta\":{},\"data_type\":null,\"quote\":null,\"tags\":[],\"config\":{},\"doc_blocks\":");
+        try writer.writeAll(",\"meta\":");
+        if (column.meta_json) |value| try writeJsonValue(writer, value) else try writer.writeAll("{}");
+        try writer.writeAll(",\"data_type\":");
+        try writeNullableString(writer, column.data_type);
+        try writer.writeAll(",\"quote\":");
+        if (column.quote) |value| try writer.writeAll(if (value) "true" else "false") else try writer.writeAll("null");
+        try writer.writeAll(",\"tags\":");
+        try json.stringArray(writer, column.tags.items);
+        try writer.writeAll(",\"config\":");
+        if (column.config_json) |value| try writeJsonValue(writer, value) else try writer.writeAll("{}");
+        try writer.writeAll(",\"doc_blocks\":");
         try json.stringArray(writer, column.doc_blocks.items);
         try writer.writeAll("}");
     }
@@ -2343,4 +2361,36 @@ test "snapshot manifest identity retains file checksum and block FQN" {
     try std.testing.expectEqualStrings("097ad32ce920143de83bc07e2bdd8a3825c89545a9edf0bab98c93500b1518e9", node.get("checksum").?.object.get("checksum").?.string);
     try std.testing.expectEqualStrings("timestamp", node.get("config").?.object.get("strategy").?.string);
     try std.testing.expect(!disabled.get("config").?.object.get("enabled").?.bool);
+}
+
+fn writeJsonValue(writer: *Io.Writer, value: std.json.Value) anyerror!void {
+    switch (value) {
+        .null => try writer.writeAll("null"),
+        .bool => try writer.writeAll(if (value.bool) "true" else "false"),
+        .string => try json.string(writer, value.string),
+        .integer => try writer.print("{d}", .{value.integer}),
+        .float => try writer.print("{d}", .{value.float}),
+        .number_string => try writer.writeAll(value.number_string),
+        .array => {
+            try writer.writeAll("[");
+            for (value.array.items, 0..) |item, index| {
+                if (index != 0) try writer.writeAll(",");
+                try writeJsonValue(writer, item);
+            }
+            try writer.writeAll("]");
+        },
+        .object => {
+            try writer.writeAll("{");
+            var entries = value.object.iterator();
+            var count: usize = 0;
+            while (entries.next()) |entry| {
+                if (count != 0) try writer.writeAll(",");
+                try json.string(writer, entry.key_ptr.*);
+                try writer.writeAll(":");
+                try writeJsonValue(writer, entry.value_ptr.*);
+                count += 1;
+            }
+            try writer.writeAll("}");
+        },
+    }
 }

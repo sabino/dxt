@@ -490,6 +490,10 @@
         },
         "extra_ctes_injected": {
           "type": "boolean"
+        },
+        "meta": {
+          "type": "object",
+          "additionalProperties": true
         }
       }
     },
@@ -585,6 +589,31 @@
         },
         "alias": {
           "type": "string"
+        },
+        "meta": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "hard_deletes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dbt_valid_to_current": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snapshot_meta_column_names": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       }
     },

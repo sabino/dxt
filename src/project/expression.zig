@@ -315,16 +315,37 @@ const Parser = struct {
         var args: std.ArrayList(Argument) = .empty;
         var saw_keyword = false;
         if (!self.take(")")) while (true) {
-            const saved = self.index;
-            var keyword: ?[]const u8 = null;
-            if (self.name()) |candidate| {
-                if (self.take("=") and !self.take("=")) keyword = candidate else self.index = saved;
-            } else |_| self.index = saved;
-            if (keyword != null) saw_keyword = true else if (saw_keyword) return error.InvalidJinjaArguments;
-            if (keyword) |key| for (args.items) |arg| if (arg.name) |other| {
-                if (std.mem.eql(u8, key, other)) return error.InvalidJinjaArguments;
-            };
-            try args.append(self.allocator, .{ .name = keyword, .value = try self.binary(0) });
+            if (self.take("**")) {
+                const expanded = try self.binary(0);
+                if (self.active) {
+                    if (expanded != .object) return error.InvalidJinjaArguments;
+                    for (expanded.object) |entry| {
+                        for (args.items) |arg| if (arg.name) |argument_name| {
+                            if (std.mem.eql(u8, argument_name, entry.key)) return error.InvalidJinjaArguments;
+                        };
+                        try args.append(self.allocator, .{ .name = entry.key, .value = entry.value });
+                    }
+                }
+                saw_keyword = true;
+            } else if (self.take("*")) {
+                const expanded = try self.binary(0);
+                if (saw_keyword) return error.InvalidJinjaArguments;
+                if (self.active) {
+                    if (expanded != .list) return error.InvalidJinjaArguments;
+                    for (expanded.list) |value| try args.append(self.allocator, .{ .value = value });
+                }
+            } else {
+                const saved = self.index;
+                var keyword: ?[]const u8 = null;
+                if (self.name()) |candidate| {
+                    if (self.take("=") and !self.take("=")) keyword = candidate else self.index = saved;
+                } else |_| self.index = saved;
+                if (keyword != null) saw_keyword = true else if (saw_keyword) return error.InvalidJinjaArguments;
+                if (keyword) |key| for (args.items) |arg| if (arg.name) |other| {
+                    if (std.mem.eql(u8, key, other)) return error.InvalidJinjaArguments;
+                };
+                try args.append(self.allocator, .{ .name = keyword, .value = try self.binary(0) });
+            }
             if (self.take(")")) break;
             try self.expect(",");
             if (self.take(")")) break;
@@ -529,4 +550,18 @@ test "typed expressions preserve precedence, containers, filters and short circu
     try std.testing.expectEqualStrings("fallback", (try evaluate(a, "missing | default('fallback')", null)).string);
     try std.testing.expectError(error.JinjaDivisionByZero, evaluate(a, "3/0", null));
     try std.testing.expectError(error.InvalidJinjaExpression, evaluate(a, "[1,", null));
+}
+
+test "typed Jinja calls expand positional lists and keyword maps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const args = try evaluateArguments(allocator, "*[1,2], **{'strategy':'timestamp','enabled':true}", null);
+    try std.testing.expectEqual(@as(usize, 4), args.len);
+    try std.testing.expectEqual(@as(f64, 2), args[1].value.number);
+    try std.testing.expectEqualStrings("strategy", args[2].name.?);
+    try std.testing.expect(args[3].value.boolean);
+    try std.testing.expectError(error.InvalidJinjaArguments, evaluateArguments(allocator, "a=1, **{'a':2}", null));
+    try std.testing.expectError(error.InvalidJinjaArguments, evaluateArguments(allocator, "**[1,2]", null));
+    try std.testing.expect(!(try evaluate(allocator, "false and missing_call(**unknown)", null)).truthy());
 }

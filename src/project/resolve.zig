@@ -387,17 +387,11 @@ fn hasSource(graph: *const Graph, unique_id: []const u8) bool {
 }
 
 fn resolveRefInPackage(graph: *const Graph, package: []const u8, name: []const u8) !?[]const u8 {
-    var refable_count: usize = 0;
-    var has_snapshot = false;
-    for (graph.nodes.items) |node| {
-        if (!node.enabled or !std.mem.eql(u8, node.package_name, package) or !std.mem.eql(u8, node.name, name)) continue;
-        if (std.mem.eql(u8, node.resource_type, "snapshot")) {
-            has_snapshot = true;
-            refable_count += 1;
-        } else if (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "seed")) refable_count += 1;
-    }
-    // Core's parse-order precedence for colliding names is outside this read-only slice.
-    if (has_snapshot and refable_count > 1) return error.UnsupportedSnapshotRefCollision;
+    // RefableLookup follows Core parser insertion order: seed > snapshot > model.
+    const preferred_seed = try std.fmt.allocPrint(graph.allocator, "seed.{s}.{s}", .{ package, name });
+    if (hasNode(graph, preferred_seed)) return preferred_seed;
+    const preferred_snapshot = try std.fmt.allocPrint(graph.allocator, "snapshot.{s}.{s}", .{ package, name });
+    if (hasNode(graph, preferred_snapshot)) return preferred_snapshot;
 
     const model_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, name });
     if (hasDisabledNode(graph, model_id)) return error.DisabledRef;
@@ -967,5 +961,7 @@ test "snapshot refs resolve and disabled or colliding snapshot refs fail closed"
     try std.testing.expectEqualStrings("snapshot.demo.history", try resolveRefDependency(&graph, "demo", .{ .package = null, .name = "history" }));
     try std.testing.expectError(error.DisabledRef, resolveRefDependency(&graph, "demo", .{ .package = null, .name = "disabled" }));
     try appendNode(&graph, "model", "demo", "model.demo.history", "history", true);
-    try std.testing.expectError(error.UnsupportedSnapshotRefCollision, resolveRefDependency(&graph, "demo", .{ .package = null, .name = "history" }));
+    try std.testing.expectEqualStrings("snapshot.demo.history", try resolveRefDependency(&graph, "demo", .{ .package = null, .name = "history" }));
+    try appendNode(&graph, "seed", "demo", "seed.demo.history", "history", true);
+    try std.testing.expectEqualStrings("seed.demo.history", try resolveRefDependency(&graph, "demo", .{ .package = null, .name = "history" }));
 }

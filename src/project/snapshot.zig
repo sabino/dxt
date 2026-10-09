@@ -3,6 +3,7 @@ const fs = @import("fs.zig");
 const jinja = @import("jinja.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
+const expression = @import("expression.zig");
 
 // Source contract: dbt-core v1.10.5 parser/snapshots.py and resources/v1/snapshot.py.
 // SQL block parsing accepts literal configuration and static relation dependencies.
@@ -10,7 +11,7 @@ pub fn parseFile(runtime: types.Runtime, project_dir: []const u8, snapshot_root:
     const path = try fs.pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     defer runtime.allocator.free(path);
     const sql = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(16 * 1024 * 1024));
-    try parseBlocks(runtime.allocator, sql, snapshot_root, relative_path, package_name, graph);
+    try parseBlocksInner(runtime.allocator, sql, snapshot_root, relative_path, package_name, graph, false);
 }
 
 const Tag = struct {
@@ -47,6 +48,10 @@ fn nextTag(sql: []const u8, start: usize) !?Tag {
 }
 
 pub fn parseBlocks(allocator: std.mem.Allocator, sql: []const u8, snapshot_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *types.Graph) !void {
+    try parseBlocksInner(allocator, sql, snapshot_root, relative_path, package_name, graph, true);
+}
+
+fn parseBlocksInner(allocator: std.mem.Allocator, sql: []const u8, snapshot_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *types.Graph, validate: bool) !void {
     var cursor: usize = 0;
     var name: ?[]const u8 = null;
     var body_start: usize = 0;
@@ -88,18 +93,18 @@ pub fn parseBlocks(allocator: std.mem.Allocator, sql: []const u8, snapshot_root:
                 .materialized = "snapshot",
             };
             errdefer types.deinitNode(allocator, &node);
-            try scanBody(allocator, node.raw_code, &node);
-            try validateConfig(&node);
+            if (validate) try scanBody(allocator, node.raw_code, &node);
+            if (validate) try validateConfig(&node);
             try graph.nodes.append(allocator, node);
             name = null;
-        } else {
+        } else if (name == null or validate) {
             return error.UnsupportedSnapshotDefinition;
         }
     }
     if (name != null) return error.MalformedSnapshotBlock;
 }
 
-fn scanBody(allocator: std.mem.Allocator, sql: []const u8, node: *types.Node) !void {
+pub fn scanBody(allocator: std.mem.Allocator, sql: []const u8, node: *types.Node) !void {
     var cursor: usize = 0;
     while (try nextTag(sql, cursor)) |tag| {
         cursor = tag.end;
@@ -184,7 +189,7 @@ fn parseColumns(allocator: std.mem.Allocator, value: []const u8) !types.Snapshot
     return .{ .list = items };
 }
 
-fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *types.Node) !void {
+pub fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *types.Node) !void {
     var seen_keys = std.StringHashMap(void).init(allocator);
     defer seen_keys.deinit();
     var index: usize = 0;
@@ -215,6 +220,46 @@ fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *types.Node
         if (list_depth != 0) return error.UnsupportedSnapshotConfig;
         const value = std.mem.trim(u8, args[value_start..index], " \t\r\n");
         const config = &node.snapshot_config.?;
+        inline for (.{ "strategy", "target_schema", "target_database", "updated_at", "invalidate_hard_deletes", "hard_deletes", "dbt_valid_to_current", "unique_key", "check_cols", "snapshot_meta_column_names" }, 0..) |field, field_index| {
+            if (std.mem.eql(u8, key, field)) config.configured_fields |= @as(u16, 1) << field_index;
+        }
+        if (std.mem.eql(u8, value, "none") or std.mem.eql(u8, value, "None") or std.mem.eql(u8, value, "null")) {
+            var handled = false;
+            inline for (.{ "strategy", "target_schema", "target_database", "updated_at", "invalidate_hard_deletes", "hard_deletes", "dbt_valid_to_current" }) |field| {
+                if (std.mem.eql(u8, key, field)) {
+                    @field(config, field) = null;
+                    handled = true;
+                }
+            }
+            inline for (.{ "unique_key", "check_cols" }) |field| {
+                if (std.mem.eql(u8, key, field)) {
+                    if (@field(config, field)) |*prior| prior.deinit(allocator);
+                    @field(config, field) = null;
+                    handled = true;
+                }
+            }
+            if (std.mem.eql(u8, key, "schema")) {
+                node.config_schema = null;
+                node.snapshot_inline_schema = true;
+                handled = true;
+            }
+            if (std.mem.eql(u8, key, "alias")) {
+                node.config_alias = null;
+                node.snapshot_inline_alias = true;
+                handled = true;
+            }
+            if (std.mem.eql(u8, key, "snapshot_meta_column_names")) {
+                config.meta_columns = .{};
+                config.meta_columns_fields = 0;
+                config.meta_columns_configured = false;
+                handled = true;
+            }
+            if (handled) {
+                if (index < args.len) index += 1;
+                continue;
+            }
+        }
+
         if (std.mem.eql(u8, key, "strategy")) {
             config.strategy = try parseString(allocator, value);
         } else if (std.mem.eql(u8, key, "unique_key")) {
@@ -252,8 +297,23 @@ fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *types.Node
             }
         } else if (std.mem.eql(u8, key, "schema")) {
             node.config_schema = try parseString(allocator, value);
+            node.snapshot_inline_schema = true;
         } else if (std.mem.eql(u8, key, "alias")) {
             node.config_alias = try parseString(allocator, value);
+            node.snapshot_inline_alias = true;
+        } else if (std.mem.eql(u8, key, "docs")) {
+            const docs = expression.evaluate(allocator, value, null) catch return error.UnsupportedSnapshotConfig;
+            if (docs != .object) return error.UnsupportedSnapshotConfig;
+            node.docs.configured = true;
+            for (docs.object) |entry| {
+                if (std.mem.eql(u8, entry.key, "show")) node.docs.show = if (entry.value == .boolean) entry.value.boolean else return error.UnsupportedSnapshotConfig else if (std.mem.eql(u8, entry.key, "node_color")) node.docs.node_color = if (entry.value == .none) null else if (entry.value == .string) entry.value.string else return error.UnsupportedSnapshotConfig else return error.UnsupportedSnapshotConfig;
+            }
+            node.snapshot_inline_docs = true;
+        } else if (std.mem.eql(u8, key, "meta")) {
+            const meta = expression.evaluate(allocator, value, null) catch return error.UnsupportedSnapshotConfig;
+            if (meta != .object) return error.UnsupportedSnapshotConfig;
+            node.snapshot_meta_json = try jsonFromExpression(allocator, meta);
+            node.snapshot_inline_meta = true;
         } else if (std.mem.eql(u8, key, "materialized")) {
             if (!std.mem.eql(u8, try parseString(allocator, value), "snapshot")) return error.InvalidSnapshotConfig;
         } else {
@@ -356,13 +416,15 @@ fn parseMetaColumns(allocator: std.mem.Allocator, value: []const u8, config: *ty
         if (index >= value.len - 1 or value[index] != ':') return error.UnsupportedSnapshotConfig;
         index = jinja.skipWs(value, index + 1);
         if (index >= value.len - 1) return error.UnsupportedSnapshotConfig;
-        const name = jinja.parseQuoted(allocator, value, index) catch return error.UnsupportedSnapshotConfig;
+        const null_name = std.mem.startsWith(u8, value[index..], "none") or std.mem.startsWith(u8, value[index..], "None") or std.mem.startsWith(u8, value[index..], "null");
+        if (!null_name and value[index] != '\'' and value[index] != '"') return error.UnsupportedSnapshotConfig;
+        const name: jinja.ParsedString = if (null_name) .{ .value = key.value, .next = index + 4 } else jinja.parseQuoted(allocator, value, index) catch return error.UnsupportedSnapshotConfig;
         if (name.value.len == 0) return error.InvalidSnapshotConfig;
         var matched = false;
         inline for (.{ "dbt_scd_id", "dbt_updated_at", "dbt_valid_from", "dbt_valid_to", "dbt_is_deleted" }, 0..) |field, field_index| {
             if (std.mem.eql(u8, key.value, field)) {
                 @field(config.meta_columns, field) = name.value;
-                config.meta_columns_fields |= @as(u5, 1) << field_index;
+                if (null_name) config.meta_columns_fields &= ~(@as(u5, 1) << field_index) else config.meta_columns_fields |= @as(u5, 1) << field_index;
                 matched = true;
             }
         }
@@ -372,4 +434,42 @@ fn parseMetaColumns(allocator: std.mem.Allocator, value: []const u8, config: *ty
         if (index >= value.len - 1 or value[index] != ',') return error.UnsupportedSnapshotConfig;
         index += 1;
     }
+}
+
+pub fn overlayConfig(allocator: std.mem.Allocator, base: *types.SnapshotConfig, overlay: types.SnapshotConfig) void {
+    inline for (.{ "strategy", "target_schema", "target_database", "updated_at", "invalidate_hard_deletes", "hard_deletes", "dbt_valid_to_current" }, 0..) |field, index| {
+        if (@field(overlay, field) != null or overlay.configured_fields & (@as(u16, 1) << index) != 0) @field(base, field) = @field(overlay, field);
+    }
+    inline for (.{ "unique_key", "check_cols" }, 7..) |field, index| {
+        if (@field(overlay, field) != null or overlay.configured_fields & (@as(u16, 1) << index) != 0) {
+            if (@field(base, field)) |*prior| prior.deinit(allocator);
+            @field(base, field) = @field(overlay, field);
+        }
+    }
+    if (overlay.configured_fields & (@as(u16, 1) << 9) != 0) {
+        base.meta_columns = overlay.meta_columns;
+        base.meta_columns_fields = overlay.meta_columns_fields;
+    }
+    base.meta_columns_configured = base.meta_columns_fields != 0;
+    base.configured_fields |= overlay.configured_fields;
+}
+
+fn jsonFromExpression(allocator: std.mem.Allocator, value: expression.Value) anyerror!std.json.Value {
+    return switch (value) {
+        .none => .null,
+        .boolean => .{ .bool = value.boolean },
+        .number => .{ .float = value.number },
+        .string => .{ .string = value.string },
+        .list => blk: {
+            var values = std.array_list.Managed(std.json.Value).init(allocator);
+            for (value.list) |item| try values.append(try jsonFromExpression(allocator, item));
+            break :blk .{ .array = values };
+        },
+        .object => blk: {
+            var object = std.json.ObjectMap{};
+            for (value.object) |entry| try object.put(allocator, entry.key, try jsonFromExpression(allocator, entry.value));
+            break :blk .{ .object = object };
+        },
+        .undefined, .callable => error.UnsupportedSnapshotConfig,
+    };
 }

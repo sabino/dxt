@@ -1,5 +1,6 @@
 const std = @import("std");
 const jinja = @import("jinja.zig");
+const snapshot = @import("snapshot.zig");
 const resolve = @import("resolve.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
@@ -812,6 +813,16 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     return .undefined;
 }
 
+fn upsertConfigArgument(allocator: std.mem.Allocator, values: *std.ArrayList(native_expr.Entry), key: []const u8, value: native_expr.Value) !void {
+    for (values.items) |*entry| {
+        if (std.mem.eql(u8, entry.key, key)) {
+            entry.value = value;
+            return;
+        }
+    }
+    try values.append(allocator, .{ .key = key, .value = value });
+}
+
 fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
     if (std.mem.eql(u8, name, "__dxt_caller") or std.mem.eql(u8, name, "caller")) {
@@ -820,15 +831,25 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     if (std.mem.eql(u8, name, "config")) {
         if (context.parse_node) |node| {
-            var raw: std.ArrayList(u8) = .empty;
-            for (args, 0..) |arg, i| {
-                if (i != 0) try raw.appendSlice(allocator, ", ");
-                const key = arg.name orelse return error.InvalidJinjaArguments;
-                try raw.appendSlice(allocator, key);
-                try raw.append(allocator, '=');
-                if (arg.value == .boolean) try raw.appendSlice(allocator, if (arg.value.boolean) "true" else "false") else try raw.appendSlice(allocator, try native_expr.repr(arg.value, allocator));
+            var values: std.ArrayList(native_expr.Entry) = .empty;
+            for (args) |arg| {
+                if (arg.name) |key| {
+                    try upsertConfigArgument(allocator, &values, key, arg.value);
+                } else if (arg.value == .object) {
+                    for (arg.value.object) |entry| try upsertConfigArgument(allocator, &values, entry.key, entry.value);
+                } else return error.InvalidJinjaArguments;
             }
-            try jinja.parseConfig(context.allocator, raw.items, node);
+            var raw: std.ArrayList(u8) = .empty;
+            var count: usize = 0;
+            for (values.items) |entry| {
+                if (count != 0) try raw.appendSlice(allocator, ", ");
+                try raw.appendSlice(allocator, entry.key);
+                try raw.append(allocator, '=');
+                const value = entry.value;
+                if (value == .boolean) try raw.appendSlice(allocator, if (value.boolean) "true" else "false") else try raw.appendSlice(allocator, try native_expr.repr(value, allocator));
+                count += 1;
+            }
+            if (node.snapshot_config != null) try snapshot.parseConfig(context.allocator, raw.items, node) else try jinja.parseConfig(context.allocator, raw.items, node);
         }
         return .{ .string = "" };
     }

@@ -69,6 +69,7 @@ pub const ProjectConfig = struct {
     macro_paths_set: bool = false,
     test_paths_set: bool = false,
     snapshot_paths_set: bool = false,
+    snapshot_config_text: ?[]const u8 = null,
     clean_targets_set: bool = false,
     validate_macro_args: bool = false,
     target_path: []const u8 = "target",
@@ -223,6 +224,11 @@ pub const SourceDep = struct {
 
 pub const ColumnDef = struct {
     name: []const u8,
+    data_type: ?[]const u8 = null,
+    quote: ?bool = null,
+    meta_json: ?std.json.Value = null,
+    config_json: ?std.json.Value = null,
+    tags: std.ArrayList([]const u8) = .empty,
     description: []const u8 = "",
     doc_blocks: std.ArrayList([]const u8) = .empty,
     tests: std.ArrayList(GenericTestDef) = .empty,
@@ -368,6 +374,12 @@ pub const Node = struct {
     raw_code: []const u8,
     // SQL snapshot blocks retain the source file for dbt's file-level checksum.
     snapshot_file_code: ?[]const u8 = null,
+    snapshot_fqn_path: ?[]const u8 = null,
+    snapshot_yaml_definition: bool = false,
+    snapshot_inline_schema: bool = false,
+    snapshot_inline_alias: bool = false,
+    snapshot_inline_docs: bool = false,
+    snapshot_inline_meta: bool = false,
     snapshot_config: ?SnapshotConfig = null,
     description: []const u8 = "",
     materialized: []const u8 = "view",
@@ -386,6 +398,8 @@ pub const Node = struct {
     enabled: bool = true,
     docs: DocsConfig = .{},
     tags: std.ArrayList([]const u8) = .empty,
+    meta: std.ArrayList(MetaEntry) = .empty,
+    snapshot_meta_json: ?std.json.Value = null,
     doc_blocks: std.ArrayList([]const u8) = .empty,
     tests: std.ArrayList(GenericTestDef) = .empty,
     columns: std.ArrayList(ColumnDef) = .empty,
@@ -453,6 +467,7 @@ pub const SnapshotMetaColumns = struct {
 };
 
 pub const SnapshotConfig = struct {
+    configured_fields: u16 = 0,
     strategy: ?[]const u8 = null,
     unique_key: ?SnapshotColumns = null,
     target_schema: ?[]const u8 = null,
@@ -524,6 +539,15 @@ pub const SingularTestNode = struct {
     macro_depends_on: std.ArrayList([]const u8) = .empty,
 };
 
+pub const SnapshotPatch = struct {
+    package_name: []const u8,
+    name: []const u8,
+    path: []const u8,
+    config_args: []const u8,
+    properties: std.json.Value,
+};
+pub const SnapshotProjectConfig = struct { package_name: []const u8, text: []const u8 };
+
 pub const Graph = struct {
     invocation: ?*const @import("invocation.zig").Metadata = null,
     allocator: std.mem.Allocator,
@@ -548,6 +572,8 @@ pub const Graph = struct {
     docs: std.ArrayList(DocBlock) = .empty,
     macros: std.ArrayList(MacroDef) = .empty,
     model_properties: std.ArrayList(ModelProperty) = .empty,
+    snapshot_properties: std.ArrayList(SnapshotPatch) = .empty,
+    snapshot_project_configs: std.ArrayList(SnapshotProjectConfig) = .empty,
     singular_test_properties: std.ArrayList(SingularTestProperty) = .empty,
     macro_properties: std.ArrayList(MacroProperty) = .empty,
     unmatched_model_properties: std.ArrayList(UnmatchedModelProperty) = .empty,
@@ -605,6 +631,8 @@ pub const Graph = struct {
         self.docs.deinit(self.allocator);
         self.macros.deinit(self.allocator);
         self.model_properties.deinit(self.allocator);
+        self.snapshot_properties.deinit(self.allocator);
+        self.snapshot_project_configs.deinit(self.allocator);
         self.singular_test_properties.deinit(self.allocator);
         self.macro_properties.deinit(self.allocator);
         self.unmatched_model_properties.deinit(self.allocator);
@@ -675,10 +703,12 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     if (node.project_root) |project_root| allocator.free(project_root);
     node.tags.deinit(allocator);
     node.incremental.deinit(allocator);
+    node.meta.deinit(allocator);
     node.doc_blocks.deinit(allocator);
     deinitGenericTestDefs(allocator, &node.tests);
     for (node.columns.items) |*column| {
         column.doc_blocks.deinit(allocator);
+        column.tags.deinit(allocator);
         deinitGenericTestDefs(allocator, &column.tests);
     }
     node.columns.deinit(allocator);
@@ -723,6 +753,7 @@ pub fn deinitSourceDef(allocator: std.mem.Allocator, source: *SourceDef) void {
     deinitGenericTestDefs(allocator, &source.tests);
     for (source.columns.items) |*column| {
         column.doc_blocks.deinit(allocator);
+        column.tags.deinit(allocator);
         deinitGenericTestDefs(allocator, &column.tests);
     }
     source.columns.deinit(allocator);
@@ -771,6 +802,7 @@ fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) v
     deinitGenericTestDefs(allocator, &property.tests);
     for (property.columns.items) |*column| {
         column.doc_blocks.deinit(allocator);
+        column.tags.deinit(allocator);
         deinitGenericTestDefs(allocator, &column.tests);
     }
     property.columns.deinit(allocator);

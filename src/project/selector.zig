@@ -432,8 +432,8 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
 }
 
 fn nodeOutputSelector(allocator: std.mem.Allocator, node: *const Node) ![]const u8 {
-    const path_selector = try pathBackedOutputSelector(allocator, node.package_name, node.path);
-    if (!std.mem.eql(u8, node.resource_type, "snapshot")) return path_selector;
+    const path_selector = try pathBackedOutputSelector(allocator, node.package_name, node.snapshot_fqn_path orelse node.path);
+    if (!std.mem.eql(u8, node.resource_type, "snapshot") or node.snapshot_yaml_definition) return path_selector;
     defer allocator.free(path_selector);
     return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ path_selector, node.name });
 }
@@ -1038,7 +1038,7 @@ fn matchesUniqueIdFqnPattern(pattern: []const u8, unique_id: []const u8) bool {
 }
 
 fn matchesNodeFqnPattern(pattern: []const u8, node: *const Node) bool {
-    if (std.mem.eql(u8, node.resource_type, "snapshot")) {
+    if (std.mem.eql(u8, node.resource_type, "snapshot") and !node.snapshot_yaml_definition) {
         var buffer: [4096]u8 = undefined;
         var len: usize = 0;
         if (!appendFqnSlice(&buffer, &len, node.package_name) or !appendFqnByte(&buffer, &len, '.')) return false;
@@ -1046,7 +1046,7 @@ fn matchesNodeFqnPattern(pattern: []const u8, node: *const Node) bool {
         if (!appendFqnPath(&buffer, &len, node.path) or !appendFqnByte(&buffer, &len, '.') or !appendFqnSlice(&buffer, &len, node.name)) return false;
         return matchesFqnCandidate(pattern, buffer[0..len]) or matchesFqnCandidate(pattern, buffer[unscoped_start..len]);
     }
-    return matchesPathBackedFqnPattern(pattern, node.package_name, node.path);
+    return matchesPathBackedFqnPattern(pattern, node.package_name, node.snapshot_fqn_path orelse node.path);
 }
 
 fn matchesGenericTestFqnPattern(pattern: []const u8, test_node: *const GenericTestNode) bool {

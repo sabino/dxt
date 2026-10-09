@@ -12214,11 +12214,11 @@ def test_snapshot_custom_paths_replace_default_and_empty_paths_disable_discovery
     ("{% snapshot bad name %}select 1{% endsnapshot %}", "malformed SQL snapshot block"),
     ("{% snapshot bad %}{{ config(strategy='timestamp', unique_key='id') }}select 1{% endsnapshot %}", "valid timestamp or check strategy"),
     ("{% snapshot bad %}{{ config(strategy='check', unique_key='id', check_cols='id') }}{% endsnapshot %}", "valid timestamp or check strategy"),
-    ("{% snapshot bad %}{{ config(strategy=var('strategy')) }}{% endsnapshot %}", "unsupported SQL snapshot config"),
-    ("{% snapshot bad %}{% if execute %}select 1{% endif %}{% endsnapshot %}", "only named blocks"),
+    ("{% snapshot bad %}{{ config(strategy=var('strategy')) }}{% endsnapshot %}", "var"),
+    ("{% snapshot bad %}{% if execute %}select 1{% endif %}{% endsnapshot %}", "valid timestamp or check strategy"),
     ("{% snapshot bad %}{{ config(enabled=false, unknown='value') }}{% endsnapshot %}", "unsupported SQL snapshot config"),
-    ("{% snapshot bad %}{{ config(enabled=false, enabled=true) }}{% endsnapshot %}", "unsupported SQL snapshot config"),
-    ("{% snapshot bad %}{{ config(enabled=false, unique_key=['id']) }}{{ config(unique_key=var('key')) }}{% endsnapshot %}", "unsupported SQL snapshot config"),
+    ("{% snapshot bad %}{{ config(enabled=false, enabled=true) }}{% endsnapshot %}", "InvalidJinjaArguments"),
+    ("{% snapshot bad %}{{ config(enabled=false, unique_key=['id']) }}{{ config(unique_key=var('key')) }}{% endsnapshot %}", "var"),
 ])
 def test_snapshot_malformed_and_unsupported_blocks_fail_closed(tmp_path: Path, body: str, diagnostic: str):
     project = copy_fixture(tmp_path, "single_model")
@@ -12232,24 +12232,45 @@ def test_snapshot_malformed_and_unsupported_blocks_fail_closed(tmp_path: Path, b
     assert not target.exists()
 
 
+def executable_snapshot_project(tmp_path: Path):
+    from test_usability_snapshots import project_at, snapshot
+    project = project_at(tmp_path / "executable_snapshot", "")
+    (project / "models").mkdir()
+    (project / "models/customers.sql").write_text("{{ config(materialized='table') }} select * from main.input")
+    (project / "models/current_customers.sql").write_text("{{ config(materialized='table') }} select * from {{ ref('history') }} where dbt_valid_to is null")
+    (project / "seeds").mkdir()
+    (project / "seeds/region.csv").write_text("region\nEU\n")
+    (project / "tests").mkdir()
+    (project / "tests/assert_history.sql").write_text("select * from {{ ref('history') }} where false")
+    snapshot(project)
+    return project
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="DuckDB CLI is required")
 @pytest.mark.parametrize("command", ["compile", "build", "run", "seed", "test", "docs generate", "snapshot"])
-def test_snapshot_execution_commands_fail_before_writing_or_running_sql(tmp_path: Path, command: str):
-    project = copy_fixture(tmp_path, "snapshot_sql")
+def test_snapshot_execution_commands_support_resource_filtering(tmp_path: Path, command: str):
+    project = executable_snapshot_project(tmp_path)
     target = tmp_path / "target"
-    result = snapshot_cli(project, target, command, "--select", "customers customer_history")
-    assert result.returncode == 2
-    assert "snapshot resources currently support parse and ls only" in result.stderr
-    assert not target.exists()
+    result = snapshot_cli(project, target, command, "--select", "customers history region assert_history")
+    assert result.returncode == 0, result.stderr
+    assert (target / "manifest.json").exists()
+    if command in {"build", "run", "seed", "test", "snapshot"}:
+        results = json.loads((target / "run_results.json").read_text())["results"]
+        assert results and all(row["status"] in {"success", "pass"} for row in results)
+    else:
+        assert not (target / "run_results.json").exists()
+    assert duckdb_scalar(project / "warehouse.duckdb", "select count(*) from archive.history") == "2"
 
 
-def test_snapshot_yaml_properties_are_explicitly_unsupported(tmp_path: Path):
+def test_snapshot_yaml_properties_patch_sql_snapshots(tmp_path: Path):
     project = copy_fixture(tmp_path, "snapshot_sql")
     (project / "snapshots/schema.yml").write_text("version: 2\nsnapshots:\n  - name: customer_history\n    description: history\n")
     target = tmp_path / "target"
     result = snapshot_cli(project, target)
-    assert result.returncode == 2
-    assert "YAML snapshot definitions and properties are not supported" in result.stderr
-    assert not target.exists()
+    assert result.returncode == 0, result.stderr
+    node = json.loads((target / "manifest.json").read_text())["nodes"]["snapshot.snapshot_sql.customer_history"]
+    assert node["description"] == "history"
+    assert node["patch_path"] == "snapshot_sql://snapshots/schema.yml"
 
 
 def test_snapshot_disabled_reference_and_duplicate_names_fail_closed(tmp_path: Path):
@@ -12320,60 +12341,73 @@ def test_snapshot_default_commands_filter_to_unrelated_executable_resources(tmp_
     assert all(row["status"] in {"success", "pass"} for row in results)
 
 
-def test_snapshot_project_config_inheritance_is_explicitly_unsupported(tmp_path: Path):
+def test_snapshot_project_config_inheritance_disables_snapshots(tmp_path: Path):
     project = copy_fixture(tmp_path, "snapshot_sql")
+    (project / "models/current_customers.sql").unlink()
     (project / "dbt_project.yml").write_text((project / "dbt_project.yml").read_text() + "snapshots:\n  snapshot_sql:\n    +enabled: false\n")
     target = tmp_path / "target"
     result = snapshot_cli(project, target)
-    assert result.returncode == 2
-    assert "project snapshot config inheritance is not supported" in result.stderr
-    assert not target.exists()
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert "snapshot.snapshot_sql.customer_history" not in manifest["nodes"]
+    assert manifest["disabled"]["snapshot.snapshot_sql.customer_history"][0]["config"]["enabled"] is False
+    assert "snapshot.util_pkg.package_history" in manifest["nodes"]
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="DuckDB CLI is required")
 @pytest.mark.parametrize("command,resource", [("compile", "current_customers"), ("run", "current_customers"), ("test", "assert_history")])
-def test_snapshot_consumers_fail_before_compilation_or_execution(tmp_path: Path, command: str, resource: str):
-    project = copy_fixture(tmp_path, "snapshot_sql")
-    (project / "tests").mkdir()
-    (project / "tests/assert_history.sql").write_text("select * from {{ ref('customer_history') }} where false")
+def test_snapshot_consumers_compile_and_execute(tmp_path: Path, command: str, resource: str):
+    project = executable_snapshot_project(tmp_path)
     target = tmp_path / "target"
     result = snapshot_cli(project, target, command, "--select", resource)
-    assert result.returncode == 2
-    assert "snapshot resources currently support parse and ls only" in result.stderr
-    assert not target.exists()
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((target / "manifest.json").read_text())
+    node = manifest["nodes"][f"{'test' if command == 'test' else 'model'}.snapshot_runtime.{resource}"]
+    if command != "test":
+        assert node["compiled"] is True and '"archive"."history"' in node["compiled_code"]
+    if command != "compile":
+        result = json.loads((target / "run_results.json").read_text())["results"][0]
+        assert result["status"] == ("pass" if command == "test" else "success")
+        assert '"archive"."history"' in result["compiled_code"]
 
 
 @pytest.mark.parametrize("resource_type", ["model", "seed"])
-def test_snapshot_colliding_refable_names_are_explicitly_unsupported(tmp_path: Path, resource_type: str):
+def test_snapshot_refable_name_precedence_matches_core_parser_order(tmp_path: Path, resource_type: str):
     project = copy_fixture(tmp_path, "snapshot_sql")
     if resource_type == "model":
         (project / "models/customer_history.sql").write_text("select 1 as customer_id")
     else:
         (project / "seeds").mkdir()
         (project / "seeds/customer_history.csv").write_text("customer_id\n1\n")
-    result = snapshot_cli(project, tmp_path / "target")
-    assert result.returncode == 2
-    assert "ref to a snapshot sharing a name with a model or seed is not supported" in result.stderr
-    assert not (tmp_path / "target").exists()
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target)
+    assert result.returncode == 0, result.stderr
+    node = json.loads((target / "manifest.json").read_text())["nodes"]["model.snapshot_sql.current_customers"]
+    expected = "snapshot.snapshot_sql.customer_history" if resource_type == "model" else "seed.snapshot_sql.customer_history"
+    assert node["depends_on"]["nodes"] == [expected]
 
 
-def test_snapshot_default_test_rejects_singular_consumer(tmp_path: Path):
-    project = copy_fixture(tmp_path, "snapshot_sql")
-    (project / "tests").mkdir()
-    (project / "tests/assert_history.sql").write_text("select * from {{ ref('customer_history') }} where false")
+@pytest.mark.skipif(DUCKDB is None, reason="DuckDB CLI is required")
+def test_snapshot_default_test_executes_singular_consumer(tmp_path: Path):
+    project = executable_snapshot_project(tmp_path)
     target = tmp_path / "target"
     result = snapshot_cli(project, target, "test")
-    assert result.returncode == 2
-    assert "snapshot resources currently support parse and ls only" in result.stderr
-    assert not target.exists()
+    assert result.returncode == 0, result.stderr
+    results = json.loads((target / "run_results.json").read_text())["results"]
+    assert results[0]["unique_id"] == "test.snapshot_runtime.assert_history"
+    assert results[0]["status"] == "pass"
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="DuckDB CLI is required")
 @pytest.mark.parametrize("command", ["compile", "run"])
-def test_snapshot_consumer_via_unselected_ephemeral_parent_fails_closed(tmp_path: Path, command: str):
-    project = copy_fixture(tmp_path, "snapshot_sql")
-    (project / "models/ephemeral_history.sql").write_text("{{ config(materialized='ephemeral') }}\nselect * from {{ ref('customer_history') }}")
+def test_snapshot_consumer_via_unselected_ephemeral_parent_executes(tmp_path: Path, command: str):
+    project = executable_snapshot_project(tmp_path)
+    (project / "models/ephemeral_history.sql").write_text("{{ config(materialized='ephemeral') }}\nselect * from {{ ref('history') }}")
     (project / "models/final_history.sql").write_text("select * from {{ ref('ephemeral_history') }}")
     target = tmp_path / "target"
     result = snapshot_cli(project, target, command, "--select", "final_history")
-    assert result.returncode == 2
-    assert "snapshot resources currently support parse and ls only" in result.stderr
-    assert not target.exists()
+    assert result.returncode == 0, result.stderr
+    node = json.loads((target / "manifest.json").read_text())["nodes"]["model.snapshot_runtime.final_history"]
+    assert node["extra_ctes_injected"] and '"archive"."history"' in node["compiled_code"]
+    if command == "run":
+        assert duckdb_scalar(project / "warehouse.duckdb", "select count(*) from main.final_history") == "2"

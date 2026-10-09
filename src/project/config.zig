@@ -194,8 +194,7 @@ fn appendJsonVarValue(allocator: std.mem.Allocator, vars: *std.ArrayList(VarEntr
 }
 
 fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !ProjectConfig {
-    try rejectProjectSnapshotConfigs(text);
-    var config = ProjectConfig{ .name = "" };
+    var config = ProjectConfig{ .name = "", .snapshot_config_text = text };
     errdefer {
         deinitProjectConfig(allocator, &config);
     }
@@ -1489,26 +1488,7 @@ test "project seed docs application targets package seeds only" {
     try std.testing.expect(!graph.nodes.items[2].docs.configured);
 }
 
-fn rejectProjectSnapshotConfigs(text: []const u8) !void {
-    var in_snapshots = false;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw_line| {
-        const line = stripYamlComment(raw_line);
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0) continue;
-        if (leadingSpaces(line) == 0) {
-            in_snapshots = false;
-            if (splitKeyValue(trimmed)) |kv| {
-                if (std.mem.eql(u8, kv.key, "snapshots")) {
-                    const value = std.mem.trim(u8, kv.value, " \t\r");
-                    if (value.len == 0) in_snapshots = true else if (!std.mem.eql(u8, value, "{}") and !std.mem.eql(u8, value, "null")) return error.UnsupportedProjectSnapshotConfig;
-                }
-            }
-        } else if (in_snapshots) return error.UnsupportedProjectSnapshotConfig;
-    }
-}
-
-test "snapshot paths honor an explicit empty list and project snapshot inheritance fails closed" {
+test "snapshot paths honor an explicit empty list" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1516,5 +1496,7 @@ test "snapshot paths honor an explicit empty list and project snapshot inheritan
     defer deinitProjectConfig(allocator, &config);
     try std.testing.expect(config.snapshot_paths_set);
     try std.testing.expectEqual(@as(usize, 0), config.snapshot_paths.items.len);
-    try std.testing.expectError(error.UnsupportedProjectSnapshotConfig, parseProjectConfigText(allocator, "name: demo\nsnapshots:\n  demo:\n    +enabled: false\n"));
+    var inherited = try parseProjectConfigText(allocator, "name: demo\nsnapshots:\n  demo:\n    +enabled: false\n");
+    defer deinitProjectConfig(allocator, &inherited);
+    try std.testing.expect(inherited.snapshot_config_text != null);
 }

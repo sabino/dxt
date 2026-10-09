@@ -11,6 +11,7 @@ const project_fs = @import("project/fs.zig");
 const project_jinja = @import("project/jinja.zig");
 const project_loader = @import("project/loader.zig");
 const project_snapshot = @import("project/snapshot.zig");
+const snapshot_yaml = @import("project/snapshot_yaml.zig");
 const snapshot_runner = @import("project/snapshot_runner.zig");
 const project_parse = @import("project/parse.zig");
 const project_resolve = @import("project/resolve.zig");
@@ -1933,7 +1934,8 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         }
         var compiled_model = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, node);
         errdefer compiled_model.deinit(runtime.allocator);
-        const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, node.package_name, node.original_file_path });
+        const artifact_path = if (node.snapshot_yaml_definition) try std.fmt.allocPrint(runtime.allocator, "{s}/{s}.sql", .{ node.original_file_path, node.name }) else node.original_file_path;
+        const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, node.package_name, artifact_path });
         if (std.fs.path.dirname(compiled_path)) |parent| {
             try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
         }
@@ -2725,7 +2727,7 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
 
-    try project_snapshot.rejectYamlDefinitions(text);
+    try snapshot_yaml.parseProperties(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseSourcesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseUnitTestsFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
@@ -2784,12 +2786,12 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             incremental_list_key = null;
         }
 
-        if (std.mem.eql(u8, trimmed, "models:") or std.mem.eql(u8, trimmed, "seeds:") or std.mem.eql(u8, trimmed, "analyses:")) {
+        if (std.mem.eql(u8, trimmed, "models:") or std.mem.eql(u8, trimmed, "seeds:") or std.mem.eql(u8, trimmed, "analyses:") or std.mem.eql(u8, trimmed, "snapshots:")) {
             in_models = true;
             in_columns = false;
             in_config = false;
             in_seed_column_types = false;
-            active_resource_type = if (std.mem.eql(u8, trimmed, "seeds:")) "seed" else if (std.mem.eql(u8, trimmed, "analyses:")) "analysis" else "model";
+            active_resource_type = if (std.mem.eql(u8, trimmed, "seeds:")) "seed" else if (std.mem.eql(u8, trimmed, "analyses:")) "analysis" else if (std.mem.eql(u8, trimmed, "snapshots:")) "snapshot" else "model";
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -2803,7 +2805,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             continue;
         }
         if (!in_models) continue;
-        if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:") and !std.mem.eql(u8, trimmed, "seeds:") and !std.mem.eql(u8, trimmed, "analyses:")) {
+        if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:") and !std.mem.eql(u8, trimmed, "seeds:") and !std.mem.eql(u8, trimmed, "analyses:") and !std.mem.eql(u8, trimmed, "snapshots:")) {
             in_models = false;
             in_columns = false;
             in_config = false;
@@ -2959,6 +2961,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                 persist_docs_indent = null;
             }
             if (in_config and indent > config_indent) {
+                if (std.mem.eql(u8, active_resource_type, "snapshot") and in_columns and current_column != null) continue;
                 if (std.mem.eql(u8, active_resource_type, "model") and try incremental_config.applyYaml(allocator, &graph.model_properties.items[model_index].incremental, kv.key, kv.value)) {
                     if (std.mem.trim(u8, kv.value, " \t").len == 0 and (std.mem.eql(u8, kv.key, "unique_key") or std.mem.eql(u8, kv.key, "predicates") or std.mem.eql(u8, kv.key, "incremental_predicates"))) {
                         incremental_list_key = kv.key;
@@ -2997,6 +3000,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                     graph.model_properties.items[model_index].description = try dupTrimmedScalar(allocator, kv.value);
                 }
             } else if (std.mem.eql(u8, kv.key, "tags")) {
+                if (std.mem.eql(u8, active_resource_type, "snapshot") and in_columns and current_column != null) continue;
                 try parseInlineStringList(allocator, kv.value, &graph.model_properties.items[model_index].tags);
                 sortStrings(graph.model_properties.items[model_index].tags.items);
             } else if (std.mem.eql(u8, kv.key, "columns")) {
@@ -3350,7 +3354,7 @@ fn findSingularTestIndexByPackageAndName(graph: *const Graph, package_name: []co
 
 fn materializeGenericTests(graph: *Graph) !void {
     for (graph.nodes.items) |*node| {
-        if (!node.enabled or (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed"))) continue;
+        if (!node.enabled or (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot"))) continue;
         for (node.tests.items) |test_def| {
             if (isSupportedGenericTest(test_def, null)) {
                 try appendGenericTestNode(graph, node, test_def, null);

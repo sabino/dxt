@@ -244,3 +244,145 @@ def test_snapshot_empty_source_and_target_overrides(tmp_path):
     catalog = json.loads((project/'target/catalog.json').read_text())['nodes']['snapshot.snapshot_runtime.history']
     assert catalog['metadata']['schema'] == 'archive' and catalog['metadata']['name'] == 'physical_history'
     assert 'dbt_scd_id' in catalog['columns']
+
+
+def yaml_project(path: Path):
+    project = project_at(path, '')
+    (project/'snapshots/history.sql').unlink()
+    (project/'models').mkdir()
+    (project/'models/input_model.sql').write_text("{{ config(materialized='view') }} select * from main.input\n")
+    (project/'dbt_project.yml').write_text("name: snapshot_runtime\nversion: '1.0'\nconfig-version: 2\nprofile: snapshot_runtime\nsnapshots:\n  +target_schema: archive\n  snapshot_runtime:\n    +strategy: timestamp\n    +unique_key: id\n    +updated_at: ts\n    +tags: [inherited]\n")
+    (project/'snapshots/nested').mkdir()
+    (project/'snapshots/nested/definitions.yml').write_text("""version: 2
+snapshots:
+  - name: history
+    relation: ref('input_model')
+    description: Stored customer history
+    config:
+      hard_deletes: new_record
+      tags: [yaml]
+      docs: {show: false, node_color: '#336699'}
+      meta: {owner: analytics, nested: {level: 2, labels: [customer, history]}}
+    columns:
+      - name: id
+        description: Customer key
+        data_type: integer
+        quote: true
+        config:
+          meta: {owner: customer_team}
+          tags: [identifier]
+        data_tests: [not_null]
+""")
+    return project
+
+
+def test_modern_yaml_snapshot_inherited_config_and_tests(tmp_path):
+    project = yaml_project(tmp_path/'dxt')
+    result = run(project,'build')
+    assert result.returncode == 0, result.stderr
+    rows = query(project,'select * from archive.history order by id')
+    assert len(rows) == 2 and rows[0]['dbt_is_deleted'] == 'False'
+    node = json.loads((project/'target/manifest.json').read_text())['nodes']['snapshot.snapshot_runtime.history']
+    assert node['fqn'] == ['snapshot_runtime','nested','history']
+    assert node['path'] == 'nested/definitions.yml/history.sql'
+    assert node['raw_code'] == "select * from {{ ref('input_model') }}"
+    assert node['docs'] == {'show':False,'node_color':'#336699'}
+    assert node['meta'] == {'owner':'analytics','nested':{'level':2,'labels':['customer','history']}}
+    assert node['config']['tags'] == ['inherited','yaml']
+    assert node['columns']['id']['description'] == 'Customer key'
+    assert node['columns']['id']['data_type'] == 'integer' and node['columns']['id']['quote'] is True
+    assert node['columns']['id']['meta'] == {} and node['columns']['id']['tags'] == []
+    assert node['columns']['id']['config'] == {'meta':{'owner':'customer_team'}, 'tags':['identifier']}
+    results = json.loads((project/'target/run_results.json').read_text())['results']
+    assert [r['status'] for r in results] == ['success','success','pass']
+    listed = run(project,'ls','--resource-type','snapshot','--output','selector')
+    assert listed.stdout.strip() == 'snapshot_runtime.nested.history'
+    assert run(project,'snapshot','--select','snapshot_runtime.nested.history').returncode == 0
+
+
+def test_sql_snapshot_yaml_patch_and_inline_priority(tmp_path):
+    project = project_at(tmp_path/'dxt',"")
+    sql_path=project/'snapshots/history.sql'
+    sql_path.write_text(sql_path.read_text().replace("target_schema='archive'", "target_schema='inline_archive'"))
+    (project/'dbt_project.yml').write_text((project/'dbt_project.yml').read_text()+"snapshots:\n  +strategy: check\n  +unique_key: name\n  +target_schema: default_archive\n  snapshot_runtime:\n    history:\n      history:\n        +strategy: timestamp\n        +updated_at: ts\n")
+    (project/'snapshots/patch.yml').write_text("version: 2\nsnapshots:\n  - name: history\n    description: Patched history\n    config:\n      target_schema: yaml_archive\n      tags: [patched]\n    columns:\n      - name: id\n        data_tests: [not_null]\n")
+    result = run(project,'build')
+    assert result.returncode == 0, result.stderr
+    node=json.loads((project/'target/manifest.json').read_text())['nodes']['snapshot.snapshot_runtime.history']
+    assert node['schema']=='inline_archive' and node['description']=='Patched history'
+    assert node['config']['unique_key']=='id' and node['config']['strategy']=='timestamp'
+    assert any(r['status']=='pass' for r in json.loads((project/'target/run_results.json').read_text())['results'])
+
+
+def test_modern_yaml_pinned_dbt_snapshot_oracle(tmp_path):
+    dbt=pinned_dbt()
+    own=yaml_project(tmp_path/'dxt')
+    upstream=yaml_project(tmp_path/'dbt')
+    for project, executable in ((own,DXT),(upstream,dbt)):
+        result=run(project,'build',executable=executable)
+        assert result.returncode==0,result.stdout+result.stderr
+    assert query(own,'select * from archive.history order by id')==query(upstream,'select * from archive.history order by id')
+    own_node=json.loads((own/'target/manifest.json').read_text())['nodes']['snapshot.snapshot_runtime.history']
+    core_node=json.loads((upstream/'target/manifest.json').read_text())['nodes']['snapshot.snapshot_runtime.history']
+    for field in ('unique_id','name','resource_type','package_name','path','original_file_path','fqn','raw_code','database','schema','alias','checksum','description','docs','meta','refs','sources'):
+        assert own_node[field]==core_node[field],field
+    for field in ('strategy','unique_key','updated_at','target_schema','hard_deletes','tags','docs','meta','snapshot_meta_column_names'):
+        assert own_node['config'][field]==core_node['config'][field],field
+    for field in ('name','description','data_type','quote','meta','tags','config'):
+        assert own_node['columns']['id'][field] == core_node['columns']['id'][field],field
+    import jsonschema
+    jsonschema.validate(own_node,json.loads((ROOT/'tests/schemas/dbt_manifest_v12_snapshot.schema.json').read_text()))
+
+
+def test_snapshot_general_jinja_macros_vars_and_scopes(tmp_path):
+    project=project_at(tmp_path/'dxt','')
+    (project/'models').mkdir()
+    (project/'models/input_model.sql').write_text("{{ config(materialized='view') }} select * from main.input\n")
+    (project/'macros').mkdir()
+    (project/'macros/columns.sql').write_text("{% macro history_columns() %}{{ return(['id','name','ts']) }}{% endmacro %}\n")
+    (project/'snapshots/history.sql').write_text("""{% snapshot history %}
+{% set settings={'strategy': var('strategy', 'timestamp'), 'unique_key':'id', 'updated_at':'ts', 'target_schema':'archive'} %}
+{{ config(settings) }}
+{{ config(**settings) }}
+select {% for column in history_columns() %}{{ column }}{% if not loop.last %}, {% endif %}{% endfor %}
+from {{ ref(var('input_name','input_model')) }}
+where {% if execute %}true{% else %}false{% endif %}
+{% endsnapshot %}
+""")
+    result=run(project,'build')
+    assert result.returncode==0,result.stderr
+    assert len(query(project,'select * from archive.history'))==2
+    node=json.loads((project/'target/manifest.json').read_text())['nodes']['snapshot.snapshot_runtime.history']
+    assert node['depends_on']['nodes']==['model.snapshot_runtime.input_model']
+    assert 'macro.snapshot_runtime.history_columns' in node['depends_on']['macros']
+    assert node['config']['strategy']=='timestamp'
+    assert run(project,'snapshot','--vars','{strategy: timestamp,input_name: input_model}').returncode==0
+
+
+def test_snapshot_reference_precedence_and_physical_collision(tmp_path):
+    project=project_at(tmp_path/'dxt','')
+    (project/'models').mkdir()
+    (project/'models/history.sql').write_text("{{ config(materialized='table') }} select 999 as id\n")
+    (project/'models/consumer.sql').write_text("{{ config(materialized='table') }} select * from {{ ref('history') }}\n")
+    result=run(project,'build')
+    assert result.returncode==0,result.stderr
+    node=json.loads((project/'target/manifest.json').read_text())['nodes']['model.snapshot_runtime.consumer']
+    assert node['depends_on']['nodes']==['snapshot.snapshot_runtime.history']
+    assert len(query(project,'select * from main.consumer'))==2
+    path=project/'snapshots/history.sql'
+    path.write_text(path.read_text().replace("target_schema='archive'","target_schema='main'"))
+    collision=run(project,'parse')
+    assert collision.returncode!=0 and 'same database, schema, and identifier' in collision.stderr
+
+
+def test_snapshot_root_project_configs_override_dependency_inline_configs(tmp_path):
+    project=project_at(tmp_path/'dxt','')
+    package=project/'dbt_packages/dep'
+    (package/'snapshots').mkdir(parents=True)
+    (package/'dbt_project.yml').write_text("name: dep\nversion: '1.0'\nconfig-version: 2\n")
+    (package/'snapshots/history.sql').write_text("{% snapshot dependency_history %}{{ config(enabled=true,strategy='timestamp',unique_key='id',updated_at='ts',target_schema='dependency_schema') }}select * from main.input{% endsnapshot %}")
+    (project/'dbt_project.yml').write_text((project/'dbt_project.yml').read_text()+"snapshots:\n  dep:\n    +enabled: false\n    +target_schema: root_schema\n")
+    result=run(project,'parse')
+    assert result.returncode==0,result.stderr
+    node=json.loads((project/'target/manifest.json').read_text())['disabled']['snapshot.dep.dependency_history'][0]
+    assert node['config']['enabled'] is False and node['schema']=='root_schema'

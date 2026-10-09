@@ -4,6 +4,8 @@ const project_fs = @import("fs.zig");
 const project_parse = @import("parse.zig");
 const project_profile = @import("profile.zig");
 const snapshot = @import("snapshot.zig");
+const snapshot_yaml = @import("snapshot_yaml.zig");
+const compiler = @import("compiler.zig");
 const project_resolve = @import("resolve.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
@@ -186,17 +188,26 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     applyProjectSeedDocs(&graph, config.name, config.seed_docs);
     try loadSingularTests(runtime, options.project_dir, config.name, config.test_paths.items, callbacks, &graph);
     try loadSnapshots(runtime, options.project_dir, config.name, config.snapshot_paths.items, callbacks, &graph);
+    if (config.snapshot_config_text) |text| try graph.snapshot_project_configs.append(runtime.allocator, .{ .package_name = config.name, .text = text });
 
     try rejectDuplicateMacroProperties(&graph);
     try applyMacroProperties(&graph);
     try callbacks.apply_singular_test_properties(&graph, config.name);
     try callbacks.apply_model_properties(&graph, config.name);
+    try project_resolve.rejectDuplicateSnapshots(&graph);
+    for (graph.nodes.items) |*node| {
+        if (node.snapshot_config == null) continue;
+        node.refs.clearRetainingCapacity();
+        node.source_refs.clearRetainingCapacity();
+        try compiler.scanDependencies(runtime.allocator, node.raw_code, node, &graph);
+    }
+    try snapshot_yaml.finalize(&graph);
+    try snapshot_yaml.rejectRelationCollisions(&graph);
     try callbacks.materialize_generic_tests(&graph);
     sortGraphResources(&graph);
     try rejectDuplicateAnalyses(&graph);
     try rejectDuplicateModels(&graph);
     try rejectDuplicateSeeds(&graph);
-    try project_resolve.rejectDuplicateSnapshots(&graph);
     try rejectDuplicateSingularTests(&graph);
     try rejectDuplicateDocs(&graph);
     try rejectDuplicateExposures(&graph);
@@ -375,11 +386,12 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
             }
         }
         try applyProjectModelPathConfigs(graph, package_config.model_path_configs.items, false, package_config.name);
-        try callbacks.apply_model_properties(graph, package_config.name);
         applyProjectSeedDocs(graph, package_config.name, package_config.seed_docs);
         try loadSingularTests(runtime, package_dir, package_config.name, package_config.test_paths.items, callbacks, graph);
         try callbacks.apply_singular_test_properties(graph, package_config.name);
         try loadSnapshots(runtime, package_dir, package_config.name, package_config.snapshot_paths.items, callbacks, graph);
+        try callbacks.apply_model_properties(graph, package_config.name);
+        if (package_config.snapshot_config_text) |text| try graph.snapshot_project_configs.append(runtime.allocator, .{ .package_name = package_config.name, .text = text });
     }
 }
 
