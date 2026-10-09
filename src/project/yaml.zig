@@ -40,6 +40,21 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Document {
     return parseWithDiagnostics(allocator, text, null);
 }
 
+/// Shared scalar resolution for runtime SafeLoader values. Project documents
+/// retain their JSON representation while context callers preserve YAML types.
+pub const Scalar = struct { value: Value, tag: []const u8, merge: bool };
+pub fn resolveScalar(allocator: std.mem.Allocator, text: []const u8, authored_tag: ?[]const u8, plain: bool, key_position: bool) !Scalar {
+    var parser = Parser{ .allocator = allocator, .diagnostic = null, .anchors = std.StringHashMap(Anchor).init(allocator) };
+    defer parser.anchors.deinit();
+    const tag = if (authored_tag) |provided| if (eq(provided, "!")) implicitTag(text) else provided else if (plain) implicitTag(text) else "str";
+    const result = try parser.scalar(text, authored_tag, plain, key_position);
+    return .{ .value = result.value, .tag = tag, .merge = result.merge };
+}
+
+pub fn resolvesAsString(text: []const u8) bool {
+    return isTag(implicitTag(text), "str");
+}
+
 pub fn parseWithDiagnostics(allocator: std.mem.Allocator, text: []const u8, diagnostic: ?*Diagnostic) !Document {
     if (diagnostic) |out| out.* = .{};
     const arena = try allocator.create(std.heap.ArenaAllocator);

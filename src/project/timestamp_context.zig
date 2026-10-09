@@ -24,6 +24,18 @@ pub fn configuredValue(a: std.mem.Allocator, civil_ns: i96, original: []const u8
     return datetimeValue(a, civil_ns, false, offset);
 }
 
+pub fn fromYaml(a: std.mem.Allocator, canonical: []const u8) !Value {
+    const seconds = try calendar.parseTimestamp(if (canonical.len == 10) canonical else canonical[0..19]);
+    var ns = @as(i96, seconds) * std.time.ns_per_s;
+    if (canonical.len > 19 and canonical[19] == '.') ns += @as(i96, try std.fmt.parseInt(u32, canonical[20..26], 10)) * std.time.ns_per_us;
+    const original = if (canonical.len == 10) try datetimeValue(a, ns, true, null) else try configuredValue(a, ns, canonical);
+    const entries = try expression.allocateEntries(a, original.object.len + 2);
+    @memcpy(entries[0..original.object.len], original.object);
+    entries[original.object.len] = .{ .key = "__dxt_yaml_timestamp", .value = .{ .string = canonical } };
+    entries[original.object.len + 1] = .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } };
+    return .{ .object = entries };
+}
+
 fn writeZone(w: *std.Io.Writer, offset: i32, colon: bool) !void {
     const total = @abs(offset);
     try w.print("{c}{d:0>2}{s}{d:0>2}", .{ @as(u8, if (offset < 0) '-' else '+'), total / 60, if (colon) ":" else "", total % 60 });

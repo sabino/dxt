@@ -31,9 +31,13 @@ pub fn construct(a: std.mem.Allocator, iterable: Value) !Value {
 }
 
 pub fn fromMembers(a: std.mem.Allocator, members: []const Value) !Value {
+    var unique: std.ArrayList(Value) = .empty;
+    for (members) |member| try append(a, &unique, member);
     const entries = try expression.allocateEntries(a, 2);
     entries[0] = .{ .key = "__dxt_set", .value = .{ .boolean = true } };
-    entries[1] = .{ .key = "__dxt_iterable", .value = .{ .list = try a.dupe(Value, members) } };
+    const owned = try expression.allocateValues(a, unique.items.len);
+    @memcpy(owned, unique.items);
+    entries[1] = .{ .key = "__dxt_iterable", .value = .{ .list = owned } };
     return .{ .object = entries };
 }
 

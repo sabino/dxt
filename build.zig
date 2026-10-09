@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     // document model, tag resolution, aliases/merges, diagnostics and lifetimes.
     mod.addIncludePath(b.path("vendor/libyaml/include"));
     mod.addCSourceFiles(.{
-        .files = &.{ "vendor/libyaml/src/api.c", "vendor/libyaml/src/reader.c", "vendor/libyaml/src/scanner.c", "vendor/libyaml/src/parser.c" },
+        .files = &.{ "vendor/libyaml/src/api.c", "vendor/libyaml/src/reader.c", "vendor/libyaml/src/scanner.c", "vendor/libyaml/src/parser.c", "vendor/libyaml/src/emitter.c", "vendor/libyaml/src/writer.c" },
         .flags = &.{ "-std=gnu99", "-DYAML_VERSION_STRING=\"0.2.5\"", "-DYAML_VERSION_MAJOR=0", "-DYAML_VERSION_MINOR=2", "-DYAML_VERSION_PATCH=5", b.fmt("-ffile-prefix-map={s}=.", .{b.build_root.path orelse "."}) },
     });
     // The PostgreSQL grammar is statically linked into the native binary. Zig

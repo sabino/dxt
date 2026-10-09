@@ -5,7 +5,7 @@ const Value = expression.Value;
 const Argument = expression.Argument;
 
 pub fn callable(name: []const u8) bool {
-    inline for (.{ "fromjson", "tojson", "set", "set_strict", "zip", "zip_strict", "local_md5" }) |candidate| if (std.mem.eql(u8, name, candidate)) return true;
+    inline for (.{ "fromjson", "tojson", "fromyaml", "toyaml", "set", "set_strict", "zip", "zip_strict", "local_md5" }) |candidate| if (std.mem.eql(u8, name, candidate)) return true;
     return false;
 }
 
@@ -31,6 +31,22 @@ fn bind(comptime names: []const []const u8, args: []const Argument, required: us
 }
 
 pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Value {
+    if (try @import("yaml_values.zig").call(a, name, args)) |result| return result;
+    if (std.mem.eql(u8, name, "fromyaml")) {
+        const bound = try bind(&.{ "value", "default" }, args, 1);
+        const input = if (bound[0] == .string) bound[0].string else if (bound[0].attribute("__dxt_binary") == .string) bound[0].attribute("__dxt_binary").string else return error.JinjaTypeError;
+        return @import("yaml_context.zig").load(a, input) catch |err| switch (err) {
+            error.OutOfMemory, error.JinjaIterationLimitExceeded, error.JinjaExpressionDepthExceeded => return err,
+            else => return bound[1],
+        };
+    }
+    if (std.mem.eql(u8, name, "toyaml")) {
+        const bound = try bind(&.{ "value", "default", "sort_keys" }, args, 1);
+        return .{ .string = @import("yaml_dump.zig").dump(a, bound[0], bound[2].truthy()) catch |err| switch (err) {
+            error.InvalidYamlRepresentation => return bound[1],
+            else => return err,
+        } };
+    }
     if (std.mem.eql(u8, name, "local_md5")) {
         const bound = try bind(&.{"value"}, args, 1);
         if (bound[0] != .string) return error.JinjaTypeError;
@@ -80,12 +96,7 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
             } else try inputs.append(a, arg.value);
         }
         for (inputs.items) |input| {
-            const iterable = switch (input) {
-                .string, .list, .tuple => true,
-                .object => !input.attribute("__dxt_noniterable").truthy(),
-                else => false,
-            };
-            if (!iterable) return if (strict) error.JinjaTypeError else fallback;
+            if (!expression.isIterable(input)) return if (strict) error.JinjaTypeError else fallback;
         }
         return try @import("expression_sequence.zig").zip(a, inputs.items);
     }

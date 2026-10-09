@@ -14,7 +14,7 @@ pub fn baseCallable(name: []const u8) bool {
 }
 
 pub fn allowsCall(name: []const u8) bool {
-    return baseCallable(name) or std.mem.startsWith(u8, name, "modules.") or std.mem.startsWith(u8, name, "__dxt_value.") or std.mem.startsWith(u8, name, "__dxt_regex_") or std.mem.startsWith(u8, name, "__dxt_datetime:");
+    return baseCallable(name) or std.mem.startsWith(u8, name, "modules.") or std.mem.startsWith(u8, name, "__dxt_value.") or std.mem.startsWith(u8, name, "__dxt_regex_") or std.mem.startsWith(u8, name, "__dxt_datetime:") or std.mem.startsWith(u8, name, "__dxt_yaml_bytes_");
 }
 
 pub fn lookup(graph: *const types.Graph, node_package: []const u8, package: ?[]const u8, name: []const u8) ?*const types.DocBlock {
