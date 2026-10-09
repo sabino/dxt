@@ -278,7 +278,7 @@ pub fn relationValue(allocator: std.mem.Allocator, definition: RelationDef) !Val
         .{ .key = "can_be_renamed", .value = .{ .boolean = replaceable } },
         .{ .key = "can_be_replaced", .value = .{ .boolean = replaceable } },
     });
-    for ([_][]const u8{ "render", "quote", "include", "incorporate", "replace_path", "without_identifier", "matches", "information_schema", "information_schema_only" }) |method| try entries.append(allocator, .{
+    for ([_][]const u8{ "get", "render", "quote", "include", "incorporate", "replace_path", "without_identifier", "matches", "information_schema", "information_schema_only" }) |method| try entries.append(allocator, .{
         .key = method,
         .value = .{ .callable = try std.fmt.allocPrint(allocator, "__dxt_relation:{s}:{s}", .{ method, serialized }) },
     });
@@ -363,7 +363,14 @@ pub fn call(allocator: std.mem.Allocator, adapter_type: []const u8, name: []cons
     const method = name[prefix.len..boundary];
     const original = (try std.json.parseFromSlice(RelationDef, allocator, name[boundary + 1 ..], .{})).value;
     var definition = original;
-    if (std.mem.eql(u8, method, "render")) {
+    if (std.mem.eql(u8, method, "get")) {
+        const key = named(args, "key", 0);
+        if (key != .string or args.len > 2) return error.InvalidJinjaArguments;
+        if (std.mem.eql(u8, key.string, "metadata")) return .{ .object = try allocator.dupe(expression.Entry, &.{.{ .key = "type", .value = .{ .string = if (definition.information_schema_relation) "InformationSchema" else if (std.mem.eql(u8, definition.adapter_type, "postgres")) "PostgresRelation" else "DuckDBRelation" } }}) };
+        const value = (try relationValue(allocator, definition)).attribute(key.string);
+        const fallback = named(args, "default", 1);
+        return if (value == .undefined) (if (fallback == .undefined) Value.none else fallback) else value;
+    } else if (std.mem.eql(u8, method, "render")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         return .{ .string = try renderRelation(allocator, definition) };
     } else if (std.mem.eql(u8, method, "quote")) {

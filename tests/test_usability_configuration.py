@@ -794,6 +794,22 @@ def test_native_postgres_expand_target_columns_executes_and_preserves_rows(tmp_p
     assert observations[0] == observations[1] == (20, [('short',)])
 
 
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_native_relation_metadata_mapping_contract_matches_core(tmp_path, configuration_oracle, request, adapter):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, adapter)
+    pair.write('models/marts/relation_metadata.sql', """{% set relation = api.Relation.create(database=target.database, schema=target.schema, identifier='example', type='table', quote_policy={'identifier': false}) %}
+select '{{ relation.get('metadata').get('type') }}' as kind,
+       '{{ relation.get('metadata', {}).get('type', '').endswith('Relation') }}' as is_relation,
+       '{{ relation.get('missing', 'fallback') }}' as missing,
+       '{{ relation.get('quote_policy').get('identifier') }}' as quoted,
+       '{{ relation.get('include_policy').get('database') }}' as included,
+       '{{ relation.information_schema().get('metadata').get('type') }}' as information_schema_type
+""")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.relation_metadata']['compiled_code'] == expected['nodes']['model.configuration_fixture.relation_metadata']['compiled_code']
+
+
 def test_postgres_catalog_respects_authored_dispatch(tmp_path, configuration_oracle, request):
     pair = ConfigurationPair(tmp_path, configuration_oracle)
     configure_adapter(pair, request, 'postgres')
