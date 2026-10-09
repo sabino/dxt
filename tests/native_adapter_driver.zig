@@ -126,6 +126,9 @@ fn run(init: std.process.Init) !void {
         const json = try std.json.Stringify.valueAlloc(allocator, session.capabilities(), .{});
         defer allocator.free(json);
         try emit(init.io, json);
+    } else if (std.mem.eql(u8, args[2], "qualified-introspection")) {
+        try qualifiedIntrospection(allocator, &session, graph.adapter_type);
+        try emit(init.io, "{\"qualified_identity\":true,\"column_types\":true,\"relation_kinds\":true}");
     } else if (std.mem.eql(u8, args[2], "cancel")) {
         var task: QueryTask = .{ .session = &session, .allocator = allocator, .sql = if (std.mem.eql(u8, graph.adapter_type, "postgres")) "select pg_sleep(30)" else "select sum(a.i * b.i) from range(1000000) a(i), range(1000000) b(i)" };
         const worker = try std.Thread.spawn(.{}, QueryTask.run, .{&task});
@@ -141,6 +144,37 @@ fn run(init: std.process.Init) !void {
         try expectScalar(&output, "7");
         try emit(init.io, "{\"cancelled\":true,\"connection_recovered\":true}\n");
     } else return error.InvalidDriverMode;
+}
+
+fn qualifiedIntrospection(allocator: std.mem.Allocator, session: *adapter.Session, adapter_type: []const u8) !void {
+    if (std.mem.eql(u8, adapter_type, "duckdb")) {
+        try session.execute("attach ':memory:' as other_catalog; create table main.same_name(id integer); create table other_catalog.main.same_name(label varchar); create view other_catalog.main.typed_view as select label from other_catalog.main.same_name");
+        var local = try session.columns(allocator, "main", "same_name");
+        defer local.deinit(allocator);
+        try expectScalar(&local, "id");
+        if (local.rows.len != 1) return error.MixedCatalogColumns;
+        var other = try session.columnsInDatabase(allocator, "other_catalog", "main", "same_name");
+        defer other.deinit(allocator);
+        try expectScalar(&other, "label");
+        if (other.rows.len != 1) return error.MixedCatalogColumns;
+        const kind = (try session.relationTypeInDatabase(allocator, "other_catalog", "main", "typed_view")) orelse return error.MissingRelation;
+        defer allocator.free(kind);
+        if (!std.mem.eql(u8, kind, "view")) return error.InvalidRelationKind;
+        if (try session.relationExistsInDatabase(allocator, "missing_catalog", "main", "same_name")) return error.WrongCatalogIdentity;
+    } else {
+        try session.begin();
+        defer session.rollback() catch {};
+        try session.execute("create schema native_introspection; create table native_introspection.zero_columns(); create materialized view native_introspection.typed_view as select cast('x' as varchar(24)) as label");
+        if (!try session.relationExists(allocator, "native_introspection", "zero_columns")) return error.MissingZeroColumnTable;
+        var columns = try session.columns(allocator, "native_introspection", "typed_view");
+        defer columns.deinit(allocator);
+        try expectScalar(&columns, "label");
+        if (!std.mem.eql(u8, columns.rows[0][1].?, "character varying(24)")) return error.MissingTypePrecision;
+        const kind = (try session.relationTypeInDatabase(allocator, null, "native_introspection", "typed_view")) orelse return error.MissingMaterializedView;
+        defer allocator.free(kind);
+        if (!std.mem.eql(u8, kind, "materialized_view")) return error.InvalidRelationKind;
+        if (try session.relationExistsInDatabase(allocator, "missing_database", "native_introspection", "typed_view")) return error.WrongCatalogIdentity;
+    }
 }
 
 fn emit(io: std.Io, value: []const u8) !void {

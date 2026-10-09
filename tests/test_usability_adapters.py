@@ -130,6 +130,15 @@ def test_shared_duckdb_database_supports_simultaneous_writers(driver, tmp_path, 
     }
 
 
+@pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
+def test_actual_qualified_catalog_introspection_and_relation_kinds(driver, tmp_path, request, adapter):
+    environment = (request.getfixturevalue("duckdb_environment") if adapter == "duckdb"
+                   else request.getfixturevalue("postgres_fixture")[1])
+    assert decoded(invoke(driver, adapter, "qualified-introspection", tmp_path / "introspection.duckdb", environment)) == {
+        "qualified_identity": True, "column_types": True, "relation_kinds": True,
+    }
+
+
 def test_native_readonly_pool_promotes_only_after_readers_disconnect(driver, tmp_path, duckdb_environment):
     database = tmp_path / "promotion.duckdb"
     assert decoded(invoke(driver, "duckdb", "query", database, duckdb_environment, "select 1")) == [{"1": 1}]

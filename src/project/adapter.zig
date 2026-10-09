@@ -79,18 +79,48 @@ pub const Session = union(enum) {
         };
     }
     pub fn columns(self: *Session, allocator: std.mem.Allocator, schema: []const u8, relation: []const u8) !QueryResult {
+        return self.columnsInDatabase(allocator, null, schema, relation);
+    }
+    pub fn columnsInDatabase(self: *Session, allocator: std.mem.Allocator, database: ?[]const u8, schema: []const u8, relation: []const u8) !QueryResult {
         const schema_literal = try quoteLiteral(allocator, schema);
         defer allocator.free(schema_literal);
         const relation_literal = try quoteLiteral(allocator, relation);
         defer allocator.free(relation_literal);
-        const sql = try std.fmt.allocPrint(allocator, "select column_name, data_type, is_nullable, ordinal_position from information_schema.columns where table_schema = {s} and table_name = {s} order by ordinal_position", .{ schema_literal, relation_literal });
+        const database_expression = if (database) |name| try quoteLiteral(allocator, name) else try allocator.dupe(u8, "current_database()");
+        defer allocator.free(database_expression);
+        const sql = switch (self.*) {
+            .duckdb => try std.fmt.allocPrint(allocator, "select column_name, data_type, is_nullable, ordinal_position from information_schema.columns where table_catalog = {s} and table_schema = {s} and table_name = {s} order by ordinal_position", .{ database_expression, schema_literal, relation_literal }),
+            .postgres => try std.fmt.allocPrint(allocator, "select a.attname as column_name, pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type, case when a.attnotnull then 'NO' else 'YES' end as is_nullable, a.attnum as ordinal_position from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace join pg_catalog.pg_attribute a on a.attrelid = c.oid where current_database() = {s} and n.nspname = {s} and c.relname = {s} and a.attnum > 0 and not a.attisdropped order by a.attnum", .{ database_expression, schema_literal, relation_literal }),
+        };
         defer allocator.free(sql);
         return try self.query(sql);
     }
     pub fn relationExists(self: *Session, allocator: std.mem.Allocator, schema: []const u8, relation: []const u8) !bool {
-        var columns_result = try self.columns(allocator, schema, relation);
-        defer columns_result.deinit(allocator);
-        return columns_result.rows.len != 0;
+        return self.relationExistsInDatabase(allocator, null, schema, relation);
+    }
+    pub fn relationExistsInDatabase(self: *Session, allocator: std.mem.Allocator, database: ?[]const u8, schema: []const u8, relation: []const u8) !bool {
+        const kind = try self.relationTypeInDatabase(allocator, database, schema, relation);
+        defer if (kind) |value| allocator.free(value);
+        return kind != null;
+    }
+    /// Returns an owned dbt relation type: table, view or materialized_view.
+    pub fn relationTypeInDatabase(self: *Session, allocator: std.mem.Allocator, database: ?[]const u8, schema: []const u8, relation: []const u8) !?[]const u8 {
+        const schema_literal = try quoteLiteral(allocator, schema);
+        defer allocator.free(schema_literal);
+        const relation_literal = try quoteLiteral(allocator, relation);
+        defer allocator.free(relation_literal);
+        const database_expression = if (database) |name| try quoteLiteral(allocator, name) else try allocator.dupe(u8, "current_database()");
+        defer allocator.free(database_expression);
+        const sql = switch (self.*) {
+            .duckdb => try std.fmt.allocPrint(allocator, "select case when table_type = 'VIEW' then 'view' else 'table' end as relation_type from information_schema.tables where table_catalog = {s} and table_schema = {s} and table_name = {s}", .{ database_expression, schema_literal, relation_literal }),
+            .postgres => try std.fmt.allocPrint(allocator, "select case c.relkind when 'v' then 'view' when 'm' then 'materialized_view' else 'table' end as relation_type from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace where current_database() = {s} and n.nspname = {s} and c.relname = {s} and c.relkind in ('r', 'p', 'v', 'm', 'f')", .{ database_expression, schema_literal, relation_literal }),
+        };
+        defer allocator.free(sql);
+        var result = try self.query(sql);
+        defer result.deinit(allocator);
+        if (result.rows.len == 0) return null;
+        if (result.rows.len != 1 or result.rows[0].len != 1 or result.rows[0][0] == null) return error.InvalidAdapterIntrospection;
+        return try allocator.dupe(u8, result.rows[0][0].?);
     }
 };
 
