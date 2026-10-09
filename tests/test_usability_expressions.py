@@ -51,6 +51,34 @@ EXPRESSIONS = [
     "true or 1 / 0",
     "'chosen' or missing_function()",
     "none if false else 'selected' if true else 1 / 0",
+    "{'a':1,'b':2}.get('missing',9)",
+    "{'a':1,'b':2}.keys() | list",
+    "{'a':1,'b':2}.values() | list",
+    "{'a':1,'b':2}.items() | map(attribute=0) | list",
+    "[1,2,1].count(1)",
+    "[1,2,1].index(1,1)",
+    "[1,2].copy()",
+    "' abC '.strip().lower()",
+    "'ééhié'.strip('é')",
+    "'abcabc'.startswith('bc',1)",
+    "'abcabc'.endswith('bc',0,-1)",
+    "'éhi好hi'.find('hi',2)",
+    "'abcabc'.rfind('bc')",
+    "'abc'.count('')",
+    "'abc'.find('',4)",
+    "'abc'.replace('','-',2)",
+    "'aba'.replace('a','z',1)",
+    "', '.join(['a','b'])",
+    "' a  b c '.split()",
+    "' a b c '.split(None,1)",
+    "' a b c '.rsplit(maxsplit=1)",
+    "'a,,b,'.split(',')",
+    "'a,,b,'.rsplit(',',2)",
+    "' a b '.split(None,0)",
+    "' a b '.rsplit(None,0)",
+    "'aé好'[1]",
+    "'aé好'[-1]",
+    "[1,2][1.2] | default('undefined')",
 ]
 
 
@@ -78,7 +106,7 @@ def test_native_expression_matches_core(tmp_path, core_runner, expression):
     contracts.assert_artifact(root / "native/run_results.json")
 
 
-@pytest.mark.parametrize("expression", ["[1,2][::0]", "[1,'a'] | sort", "[1,2] | map() | list"])
+@pytest.mark.parametrize("expression", ["[1,2][::0]", "[1,'a'] | sort", "[1,2] | map() | list", "[1,2].index(9)", "'abc'.index('z')", "{}.get('x', default=1)", "'abc'.split(foo=1)", "'abc'.split(',',sep=',')", "'abc'.split('')"])
 def test_invalid_collection_expression_fails_like_core(tmp_path, core_runner, expression):
     root = tmp_path / "project"
     write_project(root, expression)

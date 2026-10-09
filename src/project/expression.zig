@@ -275,7 +275,10 @@ const Parser = struct {
                 }
             } else if (self.take(".")) {
                 const attribute = try self.name();
-                if (self.active) value = value.attribute(attribute);
+                if (self.take("(")) {
+                    const args = try self.arguments();
+                    if (self.active) value = try self.method(value, attribute, args);
+                } else if (self.active) value = value.attribute(attribute);
             } else if (self.take("|")) {
                 const filter_name = try self.name();
                 const args = if (self.take("(")) try self.arguments() else &.{};
@@ -328,7 +331,7 @@ const Parser = struct {
                 try self.expect(",");
                 if (self.take("]")) break;
             };
-            return .{ .list = try values.toOwnedSlice(self.allocator) };
+            return .{ .list = try ownedValues(self.allocator, &values) };
         }
         if (self.take("{")) {
             var entries: std.ArrayList(Entry) = .empty;
@@ -341,7 +344,7 @@ const Parser = struct {
                 try self.expect(",");
                 if (self.take("}")) break;
             };
-            return .{ .object = try entries.toOwnedSlice(self.allocator) };
+            return .{ .object = try ownedEntries(self.allocator, &entries) };
         }
         const start = self.index;
         const first = try self.name();
@@ -361,11 +364,29 @@ const Parser = struct {
             if (!self.active) return .none;
             if (try builtin(self.allocator, path, args)) |value| return value;
             const host = self.host orelse return error.UnsupportedJinjaCall;
+            if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| {
+                const receiver = try host.resolve(host.context, path[0..dot], self.allocator);
+                if (receiver == .object or receiver == .list or receiver == .string) return try self.method(receiver, path[dot + 1 ..], args);
+            }
             return try host.call(host.context, path, args, self.allocator);
         }
         if (!self.active) return .none;
         const host = self.host orelse return .undefined;
         return try host.resolve(host.context, path, self.allocator);
+    }
+
+    fn method(self: *Parser, receiver: Value, method_name: []const u8, args: []const Argument) !Value {
+        const bound = receiver.attribute(method_name);
+        if (bound == .callable) {
+            const host = self.host orelse return error.UnsupportedJinjaCall;
+            return try host.call(host.context, bound.callable, args, self.allocator);
+        }
+        if (try pureMethod(self.allocator, receiver, method_name, args)) |value| return value;
+        const host = self.host orelse return error.UnsupportedJinjaCall;
+        const arguments_with_receiver = try self.allocator.alloc(Argument, args.len + 1);
+        arguments_with_receiver[0] = .{ .value = receiver };
+        @memcpy(arguments_with_receiver[1..], args);
+        return try host.call(host.context, try std.fmt.allocPrint(self.allocator, "__dxt_value.{s}", .{method_name}), arguments_with_receiver, self.allocator);
     }
 
     fn arguments(self: *Parser) anyerror![]const Argument {
@@ -410,6 +431,272 @@ const Parser = struct {
         return try args.toOwnedSlice(self.allocator);
     }
 };
+
+/// Mutable empty containers need an identity just like non-empty containers.
+/// Their storage belongs to the render arena, including this one-slot backing.
+pub fn allocateValues(allocator: std.mem.Allocator, length: usize) ![]Value {
+    return (try allocator.alloc(Value, @max(1, length)))[0..length];
+}
+
+pub fn allocateEntries(allocator: std.mem.Allocator, length: usize) ![]Entry {
+    return (try allocator.alloc(Entry, @max(1, length)))[0..length];
+}
+
+fn ownedValues(allocator: std.mem.Allocator, values: *std.ArrayList(Value)) ![]Value {
+    if (values.items.len == 0) return try allocateValues(allocator, 0);
+    return try values.toOwnedSlice(allocator);
+}
+
+fn ownedEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry)) ![]Entry {
+    if (entries.items.len == 0) return try allocateEntries(allocator, 0);
+    return try entries.toOwnedSlice(allocator);
+}
+
+fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument) !?Value {
+    const positional_only = if (receiver == .object) isMethod(name_, &.{ "get", "keys", "values", "items", "copy" }) else if (receiver == .list) isMethod(name_, &.{ "copy", "count", "index" }) else if (receiver == .string) isMethod(name_, &.{ "lower", "upper", "startswith", "endswith", "find", "rfind", "count", "index", "rindex", "strip", "lstrip", "rstrip", "join", "replace" }) else false;
+    if (positional_only) for (args) |arg| if (arg.name != null) return error.InvalidJinjaArguments;
+    if (receiver == .object) {
+        if (std.mem.eql(u8, name_, "get")) {
+            if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
+            const value = receiver.attribute(args[0].value.string);
+            return if (value != .undefined) value else if (args.len == 2) args[1].value else .none;
+        }
+        if (std.mem.eql(u8, name_, "keys") or std.mem.eql(u8, name_, "values") or std.mem.eql(u8, name_, "items")) {
+            if (args.len != 0) return error.InvalidJinjaArguments;
+            const values = try allocateValues(allocator, receiver.object.len);
+            for (receiver.object, values) |entry, *value| {
+                if (std.mem.eql(u8, name_, "keys")) value.* = .{ .string = entry.key } else if (std.mem.eql(u8, name_, "values")) value.* = entry.value else {
+                    const pair = try allocateValues(allocator, 2);
+                    pair[0] = .{ .string = entry.key };
+                    pair[1] = entry.value;
+                    value.* = .{ .list = pair };
+                }
+            }
+            return .{ .list = values };
+        }
+        if (std.mem.eql(u8, name_, "copy")) {
+            if (args.len != 0) return error.InvalidJinjaArguments;
+            const entries = try allocateEntries(allocator, receiver.object.len);
+            @memcpy(entries, receiver.object);
+            return .{ .object = entries };
+        }
+    }
+    if (receiver == .list) {
+        if (std.mem.eql(u8, name_, "copy")) {
+            if (args.len != 0) return error.InvalidJinjaArguments;
+            const values = try allocateValues(allocator, receiver.list.len);
+            @memcpy(values, receiver.list);
+            return .{ .list = values };
+        }
+        if (std.mem.eql(u8, name_, "count")) {
+            if (args.len != 1) return error.InvalidJinjaArguments;
+            var count: usize = 0;
+            for (receiver.list) |value| if (equal(value, args[0].value)) {
+                count += 1;
+            };
+            return .{ .number = @floatFromInt(count) };
+        }
+        if (std.mem.eql(u8, name_, "index")) {
+            if (args.len < 1 or args.len > 3) return error.InvalidJinjaArguments;
+            const length: i64 = @intCast(receiver.list.len);
+            var start = if (args.len >= 2) try integer(args[1].value) else 0;
+            var stop = if (args.len == 3) try integer(args[2].value) else length;
+            if (start < 0) start += length;
+            if (stop < 0) stop += length;
+            start = std.math.clamp(start, 0, length);
+            stop = std.math.clamp(stop, 0, length);
+            for (receiver.list[@intCast(start)..@intCast(@max(start, stop))], @as(usize, @intCast(start))..) |value, index| if (equal(value, args[0].value)) return .{ .number = @floatFromInt(index) };
+            return error.JinjaValueNotFound;
+        }
+    }
+    if (receiver == .string) {
+        const text_ = receiver.string;
+        if (std.mem.eql(u8, name_, "lower") or std.mem.eql(u8, name_, "upper")) {
+            if (args.len != 0) return error.InvalidJinjaArguments;
+            return try filter(allocator, name_, receiver, &.{});
+        }
+        if (std.mem.eql(u8, name_, "startswith") or std.mem.eql(u8, name_, "endswith") or std.mem.eql(u8, name_, "find") or std.mem.eql(u8, name_, "rfind") or std.mem.eql(u8, name_, "count") or std.mem.eql(u8, name_, "index") or std.mem.eql(u8, name_, "rindex")) {
+            if (args.len < 1 or args.len > 3 or args[0].value != .string) return error.InvalidJinjaArguments;
+            const characters = try iterableValues(allocator, receiver);
+            const length: i64 = @intCast(characters.len);
+            var start = if (args.len >= 2) try integer(args[1].value) else 0;
+            var stop = if (args.len == 3) try integer(args[2].value) else length;
+            const starts_after_end = start > length;
+            if (start < 0) start += length;
+            if (stop < 0) stop += length;
+            start = std.math.clamp(start, 0, length);
+            stop = std.math.clamp(stop, 0, length);
+            var byte_start: usize = 0;
+            var byte_stop: usize = 0;
+            for (characters, 0..) |character, index| {
+                if (index < @as(usize, @intCast(start))) byte_start += character.string.len;
+                if (index < @as(usize, @intCast(@max(start, stop)))) byte_stop += character.string.len;
+            }
+            const range = text_[byte_start..byte_stop];
+            const needle = args[0].value.string;
+            if (std.mem.eql(u8, name_, "startswith")) return .{ .boolean = !starts_after_end and stop >= start and std.mem.startsWith(u8, range, needle) };
+            if (std.mem.eql(u8, name_, "endswith")) return .{ .boolean = !starts_after_end and stop >= start and std.mem.endsWith(u8, range, needle) };
+            if (std.mem.eql(u8, name_, "count")) {
+                if (starts_after_end or stop < start) return .{ .number = 0 };
+                if (needle.len == 0) return .{ .number = @floatFromInt(stop - start + 1) };
+                var count: usize = 0;
+                var index: usize = 0;
+                while (std.mem.indexOfPos(u8, range, index, needle)) |found| {
+                    count += 1;
+                    index = found + needle.len;
+                }
+                return .{ .number = @floatFromInt(count) };
+            }
+            const found = if (starts_after_end or stop < start) null else if (std.mem.startsWith(u8, name_, "r")) std.mem.lastIndexOf(u8, range, needle) else std.mem.indexOf(u8, range, needle);
+            if (found) |byte_position| {
+                var position = start;
+                var offset: usize = 0;
+                while (offset < byte_position) {
+                    offset += std.unicode.utf8ByteSequenceLength(range[offset]) catch return error.JinjaTypeError;
+                    position += 1;
+                }
+                return .{ .number = @floatFromInt(position) };
+            }
+            if (std.mem.endsWith(u8, name_, "index")) return error.JinjaValueNotFound;
+            return .{ .number = -1 };
+        }
+        if (std.mem.eql(u8, name_, "strip") or std.mem.eql(u8, name_, "lstrip") or std.mem.eql(u8, name_, "rstrip")) {
+            if (args.len > 1 or (args.len == 1 and args[0].value != .string and args[0].value != .none)) return error.InvalidJinjaArguments;
+            const characters = try iterableValues(allocator, receiver);
+            const removed = if (args.len == 1 and args[0].value == .string) try iterableValues(allocator, args[0].value) else null;
+            var start: usize = 0;
+            var stop = characters.len;
+            if (!std.mem.eql(u8, name_, "rstrip")) while (start < stop and stripCharacter(characters[start], removed)) : (start += 1) {};
+            if (!std.mem.eql(u8, name_, "lstrip")) while (stop > start and stripCharacter(characters[stop - 1], removed)) : (stop -= 1) {};
+            var byte_start: usize = 0;
+            var byte_stop: usize = 0;
+            for (characters, 0..) |character, index| {
+                if (index < start) byte_start += character.string.len;
+                if (index < stop) byte_stop += character.string.len;
+            }
+            return .{ .string = text_[byte_start..byte_stop] };
+        }
+        if (std.mem.eql(u8, name_, "join")) {
+            if (args.len != 1) return error.InvalidJinjaArguments;
+            const values = try iterableValues(allocator, args[0].value);
+            var output: std.ArrayList(u8) = .empty;
+            for (values, 0..) |value, index| {
+                if (value != .string) return error.JinjaTypeError;
+                if (index != 0) try output.appendSlice(allocator, text_);
+                try output.appendSlice(allocator, value.string);
+            }
+            return .{ .string = try output.toOwnedSlice(allocator) };
+        }
+        if (std.mem.eql(u8, name_, "split") or std.mem.eql(u8, name_, "rsplit")) {
+            if (args.len > 2) return error.InvalidJinjaArguments;
+            var positional: usize = 0;
+            for (args) |arg| {
+                if (arg.name) |key| {
+                    if (std.mem.eql(u8, key, "sep")) {
+                        if (positional >= 1) return error.InvalidJinjaArguments;
+                    } else if (std.mem.eql(u8, key, "maxsplit")) {
+                        if (positional >= 2) return error.InvalidJinjaArguments;
+                    } else return error.InvalidJinjaArguments;
+                } else positional += 1;
+            }
+            const separator = argument(args, "sep", 0, .none);
+            const maximum = try integer(argument(args, "maxsplit", 1, .{ .number = -1 }));
+            if (separator != .string and separator != .none) return error.JinjaTypeError;
+            if (separator == .string and separator.string.len == 0) return error.InvalidJinjaArguments;
+            const backwards = std.mem.eql(u8, name_, "rsplit");
+            var values: std.ArrayList(Value) = .empty;
+            var count: i64 = 0;
+            var position: usize = if (backwards) text_.len else 0;
+            if (separator == .none) {
+                while (true) {
+                    if (backwards) {
+                        while (position > 0 and std.ascii.isWhitespace(text_[position - 1])) position -= 1;
+                        if (position == 0) break;
+                        if (maximum >= 0 and count >= maximum) {
+                            try values.append(allocator, .{ .string = text_[0..position] });
+                            break;
+                        }
+                        const finish = position;
+                        while (position > 0 and !std.ascii.isWhitespace(text_[position - 1])) position -= 1;
+                        try values.append(allocator, .{ .string = text_[position..finish] });
+                    } else {
+                        while (position < text_.len and std.ascii.isWhitespace(text_[position])) position += 1;
+                        if (position == text_.len) break;
+                        if (maximum >= 0 and count >= maximum) {
+                            try values.append(allocator, .{ .string = text_[position..] });
+                            break;
+                        }
+                        const start = position;
+                        while (position < text_.len and !std.ascii.isWhitespace(text_[position])) position += 1;
+                        try values.append(allocator, .{ .string = text_[start..position] });
+                    }
+                    count += 1;
+                }
+            } else {
+                while (maximum < 0 or count < maximum) {
+                    if (backwards) {
+                        const found = std.mem.lastIndexOf(u8, text_[0..position], separator.string) orelse break;
+                        try values.append(allocator, .{ .string = text_[found + separator.string.len .. position] });
+                        position = found;
+                    } else {
+                        const found = std.mem.indexOfPos(u8, text_, position, separator.string) orelse break;
+                        try values.append(allocator, .{ .string = text_[position..found] });
+                        position = found + separator.string.len;
+                    }
+                    count += 1;
+                }
+                try values.append(allocator, .{ .string = if (backwards) text_[0..position] else text_[position..] });
+            }
+            if (backwards) std.mem.reverse(Value, values.items);
+            return .{ .list = try ownedValues(allocator, &values) };
+        }
+        if (std.mem.eql(u8, name_, "replace")) {
+            if (args.len < 2 or args.len > 3 or args[0].value != .string or args[1].value != .string) return error.InvalidJinjaArguments;
+            const maximum = if (args.len == 3) try integer(args[2].value) else -1;
+            var output: std.ArrayList(u8) = .empty;
+            var position: usize = 0;
+            var count: i64 = 0;
+            const needle = args[0].value.string;
+            if (needle.len == 0) {
+                if (maximum != 0) {
+                    try output.appendSlice(allocator, args[1].value.string);
+                    count += 1;
+                }
+                for (try iterableValues(allocator, receiver)) |character| {
+                    try output.appendSlice(allocator, character.string);
+                    if (maximum < 0 or count < maximum) {
+                        try output.appendSlice(allocator, args[1].value.string);
+                        count += 1;
+                    }
+                }
+            } else {
+                while (maximum < 0 or count < maximum) {
+                    const found = std.mem.indexOfPos(u8, text_, position, needle) orelse break;
+                    try output.appendSlice(allocator, text_[position..found]);
+                    try output.appendSlice(allocator, args[1].value.string);
+                    position = found + needle.len;
+                    count += 1;
+                }
+                try output.appendSlice(allocator, text_[position..]);
+            }
+            return .{ .string = try output.toOwnedSlice(allocator) };
+        }
+    }
+    return null;
+}
+
+fn isMethod(name: []const u8, methods: []const []const u8) bool {
+    for (methods) |method| if (std.mem.eql(u8, name, method)) return true;
+    return false;
+}
+
+fn stripCharacter(value: Value, removed: ?[]const Value) bool {
+    if (removed) |characters| {
+        for (characters) |character| if (equal(value, character)) return true;
+        return false;
+    }
+    return value.string.len == 1 and std.ascii.isWhitespace(value.string[0]);
+}
 
 fn expressionFinish(input: []const u8, start: usize) usize {
     var depth: usize = 0;
@@ -502,10 +789,11 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
 }
 fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
     if (value == .object and key == .string) return value.attribute(key.string);
-    if (key != .number or !std.math.isFinite(key.number) or @floor(key.number) != key.number or @abs(key.number) > 9007199254740991) return error.JinjaTypeError;
+    if (key != .number or !std.math.isFinite(key.number) or @floor(key.number) != key.number or @abs(key.number) > 9007199254740991) return .undefined;
+    const characters = if (value == .string) try iterableValues(allocator, value) else null;
     const len: usize = switch (value) {
         .list => |v| v.len,
-        .string => |v| v.len,
+        .string => characters.?.len,
         else => return error.JinjaTypeError,
     };
     var i: i64 = @intFromFloat(key.number);
@@ -513,7 +801,7 @@ fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
     if (i < 0 or i >= @as(i64, @intCast(len))) return .undefined;
     return switch (value) {
         .list => |v| v[@intCast(i)],
-        .string => |v| .{ .string = try allocator.dupe(u8, v[@intCast(i) .. @as(usize, @intCast(i)) + 1]) },
+        .string => characters.?[@intCast(i)],
         else => unreachable,
     };
 }
@@ -543,14 +831,14 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
         for (result.items) |v| try text_result.appendSlice(allocator, v.string);
         return .{ .string = try text_result.toOwnedSlice(allocator) };
     }
-    return .{ .list = try result.toOwnedSlice(allocator) };
+    return .{ .list = try ownedValues(allocator, &result) };
 }
 
 fn iterableValues(allocator: std.mem.Allocator, value: Value) ![]const Value {
     if (value == .list) return value.list;
     if (value == .undefined or value == .none) return &.{};
     if (value == .object) {
-        const result = try allocator.alloc(Value, value.object.len);
+        const result = try allocateValues(allocator, value.object.len);
         for (value.object, result) |entry, *v| v.* = .{ .string = entry.key };
         return result;
     }
@@ -647,9 +935,9 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
             length = @min(length, values.len);
             try inputs.append(allocator, values);
         }
-        const rows = try allocator.alloc(Value, length);
+        const rows = try allocateValues(allocator, length);
         for (rows, 0..) |*row, i| {
-            const fields = try allocator.alloc(Value, inputs.items.len);
+            const fields = try allocateValues(allocator, inputs.items.len);
             for (inputs.items, fields) |input, *field| field.* = input[i];
             row.* = .{ .list = fields };
         }
@@ -674,7 +962,7 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
             if (values.items.len >= 100000) return error.JinjaIterationLimitExceeded;
             try values.append(allocator, .{ .number = @floatFromInt(n) });
         }
-        return .{ .list = try values.toOwnedSlice(allocator) };
+        return .{ .list = try ownedValues(allocator, &values) };
     }
     if (std.mem.eql(u8, name, "dict") or std.mem.eql(u8, name, "namespace")) {
         var entries: std.ArrayList(Entry) = .empty;
@@ -693,7 +981,7 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
             if (updated) continue;
             try entries.append(allocator, .{ .key = key, .value = arg.value });
         }
-        return .{ .object = try entries.toOwnedSlice(allocator) };
+        return .{ .object = try ownedEntries(allocator, &entries) };
     }
     return null;
 }
@@ -706,7 +994,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
         const values = try iterableValues(allocator, value);
         const attribute = argument(args, "attribute", std.math.maxInt(usize), .none);
         const fallback = argument(args, "default", std.math.maxInt(usize), .undefined);
-        const mapped = try allocator.alloc(Value, values.len);
+        const mapped = try allocateValues(allocator, values.len);
         if (attribute != .none) {
             for (values, mapped) |v, *out| {
                 out.* = try attributeValue(allocator, v, attribute);
@@ -733,7 +1021,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
             } else tested.truthy();
             if (accepted != reject) try result.append(allocator, v);
         }
-        return .{ .list = try result.toOwnedSlice(allocator) };
+        return .{ .list = try ownedValues(allocator, &result) };
     }
     if (std.mem.eql(u8, name, "sort") or std.mem.eql(u8, name, "unique") or std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
         const values = try iterableValues(allocator, value);
@@ -774,7 +1062,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
             if (items.items.len == 0) return .undefined;
             return items.items[if (std.mem.eql(u8, name, "min")) 0 else items.items.len - 1].value;
         }
-        const result = try allocator.alloc(Value, items.items.len);
+        const result = try allocateValues(allocator, items.items.len);
         for (items.items, result) |item, *v| v.* = item.value;
         return .{ .list = result };
     }
