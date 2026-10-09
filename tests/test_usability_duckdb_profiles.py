@@ -127,17 +127,19 @@ def test_disabled_transactions_commit_sql_before_failed_inner_hook(tmp_path, mat
         location = f",location='{project / 'history.parquet'}'" if materialized == "external" else ""
         (project / "models/history.sql").write_text(
             "{{ config(materialized='" + materialized + "'" + location +
-            ",pre_hook='insert into events values(99)',post_hook='select * from missing_inner_hook') }} select 2 as id")
+            ",pre_hook='insert into events values(99)',post_hook='select * from missing_inner_hook') }} select 2 as id" +
+            (",'new schema' as payload" if materialized == "external" else ""))
         result = invoke(project, engine)
         assert result.returncode != 0, result.stdout + result.stderr
         assert query(project, "duckdb", "select * from events order by id") == [(1,), (99,)]
         if materialized != "external":
             assert query(project, "duckdb", "select * from history" + call) == [(2,)]
     if materialized == "external":
-        # SQL commits per statement, while native publication remains reversible.
-        assert (pair[0] / "history.parquet").read_bytes() == original
-        assert query(pair[0], "duckdb", "select * from history") == [(1,)]
-        assert query(pair[1], "duckdb", "select * from history") == [(2,)]
+        # The committed new view schema requires the published new file, even
+        # when its inner post-hook fails. Both engines retain autocommit output.
+        assert (pair[0] / "history.parquet").read_bytes() != original
+        for project in pair:
+            assert query(project, "duckdb", "select * from history") == [(2, "new schema")]
 
 
 def test_missing_target_chained_attribute_remains_a_compile_error(tmp_path):

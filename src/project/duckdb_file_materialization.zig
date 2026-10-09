@@ -22,7 +22,7 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
     if (policy.manage_transaction) try session.begin();
     errdefer if (policy.manage_transaction) {
         session.rollback() catch {};
-        journal.rollback() catch {};
+        if (session.* == .duckdb and session.duckdb.disable_transactions) journal.autocommitFailure() catch {} else journal.rollback() catch {};
     };
     var arena = std.heap.ArenaAllocator.init(runtime.allocator);
     defer arena.deinit();

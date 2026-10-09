@@ -8,6 +8,7 @@ const Entry = struct {
     lock: std.Io.File,
     had_original: bool = false,
     published: bool = false,
+    retained: bool = false,
 };
 
 pub const Journal = struct {
@@ -75,6 +76,7 @@ pub const Journal = struct {
         while (i != 0) {
             i -= 1;
             const entry = &self.entries.items[i];
+            if (entry.retained) continue;
             if (entry.published) {
                 removePath(self.io, entry.target) catch |err| {
                     failure = err;
@@ -93,6 +95,26 @@ pub const Journal = struct {
                 failure = err;
             };
         }
+        if (failure) |err| return err;
+    }
+
+    /// Autocommit SQL can already reference published output. Preserve those
+    /// files on later errors while restoring/removing unpublished staging.
+    pub fn autocommitFailure(self: *Journal) !void {
+        var failure: ?anyerror = null;
+        for (self.entries.items) |*entry| if (entry.published) {
+            entry.retained = true;
+            if (entry.had_original) {
+                removePath(self.io, entry.backup) catch |err| {
+                    failure = err;
+                    continue;
+                };
+                entry.had_original = false;
+            }
+        };
+        self.rollback() catch |err| {
+            failure = err;
+        };
         if (failure) |err| return err;
     }
 
@@ -165,6 +187,35 @@ test "file publication restores originals on rollback and retains committed outp
     const committed = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, target, a, .limited(100));
     defer a.free(committed);
     try std.testing.expectEqualStrings("committed", committed);
+}
+
+test "autocommit errors retain published files and clean unpublished staging" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const target = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/committed.csv", .{temporary.sub_path});
+    defer a.free(target);
+    const pending = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/pending.csv", .{temporary.sub_path});
+    defer a.free(pending);
+    try writeTestFile(target, "old");
+    try writeTestFile(pending, "untouched");
+    {
+        var journal = Journal.init(a, std.testing.io);
+        defer journal.deinit();
+        try writeTestFile(try journal.prepare(target), "committed");
+        try journal.publish();
+        const staged = try journal.prepare(pending);
+        try writeTestFile(staged, "not published");
+        try journal.autocommitFailure();
+        try journal.rollback();
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, staged, .{}));
+    }
+    const retained = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, target, a, .limited(100));
+    defer a.free(retained);
+    try std.testing.expectEqualStrings("committed", retained);
+    const untouched = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, pending, a, .limited(100));
+    defer a.free(untouched);
+    try std.testing.expectEqualStrings("untouched", untouched);
 }
 
 test "directory outputs roll back atomically and concurrent writers cannot publish" {

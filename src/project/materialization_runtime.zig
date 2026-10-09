@@ -34,6 +34,10 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
     defer host.deinit();
     var journal = @import("materialization_journal.zig").Journal.init(runtime.allocator, runtime.io);
     defer journal.deinit();
+    errdefer switch (held_runtime.adapter_session.?.*) {
+        .duckdb => |connection| if (connection.disable_transactions) journal.autocommitFailure() catch {},
+        else => {},
+    };
     host.log_events = graph.log_collector;
     runtime_graph.execution_hooks = host.host();
     var scratch = std.heap.ArenaAllocator.init(runtime.allocator);
