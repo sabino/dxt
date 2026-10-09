@@ -1356,7 +1356,9 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
         try json.string(writer, test_node.compiled_code orelse "");
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(test_node.compiled_path orelse ""));
-        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":true");
+        try writer.writeAll(",\"extra_ctes\":");
+        try writeExtraCtes(writer, test_node.extra_ctes.items);
+        try writer.writeAll(",\"extra_ctes_injected\":true");
     }
     try writer.writeAll("}");
 }
@@ -1409,7 +1411,9 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
         try json.string(writer, test_node.compiled_code orelse "");
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(test_node.compiled_path orelse ""));
-        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":true");
+        try writer.writeAll(",\"extra_ctes\":");
+        try writeExtraCtes(writer, test_node.extra_ctes.items);
+        try writer.writeAll(",\"extra_ctes_injected\":true");
     }
     try writer.writeAll("}");
 }

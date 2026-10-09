@@ -585,6 +585,20 @@ fn trimSqlRight(sql: []const u8) []const u8 {
 }
 
 pub fn compileSingularTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode) ![]const u8 {
+    var compiled = try compileSingularTestWithInjectedCtes(allocator, graph, test_node);
+    defer {
+        for (compiled.extra_ctes.items) |cte| allocator.free(cte.sql);
+        compiled.extra_ctes.deinit(allocator);
+    }
+    return compiled.compiled_code;
+}
+
+pub fn compileSingularTestWithInjectedCtes(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode) !CompiledModel {
+    const body = try compileSingularTestBody(allocator, graph, test_node);
+    return try injectTestDependencies(allocator, graph, test_node.depends_on, body);
+}
+
+fn compileSingularTestBody(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode) ![]const u8 {
     const node = Node{
         .resolved_identity = test_node.resolved_identity,
         .resource_type = "test",
@@ -610,6 +624,108 @@ pub fn compileSingularTest(allocator: std.mem.Allocator, graph: *const Graph, te
 }
 
 pub fn compileGenericTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
+    var compiled = try compileGenericTestWithInjectedCtes(allocator, graph, test_node);
+    defer {
+        for (compiled.extra_ctes.items) |cte| allocator.free(cte.sql);
+        compiled.extra_ctes.deinit(allocator);
+    }
+    return compiled.compiled_code;
+}
+
+pub fn compileGenericTestWithInjectedCtes(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) !CompiledModel {
+    const body = try compileGenericTestBody(allocator, graph, test_node);
+    return try injectTestDependencies(allocator, graph, test_node.depends_on, body);
+}
+
+fn injectTestDependencies(allocator: std.mem.Allocator, graph: *const Graph, dependencies: std.ArrayList([]const u8), body: []const u8) !CompiledModel {
+    errdefer allocator.free(body);
+    var state = EphemeralCompileState.init(allocator, graph);
+    defer state.deinit();
+    const node = Node{ .depends_on = dependencies, .resource_type = "test", .package_name = "", .unique_id = "", .name = "", .path = "", .original_file_path = "", .raw_code = "" };
+    try collectEphemeralDependencies(&state, &node);
+    if (state.extra_ctes.items.len == 0) return .{ .compiled_code = body };
+    // Core preserves a leading space in each InjectedCTE's metadata and joins
+    // definitions with comma-space while retaining the test's SQL trivia.
+    for (state.extra_ctes.items) |*cte| {
+        const sql = try std.fmt.allocPrint(allocator, " {s}", .{cte.sql});
+        allocator.free(cte.sql);
+        cte.sql = sql;
+    }
+    const injected = try injectTestCtes(allocator, body, state.extra_ctes.items);
+    allocator.free(body);
+    const ctes = state.extra_ctes;
+    state.extra_ctes = .empty;
+    return .{ .compiled_code = injected, .extra_ctes = ctes };
+}
+
+fn injectTestCtes(allocator: std.mem.Allocator, body: []const u8, ctes: []const ExtraCte) ![]const u8 {
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(allocator);
+    for (ctes, 0..) |cte, index| {
+        if (index != 0) try joined.appendSlice(allocator, ", ");
+        try joined.appendSlice(allocator, cte.sql);
+    }
+    const first = skipSqlWhitespace(body, 0);
+    const keyword = skipSqlComments(body, first);
+    if (startsWithSqlWith(body[keyword..])) {
+        var insertion = skipSqlWhitespace(body, keyword + 4);
+        if (body.len - insertion >= 9 and std.ascii.eqlIgnoreCase(body[insertion..][0..9], "recursive") and
+            (body.len - insertion == 9 or !std.ascii.isAlphanumeric(body[insertion + 9])))
+        {
+            insertion = skipSqlWhitespace(body, insertion + 9);
+        }
+        return try std.fmt.allocPrint(allocator, "{s}{s}, {s}", .{ body[0..insertion], joined.items, body[insertion..] });
+    }
+    return try std.fmt.allocPrint(allocator, "{s}with{s} {s}", .{ body[0..first], joined.items, body[first..] });
+}
+
+fn skipSqlComments(sql: []const u8, start: usize) usize {
+    var index = start;
+    while (index < sql.len) {
+        if (std.mem.startsWith(u8, sql[index..], "--")) {
+            index = if (std.mem.indexOfScalarPos(u8, sql, index, '\n')) |end| end + 1 else sql.len;
+        } else if (std.mem.startsWith(u8, sql[index..], "/*")) {
+            index = if (std.mem.indexOfPos(u8, sql, index + 2, "*/")) |end| end + 2 else sql.len;
+        } else break;
+        index = skipSqlWhitespace(sql, index);
+    }
+    return index;
+}
+
+test "test CTE injection preserves leading trivia and recursive WITH" {
+    const allocator = std.testing.allocator;
+    const ctes = [_]ExtraCte{.{ .id = "model.demo.parent", .sql = " __dbt__cte__parent as (\nselect 1\n)" }};
+    const plain = try injectTestCtes(allocator, "\n select * from __dbt__cte__parent", &ctes);
+    defer allocator.free(plain);
+    try std.testing.expectEqualStrings("\n with __dbt__cte__parent as (\nselect 1\n) select * from __dbt__cte__parent", plain);
+    const recursive = try injectTestCtes(allocator, "-- test\nWITH RECURSIVE own as (select * from __dbt__cte__parent) select * from own", &ctes);
+    defer allocator.free(recursive);
+    try std.testing.expectEqualStrings("-- test\nWITH RECURSIVE  __dbt__cte__parent as (\nselect 1\n), own as (select * from __dbt__cte__parent) select * from own", recursive);
+}
+
+test "generic and singular test compilation injects ephemeral dependency SQL" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.nodes.append(a, .{ .package_name = "demo", .unique_id = "model.demo.parent", .name = "parent", .config_alias = "custom", .path = "parent.sql", .original_file_path = "models/parent.sql", .raw_code = "select 1 as id", .materialized = "ephemeral" });
+    var generic = GenericTestNode{ .package_name = "demo", .unique_id = "test.demo.not_null", .name = "not_null", .alias = "not_null", .path = "not_null.sql", .original_file_path = "models/schema.yml", .raw_code = "", .test_name = "not_null", .column_name = "id", .attached_node = "model.demo.parent" };
+    try generic.depends_on.append(a, "model.demo.parent");
+    var generic_compiled = try compileGenericTestWithInjectedCtes(a, &graph, &generic);
+    defer generic_compiled.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), generic_compiled.extra_ctes.items.len);
+    try std.testing.expectEqualStrings(" __dbt__cte__custom as (\nselect 1 as id\n)", generic_compiled.extra_ctes.items[0].sql);
+    try std.testing.expect(std.mem.startsWith(u8, generic_compiled.compiled_code, "with __dbt__cte__custom as ("));
+    var singular = SingularTestNode{ .package_name = "demo", .unique_id = "test.demo.assert_parent", .name = "assert_parent", .alias = "assert_parent", .path = "assert_parent.sql", .original_file_path = "tests/assert_parent.sql", .raw_code = "select * from {{ ref('parent') }} where id is null" };
+    try singular.depends_on.append(a, "model.demo.parent");
+    var singular_compiled = try compileSingularTestWithInjectedCtes(a, &graph, &singular);
+    defer singular_compiled.deinit(a);
+    try std.testing.expectEqualStrings(generic_compiled.extra_ctes.items[0].sql, singular_compiled.extra_ctes.items[0].sql);
+    try std.testing.expectEqualStrings("with __dbt__cte__custom as (\nselect 1 as id\n) select * from __dbt__cte__custom where id is null", singular_compiled.compiled_code);
+}
+
+fn compileGenericTestBody(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
     if (findCustomGenericTestMacro(graph, test_node) != null) return try compileCustomGenericTest(allocator, graph, test_node, genericTestNodeColumnName(test_node));
     const is_not_null = std.mem.eql(u8, test_node.test_name, "not_null");
     const is_unique = std.mem.eql(u8, test_node.test_name, "unique");

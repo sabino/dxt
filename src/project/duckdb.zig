@@ -23,6 +23,7 @@ const DuckDbObjectKind = enum { table, view };
 
 pub const GenericTestExecutionResult = struct {
     compiled_code: []const u8,
+    compiled_ctes: []const types.ExtraCte = &.{},
     failures: i64,
     should_warn: bool = false,
     should_error: bool = false,
@@ -135,26 +136,34 @@ pub fn executeSeedWithPolicy(runtime: Runtime, db_path: []const u8, project_dir:
 
 pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const GenericTestNode) !GenericTestExecutionResult {
     const compilation_started = clock.now(runtime.io);
-    const compiled_sql = try renderGenericTestSql(runtime.allocator, graph, test_node);
-    errdefer runtime.allocator.free(compiled_sql);
+    var compiled = try compiler.compileGenericTestWithInjectedCtes(runtime.allocator, graph, test_node);
+    errdefer compiled.deinit(runtime.allocator);
+    const compiled_sql = compiled.compiled_code;
     const compilation_completed = clock.now(runtime.io);
     const result = test_audits.executeWithIdentity(runtime, graph, db_path, test_node.config, test_node.alias, test_node.package_name, compiled_sql, test_node.resolved_identity) catch |err| switch (err) {
-        error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.AdapterQueryCancelled, error.InvalidTestFailureMaterialization, error.InvalidTestResult => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+        error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.AdapterQueryCancelled, error.InvalidTestFailureMaterialization, error.InvalidTestResult => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .compiled_ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator), .failures = 0, .execution_error = true },
         else => return err,
     };
-    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = result.failures, .should_warn = result.should_warn, .should_error = result.should_error, .relation_name = result.relation_name };
+    errdefer if (result.relation_name) |relation| runtime.allocator.free(relation);
+    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .compiled_ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator), .failures = result.failures, .should_warn = result.should_warn, .should_error = result.should_error, .relation_name = result.relation_name };
 }
 
 pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const SingularTestNode) !GenericTestExecutionResult {
     const compilation_started = clock.now(runtime.io);
-    const compiled_sql = try renderSingularTestSql(runtime.allocator, graph, test_node);
-    errdefer runtime.allocator.free(compiled_sql);
+    var compiled = try compiler.compileSingularTestWithInjectedCtes(runtime.allocator, graph, test_node);
+    const original_sql = compiled.compiled_code;
+    // Config wrappers consume their input even when allocation fails.
+    compiled.compiled_code = "";
+    errdefer compiled.deinit(runtime.allocator);
+    const compiled_sql = try applySingularTestConfig(runtime.allocator, original_sql, test_node.config.where, test_node.config.limit);
+    compiled.compiled_code = compiled_sql;
     const compilation_completed = clock.now(runtime.io);
     const result = test_audits.executeWithIdentity(runtime, graph, db_path, test_node.config, test_node.alias, test_node.package_name, compiled_sql, test_node.resolved_identity) catch |err| switch (err) {
-        error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.AdapterQueryCancelled, error.InvalidTestFailureMaterialization, error.InvalidTestResult => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+        error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.AdapterQueryCancelled, error.InvalidTestFailureMaterialization, error.InvalidTestResult => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .compiled_ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator), .failures = 0, .execution_error = true },
         else => return err,
     };
-    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = result.failures, .should_warn = result.should_warn, .should_error = result.should_error, .relation_name = result.relation_name };
+    errdefer if (result.relation_name) |relation| runtime.allocator.free(relation);
+    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .compiled_ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator), .failures = result.failures, .should_warn = result.should_warn, .should_error = result.should_error, .relation_name = result.relation_name };
 }
 
 pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !void {

@@ -77,12 +77,14 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
                 node.compiled_path = compiled_path;
                 try compiler.recordGenericCompilationDependency(runtime.allocator, graph, node);
+                for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
                 counts.tests += 1;
             } else if (row.singular_test_node) |original| {
                 const node = @constCast(original);
                 node.compiled = true;
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
                 node.compiled_path = compiled_path;
+                for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
                 counts.tests += 1;
             }
         }
@@ -202,12 +204,16 @@ fn render(runtime: types.Runtime, graph: *const types.Graph, resource: runner.Re
             }
         },
         .generic => |node| {
-            row.compiled_code = try compiler.compileGenericTest(runtime.allocator, graph, node);
+            const compiled = try compiler.compileGenericTestWithInjectedCtes(runtime.allocator, graph, node);
+            row.compiled_code = compiled.compiled_code;
             row.owns_compiled_code = true;
+            row.compiled_ctes = compiled.extra_ctes.items;
         },
         .singular => |node| {
-            row.compiled_code = try compiler.compileSingularTest(runtime.allocator, graph, node);
+            const compiled = try compiler.compileSingularTestWithInjectedCtes(runtime.allocator, graph, node);
+            row.compiled_code = compiled.compiled_code;
             row.owns_compiled_code = true;
+            row.compiled_ctes = compiled.extra_ctes.items;
         },
         .unit => unreachable,
     }

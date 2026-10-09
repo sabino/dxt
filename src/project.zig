@@ -2061,6 +2061,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
     };
     errdefer {
         runtime.allocator.free(execution.compiled_code);
+        for (execution.compiled_ctes) |cte| runtime.allocator.free(cte.sql);
+        runtime.allocator.free(execution.compiled_ctes);
         if (execution.relation_name) |relation_name| runtime.allocator.free(relation_name);
     }
     if (execution.execution_error) {
@@ -2073,6 +2075,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
                 .message = message,
                 .compiled_code = execution.compiled_code,
                 .owns_compiled_code = true,
+                .compiled_ctes = execution.compiled_ctes,
+                .owns_compiled_ctes = execution.compiled_ctes.len != 0,
                 .compile_started_at = execution.compile_started_at,
                 .compile_completed_at = execution.compile_completed_at,
                 .relation_name = execution.relation_name,
@@ -2084,6 +2088,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
                 .message = message,
                 .compiled_code = execution.compiled_code,
                 .owns_compiled_code = true,
+                .compiled_ctes = execution.compiled_ctes,
+                .owns_compiled_ctes = execution.compiled_ctes.len != 0,
                 .compile_started_at = execution.compile_started_at,
                 .compile_completed_at = execution.compile_completed_at,
                 .relation_name = execution.relation_name,
@@ -2113,6 +2119,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .failures = execution.failures,
             .compiled_code = execution.compiled_code,
             .owns_compiled_code = true,
+            .compiled_ctes = execution.compiled_ctes,
+            .owns_compiled_ctes = execution.compiled_ctes.len != 0,
             .compile_started_at = execution.compile_started_at,
             .compile_completed_at = execution.compile_completed_at,
             .relation_name = execution.relation_name,
@@ -2125,6 +2133,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .failures = execution.failures,
             .compiled_code = execution.compiled_code,
             .owns_compiled_code = true,
+            .compiled_ctes = execution.compiled_ctes,
+            .owns_compiled_ctes = execution.compiled_ctes.len != 0,
             .compile_started_at = execution.compile_started_at,
             .compile_completed_at = execution.compile_completed_at,
             .relation_name = execution.relation_name,
@@ -2658,10 +2668,11 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
             }
 
             const started = clock.now(runtime.io);
-            const compiled_code = compiler.compileGenericTest(runtime.allocator, graph, test_node) catch |err| {
+            const compiled = compiler.compileGenericTestWithInjectedCtes(runtime.allocator, graph, test_node) catch |err| {
                 try recordCompileError(runtime, compile_rows, started, .{ .test_node = test_node }, err);
                 return if (err == error.UnsupportedTestExecution) error.UnsupportedCompileSelection else err;
             };
+            const compiled_code = compiled.compiled_code;
             const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, test_node.package_name, test_node.path });
             if (std.fs.path.dirname(compiled_path)) |parent| {
                 try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
@@ -2670,6 +2681,7 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
             test_node.compiled = true;
             test_node.compiled_code = compiled_code;
             test_node.compiled_path = util.normalizeForDisplay(compiled_path);
+            test_node.extra_ctes = compiled.extra_ctes;
             try compiler.recordGenericCompilationDependency(runtime.allocator, graph, test_node);
             try recordCompilation(runtime, compile_rows, started, .{ .test_node = test_node, .compiled_code = compiled_code });
             compiled_test_count += 1;
@@ -2679,10 +2691,11 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
             saw_selected_singular_test = true;
 
             const started = clock.now(runtime.io);
-            const compiled_code = compiler.compileSingularTest(runtime.allocator, graph, test_node) catch |err| {
+            const compiled = compiler.compileSingularTestWithInjectedCtes(runtime.allocator, graph, test_node) catch |err| {
                 try recordCompileError(runtime, compile_rows, started, .{ .singular_test_node = test_node }, err);
                 return err;
             };
+            const compiled_code = compiled.compiled_code;
             const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, test_node.package_name, test_node.original_file_path });
             if (std.fs.path.dirname(compiled_path)) |parent| {
                 try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
@@ -2691,6 +2704,7 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
             test_node.compiled = true;
             test_node.compiled_code = compiled_code;
             test_node.compiled_path = util.normalizeForDisplay(compiled_path);
+            test_node.extra_ctes = compiled.extra_ctes;
             try recordCompilation(runtime, compile_rows, started, .{ .singular_test_node = test_node, .compiled_code = compiled_code });
             compiled_test_count += 1;
         }
