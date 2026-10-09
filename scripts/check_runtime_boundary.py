@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import sys
+import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def runtime_text(text: str) -> str:
+    # Python model language metadata is native graph data. Permit precisely its
+    # comparison/assignment syntax; interpreter argv strings remain forbidden.
+    text = re.sub(r'std\.mem\.eql\(u8,\s*[A-Za-z_][\w.]*\.language,\s*"python"\)',
+                  'native_model_language_comparison', text)
+    return re.sub(r'\.language\s*=\s*(?:"python"|if\s*\([^;\n]+?\)\s*"python"\s*else\s*"sql")',
+                  '.language = native_model_language', text)
 
 
 def main() -> int:
@@ -24,7 +34,7 @@ def main() -> int:
         '"python3"': "product runtime must not invoke Python",
     }
     for path in sorted((ROOT / "src").rglob("*.zig")):
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        text = runtime_text(path.read_text(encoding="utf-8", errors="ignore"))
         if path.relative_to(ROOT).as_posix() == "src/project/docs_serve.zig":
             # Desktop browser launch is part of docs serve. Permit only this
             # child handle signature; parser/compiler process uses stay banned.
