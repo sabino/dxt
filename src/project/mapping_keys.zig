@@ -47,6 +47,7 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
         .callable,
         .undefined,
         .conditional_undefined,
+        .capture_undefined,
         => {},
         .tuple => |items| for (items) |item| try checkHashable(item, depth + 1),
         .object => {
@@ -222,6 +223,17 @@ test "complex NaN keys preserve identity and remain invalid JSON keys" {
     try std.testing.expect(!keyEqual(first, second));
     try std.testing.expect(!expression.equalValues(first, first));
     try std.testing.expectError(error.JinjaTypeError, jsonKey(allocator, first));
+}
+
+test "capture Undefined dictionary keys retain Python class equality" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const first = try expression.captureUndefined(allocator, "first");
+    const second = try expression.captureUndefined(allocator, "second");
+    try hashable(first);
+    try std.testing.expect(keyEqual(first, second));
+    try std.testing.expect(!keyEqual(first, .undefined));
 }
 
 test "JSON keys stringify primitives and sort original numeric types exactly" {

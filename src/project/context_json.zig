@@ -30,6 +30,15 @@ test "context JSON detects circular references and handles boxed NaN scalars" {
     try std.testing.expectEqualStrings("NaN", try stringify(allocator, number));
 }
 
+test "context JSON rejects iterable sets without serializing native protocol fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const set = try @import("set_context.zig").fromMembers(allocator, &.{.{ .integer = "1" }});
+    try std.testing.expectError(error.JinjaTypeError, stringify(allocator, set));
+    try std.testing.expectError(error.JinjaTypeError, @import("expression_json.zig").render(allocator, set, null));
+}
+
 pub fn stringifySorted(allocator: std.mem.Allocator, value: expression.Value, sort_keys: bool) ![]const u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
