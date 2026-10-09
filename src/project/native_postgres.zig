@@ -84,6 +84,7 @@ pub const Connection = struct {
                         failed = err;
                         continue;
                     };
+                    output.rows_changed = std.fmt.parseUnsigned(u64, std.mem.span(self.api.PQcmdTuples(raw)), 10) catch 0;
                 },
                 3 => {
                     // COPY streams require a dedicated protocol API. Consume

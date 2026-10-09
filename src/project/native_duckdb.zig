@@ -27,6 +27,7 @@ const Api = struct {
     duckdb_destroy_prepare: *const fn (*Handle) callconv(.c) void,
     duckdb_execute_prepared: *const fn (Handle, *CResult) callconv(.c) c_uint,
     duckdb_result_error_type: *const fn (*CResult) callconv(.c) c_uint,
+    duckdb_result_return_type: *const fn (CResult) callconv(.c) c_uint,
     duckdb_destroy_result: *const fn (*CResult) callconv(.c) void,
     duckdb_column_count: *const fn (*CResult) callconv(.c) u64,
     duckdb_row_count: *const fn (*CResult) callconv(.c) u64,
@@ -244,9 +245,10 @@ pub const Connection = struct {
             // Transaction and DDL statements also expose an empty synthetic
             // result column in the C API. Preserve the last SELECT across the
             // ROLLBACK that closes an isolated unit-test fixture transaction.
-            if (statement_type == 1 or statement_type == 4) {
+            if (self.api.duckdb_result_return_type(raw) == 3) {
                 output.deinit(self.allocator);
                 output = try self.copyResult(&raw);
+                if (output.rows_changed == 0 and (statement_type == 2 or statement_type == 3 or statement_type == 5)) output.rows_changed = output.rows.len;
             } else {
                 output.rows_changed += self.api.duckdb_rows_changed(&raw);
             }

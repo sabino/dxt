@@ -101,6 +101,15 @@ def test_actual_native_transactions_introspection_and_error_recovery(
 
 
 @pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
+def test_actual_native_dml_returning_rows(driver, tmp_path, request, adapter):
+    environment = (request.getfixturevalue("duckdb_environment") if adapter == "duckdb"
+                   else request.getfixturevalue("postgres_fixture")[1])
+    database = tmp_path / "returning.duckdb"
+    sql = "create temporary table returning_rows(id integer); insert into returning_rows values (17), (18) returning id"
+    assert decoded(invoke(driver, adapter, "query", database, environment, sql)) == [{"id": 17}, {"id": 18}]
+
+
+@pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
 def test_actual_native_cancellation_and_reusable_connection(driver, tmp_path, request, adapter):
     environment = (request.getfixturevalue("duckdb_environment") if adapter == "duckdb"
                    else request.getfixturevalue("postgres_fixture")[1])
