@@ -267,20 +267,29 @@ fn databaseFileExists(runtime: Runtime, db_path: []const u8) bool {
 
 fn queryCatalogColumnsJson(runtime: Runtime, db_path: []const u8) ![]const u8 {
     const sql =
+        \\with relations as (
+        \\ select database_name, schema_name, table_name, 'BASE TABLE' as table_type, comment
+        \\ from duckdb_tables()
+        \\ union all
+        \\ select database_name, schema_name, view_name, 'VIEW', comment from duckdb_views()
+        \\)
         \\select
-        \\    c.table_catalog,
-        \\    c.table_schema,
+        \\    c.database_name as table_catalog,
+        \\    c.schema_name as table_schema,
         \\    c.table_name,
         \\    t.table_type,
         \\    c.column_name,
-        \\    c.ordinal_position,
-        \\    c.data_type
-        \\from information_schema.columns c
-        \\join information_schema.tables t
-        \\    on c.table_schema = t.table_schema
+        \\    c.column_index as ordinal_position,
+        \\    c.data_type,
+        \\    t.comment as table_comment,
+        \\    c.comment as column_comment
+        \\from duckdb_columns() c
+        \\join relations t
+        \\    on c.database_name = t.database_name
+        \\    and c.schema_name = t.schema_name
         \\    and c.table_name = t.table_name
-        \\where c.table_schema not in ('information_schema', 'pg_catalog')
-        \\order by c.table_schema, c.table_name, c.ordinal_position;
+        \\where c.schema_name not in ('information_schema', 'pg_catalog')
+        \\order by c.schema_name, c.table_name, c.column_index;
     ;
     return try adapter.queryJson(runtime, db_path, sql, true);
 }
@@ -323,11 +332,13 @@ fn catalogEntryForRelation(allocator: std.mem.Allocator, unique_id: []const u8, 
         if (entry.columns.items.len == 0) {
             allocator.free(entry.relation_type);
             entry.relation_type = try allocator.dupe(u8, row_type);
+            if (jsonObjectString(object, "table_comment")) |comment| entry.comment = try allocator.dupe(u8, comment);
         }
         try entry.columns.append(allocator, .{
             .name = try allocator.dupe(u8, row_column),
             .data_type = try allocator.dupe(u8, row_data_type),
             .index = row_index,
+            .comment = if (jsonObjectString(object, "column_comment")) |comment| try allocator.dupe(u8, comment) else null,
         });
     }
 
@@ -381,12 +392,16 @@ fn jsonObjectUnsigned(object: std.json.ObjectMap, key: []const u8) ?u64 {
 
 fn deinitCatalogEntry(allocator: std.mem.Allocator, entry: *catalog.CatalogEntry) void {
     allocator.free(entry.unique_id);
+    if (entry.database) |database| allocator.free(database);
     allocator.free(entry.schema);
     allocator.free(entry.name);
     allocator.free(entry.relation_type);
+    if (entry.comment) |comment| allocator.free(comment);
+    if (entry.owner) |owner| allocator.free(owner);
     for (entry.columns.items) |column| {
         allocator.free(column.name);
         allocator.free(column.data_type);
+        if (column.comment) |comment| allocator.free(comment);
     }
     entry.columns.deinit(allocator);
 }

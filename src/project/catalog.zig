@@ -6,6 +6,7 @@ pub const CatalogColumn = struct {
     name: []const u8,
     data_type: []const u8,
     index: u64,
+    comment: ?[]const u8 = null,
 };
 
 pub const CatalogEntry = struct {
@@ -14,6 +15,8 @@ pub const CatalogEntry = struct {
     schema: []const u8,
     name: []const u8,
     relation_type: []const u8,
+    comment: ?[]const u8 = null,
+    owner: ?[]const u8 = null,
     columns: std.ArrayList(CatalogColumn) = .empty,
 };
 
@@ -34,9 +37,12 @@ pub fn deinitEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Catal
         allocator.free(entry.schema);
         allocator.free(entry.name);
         allocator.free(entry.relation_type);
+        if (entry.comment) |comment| allocator.free(comment);
+        if (entry.owner) |owner| allocator.free(owner);
         for (entry.columns.items) |column| {
             allocator.free(column.name);
             allocator.free(column.data_type);
+            if (column.comment) |comment| allocator.free(comment);
         }
         entry.columns.deinit(allocator);
     }
@@ -79,7 +85,11 @@ fn writeCatalogEntryMap(writer: *Io.Writer, entries: []const CatalogEntry) !void
         } else {
             try writer.writeAll("null");
         }
-        try writer.writeAll(", \"comment\": null, \"owner\": null}, \"columns\": {");
+        try writer.writeAll(", \"comment\": ");
+        try writeNullableString(writer, entry.comment);
+        try writer.writeAll(", \"owner\": ");
+        try writeNullableString(writer, entry.owner);
+        try writer.writeAll("}, \"columns\": {");
         for (entry.columns.items, 0..) |column, column_index| {
             if (column_index != 0) try writer.writeAll(",");
             try writer.writeAll("\n      ");
@@ -90,7 +100,9 @@ fn writeCatalogEntryMap(writer: *Io.Writer, entries: []const CatalogEntry) !void
             try writer.print("{d}", .{column.index});
             try writer.writeAll(", \"name\": ");
             try json.string(writer, column.name);
-            try writer.writeAll(", \"comment\": null}");
+            try writer.writeAll(", \"comment\": ");
+            try writeNullableString(writer, column.comment);
+            try writer.writeByte('}');
         }
         if (entry.columns.items.len != 0) try writer.writeAll("\n    ");
         try writer.writeAll("}, \"stats\": {\"has_stats\": {\"id\": \"has_stats\", \"label\": \"Has Stats?\", \"value\": false, \"description\": \"Indicates whether there are statistics for this table\", \"include\": false}}, \"unique_id\": ");
@@ -98,6 +110,10 @@ fn writeCatalogEntryMap(writer: *Io.Writer, entries: []const CatalogEntry) !void
         try writer.writeAll("}");
     }
     if (entries.len != 0) try writer.writeAll("\n  ");
+}
+
+fn writeNullableString(writer: *Io.Writer, value: ?[]const u8) !void {
+    if (value) |text| try json.string(writer, text) else try writer.writeAll("null");
 }
 
 test "catalog writer emits deterministic empty dbt catalog shape" {
