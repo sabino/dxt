@@ -21,7 +21,13 @@ def driver(tmp_path_factory):
     output = tmp_path_factory.mktemp("native-driver") / "adapter-driver"
     compiled = subprocess.run(
         ["zig", "build-exe", "-lc", "--dep", "adapter",
-         "-Mroot=tests/native_adapter_driver.zig", "-Madapter=src/project/adapter.zig",
+         "-Mroot=tests/native_adapter_driver.zig",
+         "-Ivendor/libyaml/include", "-cflags", "-std=gnu99",
+         '-DYAML_VERSION_STRING="0.2.5"', "-DYAML_VERSION_MAJOR=0",
+         "-DYAML_VERSION_MINOR=2", "-DYAML_VERSION_PATCH=5", "--",
+         "vendor/libyaml/src/api.c", "vendor/libyaml/src/reader.c",
+         "vendor/libyaml/src/scanner.c", "vendor/libyaml/src/parser.c",
+         "-Madapter=src/project/adapter.zig",
          f"-femit-bin={output}"],
         cwd=ROOT, text=True, capture_output=True,
     )

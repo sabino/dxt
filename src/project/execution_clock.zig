@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn now(io: std.Io) i96 {
-    return std.Io.Clock.real.now(io).raw.nanoseconds;
+    return std.Io.Clock.real.now(io).nanoseconds;
 }
 
 pub fn writeTimestamp(writer: *std.Io.Writer, timestamp: ?i96) !void {
