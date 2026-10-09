@@ -306,6 +306,9 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
         if (err == error.OutOfMemory) return err;
         _ = try writeManifest(runtime, &graph, target_dir);
         try writeRunResults(runtime, target_dir, compile_rows.items);
+        for (compile_rows.items) |row| if (std.mem.eql(u8, row.status, "error")) {
+            if (row.message) |message| try stderr.print("error: {s}\n", .{message});
+        };
         return error.ExecutionFailure;
     };
 
@@ -1412,7 +1415,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
         .node => unreachable,
     }) catch |err| blk: {
         var failure = resource.result("error");
-        failure.message = try std.fmt.allocPrint(runtime.allocator, "Test compilation failed: {s}", .{@errorName(err)});
+        failure.message = if (@import("project/compile_diagnostics.zig").message(err)) |message| try runtime.allocator.dupe(u8, message) else try std.fmt.allocPrint(runtime.allocator, "Test compilation failed: {s}", .{@errorName(err)});
         failure.compile_started_at = compilation_started;
         failure.compile_completed_at = execution_clock.now(runtime.io);
         if (resource != .unit) failure.compiled_override = false;
@@ -2396,7 +2399,7 @@ fn recordCompileError(runtime: Runtime, rows: ?*std.ArrayList(run_results.NodeRe
     var row = result;
     row.status = "error";
     row.compiled_override = false;
-    row.message = try std.fmt.allocPrint(runtime.allocator, "Compilation failed: {s}", .{@errorName(err)});
+    row.message = if (@import("project/compile_diagnostics.zig").message(err)) |message| try runtime.allocator.dupe(u8, message) else try std.fmt.allocPrint(runtime.allocator, "Compilation failed: {s}", .{@errorName(err)});
     try recordCompilation(runtime, rows, started, row);
 }
 

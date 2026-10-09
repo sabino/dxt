@@ -26,6 +26,7 @@ pub const ExitCode = enum(u8) {
 };
 
 pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, runtime: ?Runtime) !ExitCode {
+    @import("project/compile_diagnostics.zig").clear();
     const rt = runtime orelse return runCommand(args, stdout, stderr, runtime);
     var arena = std.heap.ArenaAllocator.init(rt.allocator);
     defer arena.deinit();
@@ -492,6 +493,10 @@ fn printExtraCommandHelp(command: []const u8, writer: *Io.Writer) !void {
 }
 
 fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
+    if (@import("project/compile_diagnostics.zig").message(err)) |message| {
+        stderr.print("error: {s}\n", .{message}) catch {};
+        return .failure;
+    }
     if (err == error.SqlAnalysisFailure) {
         stderr.writeAll("error: SQL analysis failed\n") catch {};
         return .failure;

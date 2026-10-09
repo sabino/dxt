@@ -103,7 +103,7 @@ fn compileResource(runtime: types.Runtime, graph_readonly: *const types.Graph, r
     render(runtime, &graph, resource, database_path, &row) catch |err| {
         row.status = "error";
         row.compiled_override = false;
-        row.message = try std.fmt.allocPrint(runtime.allocator, "Compilation failed: {s}", .{@errorName(err)});
+        row.message = if (@import("compile_diagnostics.zig").message(err)) |message| try runtime.allocator.dupe(u8, message) else try std.fmt.allocPrint(runtime.allocator, "Compilation failed: {s}", .{@errorName(err)});
     };
     row.compile_started_at = started;
     row.compile_completed_at = clock.now(runtime.io);

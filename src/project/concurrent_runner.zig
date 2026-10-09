@@ -81,7 +81,7 @@ const Job = struct {
         graph.allocator = runtime.allocator;
         var output = self.perform(runtime, &graph) catch |err| blk: {
             var failure = self.resource.result("error");
-            failure.message = runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource execution failed") catch null;
+            failure.message = runtime.allocator.dupe(u8, @import("compile_diagnostics.zig").message(err) orelse if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource execution failed") catch null;
             break :blk failure;
         };
         output.thread_number = if (self.single_threaded) 0 else self.worker_number;

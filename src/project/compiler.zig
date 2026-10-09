@@ -185,7 +185,13 @@ const CompileContext = struct {
     }
 
     fn evaluate(self: *CompileContext, span: []const u8) !native_expr.Value {
-        return try native_expr.evaluate(self.value_arena.allocator(), span, self.host());
+        return native_expr.evaluate(self.value_arena.allocator(), span, self.host()) catch |err| {
+            if (@import("compile_diagnostics.zig").message(err) == null) {
+                const detail = try std.fmt.allocPrint(self.value_arena.allocator(), "{s} evaluating expression: {s}", .{ @errorName(err), span });
+                @import("compile_diagnostics.zig").captureError(self.node.original_file_path, self.node.name, detail, err);
+            }
+            return err;
+        };
     }
 };
 
@@ -272,7 +278,7 @@ pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *No
 }
 
 fn requiresNativeRendering(sql: []const u8) bool {
-    for ([_][]const u8{ "var(", "var (", "env_var(", "env_var (", "{% set", "{%- set", "{% call", "{%- call", "{% for", "{%- for", "run_query(", "statement(", "log(", "print(" }) |needle|
+    for ([_][]const u8{ "var(", "var (", "env_var(", "env_var (", "{% set", "{%- set", "{% call", "{%- call", "{% for", "{%- for", "run_query(", "statement(", "log(", "print(", "exceptions." }) |needle|
         if (std.mem.indexOf(u8, sql, needle) != null) return true;
     return false;
 }
@@ -1080,7 +1086,11 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         context.returned = args[0].value;
         return .{ .string = "" };
     }
-    if (std.mem.eql(u8, name, "exceptions.raise_compiler_error")) return error.JinjaCompilerError;
+    if (std.mem.eql(u8, name, "exceptions.raise_compiler_error")) {
+        if (args.len != 1) return error.InvalidJinjaArguments;
+        @import("compile_diagnostics.zig").capture(context.node.original_file_path, context.node.name, try args[0].value.text(allocator));
+        return error.JinjaCompilerError;
+    }
     if (context.parse_node != null) {
         if (try @import("adapter_context.zig").parseReplacement(allocator, name)) |value| return value;
         if (std.mem.eql(u8, name, "run_query") or std.mem.eql(u8, name, "load_result")) return .none;
