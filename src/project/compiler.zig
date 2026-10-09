@@ -371,6 +371,22 @@ pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *No
 }
 
 fn requiresNativeRendering(sql: []const u8) bool {
+    // Core's static parser accepts whole literal dependency/config calls.
+    // Other output expressions must execute during parse as well, so invalid
+    // arithmetic, conversions and attributes cannot be silently skipped.
+    if (std.mem.indexOf(u8, sql, "{%") != null) return true;
+    var output_position: usize = 0;
+    while (std.mem.indexOfPos(u8, sql, output_position, "{{")) |open| {
+        const close = jinja.findExpressionClose(sql, open + 2) orelse return true;
+        output_position = close + 2;
+        const span = tagContent(sql, open, close);
+        var identifier_end: usize = 0;
+        while (identifier_end < span.len and jinja.isIdentChar(span[identifier_end])) identifier_end += 1;
+        const identifier = span[0..identifier_end];
+        if (!std.mem.eql(u8, identifier, "config") and !std.mem.eql(u8, identifier, "ref") and !std.mem.eql(u8, identifier, "source")) return true;
+        const call = jinja.readJinjaCall(span, identifier, identifier_end) catch return true;
+        if (call == null or call.?.package_name != null or jinja.skipWs(span, call.?.close + 1) != span.len) return true;
+    }
     for ([_][]const u8{ "var(", "var (", "env_var(", "env_var (", "{% set", "{%- set", "{% call", "{%- call", "{% for", "{%- for", "run_query(", "statement(", "log(", "print(", "exceptions." }) |needle|
         if (std.mem.indexOf(u8, sql, needle) != null) return true;
     // A positional configuration map is an expression, including its key
@@ -1376,7 +1392,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         binding_index -= 1;
         if (!std.mem.eql(u8, context.bindings.items[binding_index].name, name[0..root_end])) continue;
         const bound = try resolveExpressionValue(context, name, allocator);
-        if (bound == .capture_undefined) return bound;
+        if (bound == .capture_undefined) return try native_expr.callUndefined(bound);
         const callable = native_expr.callableName(bound);
         if (callable) |function| if (!std.mem.eql(u8, function, name)) return try callExpressionValue(context, function, args, allocator);
         if (root_end == name.len and callable == null) return error.JinjaTypeError;
@@ -1594,11 +1610,11 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
                 return try hooks.call(hooks.context, name, forwarded, allocator);
             }
             return hooks.call(hooks.context, name, args, allocator) catch |err| {
-                if (err == error.UnresolvedMacro and context.capturesUndefined()) return try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name);
+                if (err == error.UnresolvedMacro and context.capturesUndefined()) return try native_expr.callUndefined(try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name));
                 return err;
             };
         }
-        if (context.capturesUndefined()) return try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name);
+        if (context.capturesUndefined()) return try native_expr.callUndefined(try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name));
         return error.UnresolvedMacro;
     }
     const macro = findMacroByUniqueId(context.graph, macro_id.?) orelse return error.UnresolvedMacro;
@@ -4311,4 +4327,22 @@ test "compiler parse context captures unknown calls and bound Undefined attribut
     try std.testing.expectEqualStrings("select 1", try compileModel(allocator, &graph, &node));
     node.raw_code = "{% set captured = missing %}{{ captured.deep }}";
     try std.testing.expectError(error.UndefinedJinjaValue, compileModel(allocator, &graph, &node));
+}
+
+test "parse evaluates non-dependency output expressions and keeps literal calls static" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "missing + 1", "1 + missing", "+missing", "-missing", "missing < 1", "missing | int", "missing | float", "none | list" }) |body| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const sql = try std.fmt.allocPrint(allocator, "select {{{{ {s} }}}} as id", .{body});
+        var node = Node{ .package_name = "demo", .unique_id = "model.demo.probe", .name = "probe", .path = "models/probe.sql", .original_file_path = "models/probe.sql", .raw_code = sql };
+        defer types.deinitNode(allocator, &node);
+        var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+        defer graph.deinit();
+        const result = scanDependencies(allocator, sql, &node, &graph);
+        if (result) |_| return error.TestExpectedError else |_| {}
+    }
+    try std.testing.expect(!requiresNativeRendering("{{ config(materialized='table') }} select * from {{ ref('base') }} join {{ source('raw','events') }} using(id)"));
+    try std.testing.expect(requiresNativeRendering("select {{ ref('base') ~ missing + 1 }}"));
 }
