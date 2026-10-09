@@ -529,3 +529,37 @@ def test_postgres_resource_database_identity_matches_core(tmp_path, configuratio
     for manifest in [actual, expected]:
         assert manifest['nodes']['model.configuration_fixture.identity']['database'] == (authored_database or 'configuration_fixture')
         assert manifest['sources']['source.configuration_fixture.raw.orders']['database'] == 'configuration_fixture'
+
+
+@pytest.mark.parametrize('expression', [
+    "api.Column.create('label', 'string').data_type",
+    "api.Column('label', 'varchar', 12).data_type",
+    "api.Column('amount', 'numeric', numeric_precision=18, numeric_scale=3).data_type",
+    "api.Column('id', 'integer').is_integer()",
+    "api.Column('id', 'integer').is_numeric()",
+    "api.Column('ratio', 'double').is_float()",
+    "api.Column('label', 'varchar', 12).quoted",
+    "api.Column('label', 'varchar', 12).string_size()",
+    "api.Column('label', 'varchar', 12).can_expand_to(api.Column('label', 'varchar', 24))",
+    "api.Column('id', 'integer').literal(7)",
+    "api.Relation.add_ephemeral_prefix('orders')",
+])
+def test_native_adapter_column_values_match_core(tmp_path, configuration_oracle, expression):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/context.sql', "select '{{ " + expression + " }}' as value\n")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.context']['compiled_code'] == expected['nodes']['model.configuration_fixture.context']['compiled_code']
+
+
+def test_native_model_and_configuration_context_match_core(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/schema.yml', 'version: 2\nmodels:\n  - name: context\n    description: A context fixture\n    config: {materialized: table, meta: {owner: analytics}}\n    columns:\n      - {name: id, data_type: integer, description: Identifier}\n')
+    pair.write('models/marts/context.sql', "select '{{ model.name }}' as name, '{{ model.config.materialized }}' as materialization, '{{ model.columns.id.data_type }}' as declared_type, '{{ config.get(\"contract\").enforced }}' as enforced, '{{ config.get(\"missing\", \"fallback\") }}' as fallback, '{{ adapter.type() }}' as adapter\n")
+    actual, expected = pair.invoke('run')
+    assert actual['nodes']['model.configuration_fixture.context']['compiled_code'] == expected['nodes']['model.configuration_fixture.context']['compiled_code']
+
+
+def test_native_required_configuration_missing_fails_like_core(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/context.sql', 'select {{ config.require("missing") }} as value\n')
+    pair.invoke('compile', success=False)

@@ -64,6 +64,8 @@ pub fn parseColumnsWithArgumentsProperty(allocator: std.mem.Allocator, input: st
         const name = values.get(item, "name") orelse return error.InvalidResourceProperties;
         var column = types.ColumnDef{ .name = try ownedString(allocator, name), .properties = try values.clone(allocator, item) };
         if (values.get(item, "description")) |description| column.description = try ownedString(allocator, description);
+        if (values.get(column.properties, "data_type")) |dtype| column.data_type = if (dtype == .null) null else try resource.string(dtype);
+        if (values.get(item, "quote")) |quote| column.quote = if (quote == .null) null else try resource.boolean(quote);
         try parseTestsWithArgumentsProperty(allocator, values.get(item, "data_tests") orelse values.get(item, "tests") orelse .null, &column.tests, nested_arguments);
         try columns.append(allocator, column);
     }
@@ -148,6 +150,7 @@ test "typed properties retain nested test arguments and complete column definiti
     try parseModels(.{ .allocator = allocator, .io = std.testing.io }, document.value, "models/schema.yml", "demo", &graph);
     const property = graph.model_properties.items[0];
     try std.testing.expectEqualStrings("integer", values.get(property.columns.items[0].properties, "data_type").?.string);
+    try std.testing.expectEqualStrings("integer", property.columns.items[0].data_type.?);
     try std.testing.expectEqual(@as(i64, 3), values.get(property.tests.items[0].arguments, "threshold").?.integer);
     try std.testing.expect(!values.get(values.get(property.tests.items[0].arguments, "options").?, "nested").?.array.items[1].bool);
 }

@@ -4417,6 +4417,8 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
             if (source.properties != .null) {
                 @import("project/config_value.zig").deinit(graph.allocator, &existing.properties);
                 existing.properties = try @import("project/config_value.zig").clone(graph.allocator, source.properties);
+                existing.data_type = source.data_type;
+                existing.quote = source.quote;
                 existing.description = "";
                 existing.doc_blocks.clearRetainingCapacity();
             }
@@ -4429,7 +4431,7 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
         }
     }
 
-    var column = ColumnDef{ .name = source.name, .properties = try @import("project/config_value.zig").clone(graph.allocator, source.properties) };
+    var column = ColumnDef{ .name = source.name, .data_type = source.data_type, .quote = source.quote, .properties = try @import("project/config_value.zig").clone(graph.allocator, source.properties) };
     errdefer {
         column.doc_blocks.deinit(graph.allocator);
         column.tests.deinit(graph.allocator);

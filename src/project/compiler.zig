@@ -879,9 +879,14 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         for (flags.object) |entry| if (std.mem.eql(u8, entry.key, path[6..])) return entry.value;
         return .undefined;
     }
-    if (std.mem.eql(u8, path, "model.name")) return .{ .string = context.node.name };
-    if (std.mem.eql(u8, path, "model.unique_id")) return .{ .string = context.node.unique_id };
-    if (std.mem.eql(u8, path, "model.config.materialized")) return .{ .string = context.node.materialized };
+    if (std.mem.eql(u8, path, "model") or std.mem.startsWith(u8, path, "model.")) {
+        const model = try @import("context_values.zig").model(allocator, context.graph, context.node);
+        return if (path.len == 5) model else @import("context_values.zig").attribute(model, path[6..]);
+    }
+    if (std.mem.eql(u8, path, "config") or std.mem.startsWith(u8, path, "config.")) {
+        const config = try @import("context_values.zig").config(allocator, context.node);
+        return if (path.len == 6) config else @import("context_values.zig").attribute(config, path[7..]);
+    }
     if (std.mem.eql(u8, path, "this") or std.mem.startsWith(u8, path, "this.")) {
         var value = try relationValueForNode(allocator, context.graph, context.node, false);
         if (path.len == 4) return value;
@@ -952,6 +957,17 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
     if (try @import("bundled_macros.zig").callColumn(allocator, name, args)) |value| return value;
     if (try dbt_context.call(allocator, context.graph.adapter_type, name, args)) |value| return value;
+    if (std.mem.eql(u8, name, "adapter.type")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        return .{ .string = context.graph.adapter_type };
+    }
+    if (std.mem.eql(u8, name, "config.get") or std.mem.eql(u8, name, "config.require")) {
+        if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
+        const value = (try @import("context_values.zig").config(allocator, context.node)).attribute(args[0].value.string);
+        if (value != .undefined) return value;
+        if (args.len == 2) return args[1].value;
+        return if (std.mem.eql(u8, name, "config.require")) error.RequiredConfigurationMissing else .none;
+    }
     // The expression lexer resolves direct dotted calls through the host;
     // object methods bound by a macro therefore need their immutable callable
     // payload resolved before ordinary package namespace lookup.

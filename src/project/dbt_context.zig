@@ -39,6 +39,112 @@ pub const RelationDef = struct {
     information_schema_view: ?[]const u8 = null,
 };
 
+pub const ColumnDef = struct {
+    adapter_type: []const u8 = "duckdb",
+    column: []const u8,
+    dtype: []const u8,
+    char_size: ?u64 = null,
+    numeric_precision: std.json.Value = .null,
+    numeric_scale: std.json.Value = .null,
+};
+
+fn isString(dtype: []const u8) bool {
+    for ([_][]const u8{ "text", "character varying", "character", "varchar" }) |kind| if (std.ascii.eqlIgnoreCase(dtype, kind)) return true;
+    return false;
+}
+
+fn isNumeric(dtype: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(dtype, "numeric") or std.ascii.eqlIgnoreCase(dtype, "decimal");
+}
+
+fn columnStringSize(definition: ColumnDef) !u64 {
+    if (!isString(definition.dtype)) return error.InvalidColumnStringSize;
+    return if (std.mem.eql(u8, definition.dtype, "text")) 256 else definition.char_size orelse 256;
+}
+
+fn columnDataType(allocator: std.mem.Allocator, definition: ColumnDef) ![]const u8 {
+    if (isString(definition.dtype)) return try std.fmt.allocPrint(allocator, "character varying({d})", .{try columnStringSize(definition)});
+    if (isNumeric(definition.dtype) and definition.numeric_precision != .null and definition.numeric_scale != .null) return try std.fmt.allocPrint(allocator, "{s}({s},{s})", .{ definition.dtype, try (try @import("config_value.zig").toExpression(allocator, definition.numeric_precision)).text(allocator), try (try @import("config_value.zig").toExpression(allocator, definition.numeric_scale)).text(allocator) });
+    return definition.dtype;
+}
+
+pub fn columnValue(allocator: std.mem.Allocator, definition: ColumnDef) !Value {
+    const serialized = try std.json.Stringify.valueAlloc(allocator, definition, .{});
+    var entries: std.ArrayList(expression.Entry) = .empty;
+    try entries.appendSlice(allocator, &.{
+        .{ .key = "__dxt_column", .value = .{ .string = serialized } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(allocator, "<Column {s} ({s})>", .{ definition.column, try columnDataType(allocator, definition) }) } },
+        .{ .key = "column", .value = .{ .string = definition.column } },
+        .{ .key = "name", .value = .{ .string = definition.column } },
+        .{ .key = "dtype", .value = .{ .string = definition.dtype } },
+        .{ .key = "data_type", .value = .{ .string = try columnDataType(allocator, definition) } },
+        .{ .key = "quoted", .value = .{ .string = try std.fmt.allocPrint(allocator, "\"{s}\"", .{definition.column}) } },
+        .{ .key = "char_size", .value = if (definition.char_size) |size| .{ .number = @floatFromInt(size) } else .none },
+        .{ .key = "numeric_precision", .value = try @import("config_value.zig").toExpression(allocator, definition.numeric_precision) },
+        .{ .key = "numeric_scale", .value = try @import("config_value.zig").toExpression(allocator, definition.numeric_scale) },
+    });
+    for ([_][]const u8{ "is_string", "is_numeric", "is_integer", "is_float", "string_size", "can_expand_to", "literal" }) |method| try entries.append(allocator, .{
+        .key = method,
+        .value = .{ .callable = try std.fmt.allocPrint(allocator, "__dxt_column:{s}:{s}", .{ method, serialized }) },
+    });
+    return .{ .object = try entries.toOwnedSlice(allocator) };
+}
+
+fn callColumn(allocator: std.mem.Allocator, adapter_type: []const u8, name: []const u8, args: []const Argument) !?Value {
+    const create = std.mem.eql(u8, name, "api.Column.create") or std.mem.eql(u8, name, "adapter.Column.create");
+    if (create or std.mem.eql(u8, name, "api.Column") or std.mem.eql(u8, name, "adapter.Column")) {
+        const column = named(args, if (create) "name" else "column", 0);
+        const dtype = named(args, if (create) "label_or_dtype" else "dtype", 1);
+        if (column != .string or dtype != .string) return error.InvalidJinjaArguments;
+        var definition = ColumnDef{ .adapter_type = adapter_type, .column = column.string, .dtype = if (create and std.ascii.eqlIgnoreCase(dtype.string, "string")) "TEXT" else dtype.string };
+        if (!create) {
+            const size = named(args, "char_size", 2);
+            if (size != .none and size != .undefined) {
+                if (size != .number or size.number < 0 or @floor(size.number) != size.number or size.number >= 9007199254740992) return error.InvalidJinjaArguments;
+                definition.char_size = @intFromFloat(size.number);
+            }
+            const precision = named(args, "numeric_precision", 3);
+            const scale = named(args, "numeric_scale", 4);
+            if (precision != .undefined) definition.numeric_precision = try @import("config_value.zig").fromExpression(allocator, precision);
+            if (scale != .undefined) definition.numeric_scale = try @import("config_value.zig").fromExpression(allocator, scale);
+        }
+        return try columnValue(allocator, definition);
+    }
+    const prefix = "__dxt_column:";
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    const boundary = std.mem.indexOfScalarPos(u8, name, prefix.len, ':') orelse return error.InvalidColumn;
+    const method = name[prefix.len..boundary];
+    const definition = (try std.json.parseFromSlice(ColumnDef, allocator, name[boundary + 1 ..], .{})).value;
+    if (std.mem.eql(u8, method, "literal")) {
+        if (args.len != 1) return error.InvalidJinjaArguments;
+        return .{ .string = try std.fmt.allocPrint(allocator, "{s}::{s}", .{ try args[0].value.text(allocator), try columnDataType(allocator, definition) }) };
+    }
+    if (std.mem.eql(u8, method, "can_expand_to")) {
+        if (args.len != 1) return error.InvalidJinjaArguments;
+        const other = args[0].value.attribute("__dxt_column");
+        if (other != .string) return error.InvalidColumn;
+        const other_definition = (try std.json.parseFromSlice(ColumnDef, allocator, other.string, .{})).value;
+        return .{ .boolean = isString(definition.dtype) and isString(other_definition.dtype) and try columnStringSize(other_definition) > try columnStringSize(definition) };
+    }
+    if (args.len != 0) return error.InvalidJinjaArguments;
+    if (std.mem.eql(u8, method, "string_size")) return .{ .number = @floatFromInt(try columnStringSize(definition)) };
+    if (std.mem.eql(u8, method, "is_string")) return .{ .boolean = isString(definition.dtype) };
+    if (std.mem.eql(u8, method, "is_numeric")) return .{ .boolean = isNumeric(definition.dtype) };
+    if (std.mem.eql(u8, method, "is_float")) {
+        for ([_][]const u8{ "real", "float", "float4", "float8", "double", "double precision" }) |dtype| {
+            if (std.mem.eql(u8, adapter_type, "duckdb") and std.mem.eql(u8, dtype, "double precision")) continue;
+            if (std.ascii.eqlIgnoreCase(dtype, definition.dtype)) return .{ .boolean = true };
+        }
+        return .{ .boolean = false };
+    }
+    if (std.mem.eql(u8, method, "is_integer")) {
+        const candidates: []const []const u8 = if (std.mem.eql(u8, adapter_type, "duckdb")) &.{ "tinyint", "smallint", "integer", "bigint", "hugeint", "utinyint", "usmallint", "uinteger", "ubigint", "int1", "int2", "int4", "int8", "short", "int", "signed", "long" } else &.{ "smallint", "integer", "bigint", "smallserial", "serial", "bigserial", "int2", "int4", "int8", "serial2", "serial4", "serial8" };
+        for (candidates) |dtype| if (std.ascii.eqlIgnoreCase(dtype, definition.dtype)) return .{ .boolean = true };
+        return .{ .boolean = false };
+    }
+    return error.UnsupportedColumnMethod;
+}
+
 fn optional(value: ?[]const u8) Value {
     return if (value) |text| .{ .string = text } else .none;
 }
@@ -167,6 +273,12 @@ fn refreshImplicitSql(allocator: std.mem.Allocator, original: RelationDef, chang
 }
 
 pub fn call(allocator: std.mem.Allocator, adapter_type: []const u8, name: []const u8, args: []const Argument) !?Value {
+    if (try @import("timestamp_context.zig").call(allocator, name, args)) |value| return value;
+    if (try callColumn(allocator, adapter_type, name, args)) |value| return value;
+    if (std.mem.eql(u8, name, "api.Relation.add_ephemeral_prefix") or std.mem.eql(u8, name, "adapter.Relation.add_ephemeral_prefix")) {
+        if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
+        return .{ .string = try std.fmt.allocPrint(allocator, "__dbt__cte__{s}", .{args[0].value.string}) };
+    }
     if (std.mem.eql(u8, name, "api.Relation.create") or std.mem.eql(u8, name, "adapter.Relation.create")) {
         var definition = RelationDef{ .adapter_type = adapter_type };
         inline for (.{ "database", "schema", "identifier" }, 0..) |key, position| @field(definition, key) = try stringOrNull(named(args, key, position));
