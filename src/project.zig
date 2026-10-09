@@ -3672,10 +3672,15 @@ fn parseSeed(runtime: Runtime, project_root: []const u8, seed_root: []const u8, 
     try graph.nodes.append(runtime.allocator, node);
 }
 
+fn findNodeIndexByUniqueId(graph: *const Graph, unique_id: []const u8) ?usize {
+    for (graph.nodes.items, 0..) |node, index| if (std.mem.eql(u8, node.unique_id, unique_id)) return index;
+    return null;
+}
+
 fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
     for (graph.model_properties.items) |property| {
         if (!std.mem.eql(u8, property.package_name, package_name)) continue;
-        const node_index = findNodeIndexByResourceTypeAndName(graph, property.package_name, property.resource_type, property.name) orelse {
+        const node_index = (if (property.assigned_unique_id) |unique_id| findNodeIndexByUniqueId(graph, unique_id) else findNodeIndexByResourceTypeAndName(graph, property.package_name, property.resource_type, property.name)) orelse {
             try graph.unmatched_model_properties.append(graph.allocator, .{ .resource_type = property.resource_type, .name = property.name, .patch_path = property.patch_path });
             continue;
         };
@@ -3807,8 +3812,10 @@ fn materializeGenericTests(graph: *Graph) !void {
 
 fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTestDef, column_name: ?[]const u8) !void {
     const effective_column_name = genericTestColumnName(test_def, column_name);
-    const names = try synthesizeGenericTestNames(graph.allocator, test_def, node.name, effective_column_name);
-    const unique_id = try genericTestUniqueId(graph.allocator, node.package_name, names.full, test_def, node.name, effective_column_name);
+    const names = try synthesizeGenericTestNames(graph.allocator, test_def, if (node.version == .null) node.name else node.default_alias orelse node.name, effective_column_name);
+    const model_kwarg = try @import("project/model_versions.zig").modelKwarg(graph.allocator, node);
+    defer graph.allocator.free(model_kwarg);
+    const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, node.package_name, names.full, test_def, model_kwarg, effective_column_name);
     for (graph.tests.items) |existing| {
         if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
     }
@@ -3862,9 +3869,9 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
             try appendUnique(graph.allocator, &test_node.depends_on, target_unique_id);
         }
     }
-    try test_node.refs.append(graph.allocator, .{ .package = null, .name = node.name });
+    try test_node.refs.append(graph.allocator, .{ .package = null, .name = node.name, .version = try @import("project/config_value.zig").clone(graph.allocator, node.version) });
     try appendUnique(graph.allocator, &test_node.depends_on, node.unique_id);
-    if (isBuiltInGenericTestNode(&test_node) and !std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
+    if (isBuiltInGenericTestNode(&test_node) and (node.version != .null or (!std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")))) {
         try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
     }
     try graph.tests.append(graph.allocator, test_node);
@@ -4310,6 +4317,8 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
             if (source.properties != .null) {
                 @import("project/config_value.zig").deinit(graph.allocator, &existing.properties);
                 existing.properties = try @import("project/config_value.zig").clone(graph.allocator, source.properties);
+                existing.description = "";
+                existing.doc_blocks.clearRetainingCapacity();
             }
             if (source.description.len != 0) existing.description = try resolveDocDescription(graph, package_name, source.description, &existing.doc_blocks);
             for (source.tests.items) |test_def| {

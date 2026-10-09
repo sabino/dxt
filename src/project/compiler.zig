@@ -907,28 +907,27 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         const macro = findMacroByUniqueId(context.graph, macro_id) orelse return error.UnresolvedMacro;
         return .{ .callable = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ macro.package_name, macro.name }) };
     }
-    if (std.mem.eql(u8, name, "ref") or std.mem.eql(u8, name, "source")) {
+    if (std.mem.eql(u8, name, "ref")) {
+        const dep = try refFromArguments(context.allocator, args);
         if (context.parse_node) |node| {
-            for (args) |arg| if (arg.name != null or arg.value != .string) return error.InvalidJinjaArguments;
-            if (std.mem.eql(u8, name, "ref")) {
-                if (args.len < 1 or args.len > 2) return error.InvalidJinjaArguments;
-                try node.refs.append(context.allocator, .{ .package = if (args.len == 2) try context.allocator.dupe(u8, args[0].value.string) else null, .name = try context.allocator.dupe(u8, args[args.len - 1].value.string) });
-            } else {
-                if (args.len != 2) return error.InvalidJinjaArguments;
-                try node.source_refs.append(context.allocator, .{ .source_name = try context.allocator.dupe(u8, args[0].value.string), .table_name = try context.allocator.dupe(u8, args[1].value.string) });
-            }
+            try node.refs.append(context.allocator, dep);
             return .{ .string = "__dxt_parse_relation__" };
         }
-        var raw_args: std.ArrayList(u8) = .empty;
-        for (args, 0..) |arg, i| {
-            if (arg.name != null or arg.value != .string) return error.InvalidJinjaArguments;
-            if (i != 0) try raw_args.appendSlice(allocator, ", ");
-            try raw_args.appendSlice(allocator, try native_expr.repr(arg.value, allocator));
+        const unique_id = try resolve.resolveRefDependency(context.graph, context.node.package_name, dep);
+        const target = findNodeByUniqueId(context.graph, unique_id) orelse return error.UnresolvedRef;
+        const relation = if (std.mem.eql(u8, target.resource_type, "model") and std.mem.eql(u8, target.materialized, "ephemeral")) try ephemeralCteName(allocator, target) else try relationNameForRefNode(allocator, context.graph, target);
+        return .{ .string = relation };
+    }
+    if (std.mem.eql(u8, name, "source")) {
+        if (args.len != 2 or args[0].name != null or args[1].name != null or args[0].value != .string or args[1].value != .string) return error.InvalidJinjaArguments;
+        const dep = SourceDep{ .source_name = try context.allocator.dupe(u8, args[0].value.string), .table_name = try context.allocator.dupe(u8, args[1].value.string) };
+        if (context.parse_node) |node| {
+            try node.source_refs.append(context.allocator, dep);
+            return .{ .string = "__dxt_parse_relation__" };
         }
-        const call = try std.fmt.allocPrint(allocator, "{s}({s})", .{ name, raw_args.items });
-        const rendered = try renderLegacyExpression(context, call);
-        defer context.allocator.free(rendered);
-        return .{ .string = try allocator.dupe(u8, rendered) };
+        const unique_id = try resolve.resolveSourceDependency(context.graph, context.node.package_name, dep);
+        const source = findSourceByUniqueId(context.graph, unique_id) orelse return error.UnresolvedSource;
+        return .{ .string = try relationNameForSource(allocator, source) };
     }
     var macro_id: ?[]const u8 = null;
     if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
@@ -943,6 +942,25 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         if (context.macro_render_depth == 0) try util.appendUnique(context.allocator, &node.macro_depends_on, macro.unique_id);
     }
     return try renderMacroValue(context, macro, args);
+}
+
+fn refFromArguments(allocator: std.mem.Allocator, args: []const native_expr.Argument) !RefDep {
+    var positional: [2][]const u8 = undefined;
+    var count: usize = 0;
+    var version: std.json.Value = .null;
+    for (args) |arg| {
+        if (arg.name) |key| {
+            if ((!std.mem.eql(u8, key, "v") and !std.mem.eql(u8, key, "version")) or version != .null) return error.InvalidJinjaArguments;
+            version = try @import("config_value.zig").fromExpression(allocator, arg.value);
+            if (version != .null and version != .integer and version != .float and version != .string) return error.InvalidJinjaArguments;
+        } else {
+            if (arg.value != .string or count == 2) return error.InvalidJinjaArguments;
+            positional[count] = arg.value.string;
+            count += 1;
+        }
+    }
+    if (count == 0) return error.InvalidJinjaArguments;
+    return .{ .package = if (count == 2) try allocator.dupe(u8, positional[0]) else null, .name = try allocator.dupe(u8, positional[count - 1]), .version = version };
 }
 
 const MacroParameter = struct { name: []const u8, default: ?[]const u8 = null };
@@ -2009,7 +2027,7 @@ pub fn relationIdentifierForNode(node: *const Node) []const u8 {
         const trimmed = std.mem.trim(u8, custom_alias, " \t\r\n");
         if (trimmed.len != 0) return trimmed;
     }
-    return node.name;
+    return node.default_alias orelse node.name;
 }
 
 pub fn relationNameForSource(allocator: std.mem.Allocator, source: *const SourceDef) ![]const u8 {

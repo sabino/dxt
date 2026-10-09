@@ -10,28 +10,47 @@ pub fn parseModels(runtime: types.Runtime, document: std.json.Value, path: []con
             if (items != .array) return error.InvalidResourceProperties;
             for (items.array.items) |item| {
                 if (item != .object) return error.InvalidResourceProperties;
-                var property = types.ModelProperty{ .package_name = package, .resource_type = pair[1], .name = try ownedString(runtime.allocator, values.get(item, "name") orelse return error.InvalidResourceProperties), .patch_path = path, .properties = try values.clone(runtime.allocator, item) };
-                if (values.get(item, "description")) |description| property.description = try ownedString(runtime.allocator, description);
-                var context = renderer.Context{ .runtime = runtime, .vars = graph.vars.items, .target = graph.target_context, .package_name = package };
-                if (values.get(item, "config")) |config| {
-                    if (config != .object) return error.InvalidResourceProperties;
-                    var it = config.object.iterator();
-                    while (it.next()) |entry| {
-                        const key = resource.normalizeKey(entry.key_ptr.*);
-                        var value = if (std.mem.eql(u8, key, "pre-hook") or std.mem.eql(u8, key, "post-hook")) try values.clone(runtime.allocator, entry.value_ptr.*) else try context.render(entry.value_ptr.*);
-                        defer values.deinit(runtime.allocator, &value);
-                        try resource.mergeField(runtime.allocator, &property.config_values, key, value);
+                if (comptime std.mem.eql(u8, pair[1], "model")) {
+                    if (values.get(item, "versions") != null) {
+                        var expanded = try @import("model_versions.zig").expand(runtime.allocator, item);
+                        defer @import("model_versions.zig").deinit(runtime.allocator, &expanded);
+                        for (expanded.items) |version| {
+                            var property = try parseModelItem(runtime, version.item, path, package, pair[1], graph);
+                            property.name = try runtime.allocator.dupe(u8, version.sql_name);
+                            property.logical_name = try runtime.allocator.dupe(u8, version.name);
+                            property.version = try values.clone(runtime.allocator, version.version);
+                            property.latest_version = try values.clone(runtime.allocator, version.latest);
+                            try graph.model_properties.append(runtime.allocator, property);
+                        }
+                        continue;
                     }
                 }
-                for ([_][]const u8{ "meta", "docs", "tags", "group", "access", "contract" }) |key| {
-                    if (values.get(item, key)) |value| try resource.mergeField(runtime.allocator, &property.config_values, key, value);
-                }
-                try parseTestsWithArgumentsProperty(runtime.allocator, values.get(item, "data_tests") orelse values.get(item, "tests") orelse .null, &property.tests, graph.require_generic_test_arguments_property);
-                try parseColumnsWithArgumentsProperty(runtime.allocator, values.get(item, "columns") orelse .null, &property.columns, graph.require_generic_test_arguments_property);
-                try graph.model_properties.append(runtime.allocator, property);
+                try graph.model_properties.append(runtime.allocator, try parseModelItem(runtime, item, path, package, pair[1], graph));
             }
         }
     }
+}
+
+fn parseModelItem(runtime: types.Runtime, item: std.json.Value, path: []const u8, package: []const u8, resource_type: []const u8, graph: *const types.Graph) !types.ModelProperty {
+    var property = types.ModelProperty{ .package_name = package, .resource_type = resource_type, .name = try ownedString(runtime.allocator, values.get(item, "name") orelse return error.InvalidResourceProperties), .patch_path = path, .properties = try values.clone(runtime.allocator, item) };
+    if (values.get(item, "description")) |description| property.description = try ownedString(runtime.allocator, description);
+    var context = renderer.Context{ .runtime = runtime, .vars = graph.vars.items, .target = graph.target_context, .package_name = package };
+    if (values.get(item, "config")) |config| {
+        if (config != .object) return error.InvalidResourceProperties;
+        var it = config.object.iterator();
+        while (it.next()) |entry| {
+            const key = resource.normalizeKey(entry.key_ptr.*);
+            var value = if (std.mem.eql(u8, key, "pre-hook") or std.mem.eql(u8, key, "post-hook")) try values.clone(runtime.allocator, entry.value_ptr.*) else try context.render(entry.value_ptr.*);
+            defer values.deinit(runtime.allocator, &value);
+            try resource.mergeField(runtime.allocator, &property.config_values, key, value);
+        }
+    }
+    for ([_][]const u8{ "meta", "docs", "tags", "group", "access", "contract" }) |key| {
+        if (values.get(item, key)) |value| try resource.mergeField(runtime.allocator, &property.config_values, key, value);
+    }
+    try parseTestsWithArgumentsProperty(runtime.allocator, values.get(item, "data_tests") orelse values.get(item, "tests") orelse .null, &property.tests, graph.require_generic_test_arguments_property);
+    try parseColumnsWithArgumentsProperty(runtime.allocator, values.get(item, "columns") orelse .null, &property.columns, graph.require_generic_test_arguments_property);
+    return property;
 }
 
 pub fn parseColumns(allocator: std.mem.Allocator, input: std.json.Value, columns: *std.ArrayList(types.ColumnDef)) !void {

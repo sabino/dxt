@@ -216,6 +216,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     applyProjectSeedDocs(&graph, config.name, config.seed_docs);
     try loadSingularTests(runtime, options.project_dir, config.name, config.test_paths.items, callbacks, &graph);
     try loadSnapshots(runtime, options.project_dir, config.name, config.snapshot_paths.items, callbacks, &graph);
+    try @import("model_versions.zig").assign(&graph, config.name);
     try applyProjectModelPathConfigs(&graph, config.model_path_configs.items, true, null);
 
     try rejectDuplicateMacroProperties(&graph);
@@ -441,6 +442,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
         try loadSingularTests(runtime, package_dir, package_config.name, package_config.test_paths.items, callbacks, graph);
         try callbacks.apply_singular_test_properties(graph, package_config.name);
         try loadSnapshots(runtime, package_dir, package_config.name, package_config.snapshot_paths.items, callbacks, graph);
+        try @import("model_versions.zig").assign(graph, package_config.name);
         try applyProjectModelPathConfigs(graph, package_config.model_path_configs.items, false, package_config.name);
         try callbacks.apply_model_properties(graph, package_config.name);
     }

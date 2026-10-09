@@ -221,6 +221,8 @@ fn validateSelectorMethod(part: []const u8) !void {
         "semantic_model:",
         "saved_query:",
         "config.materialized:",
+        "version:",
+        "fqn:",
         "source_status:",
         "result:",
         "state:",
@@ -234,6 +236,7 @@ fn validateSelectorMethod(part: []const u8) !void {
             if (std.mem.eql(u8, prefix, "source_status:") and !isSupportedSourceStatusSelector(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "result:") and !run_results.isSupportedResultSelectorStatus(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "state:") and !isSupportedStateSelector(value)) return error.UnsupportedSelector;
+            if (std.mem.eql(u8, prefix, "version:") and !std.mem.eql(u8, value, "latest") and !std.mem.eql(u8, value, "old") and !std.mem.eql(u8, value, "prerelease") and !std.mem.eql(u8, value, "none")) return error.UnsupportedSelector;
             return;
         }
     }
@@ -536,6 +539,18 @@ fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value
 fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []const u8, context: SelectionContext) bool {
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(node.unique_id, value, context);
+    if (std.mem.startsWith(u8, value, "fqn:")) return matchesNodeFqnPattern(value[4..], node);
+    if (std.mem.startsWith(u8, value, "version:")) {
+        if (!std.mem.eql(u8, node.resource_type, "model")) return false;
+        const kind = value[8..];
+        if (std.mem.eql(u8, kind, "none")) return node.version == .null;
+        if (node.version == .null or node.latest_version == .null) return false;
+        const versions = @import("model_versions.zig");
+        if (std.mem.eql(u8, kind, "latest")) return versions.equal(graph.allocator, node.version, node.latest_version) catch false;
+        if (std.mem.eql(u8, kind, "old")) return versions.less(graph.allocator, node.version, node.latest_version) catch false;
+        if (std.mem.eql(u8, kind, "prerelease")) return versions.less(graph.allocator, node.latest_version, node.version) catch false;
+        return false;
+    }
     if (matchesSelectorPattern(value, node.name) or std.mem.eql(u8, value, node.unique_id) or matchesNodeFqnPattern(value, node)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
@@ -1090,6 +1105,20 @@ fn matchesUniqueIdFqnPattern(pattern: []const u8, unique_id: []const u8) bool {
 }
 
 fn matchesNodeFqnPattern(pattern: []const u8, node: *const Node) bool {
+    if (node.version != .null) {
+        var buffer: [4096]u8 = undefined;
+        var len: usize = 0;
+        if (!appendFqnSlice(&buffer, &len, node.package_name) or !appendFqnByte(&buffer, &len, '.')) return false;
+        const unscoped_start = len;
+        if (std.mem.lastIndexOfScalar(u8, node.path, '/')) |slash| {
+            if (!appendFqnPath(&buffer, &len, node.path[0 .. slash + 1])) return false;
+        }
+        if (!appendFqnSlice(&buffer, &len, node.name) or !appendFqnSlice(&buffer, &len, ".v")) return false;
+        const version = @import("config_value.zig").scalarText(std.heap.page_allocator, node.version) catch return false;
+        defer std.heap.page_allocator.free(version);
+        if (!appendFqnSlice(&buffer, &len, version)) return false;
+        return matchesFqnCandidate(pattern, buffer[0..len]) or matchesFqnCandidate(pattern, buffer[unscoped_start..len]);
+    }
     if (std.mem.eql(u8, node.resource_type, "snapshot") and !node.snapshot_yaml_definition) {
         var buffer: [4096]u8 = undefined;
         var len: usize = 0;

@@ -49,7 +49,8 @@ pub fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathCon
                 const source = node.snapshot_fqn_path orelse node.path;
                 const extension = std.mem.lastIndexOfScalar(u8, source, '.') orelse source.len;
                 break :path if (node.snapshot_yaml_definition) source[0..extension] else try std.fmt.allocPrint(graph.allocator, "{s}/{s}", .{ source[0..extension], node.name });
-            } else node.path;
+            } else if (node.version != .null) try std.fmt.allocPrint(graph.allocator, "{s}{s}{s}.sql", .{ std.fs.path.dirname(node.path) orelse "", if (std.fs.path.dirname(node.path) != null) "/" else "", node.name }) else node.path;
+            defer if (node.version != .null) graph.allocator.free(resource_path);
             if (!modelPathConfigMatches(config.path, resource_path)) continue;
             typed_path = true;
             const layer = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) &node.root_override_config else &node.project_config;
@@ -73,7 +74,9 @@ pub fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathCon
                 if (!std.mem.eql(u8, config.package_name, package_name)) continue;
             }
             if (!std.mem.eql(u8, node.package_name, config.package_name)) continue;
-            if (!modelPathConfigMatches(config.path, node.path)) continue;
+            const config_path = if (node.version != .null) try std.fmt.allocPrint(graph.allocator, "{s}{s}{s}.sql", .{ std.fs.path.dirname(node.path) orelse "", if (std.fs.path.dirname(node.path) != null) "/" else "", node.name }) else node.path;
+            defer if (node.version != .null) graph.allocator.free(config_path);
+            if (!modelPathConfigMatches(config.path, config_path)) continue;
             const depth = modelPathConfigDepth(config.path);
             var protected = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) types.IncrementalConfigMask{} else node.inline_incremental;
             inline for (.{ "unique_key", "strategy", "on_schema_change", "full_refresh", "predicates" }, 0..) |field, field_index| {

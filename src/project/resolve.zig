@@ -158,18 +158,40 @@ pub fn packageNameFromMacroUniqueId(unique_id: []const u8) ?[]const u8 {
 
 pub fn resolveRefDependency(graph: *const Graph, current_package: []const u8, ref_dep: RefDep) ![]const u8 {
     const package = ref_dep.package orelse current_package;
-    if (try resolveRefInPackage(graph, package, ref_dep.name)) |unique_id| return unique_id;
+    if (try resolveVersionedRefInPackage(graph, package, ref_dep)) |unique_id| return unique_id;
     if (ref_dep.package != null) return error.UnresolvedRef;
-
     var found: ?[]const u8 = null;
     for (graph.nodes.items) |node| {
-        if (!std.mem.eql(u8, node.name, ref_dep.name)) continue;
+        if (!std.mem.eql(u8, node.name, ref_dep.name) or !node.enabled) continue;
         if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot")) continue;
-        if (!node.enabled) continue;
+        if (!try versionMatches(graph.allocator, node, ref_dep.version)) continue;
         if (found != null) return error.UnresolvedRef;
         found = node.unique_id;
     }
     return found orelse error.UnresolvedRef;
+}
+
+fn versionMatches(allocator: std.mem.Allocator, node: Node, requested: std.json.Value) !bool {
+    if (requested != .null) return node.version != .null and try @import("model_versions.zig").equal(allocator, node.version, requested);
+    return node.version == .null or try @import("model_versions.zig").equal(allocator, node.version, node.latest_version);
+}
+fn resolveVersionedRefInPackage(graph: *const Graph, package: []const u8, ref_dep: RefDep) !?[]const u8 {
+    var found: ?[]const u8 = null;
+    var disabled = false;
+    for (graph.nodes.items) |node| {
+        if (!std.mem.eql(u8, node.package_name, package) or !std.mem.eql(u8, node.name, ref_dep.name) or node.version == .null) continue;
+        if (!try versionMatches(graph.allocator, node, ref_dep.version)) continue;
+        if (!node.enabled) {
+            disabled = true;
+            continue;
+        }
+        if (found != null) return error.UnresolvedRef;
+        found = node.unique_id;
+    }
+    if (found != null) return found;
+    if (disabled) return error.DisabledRef;
+    if (ref_dep.version != .null) return null;
+    return try resolveRefInPackage(graph, package, ref_dep.name);
 }
 
 pub fn resolveSourceDependency(graph: *const Graph, current_package: []const u8, source_dep: SourceDep) ![]const u8 {
@@ -204,7 +226,6 @@ pub fn resolveDependencies(graph: *Graph) !void {
         for (node.source_refs.items) |source_dep| {
             try appendUnique(graph.allocator, &node.depends_on, try resolveSourceDependency(graph, node.package_name, source_dep));
         }
-        sortStrings(node.depends_on.items);
     }
     for (graph.exposures.items) |*exposure| {
         if (!exposure.enabled) continue;

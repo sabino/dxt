@@ -240,6 +240,7 @@ pub const JsonScalar = struct {
 };
 
 pub const RefDep = struct {
+    version: std.json.Value = .null,
     package: ?[]const u8,
     name: []const u8,
 };
@@ -330,6 +331,10 @@ pub const MacroArgument = struct {
 };
 
 pub const ModelProperty = struct {
+    logical_name: ?[]const u8 = null,
+    version: std.json.Value = .null,
+    latest_version: std.json.Value = .null,
+    assigned_unique_id: ?[]const u8 = null,
     package_name: []const u8,
     resource_type: []const u8 = "model",
     name: []const u8,
@@ -391,6 +396,9 @@ pub const ExtraCte = struct {
 };
 
 pub const Node = struct {
+    default_alias: ?[]const u8 = null,
+    version: std.json.Value = .null,
+    latest_version: std.json.Value = .null,
     resource_type: []const u8 = "model",
     package_name: []const u8,
     unique_id: []const u8,
@@ -787,6 +795,8 @@ pub fn deinitDispatchConfigs(allocator: std.mem.Allocator, configs: *std.ArrayLi
 }
 
 pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
+    config_value.deinit(allocator, &node.version);
+    config_value.deinit(allocator, &node.latest_version);
     config_value.deinit(allocator, &node.properties);
     config_value.deinit(allocator, &node.raw_config);
     config_value.deinit(allocator, &node.effective_config);
@@ -897,6 +907,8 @@ fn deinitMacro(allocator: std.mem.Allocator, macro: *MacroDef) void {
 }
 
 fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) void {
+    config_value.deinit(allocator, &property.version);
+    config_value.deinit(allocator, &property.latest_version);
     config_value.deinit(allocator, &property.config_values);
     config_value.deinit(allocator, &property.properties);
     property.incremental.deinit(allocator);

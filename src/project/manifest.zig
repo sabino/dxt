@@ -449,7 +449,15 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
     try writer.writeAll(",\"alias\":");
     try json.string(writer, alias);
     try writer.writeAll(",\"fqn\":");
-    try writeFqnFromPath(writer, node.package_name, node.snapshot_fqn_path orelse node.path, node.name, if (snapshot_config != null and !node.snapshot_yaml_definition) node.name else null);
+    if (node.version != .null) {
+        const version = try @import("config_value.zig").scalarText(allocator, node.version);
+        defer allocator.free(version);
+        const logical_path = try std.fmt.allocPrint(allocator, "{s}{s}{s}.sql", .{ std.fs.path.dirname(node.path) orelse "", if (std.fs.path.dirname(node.path) != null) "/" else "", node.name });
+        defer allocator.free(logical_path);
+        const version_part = try std.fmt.allocPrint(allocator, "v{s}", .{version});
+        defer allocator.free(version_part);
+        try writeFqnFromPath(writer, node.package_name, logical_path, node.name, version_part);
+    } else try writeFqnFromPath(writer, node.package_name, node.snapshot_fqn_path orelse node.path, node.name, if (snapshot_config != null and !node.snapshot_yaml_definition) node.name else null);
     try writer.writeAll(",\"checksum\":");
     try writeSha256Checksum(writer, if (node.snapshot_file_code) |file_code| std.mem.trim(u8, file_code, " \t\r\n\x0b\x0c") else node.raw_code);
 }
@@ -852,6 +860,10 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
+    try writer.writeAll(",\"version\":");
+    try std.json.Stringify.value(node.version, .{}, writer);
+    try writer.writeAll(",\"latest_version\":");
+    try std.json.Stringify.value(node.latest_version, .{}, writer);
     try writeUnrenderedNodeConfig(writer, graph, &node);
     try writeNodeIdentityFields(allocator, writer, graph, &node);
     try writer.writeAll(",\"path\":");
@@ -907,6 +919,7 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
         try writer.writeAll(",\"meta\":");
         if (node.snapshot_meta_json) |value| try writeJsonValue(writer, value) else try writeMetaObject(writer, node.meta.items);
     }
+    if (node.snapshot_config == null and @import("config_value.zig").get(node.effective_config, "meta") == null) try writer.writeAll(",\"meta\":{}");
     try writeAdditionalConfig(writer, &node);
     try writer.writeAll("},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, node.macro_depends_on.items);
@@ -1233,6 +1246,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try json.string(writer, test_node.test_name);
     try writer.writeAll(",\"kwargs\":{\"model\":");
     const model_kwarg = if (test_node.attached_node) |attached_node| blk: {
+        for (graph.nodes.items) |*model| if (std.mem.eql(u8, model.unique_id, attached_node)) break :blk try @import("model_versions.zig").modelKwarg(allocator, model);
         const model_name = modelNameFromUniqueId(attached_node);
         break :blk try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
     } else blk: {
@@ -1563,7 +1577,9 @@ fn writeRefDeps(writer: *Io.Writer, refs: []const RefDep) !void {
         try json.string(writer, ref_dep.name);
         try writer.writeAll(",\"package\":");
         try writeNullableString(writer, ref_dep.package);
-        try writer.writeAll(",\"version\":null}");
+        try writer.writeAll(",\"version\":");
+        try std.json.Stringify.value(ref_dep.version, .{}, writer);
+        try writer.writeAll("}");
     }
     try writer.writeAll("]");
 }

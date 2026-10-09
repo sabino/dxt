@@ -279,3 +279,98 @@ def test_namespaced_builtin_name_uses_authored_generic_macro(tmp_path, configura
     actual, expected = [next(node for node in m["nodes"].values() if node["resource_type"] == "test") for m in manifests]
     for key in ["test_metadata", "compiled_code", "depends_on", "attached_node"]:
         assert actual[key] == expected[key]
+
+
+@pytest.mark.parametrize("latest", [1, 2])
+def test_model_versions_latest_explicit_refs_defined_in_and_column_inheritance(tmp_path, configuration_oracle, latest):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.append_project("models: {configuration_fixture: {orders: {+materialized: table, +meta: {owner: versioned}}}}\n")
+    pair.write("models/orders_v1.sql", "select 1 as id, 'old' as legacy")
+    pair.write("models/custom_orders.sql", "select 2 as id, 'new' as label")
+    pair.write("models/marts/rendered.sql", "select * from {{ ref('orders') }} union all select * from {{ ref('orders', v=1) }} union all select * from {{ ref('configuration_fixture', 'orders', version=2) }}")
+    pair.write("models/properties.yml", f"""version: 2
+models:
+  - name: orders
+    description: Versioned orders
+    latest_version: {latest}
+    config: {{tags: [orders]}}
+    columns:
+      - {{name: id, description: Identifier, data_type: integer, data_tests: [not_null]}}
+      - {{name: legacy, description: Old label, data_type: varchar}}
+    versions:
+      - v: 1
+      - v: 2
+        defined_in: custom_orders
+        description: Current orders
+        config: {{meta: {{generation: 2}}}}
+        columns:
+          - {{include: all, exclude: [legacy]}}
+          - {{name: label, description: New label, data_type: varchar}}
+""")
+    manifests = pair.invoke()
+    for uid in ["model.configuration_fixture.orders.v1", "model.configuration_fixture.orders.v2", "model.configuration_fixture.rendered"]:
+        actual, expected = [m["nodes"][uid] for m in manifests]
+        for key in ["name", "alias", "version", "latest_version", "fqn", "description", "columns", "refs", "depends_on", "compiled_code"]:
+            assert actual[key] == expected[key], (uid, key)
+        for key in ["materialized", "meta", "tags"]:
+            assert actual["config"][key] == expected["config"][key], (uid, key)
+    actual_tests, expected_tests = [{uid: n for uid, n in m["nodes"].items() if n["resource_type"] == "test"} for m in manifests]
+    assert actual_tests.keys() == expected_tests.keys()
+    assert len(actual_tests) == 2
+    for uid in expected_tests:
+        for key in ["name", "test_metadata", "refs", "depends_on", "attached_node"]:
+            assert actual_tests[uid][key] == expected_tests[uid][key], (uid, key)
+        assert " ".join(actual_tests[uid]["compiled_code"].replace('"id"', 'id').split()) == " ".join(expected_tests[uid]["compiled_code"].split())
+
+
+def test_latest_model_version_uses_unversioned_file_and_null_alias_default(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write("models/orders_v1.sql", "select 1 as id")
+    pair.write("models/orders.sql", "select 2 as id")
+    pair.write("models/marts/rendered.sql", "select * from {{ ref('orders') }}")
+    pair.write("models/properties.yml", "models: [{name: orders, config: {alias: null}, versions: [{v: 1}, {v: 2}]}]\n")
+    manifests = pair.invoke()
+    for uid in ["model.configuration_fixture.orders.v2", "model.configuration_fixture.rendered"]:
+        actual, expected = [m["nodes"][uid] for m in manifests]
+        for key in ["name", "alias", "version", "latest_version", "fqn", "depends_on", "compiled_code"]:
+            assert actual[key] == expected[key], (uid, key)
+
+
+
+@pytest.mark.parametrize("selection, names", [("version:latest", ["model.configuration_fixture.orders.v2"]), ("version:old", ["model.configuration_fixture.orders.v1"]), ("version:prerelease", ["model.configuration_fixture.orders.v3"]), ("version:none", ["model.configuration_fixture.rendered"]), ("orders.v1", ["model.configuration_fixture.orders.v1"]), ("fqn:configuration_fixture.orders.v2", ["model.configuration_fixture.orders.v2"])])
+def test_model_version_selectors_match_core(tmp_path, configuration_oracle, selection, names):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    for v in [1, 2, 3]:
+        pair.write(f"models/orders_v{v}.sql", f"select {v} as id")
+    pair.write("models/marts/rendered.sql", "select 0 as id")
+    pair.write("models/properties.yml", "models: [{name: orders, latest_version: 2, versions: [{v: 1}, {v: 2}, {v: 3}]}]\n")
+    actual, expected = pair.projects
+    args = ["ls", "--select", selection, "--resource-type", "model", "--output", "json", "--output-keys", "unique_id"]
+    result = subprocess.run([DXT, *args, "--project-dir", str(actual), "--profiles-dir", str(actual)], text=True, capture_output=True, cwd=ROOT)
+    reference = configuration_oracle.invoke([*args, "--project-dir", str(expected), "--profiles-dir", str(expected), "--no-partial-parse", "--quiet"])
+    assert reference.success, reference.exception
+    assert result.returncode == 0, result.stderr
+    reference_ids = sorted(json.loads(line)["unique_id"] for line in reference.result)
+    assert sorted(row["unique_id"] for row in json.loads(result.stdout)) == reference_ids == names
+
+
+def test_model_version_columns_default_inheritance_and_explicit_replacement(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write("models/orders_v1.sql", "select 1 as id, 'x' as label")
+    pair.write("models/orders_v2.sql", "select 2 as id, 'x' as label")
+    pair.write("models/properties.yml", """models:
+  - name: orders
+    columns:
+      - {name: id, description: Identifier, data_type: integer, data_tests: [not_null]}
+      - {name: label, description: Label, data_type: varchar}
+    versions:
+      - {v: 1}
+      - v: 2
+        columns: [{name: id, description: New identifier}]
+""")
+    manifests = pair.invoke()
+    for uid in ["model.configuration_fixture.orders.v1", "model.configuration_fixture.orders.v2"]:
+        actual, expected = [m["nodes"][uid] for m in manifests]
+        assert actual["columns"] == expected["columns"]
+    actual, expected = [{uid: n["test_metadata"] for uid, n in m["nodes"].items() if n["resource_type"] == "test"} for m in manifests]
+    assert actual == expected
