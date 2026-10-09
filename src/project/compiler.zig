@@ -1122,8 +1122,9 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         binding_index -= 1;
         if (!std.mem.eql(u8, context.bindings.items[binding_index].name, name[0..root_end])) continue;
         const bound = try resolveExpressionValue(context, name, allocator);
-        if (bound == .callable and !std.mem.eql(u8, bound.callable, name)) return try callExpressionValue(context, bound.callable, args, allocator);
-        if (root_end == name.len and bound != .callable) return error.JinjaTypeError;
+        const callable = native_expr.callableName(bound);
+        if (callable) |function| if (!std.mem.eql(u8, function, name)) return try callExpressionValue(context, function, args, allocator);
+        if (root_end == name.len and callable == null) return error.JinjaTypeError;
         break;
     }
     if (try @import("bundled_macros.zig").callColumn(allocator, name, args)) |value| return value;
@@ -3953,4 +3954,14 @@ test "typed generic parse rendering captures macro configs and dependencies" {
     try std.testing.expectEqualStrings("parent", probe.refs.items[0].name);
     try std.testing.expectEqualStrings("macro", @import("config_value.zig").get(probe.inline_config, "tags").?.array.items[0].string);
     try std.testing.expectEqualStrings("macro.demo.test_positive", probe.macro_depends_on.items[0]);
+}
+
+test "compiler calls aliases of typed regex class objects" {
+    const allocator = std.testing.allocator;
+    var graph = Graph{ .allocator = allocator, .project_name = "fixture" };
+    defer graph.deinit();
+    const node = Node{ .unique_id = "model.fixture.alias", .package_name = "fixture", .name = "alias", .path = "alias.sql", .original_file_path = "models/alias.sql", .raw_code = "{% set flag = modules.re.RegexFlag %}{% set err = modules.re.error %}select '{{ flag(10) }}|{{ err('bad') }}'" };
+    const sql = try compileModel(allocator, &graph, &node);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings("select 're.IGNORECASE|re.MULTILINE|bad'", sql);
 }
