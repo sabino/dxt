@@ -785,6 +785,12 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
         const args = span[call.open + 1 .. call.close];
 
         if (call.package_name) |package_name| {
+            if ((std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "quote")) or
+                (std.mem.eql(u8, package_name, "exceptions") and std.mem.eql(u8, call.name, "raise_compiler_error")))
+            {
+                i = call.close + 1;
+                continue;
+            }
             if (graph) |known_graph| {
                 if (std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "dispatch")) {
                     const dispatch_args = try parseAdapterDispatchArgs(allocator, args);
@@ -813,6 +819,10 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
             const rendered = try parse_context.renderCall(call, args);
             allocator.free(rendered);
         } else {
+            if (isExpressionBuiltin(call.name) or (start > 0 and std.mem.trimEnd(u8, span[0..start], " \t\r\n").len > 0 and std.mem.trimEnd(u8, span[0..start], " \t\r\n")[std.mem.trimEnd(u8, span[0..start], " \t\r\n").len - 1] == '|')) {
+                i = call.close + 1;
+                continue;
+            }
             if (graph) |known_graph| {
                 if (findMacroIdForUnqualifiedNamespaceCall(known_graph, node.package_name, call.name)) |macro_id| {
                     try appendUnique(allocator, &node.macro_depends_on, macro_id);
@@ -824,6 +834,13 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
         }
         i = call.close + 1;
     }
+}
+
+fn isExpressionBuiltin(name: []const u8) bool {
+    for ([_][]const u8{ "var", "env_var", "range", "dict", "namespace", "return" }) |builtin_name| {
+        if (std.mem.eql(u8, name, builtin_name)) return true;
+    }
+    return false;
 }
 
 pub fn scanMacroSqlForKnownMacroCalls(allocator: std.mem.Allocator, sql: []const u8, graph: *const Graph, current_macro_id: []const u8, macro_depends_on: *std.ArrayList([]const u8)) !void {
@@ -999,7 +1016,7 @@ pub fn deinitAdapterDispatchArgs(allocator: std.mem.Allocator, args: AdapterDisp
     if (args.macro_namespace) |namespace| allocator.free(namespace);
 }
 
-fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !void {
+pub fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !void {
     if (try parseConfigQuotedValue(allocator, args, "materialized")) |value| {
         node.materialized = value;
         node.inline_materialized = true;

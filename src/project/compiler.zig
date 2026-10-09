@@ -2,6 +2,8 @@ const std = @import("std");
 const jinja = @import("jinja.zig");
 const resolve = @import("resolve.zig");
 const types = @import("types.zig");
+const util = @import("util.zig");
+const native_expr = @import("expression.zig");
 
 const Graph = types.Graph;
 const ExtraCte = types.ExtraCte;
@@ -13,7 +15,7 @@ const SingularTestNode = types.SingularTestNode;
 const SourceDep = types.SourceDep;
 const SourceDef = types.SourceDef;
 
-const max_macro_render_depth = 8;
+const max_macro_render_depth = 64;
 
 const Relation = struct {
     database: ?[]const u8 = null,
@@ -78,9 +80,19 @@ const CompileContext = struct {
     current_macro_package: ?[]const u8 = null,
     macro_render_depth: usize = 0,
     validating_skipped_loop_body: bool = false,
+    value_arena: std.heap.ArenaAllocator,
+    bindings: std.ArrayList(ValueBinding) = .empty,
+    returned: ?native_expr.Value = null,
+    parse_node: ?*Node = null,
+
+    const ValueBinding = struct {
+        name: []const u8,
+        value: native_expr.Value,
+        scope_depth: usize,
+    };
 
     fn init(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) CompileContext {
-        return .{ .allocator = allocator, .graph = graph, .node = node };
+        return .{ .allocator = allocator, .graph = graph, .node = node, .value_arena = std.heap.ArenaAllocator.init(allocator) };
     }
 
     fn deinit(self: *CompileContext) void {
@@ -90,6 +102,8 @@ const CompileContext = struct {
         }
         self.lists.deinit(self.allocator);
         self.vars.deinit(self.allocator);
+        self.bindings.deinit(self.allocator);
+        self.value_arena.deinit();
     }
 
     fn setList(self: *CompileContext, name: []const u8, values: std.ArrayList([]const u8)) !void {
@@ -119,6 +133,7 @@ const CompileContext = struct {
     }
 
     fn popScope(self: *CompileContext) void {
+        while (self.bindings.items.len > 0 and self.bindings.items[self.bindings.items.len - 1].scope_depth == self.scope_depth) _ = self.bindings.pop();
         while (self.lists.items.len > 0 and self.lists.items[self.lists.items.len - 1].scope_depth == self.scope_depth) {
             var list = self.lists.pop().?;
             for (list.values.items) |value| self.allocator.free(value);
@@ -143,6 +158,26 @@ const CompileContext = struct {
             if (std.mem.eql(u8, variable.name, name)) return variable.value;
         }
         return null;
+    }
+
+    fn setValue(self: *CompileContext, name: []const u8, value: native_expr.Value) !void {
+        var i = self.bindings.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.bindings.items[i].scope_depth == self.scope_depth and std.mem.eql(u8, self.bindings.items[i].name, name)) {
+                self.bindings.items[i].value = value;
+                return;
+            }
+        }
+        try self.bindings.append(self.allocator, .{ .name = name, .value = value, .scope_depth = self.scope_depth });
+    }
+
+    fn host(self: *CompileContext) native_expr.Host {
+        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue };
+    }
+
+    fn evaluate(self: *CompileContext, span: []const u8) !native_expr.Value {
+        return try native_expr.evaluate(self.value_arena.allocator(), span, self.host());
     }
 };
 
@@ -178,6 +213,54 @@ pub fn compileModel(allocator: std.mem.Allocator, graph: *const Graph, node: *co
     return try compileModelBody(allocator, graph, node);
 }
 
+/// Render with execute=false to discover dependencies through real expression,
+/// scope and macro semantics, including macros returning a list of ref names.
+pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
+    const fallback = Graph{ .allocator = allocator, .project_name = node.package_name };
+    var context = CompileContext.init(allocator, graph orelse &fallback, node);
+    defer context.deinit();
+    context.parse_node = node;
+    var rendered: std.ArrayList(u8) = .empty;
+    defer rendered.deinit(allocator);
+    try renderRange(&context, sql, 0, sql.len, &rendered);
+}
+
+pub fn renderOperation(runtime: types.Runtime, graph: *const Graph, macro_name: []const u8, kwargs: std.json.Value) ![]const u8 {
+    const node = Node{ .package_name = graph.project_name, .unique_id = "operation", .name = "operation", .path = "", .original_file_path = "", .raw_code = "" };
+    var context = CompileContext.init(runtime.allocator, graph, &node);
+    defer context.deinit();
+    if (kwargs != .object) return error.InvalidJinjaArguments;
+    var args: std.ArrayList(native_expr.Argument) = .empty;
+    const allocator = context.value_arena.allocator();
+    var iterator = kwargs.object.iterator();
+    while (iterator.next()) |entry| try args.append(allocator, .{ .name = entry.key_ptr.*, .value = try valueFromJson(allocator, entry.value_ptr.*) });
+    const result = try callExpressionValue(&context, macro_name, args.items, allocator);
+    return try runtime.allocator.dupe(u8, if (result == .none) "" else try result.text(allocator));
+}
+
+fn valueFromJson(allocator: std.mem.Allocator, value: std.json.Value) anyerror!native_expr.Value {
+    return switch (value) {
+        .null => .none,
+        .bool => |v| .{ .boolean = v },
+        .integer => |v| .{ .number = @floatFromInt(v) },
+        .float => |v| .{ .number = v },
+        .number_string => |v| .{ .number = try std.fmt.parseFloat(f64, v) },
+        .string => |v| .{ .string = v },
+        .array => |items| blk: {
+            const values = try allocator.alloc(native_expr.Value, items.items.len);
+            for (items.items, values) |item, *result| result.* = try valueFromJson(allocator, item);
+            break :blk .{ .list = values };
+        },
+        .object => |object| blk: {
+            const entries = try allocator.alloc(native_expr.Entry, object.count());
+            var iterator = object.iterator();
+            var i: usize = 0;
+            while (iterator.next()) |entry| : (i += 1) entries[i] = .{ .key = entry.key_ptr.*, .value = try valueFromJson(allocator, entry.value_ptr.*) };
+            break :blk .{ .object = entries };
+        },
+    };
+}
+
 pub fn compileModelWithInjectedCtes(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) !CompiledModel {
     var state = EphemeralCompileState.init(allocator, graph);
     errdefer state.deinit();
@@ -208,7 +291,8 @@ fn compileModelBody(allocator: std.mem.Allocator, graph: *const Graph, node: *co
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    try renderRange(&context, node.raw_code, 0, node.raw_code.len, &out);
+    const end = node.raw_code.len - @as(usize, if (std.mem.endsWith(u8, node.raw_code, "\n")) 1 else 0);
+    try renderRange(&context, node.raw_code, 0, end, &out);
     return try out.toOwnedSlice(allocator);
 }
 
@@ -427,6 +511,7 @@ fn applyGenericTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?
 fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_index: usize, out: *std.ArrayList(u8)) anyerror!void {
     var index = start;
     while (index < end_index) {
+        if (context.returned != null) return;
         if (index + 1 >= end_index or sql[index] != '{') {
             try out.append(context.allocator, sql[index]);
             index += 1;
@@ -434,10 +519,11 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
         }
 
         const tag_kind = sql[index + 1];
+        if (index + 2 < end_index and sql[index + 2] == '-') trimOutput(context.allocator, out);
         if (tag_kind == '#') {
             const close = std.mem.indexOfPos(u8, sql, index + 2, "#}") orelse return error.UnsupportedJinja;
             if (close + 2 > end_index) return error.UnsupportedJinja;
-            index = close + 2;
+            index = afterTag(sql, close + 2, end_index);
             continue;
         }
 
@@ -452,45 +538,84 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
         };
         const close = std.mem.indexOfPos(u8, sql, index + 2, close_marker) orelse return error.UnsupportedJinja;
         if (close + 2 > end_index) return error.UnsupportedJinja;
-        const span = std.mem.trim(u8, sql[index + 2 .. close], " \t\r\n-");
+        const span = tagContent(sql, index, close);
         if (tag_kind == '{') {
             const rendered = try renderExpression(context, span);
             defer context.allocator.free(rendered);
             try out.appendSlice(context.allocator, rendered);
         } else {
-            if (context.macro_render_depth > 0) return error.UnsupportedJinja;
             if (isEndForStatement(span)) return error.UnsupportedJinja;
             if (isEndIfStatement(span) or isElseStatement(span) or isElifStatement(span)) return error.UnsupportedJinja;
             if (isForStatement(span)) {
-                const block = try parseForBlock(sql, close + 2, span);
-                const values = context.getList(block.list_name) orelse return error.UnsupportedJinja;
-                if (values.len == 0) try validateSkippedLoopBody(context, sql, block);
-                for (values) |value| {
+                const block = try parseForBlock(sql, afterTag(sql, close + 2, end_index), span);
+                const iterable = try context.evaluate(block.list_name);
+                const values = try iterationValues(context.value_arena.allocator(), iterable);
+                for (values, 0..) |value, loop_index| {
                     context.pushScope();
-                    try context.pushVar(block.variable_name, value);
+                    try context.setValue(block.variable_name, value);
+                    const entries = try context.value_arena.allocator().alloc(native_expr.Entry, 6);
+                    entries[0] = .{ .key = "index", .value = .{ .number = @floatFromInt(loop_index + 1) } };
+                    entries[1] = .{ .key = "index0", .value = .{ .number = @floatFromInt(loop_index) } };
+                    entries[2] = .{ .key = "first", .value = .{ .boolean = loop_index == 0 } };
+                    entries[3] = .{ .key = "last", .value = .{ .boolean = loop_index + 1 == values.len } };
+                    entries[4] = .{ .key = "length", .value = .{ .number = @floatFromInt(values.len) } };
+                    entries[5] = .{ .key = "revindex", .value = .{ .number = @floatFromInt(values.len - loop_index) } };
+                    try context.setValue("loop", .{ .object = entries });
                     renderRange(context, sql, block.body_start, block.body_end, out) catch |err| {
-                        context.popVar();
                         context.popScope();
                         return err;
                     };
-                    context.popVar();
                     context.popScope();
+                    if (context.returned != null) break;
                 }
-                index = block.end_tag_close;
+                index = afterTag(sql, block.end_tag_close, end_index);
                 continue;
             }
             if (isIfStatement(span)) {
-                const block = try parseIfBlock(context, sql, close + 2, span);
+                const block = try parseIfBlock(context, sql, afterTag(sql, close + 2, end_index), span);
                 if (block.selected_body_start) |selected_start| {
                     try renderRange(context, sql, selected_start, block.selected_body_end, out);
                 }
-                index = block.end_tag_close;
+                index = afterTag(sql, block.end_tag_close, end_index);
                 continue;
             }
             try renderStatement(context, span);
         }
-        index = close + 2;
+        index = afterTag(sql, close + 2, end_index);
     }
+    if (end_index + 2 < sql.len and sql[end_index] == '{' and sql[end_index + 2] == '-') trimOutput(context.allocator, out);
+}
+
+fn tagContent(sql: []const u8, start: usize, close: usize) []const u8 {
+    const begin = start + 2 + @as(usize, if (sql[start + 2] == '-') 1 else 0);
+    const finish = close - @as(usize, if (close > begin and sql[close - 1] == '-') 1 else 0);
+    return std.mem.trim(u8, sql[begin..finish], " \t\r\n");
+}
+
+fn trimOutput(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) void {
+    _ = allocator;
+    while (out.items.len > 0 and std.ascii.isWhitespace(out.items[out.items.len - 1])) _ = out.pop();
+}
+
+fn afterTag(sql: []const u8, end: usize, limit: usize) usize {
+    var next = end;
+    if (end >= 3 and sql[end - 3] == '-') while (next < limit and std.ascii.isWhitespace(sql[next])) {
+        next += 1;
+    };
+    return next;
+}
+
+fn iterationValues(allocator: std.mem.Allocator, iterable: native_expr.Value) ![]const native_expr.Value {
+    if (iterable == .list) return iterable.list;
+    if (iterable == .undefined) return error.UndefinedJinjaValue;
+    const count: usize = switch (iterable) {
+        .object => |v| v.len,
+        .string => |v| v.len,
+        else => return error.JinjaTypeError,
+    };
+    const values = try allocator.alloc(native_expr.Value, count);
+    for (values, 0..) |*value, i| value.* = .{ .string = if (iterable == .object) iterable.object[i].key else iterable.string[i .. i + 1] };
+    return values;
 }
 
 fn validateSkippedLoopBody(context: *CompileContext, sql: []const u8, block: ForBlock) anyerror!void {
@@ -522,15 +647,221 @@ pub fn relationNameForNode(allocator: std.mem.Allocator, graph: *const Graph, no
 }
 
 fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
+    // Dispatch returns a callable macro in dbt's context. Preserve its existing
+    // namespace resolution while ordinary expressions use native typed values.
+    if (std.mem.startsWith(u8, span, "adapter.dispatch")) return try renderAdapterDispatchExpression(context, span);
+    const value = try context.evaluate(span);
+    if (context.returned != null) return try context.allocator.dupe(u8, "");
+    return try context.allocator.dupe(u8, try value.text(context.value_arena.allocator()));
+}
+
+fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: std.mem.Allocator) anyerror!native_expr.Value {
+    const context: *CompileContext = @ptrCast(@alignCast(raw_context));
+    var parts = std.mem.splitScalar(u8, path, '.');
+    const name = parts.next() orelse return .undefined;
+    var index = context.bindings.items.len;
+    while (index > 0) {
+        index -= 1;
+        const binding = context.bindings.items[index];
+        if (std.mem.eql(u8, binding.name, name)) {
+            var value = binding.value;
+            while (parts.next()) |attribute| value = value.attribute(attribute);
+            return value;
+        }
+    }
+    if (context.getVar(path)) |value| return .{ .string = value };
+    if (context.getList(path)) |strings| {
+        const values = try allocator.alloc(native_expr.Value, strings.len);
+        for (strings, values) |s, *v| v.* = .{ .string = s };
+        return .{ .list = values };
+    }
+    if (std.mem.eql(u8, path, "execute")) return .{ .boolean = context.parse_node == null };
+    if (std.mem.eql(u8, path, "flags.FULL_REFRESH")) return .{ .boolean = context.graph.full_refresh };
+    if (std.mem.eql(u8, path, "model.name")) return .{ .string = context.node.name };
+    if (std.mem.eql(u8, path, "model.unique_id")) return .{ .string = context.node.unique_id };
+    if (std.mem.eql(u8, path, "model.config.materialized")) return .{ .string = context.node.materialized };
+    if (std.mem.eql(u8, path, "this")) return .{ .string = try relationNameForNode(allocator, context.graph, context.node) };
+    if (std.mem.startsWith(u8, path, "this.")) return .{ .string = try renderThisAttribute(allocator, context.graph, context.node, path[5..]) };
+    if (std.mem.startsWith(u8, path, "target.")) return .{ .string = try renderTargetAttribute(allocator, context.graph, path[7..]) };
+    if (context.graph.execution_hooks) |hooks| return try hooks.resolve(hooks.context, path, allocator);
+    return .undefined;
+}
+
+fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
+    const context: *CompileContext = @ptrCast(@alignCast(raw_context));
+    if (std.mem.eql(u8, name, "config")) {
+        if (context.parse_node) |node| {
+            var raw: std.ArrayList(u8) = .empty;
+            for (args, 0..) |arg, i| {
+                if (i != 0) try raw.appendSlice(allocator, ", ");
+                const key = arg.name orelse return error.InvalidJinjaArguments;
+                try raw.appendSlice(allocator, key);
+                try raw.append(allocator, '=');
+                if (arg.value == .boolean) try raw.appendSlice(allocator, if (arg.value.boolean) "true" else "false") else try raw.appendSlice(allocator, try native_expr.repr(arg.value, allocator));
+            }
+            try jinja.parseConfig(context.allocator, raw.items, node);
+        }
+        return .{ .string = "" };
+    }
+    if (std.mem.eql(u8, name, "is_incremental")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        return .{ .boolean = context.parse_node == null and context.node.runtime_is_incremental };
+    }
+    if (std.mem.eql(u8, name, "var") or std.mem.eql(u8, name, "env_var")) {
+        if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
+        const key = args[0].value.string;
+        const text: ?[]const u8 = if (std.mem.eql(u8, name, "var")) findGraphVarValue(context.graph, key) else if (context.graph.environment) |environment| environment.get(key) else null;
+        if (text) |value| {
+            if (std.mem.eql(u8, name, "env_var")) return .{ .string = value };
+            const parsed = native_expr.evaluate(allocator, value, null) catch return .{ .string = value };
+            return if (parsed == .undefined) .{ .string = value } else parsed;
+        }
+        if (args.len == 2) return args[1].value;
+        return if (std.mem.eql(u8, name, "var")) error.UnresolvedVar else error.EnvironmentVariableMissing;
+    }
+    if (std.mem.eql(u8, name, "return")) {
+        if (args.len != 1 or context.macro_render_depth == 0) return error.InvalidJinjaArguments;
+        context.returned = args[0].value;
+        return .{ .string = "" };
+    }
+    if (std.mem.eql(u8, name, "exceptions.raise_compiler_error")) return error.JinjaCompilerError;
+    if (std.mem.eql(u8, name, "adapter.quote")) {
+        if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
+        return .{ .string = try quoteIdentifier(allocator, args[0].value.string) };
+    }
+    if (std.mem.eql(u8, name, "adapter.dispatch")) {
+        if (args.len < 1 or args.len > 2 or args[0].value != .string or (args.len == 2 and args[1].value != .string)) return error.InvalidJinjaArguments;
+        const prefixes = jinja.dispatchPrefixesForAdapter(context.graph.adapter_type);
+        const macro_id = resolve.findMacroIdForAdapterDispatch(context.graph, context.current_macro_package orelse context.node.package_name, args[0].value.string, if (args.len == 2) args[1].value.string else null, prefixes.slice()) orelse return error.UnresolvedMacro;
+        const macro = findMacroByUniqueId(context.graph, macro_id) orelse return error.UnresolvedMacro;
+        return .{ .callable = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ macro.package_name, macro.name }) };
+    }
+    if (std.mem.eql(u8, name, "ref") or std.mem.eql(u8, name, "source")) {
+        if (context.parse_node) |node| {
+            for (args) |arg| if (arg.name != null or arg.value != .string) return error.InvalidJinjaArguments;
+            if (std.mem.eql(u8, name, "ref")) {
+                if (args.len < 1 or args.len > 2) return error.InvalidJinjaArguments;
+                try node.refs.append(context.allocator, .{ .package = if (args.len == 2) try context.allocator.dupe(u8, args[0].value.string) else null, .name = try context.allocator.dupe(u8, args[args.len - 1].value.string) });
+            } else {
+                if (args.len != 2) return error.InvalidJinjaArguments;
+                try node.source_refs.append(context.allocator, .{ .source_name = try context.allocator.dupe(u8, args[0].value.string), .table_name = try context.allocator.dupe(u8, args[1].value.string) });
+            }
+            return .{ .string = "__dxt_parse_relation__" };
+        }
+        var raw_args: std.ArrayList(u8) = .empty;
+        for (args, 0..) |arg, i| {
+            if (arg.name != null or arg.value != .string) return error.InvalidJinjaArguments;
+            if (i != 0) try raw_args.appendSlice(allocator, ", ");
+            try raw_args.appendSlice(allocator, try native_expr.repr(arg.value, allocator));
+        }
+        const call = try std.fmt.allocPrint(allocator, "{s}({s})", .{ name, raw_args.items });
+        const rendered = try renderLegacyExpression(context, call);
+        defer context.allocator.free(rendered);
+        return .{ .string = try allocator.dupe(u8, rendered) };
+    }
+    var macro_id: ?[]const u8 = null;
+    if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
+        macro_id = resolve.findMacroIdByPackageAndName(context.graph, name[0..dot], name[dot + 1 ..]);
+    } else macro_id = resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.current_macro_package orelse context.node.package_name, name);
+    if (macro_id == null) {
+        if (context.graph.execution_hooks) |hooks| return try hooks.call(hooks.context, name, args, allocator);
+        return error.UnresolvedMacro;
+    }
+    const macro = findMacroByUniqueId(context.graph, macro_id.?) orelse return error.UnresolvedMacro;
+    if (context.parse_node) |node| try util.appendUnique(context.allocator, &node.macro_depends_on, macro.unique_id);
+    return try renderMacroValue(context, macro, args);
+}
+
+const MacroParameter = struct { name: []const u8, default: ?[]const u8 = null };
+
+fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []const native_expr.Argument) anyerror!native_expr.Value {
+    if (context.macro_render_depth >= max_macro_render_depth) return error.JinjaExpressionDepthExceeded;
+    const allocator = context.value_arena.allocator();
+    const open_start = std.mem.indexOf(u8, macro.macro_sql, "{%") orelse return error.UnsupportedJinja;
+    const open_end = std.mem.indexOfPos(u8, macro.macro_sql, open_start + 2, "%}") orelse return error.UnsupportedJinja;
+    const declaration = std.mem.trim(u8, macro.macro_sql[open_start + 2 .. open_end], " \t\r\n-");
+    const paren = std.mem.indexOfScalar(u8, declaration, '(') orelse return error.UnsupportedJinja;
+    const close = findMatchingParen(declaration, paren) orelse return error.UnsupportedJinja;
+    var parameters: std.ArrayList(MacroParameter) = .empty;
+    var offset = paren + 1;
+    while (offset < close) {
+        const finish = expressionBoundary(declaration, offset, close);
+        const part = std.mem.trim(u8, declaration[offset..finish], " \t\r\n");
+        if (part.len != 0) {
+            const eq = std.mem.indexOfScalar(u8, part, '=');
+            const param_name = std.mem.trim(u8, if (eq) |at| part[0..at] else part, " \t\r\n");
+            if (param_name.len == 0 or !jinja.isIdentStart(param_name[0])) return error.InvalidJinjaArguments;
+            for (param_name) |c| if (!jinja.isIdentChar(c)) return error.InvalidJinjaArguments;
+            try parameters.append(allocator, .{ .name = param_name, .default = if (eq) |at| std.mem.trim(u8, part[at + 1 ..], " \t\r\n") else null });
+        }
+        offset = finish + 1;
+    }
+    const previous_package = context.current_macro_package;
+    const previous_return = context.returned;
+    const binding_start = context.bindings.items.len;
+    context.returned = null;
+    context.current_macro_package = macro.package_name;
+    context.macro_render_depth += 1;
+    context.pushScope();
+    defer {
+        context.bindings.shrinkRetainingCapacity(binding_start);
+        context.popScope();
+        context.macro_render_depth -= 1;
+        context.current_macro_package = previous_package;
+        context.returned = previous_return;
+    }
+    const assigned = try allocator.alloc(bool, parameters.items.len);
+    @memset(assigned, false);
+    for (args, 0..) |arg, position| {
+        var parameter_index: usize = position;
+        if (arg.name) |keyword| {
+            parameter_index = parameters.items.len;
+            for (parameters.items, 0..) |parameter, i| if (std.mem.eql(u8, parameter.name, keyword)) {
+                parameter_index = i;
+                break;
+            };
+        }
+        if (parameter_index >= parameters.items.len or assigned[parameter_index]) return error.InvalidJinjaArguments;
+        assigned[parameter_index] = true;
+        try context.setValue(parameters.items[parameter_index].name, arg.value);
+    }
+    for (parameters.items, assigned) |parameter, present| {
+        if (!present) try context.setValue(parameter.name, if (parameter.default) |default| try context.evaluate(default) else return error.InvalidJinjaArguments);
+    }
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(context.allocator);
+    const body_end = findEndMacroTag(macro.macro_sql, open_end + 2) orelse return error.UnsupportedJinja;
+    try renderRange(context, macro.macro_sql, afterTag(macro.macro_sql, open_end + 2, body_end), body_end, &out);
+    return context.returned orelse .{ .string = try allocator.dupe(u8, out.items) };
+}
+
+fn expressionBoundary(text: []const u8, start: usize, end: usize) usize {
+    var index = start;
+    var depth: usize = 0;
+    while (index < end) : (index += 1) {
+        if (text[index] == '\'' or text[index] == '"') {
+            index = (jinja.skipQuotedSpan(text, index) orelse return end) - 1;
+            continue;
+        }
+        switch (text[index]) {
+            '(', '[', '{' => depth += 1,
+            ')', ']', '}' => {
+                if (depth > 0) depth -= 1;
+            },
+            ',' => if (depth == 0) {
+                return index;
+            },
+            else => {},
+        }
+    }
+    return end;
+}
+
+fn renderLegacyExpression(context: *CompileContext, span: []const u8) ![]const u8 {
     const allocator = context.allocator;
     const graph = context.graph;
     const node = context.node;
     if (context.getVar(span)) |value| return try allocator.dupe(u8, value);
-    if (context.macro_render_depth > 0 and
-        (std.mem.eql(u8, span, "this") or std.mem.startsWith(u8, span, "this.") or std.mem.startsWith(u8, span, "target.")))
-    {
-        return error.UnsupportedJinja;
-    }
     if (std.mem.eql(u8, span, "this")) {
         return try relationNameForNode(allocator, graph, node);
     }
@@ -547,7 +878,6 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
     const call = try parseSingleCall(span);
     const args = span[call.open + 1 .. call.close];
     if (call.package_name) |package_name| {
-        if (context.macro_render_depth > 0) return error.UnsupportedJinja;
         if (resolve.findMacroIdByPackageAndName(graph, package_name, call.name)) |macro_id| {
             const macro = findMacroByUniqueId(graph, macro_id) orelse return error.UnresolvedMacro;
             return try renderMacroCall(context, macro, args);
@@ -565,7 +895,6 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
         const inner = std.mem.trim(u8, args, " \t\r\n");
         return try renderExpression(context, inner);
     }
-    if (context.macro_render_depth > 0) return error.UnsupportedJinja;
     if (std.mem.eql(u8, call.name, "ref")) {
         var strings = try parseCompileStringArgs(context, args, error.UnsupportedDynamicRef);
         defer strings.deinit(allocator);
@@ -741,47 +1070,9 @@ fn renderAdapterDispatchExpression(context: *CompileContext, span: []const u8) !
 }
 
 fn renderMacroCall(context: *CompileContext, macro: *const MacroDef, raw_args: []const u8) ![]const u8 {
-    if (context.macro_render_depth >= max_macro_render_depth) return error.UnsupportedJinja;
-
-    var block = try parseMacroBlock(context.allocator, macro);
-    defer block.params.deinit(context.allocator);
-
-    var values = try parseMacroArgumentValues(context.allocator, context, raw_args);
-    defer {
-        for (values.items) |value| context.allocator.free(value);
-        values.deinit(context.allocator);
-    }
-    if (values.items.len != block.params.items.len) return error.UnsupportedJinja;
-
-    const previous_package = context.current_macro_package;
-    context.current_macro_package = macro.package_name;
-    context.macro_render_depth += 1;
-    context.pushScope();
-    var pushed_vars: usize = 0;
-    errdefer {
-        var index = pushed_vars;
-        while (index > 0) : (index -= 1) context.popVar();
-        context.popScope();
-        context.macro_render_depth -= 1;
-        context.current_macro_package = previous_package;
-    }
-
-    for (block.params.items, values.items) |name, value| {
-        try context.pushVar(name, value);
-        pushed_vars += 1;
-    }
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(context.allocator);
-    try renderRange(context, macro.macro_sql, block.body.start, block.body.end, &out);
-
-    var index = pushed_vars;
-    while (index > 0) : (index -= 1) context.popVar();
-    context.popScope();
-    context.macro_render_depth -= 1;
-    context.current_macro_package = previous_package;
-
-    return try out.toOwnedSlice(context.allocator);
+    const args = try native_expr.evaluateArguments(context.value_arena.allocator(), raw_args, context.host());
+    const value = try renderMacroValue(context, macro, args);
+    return try context.allocator.dupe(u8, try value.text(context.value_arena.allocator()));
 }
 
 const MacroBodyRange = struct {
@@ -1073,13 +1364,16 @@ fn renderTargetAttribute(allocator: std.mem.Allocator, graph: *const Graph, attr
 fn renderStatement(context: *CompileContext, span: []const u8) !void {
     if (span.len == 0) return;
     if (std.mem.startsWith(u8, span, "set ")) {
-        const assignment = try parseSetListStatement(context.allocator, span);
-        try context.setList(assignment.name, assignment.values);
+        const assignment = std.mem.trim(u8, span[4..], " \t\r\n");
+        const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return error.UnsupportedJinja;
+        const name = std.mem.trim(u8, assignment[0..equals], " \t\r\n");
+        if (name.len == 0 or !jinja.isIdentStart(name[0])) return error.UnsupportedJinja;
+        for (name) |c| if (!jinja.isIdentChar(c)) return error.UnsupportedJinja;
+        try context.setValue(name, try context.evaluate(assignment[equals + 1 ..]));
         return;
     }
-    const call = try parseSingleCall(span);
-    if (call.package_name == null and std.mem.eql(u8, call.name, "config")) return;
-    return error.UnsupportedJinja;
+    const call = if (std.mem.startsWith(u8, span, "do ")) span[3..] else span;
+    _ = try context.evaluate(call);
 }
 
 const SetListAssignment = struct {
@@ -1206,7 +1500,7 @@ fn parseIfBlock(context: *CompileContext, sql: []const u8, body_start: usize, sp
                 selected_body_start = branch_start;
                 selected_body_end = index;
             }
-            branch_start = close + 2;
+            branch_start = afterTag(sql, close + 2, sql.len);
             branch_active = if (selected_body_start == null)
                 try parseStaticIfCondition(context, tag_span)
             else
@@ -1218,7 +1512,7 @@ fn parseIfBlock(context: *CompileContext, sql: []const u8, body_start: usize, sp
                 selected_body_start = branch_start;
                 selected_body_end = index;
             }
-            branch_start = close + 2;
+            branch_start = afterTag(sql, close + 2, sql.len);
             branch_active = selected_body_start == null;
         }
         index = close + 2;
@@ -1227,47 +1521,8 @@ fn parseIfBlock(context: *CompileContext, sql: []const u8, body_start: usize, sp
 }
 
 fn parseStaticIfCondition(context: *CompileContext, span: []const u8) !bool {
-    const keyword_len: usize = if (isIfStatement(span))
-        "if".len
-    else if (isElifStatement(span))
-        "elif".len
-    else
-        return error.UnsupportedJinja;
-    const condition = std.mem.trim(u8, span[keyword_len..], " \t\r\n");
-    if (condition.len == 0) return error.UnsupportedJinja;
-
-    if (parseStaticBooleanCondition(context, condition)) |value| return value;
-
-    if (findStaticComparison(condition)) |comparison| {
-        const operator_len: usize = switch (comparison.operator) {
-            .equal, .not_equal => 2,
-        };
-        const lhs_span = std.mem.trim(u8, condition[0..comparison.operator_start], " \t\r\n");
-        const rhs_span = std.mem.trim(u8, condition[comparison.operator_start + operator_len ..], " \t\r\n");
-        if (lhs_span.len == 0 or rhs_span.len == 0) return error.UnsupportedJinja;
-
-        const lhs = try parseStaticConditionValue(context, lhs_span);
-        defer deinitStaticConditionValue(context.allocator, lhs);
-        const rhs = try parseStaticConditionValue(context, rhs_span);
-        defer deinitStaticConditionValue(context.allocator, rhs);
-
-        const equal = switch (lhs) {
-            .boolean => |lhs_bool| switch (rhs) {
-                .boolean => |rhs_bool| lhs_bool == rhs_bool,
-                .string => return error.UnsupportedJinja,
-            },
-            .string => |lhs_string| switch (rhs) {
-                .boolean => return error.UnsupportedJinja,
-                .string => |rhs_string| std.mem.eql(u8, lhs_string, rhs_string),
-            },
-        };
-        return switch (comparison.operator) {
-            .equal => equal,
-            .not_equal => !equal,
-        };
-    }
-
-    return error.UnsupportedJinja;
+    const keyword_len: usize = if (isIfStatement(span)) 2 else if (isElifStatement(span)) 4 else return error.UnsupportedJinja;
+    return (try context.evaluate(std.mem.trim(u8, span[keyword_len..], " \t\r\n"))).truthy();
 }
 
 fn parseStaticBooleanCondition(context: *const CompileContext, condition: []const u8) ?bool {
@@ -1361,12 +1616,8 @@ fn parseForBlock(sql: []const u8, body_start: usize, span: []const u8) !ForBlock
     const after_ok = after >= span.len or !jinja.isIdentChar(span[after]);
     if (!before_ok or !after_ok) return error.UnsupportedJinja;
     index = jinja.skipWs(span, after);
-    const list_start = index;
-    if (index >= span.len or !jinja.isIdentStart(span[index])) return error.UnsupportedJinja;
-    index += 1;
-    while (index < span.len and jinja.isIdentChar(span[index])) index += 1;
-    const list_name = span[list_start..index];
-    if (std.mem.trim(u8, span[index..], " \t\r\n").len != 0) return error.UnsupportedJinja;
+    const list_name = std.mem.trim(u8, span[index..], " \t\r\n");
+    if (list_name.len == 0) return error.UnsupportedJinja;
 
     const endfor = findMatchingEndFor(sql, body_start) orelse return error.UnsupportedJinja;
     return .{
@@ -2327,7 +2578,7 @@ test "compileModel prefers adapter-specific dispatched macro implementation" {
     try std.testing.expectEqualStrings("select duck(subtotal) as subtotal", compiled);
 }
 
-test "compileModel rejects unsupported statements inside macros" {
+test "compileModel renders conditional statements inside macros" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2350,7 +2601,9 @@ test "compileModel rejects unsupported statements inside macros" {
         .raw_code = "select {{ render_value('subtotal') }} as subtotal",
     });
 
-    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select subtotal as subtotal", compiled);
 }
 
 test "compileModel expands empty static string-list for loops" {
@@ -2421,10 +2674,10 @@ test "compileModel rejects static for loops over unknown lists" {
         .raw_code = "{% for payment_method in payment_methods %}{{ payment_method }}{% endfor %}",
     });
 
-    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    try std.testing.expectError(error.UndefinedJinjaValue, compileModel(allocator, &graph, &graph.nodes.items[0]));
 }
 
-test "compileModel rejects non-list static set values" {
+test "compileModel accepts scalar set values" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2439,10 +2692,12 @@ test "compileModel rejects non-list static set values" {
         .raw_code = "{% set payment_methods = 'credit_card' %}select 1",
     });
 
-    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select 1", compiled);
 }
 
-test "compileModel rejects unquoted static list values" {
+test "compileModel permits an unused undefined list value" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2457,7 +2712,9 @@ test "compileModel rejects unquoted static list values" {
         .raw_code = "{% set payment_methods = [credit_card] %}select 1",
     });
 
-    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select 1", compiled);
 }
 
 test "compileModel keeps static set assignments loop-local" {
@@ -2475,7 +2732,7 @@ test "compileModel keeps static set assignments loop-local" {
         .raw_code = "{% set xs = ['a'] %}{% for x in xs %}{% set ys = ['b'] %}{% endfor %}{% for y in ys %}{{ y }}{% endfor %}",
     });
 
-    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    try std.testing.expectError(error.UndefinedJinjaValue, compileModel(allocator, &graph, &graph.nodes.items[0]));
 }
 
 test "compileModel keeps iteration values stable when loop body shadows source list" {
@@ -2584,11 +2841,11 @@ test "compileModel rejects unsupported reached if conditions" {
         .raw_code = "{% if false %}select 1{% elif var('enabled') %}select 2{% endif %}",
     });
 
-    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
-    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[1]));
+    try std.testing.expectError(error.UnresolvedVar, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    try std.testing.expectError(error.UnresolvedVar, compileModel(allocator, &graph, &graph.nodes.items[1]));
 }
 
-test "compileModel validates unsupported syntax inside empty static loops" {
+test "compileModel skips expressions inside empty loops" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2603,10 +2860,12 @@ test "compileModel validates unsupported syntax inside empty static loops" {
         .raw_code = "{% set xs = [] %}{% for x in xs %}{% if var('enabled') %}{{ x }}{% endif %}{% endfor %}select 1",
     });
 
-    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select 1", compiled);
 }
 
-test "compileModel rejects escaped static list values" {
+test "compileModel accepts escaped string list values" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2621,7 +2880,9 @@ test "compileModel rejects escaped static list values" {
         .raw_code = "{% set xs = ['a\\n'] %}select 1",
     });
 
-    try std.testing.expectError(error.UnsupportedJinja, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("select 1", compiled);
 }
 
 test "relationNameForNode quotes identifiers" {
@@ -2833,4 +3094,25 @@ test "compileModel uses warehouse supplied incremental context" {
     node.runtime_is_incremental = true;
     const repeated = try compileModel(allocator, &graph, &node);
     try std.testing.expectEqualStrings("select 1 as incremental, 0 as initial, True as active", repeated);
+}
+
+test "renderOperation binds typed keyword arguments and macro defaults" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.macros.append(allocator, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.sum_values",
+        .name = "sum_values",
+        .path = "sum.sql",
+        .original_file_path = "macros/sum.sql",
+        .macro_sql = "{% macro sum_values(a, b=3) %}{{ return(a + b) }}discarded{% endmacro %}",
+    });
+    const kwargs = try std.json.parseFromSlice(std.json.Value, allocator, "{\"a\":2}", .{});
+    defer kwargs.deinit();
+    const output = try renderOperation(.{ .allocator = allocator, .io = std.testing.io }, &graph, "sum_values", kwargs.value);
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings("5", output);
 }

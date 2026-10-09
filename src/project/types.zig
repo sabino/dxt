@@ -4,6 +4,7 @@ const Io = std.Io;
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: Io,
+    environment: ?*const std.process.Environ.Map = null,
 };
 
 pub const Options = struct {
@@ -446,6 +447,8 @@ pub const SingularTestNode = struct {
 
 pub const Graph = struct {
     allocator: std.mem.Allocator,
+    environment: ?*const std.process.Environ.Map = null,
+    execution_hooks: ?@import("expression.zig").Host = null,
     project_name: []const u8,
     adapter_type: []const u8 = "duckdb",
     target_schema: []const u8 = "main",

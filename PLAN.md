@@ -50,6 +50,21 @@ modules, add native/CLI and pinned Core evidence, and do not edit docs or PLAN.
 Later waves cover remaining configuration/macros, adapter certification,
 commands/artifacts, semantic/static-analysis/stateful/cross-database features.
 
+After its scheduling commit, the scheduler worker owns the focused native
+DuckDB/Postgres adapter contract in a second isolated worktree. Shared backend
+integration follows test-error, incremental and snapshot commits. Threaded
+execution requires shared native connections rather than concurrent DuckDB CLI
+writers; coordinate the scheduler on that contract. Dependencies use the same
+Runtime.environment interface as Jinja. Registry live verification currently
+receives an actual proxy denial for dbt Hub; deterministic HTTP fixtures cover
+the API while native code remains available for allowed deployments.
+The completed test-error worker next owns native debug/init/run-operation,
+retry/clone and command/flag integration in its own worktree. It coordinates
+macro invocation with the supervisor and live connection checks with the
+adapter worker; command commits integrate after state/defer and dependencies.
+Parallel pytest runs use separate ignored basetemp directories to prevent
+pytest's shared temporary-retention cleanup from removing active fixtures.
+
 Validation uses the current pinned Core/adapter contract, repeated-run and
 failure fixtures, full applicable schemas, public projects, native tests,
 runtime/safety scans and release builds. Inspect every failed gate before

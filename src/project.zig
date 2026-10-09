@@ -2976,7 +2976,7 @@ fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8,
     errdefer {
         deinitNode(runtime.allocator, &node);
     }
-    try project_jinja.scanSql(runtime.allocator, sql, &node, graph);
+    try compiler.scanDependencies(runtime.allocator, sql, &node, graph);
     try graph.nodes.append(runtime.allocator, node);
 }
 
@@ -2999,7 +2999,7 @@ fn parseAnalysis(runtime: Runtime, project_dir: []const u8, analysis_root: []con
         .materialized = "analysis",
     };
     errdefer deinitNode(runtime.allocator, &node);
-    try project_jinja.scanSql(runtime.allocator, sql, &node, graph);
+    try compiler.scanDependencies(runtime.allocator, sql, &node, graph);
     node.materialized = "analysis";
     node.inline_materialized = false;
     try graph.nodes.append(runtime.allocator, node);
@@ -3023,7 +3023,7 @@ fn parseSingularTest(runtime: Runtime, project_dir: []const u8, test_root: []con
         .materialized = "test",
     };
     defer deinitNode(runtime.allocator, &scan_node);
-    try project_jinja.scanSql(runtime.allocator, sql, &scan_node, graph);
+    try compiler.scanDependencies(runtime.allocator, sql, &scan_node, graph);
 
     var test_node = SingularTestNode{
         .package_name = package_name,

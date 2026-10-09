@@ -18,6 +18,7 @@ pub fn main(init: std.process.Init) !void {
     const code = try dxt.run(args, stdout, stderr, .{
         .allocator = arena,
         .io = init.io,
+        .environment = init.environ_map,
     });
     try stdout.flush();
     try stderr.flush();
