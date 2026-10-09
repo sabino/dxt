@@ -1288,12 +1288,6 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try writer.writeAll("},\"config\":");
     var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, true, &.{}, .null);
     defer @import("config_value.zig").deinit(allocator, &canonical_config);
-    if (test_node.attached_node) |identifier| for (graph.nodes.items) |attached| {
-        if (std.mem.eql(u8, attached.unique_id, identifier)) {
-            if (@import("config_value.zig").get(attached.effective_config, "group")) |group| try @import("config_value.zig").put(allocator, &canonical_config, "group", group);
-            break;
-        }
-    };
     try std.json.Stringify.value(canonical_config, .{}, writer);
     try writer.writeAll(",\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);

@@ -64,6 +64,7 @@ def test_group_definitions_access_and_membership_match_full_core_artifact(tmp_pa
     for key in ['model.ownership.base', 'model.ownership.consumer']:
         assert native['nodes'][key]['access'] == core['nodes'][key]['access']
         assert native['nodes'][key]['config']['group'] == core['nodes'][key]['config']['group']
+    assert {key: node['config'] for key, node in native['nodes'].items()} == {key: node['config'] for key, node in core['nodes'].items()}
     contracts.assert_artifact(project / 'native/manifest.json')
 
 
