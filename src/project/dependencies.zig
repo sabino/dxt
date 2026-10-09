@@ -191,7 +191,14 @@ pub fn installPathWithVars(runtime: Runtime, project_dir: []const u8, vars: std.
     for ([_][]const u8{ "models", "seeds", "macros", "tests", "analyses", "snapshots", ".git", ".dxt-deps" }) |protected| {
         if (eq(first, protected)) return error.InvalidPackagesInstallPath;
     }
-    const project_config = try config.loadProjectConfig(runtime, project_dir);
+    var cli_entries: std.ArrayList(types.VarEntry) = .empty;
+    defer cli_entries.deinit(runtime.allocator);
+    if (vars == .object) {
+        var vars_it = vars.object.iterator();
+        while (vars_it.next()) |entry| try cli_entries.append(runtime.allocator, .{ .name = entry.key_ptr.*, .value = "", .typed_value = entry.value_ptr.*, .priority = 100 });
+    }
+    var project_config = try config.loadProjectConfigWithContext(runtime, project_dir, cli_entries.items, .null);
+    defer types.deinitProjectConfig(runtime.allocator, &project_config);
     for ([_][]const []const u8{ project_config.model_paths.items, project_config.seed_paths.items, project_config.macro_paths.items, project_config.test_paths.items, project_config.analysis_paths.items, project_config.snapshot_paths.items }) |source_paths| {
         for (source_paths) |source_path| {
             const normalized = std.mem.trimEnd(u8, std.mem.trimStart(u8, source_path, "./"), "/");

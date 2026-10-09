@@ -23,6 +23,10 @@ pub fn applyInline(allocator: std.mem.Allocator, args_text: []const u8, node: *t
             }
         }
     }
+    try applyParsedInline(allocator, config, node);
+}
+
+pub fn applyParsedInline(allocator: std.mem.Allocator, config: std.json.Value, node: *types.Node) !void {
     try merge(allocator, &node.inline_config, config);
     try merge(allocator, &node.raw_config, config);
     try merge(allocator, &node.effective_config, config);

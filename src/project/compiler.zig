@@ -218,28 +218,30 @@ pub fn compileModel(allocator: std.mem.Allocator, graph: *const Graph, node: *co
 /// Render with execute=false to discover dependencies through real expression,
 /// scope and macro semantics, including macros returning a list of ref names.
 pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
-    // Core's static extraction sees literal refs in both execute branches.
-    // General macro/expression templates fall back to execute=false rendering.
-    const refs_start = node.refs.items.len;
-    const sources_start = node.source_refs.items.len;
-    const macros_start = node.macro_depends_on.items.len;
+    // Static extraction runs on an isolated node. A macro or dynamic expression
+    // can force full rendering after literal configs were seen; those tentative
+    // hooks and tags must not be applied a second time by the real renderer.
+    var probe = Node{
+        .package_name = node.package_name,
+        .unique_id = node.unique_id,
+        .name = node.name,
+        .path = node.path,
+        .original_file_path = node.original_file_path,
+        .raw_code = node.raw_code,
+        .resource_type = node.resource_type,
+    };
+    defer types.deinitNode(allocator, &probe);
     var static_success = true;
-    jinja.scanSql(allocator, sql, node, graph) catch |err| switch (err) {
+    jinja.scanSql(allocator, sql, &probe, graph) catch |err| switch (err) {
         error.UnsupportedJinja, error.UnsupportedDynamicRef, error.UnsupportedDynamicSource, error.UnresolvedVar, error.UnresolvedMacro => static_success = false,
         else => return err,
     };
-    if (static_success and node.macro_depends_on.items.len == macros_start and !requiresNativeRendering(sql)) return;
-    for (node.refs.items[refs_start..]) |ref| {
-        if (ref.package) |package| allocator.free(package);
-        allocator.free(ref.name);
+    if (static_success and probe.macro_depends_on.items.len == 0 and !requiresNativeRendering(sql)) {
+        try node.refs.appendSlice(allocator, probe.refs.items);
+        try node.source_refs.appendSlice(allocator, probe.source_refs.items);
+        try @import("resource_config.zig").applyParsedInline(allocator, probe.inline_config, node);
+        return;
     }
-    for (node.source_refs.items[sources_start..]) |source| {
-        allocator.free(source.source_name);
-        allocator.free(source.table_name);
-    }
-    node.refs.shrinkRetainingCapacity(refs_start);
-    node.source_refs.shrinkRetainingCapacity(sources_start);
-    node.macro_depends_on.shrinkRetainingCapacity(macros_start);
     const fallback = Graph{ .allocator = allocator, .project_name = node.package_name };
     var context = CompileContext.init(allocator, graph orelse &fallback, node);
     defer context.deinit();
@@ -1532,6 +1534,7 @@ fn findMatchingParen(text: []const u8, open: usize) ?usize {
 }
 
 fn renderThisAttribute(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, attribute: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, attribute, "database")) return try allocator.dupe(u8, relationDatabaseForNode(graph, node) orelse "");
     if (std.mem.eql(u8, attribute, "schema")) return try relationSchemaForNode(allocator, graph, node);
     if (std.mem.eql(u8, attribute, "name") or std.mem.eql(u8, attribute, "table") or std.mem.eql(u8, attribute, "identifier")) {
         return try allocator.dupe(u8, relationIdentifierForNode(node));
@@ -1986,18 +1989,18 @@ pub fn relationSchemaForNode(allocator: std.mem.Allocator, graph: *const Graph, 
 }
 
 pub fn relationDatabaseForNode(graph: *const Graph, node: *const Node) ?[]const u8 {
-    if (node.snapshot_config) |config| {
-        if (config.target_database) |database| return database;
-        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return null;
-        const path = graph.database_path orelse return "memory";
-        if (std.mem.eql(u8, path, ":memory:")) return "memory";
-        const basename = std.fs.path.basename(path);
-        if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot| {
-            if (dot != 0) return basename[0..dot];
-        }
-        return basename;
+    const values = @import("config_value.zig");
+    if (node.snapshot_config) |config| if (config.target_database) |database| return database;
+    if (values.get(node.effective_config, "database")) |database| if (database == .string) return database.string;
+    if (values.get(graph.target_context, "database")) |database| if (database == .string) return database.string;
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return null;
+    const path = graph.database_path orelse return if (node.snapshot_config != null) "memory" else null;
+    if (std.mem.eql(u8, path, ":memory:")) return "memory";
+    const basename = std.fs.path.basename(path);
+    if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot| {
+        if (dot != 0) return basename[0..dot];
     }
-    return null;
+    return basename;
 }
 
 pub fn relationIdentifierForNode(node: *const Node) []const u8 {
@@ -3348,4 +3351,27 @@ test "renderOperation binds typed keyword arguments and macro defaults" {
     const output = try renderOperation(.{ .allocator = allocator, .io = std.testing.io }, &graph, "sum_values", kwargs.value);
     defer allocator.free(output);
     try std.testing.expectEqualStrings("5", output);
+}
+
+test "static extraction fallback applies literal and macro hooks once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.macros.append(allocator, .{
+        .unique_id = "macro.demo.configure",
+        .package_name = "demo",
+        .name = "configure",
+        .path = "configure.sql",
+        .original_file_path = "macros/configure.sql",
+        .macro_sql = "{% macro configure() %}{{ config(post_hook=['select 2']) }}{% endmacro %}",
+    });
+    var node = Node{ .package_name = "demo", .unique_id = "model.demo.orders", .name = "orders", .path = "orders.sql", .original_file_path = "models/orders.sql", .raw_code = "" };
+    defer types.deinitNode(allocator, &node);
+    try scanDependencies(allocator, "{{ config(pre_hook=['select 1'], tags=['inline']) }} {{ configure() }} select 1", &node, &graph);
+    const values = @import("config_value.zig");
+    try std.testing.expectEqual(@as(usize, 1), values.get(node.inline_config, "pre-hook").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 1), values.get(node.inline_config, "post-hook").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 1), node.tags.items.len);
 }

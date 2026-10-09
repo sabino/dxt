@@ -7,6 +7,7 @@ pub const Context = struct {
     runtime: types.Runtime,
     vars: []const types.VarEntry = &.{},
     target: std.json.Value = .null,
+    package_name: ?[]const u8 = null,
     allow_secrets: bool = false,
 
     pub fn render(self: *Context, value: std.json.Value) anyerror!std.json.Value {
@@ -34,7 +35,7 @@ pub const Context = struct {
         const scratch = arena.allocator();
         const trimmed = std.mem.trim(u8, text, " \t\r\n");
         const host = expression.Host{ .context = self, .resolve = resolve, .call = call };
-        if (std.mem.startsWith(u8, trimmed, "{{") and std.mem.endsWith(u8, trimmed, "}}") and std.mem.indexOf(u8, trimmed[2 .. trimmed.len - 2], "}}") == null) {
+        if (std.mem.startsWith(u8, trimmed, "{{") and std.mem.endsWith(u8, trimmed, "}}") and @import("jinja.zig").findExpressionClose(trimmed, 2) == trimmed.len - 2) {
             const result = try expression.evaluate(scratch, std.mem.trim(u8, trimmed[2 .. trimmed.len - 2], " \t\r\n-"), host);
             return try values.fromExpression(allocator, result);
         }
@@ -43,7 +44,7 @@ pub const Context = struct {
         var cursor: usize = 0;
         while (std.mem.indexOfPos(u8, text, cursor, "{{")) |open| {
             try out.appendSlice(allocator, text[cursor..open]);
-            const close = std.mem.indexOfPos(u8, text, open + 2, "}}") orelse return error.UnsupportedJinja;
+            const close = @import("jinja.zig").findExpressionClose(text, open + 2) orelse return error.UnsupportedJinja;
             const result = try expression.evaluate(scratch, std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-"), host);
             try out.appendSlice(allocator, try result.text(scratch));
             cursor = close + 2;
@@ -68,7 +69,15 @@ pub const Context = struct {
             if (!self.allow_secrets and std.mem.startsWith(u8, key, "DBT_ENV_SECRET_")) return error.SecretEnvironmentVariableForbidden;
             if (self.runtime.environment) |env| if (env.get(key)) |value| return .{ .string = value };
         } else {
-            for (self.vars) |entry| if (std.mem.eql(u8, entry.name, key)) return if (entry.typed_value) |value| try values.toExpression(allocator, value) else .{ .string = entry.value };
+            var selected: ?*const types.VarEntry = null;
+            for (self.vars) |*entry| {
+                if (!std.mem.eql(u8, entry.name, key)) continue;
+                if (entry.package_name) |package| {
+                    if (self.package_name == null or !std.mem.eql(u8, package, self.package_name.?)) continue;
+                }
+                if (selected == null or entry.priority >= selected.?.priority) selected = entry;
+            }
+            if (selected) |entry| return if (entry.typed_value) |value| try values.toExpression(allocator, value) else .{ .string = entry.value };
         }
         if (args.len == 2) return args[1].value;
         return if (std.mem.eql(u8, name, "env_var")) error.EnvironmentVariableMissing else error.UnresolvedVar;
@@ -92,4 +101,23 @@ test "configuration renderer retains native values and restricts secret contexts
     var password = try context.renderString("{{ env_var('DBT_ENV_SECRET_PASSWORD') }}");
     defer values.deinit(allocator, &password);
     try std.testing.expectEqualStrings("synthetic", password.string);
+}
+
+test "configuration variables use package scope and ordered priorities" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const vars = [_]types.VarEntry{
+        .{ .name = "owner", .value = "dependency", .package_name = "util", .priority = 10 },
+        .{ .name = "owner", .value = "global", .priority = 80 },
+        .{ .name = "owner", .value = "scoped", .package_name = "util", .priority = 90 },
+    };
+    var context = Context{ .runtime = .{ .allocator = allocator, .io = std.testing.io }, .vars = &vars, .package_name = "util" };
+    var scoped = try context.renderString("{{ var('owner') }}");
+    defer values.deinit(allocator, &scoped);
+    try std.testing.expectEqualStrings("scoped", scoped.string);
+    context.package_name = "root";
+    var global = try context.renderString("{{ var('owner') }}");
+    defer values.deinit(allocator, &global);
+    try std.testing.expectEqualStrings("global", global.string);
 }

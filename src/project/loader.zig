@@ -287,8 +287,20 @@ fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []
     }
 }
 
+fn cliVariableMap(allocator: std.mem.Allocator, vars: []const types.VarEntry) !std.json.Value {
+    var result: std.json.Value = .{ .object = .empty };
+    errdefer config_value.deinit(allocator, &result);
+    for (vars) |entry| {
+        if (entry.priority < 100 or entry.package_name != null) continue;
+        try config_value.put(allocator, &result, entry.name, entry.typed_value orelse .{ .string = entry.value });
+    }
+    return result;
+}
+
 fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, callbacks: Callbacks, graph: *Graph) !void {
-    const packages_dir = try @import("dependencies.zig").installPath(runtime, project_dir);
+    var install_vars = try cliVariableMap(runtime.allocator, graph.vars.items);
+    defer config_value.deinit(runtime.allocator, &install_vars);
+    const packages_dir = try @import("dependencies.zig").installPathWithVars(runtime, project_dir, install_vars);
     var package_dirs: std.ArrayList([]const u8) = .empty;
     defer package_dirs.deinit(runtime.allocator);
 
@@ -315,7 +327,9 @@ fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, callbac
 }
 
 fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, callbacks: Callbacks, graph: *Graph) !void {
-    const packages_dir = try @import("dependencies.zig").installPath(runtime, project_dir);
+    var install_vars = try cliVariableMap(runtime.allocator, graph.vars.items);
+    defer config_value.deinit(runtime.allocator, &install_vars);
+    const packages_dir = try @import("dependencies.zig").installPathWithVars(runtime, project_dir, install_vars);
     var package_dirs: std.ArrayList([]const u8) = .empty;
     defer package_dirs.deinit(runtime.allocator);
 

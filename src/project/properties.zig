@@ -12,7 +12,7 @@ pub fn parseModels(runtime: types.Runtime, document: std.json.Value, path: []con
                 if (item != .object) return error.InvalidResourceProperties;
                 var property = types.ModelProperty{ .package_name = package, .resource_type = pair[1], .name = try ownedString(runtime.allocator, values.get(item, "name") orelse return error.InvalidResourceProperties), .patch_path = path, .properties = try values.clone(runtime.allocator, item) };
                 if (values.get(item, "description")) |description| property.description = try ownedString(runtime.allocator, description);
-                var context = renderer.Context{ .runtime = runtime, .vars = graph.vars.items, .target = graph.target_context };
+                var context = renderer.Context{ .runtime = runtime, .vars = graph.vars.items, .target = graph.target_context, .package_name = package };
                 if (values.get(item, "config")) |config| {
                     if (config != .object) return error.InvalidResourceProperties;
                     var it = config.object.iterator();

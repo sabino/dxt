@@ -182,3 +182,15 @@ def test_inline_singular_test_warning_config_reaches_execution(tmp_path, configu
     results = [json.loads((p / "target/run_results.json").read_text())["results"][0] for p in pair.projects]
     assert [result["status"] for result in results] == ["warn", "warn"]
     assert [result["failures"] for result in results] == [1, 1]
+
+
+def test_cli_vars_resolve_custom_package_install_path(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.append_project("packages-install-path: '{{ var(\"install_dir\") }}'\n")
+    pair.write("vendored/util_pkg/dbt_project.yml", "name: util_pkg\nversion: '1.0'\n")
+    pair.write("vendored/util_pkg/models/upstream.sql", "select 7 as id")
+    pair.write("models/marts/rendered.sql", "select * from {{ ref('util_pkg', 'upstream') }}")
+    manifests = pair.invoke(flags=["--vars", "{install_dir: vendored}"])
+    actual, expected = [m["nodes"]["model.configuration_fixture.rendered"] for m in manifests]
+    assert actual["compiled_code"] == expected["compiled_code"]
+    assert actual["depends_on"]["nodes"] == expected["depends_on"]["nodes"]
