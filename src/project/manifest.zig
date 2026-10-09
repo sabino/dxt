@@ -1023,21 +1023,75 @@ fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
         try json.string(writer, column.name);
         try writer.writeAll(",\"description\":");
         try json.string(writer, column.description);
-        try writer.writeAll(",\"meta\":");
-        if (column.meta_json) |value| try writeJsonValue(writer, value) else try writer.writeAll("{}");
-        try writer.writeAll(",\"data_type\":");
-        try writeNullableString(writer, column.data_type);
-        try writer.writeAll(",\"quote\":");
-        if (column.quote) |value| try writer.writeAll(if (value) "true" else "false") else try writer.writeAll("null");
-        try writer.writeAll(",\"tags\":");
-        try json.stringArray(writer, column.tags.items);
-        try writer.writeAll(",\"config\":");
-        if (column.config_json) |value| try writeJsonValue(writer, value) else try writer.writeAll("{}");
+        if (column.properties == .null) {
+            try writer.writeAll(",\"meta\":");
+            if (column.meta_json) |value| try writeJsonValue(writer, value) else try writer.writeAll("{}");
+            try writer.writeAll(",\"data_type\":");
+            try writeNullableString(writer, column.data_type);
+            try writer.writeAll(",\"quote\":");
+            if (column.quote) |value| try writer.writeAll(if (value) "true" else "false") else try writer.writeAll("null");
+            try writer.writeAll(",\"tags\":");
+            try json.stringArray(writer, column.tags.items);
+            try writer.writeAll(",\"config\":");
+            if (column.config_json) |value| try writeJsonValue(writer, value) else try writer.writeAll("{}");
+            try writer.writeAll(",\"constraints\":[],\"granularity\":null");
+        } else {
+            const fields = @import("config_value.zig");
+            const config = fields.get(column.properties, "config") orelse @as(std.json.Value, .{ .object = .empty });
+            const meta = fields.get(config, "meta") orelse fields.get(column.properties, "meta") orelse @as(std.json.Value, .{ .object = .empty });
+            const tags = fields.get(config, "tags") orelse fields.get(column.properties, "tags") orelse @as(std.json.Value, .{ .array = std.json.Array.init(std.heap.page_allocator) });
+            try writer.writeAll(",\"meta\":");
+            try std.json.Stringify.value(meta, .{}, writer);
+            try writer.writeAll(",\"data_type\":");
+            try std.json.Stringify.value(fields.get(column.properties, "data_type") orelse .null, .{}, writer);
+            try writer.writeAll(",\"quote\":");
+            try std.json.Stringify.value(fields.get(column.properties, "quote") orelse .null, .{}, writer);
+            try writer.writeAll(",\"tags\":");
+            try std.json.Stringify.value(tags, .{}, writer);
+            try writer.writeAll(",\"config\":");
+            try writer.writeAll("{\"meta\":");
+            try std.json.Stringify.value(fields.get(config, "meta") orelse @as(std.json.Value, .{ .object = .empty }), .{}, writer);
+            try writer.writeAll(",\"tags\":");
+            try std.json.Stringify.value(fields.get(config, "tags") orelse @as(std.json.Value, .{ .array = std.json.Array.init(std.heap.page_allocator) }), .{}, writer);
+            if (config == .object) {
+                var it = config.object.iterator();
+                while (it.next()) |entry| {
+                    if (std.mem.eql(u8, entry.key_ptr.*, "meta") or std.mem.eql(u8, entry.key_ptr.*, "tags")) continue;
+                    try writer.writeAll(",");
+                    try json.string(writer, entry.key_ptr.*);
+                    try writer.writeAll(":");
+                    try std.json.Stringify.value(entry.value_ptr.*, .{}, writer);
+                }
+            }
+            try writer.writeAll("}");
+            try writer.writeAll(",\"constraints\":");
+            try writeConstraints(writer, fields.get(column.properties, "constraints") orelse .null);
+            try writer.writeAll(",\"granularity\":");
+            try std.json.Stringify.value(fields.get(column.properties, "granularity") orelse .null, .{}, writer);
+        }
         try writer.writeAll(",\"doc_blocks\":");
         try json.stringArray(writer, column.doc_blocks.items);
         try writer.writeAll("}");
     }
     try writer.writeAll("}");
+}
+
+fn writeConstraints(writer: *Io.Writer, constraints: std.json.Value) !void {
+    const fields = @import("config_value.zig");
+    try writer.writeAll("[");
+    if (constraints == .array) for (constraints.array.items, 0..) |constraint, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("{");
+        inline for (.{ "type", "name", "expression", "warn_unenforced", "warn_unsupported", "to", "to_columns" }, 0..) |key, field_index| {
+            if (field_index != 0) try writer.writeAll(",");
+            try json.string(writer, key);
+            try writer.writeAll(":");
+            const fallback: std.json.Value = if (std.mem.startsWith(u8, key, "warn_")) .{ .bool = true } else if (std.mem.eql(u8, key, "to_columns")) .{ .array = std.json.Array.init(std.heap.page_allocator) } else .null;
+            try std.json.Stringify.value(fields.get(constraint, key) orelse fallback, .{}, writer);
+        }
+        try writer.writeAll("}");
+    };
+    try writer.writeAll("]");
 }
 
 fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, test_node: GenericTestNode) !void {

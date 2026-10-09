@@ -138,3 +138,47 @@ def test_root_package_resource_overrides_and_package_vars(tmp_path, configuratio
     assert actual["compiled_code"] == expected["compiled_code"]
     assert actual["config"]["materialized"] == expected["config"]["materialized"]
     assert actual["config"]["tags"] == expected["config"]["tags"]
+
+
+def test_yaml_model_properties_anchors_typed_metadata_columns_and_precedence(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.append_project("models: {configuration_fixture: {+materialized: table, +meta: {owner: project, retained: true}, +tags: [project]}}\n")
+    pair.write("models/marts/rendered.sql", "{{ config(materialized='view', meta={'inline': True}, tags=['inline']) }} select 1 as id")
+    pair.write("models/properties.yml", """version: 2
+model_defaults: &defaults
+  description: 'Orders with "quoted" labels'
+  config:
+    materialized: table
+    meta: {owner: yaml, nested: [1, true, null]}
+    tags: [yaml]
+    docs: {show: false, node_color: '#123456'}
+models:
+  - <<: *defaults
+    name: rendered
+    columns:
+      - name: id
+        description: Identifier
+        data_type: integer
+        constraints: [{type: not_null}]
+        quote: true
+        meta: {owner: data, nested: {enabled: true}}
+        tags: [identifier]
+""")
+    manifests = pair.invoke("parse")
+    actual, expected = [m["nodes"]["model.configuration_fixture.rendered"] for m in manifests]
+    for key in ["description", "docs", "meta", "unrendered_config", "columns"]:
+        assert actual[key] == expected[key]
+    for key in ["materialized", "tags", "meta", "docs"]:
+        assert actual["config"][key] == expected["config"][key]
+
+
+def test_inline_singular_test_warning_config_reaches_execution(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write("tests/warning.sql", "{{ config(severity='warn', warn_if='> 0', error_if='> 10', limit=3) }} select 1 as failure")
+    manifests = pair.invoke("test")
+    actual, expected = [m["nodes"]["test.configuration_fixture.warning"] for m in manifests]
+    for key in ["severity", "warn_if", "error_if", "limit"]:
+        assert actual["config"][key] == expected["config"][key]
+    results = [json.loads((p / "target/run_results.json").read_text())["results"][0] for p in pair.projects]
+    assert [result["status"] for result in results] == ["warn", "warn"]
+    assert [result["failures"] for result in results] == [1, 1]

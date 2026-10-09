@@ -165,6 +165,20 @@ pub fn apply(allocator: std.mem.Allocator, node: *types.Node) !void {
         node.incremental.configured.predicates = true;
     }
     if (values.get(config, "store_failures")) |v| node.test_config.store_failures = if (v == .null) null else try boolean(v);
+    if (values.get(config, "where")) |v| node.test_config.where = try nullableString(v);
+    if (values.get(config, "limit")) |v| {
+        if (v == .null) node.test_config.limit = null else if (v == .integer and v.integer >= 0) node.test_config.limit = @intCast(v.integer) else return error.InvalidConfiguration;
+    }
+    if (values.get(config, "severity")) |v| {
+        const severity = try string(v);
+        if (!std.ascii.eqlIgnoreCase(severity, "warn") and !std.ascii.eqlIgnoreCase(severity, "error")) return error.InvalidConfiguration;
+        node.test_config.severity = severity;
+    }
+    if (values.get(config, "warn_if")) |v| node.test_config.warn_if = try string(v);
+    if (values.get(config, "error_if")) |v| node.test_config.error_if = try string(v);
+    inline for (std.meta.tags(types.GenericTestConfigField)) |key| {
+        if (values.get(config, @tagName(key)) != null) node.test_config.markConfigured(key);
+    }
     if (values.get(config, "quote_columns")) |v| node.quote_columns = if (v == .null) null else try boolean(v);
     if (values.get(config, "column_types")) |v| {
         if (v != .object) return error.InvalidConfiguration;
@@ -173,6 +187,17 @@ pub fn apply(allocator: std.mem.Allocator, node: *types.Node) !void {
         while (it.next()) |entry| try node.seed_column_types.append(allocator, .{ .name = entry.key_ptr.*, .data_type = try string(entry.value_ptr.*) });
     }
     if (node.snapshot_config != null) try @import("snapshot.zig").applyJsonConfig(allocator, config, node);
+}
+
+/// Scan nodes own the JSON values backing config strings. Copy before the
+/// temporary scan node is destroyed and a singular test keeps its settings.
+pub fn cloneTestConfig(allocator: std.mem.Allocator, source: types.GenericTestConfig) !types.GenericTestConfig {
+    var result = source;
+    if (source.where) |where| result.where = try allocator.dupe(u8, where);
+    result.severity = try allocator.dupe(u8, source.severity);
+    result.warn_if = try allocator.dupe(u8, source.warn_if);
+    result.error_if = try allocator.dupe(u8, source.error_if);
+    return result;
 }
 
 pub fn string(value: std.json.Value) ![]const u8 {
@@ -195,4 +220,19 @@ test "typed inline configs accept dictionaries and preserve nested metadata" {
     try std.testing.expect(!node.enabled);
     try std.testing.expectEqual(@as(usize, 2), node.incremental.unique_key.?.list.items.len);
     try std.testing.expect(values.get(values.get(node.effective_config, "meta").?, "nested").?.array.items[0].bool);
+}
+
+test "inline singular test config projects severity and failure conditions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var node = types.Node{ .package_name = "demo", .unique_id = "test.demo.warning", .name = "warning", .path = "warning.sql", .original_file_path = "tests/warning.sql", .raw_code = "", .resource_type = "test" };
+    defer types.deinitNode(allocator, &node);
+    try applyInline(allocator, "severity='warn', warn_if='> 2', error_if='> 5', where='id is not null', limit=7", &node);
+    try std.testing.expectEqualStrings("warn", node.test_config.severity);
+    try std.testing.expectEqualStrings("> 2", node.test_config.warn_if);
+    try std.testing.expectEqualStrings("> 5", node.test_config.error_if);
+    try std.testing.expectEqualStrings("id is not null", node.test_config.where.?);
+    try std.testing.expectEqual(@as(u64, 7), node.test_config.limit.?);
+    try std.testing.expect(node.test_config.configured.contains(.severity));
 }

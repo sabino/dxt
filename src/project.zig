@@ -2787,7 +2787,9 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
     try parseSourcesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseUnitTestsFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
-    try parseModelPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
+    var properties_document = try @import("project/yaml.zig").parse(runtime.allocator, text);
+    defer properties_document.deinit();
+    try @import("project/properties.zig").parseModels(runtime, properties_document.value, relative_path, package_name, graph);
     try parseSingularTestPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseMacroPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
 }
@@ -3289,7 +3291,7 @@ fn parseSingularTest(runtime: Runtime, project_dir: []const u8, test_root: []con
         .path = test_path,
         .original_file_path = relative_path,
         .raw_code = sql,
-        .config = scan_node.test_config,
+        .config = try @import("project/resource_config.zig").cloneTestConfig(runtime.allocator, scan_node.test_config),
         .enabled = scan_node.enabled,
         .inline_enabled = scan_node.inline_enabled,
         .inline_store_failures = scan_node.inline_store_failures,
@@ -3344,6 +3346,19 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
             current.columns = current.columns orelse docs.columns;
             node.persist_docs = current;
         }
+        if (property.properties != .null) {
+            @import("project/config_value.zig").deinit(graph.allocator, &node.properties);
+            node.properties = try @import("project/config_value.zig").clone(graph.allocator, property.properties);
+        }
+        if (property.config_values != .null) {
+            try @import("project/resource_config.zig").merge(graph.allocator, &node.property_config, property.config_values);
+            const raw_config = @import("project/config_value.zig").get(property.properties, "config") orelse .null;
+            try @import("project/config_value.zig").overlay(graph.allocator, &node.property_raw_config, raw_config);
+            for ([_][]const u8{ "meta", "docs", "tags", "group", "access", "contract" }) |key| if (@import("project/config_value.zig").get(property.properties, key)) |value| {
+                try @import("project/config_value.zig").put(graph.allocator, &node.property_raw_config, key, value);
+            };
+            try @import("project/resource_config.zig").rebuild(graph.allocator, node);
+        }
         if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.package_name, property.description, &node.doc_blocks);
         if (std.mem.eql(u8, node.resource_type, "model") and property.materialized.len != 0 and !node.inline_materialized) node.materialized = property.materialized;
         if (std.mem.eql(u8, node.resource_type, "model")) try incremental_config.overlay(graph.allocator, &node.incremental, property.incremental, node.inline_incremental);
@@ -3363,7 +3378,7 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
         for (property.tags.items) |tag| {
             try appendUnique(graph.allocator, &node.tags, tag);
         }
-        sortStrings(node.tags.items);
+        if (property.properties == .null) sortStrings(node.tags.items);
         for (property.tests.items) |test_def| {
             try appendGenericTestDefClone(graph, &node.tests, test_def);
         }
@@ -3939,6 +3954,10 @@ fn appendSeedColumnType(allocator: std.mem.Allocator, property: *types.ModelProp
 fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.ArrayList(ColumnDef), source: ColumnDef) !void {
     for (columns.items) |*existing| {
         if (std.mem.eql(u8, existing.name, source.name)) {
+            if (source.properties != .null) {
+                @import("project/config_value.zig").deinit(graph.allocator, &existing.properties);
+                existing.properties = try @import("project/config_value.zig").clone(graph.allocator, source.properties);
+            }
             if (source.description.len != 0) existing.description = try resolveDocDescription(graph, package_name, source.description, &existing.doc_blocks);
             for (source.tests.items) |test_def| {
                 try appendGenericTestDefClone(graph, &existing.tests, test_def);
@@ -3948,7 +3967,7 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
         }
     }
 
-    var column = ColumnDef{ .name = source.name };
+    var column = ColumnDef{ .name = source.name, .properties = try @import("project/config_value.zig").clone(graph.allocator, source.properties) };
     errdefer {
         column.doc_blocks.deinit(graph.allocator);
         column.tests.deinit(graph.allocator);

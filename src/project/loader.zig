@@ -92,6 +92,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         .invocation = runtime.invocation,
         .project_name = config.name,
         .validate_macro_args = config.validate_macro_args,
+        .require_generic_test_arguments_property = config.require_generic_test_arguments_property,
         .full_refresh = options.full_refresh,
     };
     errdefer graph.deinit();

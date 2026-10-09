@@ -83,6 +83,7 @@ pub const ProjectConfig = struct {
     snapshot_config_text: ?[]const u8 = null,
     clean_targets_set: bool = false,
     validate_macro_args: bool = false,
+    require_generic_test_arguments_property: bool = false,
     target_path: []const u8 = "target",
     raw_project: std.json.Value = .null,
     rendered_project: std.json.Value = .null,
@@ -246,6 +247,7 @@ pub const ColumnDef = struct {
     description: []const u8 = "",
     doc_blocks: std.ArrayList([]const u8) = .empty,
     tests: std.ArrayList(GenericTestDef) = .empty,
+    properties: std.json.Value = .null,
 };
 
 pub const GenericTestDef = struct {
@@ -436,6 +438,7 @@ pub const Node = struct {
     project_raw_config: std.json.Value = .null,
     property_raw_config: std.json.Value = .null,
     root_override_raw_config: std.json.Value = .null,
+    properties: std.json.Value = .null,
 };
 
 pub const IncrementalConfigMask = struct {
@@ -604,6 +607,7 @@ pub const Graph = struct {
     dispatch_configs: std.ArrayList(DispatchConfig) = .empty,
     source_project_configs: std.ArrayList(SourceProjectConfig) = .empty,
     validate_macro_args: bool = false,
+    require_generic_test_arguments_property: bool = false,
     deferred_relations: std.ArrayList(DeferredRelation) = .empty,
 
     pub fn deferredRelation(self: *const Graph, unique_id: []const u8) ?[]const u8 {
@@ -725,6 +729,7 @@ pub fn deinitDispatchConfigs(allocator: std.mem.Allocator, configs: *std.ArrayLi
 }
 
 pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
+    config_value.deinit(allocator, &node.properties);
     config_value.deinit(allocator, &node.raw_config);
     config_value.deinit(allocator, &node.effective_config);
     config_value.deinit(allocator, &node.inline_config);
@@ -741,6 +746,7 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     node.doc_blocks.deinit(allocator);
     deinitGenericTestDefs(allocator, &node.tests);
     for (node.columns.items) |*column| {
+        config_value.deinit(allocator, &column.properties);
         column.doc_blocks.deinit(allocator);
         column.tags.deinit(allocator);
         deinitGenericTestDefs(allocator, &column.tests);
@@ -786,6 +792,7 @@ fn deinitSingularTestProperty(allocator: std.mem.Allocator, property: *SingularT
 pub fn deinitSourceDef(allocator: std.mem.Allocator, source: *SourceDef) void {
     deinitGenericTestDefs(allocator, &source.tests);
     for (source.columns.items) |*column| {
+        config_value.deinit(allocator, &column.properties);
         column.doc_blocks.deinit(allocator);
         column.tags.deinit(allocator);
         deinitGenericTestDefs(allocator, &column.tests);
@@ -835,6 +842,7 @@ fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) v
     property.doc_blocks.deinit(allocator);
     deinitGenericTestDefs(allocator, &property.tests);
     for (property.columns.items) |*column| {
+        config_value.deinit(allocator, &column.properties);
         column.doc_blocks.deinit(allocator);
         column.tags.deinit(allocator);
         deinitGenericTestDefs(allocator, &column.tests);
