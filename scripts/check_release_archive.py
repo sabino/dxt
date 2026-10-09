@@ -31,6 +31,8 @@ REQUIRED_MEMBERS = {
     "docs/licenses/dbt-LICENSE",
     "docs/licenses/dbt_duckdb-LICENSE",
     "docs/licenses/dbt_postgres-LICENSE",
+    "docs/licenses/unicode-LICENSE",
+    "docs/licenses/unicode-UPSTREAM",
 }
 
 ALLOWED_TOP_LEVEL_FILES = {

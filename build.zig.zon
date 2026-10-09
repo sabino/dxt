@@ -12,6 +12,7 @@
         "vendor/libpg_query",
         "vendor/dbt-docs",
         "vendor/dbt-includes",
+        "vendor/unicode",
         "README.md",
         "PLAN.md",
         "AGENTS.md",

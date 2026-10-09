@@ -17,6 +17,8 @@ NOTICES = {
     'libpg_query-THIRD_PARTY_LICENSES.txt': 'vendor/libpg_query/THIRD_PARTY_LICENSES.txt',
     'libpg_query-provenance.json': 'vendor/libpg_query/provenance.json',
     'dbt-includes-provenance.json': 'vendor/dbt-includes/provenance.json',
+    'unicode-LICENSE': 'vendor/unicode/LICENSE',
+    'unicode-UPSTREAM': 'vendor/unicode/README.md',
     **{f'{package}-LICENSE': f'vendor/dbt-includes/{package}/LICENSE'
        for package in ['dbt', 'dbt_duckdb', 'dbt_postgres']},
 }
