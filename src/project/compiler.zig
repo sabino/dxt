@@ -557,6 +557,10 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
     if (std.mem.eql(u8, call.name, "config")) {
         return try allocator.dupe(u8, "");
     }
+    if (std.mem.eql(u8, call.name, "is_incremental")) {
+        if (std.mem.trim(u8, args, " \t\r\n").len != 0) return error.UnsupportedJinja;
+        return try allocator.dupe(u8, if (node.runtime_is_incremental) "True" else "False");
+    }
     if (std.mem.eql(u8, call.name, "return")) {
         const inner = std.mem.trim(u8, args, " \t\r\n");
         return try renderExpression(context, inner);
@@ -1232,7 +1236,7 @@ fn parseStaticIfCondition(context: *CompileContext, span: []const u8) !bool {
     const condition = std.mem.trim(u8, span[keyword_len..], " \t\r\n");
     if (condition.len == 0) return error.UnsupportedJinja;
 
-    if (parseStaticBooleanCondition(condition)) |value| return value;
+    if (parseStaticBooleanCondition(context, condition)) |value| return value;
 
     if (findStaticComparison(condition)) |comparison| {
         const operator_len: usize = switch (comparison.operator) {
@@ -1266,21 +1270,21 @@ fn parseStaticIfCondition(context: *CompileContext, span: []const u8) !bool {
     return error.UnsupportedJinja;
 }
 
-fn parseStaticBooleanCondition(condition: []const u8) ?bool {
+fn parseStaticBooleanCondition(context: *const CompileContext, condition: []const u8) ?bool {
     if (std.mem.startsWith(u8, condition, "not ")) {
         const operand = std.mem.trim(u8, condition["not".len..], " \t\r\n");
-        const value = parseStaticBooleanCondition(operand) orelse return null;
+        const value = parseStaticBooleanCondition(context, operand) orelse return null;
         return !value;
     }
     if (std.ascii.eqlIgnoreCase(condition, "true")) return true;
     if (std.ascii.eqlIgnoreCase(condition, "false")) return false;
     if (std.mem.eql(u8, condition, "execute")) return true;
-    if (std.mem.eql(u8, condition, "is_incremental()")) return false;
+    if (std.mem.eql(u8, condition, "is_incremental()")) return context.node.runtime_is_incremental;
     return null;
 }
 
 fn parseStaticConditionValue(context: *CompileContext, expression: []const u8) !StaticConditionValue {
-    if (parseStaticBooleanCondition(expression)) |value| return .{ .boolean = value };
+    if (parseStaticBooleanCondition(context, expression)) |value| return .{ .boolean = value };
     if (expression[0] == '"' or expression[0] == '\'') {
         const parsed = try jinja.parseQuoted(context.allocator, expression, 0);
         errdefer context.allocator.free(parsed.value);
@@ -2807,4 +2811,26 @@ test "relationNameForSource renders database and source quote policy" {
 
     const relation_name = try relationNameForSource(allocator, &source);
     try std.testing.expectEqualStrings("raw_db.\"RawSchema\".RawCustomers", relation_name);
+}
+
+test "compileModel uses warehouse supplied incremental context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.events",
+        .name = "events",
+        .path = "events.sql",
+        .original_file_path = "models/events.sql",
+        .materialized = "incremental",
+        .raw_code = "select {% if is_incremental() %}1{% else %}0{% endif %} as incremental, {% if not is_incremental() %}1{% else %}0{% endif %} as initial, {{ is_incremental() }} as active",
+    };
+    const first = try compileModel(allocator, &graph, &node);
+    try std.testing.expectEqualStrings("select 0 as incremental, 1 as initial, False as active", first);
+    node.runtime_is_incremental = true;
+    const repeated = try compileModel(allocator, &graph, &node);
+    try std.testing.expectEqualStrings("select 1 as incremental, 0 as initial, True as active", repeated);
 }
