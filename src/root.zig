@@ -29,7 +29,7 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
     const prepared = @import("project/cli_options.zig").prepare(scoped, args) catch |err| return commandError(err, stderr);
     scoped.global_options = &prepared.options;
     // Serving is long lived and must publish its listening address immediately.
-    if (prepared.args.len > 2 and equals(prepared.args[1], "docs") and equals(prepared.args[2], "serve")) return runPrepared(prepared.args, stdout, stderr, scoped);
+    if (prepared.args.len > 2 and equals(prepared.args[1], "docs") and equals(prepared.args[2], "serve")) return runCommand(prepared.args, stdout, stderr, scoped);
     var output: Io.Writer.Allocating = .init(scoped.allocator);
     defer output.deinit();
     var diagnostics: Io.Writer.Allocating = .init(scoped.allocator);

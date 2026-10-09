@@ -370,6 +370,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     }
 
     const catalog_path = try pathJoin(runtime.allocator, &.{ target_dir, "catalog.json" });
+    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     const catalog_json = try catalog.renderCatalogWithInvocation(runtime.allocator, catalog_entries.nodes.items, catalog_entries.sources.items, runtime.invocation);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = catalog_path, .data = catalog_json });
     try docs_serve.writeIndex(runtime, target_dir, options.docs_static);

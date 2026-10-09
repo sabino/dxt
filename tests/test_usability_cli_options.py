@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
+import time
+import urllib.request
 from importlib.metadata import version
 from pathlib import Path
 
@@ -174,3 +177,80 @@ def test_native_log_filters_file_format_rotation_and_quiet_errors(tmp_path, duck
     result = invoke("dxt", ["--quiet", "--log-level-file", "error", "--log-path", log_dir, "run", "--project-dir", root], root, environment(duckdb_environment), ok=False)
     assert result.returncode == 1 and "error:" in result.stderr
     assert result.stdout == ""
+
+
+@pytest.mark.parametrize("flags,expected_code", [
+    (["--warn-error", "--warn-error-options", "{}"], 2),
+    (["--warn-error-options", "{error: [UnrecognizedCoreEvent]}"], 1),
+    (["--warn-error-options", "{error: all, include: all}"], 1),
+    (["--warn-error-options", "{warn: [LogTestResult]}"], 1),
+    (["--warn-error-options", "{include: all, exclude: [LogTestResult]}"], 2),
+])
+def test_core_warning_policy_invalid_values_and_legacy_deprecation_fail_before_artifacts(tmp_path, duckdb_environment, flags, expected_code):
+    root, _ = project(tmp_path)
+    for engine in ["dxt", "core"]:
+        target = tmp_path / f"{engine}-target"
+        result = invoke(engine, ["-q", *flags, "parse", "--project-dir", root, "--target-path", target], root, environment(duckdb_environment), ok=False)
+        assert result.returncode == expected_code, result.stdout + result.stderr
+        assert not (target / "manifest.json").exists()
+
+
+def test_core_colors_and_warning_silencing_have_console_and_file_effects(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    (root / "models/schema.yml").write_text("version: 2\nmodels:\n  - name: nonexistent\n    description: missing model\n")
+    for engine in ["dxt", "core"]:
+        log_dir = tmp_path / f"{engine}-logs"
+        common = ["--log-path", log_dir, "--no-use-colors-file", "parse", "--project-dir", root]
+        plain = invoke(engine, [*common, "--target-path", tmp_path / f"{engine}-plain"], root, environment(duckdb_environment, DBT_USE_COLORS="false"))
+        assert "\x1b[" not in plain.stdout + plain.stderr
+        assert "\x1b[" not in (log_dir / "dbt.log").read_text()
+        colored = invoke(engine, ["--use-colors", *common, "--target-path", tmp_path / f"{engine}-colored"], root, environment(duckdb_environment, DBT_USE_COLORS="false"))
+        assert "\x1b[33m" in colored.stdout + colored.stderr
+        # Core's global color setting colors warning message text before file
+        # formatting, while use-colors-file independently controls its prefix.
+        lines = (log_dir / "dbt.log").read_text().splitlines()
+        assert all(not line.startswith("\x1b[") for line in lines)
+        silent = invoke(engine, ["--warn-error-options", "{silence: [NoNodeForYamlKey]}", *common, "--target-path", tmp_path / f"{engine}-silent"], root, environment(duckdb_environment, DBT_USE_COLORS="false"))
+        assert "nonexistent" not in silent.stdout + silent.stderr
+
+
+def test_core_docs_no_compile_no_json_writes_catalog_into_fresh_target(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    for engine in ["dxt", "core"]:
+        target = tmp_path / f"{engine}-target"
+        invoke(engine, ["-q", "--no-write-json", "docs", "generate", "--no-compile", "--project-dir", root, "--target-path", target], root, environment(duckdb_environment))
+        assert json.loads((target / "catalog.json").read_text())["nodes"] == {}
+        assert not (target / "manifest.json").exists()
+        assert not (target / "semantic_manifest.json").exists()
+        assert not (target / "run_results.json").exists()
+
+
+def test_core_docs_server_address_is_primary_output_under_quiet_json_logs(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    for engine in ["dxt", "core"]:
+        target = tmp_path / f"{engine}-target"
+        invoke(engine, ["-q", "docs", "generate", "--project-dir", root, "--target-path", target], root, environment(duckdb_environment))
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        executable = str(DXT) if engine == "dxt" else "dbt"
+        args = ["-q", "--log-format=json", "docs", "serve", "--no-browser", "--project-dir", str(root), "--target-path", str(target), "--port", str(port)]
+        child = subprocess.Popen([executable, *args], cwd=root, env=environment(duckdb_environment), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1) as response:
+                        assert response.status == 200
+                        assert "html" in response.read().decode().lower()
+                    break
+                except (OSError, TimeoutError):
+                    assert child.poll() is None, child.communicate()
+                    assert time.monotonic() < deadline
+                    time.sleep(0.05)
+        finally:
+            child.terminate()
+            output, diagnostics = child.communicate(timeout=10)
+        assert f"Serving docs at {port}" in output
+        assert f"http://" in output
+        assert '"CommandStart"' not in diagnostics

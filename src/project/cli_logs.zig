@@ -37,13 +37,18 @@ fn console(runtime: types.Runtime, options: types.Options, writer: *std.Io.Write
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         const severity = level(runtime.allocator, line);
-        if (@intFromEnum(severity) < @intFromEnum(minimum)) continue;
+        const event = try displayedEvent(runtime.allocator, line);
+        defer if (event) |value| runtime.allocator.free(value.message);
+        const printed = if (event) |value| value.printed else false;
+        if (@intFromEnum(if (printed) types.LogLevel.@"error" else severity) < @intFromEnum(minimum)) continue;
+        const display = if (options.log_format != .json and event != null) event.?.message else line;
+        if (options.use_colors and options.log_format != .json and !printed) try writer.writeAll("\x1b[0m");
         const color = options.use_colors and options.log_format != .json and (severity == .warn or severity == .@"error");
         if (color) try writer.writeAll(if (severity == .warn) "\x1b[33m" else "\x1b[31m");
-        if (options.log_format == .debug) {
+        if (options.log_format == .debug and !printed) {
             try clock.writeTimestamp(writer, clock.now(runtime.io));
-            try writer.print(" [{s}] [MainThread]: {s}", .{ @tagName(severity), line });
-        } else try writer.writeAll(line);
+            try writer.print(" [{s}] [MainThread]: {s}", .{ @tagName(severity), display });
+        } else try writer.writeAll(display);
         if (color) try writer.writeAll("\x1b[0m");
         try writer.writeByte('\n');
     }
@@ -55,8 +60,13 @@ fn fileEvents(runtime: types.Runtime, options: types.Options, writer: *std.Io.Wr
         if (line.len == 0) continue;
         const severity = level(runtime.allocator, line);
         if (@intFromEnum(severity) < @intFromEnum(options.log_level_file)) continue;
-        const color = options.use_colors_file and options.log_format_file != .json and (severity == .warn or severity == .@"error");
-        if (color) try writer.writeAll(if (severity == .warn) "\x1b[33m" else "\x1b[31m");
+        const event = try displayedEvent(runtime.allocator, line);
+        defer if (event) |value| runtime.allocator.free(value.message);
+        const display = if (options.log_format_file != .json and event != null) event.?.message else line;
+        if (options.use_colors_file and options.log_format_file != .json) try writer.writeAll("\x1b[0m");
+        // Core warning messages are colored by global USE_COLOR before either
+        // logger formats them. The file flag independently controls its prefix.
+        const color = options.use_colors and options.log_format_file != .json and (severity == .warn or severity == .@"error");
         if (options.log_format_file == .json) {
             if (line[0] == '{') {
                 try writer.print("{s}\n", .{line});
@@ -73,11 +83,35 @@ fn fileEvents(runtime: types.Runtime, options: types.Options, writer: *std.Io.Wr
             try writer.writeAll("}}\n");
         } else if (options.log_format_file == .debug) {
             try clock.writeTimestamp(writer, clock.now(runtime.io));
-            try writer.print(" [{s}] [MainThread]: {s}", .{ @tagName(severity), line });
-        } else try writer.writeAll(line);
+            try writer.print(" [{s}] [MainThread]: ", .{@tagName(severity)});
+            if (color) try writer.writeAll(if (severity == .warn) "\x1b[33m" else "\x1b[31m");
+            try writer.writeAll(display);
+        } else {
+            if (color) try writer.writeAll(if (severity == .warn) "\x1b[33m" else "\x1b[31m");
+            try writer.writeAll(display);
+        }
         if (color) try writer.writeAll("\x1b[0m");
         if (options.log_format_file != .json) try writer.writeByte('\n');
     }
+}
+
+const DisplayedEvent = struct { message: []const u8, printed: bool };
+fn displayedEvent(allocator: std.mem.Allocator, line: []const u8) !?DisplayedEvent {
+    if (line[0] != '{') return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const info = parsed.value.object.get("info") orelse return null;
+    if (info != .object) return null;
+    const name = info.object.get("name") orelse return null;
+    if (name != .string) return null;
+    const printed = std.mem.eql(u8, name.string, "PrintEvent");
+    if (!printed and !std.mem.eql(u8, name.string, "JinjaLog")) return null;
+    const data = parsed.value.object.get("data") orelse return null;
+    if (data != .object) return null;
+    const message = data.object.get("msg") orelse data.object.get("message") orelse return null;
+    if (message != .string) return null;
+    return .{ .message = try allocator.dupe(u8, message.string), .printed = printed };
 }
 
 fn level(allocator: std.mem.Allocator, line: []const u8) types.LogLevel {
@@ -97,6 +131,9 @@ fn help(args: []const []const u8) bool {
 }
 fn primaryOutput(args: []const []const u8) bool {
     if (args.len < 2 or help(args)) return true;
+    // dbt/task/docs/serve.py uses click.echo directly: the server address is
+    // command output and remains visible with --quiet and JSON event logging.
+    if (args.len > 2 and std.mem.eql(u8, args[1], "docs") and std.mem.eql(u8, args[2], "serve")) return true;
     for ([_][]const u8{ "ls", "version", "--version", "metric", "plan", "apply", "environment", "intervals", "audit", "promote", "rollback" }) |name| if (std.mem.eql(u8, args[1], name)) return true;
     return false;
 }

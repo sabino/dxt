@@ -114,11 +114,15 @@ pub fn serve(runtime: types.Runtime, options: types.Options, target_dir: []const
     });
     defer server.deinit(runtime.io);
 
-    try stdout.print("Serving docs at {d}\n", .{options.docs_port});
-    try stdout.print("To access from your browser, navigate to: http://{s}:{d}\n", .{ options.docs_host, options.docs_port });
-    try stdout.writeAll("\n\nPress Ctrl+C to exit.\n");
+    var startup: std.Io.Writer.Allocating = .init(runtime.allocator);
+    defer startup.deinit();
+    try startup.writer.print("Serving docs at {d}\n", .{options.docs_port});
+    try startup.writer.print("To access from your browser, navigate to: http://{s}:{d}\n", .{ options.docs_host, options.docs_port });
+    try startup.writer.writeAll("\n\nPress Ctrl+C to exit.\n");
+    if (options.docs_open_browser) try openBrowser(runtime, options, &startup.writer);
+    var diagnostics: std.Io.Writer.Discarding = .init(&.{});
+    try @import("cli_logs.zig").finish(runtime, options, &.{ "dxt", "docs", "serve" }, stdout, &diagnostics.writer, startup.written(), "");
     try stdout.flush();
-    if (options.docs_open_browser) try openBrowser(runtime, options, stdout);
 
     while (true) {
         const stream = try server.accept(runtime.io);
