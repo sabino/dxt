@@ -40,9 +40,11 @@ Dependency transports use external `git`, `curl` and `tar` when fetching and
 extracting packages; install those tools for the corresponding `deps` workflows.
 
 The YAML parser, PostgreSQL SQL grammar, static Python model syntax frontend,
-Unicode tables, default SQL macro sources and docs application are embedded in
-the executable. Python model discovery and compilation preserve resources;
-model execution in the initial release is SQL only. End users do not install dbt,
+Unicode tables/names, PCRE2 regular-expression engine, default SQL macro sources
+and docs application are embedded in the executable. The regex engine is
+statically linked without JIT or an external runtime library. Python model
+discovery and compilation preserve resources; model execution in the initial
+release is SQL only. End users do not install dbt,
 MetricFlow, a Python interpreter or developer requirements to run dxt.
 
 ## Workflow Gates
@@ -102,7 +104,9 @@ CHANGELOG, SECURITY, the public `docs/` tree and a project LICENSE if present.
   provenance for its PostgreSQL **17.7** grammar sources.
 - Tree-sitter **0.25.10** and tree-sitter-python **0.23.6** MIT licenses and
   checksum provenance, plus the runtime's retained Unicode/ICU notice.
-- Unicode **15.0** table license and upstream generation reference.
+- Unicode **15.0** table license, upstream generation reference and
+  named-character data checksum provenance.
+- PCRE2 **10.44** BSD license, pinned upstream reference and source checksums.
 - The embedded dbt docs application's Apache-2.0 license/upstream reference;
   its original third-party notices remain embedded.
 - dbt Core/DuckDB/PostgreSQL macro-source licenses and checksum provenance for

@@ -34,6 +34,16 @@ DuckDB and PostgreSQL.
 - Native grants and persist-docs execution through bundled adapter dispatch,
   including PostgreSQL role revocation and actual relation/column comments.
   DuckDB grants retain its upstream warning capability.
+- Native table/view/incremental contract validation and adapter-supported
+  constraints, including declared column order, PostgreSQL foreign keys and
+  rollback on schema or data violations.
+- Authored SQL materializations with adapter/package selection, explicit
+  builtin overrides, held-session SQL/hooks, validated relation returns and
+  authored `main` response metadata.
+- Native DuckDB profile initialization for configuration/settings,
+  attachments, extensions and secrets, with private credentials, connection
+  lifetime and typed connect/query retry policies. Python-dependent profile
+  plugins, filesystems and remote drivers fail visibly.
 - Native generic/singular data-test configs, SQL thresholds and persisted
   failure tables/views; dict/CSV/SQL unit fixtures, sparse/empty inputs, typed
   macro/var/env overrides and versioned models.
@@ -43,6 +53,8 @@ DuckDB and PostgreSQL.
 - Typed Jinja expressions, Unicode/numeric/tuple/container values, filters,
   scoped control/capture/call blocks, macro defaults/kwargs/returns, namespace
   mutation and adapter dispatch.
+- Native `modules.re` pattern/match objects, substitutions, iteration and
+  flags through statically linked PCRE2 and a Zig compatibility layer.
 - Embedded pinned dbt Core/DuckDB/PostgreSQL SQL macros and native
   Relation/Column/timestamp/query-result objects, database queries/statements,
   named results and adapter metadata caches.
@@ -74,6 +86,9 @@ DuckDB and PostgreSQL.
   promotion and rollback.
 - Native persistent parse and relation caches with input-safe invalidation.
   The native parse cache is separate from Core's MessagePack format.
+- Parsed database/schema/alias generator policies across root/package scopes,
+  dispatch, versions, seeds, snapshots, audit identities and saved-query
+  exports; consumers and warm-cache restores retain resolved identities.
 - Deterministic release archives with embedded-source licenses/provenance,
   checksum/architecture/safety checks and actual extracted installation gates
   for both adapters with PATH empty.
@@ -96,15 +111,22 @@ DuckDB and PostgreSQL.
   durable extension results consumable by Core retry.
 - Actual option effects replace the previous stored-only threads and ignored
   full-refresh behavior.
+- Generic tests preserve typed `get_where_subquery` results for authored
+  Relation attribute/method access, retain configured input bounds and inject
+  ephemeral dependencies into generic/singular compiled SQL.
+- Compiled generic-test macro bodies retain authored SQL; configured limits
+  belong to the runtime materialization rather than compiled-code rewriting.
 
 ### Compatibility And Acceptance
 
 - Comparisons target dbt Core **1.10.5**, dbt-duckdb **1.9.6**, dbt-postgres
   **1.9.1**, MetricFlow **0.208.1** and semantic interfaces **0.9.0**; native
   fixtures pin DuckDB **1.4.2** and Zig **0.16.0**.
-- Contract/constraint runtime enforcement, authored custom materializations and
-  remaining naming-policy/DuckDB profile initialization are active completion
-  work.
+- Contracts, authored SQL materializations, parsed/compiled naming policies
+  and native DuckDB profile initialization have focused upstream evidence.
+  Executed data-test helper/publication closure, invocation-wide warning
+  deduplication, stock result metadata and microbatch custom-lifecycle
+  integration remain active completion work.
 - Focused native/CLI/Core/MetricFlow evidence exists across the implemented
   tracks. Final whole-tree/public-project, both-adapter archive, platform and
   performance acceptance remains pending.

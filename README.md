@@ -70,10 +70,11 @@ system `git`, `curl` and `tar` for the corresponding package transports.
 
 | Area | Native implementation |
 | --- | --- |
-| Project and resources | Shared YAML/config precedence, packages, versions, groups/access, models, analyses, seeds, sources, SQL/YAML snapshots, macros, docs, exposures, data/unit tests and semantic resources. |
-| Compiler | Typed expressions and containers, macro arguments/returns, dispatch, bundled upstream SQL macros, Relation/Column/timestamp context, database-backed queries/statements and adapter introspection. |
+| Project and resources | Shared YAML/config precedence, custom database/schema/alias naming, packages, versions, groups/access, models, analyses, seeds, sources, SQL/YAML snapshots, macros, docs, exposures, data/unit tests and semantic resources. |
+| Compiler | Typed expressions and containers, macro arguments/returns, dispatch, bundled upstream SQL macros, native regular expressions, Relation/Column/timestamp context, database-backed queries/statements and adapter introspection. |
 | Execution | Native DuckDB/libpq sessions, dependency workers, ephemeral ancestry, unit-test gates, durable errors/skips, fail-fast cancellation, transactions and retry. |
-| Materializations | Table/view, adapter-specific incremental strategies and schema changes, microbatch, seeds, timestamp/check snapshots and state-based clone views; PostgreSQL materialized views and DuckDB local external/table-function resources. |
+| Materializations | Table/view, enforced contracts/constraints, authored SQL materializations, hooks/grants/persisted docs, adapter-specific incremental strategies and schema changes, microbatch, seeds, snapshots and clone views; PostgreSQL materialized views and DuckDB local external/table functions. |
+| Profiles | Native DuckDB configuration, settings, attachments, secrets, connection lifetime and retry policies; PostgreSQL connection profiles through libpq. |
 | Selection and integration | Graph/YAML selectors, indirect selection, state comparisons, defer/favor-state, effective command/env options, structured logs, real debug/init/operations, docs and freshness. |
 | Artifacts and caches | Manifest v12, Run Results v6, Catalog v1, Sources v3, semantic manifests, native parse/relation/SQL caches and the embedded dbt docs application. |
 | SQL analysis | Native dialect grammars, typed logical IR, column lineage, source diagnostics, explain output and dependency-aware invalidation. |

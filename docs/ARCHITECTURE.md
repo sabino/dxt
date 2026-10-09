@@ -40,6 +40,12 @@ retain dbt unique IDs, raw and effective configuration, dependency edges,
 versions, groups and access metadata. `resolve.zig` resolves references and
 macro namespaces; selector expressions operate on that shared graph.
 
+`naming.zig` evaluates database/schema/alias generators in the parse context and
+stores owned resolved identities. Package scopes, adapter dispatch, model
+versions, seeds, snapshots and persisted audit relations share those identities
+through `this`, `ref`, compilation and cache restores. Saved-query exports also
+use the pinned generator policy while retaining configured export overrides.
+
 `python_model.zig` inspects Python syntax through a statically linked
 Tree-sitter frontend. It records literal `dbt.ref()`, `dbt.source()` and
 `dbt.config()` metadata without evaluating authored code. Compilation appends
@@ -72,6 +78,12 @@ They do not invoke a Python template engine or installed dbt runtime.
 Invocation-owned relation metadata caches coordinate worker introspection and
 invalidate entries when native SQL changes relation/schema state.
 
+`regex_context.zig` exposes native `modules.re` functions and typed pattern/match
+values. Zig owns argument binding, Python-pattern normalization, captures,
+substitutions and iteration over the statically linked PCRE2 10.44 UTF-8 engine.
+Unicode tables and named-character data retain their pinned provenance. This
+provider does not invoke an interpreter or require an external regex library.
+
 ## Adapters And Execution
 
 `adapter.zig` defines the shared `Session` and `QueryResult` contracts: typed
@@ -86,6 +98,12 @@ DuckDB CLI fallback remains for supported autocommit calls when a native library
 is unavailable. Held transactions, native analysis and concurrent execution
 require the native driver. PostgreSQL loads `libpq.so.5` by default, with
 `DXT_POSTGRES_LIBRARY` available as an explicit override.
+
+`duckdb_profile.zig` validates and applies private native connection options,
+settings, attachments, extensions, secrets, lifetime/transaction policies and
+typed retry configuration. Credentials are excluded from public target/cache
+artifacts. Python-dependent plugin, filesystem and remote profile facilities
+produce explicit errors before opening the warehouse.
 
 `concurrent_runner.zig`, `concurrent_compiler.zig` and `scheduler.zig` coordinate
 selected resources and their prerequisites. `--threads` bounds work; unit tests
@@ -190,6 +208,7 @@ the native HTTP server.
 | libpg_query 6.2.5, PostgreSQL 17.7 grammar | PostgreSQL SQL AST | Compiled into the binary; upstream and third-party notices. |
 | Tree-sitter 0.25.10 and tree-sitter-python 0.23.6 | Static Python model syntax | Compiled into the binary; MIT and retained Unicode/ICU notices. |
 | Unicode 15.0 tables | Typed string operations | Embedded tables; Unicode license and provenance. |
+| PCRE2 10.44 | Native regular-expression engine | Statically linked UTF-8 engine without JIT; BSD license and source checksums. |
 | DuckDB C library | DuckDB execution/AST | External native library; CI pins 1.4.2. |
 | libpq | PostgreSQL execution | External native library. |
 | dbt SQL includes and docs browser | Macro defaults and documentation UI | Embedded sources; upstream licenses/provenance ship with releases. |
