@@ -43,6 +43,8 @@ EXPRESSIONS = [
     "[{'key':1},{'key':2}] | map(attribute='key') | list",
     "dict(zip((1,2),('one','two')))",
     "{(-1)**0.5:'complex'}[(-1)**0.5]",
+    "{1:2}[[]] | default('undefined')",
+    "{'x':1}[{}] | default('undefined')",
 ]
 
 
@@ -75,6 +77,12 @@ TEMPLATES = [
     "{% set r=api.Relation.create(schema='main',identifier='key') %}{% set d={r:'found'} %}{{ d.keys()|list }}|{{ d.items()|list }}",
     "{% set r=api.Relation.create(schema='main',identifier='key') %}{% set other=r.include(schema=false) %}{% set d={r:'found'} %}{{ d.get(other,'different') }}|{{ r == other }}",
     "{% set r=api.Relation.create(schema='main',identifier='key') %}{% set other=r.quote(identifier=false) %}{% set d={r:'found'} %}{{ d.get(other,'different') }}|{{ r == other }}",
+    "{% set c=((-1)**0.5)*(var('infinite')|float) %}{% set n=c-c %}{% set d={n:'same'} %}{{ d[n] }}|{{ n in d }}|{{ d.get(n) }}",
+    "{% set c=((-1)**0.5)*(var('infinite')|float) %}{% set n=c-c %}{% set other=c-c %}{% set d={n:'first',other:'second'} %}{{ d|length }}|{{ d[n] }}|{{ d[other] }}",
+    "{% set c=((-1)**0.5)*(var('infinite')|float) %}{% set n=c-c %}{% set d={(n,1):'pair'} %}{{ d[(n,true)] }}|{{ d.get((c-c,1),'different') }}",
+    "{% set c=((-1)**0.5)*(var('infinite')|float) %}{% set n=c-c %}{{ n == n }}|{{ n is number }}|{{ n is sameas(n) }}|{{ n is sameas(c-c) }}|{{ n in [n] }}|{{ [n] == [n] }}",
+    "{% set c=((-1)**0.5)*(var('infinite')|float) %}{% set n=c-c %}{{ [n,-n,n.conjugate(),+n] }}|{{ [n+1,n*2,n/2,n**2] }}",
+    "{% set c=((-1)**0.5)*(var('infinite')|float) %}{% set n=c-c %}{% set real=n.real %}{% set d={real:'real'} %}{{ d[real] }}|{{ n.real is sameas(n.real) }}|{{ n.imag is float }}",
 ]
 
 
@@ -83,11 +91,11 @@ def test_mapping_bindings_mutations_and_relations_match_core(tmp_path, core_runn
     root = tmp_path / "mapping_contract"
     write_project(root, "0")
     (root / "models/value.sql").write_text("select '" + template + "' as rendered\n")
-    compare(root, core_runner, {"nan_text": "nan"})
+    compare(root, core_runner, {"nan_text": "nan", "infinite": "inf"})
 
 
 @pytest.mark.parametrize("expression", [
-    "{[]:1}", "{{}:1}", "{([1],):1}", "{1:2}[[]]", "{1:2}.get({})",
+    "{[]:1}", "{{}:1}", "{([1],):1}", "{1:2}.get({})",
     "[] in {1:2}", "dict([(1,2,3)])", "dict([(1,)])", "dict(1)",
     "dict({}, {})", "dict(**{1:2})",
 ])

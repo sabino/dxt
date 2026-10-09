@@ -1179,7 +1179,12 @@ fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
         }
     }
     if (value == .object) if (sequence(value)) |items| return try indexValue(allocator, .{ .list = items }, key);
-    if (value == .object) return try mappingGet(value, key);
+    if (value == .object) return mappingGet(value, key) catch |err| {
+        // Jinja's getitem suppresses Python dictionary TypeError, including
+        // an unhashable subscript. Direct dict methods and membership raise.
+        if (err == error.JinjaTypeError) return .undefined;
+        return err;
+    };
     var i = integerIndex(key) catch return .undefined;
     const characters = if (value == .string) try iterableValues(allocator, value) else null;
     const len: usize = switch (value) {
