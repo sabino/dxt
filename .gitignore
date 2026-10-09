@@ -37,3 +37,4 @@ dbt_internal_packages/
 
 .agent/runs/
 .dxt-deps/
+.dxt/

@@ -3,6 +3,7 @@ pub const DuckDBPool = @import("project/native_duckdb.zig").Pool;
 const Io = std.Io;
 const project = @import("project.zig");
 const dependencies = @import("project/dependencies.zig");
+const cross_database = @import("project/cross_database.zig");
 pub const yaml = @import("project/yaml.zig");
 
 test "shared native YAML reader is available" {
@@ -118,6 +119,23 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
         };
         const options = dependencies.parseOptions(args[2..], stderr) catch |err| return commandError(err, stderr);
         dependencies.install(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        return .ok;
+    }
+
+    if (equals(command, "cross-database")) {
+        if (hasHelp(args[2..])) {
+            try cross_database.printHelp(stdout);
+            return .ok;
+        }
+        const rt = runtime orelse return .usage;
+        const options = cross_database.parseOptions(args[2..]) catch |err| {
+            try stderr.print("error: {s}; see dxt cross-database --help\n", .{@errorName(err)});
+            return .usage;
+        };
+        cross_database.command(rt, options, stdout, stderr) catch |err| {
+            try stderr.print("error: cross-database command failed: {s}\n", .{@errorName(err)});
+            return .failure;
+        };
         return .ok;
     }
 
