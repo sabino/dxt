@@ -1315,7 +1315,8 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
     // Core creates all selected model and persisted-test schemas before jobs.
     // Serial preparation avoids DuckDB catalog conflicts between audit jobs.
     var preparation = try @import("project/adapter.zig").openSession(runtime, graph, db_path);
-    defer preparation.deinit();
+    var preparation_active = true;
+    defer if (preparation_active) preparation.deinit();
     for (resources.items) |resource| {
         const config = switch (resource) {
             .generic => |node| node.config,
@@ -1343,6 +1344,15 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
     defer task_rows.deinit(runtime.allocator);
     defer deinitRunResults(runtime.allocator, task_rows.items);
     const start_failed = try @import("project/hook_operations.zig").run(runtime, graph, &preparation, db_path, target_dir, "on-run-start", &task_rows, stderr, null);
+    // A file-backed keep_open=false profile closes its final connection between
+    // preparation, model jobs and end hooks, resetting connection-local state.
+    const reset_preparation = graph.adapter_kind == .duckdb and
+        !std.mem.eql(u8, db_path, ":memory:") and
+        !@import("project/duckdb_profile.zig").keepOpen(graph.duckdb_credentials);
+    if (reset_preparation) {
+        preparation.deinit();
+        preparation_active = false;
+    }
     var summary = if (start_failed and graph.skip_nodes_if_on_run_start_fails) blk: {
         const rows = try runtime.allocator.alloc(run_results.NodeResult, resources.items.len);
         for (resources.items, rows) |resource, *row| {
@@ -1378,6 +1388,10 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
             }
             for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
         }
+    }
+    if (!preparation_active) {
+        preparation = try @import("project/adapter.zig").openSession(runtime, graph, db_path);
+        preparation_active = true;
     }
     const end_failed = @import("project/hook_operations.zig").run(runtime, graph, &preparation, db_path, target_dir, "on-run-end", &task_rows, stderr, if (start_failed and graph.skip_nodes_if_on_run_start_fails) &.{} else null) catch |err| {
         _ = try writeManifest(runtime, graph, target_dir);

@@ -19,6 +19,7 @@ NOTICES = {
     'dbt-includes-provenance.json': 'vendor/dbt-includes/provenance.json',
     'unicode-LICENSE': 'vendor/unicode/LICENSE',
     'unicode-UPSTREAM': 'vendor/unicode/README.md',
+    'unicode-names-provenance.json': 'vendor/unicode/names-source.json',
     'pcre2-LICENSE': 'vendor/pcre2/LICENSE',
     'pcre2-UPSTREAM': 'vendor/pcre2/README.md',
     'pcre2-provenance.json': 'vendor/pcre2/SOURCE.json',

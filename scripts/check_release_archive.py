@@ -33,6 +33,7 @@ REQUIRED_MEMBERS = {
     "docs/licenses/dbt_postgres-LICENSE",
     "docs/licenses/unicode-LICENSE",
     "docs/licenses/unicode-UPSTREAM",
+    "docs/licenses/unicode-names-provenance.json",
     "docs/licenses/pcre2-LICENSE",
     "docs/licenses/pcre2-UPSTREAM",
     "docs/licenses/pcre2-provenance.json",
