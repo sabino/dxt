@@ -52,5 +52,12 @@ pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, path
         try session.execute(reset);
     }
     try session.execute(sql);
+    if (policy.main_result != null) {
+        const delimiter: std.json.Value = values.get(node.effective_config, "delimiter") orelse .{ .string = "," };
+        if (delimiter != .string) return error.InvalidSeedDelimiter;
+        var document = try csv.parseWithDelimiter(a, node.raw_code, delimiter.string);
+        defer document.deinit();
+        try @import("materialization_result.zig").captureSeed(a, policy.main_result, full_refresh, document.rows.len);
+    }
     if (policy.manage_transaction) try session.commit();
 }

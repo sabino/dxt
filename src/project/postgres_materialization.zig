@@ -10,6 +10,8 @@ const types = @import("types.zig");
 pub const ExecutionPolicy = struct {
     manage_transaction: bool = true,
     file_effects: ?*@import("materialization_journal.zig").Journal = null,
+    // Owned by the caller, including when a later hook or commit fails.
+    main_result: ?*?@import("materialization_result.zig").Result = null,
 };
 
 pub fn isSupported(value: []const u8) bool {
@@ -40,6 +42,7 @@ pub fn executeReturningWithPolicy(runtime: types.Runtime, graph: *const types.Gr
     errdefer if (policy.manage_transaction) session.rollback() catch {};
     var result = try executeInTransaction(runtime.allocator, session, graph, node, sql);
     errdefer result.deinit(runtime.allocator);
+    try @import("materialization_result.zig").captureQuery(runtime.allocator, policy.main_result, result);
     if (policy.manage_transaction) try session.commit();
     return result;
 }

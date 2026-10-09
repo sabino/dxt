@@ -80,6 +80,11 @@ pub fn executeModel(runtime: Runtime, db_path: []const u8, graph: *const Graph, 
 
 pub const ExecutionPolicy = postgres_materialization.ExecutionPolicy;
 pub fn executeModelWithPolicy(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
+    try executeModelBody(runtime, db_path, graph, node, policy);
+    if (std.mem.eql(u8, graph.adapter_type, "duckdb")) try @import("materialization_result.zig").captureQuery(runtime.allocator, policy.main_result, .{});
+}
+
+fn executeModelBody(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
     if (std.mem.eql(u8, node.materialized, "external") or std.mem.eql(u8, node.materialized, "table_function")) return @import("duckdb_file_materialization.zig").execute(runtime, db_path, graph, node, policy);
     if (std.mem.eql(u8, node.materialized, "incremental")) return try incremental.executeWithPolicy(runtime, db_path, graph, node, policy);
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) {

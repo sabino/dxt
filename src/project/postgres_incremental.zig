@@ -29,10 +29,12 @@ pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, node
         table.materialized = "table";
         var held_runtime = runtime;
         held_runtime.adapter_session = session;
-        try materialization.executeWithPolicy(held_runtime, graph, &table, trimmedSql(node), .{ .manage_transaction = false });
+        var creation_policy = policy;
+        creation_policy.manage_transaction = false;
+        try materialization.executeWithPolicy(held_runtime, graph, &table, trimmedSql(node), creation_policy);
     } else {
         if (!std.mem.eql(u8, kind.?, "table")) return error.PostgresExecutionFailed;
-        try update(runtime.allocator, session, graph, node, schema);
+        try update(runtime.allocator, session, graph, node, schema, policy);
     }
     if (policy.manage_transaction) try session.commit();
 }
@@ -40,7 +42,7 @@ pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, node
 fn trimmedSql(node: *const types.Node) []const u8 {
     return std.mem.trimEnd(u8, node.compiled_code orelse "", " \t\r\n;");
 }
-fn update(allocator: std.mem.Allocator, session: *adapter.Session, graph: *const types.Graph, node: *const types.Node, schema: []const u8) !void {
+fn update(allocator: std.mem.Allocator, session: *adapter.Session, graph: *const types.Graph, node: *const types.Node, schema: []const u8, policy: ExecutionPolicy) !void {
     const strategy = node.incremental.strategy orelse "default";
     if ((std.mem.eql(u8, strategy, "merge") or std.mem.eql(u8, strategy, "microbatch")) and !session.capabilities().merge) return error.PostgresExecutionFailed;
     const target = try compiler.relationNameForNode(allocator, graph, node);
@@ -83,7 +85,9 @@ fn update(allocator: std.mem.Allocator, session: *adapter.Session, graph: *const
     const dest = if (std.mem.eql(u8, config.schemaPolicy(node.incremental), "ignore")) expanded_columns else source_columns;
     const mutation = if (std.mem.eql(u8, strategy, "merge") or std.mem.eql(u8, strategy, "microbatch")) try renderMergeSql(allocator, graph, node, target, stage, dest) else try renderInsertSql(allocator, node, target, stage, dest);
     defer allocator.free(mutation);
-    try session.execute(mutation);
+    var main = try session.query(mutation);
+    defer main.deinit(allocator);
+    try @import("materialization_result.zig").captureQuery(allocator, policy.main_result, main);
     const cleanup = try std.fmt.allocPrint(allocator, "drop table {s}", .{stage});
     defer allocator.free(cleanup);
     try session.execute(cleanup);

@@ -20,9 +20,10 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
 
 pub fn executeReturning(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node) !?@import("materialization_result.zig").Result {
     if (try @import("custom_materialization.zig").custom(graph, node)) |macro| return try @import("custom_materialization.zig").execute(runtime, db_path, graph, node, macro);
-    var marker: u8 = 0;
-    try executeWithBody(runtime, db_path, graph, node, .{ .context = &marker, .execute = stockBody });
-    return null;
+    var response: ?@import("materialization_result.zig").Result = null;
+    errdefer if (response) |result| result.deinit(runtime.allocator);
+    try executeWithBody(runtime, db_path, graph, node, .{ .context = &response, .execute = stockBody });
+    return response;
 }
 
 pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node, body: BodyExecutor) !void {
@@ -63,6 +64,7 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
     try runHooks(allocator, &runtime_graph, node, config, "pre-hook", false);
     try host.begin();
     errdefer host.rollback() catch {};
+    errdefer |err| if (host.lastError()) |message| @import("compile_diagnostics.zig").captureError(node.original_file_path, node.name, message, err);
     try runHooks(allocator, &runtime_graph, node, config, "pre-hook", true);
     if (@import("contracts.zig").enforced(node)) _ = try compiler.renderMacroForNode(allocator, &runtime_graph, node, "get_assert_columns_equivalent", &.{.{ .name = "sql", .value = .{ .string = duckdb.trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution) } }});
     try body.execute(body.context, held_runtime, &runtime_graph, node, db_path, .{ .manage_transaction = false, .file_effects = &journal });
@@ -98,8 +100,10 @@ fn runHooks(allocator: std.mem.Allocator, graph: *const types.Graph, node: *cons
     _ = try compiler.renderMacroForNode(allocator, graph, node, "run_hooks", &args);
 }
 
-fn stockBody(_: *anyopaque, runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, db_path: []const u8, policy: duckdb.ExecutionPolicy) anyerror!void {
-    if (std.mem.eql(u8, node.resource_type, "seed")) return duckdb.executeSeedWithPolicy(runtime, db_path, graph.command_options.project_dir, graph, node, policy);
-    if (std.mem.eql(u8, node.resource_type, "snapshot")) return @import("snapshot_runner.zig").executeWithPolicy(runtime, db_path, graph, node, policy);
-    return duckdb.executeModelWithPolicy(runtime, db_path, graph, node, policy);
+fn stockBody(raw: *anyopaque, runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, db_path: []const u8, policy: duckdb.ExecutionPolicy) anyerror!void {
+    var observed = policy;
+    observed.main_result = @ptrCast(@alignCast(raw));
+    if (std.mem.eql(u8, node.resource_type, "seed")) return duckdb.executeSeedWithPolicy(runtime, db_path, graph.command_options.project_dir, graph, node, observed);
+    if (std.mem.eql(u8, node.resource_type, "snapshot")) return @import("snapshot_runner.zig").executeWithPolicy(runtime, db_path, graph, node, observed);
+    return duckdb.executeModelWithPolicy(runtime, db_path, graph, node, observed);
 }

@@ -45,6 +45,7 @@ pub fn executeWithPolicy(runtime: Runtime, db_path: []const u8, graph: *const Gr
     defer allocator.free(sql);
     // Source staging, schema changes, validity updates and new records share one transaction.
     try duckdb.executeSql(runtime, db_path, sql);
+    try @import("materialization_result.zig").captureQuery(allocator, policy.main_result, .{});
 }
 
 fn executePostgres(runtime: Runtime, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
@@ -101,9 +102,12 @@ fn executePostgres(runtime: Runtime, graph: *const Graph, node: *const Node, pol
         defer allocator.free(expansion);
         if (expansion.len != 0) try session.execute(expansion);
     }
-    const sql = try renderExecutionSqlWithPolicy(allocator, graph, node, source_columns.items, target_columns.items, false, false);
+    const sql = try renderExecutionSqlWithCleanup(allocator, graph, node, source_columns.items, target_columns.items, false, false, false);
     defer allocator.free(sql);
-    try session.execute(sql);
+    var main = try session.query(sql);
+    defer main.deinit(allocator);
+    try @import("materialization_result.zig").captureQuery(allocator, policy.main_result, main);
+    try session.execute(if (target_columns.items.len == 0) "drop table __dxt_snapshot_source" else if (std.mem.eql(u8, hardDeletes(node.snapshot_config.?), "ignore")) "drop table __dxt_snapshot_changes; drop table __dxt_snapshot_target; drop table __dxt_snapshot_source" else "drop table __dxt_snapshot_changes; drop table __dxt_snapshot_target; drop table __dxt_snapshot_source; drop table __dxt_snapshot_deletes");
     if (kind == null) {
         const relation = try compiler.relationNameForNode(allocator, graph, node);
         defer allocator.free(relation);
@@ -263,6 +267,10 @@ pub fn renderExecutionSql(allocator: std.mem.Allocator, graph: *const Graph, nod
 }
 
 pub fn renderExecutionSqlWithPolicy(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, source_columns: []const Column, target_columns: []const Column, begin_transaction: bool, commit_transaction: bool) ![]const u8 {
+    return renderExecutionSqlWithCleanup(allocator, graph, node, source_columns, target_columns, begin_transaction, commit_transaction, true);
+}
+
+fn renderExecutionSqlWithCleanup(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, source_columns: []const Column, target_columns: []const Column, begin_transaction: bool, commit_transaction: bool, cleanup: bool) ![]const u8 {
     const config = node.snapshot_config.?;
     const names = config.meta_columns;
     const scd_id = try compiler.quoteIdentifier(allocator, names.dbt_scd_id);
@@ -302,7 +310,8 @@ pub fn renderExecutionSqlWithPolicy(allocator: std.mem.Allocator, graph: *const 
         try writeSourceColumns(writer, allocator, source_columns, "s");
         try writer.print(", __dxt_snapshot_scd_id as {s}, __dxt_snapshot_updated_at as {s}, __dxt_snapshot_updated_at as {s}, coalesce(nullif(__dxt_snapshot_updated_at,__dxt_snapshot_updated_at), {s}) as {s}", .{ scd_id, updated, valid_from, current, valid_to });
         if (new_record) try writer.print(", 'False' as {s}", .{deleted});
-        try writer.writeAll(" from __dxt_snapshot_source s;\ndrop table __dxt_snapshot_source;\n");
+        try writer.writeAll(" from __dxt_snapshot_source s;\n");
+        if (cleanup) try writer.writeAll("drop table __dxt_snapshot_source;\n");
         if (commit_transaction) try writer.writeAll("commit;\n");
         return out.toOwnedSlice();
     }
@@ -349,8 +358,11 @@ pub fn renderExecutionSqlWithPolicy(allocator: std.mem.Allocator, graph: *const 
     try writeSourceColumns(writer, allocator, source_columns, "s");
     try writer.print(", __dxt_snapshot_scd_id, __dxt_snapshot_updated_at, __dxt_snapshot_updated_at, coalesce(nullif(__dxt_snapshot_updated_at,__dxt_snapshot_updated_at), {s})", .{current});
     if (new_record) try writer.writeAll(", 'False'");
-    try writer.writeAll(" from __dxt_snapshot_changes s;\ndrop table __dxt_snapshot_changes;\ndrop table __dxt_snapshot_target;\ndrop table __dxt_snapshot_source;\n");
-    if (!std.mem.eql(u8, hardDeletes(config), "ignore")) try writer.writeAll("drop table __dxt_snapshot_deletes;\n");
+    try writer.writeAll(" from __dxt_snapshot_changes s;\n");
+    if (cleanup) {
+        try writer.writeAll("drop table __dxt_snapshot_changes;\ndrop table __dxt_snapshot_target;\ndrop table __dxt_snapshot_source;\n");
+        if (!std.mem.eql(u8, hardDeletes(config), "ignore")) try writer.writeAll("drop table __dxt_snapshot_deletes;\n");
+    }
     if (commit_transaction) try writer.writeAll("commit;\n");
     return out.toOwnedSlice();
 }
