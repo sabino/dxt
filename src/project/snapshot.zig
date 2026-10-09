@@ -330,6 +330,85 @@ fn hasColumns(columns: types.SnapshotColumns) bool {
     };
 }
 
+/// Rebuild the runtime snapshot configuration from the final typed config map.
+/// Strings borrow the map's lifetime; column-list containers belong to the node.
+/// Semantic strategy validation runs after every precedence layer is applied.
+pub fn applyJsonConfig(allocator: std.mem.Allocator, value: std.json.Value, node: *types.Node) !void {
+    if (value != .object or node.snapshot_config == null) return error.InvalidSnapshotConfig;
+    if (node.snapshot_config.?.unique_key) |*columns| columns.deinit(allocator);
+    if (node.snapshot_config.?.check_cols) |*columns| columns.deinit(allocator);
+    node.snapshot_config = .{};
+    const config = &node.snapshot_config.?;
+    inline for (.{ "strategy", "target_schema", "target_database", "updated_at", "invalidate_hard_deletes", "hard_deletes", "dbt_valid_to_current", "unique_key", "check_cols", "snapshot_meta_column_names" }, 0..) |field, index| {
+        if (value.object.contains(field)) config.configured_fields |= @as(u16, 1) << index;
+    }
+    inline for (.{ "strategy", "target_schema", "target_database", "updated_at", "hard_deletes", "dbt_valid_to_current" }) |field| {
+        if (value.object.get(field)) |item| @field(config, field) = if (item == .null) null else if (item == .string) item.string else return error.InvalidSnapshotConfig;
+    }
+    if (value.object.get("invalidate_hard_deletes")) |item| config.invalidate_hard_deletes = if (item == .null) null else if (item == .bool) item.bool else return error.InvalidSnapshotConfig;
+    inline for (.{ "unique_key", "check_cols" }) |field| {
+        if (value.object.get(field)) |item| {
+            if (item == .string) @field(config, field) = .{ .string = item.string } else if (item == .array) {
+                var columns: std.ArrayList([]const u8) = .empty;
+                errdefer columns.deinit(allocator);
+                for (item.array.items) |column| {
+                    if (column != .string) return error.InvalidSnapshotConfig;
+                    try columns.append(allocator, column.string);
+                }
+                @field(config, field) = .{ .list = columns };
+            } else if (item != .null) return error.InvalidSnapshotConfig;
+        }
+    }
+    if (value.object.get("snapshot_meta_column_names")) |names| {
+        if (names != .null) {
+            if (names != .object) return error.InvalidSnapshotConfig;
+            config.meta_columns_configured = true;
+            var entries = names.object.iterator();
+            while (entries.next()) |entry| {
+                var known = false;
+                inline for (.{ "dbt_valid_to", "dbt_valid_from", "dbt_scd_id", "dbt_updated_at", "dbt_is_deleted" }, 0..) |field, index| {
+                    if (std.mem.eql(u8, entry.key_ptr.*, field)) {
+                        known = true;
+                        const name = entry.value_ptr.*;
+                        if (name != .null) {
+                            if (name != .string or name.string.len == 0) return error.InvalidSnapshotConfig;
+                            @field(config.meta_columns, field) = name.string;
+                            config.meta_columns_fields |= @as(u5, 1) << index;
+                        }
+                    }
+                }
+                if (!known) return error.InvalidSnapshotConfig;
+            }
+        }
+    }
+    if (value.object.get("meta")) |meta| {
+        if (meta != .object) return error.InvalidSnapshotConfig;
+        node.snapshot_meta_json = meta;
+    }
+}
+
+test "typed snapshot config rebuild retains native values and clears nullable overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var node = types.Node{ .resource_type = "snapshot", .package_name = "demo", .unique_id = "snapshot.demo.history", .name = "history", .path = "history.sql", .original_file_path = "snapshots/history.sql", .raw_code = "", .snapshot_config = .{} };
+    defer types.deinitNode(allocator, &node);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"strategy\":\"check\",\"unique_key\":[\"id\",\"tenant\"],\"check_cols\":\"all\",\"hard_deletes\":\"new_record\",\"snapshot_meta_column_names\":{\"dbt_valid_to\":\"valid_to\",\"dbt_is_deleted\":null},\"meta\":{\"nested\":[true,null]}}", .{});
+    defer parsed.deinit();
+    try applyJsonConfig(allocator, parsed.value, &node);
+    try validateConfig(&node);
+    try std.testing.expectEqual(@as(usize, 2), node.snapshot_config.?.unique_key.?.list.items.len);
+    try std.testing.expectEqualStrings("valid_to", node.snapshot_config.?.meta_columns.dbt_valid_to);
+    try std.testing.expectEqual(@as(u5, 1), node.snapshot_config.?.meta_columns_fields);
+    try std.testing.expect(node.snapshot_meta_json.?.object.get("nested").?.array.items[0].bool);
+    const cleared = try std.json.parseFromSlice(std.json.Value, allocator, "{\"unique_key\":null,\"snapshot_meta_column_names\":null}", .{});
+    defer cleared.deinit();
+    try applyJsonConfig(allocator, cleared.value, &node);
+    try std.testing.expect(node.snapshot_config.?.unique_key == null);
+    try std.testing.expectEqualStrings("dbt_valid_to", node.snapshot_config.?.meta_columns.dbt_valid_to);
+    try std.testing.expectError(error.InvalidSnapshotConfig, validateConfig(&node));
+}
+
 pub fn validateConfig(node: *const types.Node) !void {
     if (!node.enabled) return;
     const config = node.snapshot_config.?;
