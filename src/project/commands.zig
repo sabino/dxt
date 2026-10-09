@@ -115,21 +115,35 @@ pub const OperationHost = struct {
     stdout: *std.Io.Writer,
     stored: std.ArrayList(StoredValue) = .empty,
     session: ?adapter.Session = null,
+    borrowed_session: ?*adapter.Session = null,
     owned_pool: ?*adapter.DuckDBPool = null,
     values: std.heap.ArenaAllocator,
 
     transaction_open: bool = false,
 
+    /// Construct the context without connecting. Offline compilation remains
+    /// available; the first database callback opens or borrows a session.
+    pub fn initLazy(runtime: Runtime, graph: *const types.Graph, db_path: []const u8, stdout: *std.Io.Writer) !OperationHost {
+        return .{ .runtime = runtime, .graph = graph, .db_path = db_path, .stdout = stdout, .values = std.heap.ArenaAllocator.init(runtime.allocator), .borrowed_session = runtime.adapter_session };
+    }
+
     pub fn init(runtime: Runtime, graph: *const types.Graph, db_path: []const u8, stdout: *std.Io.Writer) !OperationHost {
-        var self = OperationHost{ .runtime = runtime, .graph = graph, .db_path = db_path, .stdout = stdout, .values = std.heap.ArenaAllocator.init(runtime.allocator) };
+        var self = try initLazy(runtime, graph, db_path, stdout);
         errdefer self.deinit();
-        if (self.runtime.duckdb_pool == null and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
+        try self.ensureSession();
+        return self;
+    }
+
+    fn ensureSession(self: *OperationHost) !void {
+        if (self.currentSession() != null) return;
+        const runtime = self.runtime;
+        if (self.runtime.duckdb_pool == null and std.mem.eql(u8, self.graph.adapter_type, "duckdb")) {
             const pool = try runtime.allocator.create(adapter.DuckDBPool);
             pool.* = adapter.DuckDBPool.init(runtime.allocator, runtime.io, runtime.environment);
             self.owned_pool = pool;
             self.runtime.duckdb_pool = pool;
         }
-        self.session = adapter.openSession(self.runtime, graph, db_path) catch |err| switch (err) {
+        self.session = adapter.openSession(self.runtime, self.graph, self.db_path) catch |err| switch (err) {
             error.NativeDuckDbLibraryNotFound => blk: {
                 if (runtime.environment) |environment| {
                     if (environment.get("DXT_DUCKDB_LIBRARY") != null) return err;
@@ -139,7 +153,25 @@ pub const OperationHost = struct {
             },
             else => return err,
         };
-        return self;
+    }
+
+    fn currentSession(self: *OperationHost) ?*adapter.Session {
+        if (self.borrowed_session) |session| return session;
+        return if (self.session) |*session| session else null;
+    }
+
+    pub fn commit(self: *OperationHost) !void {
+        if (!self.transaction_open) return;
+        const session = self.currentSession() orelse return error.NativeDuckDbPoolRequired;
+        try session.commit();
+        self.transaction_open = false;
+    }
+
+    pub fn rollback(self: *OperationHost) !void {
+        if (!self.transaction_open) return;
+        const session = self.currentSession() orelse return error.NativeDuckDbPoolRequired;
+        try session.rollback();
+        self.transaction_open = false;
     }
 
     pub fn host(self: *OperationHost) expression.Host {
@@ -147,6 +179,7 @@ pub const OperationHost = struct {
     }
 
     pub fn deinit(self: *OperationHost) void {
+        self.rollback() catch {};
         if (self.session) |*session| session.deinit();
         if (self.owned_pool) |pool| {
             pool.deinit();
@@ -195,7 +228,8 @@ pub const OperationHost = struct {
             if (sql != .string or key != .string) return error.InvalidJinjaArguments;
             const auto_begin: expression.Value = argument(args, "auto_begin", 2) orelse .{ .boolean = true };
             if (auto_begin.truthy() and !self.transaction_open) {
-                const session = if (self.session) |*value| value else return error.NativeDuckDbPoolRequired;
+                try self.ensureSession();
+                const session = self.currentSession() orelse return error.NativeDuckDbPoolRequired;
                 try session.begin();
                 self.transaction_open = true;
             }
@@ -211,19 +245,16 @@ pub const OperationHost = struct {
         }
         if (std.mem.eql(u8, name, "adapter.type")) return .{ .string = self.graph.adapter_type };
         if (std.mem.eql(u8, name, "adapter.commit") or std.mem.eql(u8, name, "adapter.clear_transaction")) {
-            if (self.transaction_open) {
-                const session = if (self.session) |*value| value else return error.NativeDuckDbPoolRequired;
-                try session.commit();
-                self.transaction_open = false;
-            }
+            try self.commit();
             return .none;
         }
         return error.UnresolvedMacro;
     }
 
     fn query(self: *OperationHost, sql: []const u8, _: std.mem.Allocator) !expression.Value {
+        try self.ensureSession();
         const allocator = self.values.allocator();
-        var output = if (self.session) |*session| try session.query(sql) else try adapter.queryForGraph(self.runtime, self.graph, self.db_path, sql);
+        var output = if (self.currentSession()) |session| try session.query(sql) else try adapter.queryForGraph(self.runtime, self.graph, self.db_path, sql);
         defer output.deinit(self.runtime.allocator);
         const trimmed = std.mem.trim(u8, sql, " \t\r\n;");
         if (std.ascii.eqlIgnoreCase(trimmed, "begin") or std.ascii.eqlIgnoreCase(trimmed, "begin transaction")) self.transaction_open = true;
