@@ -24,9 +24,11 @@ const Api = struct {
     duckdb_destroy_extracted: *const fn (*Handle) callconv(.c) void,
     duckdb_prepare_extracted_statement: *const fn (Handle, Handle, u64, *Handle) callconv(.c) c_uint,
     duckdb_prepared_statement_type: *const fn (Handle) callconv(.c) c_uint,
+    duckdb_prepare_error: *const fn (Handle) callconv(.c) ?[*:0]const u8,
     duckdb_destroy_prepare: *const fn (*Handle) callconv(.c) void,
     duckdb_execute_prepared: *const fn (Handle, *CResult) callconv(.c) c_uint,
     duckdb_result_error_type: *const fn (*CResult) callconv(.c) c_uint,
+    duckdb_result_error: *const fn (*CResult) callconv(.c) ?[*:0]const u8,
     duckdb_result_return_type: *const fn (CResult) callconv(.c) c_uint,
     duckdb_destroy_result: *const fn (*CResult) callconv(.c) void,
     duckdb_column_count: *const fn (*CResult) callconv(.c) u64,
@@ -175,7 +177,7 @@ pub const Pool = struct {
         var config: Handle = null;
         defer api.duckdb_destroy_config(&config);
         if (api.duckdb_create_config(&config) != 0) return error.NativeDuckDbConnectionFailed;
-        if (readonly and api.duckdb_set_config(config, "access_mode", "READ_ONLY") != 0) return error.NativeDuckDbConnectionFailed;
+        if (readonly and !std.mem.eql(u8, path, ":memory:") and api.duckdb_set_config(config, "access_mode", "READ_ONLY") != 0) return error.NativeDuckDbConnectionFailed;
         var handle: Handle = null;
         var message: ?[*:0]u8 = null;
         const status = api.duckdb_open_ext(path_z, &handle, config, &message);
@@ -215,8 +217,13 @@ pub const Connection = struct {
     pool: *Pool,
     database: *Database,
     memory: bool,
+    binding_readonly: bool = false,
+    // Raw SQL diagnostics are memory-only. Public formatters must redact
+    // connection paths and secret values before publishing their projection.
+    last_error: ?[]const u8 = null,
 
     pub fn deinit(self: *Connection) void {
+        self.clearError();
         if (self.handle == null) return;
         self.api.duckdb_disconnect(&self.handle);
         self.pool.release(self.database, self.memory);
@@ -231,6 +238,7 @@ pub const Connection = struct {
     }
 
     pub fn query(self: *Connection, sql: []const u8) !QueryResult {
+        self.clearError();
         if (self.readonly) {
             var begin_result = try self.queryStatements("begin transaction read only", false);
             begin_result.deinit(self.allocator);
@@ -251,18 +259,26 @@ pub const Connection = struct {
         var extracted: Handle = null;
         const count = self.api.duckdb_extract_statements(self.handle, sql_z, &extracted);
         defer self.api.duckdb_destroy_extracted(&extracted);
-        if (self.api.duckdb_extract_statements_error(extracted) != null) return error.DuckDbExecutionFailed;
+        if (self.api.duckdb_extract_statements_error(extracted)) |message| {
+            self.captureError(message);
+            return error.DuckDbExecutionFailed;
+        }
         var output: QueryResult = .{};
         errdefer output.deinit(self.allocator);
         for (0..count) |index| {
             var prepared: Handle = null;
             defer self.api.duckdb_destroy_prepare(&prepared);
-            if (self.api.duckdb_prepare_extracted_statement(self.handle, extracted, index, &prepared) != 0) return error.DuckDbExecutionFailed;
+            if (self.api.duckdb_prepare_extracted_statement(self.handle, extracted, index, &prepared) != 0) {
+                self.captureError(self.api.duckdb_prepare_error(prepared));
+                return error.DuckDbExecutionFailed;
+            }
             const statement_type = self.api.duckdb_prepared_statement_type(prepared);
+            if (self.binding_readonly and (statement_type == 10 or statement_type == 25 or statement_type == 26)) return error.NativeDuckDbReadOnlyConnection;
             if (readonly and statement_type != 1 and statement_type != 4) return error.NativeDuckDbReadOnlyConnection;
             var raw: CResult = .{};
             defer self.api.duckdb_destroy_result(&raw);
             if (self.api.duckdb_execute_prepared(prepared, &raw) != 0) {
+                self.captureError(self.api.duckdb_result_error(&raw));
                 if (self.api.duckdb_result_error_type(&raw) == 29) return error.AdapterQueryCancelled;
                 return error.DuckDbExecutionFailed;
             }
@@ -286,13 +302,39 @@ pub const Connection = struct {
     }
 
     pub fn begin(self: *Connection) !void {
+        if (self.binding_readonly) return error.NativeDuckDbReadOnlyConnection;
         try self.execute("begin transaction");
     }
     pub fn commit(self: *Connection) !void {
+        if (self.binding_readonly) return error.NativeDuckDbReadOnlyConnection;
         try self.execute("commit");
     }
     pub fn rollback(self: *Connection) !void {
+        if (self.binding_readonly) return error.NativeDuckDbReadOnlyConnection;
         try self.execute("rollback");
+    }
+
+    /// Temp views/tables remain visible across binder queries. The database
+    /// enforces READ ONLY while the driver rejects transaction escapes.
+    pub fn enterReadOnlySession(self: *Connection) !void {
+        if (self.binding_readonly) return error.NativeDuckDbReadOnlyConnection;
+        var output = try self.queryStatements("begin transaction read only", false);
+        output.deinit(self.allocator);
+        self.readonly = false;
+        self.binding_readonly = true;
+    }
+
+    fn clearError(self: *Connection) void {
+        if (self.last_error) |owned| self.allocator.free(owned);
+        self.last_error = null;
+    }
+
+    fn captureError(self: *Connection, message: ?[*:0]const u8) void {
+        self.clearError();
+        if (message) |text| {
+            const value = std.mem.span(text);
+            self.last_error = self.allocator.dupe(u8, value[0..@min(value.len, 64 * 1024)]) catch null;
+        }
     }
 
     fn copyResult(self: *Connection, raw: *CResult) !QueryResult {

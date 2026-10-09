@@ -55,6 +55,12 @@ pub const Session = union(enum) {
             .postgres => |*connection| try connection.cancel(),
         }
     }
+    pub fn lastError(self: *const Session) ?[]const u8 {
+        return switch (self.*) {
+            .duckdb => |*connection| connection.last_error,
+            .postgres => null,
+        };
+    }
     pub fn capabilities(self: *const Session) Capabilities {
         return switch (self.*) {
             .duckdb => @import("native_duckdb.zig").capabilities,

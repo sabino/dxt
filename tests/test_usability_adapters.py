@@ -132,6 +132,21 @@ def test_native_readonly_pool_promotes_only_after_readers_disconnect(driver, tmp
     }
 
 
+def test_native_binding_session_retains_temp_views_and_memory_diagnostics(driver, tmp_path, duckdb_environment):
+    assert decoded(invoke(driver, "duckdb", "binder", ":memory:", duckdb_environment)) == {
+        "temporary_binding": True, "diagnostics_in_memory": True,
+    }
+
+
+def test_native_binding_cannot_escape_shared_writer_readonly_transaction(driver, tmp_path, duckdb_environment):
+    database = tmp_path / "binding.duckdb"
+    assert decoded(invoke(driver, "duckdb", "binder-write", database, duckdb_environment)) == {
+        "persistent_writes_rejected": True, "transaction_escape_rejected": True,
+    }
+    assert decoded(invoke(driver, "duckdb", "query", database, duckdb_environment,
+                          "select count(*) as n from guarded_binding")) == [{"n": 0}]
+
+
 def test_native_transaction_script_preserves_selected_result_through_rollback(
     driver, tmp_path, duckdb_environment
 ):

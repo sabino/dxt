@@ -58,6 +58,44 @@ fn run(init: std.process.Init) !void {
         try emit(init.io, "{\"readers_preserved\":true,\"promoted_after_disconnect\":true}");
         return;
     }
+    if (std.mem.eql(u8, args[2], "binder")) {
+        var connection = (try pool.acquire(args[3], true)).?;
+        defer connection.deinit();
+        try connection.enterReadOnlySession();
+        try connection.execute("create temporary view dxt_bound as select 17 as id");
+        var described = try connection.query("describe select id from dxt_bound");
+        defer described.deinit(allocator);
+        try expectScalar(&described, "id");
+        connection.execute("select missing_column from dxt_bound") catch |err| {
+            if (err != error.DuckDbExecutionFailed or connection.last_error == null) return error.MissingBinderDiagnostic;
+        };
+        // A binder SQL error aborts its transaction; a fresh held session is
+        // used by the next model. Disconnect rolls back every temp object.
+        try emit(init.io, "{\"temporary_binding\":true,\"diagnostics_in_memory\":true}");
+        return;
+    }
+    if (std.mem.eql(u8, args[2], "binder-write")) {
+        var connection = (try pool.acquire(args[3], false)).?;
+        defer connection.deinit();
+        try connection.execute("create table guarded_binding(id integer)");
+        var reader = (try pool.acquire(args[3], true)).?;
+        defer reader.deinit();
+        try reader.enterReadOnlySession();
+        const attempts = [_][]const u8{ "commit", "rollback", "attach ':memory:' as escaped" };
+        for (attempts) |attempt| {
+            reader.execute(attempt) catch |err| {
+                if (err != error.NativeDuckDbReadOnlyConnection) return err;
+                continue;
+            };
+            return error.ReadOnlySessionEscaped;
+        }
+        reader.execute("insert into guarded_binding values (17)") catch |err| {
+            if (err != error.DuckDbExecutionFailed) return err;
+            try emit(init.io, "{\"persistent_writes_rejected\":true,\"transaction_escape_rejected\":true}");
+            return;
+        };
+        return error.ReadOnlyWriteWasAllowed;
+    }
     if (std.mem.eql(u8, args[2], "query") or std.mem.eql(u8, args[2], "profile")) {
         if (args.len != 5) return error.MissingSql;
         var output = try adapter.queryForGraph(runtime, &graph, args[3], args[4]);
