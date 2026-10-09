@@ -7,6 +7,7 @@ const duckdb = @import("duckdb.zig");
 const fs = @import("fs.zig");
 const values = @import("config_value.zig");
 const cross = @import("cross_database.zig");
+const target_locks = @import("cross_database_lock.zig");
 
 pub fn printHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll(
@@ -198,23 +199,72 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, options: types
     }
     const database = try duckdb.databasePath(runtime.allocator, target, graph);
     defer runtime.allocator.free(database);
+    var locks: std.ArrayList(target_locks.Lock) = .empty;
+    defer {
+        for (locks.items) |*lock| lock.deinit();
+        locks.deinit(runtime.allocator);
+    }
+    var export_session: ?adapter.Session = null;
+    defer if (export_session) |*session| session.deinit();
+    errdefer if (export_session) |*session| session.rollback() catch {};
+    if (query.export_saved_query) {
+        const connection = if (physical) |document| document.value.connections[document.value.models[0].destination] else profileConnection(graph, database);
+        var acquired: std.StringHashMap(void) = .init(runtime.allocator);
+        defer {
+            var keys = acquired.keyIterator();
+            while (keys.next()) |key| runtime.allocator.free(key.*);
+            acquired.deinit();
+        }
+        for (exports) |exported| {
+            const config = sem.field(exported, "config");
+            const schema = sem.string(sem.field(config, "schema_name")) orelse graph.target_schema;
+            const alias = sem.string(sem.field(config, "alias")) orelse return error.InvalidMetricQuery;
+            const key = try std.fmt.allocPrint(runtime.allocator, "{s}.{s}", .{ schema, alias });
+            defer runtime.allocator.free(key);
+            if (acquired.contains(key)) continue;
+            var lock = try target_locks.acquire(runtime, options.project_dir, connection, schema, alias);
+            locks.append(runtime.allocator, lock) catch |err| {
+                lock.deinit();
+                return err;
+            };
+            const owned_key = try runtime.allocator.dupe(u8, key);
+            acquired.put(owned_key, {}) catch |err| {
+                runtime.allocator.free(owned_key);
+                return err;
+            };
+        }
+        if (std.mem.eql(u8, connection.adapter_type, "postgres")) {
+            export_session = if (physical) |document| try cross.openConnection(runtime, document.root, connection) else try adapter.openSession(runtime, graph, database);
+            try export_session.?.begin();
+            for (exports) |exported| {
+                const config = sem.field(exported, "config");
+                const schema = sem.string(sem.field(config, "schema_name")) orelse graph.target_schema;
+                const alias = sem.string(sem.field(config, "alias")) orelse return error.InvalidMetricQuery;
+                try target_locks.acquireDatabase(runtime.allocator, &export_session.?, schema, alias);
+            }
+        }
+    }
     if (physical) |*document| {
         var outcome = try cross.executeQueryPlan(runtime, document);
         defer outcome.deinit(runtime.allocator);
         if (query.export_saved_query) {
-            var destination = try cross.openConnection(runtime, document.root, document.value.connections[document.value.models[0].destination]);
-            defer destination.deinit();
+            var destination: ?adapter.Session = if (export_session == null) try cross.openConnection(runtime, document.root, document.value.connections[document.value.models[0].destination]) else null;
+            defer if (destination) |*session| session.deinit();
             var destination_runtime = runtime;
-            destination_runtime.adapter_session = &destination;
+            destination_runtime.adapter_session = if (export_session) |*session| session else &destination.?;
             const model = document.value.models[0];
             const local_sql = if (model.execution_connection == model.destination) try cross.renderSql(runtime.allocator, model, null) else "";
-            try exportRelations(destination_runtime, graph, database, exports, local_sql, &outcome, document.value.connections[model.execution_connection].adapter_type);
+            try exportRelations(destination_runtime, graph, database, exports, local_sql, &outcome, document.value.connections[model.execution_connection].adapter_type, export_session != null);
+            if (export_session) |*session| session.commit() catch return error.MetricExecutionFailure;
             try stdout.print("Exported {d} saved query relation(s)\n", .{exports.len});
         } else try writeResults(runtime, target, &outcome.result, stdout);
         return;
     }
     if (query.export_saved_query) {
-        try exportRelations(runtime, graph, database, exports, plan.sql, null, graph.adapter_type);
+        var export_runtime = runtime;
+        if (export_session) |*session| export_runtime.adapter_session = session;
+        try exportRelations(export_runtime, graph, database, exports, plan.sql, null, graph.adapter_type, export_session != null);
+        if (export_session) |*session| session.commit() catch return error.MetricExecutionFailure;
         try stdout.print("Exported {d} saved query relation(s)\n", .{exports.len});
         return;
     }
@@ -222,6 +272,27 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, options: types
     defer result.deinit(runtime.allocator);
     try writeResults(runtime, target, &result, stdout);
 }
+fn profileConnection(graph: *const types.Graph, database: []const u8) cross.Connection {
+    return .{
+        .name = "profile",
+        .profile_name = graph.profile_name orelse graph.project_name,
+        .target = graph.target_name orelse "default",
+        .adapter_type = graph.adapter_type,
+        .role = "destination",
+        .trust_domain = "profile",
+        .allowed_destinations = &.{},
+        .identity = .{
+            .profile_name = graph.profile_name orelse graph.project_name,
+            .target_name = graph.target_name orelse "default",
+            .adapter_type = graph.adapter_type,
+            .target_schema = graph.target_schema,
+            .database_path = if (std.mem.eql(u8, graph.adapter_type, "duckdb")) database else null,
+            .connection_info = graph.connection_info,
+            .target_context = graph.target_context,
+        },
+    };
+}
+
 fn physicalPlan(runtime: types.Runtime, options: types.Options, query: planner.Query, connection: []const u8, plan: *const planner.Plan) !cross.QueryPlan {
     const bindings = try runtime.allocator.alloc(cross.RelationBinding, plan.bindings.len);
     defer runtime.allocator.free(bindings);
@@ -237,32 +308,47 @@ fn writeResults(runtime: types.Runtime, target: []const u8, result: *const adapt
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = path, .data = json });
     try stdout.print("{s}\n", .{json});
 }
-fn exportRelations(runtime: types.Runtime, graph: *const types.Graph, database: []const u8, exports: []const std.json.Value, sql: []const u8, outcome: ?*const cross.QueryOutcome, source_adapter: []const u8) !void {
+fn exportRelations(runtime: types.Runtime, graph: *const types.Graph, database: []const u8, exports: []const std.json.Value, sql: []const u8, outcome: ?*const cross.QueryOutcome, source_adapter: []const u8, transaction_open: bool) !void {
+    var owned_session: ?adapter.Session = null;
+    defer if (owned_session) |*session| session.deinit();
+    var export_runtime = runtime;
+    if (runtime.adapter_session == null and std.mem.eql(u8, graph.adapter_type, "postgres")) {
+        owned_session = try adapter.openSession(runtime, graph, database);
+        export_runtime.adapter_session = &owned_session.?;
+    }
+    const session = export_runtime.adapter_session;
     for (exports) |exported| {
         const config = sem.field(exported, "config");
         const schema = sem.string(sem.field(config, "schema_name")) orelse graph.target_schema;
         const alias = sem.string(sem.field(config, "alias")) orelse return error.InvalidMetricQuery;
         const kind = sem.string(sem.field(config, "export_as")) orelse return error.InvalidMetricQuery;
+        errdefer if (session) |destination| destination.rollback() catch {};
+        if (session) |destination| {
+            if (!transaction_open) {
+                try destination.begin();
+                try target_locks.acquireDatabase(runtime.allocator, destination, schema, alias);
+            }
+        }
         const qs = try adapter.quoteIdentifier(runtime.allocator, schema);
         const qi = try adapter.quoteIdentifier(runtime.allocator, alias);
         const schema_literal = try adapter.quoteLiteral(runtime.allocator, schema);
         const alias_literal = try adapter.quoteLiteral(runtime.allocator, alias);
         const lookup = try std.fmt.allocPrint(runtime.allocator, "select table_type from information_schema.tables where table_schema={s} and table_name={s}", .{ schema_literal, alias_literal });
-        var existing = adapter.queryForGraph(runtime, graph, database, lookup) catch return error.MetricExecutionFailure;
+        var existing = adapter.queryForGraph(export_runtime, graph, database, lookup) catch return error.MetricExecutionFailure;
         defer existing.deinit(runtime.allocator);
         const drop = if (existing.firstScalar()) |table_type| try std.fmt.allocPrint(runtime.allocator, "DROP {s} {s}.{s};", .{ if (std.mem.eql(u8, table_type, "VIEW")) "VIEW" else "TABLE", qs, qi }) else "";
         if (outcome != null and std.mem.eql(u8, kind, "table")) {
-            const session = runtime.adapter_session orelse return error.MetricExecutionFailure;
-            try session.begin();
-            errdefer session.rollback() catch {};
-            try session.execute(try std.fmt.allocPrint(runtime.allocator, "CREATE SCHEMA IF NOT EXISTS {s}; {s}", .{ qs, drop }));
+            const destination = session orelse return error.MetricExecutionFailure;
+            destination.execute(try std.fmt.allocPrint(runtime.allocator, "CREATE SCHEMA IF NOT EXISTS {s}; {s}", .{ qs, drop })) catch return error.MetricExecutionFailure;
             const relation = try std.fmt.allocPrint(runtime.allocator, "{s}.{s}", .{ qs, qi });
-            try cross.materializeQueryResult(runtime, session, relation, outcome.?, source_adapter);
-            try session.commit();
+            cross.materializeQueryResult(export_runtime, destination, relation, outcome.?, source_adapter) catch return error.MetricExecutionFailure;
+        } else if (session) |destination| {
+            destination.execute(try std.fmt.allocPrint(runtime.allocator, "CREATE SCHEMA IF NOT EXISTS {s}; {s} CREATE {s} {s}.{s} AS {s};", .{ qs, drop, kind, qs, qi, sql })) catch return error.MetricExecutionFailure;
         } else {
             const export_sql = try std.fmt.allocPrint(runtime.allocator, "BEGIN; CREATE SCHEMA IF NOT EXISTS {s}; {s} CREATE {s} {s}.{s} AS {s}; COMMIT;", .{ qs, drop, kind, qs, qi, sql });
-            adapter.executeForGraph(runtime, graph, database, export_sql) catch return error.MetricExecutionFailure;
+            adapter.executeForGraph(export_runtime, graph, database, export_sql) catch return error.MetricExecutionFailure;
         }
+        if (session) |destination| if (!transaction_open) destination.commit() catch return error.MetricExecutionFailure;
     }
 }
 
