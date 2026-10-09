@@ -321,7 +321,7 @@ pub const GenericTestDef = struct {
 
 pub const GenericTestConfig = struct {
     configured: std.enums.EnumSet(GenericTestConfigField) = .initEmpty(),
-    configured_order: [6]GenericTestConfigField = undefined,
+    configured_order: [std.meta.fields(GenericTestConfigField).len]GenericTestConfigField = undefined,
     configured_order_len: usize = 0,
     where: ?[]const u8 = null,
     limit: ?u64 = null,
@@ -329,6 +329,11 @@ pub const GenericTestConfig = struct {
     warn_if: []const u8 = "!= 0",
     error_if: []const u8 = "!= 0",
     store_failures: ?bool = null,
+    store_failures_as: ?[]const u8 = null,
+    schema: ?[]const u8 = null,
+    alias: ?[]const u8 = null,
+    database: ?[]const u8 = null,
+    fail_calc: []const u8 = "count(*)",
 
     pub fn markConfigured(self: *GenericTestConfig, key: GenericTestConfigField) void {
         if (!self.configured.contains(key)) {
@@ -339,7 +344,7 @@ pub const GenericTestConfig = struct {
     }
 };
 
-pub const GenericTestConfigField = enum { where, limit, severity, warn_if, error_if, store_failures };
+pub const GenericTestConfigField = enum { where, limit, severity, warn_if, error_if, store_failures, store_failures_as, schema, alias, database, fail_calc };
 
 pub const DocBlock = struct {
     package_name: []const u8,

@@ -129,6 +129,10 @@ pub fn parseTestConfig(allocator: std.mem.Allocator, config: std.json.Value, tar
     if (values.get(config, "warn_if")) |value| target.warn_if = try ownedString(allocator, value);
     if (values.get(config, "error_if")) |value| target.error_if = try ownedString(allocator, value);
     if (values.get(config, "store_failures")) |value| target.store_failures = if (value == .null) null else try resource.boolean(value);
+    inline for (.{ "store_failures_as", "schema", "alias", "database" }) |key| if (values.get(config, key)) |value| {
+        @field(target, key) = if (value == .null) null else try ownedString(allocator, value);
+    };
+    if (values.get(config, "fail_calc")) |value| target.fail_calc = try ownedString(allocator, value);
     inline for (std.meta.tags(types.GenericTestConfigField)) |key| {
         if (values.get(config, @tagName(key)) != null) target.markConfigured(key);
     }

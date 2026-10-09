@@ -367,6 +367,14 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
     const which = try allocator.dupe(u8, which_value.string);
     var options = current;
     options.which = which;
+    if (args.get("show")) |value| {
+        if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
+        options.seed_show = value == .bool and value.bool;
+    }
+    if (args.get("store_failures")) |value| {
+        if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
+        options.store_failures = value == .bool and value.bool;
+    }
     if (args.get("empty")) |value| {
         if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
         options.empty = value == .bool and value.bool;

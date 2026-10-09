@@ -169,6 +169,12 @@ pub fn apply(allocator: std.mem.Allocator, node: *types.Node) !void {
         node.incremental.configured.predicates = true;
     }
     if (values.get(config, "store_failures")) |v| node.test_config.store_failures = if (v == .null) null else try boolean(v);
+    if (std.mem.eql(u8, node.resource_type, "test")) {
+        inline for (.{ "store_failures_as", "schema", "alias", "database" }) |key| if (values.get(config, key)) |v| {
+            @field(node.test_config, key) = try nullableString(v);
+        };
+        if (values.get(config, "fail_calc")) |v| node.test_config.fail_calc = try string(v);
+    }
     if (values.get(config, "where")) |v| node.test_config.where = try nullableString(v);
     if (values.get(config, "limit")) |v| {
         if (v == .null) node.test_config.limit = null else if (v == .integer and v.integer >= 0) node.test_config.limit = @intCast(v.integer) else return error.InvalidConfiguration;
@@ -201,6 +207,10 @@ pub fn cloneTestConfig(allocator: std.mem.Allocator, source: types.GenericTestCo
     result.severity = try allocator.dupe(u8, source.severity);
     result.warn_if = try allocator.dupe(u8, source.warn_if);
     result.error_if = try allocator.dupe(u8, source.error_if);
+    result.fail_calc = try allocator.dupe(u8, source.fail_calc);
+    inline for (.{ "store_failures_as", "schema", "alias", "database" }) |key| if (@field(source, key)) |value| {
+        @field(result, key) = try allocator.dupe(u8, value);
+    };
     return result;
 }
 

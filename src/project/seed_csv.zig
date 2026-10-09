@@ -112,7 +112,7 @@ fn parseNative(allocator: std.mem.Allocator, raw_csv: []const u8, delimiter: []c
     return .{ .arena = arena, .headers = headers, .rows = records.items[1..] };
 }
 
-const Kind = enum { integer, number, date, timestamp, boolean, text };
+pub const Kind = enum { integer, number, date, timestamp, boolean, text };
 const Column = struct { name: []const u8, sql_name: []const u8, kind: Kind, data_type: []const u8, explicit: bool };
 
 /// Bind seed column types without executing DDL or exposing files to a server.
@@ -143,6 +143,14 @@ pub fn renderTypeQuery(allocator: std.mem.Allocator, node: *const types.Node) ![
 }
 
 pub fn renderSql(allocator: std.mem.Allocator, graph: *const types.Graph, node: *const types.Node) ![]u8 {
+    return renderSqlMode(allocator, graph, node, true);
+}
+
+pub fn renderInsertSql(allocator: std.mem.Allocator, graph: *const types.Graph, node: *const types.Node) ![]u8 {
+    return renderSqlMode(allocator, graph, node, false);
+}
+
+fn renderSqlMode(allocator: std.mem.Allocator, graph: *const types.Graph, node: *const types.Node, create: bool) ![]u8 {
     if (!std.mem.eql(u8, node.resource_type, "seed")) return error.UnsupportedSeedExecution;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -169,16 +177,18 @@ pub fn renderSql(allocator: std.mem.Allocator, graph: *const types.Graph, node: 
         };
         column.* = .{ .name = header, .sql_name = sql_name, .kind = kind, .data_type = data_type, .explicit = override != null };
     }
-    const schema = try adapter.quoteIdentifier(a, try compiler.relationSchemaForNode(a, graph, node));
     const relation = try compiler.relationNameForNode(a, graph, node);
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
-    try output.writer.print("create schema if not exists {s};\ncreate table {s} (", .{ schema, relation });
-    for (columns, 0..) |column, index| {
-        if (index != 0) try output.writer.writeAll(", ");
-        try output.writer.print("{s} {s}", .{ column.sql_name, column.data_type });
+    if (create) {
+        const schema = try adapter.quoteIdentifier(a, try compiler.relationSchemaForNode(a, graph, node));
+        try output.writer.print("create schema if not exists {s};\ncreate table {s} (", .{ schema, relation });
+        for (columns, 0..) |column, index| {
+            if (index != 0) try output.writer.writeAll(", ");
+            try output.writer.print("{s} {s}", .{ column.sql_name, column.data_type });
+        }
+        try output.writer.writeAll(");\n");
     }
-    try output.writer.writeAll(");\n");
     // Match Core's bounded batches instead of constructing a single unlimited
     // VALUES statement; no subprocess or server-side filesystem access is used.
     for (document.rows, 0..) |row, row_index| {
@@ -211,7 +221,7 @@ pub fn renderSql(allocator: std.mem.Allocator, graph: *const types.Graph, node: 
     return output.toOwnedSlice();
 }
 
-fn infer(a: std.mem.Allocator, rows: []const []const []const u8, column: usize) !Kind {
+pub fn infer(a: std.mem.Allocator, rows: []const []const []const u8, column: usize) !Kind {
     var numeric = true;
     var fractional = false;
     var date = true;
@@ -257,7 +267,7 @@ fn isIsoDate(text: []const u8) bool {
     return year != 0 and day > 0 and day <= days;
 }
 
-fn number(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
+pub fn number(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
     var text = std.mem.trim(u8, raw, " \t\r\n%");
     const negative = std.mem.startsWith(u8, text, "-");
     if (negative) text = text[1..];
@@ -296,7 +306,7 @@ fn columnOverride(node: *const types.Node, name: []const u8) ?[]const u8 {
     for (node.seed_column_types.items) |column| if (std.mem.eql(u8, column.name, name)) return column.data_type;
     return null;
 }
-fn isNull(value: []const u8) bool {
+pub fn isNull(value: []const u8) bool {
     const text = std.mem.trim(u8, value, " \t\r\n");
     return text.len == 0 or std.ascii.eqlIgnoreCase(text, "null");
 }

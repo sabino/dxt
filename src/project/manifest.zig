@@ -5,6 +5,7 @@ const json = @import("json.zig");
 const selector = @import("selector.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
+const audits = @import("test_audits.zig");
 
 const Graph = types.Graph;
 const Node = types.Node;
@@ -495,12 +496,14 @@ fn writeTestNodeIdentityFields(
     path: []const u8,
     name: []const u8,
     raw_code: ?[]const u8,
+    config: types.GenericTestConfig,
 ) !void {
-    const schema_name = try std.fmt.allocPrint(allocator, "{s}_dbt_test__audit", .{graph.target_schema});
+    const audit_node = audits.auditNode(config, name, package_name);
+    const schema_name = try compiler.relationSchemaForNode(allocator, graph, &audit_node);
     defer allocator.free(schema_name);
 
     try writer.writeAll(",\"database\":");
-    try writeNullableString(writer, databaseNameForGraph(graph));
+    try writeNullableString(writer, config.database orelse compiler.relationDatabaseForNode(graph, &audit_node));
     try writer.writeAll(",\"schema\":");
     try json.string(writer, schema_name);
     try writer.writeAll(",\"fqn\":");
@@ -1256,8 +1259,8 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try json.string(writer, test_node.name);
     try writeUnrenderedTestConfig(writer, test_node.config);
     try writer.writeAll(",\"alias\":");
-    try json.string(writer, test_node.alias);
-    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, null);
+    try json.string(writer, test_node.config.alias orelse test_node.alias);
+    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, null, test_node.config);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -1329,11 +1332,19 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     }
     try writer.writeAll("},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":");
     try json.string(writer, test_node.config.severity);
-    try writer.writeAll(",\"fail_calc\":\"count(*)\",\"warn_if\":");
+    try writer.writeAll(",\"fail_calc\":");
+    try json.string(writer, test_node.config.fail_calc);
+    try writer.writeAll(",\"warn_if\":");
     try json.string(writer, test_node.config.warn_if);
     try writer.writeAll(",\"error_if\":");
     try json.string(writer, test_node.config.error_if);
-    try writer.writeAll(",\"schema\":\"dbt_test__audit\",\"where\":");
+    try writer.writeAll(",\"schema\":");
+    try json.string(writer, test_node.config.schema orelse "dbt_test__audit");
+    try writer.writeAll(",\"alias\":");
+    try writeNullableString(writer, test_node.config.alias);
+    try writer.writeAll(",\"database\":");
+    try writeNullableString(writer, test_node.config.database);
+    try writer.writeAll(",\"where\":");
     if (test_node.config.where) |where_sql| {
         try json.string(writer, where_sql);
     } else {
@@ -1346,11 +1357,13 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
         try writer.writeAll("null");
     }
     try writer.writeAll(",\"store_failures\":");
-    if (test_node.config.store_failures) |store_failures| {
+    if (audits.configuredStore(test_node.config)) |store_failures| {
         try writer.writeAll(if (store_failures) "true" else "false");
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"store_failures_as\":");
+    try writeNullableString(writer, audits.configuredKind(test_node.config));
     try writer.writeAll(",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
@@ -1378,8 +1391,8 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     try json.string(writer, test_node.name);
     try writeUnrenderedTestConfig(writer, test_node.config);
     try writer.writeAll(",\"alias\":");
-    try json.string(writer, test_node.alias);
-    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, test_node.raw_code);
+    try json.string(writer, test_node.config.alias orelse test_node.alias);
+    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, test_node.raw_code, test_node.config);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -1404,11 +1417,19 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     try writer.writeAll(if (test_node.enabled) "true" else "false");
     try writer.writeAll(",\"materialized\":\"test\",\"severity\":");
     try json.string(writer, test_node.config.severity);
-    try writer.writeAll(",\"fail_calc\":\"count(*)\",\"warn_if\":");
+    try writer.writeAll(",\"fail_calc\":");
+    try json.string(writer, test_node.config.fail_calc);
+    try writer.writeAll(",\"warn_if\":");
     try json.string(writer, test_node.config.warn_if);
     try writer.writeAll(",\"error_if\":");
     try json.string(writer, test_node.config.error_if);
-    try writer.writeAll(",\"schema\":\"dbt_test__audit\",\"where\":");
+    try writer.writeAll(",\"schema\":");
+    try json.string(writer, test_node.config.schema orelse "dbt_test__audit");
+    try writer.writeAll(",\"alias\":");
+    try writeNullableString(writer, test_node.config.alias);
+    try writer.writeAll(",\"database\":");
+    try writeNullableString(writer, test_node.config.database);
+    try writer.writeAll(",\"where\":");
     if (test_node.config.where) |where_sql| {
         try json.string(writer, where_sql);
     } else {
@@ -1421,11 +1442,13 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
         try writer.writeAll("null");
     }
     try writer.writeAll(",\"store_failures\":");
-    if (test_node.config.store_failures) |store_failures| {
+    if (audits.configuredStore(test_node.config)) |store_failures| {
         try writer.writeAll(if (store_failures) "true" else "false");
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"store_failures_as\":");
+    try writeNullableString(writer, audits.configuredKind(test_node.config));
     try writer.writeAll(",\"tags\":");
     try json.stringArray(writer, test_node.tags.items);
     try writer.writeAll(",\"meta\":{}},\"depends_on\":{\"macros\":");
@@ -1465,6 +1488,11 @@ fn genericTestRawCode(allocator: std.mem.Allocator, node: GenericTestNode) ![]co
             .error_if => try writeGenericConfigString(writer, node.config.error_if),
             .limit => if (node.config.limit) |limit| try writer.print("{d}", .{limit}) else try writer.writeAll("None"),
             .store_failures => if (node.config.store_failures) |value| try writer.writeAll(if (value) "True" else "False") else try writer.writeAll("None"),
+            .store_failures_as => if (node.config.store_failures_as) |value| try writeGenericConfigString(writer, value) else try writer.writeAll("None"),
+            .schema => if (node.config.schema) |value| try writeGenericConfigString(writer, value) else try writer.writeAll("None"),
+            .alias => if (node.config.alias) |value| try writeGenericConfigString(writer, value) else try writer.writeAll("None"),
+            .database => if (node.config.database) |value| try writeGenericConfigString(writer, value) else try writer.writeAll("None"),
+            .fail_calc => try writeGenericConfigString(writer, node.config.fail_calc),
         }
     }
     if (config_start) |start| {
@@ -1500,6 +1528,11 @@ fn writeUnrenderedTestConfig(writer: *Io.Writer, config: types.GenericTestConfig
             .warn_if => !std.mem.eql(u8, config.warn_if, "!= 0"),
             .error_if => !std.mem.eql(u8, config.error_if, "!= 0"),
             .store_failures => config.store_failures != null,
+            .store_failures_as => config.store_failures_as != null,
+            .schema => config.schema != null,
+            .alias => config.alias != null,
+            .database => config.database != null,
+            .fail_calc => !std.mem.eql(u8, config.fail_calc, "count(*)"),
         };
         if (config.configured.contains(key) or non_default) {
             if (wrote) try writer.writeAll(",");
@@ -1513,6 +1546,11 @@ fn writeUnrenderedTestConfig(writer: *Io.Writer, config: types.GenericTestConfig
                 .warn_if => try json.string(writer, config.warn_if),
                 .error_if => try json.string(writer, config.error_if),
                 .store_failures => try writeNullableBool(writer, config.store_failures),
+                .store_failures_as => try writeNullableString(writer, config.store_failures_as),
+                .schema => try writeNullableString(writer, config.schema),
+                .alias => try writeNullableString(writer, config.alias),
+                .database => try writeNullableString(writer, config.database),
+                .fail_calc => try json.string(writer, config.fail_calc),
             }
         }
     }

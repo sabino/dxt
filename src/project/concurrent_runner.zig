@@ -44,7 +44,7 @@ pub const Summary = struct {
     rows: []results.NodeResult,
     had_execution_error: bool = false,
     failed_tests: usize = 0,
-    total_failures: u64 = 0,
+    total_failures: i64 = 0,
 };
 
 const Mode = enum { execute, compile };

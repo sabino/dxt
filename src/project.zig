@@ -648,7 +648,7 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
         return error.UnsupportedSeedSelection;
     }
 
-    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedSeedAdapterExecution;
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb") and !std.mem.eql(u8, graph.adapter_type, "postgres")) return error.UnsupportedSeedAdapterExecution;
     const seed_nodes = try selectedSeedExecutionOrder(runtime, &graph, selected_seeds);
     defer runtime.allocator.free(seed_nodes);
     try validateSeedExecution(&graph, seed_nodes);
@@ -671,6 +671,7 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
         }
     }
 
+    try @import("project/seed_preview.zig").write(runtime, &graph, options, executed.items, stdout);
     try writeRunResults(runtime, target_dir, executed.items);
     try stdout.print("Seeded {d} seed(s) into {s}; wrote artifacts into {s}\n", .{
         executed.items.len,
@@ -701,7 +702,7 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
         return error.UnsupportedTestSelection;
     }
 
-    if (!std.mem.eql(u8, graph.adapter_type, "duckdb") and !(std.mem.eql(u8, graph.adapter_type, "postgres") and selected.len == 0)) return error.UnsupportedTestExecution;
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb") and !std.mem.eql(u8, graph.adapter_type, "postgres")) return error.UnsupportedTestExecution;
     const test_nodes = try selectedDataTestExecutionOrder(runtime, &graph, selected);
     defer runtime.allocator.free(test_nodes);
     try validateDataTestExecution(test_nodes);
@@ -1227,24 +1228,31 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
     };
     if (resources.items.len == 0) return error.UnsupportedBuildSelection;
     try validateConcurrentResources(runtime, graph, resources.items, label);
-    // Core creates relation schemas before launching independent resources.
-    // This also avoids concurrent schema creation catalog conflicts in DuckDB.
-    var needs_schemas = false;
-    for (resources.items) |resource| if (resource == .node) {
-        needs_schemas = true;
-    };
-    if (needs_schemas) {
-        var preparation = try @import("project/adapter.zig").openSession(runtime, graph, db_path);
-        defer preparation.deinit();
-        for (resources.items) |resource| if (resource == .node) {
-            const schema = try compiler.relationSchemaForNode(runtime.allocator, graph, resource.node);
+    // Core creates all selected model and persisted-test schemas before jobs.
+    // Serial preparation avoids DuckDB catalog conflicts between audit jobs.
+    var preparation = try @import("project/adapter.zig").openSession(runtime, graph, db_path);
+    defer preparation.deinit();
+    for (resources.items) |resource| {
+        const config = switch (resource) {
+            .generic => |node| node.config,
+            .singular => |node| node.config,
+            else => null,
+        };
+        const node: ?Node = switch (resource) {
+            .node => |value| value.*,
+            .generic => |value| if (@import("project/test_audits.zig").shouldStore(config.?, options)) @import("project/test_audits.zig").auditNode(config.?, value.alias, value.package_name) else null,
+            .singular => |value| if (@import("project/test_audits.zig").shouldStore(config.?, options)) @import("project/test_audits.zig").auditNode(config.?, value.alias, value.package_name) else null,
+            else => null,
+        };
+        if (node) |value| {
+            const schema = try compiler.relationSchemaForNode(runtime.allocator, graph, &value);
             defer runtime.allocator.free(schema);
             const quoted = try compiler.quoteIdentifier(runtime.allocator, schema);
             defer runtime.allocator.free(quoted);
             const sql = try std.fmt.allocPrint(runtime.allocator, "create schema if not exists {s}", .{quoted});
             defer runtime.allocator.free(sql);
             try preparation.execute(sql);
-        };
+        }
     }
     const summary = try concurrent_runner.run(runtime, graph, options, resources.items, db_path, executeConcurrentResource, stderr);
     defer runtime.allocator.free(summary.rows);
@@ -1272,6 +1280,7 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
         }
     }
     _ = try writeManifest(runtime, graph, target_dir);
+    try @import("project/seed_preview.zig").write(runtime, graph, options, summary.rows, stdout);
     try writeRunResults(runtime, target_dir, summary.rows);
     if (summary.had_execution_error) {
         if (summary.failed_tests != 0) try stdout.print("{d} test(s) failed with {d} failure row(s)\n", .{ summary.failed_tests, summary.total_failures });
@@ -1706,7 +1715,7 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
 
 fn executeSeedAppendingResult(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node, executed: *std.ArrayList(run_results.NodeResult)) !bool {
     duckdb.executeSeed(runtime, db_path, project_dir, graph, node) catch |err| switch (err) {
-        error.DuckDbExecutionFailed => {
+        error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.CannotSeedView => {
             try appendExecutionErrorResult(runtime.allocator, executed, node);
             return false;
         },
@@ -1850,7 +1859,7 @@ fn failExecution(runtime: Runtime, target_dir: []const u8, manifest_path: []cons
 
 const GenericTestExecutionSummary = struct {
     failed_tests: usize = 0,
-    total_failures: u64 = 0,
+    total_failures: i64 = 0,
 };
 
 fn appendDataTestResults(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_nodes: []const DataTestRef, executed: *std.ArrayList(run_results.NodeResult)) !GenericTestExecutionSummary {
@@ -1960,8 +1969,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
         return .{ .failed_tests = 1 };
     }
     var classification = switch (test_ref) {
-        .generic => |test_node| try classifyGenericTestResult(execution.failures, test_node.config),
-        .singular => |test_node| try classifyGenericTestResult(execution.failures, test_node.config),
+        .generic => |test_node| try classifyExecutedTestResult(execution.should_warn, execution.should_error, test_node.config),
+        .singular => |test_node| try classifyExecutedTestResult(execution.should_warn, execution.should_error, test_node.config),
     };
     if (std.mem.eql(u8, classification.status, "warn") and try cli_options.warningIsError(runtime, "LogTestResult")) {
         classification.status = "fail";
@@ -2026,7 +2035,7 @@ fn appendUnitTestExecutionResult(allocator: std.mem.Allocator, unit_test: *const
     }
     const classification = classifyDefaultTestResult(execution.failures);
     const message = if (execution.failure_message) |difference| difference else if (classification.message_kind) |kind|
-        try formatTestThresholdMessage(allocator, execution.failures, kind, classification.condition orelse "!= 0")
+        try formatTestThresholdMessage(allocator, @intCast(execution.failures), kind, classification.condition orelse "!= 0")
     else
         null;
     errdefer if (message) |owned_message| allocator.free(owned_message);
@@ -2034,7 +2043,7 @@ fn appendUnitTestExecutionResult(allocator: std.mem.Allocator, unit_test: *const
         .unit_test_node = unit_test,
         .status = classification.status,
         .message = message,
-        .failures = execution.failures,
+        .failures = @intCast(execution.failures),
         .compiled_code = execution.compiled_code,
         .owns_compiled_code = true,
         .compile_started_at = execution.compile_started_at,
@@ -2042,7 +2051,7 @@ fn appendUnitTestExecutionResult(allocator: std.mem.Allocator, unit_test: *const
     });
     return .{
         .failed_tests = if (classification.fails_command) 1 else 0,
-        .total_failures = if (classification.fails_command) execution.failures else 0,
+        .total_failures = if (classification.fails_command) @as(i64, @intCast(execution.failures)) else 0,
     };
 }
 
@@ -2068,7 +2077,7 @@ test "unit execution errors retain prior rows and contain only sanitized metadat
         .execution_error = true,
     }, &executed);
     try std.testing.expectEqual(@as(usize, 1), summary.failed_tests);
-    try std.testing.expectEqual(@as(u64, 0), summary.total_failures);
+    try std.testing.expectEqual(@as(i64, 0), summary.total_failures);
     try std.testing.expectEqual(@as(usize, 2), executed.items.len);
     try std.testing.expectEqualStrings("pass", executed.items[0].status);
     const error_row = executed.items[1];
@@ -2092,6 +2101,13 @@ const TestResultClassification = struct {
 fn classifyDefaultTestResult(failures: u64) TestResultClassification {
     if (failures == 0) return .{ .status = "pass" };
     return .{ .status = "fail", .fails_command = true, .message_kind = "fail", .condition = "!= 0" };
+}
+
+fn classifyExecutedTestResult(should_warn: bool, should_error: bool, config: types.GenericTestConfig) !TestResultClassification {
+    if (!std.ascii.eqlIgnoreCase(config.severity, "warn") and !std.ascii.eqlIgnoreCase(config.severity, "error")) return error.UnsupportedTestExecution;
+    if (std.ascii.eqlIgnoreCase(config.severity, "error") and should_error) return .{ .status = "fail", .fails_command = true, .message_kind = "fail", .condition = config.error_if };
+    if (should_warn) return .{ .status = "warn", .message_kind = "warn", .condition = config.warn_if };
+    return .{ .status = "pass" };
 }
 
 fn classifyGenericTestResult(failures: u64, config: types.GenericTestConfig) !TestResultClassification {
@@ -2240,7 +2256,7 @@ fn countSelectedUnitTests(graph: *const Graph, selected: []const selector.Select
     return count;
 }
 
-fn formatTestThresholdMessage(allocator: std.mem.Allocator, failures: u64, kind: []const u8, condition: []const u8) ![]const u8 {
+fn formatTestThresholdMessage(allocator: std.mem.Allocator, failures: i64, kind: []const u8, condition: []const u8) ![]const u8 {
     return try std.fmt.allocPrint(
         allocator,
         "Got {d} {s}, configured to {s} if {s}",
@@ -3645,6 +3661,20 @@ fn applySingularTestConfigValue(allocator: std.mem.Allocator, property: *types.S
         property.config.store_failures = try parseBool(value);
         return true;
     }
+    inline for (.{ "store_failures_as", "schema", "alias", "database", "fail_calc" }) |name| {
+        if (std.mem.eql(u8, key, name)) {
+            var document = try @import("project/yaml.zig").parse(allocator, value);
+            defer document.deinit();
+            property.config.markConfigured(@field(types.GenericTestConfigField, name));
+            if (comptime std.mem.eql(u8, name, "fail_calc")) {
+                if (document.value != .string) return error.InvalidGenericTestConfiguration;
+                property.config.fail_calc = try allocator.dupe(u8, document.value.string);
+            } else {
+                @field(property.config, name) = if (document.value == .null) null else if (document.value == .string) try allocator.dupe(u8, document.value.string) else return error.InvalidGenericTestConfiguration;
+            }
+            return true;
+        }
+    }
     return false;
 }
 
@@ -3848,14 +3878,12 @@ fn applySingularTestProperties(graph: *Graph, package_name: []const u8) !void {
         }
         inline for (std.meta.fields(types.GenericTestConfigField)) |field| {
             const key = @field(types.GenericTestConfigField, field.name);
-            if (property.config.configured.contains(key)) test_node.config.markConfigured(key);
+            if (property.config.configured.contains(key) and !test_node.config.configured.contains(key)) {
+                @field(test_node.config, field.name) = @field(property.config, field.name);
+                test_node.config.markConfigured(key);
+            }
         }
-        if (property.config.where) |where_sql| test_node.config.where = where_sql;
-        if (property.config.limit) |limit| test_node.config.limit = limit;
-        test_node.config.severity = property.config.severity;
-        test_node.config.warn_if = property.config.warn_if;
-        test_node.config.error_if = property.config.error_if;
-        if (!test_node.inline_store_failures) test_node.config.store_failures = property.config.store_failures;
+        if (test_node.config.alias) |alias| test_node.alias = alias;
         for (property.tags.items) |tag| {
             try appendUnique(graph.allocator, &test_node.tags, tag);
         }
@@ -3933,7 +3961,7 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
         .package_name = node.package_name,
         .unique_id = unique_id,
         .name = names.full,
-        .alias = names.compiled,
+        .alias = test_def.config.alias orelse names.compiled,
         .path = try std.fmt.allocPrint(graph.allocator, "{s}.sql", .{names.compiled}),
         .original_file_path = node.patch_path orelse node.original_file_path,
         .raw_code = raw_code,
@@ -4016,7 +4044,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .package_name = source.package_name,
         .unique_id = unique_id,
         .name = names.full,
-        .alias = names.compiled,
+        .alias = test_def.config.alias orelse names.compiled,
         .path = try std.fmt.allocPrint(graph.allocator, "{s}.sql", .{names.compiled}),
         .original_file_path = source.original_file_path,
         .raw_code = raw_code,

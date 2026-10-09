@@ -849,6 +849,12 @@ fn parseOptions(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
             } else if (equals(arg, "--empty") or equals(arg, "--no-empty")) {
                 if (!equals(options.which, "run") and !equals(options.which, "build") and !equals(options.which, "compile") and !equals(options.which, "snapshot")) return error.UnsupportedCommandOption;
                 options.empty = equals(arg, "--empty");
+            } else if (equals(arg, "--show")) {
+                if (!equals(options.which, "seed") and !equals(options.which, "build")) return error.UnsupportedCommandOption;
+                options.seed_show = true;
+            } else if (equals(arg, "--store-failures")) {
+                if (!equals(options.which, "test") and !equals(options.which, "build")) return error.UnsupportedCommandOption;
+                options.store_failures = true;
             } else if (equals(arg, "--empty-catalog")) {
                 options.docs_empty_catalog = true;
             } else if (equals(arg, "--defer") or equals(arg, "--no-defer")) {
@@ -949,12 +955,14 @@ fn isOptionLike(arg: []const u8) bool {
 }
 
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
+    if ((mode == .seed or mode == .build) and equals(arg, "--show")) return true;
+    if ((mode == .build or mode == .test_command) and equals(arg, "--store-failures")) return true;
     if (mode == .deps and (equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast"))) return true;
     if ((mode == .build or mode == .compile or mode == .common_and_select) and (equals(arg, "--empty") or equals(arg, "--no-empty"))) return true;
     if (mode == .docs_generate and equals(arg, "--empty-catalog")) return true;
     if ((equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast")) and (mode == .build or mode == .seed or mode == .test_command or mode == .retry or mode == .compile or mode == .docs_generate or mode == .source_freshness)) return true;
     if (mode != .common_only and mode != .clean and mode != .docs_serve and mode != .init and mode != .debug and mode != .operation and mode != .clone and mode != .retry and (equals(arg, "--defer") or equals(arg, "--no-defer") or equals(arg, "--favor-state") or equals(arg, "--no-favor-state"))) return true;
-    if ((mode == .build or mode == .compile or mode == .clone) and equals(arg, "--full-refresh")) return true;
+    if ((mode == .build or mode == .compile or mode == .seed or mode == .clone) and equals(arg, "--full-refresh")) return true;
     if (mode == .init and equals(arg, "--skip-profile-setup")) return true;
     if (mode == .docs_serve and (equals(arg, "--browser") or equals(arg, "--no-browser") or equals(arg, "--no-open"))) return true;
     if (mode == .docs_generate and (equals(arg, "--static") or equals(arg, "--compile") or equals(arg, "--no-compile"))) return true;

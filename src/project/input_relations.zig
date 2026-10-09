@@ -59,6 +59,9 @@ pub fn parseSample(runtime: types.Runtime, text: []const u8) !types.SampleWindow
         const start = document.value.object.get("start") orelse return error.InvalidSampleWindow;
         const end = document.value.object.get("end") orelse return error.InvalidSampleWindow;
         if (start != .string or end != .string) return error.InvalidSampleWindow;
+        // Core SampleWindow accepts serialized strings and datetime scalars,
+        // while YAML's date-only scalar is a datetime.date and is rejected.
+        if (document.isDate(start) or document.isDate(end)) return error.InvalidSampleWindow;
         return .{ .start = try parseDate(start.string, true), .end = try parseDate(end.string, true) };
     }
     const separator = std.mem.indexOfScalar(u8, trimmed, ' ') orelse return error.InvalidSampleWindow;

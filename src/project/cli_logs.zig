@@ -32,7 +32,6 @@ pub fn finish(runtime: types.Runtime, options: types.Options, args: []const []co
 }
 
 fn console(runtime: types.Runtime, options: types.Options, writer: *std.Io.Writer, text: []const u8) !void {
-    if (options.log_level == .none) return;
     const minimum: types.LogLevel = if (options.quiet) .@"error" else if (options.debug) .debug else options.log_level;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -40,6 +39,11 @@ fn console(runtime: types.Runtime, options: types.Options, writer: *std.Io.Write
         const severity = level(runtime.allocator, line);
         const event = try displayedEvent(runtime.allocator, line);
         defer if (event) |value| runtime.allocator.free(value.message);
+        if (event) |value| if (value.primary) {
+            try writer.writeAll(value.message);
+            continue;
+        };
+        if (options.log_level == .none) continue;
         const printed = if (event) |value| value.printed else false;
         if (@intFromEnum(if (printed) types.LogLevel.@"error" else severity) < @intFromEnum(minimum)) continue;
         const display = if (options.log_format != .json and event != null) event.?.message else line;
@@ -65,6 +69,7 @@ fn fileEvents(runtime: types.Runtime, options: types.Options, writer: *std.Io.Wr
         if (@intFromEnum(severity) < @intFromEnum(minimum)) continue;
         const event = try displayedEvent(runtime.allocator, line);
         defer if (event) |value| runtime.allocator.free(value.message);
+        if (event) |value| if (value.primary) continue;
         const display = if (options.log_format_file != .json and event != null) event.?.message else line;
         if (options.use_colors_file and options.log_format_file != .json) try writer.writeAll("\x1b[0m");
         // Core warning messages are colored by global USE_COLOR before either
@@ -98,7 +103,7 @@ fn fileEvents(runtime: types.Runtime, options: types.Options, writer: *std.Io.Wr
     }
 }
 
-const DisplayedEvent = struct { message: []const u8, printed: bool };
+const DisplayedEvent = struct { message: []const u8, printed: bool, primary: bool = false };
 fn displayedEvent(allocator: std.mem.Allocator, line: []const u8) !?DisplayedEvent {
     if (line[0] != '{') return null;
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return null;
@@ -109,12 +114,13 @@ fn displayedEvent(allocator: std.mem.Allocator, line: []const u8) !?DisplayedEve
     const name = info.object.get("name") orelse return null;
     if (name != .string) return null;
     const printed = std.mem.eql(u8, name.string, "PrintEvent");
-    if (!printed and !std.mem.startsWith(u8, name.string, "JinjaLog")) return null;
+    const primary = std.mem.eql(u8, name.string, "SeedSampleTable");
+    if (!primary and !printed and !std.mem.startsWith(u8, name.string, "JinjaLog")) return null;
     const data = parsed.value.object.get("data") orelse return null;
     if (data != .object) return null;
     const message = data.object.get("msg") orelse data.object.get("message") orelse return null;
     if (message != .string) return null;
-    return .{ .message = try allocator.dupe(u8, message.string), .printed = printed };
+    return .{ .message = try allocator.dupe(u8, message.string), .printed = printed, .primary = primary };
 }
 
 fn level(allocator: std.mem.Allocator, line: []const u8) types.LogLevel {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const clock = @import("execution_clock.zig");
 const adapter = @import("adapter.zig");
+const test_audits = @import("test_audits.zig");
 const catalog = @import("catalog.zig");
 const incremental = @import("incremental.zig");
 const postgres_materialization = @import("postgres_materialization.zig");
@@ -22,7 +23,9 @@ const DuckDbObjectKind = enum { table, view };
 
 pub const GenericTestExecutionResult = struct {
     compiled_code: []const u8,
-    failures: u64,
+    failures: i64,
+    should_warn: bool = false,
+    should_error: bool = false,
     relation_name: ?[]const u8 = null,
     execution_error: bool = false,
     execution_cancelled: bool = false,
@@ -114,6 +117,7 @@ pub fn executeModelWithPolicy(runtime: Runtime, db_path: []const u8, graph: *con
 }
 
 pub fn executeSeed(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node) !void {
+    if (runtime.adapter_session != null or std.mem.eql(u8, graph.adapter_type, "postgres")) return @import("seed_lifecycle.zig").execute(runtime, graph, db_path, node);
     try dropRelationIfExists(runtime, db_path, graph, node, .view);
 
     const sql = try renderSeedSql(runtime.allocator, project_dir, graph, node);
@@ -126,36 +130,24 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
     const compilation_started = clock.now(runtime.io);
     const compiled_sql = try renderGenericTestSql(runtime.allocator, graph, test_node);
     errdefer runtime.allocator.free(compiled_sql);
-    const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
-    defer runtime.allocator.free(execution_sql);
     const compilation_completed = clock.now(runtime.io);
-    const failures = queryGenericTestFailures(runtime, db_path, execution_sql) catch |err| switch (err) {
-        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+    const result = test_audits.execute(runtime, graph, db_path, test_node.config, test_node.alias, test_node.package_name, compiled_sql) catch |err| switch (err) {
+        error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.AdapterQueryCancelled, error.InvalidTestFailureMaterialization, error.InvalidTestResult => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
         else => return err,
     };
-    const relation_name = syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures) catch |err| switch (err) {
-        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
-        else => return err,
-    };
-    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
+    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = result.failures, .should_warn = result.should_warn, .should_error = result.should_error, .relation_name = result.relation_name };
 }
 
 pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const SingularTestNode) !GenericTestExecutionResult {
     const compilation_started = clock.now(runtime.io);
     const compiled_sql = try renderSingularTestSql(runtime.allocator, graph, test_node);
     errdefer runtime.allocator.free(compiled_sql);
-    const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
-    defer runtime.allocator.free(execution_sql);
     const compilation_completed = clock.now(runtime.io);
-    const failures = queryGenericTestFailures(runtime, db_path, execution_sql) catch |err| switch (err) {
-        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+    const result = test_audits.execute(runtime, graph, db_path, test_node.config, test_node.alias, test_node.package_name, compiled_sql) catch |err| switch (err) {
+        error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.AdapterQueryCancelled, error.InvalidTestFailureMaterialization, error.InvalidTestResult => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
         else => return err,
     };
-    const relation_name = syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures) catch |err| switch (err) {
-        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
-        else => return err,
-    };
-    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
+    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = result.failures, .should_warn = result.should_warn, .should_error = result.should_error, .relation_name = result.relation_name };
 }
 
 pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !void {

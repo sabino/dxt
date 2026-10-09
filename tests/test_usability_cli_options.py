@@ -344,7 +344,7 @@ def test_core_event_time_pair_validation_and_command_placement(tmp_path, duckdb_
 def test_core_sample_validation_and_explicit_override_of_environment(tmp_path, duckdb_environment):
     root, _ = project(tmp_path)
     for engine in ['dxt', 'core']:
-        for value in ['bad', '1 minute', '{start: 2024-01-01}', '{start: bad, end: 2024-01-02}']:
+        for value in ['bad', '1 minute', '{start: 2024-01-01}', '{start: bad, end: 2024-01-02}', '{start: 2024-01-01, end: 2024-01-02}']:
             result = invoke(engine, ['-q', 'run', '--project-dir', root, '--sample', value], root, environment(duckdb_environment), ok=False)
             assert result.returncode == 2, (engine, value, result.stdout, result.stderr)
         invoke(engine, ['-q', 'run', '--project-dir', root, '-s', 'a', '--sample', '''{start: '2024-01-01', end: '2024-01-02'}'''], root,

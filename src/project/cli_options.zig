@@ -114,6 +114,7 @@ fn defaults(runtime: types.Runtime, command: ?[]const u8) !types.Options {
         options.event_time_end = environment(runtime, "DBT_EVENT_TIME_END");
     }
     options.quiet = try environmentBool(runtime, "DBT_QUIET", false);
+    if (eq(options.which, "test") or eq(options.which, "build")) options.store_failures = try environmentBool(runtime, "DBT_STORE_FAILURES", false);
     options.debug = try environmentBool(runtime, "DBT_DEBUG", false);
     options.write_json = try environmentBool(runtime, "DBT_WRITE_JSON", true);
     options.warn_error = try environmentBool(runtime, "DBT_WARN_ERROR", false);

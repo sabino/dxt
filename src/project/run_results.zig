@@ -26,7 +26,7 @@ pub const NodeResult = struct {
     unit_test_node: ?*const UnitTestDef = null,
     status: []const u8 = "success",
     message: ?[]const u8 = null,
-    failures: ?u64 = null,
+    failures: ?i64 = null,
     compiled_code: ?[]const u8 = null,
     owns_compiled_code: bool = false,
     relation_name: ?[]const u8 = null,
@@ -218,7 +218,9 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
         if (threads == 0) return error.InvalidOption;
         try writer.print("{d}", .{threads});
     }
+    if (std.mem.eql(u8, opts.which, "seed") or std.mem.eql(u8, opts.which, "build")) try writer.print(",\"show\":{s}", .{if (opts.seed_show) "true" else "false"});
     try writer.print(",\"full_refresh\":{s}", .{if (opts.full_refresh) "true" else "false"});
+    if (std.mem.eql(u8, opts.which, "test") or std.mem.eql(u8, opts.which, "build")) try writer.print(",\"store_failures\":{s}", .{if (opts.store_failures) "true" else "false"});
     if (std.mem.eql(u8, opts.which, "run") or std.mem.eql(u8, opts.which, "build") or std.mem.eql(u8, opts.which, "compile") or std.mem.eql(u8, opts.which, "snapshot")) try writer.print(",\"empty\":{s}", .{if (opts.empty) "true" else "false"});
     if (opts.sample_window) |window| {
         try writer.writeAll(",\"sample\":{\"start\":");

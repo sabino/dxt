@@ -19,6 +19,15 @@ pub const Document = struct {
     arena: *std.heap.ArenaAllocator,
     owner: std.mem.Allocator,
     value: Value,
+    // The JSON value model represents YAML dates as strings; retain scalar
+    // provenance for consumers whose schemas distinguish a date from a string.
+    date_strings: []const []const u8 = &.{},
+
+    pub fn isDate(self: *const Document, value: Value) bool {
+        if (value != .string) return false;
+        for (self.date_strings) |date| if (date.ptr == value.string.ptr) return true;
+        return false;
+    }
 
     pub fn deinit(self: *Document) void {
         self.arena.deinit();
@@ -55,7 +64,7 @@ pub fn parseWithDiagnostics(allocator: std.mem.Allocator, text: []const u8, diag
         try parser.next();
     }
     if (parser.event.type != c.YAML_STREAM_END_EVENT) return parser.fail("expected one YAML document; multiple documents are not supported", error.YamlMultipleDocuments);
-    return .{ .arena = arena, .owner = allocator, .value = value };
+    return .{ .arena = arena, .owner = allocator, .value = value, .date_strings = parser.date_strings.items };
 }
 
 const Node = struct { value: Value, merge: bool = false, mapping_keys: ?[]const Value = null };
@@ -69,6 +78,7 @@ const Parser = struct {
     events: usize = 0,
     diagnostic: ?*Diagnostic,
     anchors: std.StringHashMap(Anchor),
+    date_strings: std.ArrayList([]const u8) = .empty,
 
     fn next(self: *Parser) !void {
         if (self.has_event) c.yaml_event_delete(&self.event);
@@ -127,6 +137,8 @@ const Parser = struct {
                 const explicit_tag = if (self.event.data.scalar.tag != null) std.mem.span(self.event.data.scalar.tag) else null;
                 const plain = self.event.data.scalar.style == c.YAML_PLAIN_SCALAR_STYLE;
                 const result = self.scalar(scalar_text, explicit_tag, plain, key_position) catch |err| return self.fail("invalid YAML scalar or unsupported safe tag", err);
+                const tag = explicit_tag orelse if (plain) implicitTag(scalar_text) else "str";
+                if (isTag(tag, "timestamp") and result.value == .string and result.value.string.len == 10) try self.date_strings.append(self.allocator, result.value.string);
                 self.completeAnchor(anchor, result);
                 try self.next();
                 return result;
