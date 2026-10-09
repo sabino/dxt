@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const Kind = enum { boolean, integer, decimal, floating, text, date, time, timestamp, binary, other };
-pub const Column = struct { name: []const u8, kind: Kind, native_type: u32 = 0 };
+pub const Column = struct { name: []const u8, kind: Kind, native_type: u32 = 0, native_type_modifier: i32 = -1 };
 pub const QueryResult = struct {
     owner_allocator: ?std.mem.Allocator = null,
     columns: []Column = &.{},

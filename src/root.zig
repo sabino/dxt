@@ -10,6 +10,11 @@ test "shared native YAML reader is available" {
     _ = yaml;
 }
 
+test "native SQL dialect parsers are available" {
+    _ = @import("project/sql_parser.zig");
+    _ = @import("project/sql_ir.zig");
+}
+
 pub const Invocation = @import("project/invocation.zig").Metadata;
 pub const version = @import("project/invocation.zig").version;
 pub const Runtime = project.Runtime;
@@ -237,6 +242,18 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
         project.parse(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
+    if (equals(command, "analyze") or equals(command, "explain")) {
+        if (hasHelp(args[2..])) {
+            try stdout.print("Usage: dxt {s} [project and selection options]\n\nNative typed SQL analysis writes dxt_sql_analysis.json.\nSupports --project-dir, --profiles-dir, --target, --target-path,\n--select, --exclude, --selector, --resource-type and --output <text|json>.\nRead-only DuckDB and PostgreSQL binding requires the native adapter.\n", .{command});
+            return .ok;
+        }
+        const rt = runtime orelse return .usage;
+        var options = parseOptions(rt.allocator, args[2..], stderr, .list) catch |err| return commandError(err, stderr);
+        if (options.output != .text and options.output != .json) return .usage;
+        options.which = command;
+        project.analyze(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
+        return .ok;
+    }
     if (equals(command, "compile")) {
         if (hasHelp(args[2..])) {
             try printCommandHelp(command, stdout, .project_selection);
@@ -436,6 +453,10 @@ fn printExtraCommandHelp(command: []const u8, writer: *Io.Writer) !void {
 }
 
 fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
+    if (err == error.SqlAnalysisFailure) {
+        stderr.writeAll("error: SQL analysis failed\n") catch {};
+        return .failure;
+    }
     switch (err) {
         error.InvalidWarnErrorOptions, error.ConflictingWarnErrorOptionKeys => {
             stderr.print("error: invalid warn-error-options policy: {s}\n", .{@errorName(err)}) catch {};
@@ -910,6 +931,8 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  deps             Resolve and install local, Git, and Hub package dependencies.
         \\  compile          Compile supported dbt SQL/Jinja without executing.
         \\  run              Execute supported selected DuckDB SQL models.
+        \\  analyze          Parse SQL, bind types and resolve column lineage.
+        \\  explain          Write native plans and typed logical SQL analysis.
         \\  snapshot         Maintain selected DuckDB timestamp and check snapshots.
         \\  seed             Load supported selected DuckDB CSV seeds.
         \\  test             Execute supported selected DuckDB tests.

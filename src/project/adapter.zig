@@ -69,7 +69,7 @@ pub const Session = union(enum) {
     pub fn lastError(self: *const Session) ?[]const u8 {
         return switch (self.*) {
             .duckdb => |*connection| connection.last_error,
-            .postgres => null,
+            .postgres => |*connection| connection.last_error,
         };
     }
     pub fn capabilities(self: *const Session) Capabilities {

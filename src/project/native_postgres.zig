@@ -19,6 +19,7 @@ const Api = struct {
     PQnfields: *const fn (Handle) callconv(.c) c_int,
     PQfname: *const fn (Handle, c_int) callconv(.c) [*:0]const u8,
     PQftype: *const fn (Handle, c_int) callconv(.c) u32,
+    PQfmod: *const fn (Handle, c_int) callconv(.c) c_int,
     PQgetisnull: *const fn (Handle, c_int, c_int) callconv(.c) c_int,
     PQgetvalue: *const fn (Handle, c_int, c_int) callconv(.c) [*:0]const u8,
     PQgetlength: *const fn (Handle, c_int, c_int) callconv(.c) c_int,
@@ -37,6 +38,8 @@ pub const Connection = struct {
     api: Api,
     handle: Handle,
     cancellation: Handle,
+    last_error: ?[]const u8 = null,
+    last_error_position: ?usize = null,
 
     /// conninfo stays in memory; server diagnostic text is never published.
     pub fn open(allocator: std.mem.Allocator, conninfo: []const u8, library_path: ?[]const u8) !Connection {
@@ -59,6 +62,7 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
+        self.clearError();
         self.api.PQfreeCancel(self.cancellation);
         self.api.PQfinish(self.handle);
         self.library.close();
@@ -67,6 +71,7 @@ pub const Connection = struct {
 
     pub fn query(self: *Connection, sql: []const u8) !QueryResult {
         if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
+        self.clearError();
         if (std.mem.indexOfScalar(u8, sql, 0) != null) return error.InvalidSqlText;
         const sql_z = try self.allocator.dupeZ(u8, sql);
         defer self.allocator.free(sql_z);
@@ -104,6 +109,11 @@ pub const Connection = struct {
                     if (self.api.PQputCopyEnd(self.handle, "COPY streaming requires a dedicated adapter operation") != 1) return error.PostgresExecutionFailed;
                 },
                 else => {
+                    if (self.last_error == null) if (self.api.PQresultErrorField(raw, 'M')) |message| {
+                        const raw_message = std.mem.span(message);
+                        self.last_error = self.allocator.dupe(u8, raw_message[0..@min(raw_message.len, 64 * 1024)]) catch null;
+                    };
+                    if (self.api.PQresultErrorField(raw, 'P')) |position| self.last_error_position = std.fmt.parseUnsigned(usize, std.mem.span(position), 10) catch null;
                     const state = self.api.PQresultErrorField(raw, 'C');
                     if (failed == null) failed = if (state != null and std.mem.eql(u8, std.mem.span(state.?), "57014")) error.AdapterQueryCancelled else error.PostgresExecutionFailed;
                 },
@@ -111,6 +121,12 @@ pub const Connection = struct {
         }
         if (failed) |err| return err;
         return output;
+    }
+
+    fn clearError(self: *Connection) void {
+        if (self.last_error) |message| self.allocator.free(message);
+        self.last_error = null;
+        self.last_error_position = null;
     }
 
     pub fn execute(self: *Connection, sql: []const u8) !void {
@@ -146,7 +162,7 @@ pub const Connection = struct {
         for (output.columns) |*column| column.* = .{ .name = "", .kind = .other };
         for (output.columns, 0..) |*column, index| {
             const type_id = self.api.PQftype(raw, @intCast(index));
-            column.* = .{ .name = try self.allocator.dupe(u8, std.mem.span(self.api.PQfname(raw, @intCast(index)))), .kind = postgresKind(type_id), .native_type = type_id };
+            column.* = .{ .name = try self.allocator.dupe(u8, std.mem.span(self.api.PQfname(raw, @intCast(index)))), .kind = postgresKind(type_id), .native_type = type_id, .native_type_modifier = self.api.PQfmod(raw, @intCast(index)) };
         }
         output.rows = try self.allocator.alloc([]?[]const u8, n_rows);
         for (output.rows) |*row| row.* = &.{};

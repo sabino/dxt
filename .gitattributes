@@ -1,0 +1,4 @@
+# Keep the pinned upstream C grammar byte-identical, including its whitespace.
+vendor/libpg_query/**/*.c -whitespace
+vendor/libpg_query/**/*.h -whitespace
+vendor/libpg_query/*.h -whitespace

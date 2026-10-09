@@ -18,6 +18,22 @@ pub fn build(b: *std.Build) void {
         .files = &.{ "vendor/libyaml/src/api.c", "vendor/libyaml/src/reader.c", "vendor/libyaml/src/scanner.c", "vendor/libyaml/src/parser.c" },
         .flags = &.{ "-std=gnu99", "-DYAML_VERSION_STRING=\"0.2.5\"", "-DYAML_VERSION_MAJOR=0", "-DYAML_VERSION_MINOR=2", "-DYAML_VERSION_PATCH=5", b.fmt("-ffile-prefix-map={s}=.", .{b.build_root.path orelse "."}) },
     });
+    // The PostgreSQL grammar is statically linked into the native binary. Zig
+    // owns AST normalization, logical IR, binding and analysis artifacts.
+    const pg_parser = b.addLibrary(.{
+        .name = "dxt_pg_query",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    pg_parser.root_module.addIncludePath(b.path("vendor/libpg_query"));
+    pg_parser.root_module.addIncludePath(b.path("vendor/libpg_query/vendor"));
+    pg_parser.root_module.addIncludePath(b.path("vendor/libpg_query/src/include"));
+    pg_parser.root_module.addIncludePath(b.path("vendor/libpg_query/src/postgres/include"));
+    pg_parser.root_module.addCSourceFiles(.{
+        .files = @import("vendor/libpg_query/sources.zig").files,
+        .flags = &.{ "-std=gnu99", "-fno-strict-aliasing", "-fwrapv", "-Wno-unused-function", "-Wno-unused-variable", b.fmt("-ffile-prefix-map={s}=.", .{b.build_root.path orelse "."}) },
+    });
+    mod.linkLibrary(pg_parser);
 
     const exe = b.addExecutable(.{
         .name = "dxt",

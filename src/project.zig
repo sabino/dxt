@@ -329,6 +329,29 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     }
 }
 
+pub fn analyze(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
+    defer graph.deinit();
+    try resolveDependencies(&graph);
+    var selection = try resolveSelection(runtime, options);
+    defer selection.deinit(runtime.allocator);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    defer selection_state.deinit(runtime.allocator);
+    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, options.resource_type, selection.select, selection.exclude, selection_state.context());
+    const target_dir = try targetDir(runtime, options);
+    try project_defer.apply(runtime, &graph, options, selected, target_dir);
+    var ids: std.ArrayList([]const u8) = .empty;
+    defer ids.deinit(runtime.allocator);
+    for (graph.nodes.items) |node| {
+        if (!node.enabled or (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "analysis") and !std.mem.eql(u8, node.resource_type, "snapshot") and !std.mem.eql(u8, node.resource_type, "seed"))) continue;
+        for (selected) |item| if (std.mem.eql(u8, item.unique_id, node.unique_id)) {
+            try ids.append(runtime.allocator, node.unique_id);
+            break;
+        };
+    }
+    try @import("project/sql_analysis.zig").run(runtime, &graph, ids.items, target_dir, stdout, stderr, options.output == .json or std.mem.eql(u8, options.which, "explain"));
+}
+
 pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
     defer graph.deinit();

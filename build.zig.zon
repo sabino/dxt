@@ -9,6 +9,7 @@
         ".zigversion",
         "src",
         "vendor/libyaml",
+        "vendor/libpg_query",
         "vendor/dbt-docs",
         "README.md",
         "PLAN.md",

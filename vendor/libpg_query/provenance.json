@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/pganalyze/libpg_query",
+  "commit": "c2c27b1e5b13584b594e5dee082f9d007b5e721b",
+  "version": "6.2.5",
+  "postgres_grammar": "17.7",
+  "archive_sha256": "ab62778ea6e1a897d04f1c37f6526fd0a3dd1fb1facc568deef6f2cd59b9d04b",
+  "purpose": "Native PostgreSQL AST and byte locations for typed SQL analysis; orchestration, IR, lineage and artifacts remain Zig."
+}

@@ -101,6 +101,33 @@ pub fn parseWithDelimiter(allocator: std.mem.Allocator, raw_csv: []const u8, del
 const Kind = enum { integer, number, date, timestamp, boolean, text };
 const Column = struct { name: []const u8, sql_name: []const u8, kind: Kind, data_type: []const u8, explicit: bool };
 
+/// Bind seed column types without executing DDL or exposing files to a server.
+/// Uses the same native CSV inference and overrides as seed execution.
+pub fn renderTypeQuery(allocator: std.mem.Allocator, node: *const types.Node) ![]u8 {
+    const delimiter: std.json.Value = values.get(node.effective_config, "delimiter") orelse .{ .string = "," };
+    if (delimiter != .string) return error.InvalidSeedDelimiter;
+    var document = try parseWithDelimiter(allocator, node.raw_code, delimiter.string);
+    defer document.deinit();
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    try output.writer.writeAll("select ");
+    for (document.headers, 0..) |header, index| {
+        if (index != 0) try output.writer.writeAll(", ");
+        const kind = try infer(allocator, document.rows, index);
+        const data_type = columnOverride(node, header) orelse switch (kind) {
+            .integer => "integer",
+            .number => "float8",
+            .date => "date",
+            .timestamp => "timestamp without time zone",
+            .boolean => "boolean",
+            .text => "text",
+        };
+        try output.writer.print("cast(null as {s}) as {s}", .{ data_type, try adapter.quoteIdentifier(allocator, header) });
+    }
+    try output.writer.writeAll(" where false");
+    return output.toOwnedSlice();
+}
+
 pub fn renderSql(allocator: std.mem.Allocator, graph: *const types.Graph, node: *const types.Node) ![]u8 {
     if (!std.mem.eql(u8, node.resource_type, "seed")) return error.UnsupportedSeedExecution;
     var arena = std.heap.ArenaAllocator.init(allocator);
