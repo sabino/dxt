@@ -3,6 +3,7 @@ const clock = @import("execution_clock.zig");
 const adapter = @import("adapter.zig");
 const catalog = @import("catalog.zig");
 const incremental = @import("incremental.zig");
+const postgres_materialization = @import("postgres_materialization.zig");
 const compiler = @import("compiler.zig");
 const project_fs = @import("fs.zig");
 const selector = @import("selector.zig");
@@ -66,19 +67,57 @@ pub fn isSupportedMaterialization(value: []const u8) bool {
     return std.mem.eql(u8, value, "table") or std.mem.eql(u8, value, "view") or std.mem.eql(u8, value, "incremental");
 }
 
+pub fn isSupportedMaterializationForAdapter(adapter_type: []const u8, value: []const u8) bool {
+    return isSupportedMaterialization(value) or (std.mem.eql(u8, adapter_type, "postgres") and postgres_materialization.isSupported(value));
+}
+
 fn isUnsupportedConnectionPath(value: []const u8) bool {
     return std.mem.startsWith(u8, value, "md:") or
         std.mem.startsWith(u8, value, "motherduck:");
 }
 
 pub fn executeModel(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node) !void {
-    if (std.mem.eql(u8, node.materialized, "incremental")) return try incremental.execute(runtime, db_path, graph, node);
-    try dropConflictingMaterialization(runtime, db_path, graph, node);
+    return executeModelWithPolicy(runtime, db_path, graph, node, .{});
+}
 
+pub const ExecutionPolicy = postgres_materialization.ExecutionPolicy;
+pub fn executeModelWithPolicy(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
+    if (std.mem.eql(u8, node.materialized, "incremental")) return try incremental.execute(runtime, db_path, graph, node);
+    if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
+        const sql = trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution);
+        return postgres_materialization.executeWithPolicy(runtime, graph, node, sql, policy) catch |err| switch (err) {
+            error.PostgresExecutionFailed, error.PostgresMaterializedViewConfigurationChanged => error.DuckDbExecutionFailed,
+            else => err,
+        };
+    }
     const sql = try renderModelSql(runtime.allocator, graph, node);
     defer runtime.allocator.free(sql);
-
-    try executeSql(runtime, db_path, sql);
+    var owned: ?adapter.Session = null;
+    defer if (owned) |*session| session.deinit();
+    if (runtime.adapter_session == null) if (runtime.duckdb_pool) |pool| {
+        const connection = if (std.mem.eql(u8, db_path, ":memory:")) try pool.acquireSharedMemory(if (runtime.invocation) |invocation| &invocation.id else graph.project_name, false) else try pool.acquire(db_path, false);
+        if (connection) |native| owned = .{ .duckdb = native };
+    };
+    const held: ?*adapter.Session = runtime.adapter_session orelse if (owned) |*session| session else null;
+    if (held) |session| {
+        if (policy.manage_transaction) try session.begin();
+        errdefer if (policy.manage_transaction) session.rollback() catch {};
+        var held_runtime = runtime;
+        held_runtime.adapter_session = session;
+        try dropConflictingMaterialization(held_runtime, db_path, graph, node);
+        try session.execute(sql);
+        if (policy.manage_transaction) try session.commit();
+        return;
+    }
+    // The CLI fallback also performs switches in one transaction. A failed
+    // batch closes the connection, rolling back both the DROP and replacement.
+    const drop_kind: DuckDbObjectKind = if (std.mem.eql(u8, node.materialized, "table")) .view else .table;
+    const conflict = try relationObjectExists(runtime, db_path, graph, node, drop_kind);
+    const drop_sql = if (conflict) try renderDropSql(runtime.allocator, graph, node, drop_kind) else try runtime.allocator.dupe(u8, "");
+    defer runtime.allocator.free(drop_sql);
+    const batch = try std.fmt.allocPrint(runtime.allocator, "{s}{s}{s}{s}", .{ if (policy.manage_transaction) "begin transaction;\n" else "", drop_sql, sql, if (policy.manage_transaction) "commit;" else "" });
+    defer runtime.allocator.free(batch);
+    try executeSql(runtime, db_path, batch);
 }
 
 pub fn executeSeed(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node) !void {
@@ -574,7 +613,7 @@ fn renderDropSql(allocator: std.mem.Allocator, graph: *const Graph, node: *const
 }
 
 pub fn renderModelSql(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
-    if (!isSupportedMaterialization(node.materialized) or std.mem.eql(u8, node.materialized, "incremental")) {
+    if (!isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized) or std.mem.eql(u8, node.materialized, "incremental")) {
         return error.UnsupportedModelMaterialization;
     }
     const compiled_code = trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution);
@@ -585,6 +624,8 @@ pub fn renderModelSql(allocator: std.mem.Allocator, graph: *const Graph, node: *
     const relation_name = node.relation_name orelse try compiler.relationNameForNode(allocator, graph, node);
     const should_free_relation = node.relation_name == null;
     defer if (should_free_relation) allocator.free(relation_name);
+
+    if (std.mem.eql(u8, graph.adapter_type, "postgres")) return postgres_materialization.renderCreate(allocator, node, relation_name, compiled_code);
 
     const materialization_keyword: []const u8 = if (std.mem.eql(u8, node.materialized, "table")) "table" else "view";
     return try std.fmt.allocPrint(

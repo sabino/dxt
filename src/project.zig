@@ -542,7 +542,7 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     const execution_order = try selectedModelExecutionOrder(runtime, &graph, selected_models);
     defer runtime.allocator.free(execution_order);
     if (execution_order.len == 0) return error.UnsupportedRunSelection;
-    try validateRunMaterializations(execution_order);
+    try validateRunMaterializations(&graph, execution_order);
 
     const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected_models, target_dir);
@@ -935,7 +935,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
         const execution_order = try selectedModelExecutionOrder(runtime, &graph, selected);
         defer runtime.allocator.free(execution_order);
         if (execution_order.len == 0) return error.UnsupportedBuildSelection;
-        try validateBuildMaterializations(execution_order);
+        try validateBuildMaterializations(&graph, execution_order);
 
         const test_nodes = try selectedDataTestExecutionOrder(runtime, &graph, selected);
         defer runtime.allocator.free(test_nodes);
@@ -1293,7 +1293,7 @@ fn validateConcurrentResources(runtime: Runtime, graph: *const Graph, resources:
             } else if (std.mem.eql(u8, node.resource_type, "snapshot")) {
                 try snapshot_runner.validateExecution(graph, node);
             } else {
-                if (!duckdb.isSupportedMaterialization(node.materialized)) {
+                if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) {
                     if (std.mem.eql(u8, label, "Build")) return error.UnsupportedBuildModelMaterialization;
                     return error.UnsupportedModelMaterialization;
                 }
@@ -1558,17 +1558,17 @@ fn selectedSeedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []
     return try scheduler.orderNodes(runtime.allocator, graph, selected, true);
 }
 
-fn validateRunMaterializations(nodes: []const *Node) !void {
+fn validateRunMaterializations(graph: *const Graph, nodes: []const *Node) !void {
     for (nodes) |node| {
         if (std.mem.eql(u8, node.resource_type, "snapshot")) continue;
-        if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedModelMaterialization;
+        if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) return error.UnsupportedModelMaterialization;
     }
 }
 
-fn validateBuildMaterializations(nodes: []const *Node) !void {
+fn validateBuildMaterializations(graph: *const Graph, nodes: []const *Node) !void {
     for (nodes) |node| {
         if (std.mem.eql(u8, node.resource_type, "snapshot")) continue;
-        if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedBuildModelMaterialization;
+        if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) return error.UnsupportedBuildModelMaterialization;
     }
 }
 
@@ -1599,7 +1599,7 @@ fn validateSeedModelBuildExecution(graph: *const Graph, nodes: []const *Node) !v
         } else if (std.mem.eql(u8, node.resource_type, "snapshot")) {
             try snapshot_runner.validateExecution(graph, node);
         } else if (std.mem.eql(u8, node.resource_type, "model")) {
-            if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedBuildModelMaterialization;
+            if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) return error.UnsupportedBuildModelMaterialization;
         } else {
             return error.UnsupportedBuildSelection;
         }
