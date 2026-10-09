@@ -767,10 +767,6 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try json.string(writer, node.raw_code);
     try writer.writeAll(",\"description\":");
     try json.string(writer, node.description);
-    if (node.snapshot_config != null) {
-        try writer.writeAll(",\"meta\":");
-        if (node.snapshot_meta_json) |value| try writeJsonValue(writer, value) else try writeMetaObject(writer, node.meta.items);
-    }
     try writer.writeAll(",\"doc_blocks\":");
     try json.stringArray(writer, node.doc_blocks.items);
     try writer.writeAll(",\"docs\":");
@@ -833,12 +829,8 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
         try writer.writeAll(",\"extra_ctes_injected\":");
         try writer.writeAll(if (node.extra_ctes.items.len != 0) "true" else "false");
     }
-    try writer.writeAll(",\"unrendered_config\":");
-    try std.json.Stringify.value(if (node.raw_config == .null) @as(std.json.Value, .{ .object = .empty }) else node.raw_config, .{}, writer);
     try writer.writeAll(",\"meta\":");
-    if (@import("config_value.zig").get(node.effective_config, "meta")) |meta| try std.json.Stringify.value(meta, .{}, writer)
-    else if (node.snapshot_meta_json) |meta| try writeJsonValue(writer, meta)
-    else try writeMetaObject(writer, node.meta.items);
+    if (@import("config_value.zig").get(node.effective_config, "meta")) |meta| try std.json.Stringify.value(meta, .{}, writer) else if (node.snapshot_meta_json) |meta| try writeJsonValue(writer, meta) else try writeMetaObject(writer, node.meta.items);
     try writer.writeAll("}");
 }
 
