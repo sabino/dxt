@@ -13,6 +13,7 @@ pub fn build(b: *std.Build) void {
     });
     mod.addAnonymousImport("docs_ui", .{ .root_source_file = b.path("vendor/dbt-docs/embed.zig") });
     mod.addAnonymousImport("dbt_includes", .{ .root_source_file = b.path("vendor/dbt-includes/embed.zig") });
+    mod.addAnonymousImport("unicode_names", .{ .root_source_file = b.path("vendor/unicode/names.zig") });
     // libyaml handles YAML token syntax. The native Zig yaml module owns the
     // document model, tag resolution, aliases/merges, diagnostics and lifetimes.
     mod.addIncludePath(b.path("vendor/libyaml/include"));

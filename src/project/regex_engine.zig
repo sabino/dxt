@@ -50,7 +50,9 @@ pub fn compile(a: std.mem.Allocator, raw: []const u8, flags: u32) !Regex {
     const context = c.pcre2_compile_context_create_8(null) orelse return error.OutOfMemory;
     defer c.pcre2_compile_context_free_8(context);
     _ = c.pcre2_set_max_varlookbehind_8(context, 0);
-    if (normalized.flags & pattern.A != 0) _ = c.pcre2_set_compile_extra_options_8(context, c.PCRE2_EXTRA_CASELESS_RESTRICT);
+    var extra: u32 = c.PCRE2_EXTRA_ALLOW_SURROGATE_ESCAPES;
+    if (normalized.flags & pattern.A != 0) extra |= c.PCRE2_EXTRA_CASELESS_RESTRICT;
+    _ = c.pcre2_set_compile_extra_options_8(context, extra);
     var options: u32 = c.PCRE2_UTF | c.PCRE2_UCP | c.PCRE2_AUTO_CALLOUT;
     if (normalized.flags & pattern.I != 0) options |= c.PCRE2_CASELESS;
     if (normalized.flags & pattern.M != 0) options |= c.PCRE2_MULTILINE;

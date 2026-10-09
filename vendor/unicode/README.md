@@ -16,3 +16,9 @@ Source SHA-256:
 
 The Unicode license is reproduced in `LICENSE`. The same license covers the
 Unicode category ranges in `src/project/unicode_repr.zig`.
+
+`scripts/generate_unicode_names.py` generates `names.bin` and algorithmic name
+ranges from the same Unicode 15 database, with pinned `NameAliases.txt` input.
+The compact native table supports regular-expression named character escapes,
+including control aliases, ideograph names and Hangul syllables. Its input and
+output checksums are recorded in `names-source.json`.

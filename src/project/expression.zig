@@ -144,6 +144,8 @@ pub fn numericFloat(value: Value) !f64 {
 }
 
 pub fn repr(value: Value, allocator: std.mem.Allocator) ![]const u8 {
+    const rendered = value.attribute("__dxt_repr");
+    if (rendered == .string) return rendered.string;
     if (value == .string) {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
@@ -151,6 +153,11 @@ pub fn repr(value: Value, allocator: std.mem.Allocator) ![]const u8 {
         return out.toOwnedSlice();
     }
     return value.text(allocator);
+}
+pub fn callableName(value: Value) ?[]const u8 {
+    if (value == .callable) return value.callable;
+    const marker = value.attribute("__dxt_callable");
+    return if (marker == .callable) marker.callable else null;
 }
 
 pub fn evaluate(allocator: std.mem.Allocator, input: []const u8, host: ?Host) !Value {
@@ -344,9 +351,9 @@ const Parser = struct {
             if (self.take("(")) {
                 const args = try self.arguments();
                 if (self.active) {
-                    if (value != .callable) return error.JinjaTypeError;
+                    const function = callableName(value) orelse return error.JinjaTypeError;
                     const host = self.host orelse return error.UnsupportedJinjaCall;
-                    value = try host.call(host.context, value.callable, args, self.allocator);
+                    value = try host.call(host.context, function, args, self.allocator);
                 }
             } else if (self.take("[")) {
                 const start: ?Value = if (self.take(":")) null else try self.binary(0);
@@ -532,9 +539,9 @@ const Parser = struct {
 
     fn method(self: *Parser, receiver: Value, method_name: []const u8, args: []const Argument) !Value {
         const bound = receiver.attribute(method_name);
-        if (bound == .callable) {
+        if (callableName(bound)) |function| {
             const host = self.host orelse return error.UnsupportedJinjaCall;
-            return try host.call(host.context, bound.callable, args, self.allocator);
+            return try host.call(host.context, function, args, self.allocator);
         }
         if (try pureMethod(self.allocator, receiver, method_name, args)) |value| return value;
         const host = self.host orelse return error.UnsupportedJinjaCall;
@@ -608,6 +615,7 @@ fn ownedEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry)) ![
 }
 
 fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument) !?Value {
+    if (receiver.attribute("__dxt_noniterable").truthy()) return null;
     if (receiver == .complex and std.mem.eql(u8, name_, "conjugate")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         return .{ .complex = .{ .real = receiver.complex.real, .imaginary = -receiver.complex.imaginary } };
@@ -1182,7 +1190,7 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "mapping")) return value == .object and sequence(value) == null and sequences.kind(value) == null;
     if (std.mem.eql(u8, name, "iterable")) return value == .list or value == .tuple or value == .object or value == .string;
     if (std.mem.eql(u8, name, "sequence")) return value == .list or value == .tuple or (value == .object and sequences.kind(value) == null) or value == .string;
-    if (std.mem.eql(u8, name, "callable")) return value == .callable;
+    if (std.mem.eql(u8, name, "callable")) return callableName(value) != null;
     if (std.mem.eql(u8, name, "equalto") or std.mem.eql(u8, name, "eq") or std.mem.eql(u8, name, "==")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
         return equal(value, args[0].value);

@@ -95,6 +95,58 @@ EXPRESSIONS = [
     "modules.re.search('(?P<a>a)(?P=a)', 'aa').group()",
     "modules.re.search('(?>a*)a', 'aa') is none",
     "modules.re.fullmatch('a++a','aa') is none",
+    "modules.re.findall('(?i:i)', 'iIİı')",
+    "modules.re.findall('(?ai:[a-z])', 'iIİıſKAb')",
+    "modules.re.findall('(?u:[a-z])', 'iIİıſKAb',modules.re.A + modules.re.I)",
+    "modules.re.findall('(?i:i)(?-i:i)', 'Ii İi ıi II')",
+    "modules.re.search('(?P<i>i)', 'İ', modules.re.I).groupdict()",
+    "modules.re.findall('[\\\\u0069]', 'iIİı', modules.re.I)",
+    "modules.re.findall('[\\\\x69]', 'iIİı', modules.re.I)",
+    "modules.re.findall('\\\\u0069', 'iIİı', modules.re.I)",
+    "modules.re.findall('\\\\N{LATIN SMALL LETTER E WITH ACUTE}', 'é É', modules.re.I)",
+    "modules.re.findall('[\\\\N{latin small letter e with acute}]', 'é É', modules.re.I)",
+    "modules.re.findall('\\\\N{CJK UNIFIED IDEOGRAPH-597D}', '好 é')",
+    "modules.re.findall('\\\\N{HANGUL SYLLABLE GA}', '가 나')",
+    "modules.re.findall('\\\\N{NULL}', 'a\\u0000b')",
+    "modules.re.search('(?<=\\\\N{LATIN SMALL LETTER E WITH ACUTE}|é)x', 'éx').group()",
+    "modules.re.search('(?x:a # ignore \\\\K\\n b)', 'ab').group()",
+    "modules.re.search('(a)?(?(1)b|c)', 'ab').group()",
+    "modules.re.search('(?P<i>a)?(?(i)b|c)', 'c',modules.re.I).groups()",
+    "modules.re.search('.+', 'a' * 60)",
+    "modules.re.search('.+', 'é' * 60)",
+    "modules.re.compile('a', -512)",
+    "modules.re.compile('a', -512).flags",
+    "modules.re.compile('a', 512)",
+    "modules.re.template('a')",
+    "modules.re.T is undefined and modules.re.DEBUG is undefined and modules.re.TEMPLATE is undefined",
+    "modules.re | list",
+    "modules.re.RegexFlag",
+    "modules.re.Pattern",
+    "modules.re.Match",
+    "modules.re.error",
+    "modules.re.RegexFlag(0)",
+    "modules.re.RegexFlag(10)",
+    "modules.re.RegexFlag(258)",
+    "modules.re.RegexFlag(512)",
+    "modules.re.RegexFlag(513)",
+    "modules.re.RegexFlag(-1)",
+    "modules.re.RegexFlag(-513)",
+    "modules.re.RegexFlag(2.0)",
+    "modules.re.RegexFlag(10).name",
+    "modules.re.RegexFlag(512).name",
+    "modules.re.RegexFlag(9007199254740993).value",
+    "modules.re.RegexFlag(513) | tojson",
+    "modules.re.error('bad')",
+    "[modules.re.error('bad')]",
+    "modules.re.error('bad').args",
+    "modules.re.error('bad').msg",
+    "modules.re.error('bad', 'a\\nb', 2)",
+    "modules.re.error('bad', 'a\\nb', 2).lineno",
+    "modules.re.error('bad', 'a\\nb', 2).colno",
+    "modules.re.compile('').search('abc',10,10).span()",
+    "modules.re.search('a','a') is not iterable",
+    "modules.re.compile('a') is not mapping",
+    "modules.re.I is not sequence",
 ]
 
 
@@ -109,10 +161,10 @@ TEMPLATES = [
     "{% set p = modules.re.compile('(?P<a>a)') %}{{ modules.re.compile(p) is sameas(p) }}|{{ p.findall('aba') }}|{{ p.match('ab').groupdict() }}",
     "{% set matches = modules.re.finditer('a+', 'aa ba') %}{{ matches is iterable }}|{{ matches | map(attribute='lastindex') | list }}|{{ matches | list }}",
     "{% set matches = modules.re.finditer('a+', 'aa ba') %}{% for m in matches %}{{ m.span() }}:{{ m.group() }};{% endfor %}{{ matches | list }}",
-    "{% macro replacement(m) %}{{ m.group(0)|upper }}{% endmacro %}{{ modules.re.sub('[a-z]+', replacement, 'abc de') }}",
-    "{% macro replacement(m) %}{{ return(m.group(0)|upper) }}{% endmacro %}{{ modules.re.subn('[a-z]+', replacement, 'abc de') }}",
     "{% set p = modules.re.compile('a') %}{{ modules.re.search(p, 'ba').span() }}|{{ modules.re.findall(p,'aaa') }}",
     "{{ modules.re.purge() }}",
+    "{% set flag = modules.re.RegexFlag %}{{ flag(10) }}|{{ flag is callable }}",
+    "{% set err = modules.re.error %}{{ err('bad') }}|{{ err is callable }}",
 ]
 
 
@@ -159,6 +211,27 @@ INVALID = [
     "modules.re.compile(modules.re.compile('a'), modules.re.I)",
     "modules.re.search('a', 42)",
     "modules.re.finditer('a','aa') | length",
+    "modules.re.compile('(*SKIP)')",
+    "modules.re.compile('\\\\N{NO SUCH CHARACTER}')",
+    "modules.re.compile('\\\\N{KEYCAP DIGIT ONE}')",
+    "modules.re.compile('(?au)a')",
+    "modules.re.compile('a*', modules.re.T)",
+    "modules.re.template('a*')",
+    "modules.re.template(modules.re.compile('a'))",
+    "modules.re.Pattern()",
+    "modules.re.Match()",
+    "modules.re.RegexFlag('2')",
+    "modules.re.compile('a', modules.re.DEBUG)",
+    "modules.re.RegexFlag.get('value')",
+    "modules.re.compile('a', 2147483648)",
+    "modules.re.compile('\\\\C')",
+    "modules.re.compile('\\\\G')",
+    "modules.re.compile('\\\\e')",
+    "modules.re.search('a','a',extra=1)",
+    "modules.re.search('a',pattern='a',string='a')",
+    "modules.re.search('a','a').span(group=0)",
+    "modules.re.search('a','a').groups(foo=1)",
+    "modules.re.search('a','a') | list",
 ]
 
 
@@ -170,4 +243,19 @@ def test_invalid_regex_matches_core_failure(tmp_path, core_runner, expression):
     native = subprocess.run([str(DXT), *common, "--target-path", "native"], cwd=ROOT, capture_output=True, text=True)
     core = core_runner.invoke(["--quiet", *common, "--target-path", "core"])
     assert native.returncode != 0, native.stdout + native.stderr
+    assert not core.success, core.result
+
+
+@pytest.mark.parametrize("template", [
+    "{% macro replacement(m) %}{{ m.group(0)|upper }}{% endmacro %}{{ modules.re.sub('[a-z]+', replacement, 'abc de') }}",
+    "{% macro replacement(m) %}{{ return(m.group(0)|upper) }}{% endmacro %}{{ modules.re.subn('[a-z]+', replacement, 'abc de') }}",
+])
+def test_model_local_macro_replacements_fail_like_dbt_core(tmp_path, core_runner, template):
+    root = tmp_path / "regex_invalid"
+    write_project(root, "0")
+    (root / "models/value.sql").write_text("select '" + template + "' as rendered\n")
+    common = ["compile", "--project-dir", str(root), "--profiles-dir", str(root), "--no-partial-parse"]
+    native = subprocess.run([str(DXT), *common], cwd=ROOT, capture_output=True, text=True)
+    core = core_runner.invoke(["--quiet", *common])
+    assert native.returncode != 0
     assert not core.success, core.result

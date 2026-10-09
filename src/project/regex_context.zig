@@ -5,7 +5,7 @@ const engine = @import("regex_engine.zig");
 const Value = expr.Value;
 const Argument = expr.Argument;
 const Allocator = std.mem.Allocator;
-const Pattern = struct { pattern: []const u8, flags: u32 };
+const Pattern = struct { pattern: []const u8, flags: i32 };
 const Capture = struct {
     pattern: Pattern,
     string: []const u8,
@@ -15,14 +15,24 @@ const Capture = struct {
     pos: i64,
     endpos: i64,
 };
-const functions = [_][]const u8{ "compile", "search", "match", "fullmatch", "findall", "finditer", "sub", "subn", "split", "escape", "purge" };
+const functions = [_][]const u8{ "compile", "search", "match", "fullmatch", "findall", "finditer", "sub", "subn", "split", "escape", "purge", "template" };
+const exports = [_][]const u8{ "match", "fullmatch", "search", "sub", "subn", "split", "findall", "finditer", "compile", "purge", "template", "escape", "error", "Pattern", "Match", "A", "I", "L", "M", "S", "X", "U", "ASCII", "IGNORECASE", "LOCALE", "MULTILINE", "DOTALL", "VERBOSE", "UNICODE", "NOFLAG", "RegexFlag" };
 const flags = [_]struct { name: []const u8, value: u32 }{
-    .{ .name = "NOFLAG", .value = 0 },     .{ .name = "TEMPLATE", .value = 1 },  .{ .name = "T", .value = 1 },
-    .{ .name = "IGNORECASE", .value = 2 }, .{ .name = "I", .value = 2 },         .{ .name = "LOCALE", .value = 4 },
-    .{ .name = "L", .value = 4 },          .{ .name = "MULTILINE", .value = 8 }, .{ .name = "M", .value = 8 },
-    .{ .name = "DOTALL", .value = 16 },    .{ .name = "S", .value = 16 },        .{ .name = "UNICODE", .value = 32 },
-    .{ .name = "U", .value = 32 },         .{ .name = "VERBOSE", .value = 64 },  .{ .name = "X", .value = 64 },
-    .{ .name = "DEBUG", .value = 128 },    .{ .name = "ASCII", .value = 256 },   .{ .name = "A", .value = 256 },
+    .{ .name = "NOFLAG", .value = 0 },
+    .{ .name = "IGNORECASE", .value = 2 },
+    .{ .name = "I", .value = 2 },
+    .{ .name = "LOCALE", .value = 4 },
+    .{ .name = "L", .value = 4 },
+    .{ .name = "MULTILINE", .value = 8 },
+    .{ .name = "M", .value = 8 },
+    .{ .name = "DOTALL", .value = 16 },
+    .{ .name = "S", .value = 16 },
+    .{ .name = "UNICODE", .value = 32 },
+    .{ .name = "U", .value = 32 },
+    .{ .name = "VERBOSE", .value = 64 },
+    .{ .name = "X", .value = 64 },
+    .{ .name = "ASCII", .value = 256 },
+    .{ .name = "A", .value = 256 },
 };
 
 fn entry(a: Allocator, fields: []const expr.Entry) !Value {
@@ -31,7 +41,7 @@ fn entry(a: Allocator, fields: []const expr.Entry) !Value {
 fn string(value: Value) ![]const u8 {
     return if (value == .string) value.string else error.JinjaTypeError;
 }
-fn argument(args: []const Argument, name: []const u8, position: usize) Value {
+fn foundArgument(args: []const Argument, name: []const u8, position: usize) ?Value {
     var index: usize = 0;
     for (args) |arg| {
         if (arg.name) |key| {
@@ -41,11 +51,13 @@ fn argument(args: []const Argument, name: []const u8, position: usize) Value {
             index += 1;
         }
     }
-    return .undefined;
+    return null;
+}
+fn argument(args: []const Argument, name: []const u8, position: usize) Value {
+    return foundArgument(args, name, position) orelse .undefined;
 }
 fn integerArg(args: []const Argument, name: []const u8, position: usize, fallback: i64) !i64 {
-    const value = argument(args, name, position);
-    return if (value == .undefined) fallback else try expr.integerIndex(value);
+    return if (foundArgument(args, name, position)) |value| try expr.integerIndex(value) else fallback;
 }
 fn validateArguments(args: []const Argument, names: []const []const u8, required: usize) !void {
     var seen = [_]bool{false} ** 8;
@@ -68,26 +80,67 @@ fn bound(a: Allocator, prefix: []const u8, method: []const u8, definition: anyty
     return .{ .callable = try std.fmt.allocPrint(a, "{s}{s}:{s}", .{ prefix, method, try std.json.Stringify.valueAlloc(a, definition, .{}) }) };
 }
 fn flagValue(a: Allocator, number: u32) !Value {
-    const label = if (number == 0) "re.NOFLAG" else (try flagText(a, number))[2..];
+    return flagFromText(a, (try expr.integerValue(a, number)).integer);
+}
+fn flagFromText(a: Allocator, authored: []const u8) !Value {
+    const numbers = @import("expression_number.zig");
+    var number = authored;
+    if (number[0] == '-') {
+        if (numbers.order(number, "-512") != .lt) number = try numbers.apply(a, "+", "512", number) else {
+            var magnitude = try std.math.big.int.Managed.init(a);
+            defer magnitude.deinit();
+            try magnitude.setString(10, number);
+            const bits = try std.fmt.allocPrint(a, "{d}", .{magnitude.bitCountAbs()});
+            number = try numbers.apply(a, "+", try numbers.apply(a, "**", "2", bits), number);
+        }
+    }
+    const known = try std.fmt.parseInt(u32, try numbers.apply(a, "%", number, "512"), 10);
+    var names: std.ArrayList([]const u8) = .empty;
+    const canonical_names = [_][]const u8{ "ASCII", "IGNORECASE", "LOCALE", "UNICODE", "MULTILINE", "DOTALL", "VERBOSE", "TEMPLATE", "DEBUG" };
+    for ([_]u32{ 256, 2, 4, 32, 8, 16, 64, 1, 128 }, canonical_names) |bit, name| if (known & bit != 0) try names.append(a, name);
+    const unknown = try numbers.apply(a, "-", number, try std.fmt.allocPrint(a, "{d}", .{known}));
+    var name_value: Value = .none;
+    var label: []const u8 = undefined;
+    if (std.mem.eql(u8, number, "0")) {
+        label = "re.NOFLAG";
+        name_value = .{ .string = "NOFLAG" };
+    } else if (known == 0) label = try std.fmt.allocPrint(a, "re.RegexFlag({s})", .{number}) else {
+        var suffix: []const u8 = "";
+        if (!std.mem.eql(u8, unknown, "0")) {
+            var value = try std.math.big.int.Managed.init(a);
+            defer value.deinit();
+            try value.setString(10, unknown);
+            suffix = try std.fmt.allocPrint(a, "|0x{s}", .{try value.toString(a, 16, .lower)});
+        }
+        label = try std.fmt.allocPrint(a, "re.{s}{s}", .{ try std.mem.join(a, "|re.", names.items), suffix });
+        name_value = .{ .string = try std.fmt.allocPrint(a, "{s}{s}", .{ try std.mem.join(a, "|", names.items), suffix }) };
+    }
     return try entry(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
-        .{ .key = "__dxt_integer", .value = .{ .string = (try expr.integerValue(a, number)).integer } },
+        .{ .key = "__dxt_integer", .value = .{ .string = number } },
         .{ .key = "__dxt_rendered", .value = .{ .string = label } },
-        .{ .key = "value", .value = try expr.integerValue(a, number) },
-        .{ .key = "name", .value = .{ .string = label[3..] } },
+        .{ .key = "value", .value = .{ .integer = number } },
+        .{ .key = "name", .value = name_value },
+    });
+}
+fn classValue(a: Allocator, name: []const u8) !Value {
+    return try entry(a, &.{
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_callable", .value = .{ .callable = try std.fmt.allocPrint(a, "modules.re.{s}", .{name}) } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = if (std.mem.eql(u8, name, "RegexFlag")) "<flag 'RegexFlag'>" else try std.fmt.allocPrint(a, "<class 're.{s}'>", .{name}) } },
     });
 }
 
 pub fn resolve(a: Allocator, path: []const u8) !?Value {
     if (std.mem.eql(u8, path, "modules") or std.mem.eql(u8, path, "modules.re")) {
         var fields: std.ArrayList(expr.Entry) = .empty;
-        for (functions) |name| try fields.append(a, .{ .key = name, .value = .{ .callable = try std.fmt.allocPrint(a, "modules.re.{s}", .{name}) } });
-        for (flags) |flag| try fields.append(a, .{ .key = flag.name, .value = try flagValue(a, flag.value) });
+        for (exports) |name| try fields.append(a, .{ .key = name, .value = (try resolve(a, try std.fmt.allocPrint(a, "modules.re.{s}", .{name}))).? });
         const module = Value{ .object = try fields.toOwnedSlice(a) };
         return if (std.mem.eql(u8, path, "modules")) try entry(a, &.{.{ .key = "re", .value = module }}) else module;
     }
     if (std.mem.startsWith(u8, path, "modules.re.")) {
         const name = path[11..];
+        for ([_][]const u8{ "Pattern", "Match", "RegexFlag", "error" }) |class| if (std.mem.eql(u8, name, class)) return try classValue(a, class);
         for (flags) |flag| {
             if (std.mem.eql(u8, name, flag.name)) return try flagValue(a, flag.value);
             if (name.len > flag.name.len and std.mem.startsWith(u8, name, flag.name) and name[flag.name.len] == '.') {
@@ -103,15 +156,15 @@ pub fn resolve(a: Allocator, path: []const u8) !?Value {
 }
 
 fn patternValue(a: Allocator, definition: Pattern) !Value {
-    const regex = try engine.compile(a, definition.pattern, definition.flags);
+    const regex = try engine.compile(a, definition.pattern, @bitCast(definition.flags));
     defer regex.deinit();
-    const actual = Pattern{ .pattern = definition.pattern, .flags = regex.flags };
+    const actual = Pattern{ .pattern = definition.pattern, .flags = @bitCast(regex.flags) };
     var fields: std.ArrayList(expr.Entry) = .empty;
     try fields.appendSlice(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_regex_pattern", .value = .{ .string = try std.json.Stringify.valueAlloc(a, actual, .{}) } },
         .{ .key = "pattern", .value = .{ .string = definition.pattern } },
-        .{ .key = "flags", .value = try expr.integerValue(a, regex.flags) },
+        .{ .key = "flags", .value = try expr.integerValue(a, @as(i32, @bitCast(regex.flags))) },
         .{ .key = "groups", .value = try expr.integerValue(a, regex.groups) },
         .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "re.compile({s}{s})", .{ try expr.repr(.{ .string = definition.pattern }, a), try flagText(a, regex.flags & ~@as(u32, 32)) }) } },
     });
@@ -128,6 +181,8 @@ fn flagText(a: Allocator, bits: u32) ![]const u8 {
         try text.appendSlice(a, if (text.items.len == 0) ", re." else "|re.");
         try text.appendSlice(a, name);
     }
+    const unknown = bits & ~@as(u32, 511);
+    if (unknown != 0) try text.appendSlice(a, try std.fmt.allocPrint(a, "{s}0x{x}", .{ if (text.items.len == 0) ", " else "|", unknown }));
     return try text.toOwnedSlice(a);
 }
 fn groupIndex(capture: Capture, authored: Value) !usize {
@@ -155,6 +210,8 @@ fn matchValue(a: Allocator, capture: Capture) !Value {
     if (capture.lastindex) |index| for (capture.names) |name| {
         if (name.index == index) lastgroup = .{ .string = name.name };
     };
+    const matched_repr = try expr.repr(group(capture, 0, .none), a);
+    const short_repr = matched_repr[0..try engine.byteOffset(matched_repr, 50)];
     try fields.appendSlice(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_indexed", .value = .{ .list = groups } },
@@ -165,7 +222,7 @@ fn matchValue(a: Allocator, capture: Capture) !Value {
         .{ .key = "endpos", .value = try expr.integerValue(a, capture.endpos) },
         .{ .key = "lastindex", .value = if (capture.lastindex) |index| try expr.integerValue(a, index) else .none },
         .{ .key = "lastgroup", .value = lastgroup },
-        .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<re.Match object; span=({d}, {d}), match={s}>", .{ start, end, try expr.repr(group(capture, 0, .none), a) }) } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<re.Match object; span=({d}, {d}), match={s}>", .{ start, end, short_repr }) } },
     });
     for ([_][]const u8{ "group", "groups", "groupdict", "start", "end", "span", "expand" }) |method| try fields.append(a, .{ .key = method, .value = try bound(a, "__dxt_regex_match:", method, capture) });
     return .{ .object = try fields.toOwnedSlice(a) };
@@ -267,8 +324,7 @@ fn callMatch(a: Allocator, method: []const u8, capture: Capture, args: []const A
     }
     if (std.mem.eql(u8, method, "groups") or std.mem.eql(u8, method, "groupdict")) {
         try validateArguments(args, &.{"default"}, 0);
-        const default = argument(args, "default", 0);
-        const fallback: Value = if (default == .undefined) .none else default;
+        const fallback = foundArgument(args, "default", 0) orelse Value.none;
         if (std.mem.eql(u8, method, "groups")) {
             const values = try expr.allocateValues(a, capture.spans.len - 1);
             for (values, 1..) |*value, index| value.* = group(capture, index, fallback);
@@ -283,8 +339,7 @@ fn callMatch(a: Allocator, method: []const u8, capture: Capture, args: []const A
         return .{ .string = try replacement(a, try string(args[0].value), capture) };
     }
     if (args.len > 1 or (args.len == 1 and args[0].name != null)) return error.InvalidJinjaArguments;
-    const authored = argument(args, "group", 0);
-    const index = if (authored == .undefined) 0 else try groupIndex(capture, authored);
+    const index = if (foundArgument(args, "group", 0)) |authored| try groupIndex(capture, authored) else 0;
     const span = capture.spans[index];
     const start = try engine.characterOffset(capture.string, span.start);
     const end = try engine.characterOffset(capture.string, span.end);
@@ -298,7 +353,7 @@ fn callMatch(a: Allocator, method: []const u8, capture: Capture, args: []const A
 
 fn execute(a: Allocator, method: []const u8, definition: Pattern, args: []const Argument, host: ?expr.Host) !Value {
     if (std.mem.eql(u8, method, "sub") or std.mem.eql(u8, method, "subn")) try validateArguments(args, &.{ "repl", "string", "count" }, 2) else if (std.mem.eql(u8, method, "split")) try validateArguments(args, &.{ "string", "maxsplit" }, 1) else try validateArguments(args, &.{ "string", "pos", "endpos" }, 1);
-    const regex = try engine.compile(a, definition.pattern, definition.flags);
+    const regex = try engine.compile(a, definition.pattern, @bitCast(definition.flags));
     defer regex.deinit();
     const substitution = std.mem.eql(u8, method, "sub") or std.mem.eql(u8, method, "subn");
     const subject = try string(argument(args, "string", if (substitution) 1 else 0));
@@ -308,7 +363,7 @@ fn execute(a: Allocator, method: []const u8, definition: Pattern, args: []const 
     const endpos = if (has_bounds) std.math.clamp(try integerArg(args, "endpos", 2, length), 0, length) else length;
     const start = try engine.byteOffset(subject, pos);
     const end = try engine.byteOffset(subject, endpos);
-    const actual = Pattern{ .pattern = definition.pattern, .flags = regex.flags };
+    const actual = Pattern{ .pattern = definition.pattern, .flags = @bitCast(regex.flags) };
     if (std.mem.eql(u8, method, "search") or std.mem.eql(u8, method, "match") or std.mem.eql(u8, method, "fullmatch")) {
         if (pos > endpos) return .none;
         const options: u32 = if (std.mem.eql(u8, method, "fullmatch")) engine.c.PCRE2_ANCHORED | engine.c.PCRE2_ENDANCHORED else if (std.mem.eql(u8, method, "match")) engine.c.PCRE2_ANCHORED else 0;
@@ -372,6 +427,44 @@ fn execute(a: Allocator, method: []const u8, definition: Pattern, args: []const 
     return .{ .tuple = pair };
 }
 
+fn errorValue(a: Allocator, args: []const Argument) !Value {
+    try validateArguments(args, &.{ "msg", "pattern", "pos" }, 1);
+    const msg = argument(args, "msg", 0);
+    const authored_pattern = foundArgument(args, "pattern", 1) orelse Value.none;
+    const pos_value = foundArgument(args, "pos", 2) orelse Value.none;
+    var message = msg;
+    var lineno: Value = .none;
+    var colno: Value = .none;
+    if (authored_pattern != .none and pos_value != .none) {
+        const text = try string(authored_pattern);
+        const pos = try expr.integerIndex(pos_value);
+        const length: i64 = @intCast(try @import("expression_unicode.zig").count(text));
+        const bound_end = try engine.byteOffset(text, std.math.clamp(if (pos < 0) length + pos else pos, 0, length));
+        var line: i64 = 1;
+        for (text[0..bound_end]) |ch| if (ch == '\n') {
+            line += 1;
+        };
+        const last = if (std.mem.lastIndexOfScalar(u8, text[0..bound_end], '\n')) |at| try engine.characterOffset(text, @intCast(at)) else -1;
+        const column = pos - last;
+        lineno = try expr.integerValue(a, line);
+        colno = try expr.integerValue(a, column);
+        message = .{ .string = try std.fmt.allocPrint(a, "{s} at position {d}{s}", .{ try msg.text(a), pos, if (std.mem.indexOfScalar(u8, text, '\n') != null) try std.fmt.allocPrint(a, " (line {d}, column {d})", .{ line, column }) else "" }) };
+    }
+    const arguments = try expr.allocateValues(a, 1);
+    arguments[0] = message;
+    return try entry(a, &.{
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = try message.text(a) } },
+        .{ .key = "__dxt_repr", .value = .{ .string = try std.fmt.allocPrint(a, "error({s})", .{try expr.repr(message, a)}) } },
+        .{ .key = "msg", .value = msg },
+        .{ .key = "pattern", .value = authored_pattern },
+        .{ .key = "pos", .value = pos_value },
+        .{ .key = "lineno", .value = lineno },
+        .{ .key = "colno", .value = colno },
+        .{ .key = "args", .value = .{ .tuple = arguments } },
+    });
+}
+
 pub fn call(a: Allocator, name: []const u8, args: []const Argument, host: ?expr.Host) !?Value {
     const pattern_prefix = "__dxt_regex_pattern:";
     const match_prefix = "__dxt_regex_match:";
@@ -385,6 +478,26 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, host: ?expr.
     }
     if (!std.mem.startsWith(u8, name, "modules.re.")) return null;
     const method = name[11..];
+    var exported = false;
+    for (functions) |function| if (std.mem.eql(u8, method, function)) {
+        exported = true;
+        break;
+    };
+    for ([_][]const u8{ "Pattern", "Match", "RegexFlag", "error" }) |class| if (std.mem.eql(u8, method, class)) {
+        exported = true;
+    };
+    if (!exported) return null;
+    if (std.mem.eql(u8, method, "Pattern") or std.mem.eql(u8, method, "Match")) return error.JinjaTypeError;
+    if (std.mem.eql(u8, method, "error")) return try errorValue(a, args);
+    if (std.mem.eql(u8, method, "RegexFlag")) {
+        try validateArguments(args, &.{"value"}, 1);
+        const value = argument(args, "value", 0);
+        const number = if (value == .integer) value.integer else if (expr.integerProtocol(value)) |number| number else if (value == .boolean) (if (value.boolean) "1" else "0") else if (value == .number) blk: {
+            for ([_]f64{ 0, 1, 2, 4, 8, 16, 32, 64, 128, 256 }) |member| if (member == value.number) break :blk (try expr.integerValue(a, @as(u32, @intFromFloat(member)))).integer;
+            return error.InvalidRegularExpressionFlags;
+        } else return error.InvalidRegularExpressionFlags;
+        return try flagFromText(a, number);
+    }
     if (std.mem.eql(u8, method, "purge")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         return .none;
@@ -400,16 +513,18 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, host: ?expr.
     }
     const authored = argument(args, "pattern", 0);
     const substitution = std.mem.eql(u8, method, "sub") or std.mem.eql(u8, method, "subn");
-    if (std.mem.eql(u8, method, "compile")) try validateArguments(args, &.{ "pattern", "flags" }, 1) else if (substitution) try validateArguments(args, &.{ "pattern", "repl", "string", "count", "flags" }, 3) else if (std.mem.eql(u8, method, "split")) try validateArguments(args, &.{ "pattern", "string", "maxsplit", "flags" }, 2) else try validateArguments(args, &.{ "pattern", "string", "flags" }, 2);
-    const flag_value = try integerArg(args, "flags", if (std.mem.eql(u8, method, "compile")) 1 else if (substitution) 4 else if (std.mem.eql(u8, method, "split")) 3 else 2, 0);
-    if (flag_value < 0 or flag_value > std.math.maxInt(u32)) return error.InvalidRegularExpressionFlags;
+    const compiling = std.mem.eql(u8, method, "compile") or std.mem.eql(u8, method, "template");
+    if (compiling) try validateArguments(args, &.{ "pattern", "flags" }, 1) else if (substitution) try validateArguments(args, &.{ "pattern", "repl", "string", "count", "flags" }, 3) else if (std.mem.eql(u8, method, "split")) try validateArguments(args, &.{ "pattern", "string", "maxsplit", "flags" }, 2) else try validateArguments(args, &.{ "pattern", "string", "flags" }, 2);
+    const flag_value = try integerArg(args, "flags", if (compiling) 1 else if (substitution) 4 else if (std.mem.eql(u8, method, "split")) 3 else 2, 0);
+    if (flag_value < std.math.minInt(i32) or flag_value > std.math.maxInt(i32)) return error.InvalidRegularExpressionFlags;
     var definition: Pattern = undefined;
     if (authored == .object and authored.attribute("__dxt_regex_pattern") == .string) {
-        if (flag_value != 0) return error.InvalidRegularExpressionFlags;
+        if (flag_value != 0 or std.mem.eql(u8, method, "template")) return error.InvalidRegularExpressionFlags;
         definition = (try std.json.parseFromSlice(Pattern, a, authored.attribute("__dxt_regex_pattern").string, .{})).value;
         if (std.mem.eql(u8, method, "compile")) return authored;
     } else definition = .{ .pattern = try string(authored), .flags = @intCast(flag_value) };
-    if (std.mem.eql(u8, method, "compile")) return try patternValue(a, definition);
+    if (std.mem.eql(u8, method, "template")) definition.flags |= 1;
+    if (compiling) return try patternValue(a, definition);
     var forwarded: std.ArrayList(Argument) = .empty;
     var position: usize = 0;
     for (args) |arg| {

@@ -10,6 +10,27 @@ pub const U: u32 = 32;
 pub const X: u32 = 64;
 pub const A: u32 = 256;
 
+const Escape = struct { code: u21, end: usize };
+fn unicodeEscape(a: std.mem.Allocator, input: []const u8, at: usize) !?Escape {
+    const kind = input[at + 1];
+    if (kind == 'N') {
+        if (at + 2 == input.len or input[at + 2] != '{') return error.InvalidRegularExpression;
+        const close = std.mem.indexOfScalarPos(u8, input, at + 3, '}') orelse return error.InvalidRegularExpression;
+        return .{ .code = try @import("unicode_name.zig").lookup(a, input[at + 3 .. close]), .end = close + 1 };
+    }
+    const digits: usize = switch (kind) {
+        'x' => 2,
+        'u' => 4,
+        'U' => 8,
+        else => return null,
+    };
+    const end = at + 2 + digits;
+    if (end > input.len) return error.InvalidRegularExpression;
+    const code = std.fmt.parseInt(u21, input[at + 2 .. end], 16) catch return error.InvalidRegularExpression;
+    if (code > 0x10ffff) return error.InvalidRegularExpression;
+    return .{ .code = code, .end = end };
+}
+
 fn word(ascii: bool) []const u8 {
     return if (ascii) "a-zA-Z0-9_" else "\\p{L}\\p{N}_";
 }
@@ -52,6 +73,12 @@ fn classBody(a: std.mem.Allocator, body: []const u8, ascii: bool, caseless: bool
         }
         if (index + 1 == body.len) return error.InvalidRegularExpression;
         const escaped = body[index + 1];
+        if (try unicodeEscape(a, body, index)) |decoded| {
+            try positive.appendSlice(a, try std.fmt.allocPrint(a, "\\x{{{x}}}", .{decoded.code}));
+            if (caseless and !ascii and (decoded.code == 'i' or decoded.code == 'I' or decoded.code == 0x130 or decoded.code == 0x131)) try positive.appendSlice(a, "iIİı");
+            index = decoded.end;
+            continue;
+        }
         const component: ?[]const u8 = switch (escaped) {
             'w', 'W' => word(ascii),
             'd', 'D' => if (ascii) "0-9" else "\\p{Nd}",
@@ -61,7 +88,7 @@ fn classBody(a: std.mem.Allocator, body: []const u8, ascii: bool, caseless: bool
         if (component) |set| {
             if (std.ascii.isUpper(escaped)) try alternatives.append(a, try std.fmt.allocPrint(a, "[^{s}]", .{set})) else try positive.appendSlice(a, set);
         } else {
-            if (std.mem.indexOfScalar(u8, "ABZpPKRQEXhHgz", escaped) != null) return error.InvalidRegularExpression;
+            if (std.mem.indexOfScalar(u8, "ABZpPKRQEXhHgzGCce", escaped) != null) return error.InvalidRegularExpression;
             if (escaped == 'b') try positive.appendSlice(a, "\\x08") else if (escaped == 'v') try positive.appendSlice(a, "\\x0b") else try positive.appendSlice(a, body[index .. index + 2]);
         }
         index += 2;
@@ -121,6 +148,7 @@ fn fixedWidth(input: []const u8) !?usize {
                 else => 0,
             };
             position = @min(input.len, position + extra);
+            if (escaped == 'N' and position < input.len and input[position] == '{') position = (std.mem.indexOfScalarPos(u8, input, position, '}') orelse return error.InvalidRegularExpression) + 1;
         } else {
             if (ch == '^' or ch == '$') atom = 0;
             position += std.unicode.utf8ByteSequenceLength(ch) catch return error.InvalidRegularExpression;
@@ -171,7 +199,8 @@ pub fn normalize(a: std.mem.Allocator, input: []const u8, authored_flags: u32) !
     var flags = authored_flags | (if (authored_flags & A == 0) U else @as(u32, 0));
     var ascii = flags & A != 0;
     var caseless = flags & I != 0;
-    const Scope = struct { ascii: bool, caseless: bool };
+    var verbose = flags & X != 0;
+    const Scope = struct { ascii: bool, caseless: bool, verbose: bool };
     var stack: std.ArrayList(Scope) = .empty;
     defer stack.deinit(a);
     var output: std.ArrayList(u8) = .empty;
@@ -180,6 +209,13 @@ pub fn normalize(a: std.mem.Allocator, input: []const u8, authored_flags: u32) !
     var character_class = false;
     while (index < input.len) {
         const ch = input[index];
+        if (ch == '#' and verbose) {
+            const end = std.mem.indexOfScalarPos(u8, input, index, '\n') orelse input.len;
+            try output.appendSlice(a, input[index..end]);
+            index = end;
+            continue;
+        }
+        if (flags & 1 != 0 and (ch == '*' or ch == '+' or (ch == '?' and (index == 0 or input[index - 1] != '(')) or (ch == '{' and index + 1 < input.len and std.ascii.isDigit(input[index + 1])))) return error.UnsupportedRegularExpressionTemplate;
         if (ch == '[') {
             var close = index + 1;
             if (close < input.len and input[close] == '^') close += 1;
@@ -195,12 +231,10 @@ pub fn normalize(a: std.mem.Allocator, input: []const u8, authored_flags: u32) !
         if (ch == '\\') {
             if (index + 1 == input.len) return error.InvalidRegularExpression;
             const escaped = input[index + 1];
-            if (escaped == 'u' or escaped == 'U') {
-                const length: usize = if (escaped == 'u') 4 else 8;
-                if (index + 2 + length > input.len) return error.InvalidRegularExpression;
-                const code = std.fmt.parseInt(u21, input[index + 2 .. index + 2 + length], 16) catch return error.InvalidRegularExpression;
+            if (try unicodeEscape(a, input, index)) |decoded| {
+                const code = decoded.code;
                 if (caseless and !ascii and (code == 'i' or code == 'I' or code == 0x130 or code == 0x131)) try output.appendSlice(a, "[iIİı]") else try output.appendSlice(a, try std.fmt.allocPrint(a, "\\x{{{x}}}", .{code}));
-                index += length + 2;
+                index = decoded.end;
                 continue;
             }
             const replacement: ?[]const u8 = switch (escaped) {
@@ -228,6 +262,7 @@ pub fn normalize(a: std.mem.Allocator, input: []const u8, authored_flags: u32) !
             continue;
         }
         if (!character_class and ch == '(') {
+            if (std.mem.startsWith(u8, input[index..], "(*")) return error.InvalidRegularExpression;
             if (std.mem.startsWith(u8, input[index..], "(?<=") or std.mem.startsWith(u8, input[index..], "(?<!")) _ = try fixedWidth(input[index + 4 .. try groupClose(input, index)]);
             if (std.mem.startsWith(u8, input[index..], "(?")) {
                 var end = index + 2;
@@ -239,7 +274,7 @@ pub fn normalize(a: std.mem.Allocator, input: []const u8, authored_flags: u32) !
                     const has_u = std.mem.indexOfScalar(u8, modifiers, 'u') != null;
                     if (has_a and has_u) return error.InvalidRegularExpressionFlags;
                     if (input[end] == ')' and std.mem.indexOfScalar(u8, modifiers, '-') != null) return error.InvalidRegularExpressionFlags;
-                    const previous = Scope{ .ascii = ascii, .caseless = caseless };
+                    const previous = Scope{ .ascii = ascii, .caseless = caseless, .verbose = verbose };
                     var cleaned: std.ArrayList(u8) = .empty;
                     defer cleaned.deinit(a);
                     var negate = false;
@@ -252,6 +287,7 @@ pub fn normalize(a: std.mem.Allocator, input: []const u8, authored_flags: u32) !
                             ascii = modifier == 'a';
                         } else {
                             if (modifier == 'i') caseless = !negate;
+                            if (modifier == 'x') verbose = !negate;
                             try cleaned.append(a, modifier);
                             if (input[end] == ')') {
                                 const bit: u32 = switch (modifier) {
@@ -294,7 +330,14 @@ pub fn normalize(a: std.mem.Allocator, input: []const u8, authored_flags: u32) !
                 index = close + 1;
                 continue;
             }
-            try stack.append(a, .{ .ascii = ascii, .caseless = caseless });
+            try stack.append(a, .{ .ascii = ascii, .caseless = caseless, .verbose = verbose });
+            if (std.mem.startsWith(u8, input[index..], "(?(")) {
+                const close = std.mem.indexOfScalarPos(u8, input, index + 3, ')') orelse return error.InvalidRegularExpression;
+                if (input[index + 3] == '?') return error.InvalidRegularExpression;
+                try output.appendSlice(a, input[index .. close + 1]);
+                index = close + 1;
+                continue;
+            }
             if (std.mem.startsWith(u8, input[index..], "(?P<")) {
                 const close = std.mem.indexOfScalarPos(u8, input, index + 4, '>') orelse return error.InvalidRegularExpression;
                 try output.appendSlice(a, input[index .. close + 1]);
@@ -305,6 +348,7 @@ pub fn normalize(a: std.mem.Allocator, input: []const u8, authored_flags: u32) !
             if (stack.pop()) |previous| {
                 ascii = previous.ascii;
                 caseless = previous.caseless;
+                verbose = previous.verbose;
             }
         }
         if (caseless and !ascii and (ch == 'i' or ch == 'I' or std.mem.startsWith(u8, input[index..], "İ") or std.mem.startsWith(u8, input[index..], "ı"))) {
