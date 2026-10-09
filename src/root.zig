@@ -248,8 +248,11 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             return .ok;
         }
         const rt = runtime orelse return .usage;
-        var options = parseOptions(rt.allocator, args[2..], stderr, .list, rt.global_options) catch |err| return commandError(err, stderr);
-        if (options.output != .text and options.output != .json) return .usage;
+        var options = parseOptions(rt.allocator, args[2..], stderr, .analysis, rt.global_options) catch |err| return commandError(err, stderr);
+        if (options.output != .text and options.output != .json) {
+            try stderr.writeAll("error: native SQL analysis supports --output text or json\n");
+            return .usage;
+        }
         options.which = command;
         project.analyze(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
@@ -407,6 +410,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
 }
 
 const OptionMode = enum {
+    analysis,
     common_only,
     common_and_select,
     clean,
@@ -700,7 +704,7 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             continue;
         }
         if (equals(arg, "--resource-type") or equals(arg, "--resource-types") or equals(arg, "--exclude-resource-type") or equals(arg, "--exclude-resource-types")) {
-            if (mode != .list) return error.UnsupportedCommandOption;
+            if (mode != .list and mode != .analysis) return error.UnsupportedCommandOption;
             const excluded = std.mem.startsWith(u8, arg, "--exclude-");
             i += 1;
             var consumed = false;
@@ -877,13 +881,13 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
 
     if (mode == .operation and equals(arg, "--args")) return true;
     switch (mode) {
-        .common_and_select, .compile, .docs_generate, .list, .seed, .test_command, .build, .source_freshness, .clone => {
+        .common_and_select, .compile, .docs_generate, .list, .analysis, .seed, .test_command, .build, .source_freshness, .clone => {
             if (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude")) return true;
         },
         .common_only, .clean, .docs_serve, .debug, .init, .operation, .retry => {},
     }
 
-    if (mode == .list and (equals(arg, "--resource-type") or equals(arg, "--output"))) {
+    if ((mode == .list or mode == .analysis) and (equals(arg, "--resource-type") or equals(arg, "--output"))) {
         return true;
     }
     if (mode == .docs_serve and (equals(arg, "--host") or equals(arg, "--port"))) {
@@ -894,7 +898,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
 }
 
 fn isSelectorOption(arg: []const u8, mode: OptionMode) bool {
-    return mode != .common_only and mode != .clean and mode != .docs_serve and mode != .debug and mode != .init and mode != .operation and mode != .retry and (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude") or (mode == .list and equals(arg, "--models")));
+    return mode != .common_only and mode != .clean and mode != .docs_serve and mode != .debug and mode != .init and mode != .operation and mode != .retry and (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude") or ((mode == .list or mode == .analysis) and equals(arg, "--models")));
 }
 
 fn isOptionLike(arg: []const u8) bool {
@@ -1444,4 +1448,17 @@ test "list command requires output keys value" {
 
     try std.testing.expectError(error.InvalidOption, result);
     try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "option `--output-keys` requires a value") != null);
+}
+
+test "analysis options preserve text defaults independently from list selectors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var stderr: Io.Writer.Allocating = .init(arena.allocator());
+    const analysis = try parseOptions(arena.allocator(), &.{}, &stderr.writer, .analysis, null);
+    const listed = try parseOptions(arena.allocator(), &.{}, &stderr.writer, .list, null);
+    try std.testing.expect(analysis.output == .text);
+    try std.testing.expect(listed.output == .selector);
+    const selected = try parseOptions(arena.allocator(), &.{ "--output", "json", "--select", "final" }, &stderr.writer, .analysis, null);
+    try std.testing.expect(selected.output == .json);
+    try std.testing.expectEqualStrings("final", selected.select.?);
 }

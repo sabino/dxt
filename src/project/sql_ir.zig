@@ -368,6 +368,12 @@ pub const Builder = struct {
             };
         }
         if (matched) |column| return column;
+        // DuckDB represents a named STRUCT field as a dotted ColumnRef. The
+        // native binder has already distinguished the struct from a table alias.
+        if (self.dialect == .duckdb and qualifier.len != 0) {
+            const structured = self.resolveColumn(scope, "", qualifier) catch null;
+            if (structured) |column| return column;
+        }
         // ORDER BY/HAVING may refer to projected aliases. Bound output remains
         // authoritative; projection lineage is already in the IR columns.
         if (scope.outer) |outer| return try self.resolveColumn(outer, qualifier, name);

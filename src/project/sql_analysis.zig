@@ -148,7 +148,7 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
             };
             stats.bound_nodes += 1;
             var functions: std.ArrayList(ir.FunctionBinding) = .empty;
-            collectFunctions(allocator, &session, dialect, compiled, parsed.tree, &functions) catch |err| {
+            collectFunctions(allocator, &session, dialect, compiled, parsed.tree, parsed.tree, catalog.items, &functions) catch |err| {
                 try appendFailure(allocator, &nodes, &visible, selected_ids, node, try bindingDiagnostic(allocator, &session, compiled, err), compiled, runtime, graph, db_path, stderr);
                 failed = true;
                 try recover(&session, dialect);
@@ -307,13 +307,16 @@ fn explain(allocator: std.mem.Allocator, session: *adapter.Session, dialect: par
     return try values.clone(allocator, result.value);
 }
 
-fn collectFunctions(allocator: std.mem.Allocator, session: *adapter.Session, dialect: parser.Dialect, original: []const u8, ast: Value, result: *std.ArrayList(ir.FunctionBinding)) anyerror!void {
+fn collectFunctions(allocator: std.mem.Allocator, session: *adapter.Session, dialect: parser.Dialect, original: []const u8, ast: Value, root: Value, catalog: []const ir.Relation, result: *std.ArrayList(ir.FunctionBinding)) anyerror!void {
     const function = parser.tableFunction(ast, dialect);
     if (function != .null) {
         const offset = parser.location(function);
         const end = try functionEnd(original, offset);
         const ordinality = if (dialect == .duckdb) eq(text(field(ast, "with_ordinality")), "WITH_ORDINALITY") else field(field(ast, "RangeFunction"), "ordinality") == .bool and field(field(ast, "RangeFunction"), "ordinality").bool;
-        const query = try std.fmt.allocPrint(allocator, "select * from {s}{s}", .{ original[offset..end], if (ordinality) " with ordinality" else "" });
+        var replacements: std.ArrayList(Replacement) = .empty;
+        try functionArgumentReplacements(allocator, original, function, dialect, root, catalog, &replacements);
+        const fragment = try rewriteSpan(allocator, original, offset, end, replacements.items);
+        const query = try std.fmt.allocPrint(allocator, "select * from {s}{s}", .{ fragment, if (ordinality) " with ordinality" else "" });
         const columns = try bind(allocator, session, dialect, query);
         const name = if (dialect == .duckdb) text(field(function, "function_name")) else if (items(field(function, "funcname")).len != 0) text(field(field(items(field(function, "funcname"))[0], "String"), "sval")) else "";
         var input: ?ir.Input = null;
@@ -327,11 +330,77 @@ fn collectFunctions(allocator: std.mem.Allocator, session: *adapter.Session, dia
     switch (ast) {
         .object => |object| {
             var it = object.iterator();
-            while (it.next()) |entry| try collectFunctions(allocator, session, dialect, original, entry.value_ptr.*, result);
+            while (it.next()) |entry| try collectFunctions(allocator, session, dialect, original, entry.value_ptr.*, root, catalog, result);
         },
-        .array => |array| for (array.items) |child| try collectFunctions(allocator, session, dialect, original, child, result),
+        .array => |array| for (array.items) |child| try collectFunctions(allocator, session, dialect, original, child, root, catalog, result),
         else => {},
     }
+}
+// Bind a lateral function's schema using the catalog types of its correlated
+// arguments. Its original expression and origins remain in the logical IR.
+fn functionArgumentReplacements(allocator: std.mem.Allocator, original: []const u8, ast: Value, dialect: parser.Dialect, root: Value, catalog: []const ir.Relation, out: *std.ArrayList(Replacement)) anyerror!void {
+    const references = if (dialect == .duckdb and eq(text(field(ast, "class")), "COLUMN_REF")) items(field(ast, "column_names")) else if (dialect == .postgres) items(field(field(ast, "ColumnRef"), "fields")) else &.{};
+    if (references.len != 0) {
+        const name = if (dialect == .duckdb) text(references[references.len - 1]) else text(field(field(references[references.len - 1], "String"), "sval"));
+        const qualifier = if (references.len > 1) if (dialect == .duckdb) text(references[references.len - 2]) else text(field(field(references[references.len - 2], "String"), "sval")) else "";
+        var matched: ?ir.Column = null;
+        for (catalog) |relation| {
+            if (!relationUsed(root, dialect, relation, qualifier)) continue;
+            for (relation.columns) |column| if (eq(column.name, name)) {
+                if (matched != null and !eq(matched.?.data_type, column.data_type)) return error.SqlLineageAmbiguousFunctionArgument;
+                matched = column;
+            };
+        }
+        const column = matched orelse return error.SqlLineageUnresolvedFunctionArgument;
+        const position = parser.location(if (dialect == .postgres) field(ast, "ColumnRef") else ast);
+        if (position >= original.len) return error.InvalidSqlAstLocation;
+        try out.append(allocator, .{ .start = position, .end = identifierEnd(original, position), .value = try std.fmt.allocPrint(allocator, "cast(null as {s})", .{column.data_type}) });
+        return;
+    }
+    switch (ast) {
+        .object => |object| {
+            var it = object.iterator();
+            while (it.next()) |entry| try functionArgumentReplacements(allocator, original, entry.value_ptr.*, dialect, root, catalog, out);
+        },
+        .array => |array| for (array.items) |child| try functionArgumentReplacements(allocator, original, child, dialect, root, catalog, out),
+        else => {},
+    }
+}
+fn relationUsed(ast: Value, dialect: parser.Dialect, relation: ir.Relation, qualifier: []const u8) bool {
+    const node = if (dialect == .duckdb and eq(text(field(ast, "type")), "BASE_TABLE")) ast else if (dialect == .postgres) field(ast, "RangeVar") else .null;
+    if (node != .null) {
+        const name = text(field(node, if (dialect == .duckdb) "table_name" else "relname"));
+        const schema = text(field(node, if (dialect == .duckdb) "schema_name" else "schemaname"));
+        const database = text(field(node, if (dialect == .duckdb) "catalog_name" else "catalogname"));
+        const alias = if (dialect == .duckdb) text(field(node, "alias")) else text(field(field(node, "alias"), "aliasname"));
+        if (eq(name, relation.identifier) and (schema.len == 0 or eq(schema, relation.schema)) and (database.len == 0 or eq(database, relation.catalog)) and (qualifier.len == 0 or eq(qualifier, if (alias.len != 0) alias else name))) return true;
+    }
+    switch (ast) {
+        .object => |object| {
+            var it = object.iterator();
+            while (it.next()) |entry| if (relationUsed(entry.value_ptr.*, dialect, relation, qualifier)) return true;
+        },
+        .array => |array| for (array.items) |child| if (relationUsed(child, dialect, relation, qualifier)) return true,
+        else => {},
+    }
+    return false;
+}
+fn rewriteSpan(allocator: std.mem.Allocator, original: []const u8, start: usize, end: usize, replacements: []Replacement) ![]const u8 {
+    std.mem.sort(Replacement, replacements, {}, struct {
+        fn less(_: void, left: Replacement, right: Replacement) bool {
+            return left.start < right.start;
+        }
+    }.less);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    var cursor = start;
+    for (replacements) |replacement| {
+        if (replacement.start < cursor or replacement.end > end) return error.InvalidSqlAstLocation;
+        try output.writer.writeAll(original[cursor..replacement.start]);
+        try output.writer.writeAll(replacement.value);
+        cursor = replacement.end;
+    }
+    try output.writer.writeAll(original[cursor..end]);
+    return try output.toOwnedSlice();
 }
 // Delimit a function already identified by the native grammar. This renderer
 // preserves authored arguments; it does not recognize SQL statements or refs.
@@ -341,10 +410,31 @@ fn functionEnd(query: []const u8, start: usize) !usize {
     var index = start;
     while (index < query.len) : (index += 1) {
         const byte = query[index];
+        if (byte == '-' and index + 1 < query.len and query[index + 1] == '-') {
+            while (index < query.len and query[index] != '\n') index += 1;
+            continue;
+        }
+        if (byte == '/' and index + 1 < query.len and query[index + 1] == '*') {
+            var comments: usize = 1;
+            index += 2;
+            while (index + 1 < query.len and comments != 0) {
+                if (query[index] == '/' and query[index + 1] == '*') {
+                    comments += 1;
+                    index += 2;
+                } else if (query[index] == '*' and query[index + 1] == '/') {
+                    comments -= 1;
+                    index += 2;
+                } else index += 1;
+            }
+            if (comments != 0) return error.InvalidSqlAstLocation;
+            index -= 1;
+            continue;
+        }
         if (byte == '\'' or byte == '"') {
+            const escaped = byte == '\'' and index != 0 and (query[index - 1] == 'E' or query[index - 1] == 'e');
             index += 1;
             while (index < query.len) : (index += 1) {
-                if (query[index] == '\\' and index + 1 < query.len) {
+                if (escaped and query[index] == '\\' and index + 1 < query.len) {
                     index += 1;
                     continue;
                 }
@@ -531,7 +621,7 @@ fn visit(graph: *const types.Graph, allocator: std.mem.Allocator, index: usize, 
 fn nodeFingerprint(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, compiled: []const u8, parser_signature: []const u8, ast: Value, catalog: []const ir.Relation, completed: std.json.ObjectMap) ![]const u8 {
     const allocator = runtime.allocator;
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
-    digest.update("dxt-sql-analysis-v1-ir-3");
+    digest.update("dxt-sql-analysis-v1-ir-4");
     digest.update(parser_signature);
     digest.update(graph.adapter_type);
     if (graph.connection_info) |connection| digest.update(connection);

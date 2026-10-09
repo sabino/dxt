@@ -337,7 +337,11 @@ pub fn analyze(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
-    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, options.resource_type, selection.select, selection.exclude, selection_state.context());
+    const candidates = try selector.selectResourcesWithContext(runtime.allocator, &graph, options.resource_type, selection.select, selection.exclude, selection_state.context());
+    var included: std.ArrayList(selector.SelectedResource) = .empty;
+    defer included.deinit(runtime.allocator);
+    for (candidates) |item| if (cli_options.resourceIncluded(options, item.resource_type)) try included.append(runtime.allocator, item);
+    const selected = included.items;
     const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected, target_dir);
     var ids: std.ArrayList([]const u8) = .empty;

@@ -142,6 +142,9 @@ def test_installed_analysis_runs_without_cli_or_python_and_reports_native_types(
     ("select * from main.orders a join main.orders b using(id)", [{"id"}, {"amount"}, {"region"}, {"amount"}, {"region"}]),
     ("select x.i from (values (1),(2)) x(i)", [set()]),
     ("select r.range from range(5) r", [set()]),
+    ("select r.range from range(/* closing ) with nested /* ( */ comment */5) r", [set()]),
+    ("select u.tag from main.orders o, unnest([o.region]) u(tag)", [{"region"}]),
+    ("select p.properties.region from (select {'region':region} as properties from main.orders) p", [{"region"}]),
     ("select * exclude(region) replace(amount*2 as amount) rename(id as other) from main.orders", [{"id"}, {"amount"}]),
     ("with recursive t(n) as (select id from main.orders union all select n+1 from t where n<3) select * from t", [{"id"}]),
 ])
@@ -210,6 +213,7 @@ def test_postgres_native_grammar_binding_lineage_errors_and_readonly_recovery(tm
             ("select * from public.orders a join public.orders b using(id)", ["integer", "numeric(10,2)", "numeric(10,2)"]),
             ("with recursive t(n) as (select id from public.orders union all select n+1 from t where n<3) select * from t", ["integer"]),
             ("select g from generate_series(1,5) g", ["integer"]),
+            ("select g from public.orders o, lateral generate_series(1,o.id) g", ["integer"]),
             ("select x.i from (values(1),(2)) x(i)", ["integer"]),
             ("select sum(amount) over(partition by id) running from public.orders", ["numeric"]),
         ):
@@ -269,8 +273,6 @@ def test_pinned_core_compiled_sql_and_executed_results_match_analysis(tmp_path, 
     project = project_at(tmp_path)
     (project / "models/base.sql").write_text("select id,amount*2 as doubled from {{ source('raw','orders') }}")
     (project / "models/final.sql").write_text("select id,sum(doubled) total from {{ ref('base') }} group by id order by id")
-    schema = project / "models/schema.yml"
-    schema.write_text(schema.read_text().replace("    schema: main", "    database: warehouse\n    schema: main"))
     analysis = report(project, native_environment)
     oracle = subprocess.run([shutil.which("dbt"), "build", "--project-dir", str(project), "--profiles-dir", str(project), "--select", "base", "final"], env=native_environment, capture_output=True, text=True)
     assert oracle.returncode == 0, oracle.stdout + oracle.stderr
@@ -314,3 +316,13 @@ def test_native_search_path_wins_over_duplicate_relation_names(tmp_path, native_
     (project / "models/output.sql").write_text("select id from orders")
     node = report(project, native_environment)["nodes"]["model.analysis_contract.output"]
     assert node["inputs"][0]["resource_id"] == "source.analysis_contract.raw.orders"
+
+
+def test_analysis_global_options_json_output_and_invalid_list_outputs(tmp_path, native_environment):
+    project = project_at(tmp_path)
+    (project / "models/output.sql").write_text("select id from {{ source('raw','orders') }}")
+    result = subprocess.run([str(DXT), "--quiet", "--profile", "analysis_contract", "--target", "dev", "analyze", "--project-dir", str(project), "--profiles-dir", str(project), "--output", "json", "--select", "output"], env=native_environment, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert list(json.loads(result.stdout)["nodes"]) == ["model.analysis_contract.output"]
+    invalid = invoke(project, native_environment, "analyze", "--output", "selector")
+    assert invalid.returncode == 2 and "supports --output text or json" in invalid.stderr

@@ -137,6 +137,10 @@ fn primaryOutput(args: []const []const u8) bool {
     // dbt/task/docs/serve.py uses click.echo directly: the server address is
     // command output and remains visible with --quiet and JSON event logging.
     if (args.len > 2 and std.mem.eql(u8, args[1], "docs") and std.mem.eql(u8, args[2], "serve")) return true;
+    if (std.mem.eql(u8, args[1], "explain")) return true;
+    if (std.mem.eql(u8, args[1], "analyze")) for (args, 0..) |arg, index| {
+        if (std.mem.eql(u8, arg, "--output") and index + 1 < args.len and std.mem.eql(u8, args[index + 1], "json")) return true;
+    };
     for ([_][]const u8{ "ls", "version", "--version", "metric", "plan", "apply", "environment", "intervals", "audit", "promote", "rollback" }) |name| if (std.mem.eql(u8, args[1], name)) return true;
     return false;
 }
