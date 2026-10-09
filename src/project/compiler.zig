@@ -831,8 +831,9 @@ fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, t
     try args.append(arena, .{ .name = "model", .value = .{ .string = model_sql } });
     if (column_name) |column| try args.append(arena, .{ .name = "column_name", .value = .{ .string = column } });
     const result = try renderMacroValue(&context, macro, args.items);
-    const sql = try allocator.dupe(u8, try result.text(arena));
-    return try applyGenericTestLimit(allocator, sql, test_node.config.limit);
+    // Core keeps the macro body unchanged in compiled_code. Its test
+    // materialization applies the configured limit to execution/storage SQL.
+    return try allocator.dupe(u8, try result.text(arena));
 }
 
 fn genericTestModelSql(allocator: std.mem.Allocator, relation_name: []const u8, where_sql: ?[]const u8) ![]const u8 {
@@ -3033,6 +3034,7 @@ test "compileGenericTest renders root project custom generic test body" {
         .original_file_path = "models/schema.yml",
         .raw_code = "{{ test_positive_amount(**_dbt_generic_test_kwargs) }}",
         .test_name = "positive_amount",
+        .config = .{ .limit = 3 },
         .column_name = "amount",
         .attached_node = "model.demo.orders",
     });
@@ -3044,6 +3046,7 @@ test "compileGenericTest renders root project custom generic test body" {
     try std.testing.expect(std.mem.indexOf(u8, compiled, "select amount") != null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"main\".\"orders\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "where amount < 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "limit") == null);
 }
 
 test "compileGenericTest renders package custom generic test body" {
