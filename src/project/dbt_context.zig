@@ -10,12 +10,12 @@ pub fn cloneValue(allocator: std.mem.Allocator, value: Value) anyerror!Value {
         .string => |text| .{ .string = try allocator.dupe(u8, text) },
         .callable => |name| .{ .callable = try allocator.dupe(u8, name) },
         .list => |items| blk: {
-            const copied = try allocator.alloc(Value, items.len);
+            const copied = try expression.allocateValues(allocator, items.len);
             for (items, copied) |item, *copy| copy.* = try cloneValue(allocator, item);
             break :blk .{ .list = copied };
         },
         .object => |entries| blk: {
-            const copied = try allocator.alloc(expression.Entry, entries.len);
+            const copied = try expression.allocateEntries(allocator, entries.len);
             for (entries, copied) |entry, *copy| copy.* = .{ .key = try allocator.dupe(u8, entry.key), .value = try cloneValue(allocator, entry.value) };
             break :blk .{ .object = copied };
         },

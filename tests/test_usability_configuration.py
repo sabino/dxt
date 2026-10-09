@@ -563,3 +563,37 @@ def test_native_required_configuration_missing_fails_like_core(tmp_path, configu
     pair = ConfigurationPair(tmp_path, configuration_oracle)
     pair.write('models/marts/context.sql', 'select {{ config.require("missing") }} as value\n')
     pair.invoke('compile', success=False)
+
+
+@pytest.mark.parametrize('setup, expression', [
+    ("{% set items = [] %}{% do items.append('first') %}{% do items.extend(['second', 'third']) %}", "items | join(',')"),
+    ("{% set left = [] %}{% set right = [] %}{% do left.append(1) %}", "right | length"),
+    ("{% set items = [1, 2, 3] %}{% set alias = items %}{% set removed = items.pop(-2) %}", "alias | join(',') ~ ':' ~ removed"),
+    ("{% set items = [1] %}{% set nested = {'child': items} %}{% do items.append(2) %}", "nested.child | join(',')"),
+    ("{% set options = {} %}{% set alias = options %}{% do options.update({'one': 1}, two=2) %}", "alias.one ~ ',' ~ alias.two"),
+    ("{% set options = {'one': 1, 'two': 2} %}{% set alias = options %}{% set removed = options.pop('one') %}", "alias.two ~ ':' ~ (alias | length) ~ ':' ~ removed"),
+    ("{% set items = [1] %}{% set alias = items %}{% do items.clear() %}", "alias | length"),
+    ("{% set options = {'one': 1} %}{% set alias = options %}{% do options.clear() %}", "alias | length"),
+    ("{% set options = {} %}", "options.pop('missing', 'fallback')"),
+    ("{% set items = [] %}{% for number in [1, 2, 3] %}{% do items.append(number) %}{% endfor %}", "items | join(',')"),
+])
+def test_native_mutable_macro_containers_match_core(tmp_path, configuration_oracle, setup, expression):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/containers.sql', setup + "select '{{ " + expression + " }}' as value")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.containers']['compiled_code'] == expected['nodes']['model.configuration_fixture.containers']['compiled_code']
+
+
+def test_native_macro_argument_mutation_preserves_caller_aliases(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('macros/collect.sql', "{% macro collect(items) %}{% do items.append(7) %}{{ return(items) }}{% endmacro %}")
+    pair.write('models/marts/containers.sql', "{% set items = [] %}{% set returned = collect(items) %}select '{{ items | join(',') }}' as items, '{{ returned | join(',') }}' as returned")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.containers']['compiled_code'] == expected['nodes']['model.configuration_fixture.containers']['compiled_code']
+
+
+@pytest.mark.parametrize('setup, expression', [("{% set items = [] %}", "items.pop()"), ("{% set options = {} %}", "options.pop('missing')"), ("{% set items = [1] %}", "items.pop(3)"), ("{% set items = [1] %}", "items.extend(7)")])
+def test_native_invalid_container_mutation_fails_like_core(tmp_path, configuration_oracle, setup, expression):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/containers.sql', setup + "select '{{ " + expression + " }}' as value")
+    pair.invoke('compile', success=False)

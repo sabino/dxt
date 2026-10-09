@@ -46,7 +46,7 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         if (!fields.object.contains("constraints")) try fields.object.put(allocator, "constraints", .{ .array = std.json.Array.init(allocator) });
         try columns.append(allocator, .{ .key = column.name, .value = try values.toExpression(allocator, fields) });
     }
-    const tags = try allocator.alloc(Value, node.tags.items.len);
+    const tags = try expression.allocateValues(allocator, node.tags.items.len);
     for (node.tags.items, tags) |tag, *value| value.* = .{ .string = tag };
     var batch_value: Value = .none;
     if (node.runtime_batch) |batch| batch_value = .{ .object = try allocator.dupe(expression.Entry, &.{
@@ -66,7 +66,7 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         .{ .key = "schema", .value = .{ .string = try compiler.relationSchemaForNode(allocator, graph, node) } },
         .{ .key = "alias", .value = .{ .string = compiler.relationIdentifierForNode(node) } },
         .{ .key = "config", .value = try config(allocator, node) },
-        .{ .key = "columns", .value = .{ .object = try columns.toOwnedSlice(allocator) } },
+        .{ .key = "columns", .value = .{ .object = if (columns.items.len == 0) try expression.allocateEntries(allocator, 0) else try columns.toOwnedSlice(allocator) } },
         .{ .key = "tags", .value = .{ .list = tags } },
         .{ .key = "version", .value = try values.toExpression(allocator, node.version) },
         .{ .key = "latest_version", .value = try values.toExpression(allocator, node.latest_version) },

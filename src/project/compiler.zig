@@ -302,12 +302,12 @@ fn valueFromJson(allocator: std.mem.Allocator, value: std.json.Value) anyerror!n
         .number_string => |v| .{ .number = try std.fmt.parseFloat(f64, v) },
         .string => |v| .{ .string = v },
         .array => |items| blk: {
-            const values = try allocator.alloc(native_expr.Value, items.items.len);
+            const values = try native_expr.allocateValues(allocator, items.items.len);
             for (items.items, values) |item, *result| result.* = try valueFromJson(allocator, item);
             break :blk .{ .list = values };
         },
         .object => |object| blk: {
-            const entries = try allocator.alloc(native_expr.Entry, object.count());
+            const entries = try native_expr.allocateEntries(allocator, object.count());
             var iterator = object.iterator();
             var i: usize = 0;
             while (iterator.next()) |entry| : (i += 1) entries[i] = .{ .key = entry.key_ptr.*, .value = try valueFromJson(allocator, entry.value_ptr.*) };
@@ -768,7 +768,7 @@ fn iterationValues(allocator: std.mem.Allocator, iterable: native_expr.Value) ![
         .string => |v| v.len,
         else => return error.JinjaTypeError,
     };
-    const values = try allocator.alloc(native_expr.Value, count);
+    const values = try native_expr.allocateValues(allocator, count);
     for (values, 0..) |*value, i| value.* = .{ .string = if (iterable == .object) iterable.object[i].key else iterable.string[i .. i + 1] };
     return values;
 }
@@ -884,7 +884,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     }
     if (context.getVar(path)) |value| return .{ .string = value };
     if (context.getList(path)) |strings| {
-        const values = try allocator.alloc(native_expr.Value, strings.len);
+        const values = try native_expr.allocateValues(allocator, strings.len);
         for (strings, values) |s, *v| v.* = .{ .string = s };
         return .{ .list = values };
     }
@@ -973,6 +973,10 @@ fn upsertConfigArgument(allocator: std.mem.Allocator, values: *std.ArrayList(nat
 fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
     if (try @import("bundled_macros.zig").callColumn(allocator, name, args)) |value| return value;
+    if (try @import("container_methods.zig").call(allocator, name, args)) |mutation| {
+        if (mutation.original) |original| for (context.bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original, mutation.replacement.?, 0);
+        return mutation.result;
+    }
     if (try dbt_context.call(allocator, context.graph.adapter_type, name, args)) |value| return value;
     if (std.mem.eql(u8, name, "adapter.type")) {
         if (args.len != 0) return error.InvalidJinjaArguments;

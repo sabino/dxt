@@ -10,12 +10,12 @@ pub fn toExpression(allocator: std.mem.Allocator, value: std.json.Value) anyerro
         .number_string => |v| .{ .number = try std.fmt.parseFloat(f64, v) },
         .string => |v| .{ .string = v },
         .array => |items| blk: {
-            const values = try allocator.alloc(expression.Value, items.items.len);
+            const values = try expression.allocateValues(allocator, items.items.len);
             for (items.items, values) |item, *result| result.* = try toExpression(allocator, item);
             break :blk .{ .list = values };
         },
         .object => |object| blk: {
-            const entries = try allocator.alloc(expression.Entry, object.count());
+            const entries = try expression.allocateEntries(allocator, object.count());
             var it = object.iterator();
             var i: usize = 0;
             while (it.next()) |entry| : (i += 1) entries[i] = .{ .key = entry.key_ptr.*, .value = try toExpression(allocator, entry.value_ptr.*) };
