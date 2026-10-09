@@ -1,4 +1,5 @@
 const std = @import("std");
+const incremental_config = @import("incremental_config.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 
@@ -40,6 +41,7 @@ pub fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathCon
         var materialized_depth: usize = 0;
         var docs_config: ?*const ModelPathConfig = null;
         var docs_depth: usize = 0;
+        var incremental_depths = [_]usize{0} ** 5;
         for (configs) |*config| {
             if (restrict_package_name) |package_name| {
                 if (!std.mem.eql(u8, config.package_name, package_name)) continue;
@@ -47,6 +49,14 @@ pub fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathCon
             if (!std.mem.eql(u8, node.package_name, config.package_name)) continue;
             if (!modelPathConfigMatches(config.path, node.path)) continue;
             const depth = modelPathConfigDepth(config.path);
+            var protected = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) types.IncrementalConfigMask{} else node.inline_incremental;
+            inline for (.{ "unique_key", "strategy", "on_schema_change", "full_refresh", "predicates" }, 0..) |field, field_index| {
+                if (@field(config.incremental.configured, field)) {
+                    if (depth < incremental_depths[field_index]) @field(protected, field) = true else incremental_depths[field_index] = depth;
+                }
+            }
+            try incremental_config.overlay(graph.allocator, &node.incremental, config.incremental, protected);
+
             if (config.materialized.len != 0 and (materialized_config == null or depth >= materialized_depth)) {
                 materialized_config = config;
                 materialized_depth = depth;
@@ -589,6 +599,9 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
     var docs_indent: usize = 0;
     var package_name: []const u8 = "";
     var docs_path: []const u8 = "";
+    var incremental_list: ?*types.IncrementalConfig = null;
+    var incremental_list_key: []const u8 = "";
+    var incremental_list_indent: usize = 0;
     var path_stack: std.ArrayList(PathStackEntry) = .empty;
     defer path_stack.deinit(allocator);
 
@@ -598,6 +611,14 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
         const indent = leadingSpaces(line);
+        if (incremental_list) |list_config| {
+            if (indent > incremental_list_indent and std.mem.startsWith(u8, trimmed, "- ")) {
+                const value = try dupTrimmedScalar(allocator, trimmed[2..]);
+                if (std.mem.eql(u8, incremental_list_key, "unique_key")) try list_config.unique_key.?.list.append(allocator, value) else try list_config.predicates.append(allocator, value);
+                continue;
+            }
+            incremental_list = null;
+        }
 
         if (std.mem.eql(u8, trimmed, "models:")) {
             in_models = true;
@@ -656,16 +677,22 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
 
         if (std.mem.startsWith(u8, kv.key, "+")) {
             const path = try joinPathStack(allocator, path_stack.items);
+            const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
+            if (try incremental_config.applyYaml(allocator, &path_config.incremental, kv.key[1..], kv.value)) {
+                if (std.mem.trim(u8, kv.value, " \t").len == 0 and (std.mem.eql(u8, kv.key, "+unique_key") or std.mem.eql(u8, kv.key, "+predicates") or std.mem.eql(u8, kv.key, "+incremental_predicates"))) {
+                    incremental_list = &path_config.incremental;
+                    incremental_list_key = kv.key[1..];
+                    incremental_list_indent = indent;
+                }
+                continue;
+            }
             if (std.mem.eql(u8, kv.key, "+materialized")) {
-                const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
                 path_config.materialized = try dupTrimmedScalar(allocator, kv.value);
             } else if (std.mem.eql(u8, kv.key, "+tags")) {
-                const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
                 path_config.tags.clearRetainingCapacity();
                 try parseInlineStringList(allocator, kv.value, &path_config.tags);
                 sortStrings(path_config.tags.items);
             } else if (std.mem.eql(u8, kv.key, "+docs") and std.mem.trim(u8, kv.value, " \t").len == 0) {
-                const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
                 path_config.docs.configured = true;
                 in_docs = true;
                 docs_indent = indent;

@@ -293,8 +293,9 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedSourceFreshnessAdapter => stderr.writeAll("error: source freshness currently supports only DuckDB sources\n") catch {},
         error.UnsupportedSourceFreshnessSelection => stderr.writeAll("error: source freshness currently supports only selected source resources\n") catch {},
         error.UnsupportedSourceFreshness => stderr.writeAll("error: source freshness currently requires loaded_at_field or loaded_at_query and complete freshness thresholds\n") catch {},
-        error.UnsupportedModelMaterialization => stderr.writeAll("error: run currently supports only table and view model materializations\n") catch {},
-        error.UnsupportedBuildModelMaterialization => stderr.writeAll("error: build currently supports only table and view model materializations\n") catch {},
+        error.UnsupportedModelMaterialization => stderr.writeAll("error: unsupported model materialization; DuckDB supports table, view, and incremental\n") catch {},
+        error.UnsupportedIncrementalStrategy => stderr.writeAll("error: dbt-duckdb incremental strategies supported: append, delete+insert, default\n") catch {},
+        error.UnsupportedBuildModelMaterialization => stderr.writeAll("error: unsupported build model materialization; DuckDB supports table, view, and incremental\n") catch {},
         error.UnsupportedDuckDbPath => stderr.writeAll("error: this DuckDB execution slice supports only local DuckDB database file paths\n") catch {},
         error.CyclicModelDependency => stderr.writeAll("error: selected model graph contains a cycle\n") catch {},
         error.DuckDbCliNotFound => stderr.writeAll("error: DuckDB execution requires the duckdb CLI on PATH for this M3 slice\n") catch {},
@@ -443,7 +444,9 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             continue;
         }
         if (isFlag(arg, mode)) {
-            if (equals(arg, "--browser")) {
+            if (equals(arg, "--full-refresh")) {
+                options.full_refresh = true;
+            } else if (equals(arg, "--browser")) {
                 options.docs_open_browser = true;
             } else if (equals(arg, "--no-browser") or equals(arg, "--no-open")) {
                 options.docs_open_browser = false;
@@ -512,7 +515,7 @@ fn isOptionLike(arg: []const u8) bool {
 }
 
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
-    if (mode == .build and equals(arg, "--full-refresh")) return true;
+    if ((mode == .build or mode == .compile) and equals(arg, "--full-refresh")) return true;
     if (mode == .docs_serve and (equals(arg, "--browser") or equals(arg, "--no-browser") or equals(arg, "--no-open"))) return true;
     if (mode == .clean and (equals(arg, "--clean-project-files-only") or equals(arg, "--no-clean-project-files-only"))) return true;
     return false;

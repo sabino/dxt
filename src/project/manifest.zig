@@ -775,6 +775,20 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try json.stringArray(writer, node.tags.items);
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
+    if (std.mem.eql(u8, node.materialized, "incremental")) {
+        try writer.writeAll(",\"unique_key\":");
+        try writeSnapshotColumns(writer, node.incremental.unique_key);
+        try writer.writeAll(",\"incremental_strategy\":");
+        try json.nullableString(writer, node.incremental.strategy);
+        try writer.writeAll(",\"on_schema_change\":");
+        try json.string(writer, node.incremental.on_schema_change orelse "ignore");
+        try writer.writeAll(",\"full_refresh\":");
+        if (node.incremental.full_refresh) |value| try writer.writeAll(if (value) "true" else "false") else try writer.writeAll("null");
+        if (node.incremental.configured.predicates) {
+            try writer.writeAll(",\"incremental_predicates\":");
+            if (node.incremental.predicates_null) try writer.writeAll("null") else try json.stringArray(writer, node.incremental.predicates.items);
+        }
+    }
     if (node.snapshot_config) |config| try writeSnapshotConfig(writer, &node, config);
     try writer.writeAll("},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, node.macro_depends_on.items);

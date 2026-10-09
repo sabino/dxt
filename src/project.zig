@@ -5,6 +5,8 @@ const clean = @import("project/clean.zig");
 const compiler = @import("project/compiler.zig");
 const docs_serve = @import("project/docs_serve.zig");
 const duckdb = @import("project/duckdb.zig");
+const incremental = @import("project/incremental.zig");
+const incremental_config = @import("project/incremental_config.zig");
 const project_fs = @import("project/fs.zig");
 const project_jinja = @import("project/jinja.zig");
 const project_loader = @import("project/loader.zig");
@@ -1855,6 +1857,13 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         saw_selected_model = true;
         if (std.mem.eql(u8, node.materialized, "ephemeral")) continue;
 
+        if (std.mem.eql(u8, node.materialized, "incremental")) {
+            try incremental_config.validate(node.incremental);
+            if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
+            const incremental_db_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
+            defer runtime.allocator.free(incremental_db_path);
+            node.runtime_is_incremental = try incremental.isIncremental(runtime, incremental_db_path, graph, node);
+        }
         var compiled_model = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, node);
         errdefer compiled_model.deinit(runtime.allocator);
         const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, node.package_name, node.original_file_path });
@@ -2684,12 +2693,26 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
     var active_test_index: ?usize = null;
     var active_values_index: ?usize = null;
 
+    var incremental_list_key: ?[]const u8 = null;
+    var incremental_list_indent: usize = 0;
+
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
         const line = stripYamlComment(raw_line);
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
         const indent = leadingSpaces(line);
+        if (incremental_list_key) |key| {
+            if (indent > incremental_list_indent and std.mem.startsWith(u8, trimmed, "- ")) {
+                const property = &graph.model_properties.items[current_model orelse return error.UnsupportedYaml];
+                const value = try dupTrimmedScalar(allocator, trimmed[2..]);
+                if (std.mem.eql(u8, key, "unique_key")) {
+                    try property.incremental.unique_key.?.list.append(allocator, value);
+                } else try property.incremental.predicates.append(allocator, value);
+                continue;
+            }
+            incremental_list_key = null;
+        }
 
         if (std.mem.eql(u8, trimmed, "models:") or std.mem.eql(u8, trimmed, "seeds:") or std.mem.eql(u8, trimmed, "analyses:")) {
             in_models = true;
@@ -2857,6 +2880,14 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             }
 
             if (in_config and indent > config_indent) {
+                if (std.mem.eql(u8, active_resource_type, "model") and try incremental_config.applyYaml(allocator, &graph.model_properties.items[model_index].incremental, kv.key, kv.value)) {
+                    if (std.mem.trim(u8, kv.value, " \t").len == 0 and (std.mem.eql(u8, kv.key, "unique_key") or std.mem.eql(u8, kv.key, "predicates") or std.mem.eql(u8, kv.key, "incremental_predicates"))) {
+                        incremental_list_key = kv.key;
+                        incremental_list_indent = indent;
+                    }
+                    continue;
+                }
+
                 if (std.mem.eql(u8, kv.key, "enabled")) {
                     graph.model_properties.items[model_index].enabled = try parseBool(kv.value);
                 } else if (std.mem.eql(u8, kv.key, "materialized")) {
@@ -3158,6 +3189,7 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
         node.patch_path = property.patch_path;
         if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.package_name, property.description, &node.doc_blocks);
         if (std.mem.eql(u8, node.resource_type, "model") and property.materialized.len != 0 and !node.inline_materialized) node.materialized = property.materialized;
+        if (std.mem.eql(u8, node.resource_type, "model")) try incremental_config.overlay(graph.allocator, &node.incremental, property.incremental, node.inline_incremental);
         if (std.mem.eql(u8, node.resource_type, "seed")) {
             if (property.quote_columns) |quote_columns| node.quote_columns = quote_columns;
             if (property.seed_column_types.items.len != 0) {

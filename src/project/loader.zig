@@ -66,6 +66,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         .environment = runtime.environment,
         .project_name = config.name,
         .validate_macro_args = config.validate_macro_args,
+        .full_refresh = options.full_refresh,
     };
     errdefer graph.deinit();
     if (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) |identity| {

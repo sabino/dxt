@@ -1,5 +1,6 @@
 const std = @import("std");
 const catalog = @import("catalog.zig");
+const incremental = @import("incremental.zig");
 const compiler = @import("compiler.zig");
 const project_fs = @import("fs.zig");
 const selector = @import("selector.zig");
@@ -51,7 +52,7 @@ pub fn databasePath(allocator: std.mem.Allocator, target_dir: []const u8, graph:
 }
 
 pub fn isSupportedMaterialization(value: []const u8) bool {
-    return std.mem.eql(u8, value, "table") or std.mem.eql(u8, value, "view");
+    return std.mem.eql(u8, value, "table") or std.mem.eql(u8, value, "view") or std.mem.eql(u8, value, "incremental");
 }
 
 fn isUnsupportedConnectionPath(value: []const u8) bool {
@@ -61,6 +62,7 @@ fn isUnsupportedConnectionPath(value: []const u8) bool {
 }
 
 pub fn executeModel(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node) !void {
+    if (std.mem.eql(u8, node.materialized, "incremental")) return try incremental.execute(runtime, db_path, graph, node);
     try dropConflictingMaterialization(runtime, db_path, graph, node);
 
     const sql = try renderModelSql(runtime.allocator, graph, node);
@@ -550,7 +552,7 @@ fn renderDropSql(allocator: std.mem.Allocator, graph: *const Graph, node: *const
 }
 
 pub fn renderModelSql(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
-    if (!isSupportedMaterialization(node.materialized)) {
+    if (!isSupportedMaterialization(node.materialized) or std.mem.eql(u8, node.materialized, "incremental")) {
         return error.UnsupportedModelMaterialization;
     }
     const compiled_code = trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution);
@@ -841,7 +843,7 @@ test "renderModelSql rejects unsupported materialization" {
         .path = "orders.sql",
         .original_file_path = "models/orders.sql",
         .raw_code = "select 1 as id",
-        .materialized = "incremental",
+        .materialized = "custom_unknown",
         .compiled = true,
         .compiled_code = "select 1 as id",
     });

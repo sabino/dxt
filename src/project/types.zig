@@ -74,6 +74,7 @@ pub const ModelPathConfig = struct {
     package_name: []const u8,
     path: []const u8,
     materialized: []const u8 = "",
+    incremental: IncrementalConfig = .{},
     tags: std.ArrayList([]const u8) = .empty,
     docs: DocsConfig = .{},
 };
@@ -275,6 +276,7 @@ pub const ModelProperty = struct {
     patch_path: []const u8,
     description: []const u8 = "",
     materialized: []const u8 = "",
+    incremental: IncrementalConfig = .{},
     tags: std.ArrayList([]const u8) = .empty,
     doc_blocks: std.ArrayList([]const u8) = .empty,
     tests: std.ArrayList(GenericTestDef) = .empty,
@@ -343,6 +345,8 @@ pub const Node = struct {
     inline_materialized: bool = false,
     inline_enabled: bool = false,
     inline_tags: bool = false,
+    incremental: IncrementalConfig = .{},
+    inline_incremental: IncrementalConfigMask = .{},
     config_schema: ?[]const u8 = null,
     config_alias: ?[]const u8 = null,
     quote_columns: ?bool = null,
@@ -365,6 +369,29 @@ pub const Node = struct {
     compiled_path: ?[]const u8 = null,
     relation_name: ?[]const u8 = null,
     extra_ctes: std.ArrayList(ExtraCte) = .empty,
+};
+
+pub const IncrementalConfigMask = struct {
+    unique_key: bool = false,
+    strategy: bool = false,
+    on_schema_change: bool = false,
+    full_refresh: bool = false,
+    predicates: bool = false,
+};
+
+pub const IncrementalConfig = struct {
+    unique_key: ?SnapshotColumns = null,
+    strategy: ?[]const u8 = null,
+    on_schema_change: ?[]const u8 = null,
+    full_refresh: ?bool = null,
+    predicates: std.ArrayList([]const u8) = .empty,
+    predicates_null: bool = false,
+    configured: IncrementalConfigMask = .{},
+
+    pub fn deinit(self: *IncrementalConfig, allocator: std.mem.Allocator) void {
+        if (self.unique_key) |*key| key.deinit(allocator);
+        self.predicates.deinit(allocator);
+    }
 };
 
 pub const SnapshotColumns = union(enum) {
@@ -539,6 +566,7 @@ pub const AdapterIdentity = struct {
 pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig) void {
     for (config.model_path_configs.items) |*path_config| {
         path_config.tags.deinit(allocator);
+        path_config.incremental.deinit(allocator);
     }
     config.model_paths.deinit(allocator);
     config.seed_paths.deinit(allocator);
@@ -564,6 +592,7 @@ pub fn deinitDispatchConfigs(allocator: std.mem.Allocator, configs: *std.ArrayLi
 pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     if (node.project_root) |project_root| allocator.free(project_root);
     node.tags.deinit(allocator);
+    node.incremental.deinit(allocator);
     node.doc_blocks.deinit(allocator);
     deinitGenericTestDefs(allocator, &node.tests);
     for (node.columns.items) |*column| {
@@ -651,6 +680,7 @@ fn deinitMacro(allocator: std.mem.Allocator, macro: *MacroDef) void {
 }
 
 fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) void {
+    property.incremental.deinit(allocator);
     property.tags.deinit(allocator);
     property.doc_blocks.deinit(allocator);
     deinitGenericTestDefs(allocator, &property.tests);
