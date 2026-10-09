@@ -1103,6 +1103,7 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
 }
 
 pub fn iterableValues(allocator: std.mem.Allocator, value: Value) anyerror![]const Value {
+    if (value.attribute("__dxt_noniterable") == .boolean and value.attribute("__dxt_noniterable").boolean) return error.JinjaTypeError;
     if (try sequences.items(allocator, value)) |items| return items;
     if (sequence(value)) |items| return items;
     if (value == .undefined or value == .conditional_undefined or value == .none) return &.{};
@@ -1164,6 +1165,20 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "boolean")) return value == .boolean;
     if (std.mem.eql(u8, name, "true")) return value == .boolean and value.boolean;
     if (std.mem.eql(u8, name, "false")) return value == .boolean and !value.boolean;
+    if (std.mem.eql(u8, name, "sameas")) {
+        if (args.len != 1) return error.InvalidJinjaArguments;
+        const other = args[0].value;
+        if (std.meta.activeTag(value) != std.meta.activeTag(other)) return false;
+        return switch (value) {
+            .object => |entries| entries.ptr == other.object.ptr,
+            .list => |values| values.ptr == other.list.ptr,
+            .tuple => |values| values.ptr == other.tuple.ptr,
+            else => equalValues(value, other),
+        };
+    }
+    if (value.attribute("__dxt_noniterable") == .boolean and value.attribute("__dxt_noniterable").boolean) {
+        if (std.mem.eql(u8, name, "mapping") or std.mem.eql(u8, name, "iterable") or std.mem.eql(u8, name, "sequence")) return false;
+    }
     if (std.mem.eql(u8, name, "mapping")) return value == .object and sequence(value) == null and sequences.kind(value) == null;
     if (std.mem.eql(u8, name, "iterable")) return value == .list or value == .tuple or value == .object or value == .string;
     if (std.mem.eql(u8, name, "sequence")) return value == .list or value == .tuple or (value == .object and sequences.kind(value) == null) or value == .string;
@@ -1421,7 +1436,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
         .string => |v| try unicode.count(v),
         .conditional_undefined => 0,
         .list, .tuple => |v| v.len,
-        .object => |v| if (try sequences.length(value)) |length| length else if (sequence(value)) |items| items.len else v.len,
+        .object => |v| if (value.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError else if (try sequences.length(value)) |length| length else if (sequence(value)) |items| items.len else v.len,
         else => return error.JinjaTypeError,
     });
     if (std.mem.eql(u8, name, "string")) return .{ .string = try value.text(allocator) };

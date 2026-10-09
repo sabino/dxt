@@ -47,12 +47,30 @@ fn integerArg(args: []const Argument, name: []const u8, position: usize, fallbac
     const value = argument(args, name, position);
     return if (value == .undefined) fallback else try expr.integerIndex(value);
 }
+fn validateArguments(args: []const Argument, names: []const []const u8, required: usize) !void {
+    var seen = [_]bool{false} ** 8;
+    var position: usize = 0;
+    for (args) |arg| {
+        const index = if (arg.name) |name| blk: {
+            for (names, 0..) |candidate, at| if (std.mem.eql(u8, name, candidate)) break :blk at;
+            return error.InvalidJinjaArguments;
+        } else blk: {
+            const at = position;
+            position += 1;
+            break :blk at;
+        };
+        if (index >= names.len or seen[index]) return error.InvalidJinjaArguments;
+        seen[index] = true;
+    }
+    for (seen[0..required]) |present| if (!present) return error.InvalidJinjaArguments;
+}
 fn bound(a: Allocator, prefix: []const u8, method: []const u8, definition: anytype) !Value {
     return .{ .callable = try std.fmt.allocPrint(a, "{s}{s}:{s}", .{ prefix, method, try std.json.Stringify.valueAlloc(a, definition, .{}) }) };
 }
 fn flagValue(a: Allocator, number: u32) !Value {
     const label = if (number == 0) "re.NOFLAG" else (try flagText(a, number))[2..];
     return try entry(a, &.{
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_integer", .value = .{ .string = (try expr.integerValue(a, number)).integer } },
         .{ .key = "__dxt_rendered", .value = .{ .string = label } },
         .{ .key = "value", .value = try expr.integerValue(a, number) },
@@ -70,7 +88,15 @@ pub fn resolve(a: Allocator, path: []const u8) !?Value {
     }
     if (std.mem.startsWith(u8, path, "modules.re.")) {
         const name = path[11..];
-        for (flags) |flag| if (std.mem.eql(u8, name, flag.name)) return try flagValue(a, flag.value);
+        for (flags) |flag| {
+            if (std.mem.eql(u8, name, flag.name)) return try flagValue(a, flag.value);
+            if (name.len > flag.name.len and std.mem.startsWith(u8, name, flag.name) and name[flag.name.len] == '.') {
+                var value = try flagValue(a, flag.value);
+                var parts = std.mem.splitScalar(u8, name[flag.name.len + 1 ..], '.');
+                while (parts.next()) |attribute| value = try expr.checkedAttribute(value, attribute);
+                return value;
+            }
+        }
         for (functions) |function| if (std.mem.eql(u8, name, function)) return .{ .callable = path };
     }
     return null;
@@ -82,6 +108,7 @@ fn patternValue(a: Allocator, definition: Pattern) !Value {
     const actual = Pattern{ .pattern = definition.pattern, .flags = regex.flags };
     var fields: std.ArrayList(expr.Entry) = .empty;
     try fields.appendSlice(a, &.{
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_regex_pattern", .value = .{ .string = try std.json.Stringify.valueAlloc(a, actual, .{}) } },
         .{ .key = "pattern", .value = .{ .string = definition.pattern } },
         .{ .key = "flags", .value = try expr.integerValue(a, regex.flags) },
@@ -129,10 +156,15 @@ fn matchValue(a: Allocator, capture: Capture) !Value {
         if (name.index == index) lastgroup = .{ .string = name.name };
     };
     try fields.appendSlice(a, &.{
-        .{ .key = "__dxt_indexed", .value = .{ .list = groups } },                                                                                                                                     .{ .key = "__dxt_string_index", .value = .{ .object = try names.toOwnedSlice(a) } },
-        .{ .key = "string", .value = .{ .string = capture.string } },                                                                                                                                  .{ .key = "re", .value = try patternValue(a, capture.pattern) },
-        .{ .key = "pos", .value = try expr.integerValue(a, capture.pos) },                                                                                                                             .{ .key = "endpos", .value = try expr.integerValue(a, capture.endpos) },
-        .{ .key = "lastindex", .value = if (capture.lastindex) |index| try expr.integerValue(a, index) else .none },                                                                                   .{ .key = "lastgroup", .value = lastgroup },
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_indexed", .value = .{ .list = groups } },
+        .{ .key = "__dxt_string_index", .value = .{ .object = try names.toOwnedSlice(a) } },
+        .{ .key = "string", .value = .{ .string = capture.string } },
+        .{ .key = "re", .value = try patternValue(a, capture.pattern) },
+        .{ .key = "pos", .value = try expr.integerValue(a, capture.pos) },
+        .{ .key = "endpos", .value = try expr.integerValue(a, capture.endpos) },
+        .{ .key = "lastindex", .value = if (capture.lastindex) |index| try expr.integerValue(a, index) else .none },
+        .{ .key = "lastgroup", .value = lastgroup },
         .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<re.Match object; span=({d}, {d}), match={s}>", .{ start, end, try expr.repr(group(capture, 0, .none), a) }) } },
     });
     for ([_][]const u8{ "group", "groups", "groupdict", "start", "end", "span", "expand" }) |method| try fields.append(a, .{ .key = method, .value = try bound(a, "__dxt_regex_match:", method, capture) });
@@ -234,7 +266,7 @@ fn callMatch(a: Allocator, method: []const u8, capture: Capture, args: []const A
         return if (values.len == 1) values[0] else .{ .tuple = values };
     }
     if (std.mem.eql(u8, method, "groups") or std.mem.eql(u8, method, "groupdict")) {
-        if (args.len > 1) return error.InvalidJinjaArguments;
+        try validateArguments(args, &.{"default"}, 0);
         const default = argument(args, "default", 0);
         const fallback: Value = if (default == .undefined) .none else default;
         if (std.mem.eql(u8, method, "groups")) {
@@ -247,10 +279,10 @@ fn callMatch(a: Allocator, method: []const u8, capture: Capture, args: []const A
         return .{ .object = fields };
     }
     if (std.mem.eql(u8, method, "expand")) {
-        if (args.len != 1) return error.InvalidJinjaArguments;
+        if (args.len != 1 or args[0].name != null) return error.InvalidJinjaArguments;
         return .{ .string = try replacement(a, try string(args[0].value), capture) };
     }
-    if (args.len > 1) return error.InvalidJinjaArguments;
+    if (args.len > 1 or (args.len == 1 and args[0].name != null)) return error.InvalidJinjaArguments;
     const authored = argument(args, "group", 0);
     const index = if (authored == .undefined) 0 else try groupIndex(capture, authored);
     const span = capture.spans[index];
@@ -265,13 +297,14 @@ fn callMatch(a: Allocator, method: []const u8, capture: Capture, args: []const A
 }
 
 fn execute(a: Allocator, method: []const u8, definition: Pattern, args: []const Argument, host: ?expr.Host) !Value {
+    if (std.mem.eql(u8, method, "sub") or std.mem.eql(u8, method, "subn")) try validateArguments(args, &.{ "repl", "string", "count" }, 2) else if (std.mem.eql(u8, method, "split")) try validateArguments(args, &.{ "string", "maxsplit" }, 1) else try validateArguments(args, &.{ "string", "pos", "endpos" }, 1);
     const regex = try engine.compile(a, definition.pattern, definition.flags);
     defer regex.deinit();
     const substitution = std.mem.eql(u8, method, "sub") or std.mem.eql(u8, method, "subn");
     const subject = try string(argument(args, "string", if (substitution) 1 else 0));
     const length: i64 = @intCast(try @import("expression_unicode.zig").count(subject));
     const has_bounds = !substitution and !std.mem.eql(u8, method, "split");
-    const pos = if (has_bounds) @max(0, try integerArg(args, "pos", 1, 0)) else 0;
+    const pos = if (has_bounds) std.math.clamp(try integerArg(args, "pos", 1, 0), 0, length) else 0;
     const endpos = if (has_bounds) std.math.clamp(try integerArg(args, "endpos", 2, length), 0, length) else length;
     const start = try engine.byteOffset(subject, pos);
     const end = try engine.byteOffset(subject, endpos);
@@ -357,7 +390,7 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, host: ?expr.
         return .none;
     }
     if (std.mem.eql(u8, method, "escape")) {
-        if (args.len != 1) return error.InvalidJinjaArguments;
+        try validateArguments(args, &.{"pattern"}, 1);
         var text: std.ArrayList(u8) = .empty;
         for (try string(args[0].value)) |byte| {
             if (std.mem.indexOfScalar(u8, "()[]{}?*+-|^$\\.&~# \t\n\r\x0b\x0c", byte) != null) try text.append(a, '\\');
@@ -367,6 +400,7 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, host: ?expr.
     }
     const authored = argument(args, "pattern", 0);
     const substitution = std.mem.eql(u8, method, "sub") or std.mem.eql(u8, method, "subn");
+    if (std.mem.eql(u8, method, "compile")) try validateArguments(args, &.{ "pattern", "flags" }, 1) else if (substitution) try validateArguments(args, &.{ "pattern", "repl", "string", "count", "flags" }, 3) else if (std.mem.eql(u8, method, "split")) try validateArguments(args, &.{ "pattern", "string", "maxsplit", "flags" }, 2) else try validateArguments(args, &.{ "pattern", "string", "flags" }, 2);
     const flag_value = try integerArg(args, "flags", if (std.mem.eql(u8, method, "compile")) 1 else if (substitution) 4 else if (std.mem.eql(u8, method, "split")) 3 else 2, 0);
     if (flag_value < 0 or flag_value > std.math.maxInt(u32)) return error.InvalidRegularExpressionFlags;
     var definition: Pattern = undefined;
