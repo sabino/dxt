@@ -115,7 +115,7 @@ pub const Connection = struct {
                     };
                     if (self.api.PQresultErrorField(raw, 'P')) |position| self.last_error_position = std.fmt.parseUnsigned(usize, std.mem.span(position), 10) catch null;
                     const state = self.api.PQresultErrorField(raw, 'C');
-                    if (failed == null) failed = if (state != null and std.mem.eql(u8, std.mem.span(state.?), "57014")) error.AdapterQueryCancelled else error.PostgresExecutionFailed;
+                    if (failed == null) failed = classifySqlState(if (state) |code| std.mem.span(code) else null);
                 },
             }
         }
@@ -194,4 +194,24 @@ fn postgresKind(type_id: u32) result.Kind {
         18, 19, 25, 1042, 1043, 2950, 114, 3802 => .text,
         else => .other,
     };
+}
+
+/// Only server-confirmed SQLSTATEs are eligible for caller retry policy.
+/// Disconnects and uncertain commits retain the generic execution error.
+pub fn classifySqlState(state: ?[]const u8) anyerror {
+    const code = state orelse return error.PostgresExecutionFailed;
+    if (std.mem.eql(u8, code, "57014")) return error.AdapterQueryCancelled;
+    if (std.mem.eql(u8, code, "40001")) return error.PostgresSerializationFailure;
+    if (std.mem.eql(u8, code, "40P01")) return error.PostgresDeadlockDetected;
+    if (std.mem.eql(u8, code, "55P03")) return error.PostgresLockNotAvailable;
+    return error.PostgresExecutionFailed;
+}
+
+test "SQLSTATE retry classification requires a known server rejection" {
+    try std.testing.expectEqual(error.PostgresSerializationFailure, classifySqlState("40001"));
+    try std.testing.expectEqual(error.PostgresDeadlockDetected, classifySqlState("40P01"));
+    try std.testing.expectEqual(error.PostgresLockNotAvailable, classifySqlState("55P03"));
+    try std.testing.expectEqual(error.AdapterQueryCancelled, classifySqlState("57014"));
+    try std.testing.expectEqual(error.PostgresExecutionFailed, classifySqlState("08006"));
+    try std.testing.expectEqual(error.PostgresExecutionFailed, classifySqlState(null));
 }

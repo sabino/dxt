@@ -343,3 +343,18 @@ def test_native_incremental_and_snapshot_workflows_without_external_cli(driver, 
                           "select label, dbt_valid_to is null as current from archive.history order by dbt_valid_from")) == [
         {"label": "old", "current": False}, {"label": "new", "current": True},
     ]
+
+
+@pytest.mark.parametrize("state,expected", [
+    ("40001", "PostgresSerializationFailure"),
+    ("40P01", "PostgresDeadlockDetected"),
+    ("55P03", "PostgresLockNotAvailable"),
+    ("57014", "AdapterQueryCancelled"),
+    ("08006", "PostgresExecutionFailed"),
+])
+def test_actual_postgres_protocol_classifies_known_retry_states(driver, tmp_path, postgres_fixture, state, expected):
+    sql = f"do $$ begin raise exception 'synthetic state fixture' using errcode = '{state}'; end $$"
+    result = invoke(driver, "postgres", "query", tmp_path, postgres_fixture[1], sql)
+    assert result.returncode != 0
+    assert expected in result.stderr
+    assert "synthetic state fixture" not in result.stdout + result.stderr
