@@ -24,6 +24,7 @@ const Api = struct {
     PQgetvalue: *const fn (Handle, c_int, c_int) callconv(.c) [*:0]const u8,
     PQgetlength: *const fn (Handle, c_int, c_int) callconv(.c) c_int,
     PQcmdTuples: *const fn (Handle) callconv(.c) [*:0]const u8,
+    PQcmdStatus: *const fn (Handle) callconv(.c) [*:0]const u8,
     PQresultErrorField: *const fn (Handle, c_int) callconv(.c) ?[*:0]const u8,
     PQserverVersion: *const fn (Handle) callconv(.c) c_int,
     PQgetCancel: *const fn (Handle) callconv(.c) Handle,
@@ -84,7 +85,10 @@ pub const Connection = struct {
         while (self.api.PQgetResult(self.handle)) |raw| {
             defer self.api.PQclear(raw);
             switch (self.api.PQresultStatus(raw)) {
-                1 => output.rows_changed = std.fmt.parseUnsigned(u64, std.mem.span(self.api.PQcmdTuples(raw)), 10) catch 0,
+                1 => {
+                    output.deinit(self.allocator);
+                    output = .{ .owner_allocator = self.allocator, .rows_changed = std.fmt.parseUnsigned(u64, std.mem.span(self.api.PQcmdTuples(raw)), 10) catch 0, .command_tag = try self.allocator.dupe(u8, std.mem.span(self.api.PQcmdStatus(raw))) };
+                },
                 2 => {
                     output.deinit(self.allocator);
                     output = self.copyResult(raw) catch |err| {
@@ -92,6 +96,7 @@ pub const Connection = struct {
                         continue;
                     };
                     output.rows_changed = std.fmt.parseUnsigned(u64, std.mem.span(self.api.PQcmdTuples(raw)), 10) catch 0;
+                    output.command_tag = try self.allocator.dupe(u8, std.mem.span(self.api.PQcmdStatus(raw)));
                 },
                 3 => {
                     // COPY streams require a dedicated protocol API. Consume

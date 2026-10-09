@@ -13,6 +13,7 @@ pub const Value = union(enum) {
     callable: []const u8,
 
     pub fn truthy(self: Value) bool {
+        if (self == .object) if (sequence(self)) |items| return items.len != 0;
         return switch (self) {
             .undefined, .none => false,
             .boolean => |v| v,
@@ -80,7 +81,19 @@ pub const Host = struct {
     context: *anyopaque,
     resolve: *const fn (*anyopaque, []const u8, std.mem.Allocator) anyerror!Value,
     call: *const fn (*anyopaque, []const u8, []const Argument, std.mem.Allocator) anyerror!Value,
+    // Compiler hosts can preserve the current resource across nested renders
+    // without coupling this generic expression module to project Node types.
+    set_node: ?*const fn (*anyopaque, ?*const anyopaque) ?*const anyopaque = null,
 };
+
+pub fn sequence(value: Value) ?[]const Value {
+    if (value == .list) return value.list;
+    if (value == .object) {
+        const items = value.attribute("__dxt_iterable");
+        if (items == .list) return items.list;
+    }
+    return null;
+}
 
 pub fn repr(value: Value, allocator: std.mem.Allocator) ![]const u8 {
     if (value == .string) {
@@ -437,8 +450,8 @@ const Parser = struct {
                 const expanded = try self.binary(0);
                 if (saw_keyword) return error.InvalidJinjaArguments;
                 if (self.active) {
-                    if (expanded != .list) return error.InvalidJinjaArguments;
-                    for (expanded.list) |value| try args.append(self.allocator, .{ .value = value });
+                    const items = sequence(expanded) orelse return error.InvalidJinjaArguments;
+                    for (items) |value| try args.append(self.allocator, .{ .value = value });
                 }
             } else {
                 const saved = self.index;
@@ -828,6 +841,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
 }
 fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
     if (value == .object and key == .string) return value.attribute(key.string);
+    if (value == .object) if (sequence(value)) |items| return try indexValue(allocator, .{ .list = items }, key);
     if (key != .number or !std.math.isFinite(key.number) or @floor(key.number) != key.number or @abs(key.number) > 9007199254740991) return .undefined;
     const characters = if (value == .string) try iterableValues(allocator, value) else null;
     const len: usize = switch (value) {
@@ -874,7 +888,7 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
 }
 
 fn iterableValues(allocator: std.mem.Allocator, value: Value) ![]const Value {
-    if (value == .list) return value.list;
+    if (sequence(value)) |items| return items;
     if (value == .undefined or value == .none) return &.{};
     if (value == .object) {
         const result = try allocateValues(allocator, value.object.len);
@@ -932,7 +946,7 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "boolean")) return value == .boolean;
     if (std.mem.eql(u8, name, "true")) return value == .boolean and value.boolean;
     if (std.mem.eql(u8, name, "false")) return value == .boolean and !value.boolean;
-    if (std.mem.eql(u8, name, "mapping")) return value == .object;
+    if (std.mem.eql(u8, name, "mapping")) return value == .object and sequence(value) == null;
     if (std.mem.eql(u8, name, "iterable") or std.mem.eql(u8, name, "sequence")) return value == .list or value == .object or value == .string;
     if (std.mem.eql(u8, name, "callable")) return value == .callable;
     if (std.mem.eql(u8, name, "equalto") or std.mem.eql(u8, name, "eq") or std.mem.eql(u8, name, "==")) {
@@ -1140,7 +1154,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
     if (std.mem.eql(u8, name, "length") or std.mem.eql(u8, name, "count")) return .{ .number = @floatFromInt(switch (value) {
         .string => |v| v.len,
         .list => |v| v.len,
-        .object => |v| v.len,
+        .object => |v| if (sequence(value)) |items| items.len else v.len,
         else => return error.JinjaTypeError,
     }) };
     if (std.mem.eql(u8, name, "string")) return .{ .string = try value.text(allocator) };

@@ -106,7 +106,7 @@ pub fn operation(runtime: Runtime, options: Options, graph: *types.Graph, target
     try stdout.print("Completed operation {s}\n", .{name});
 }
 
-const StoredValue = struct { name: []const u8, value: expression.Value };
+const StoredValue = struct { name: []const u8, value: expression.Value, loaded: bool = false };
 /// A native SQL host for operation macros and executable compiler contexts.
 /// Results live for the host lifetime, including values retained by load_result.
 pub const OperationHost = struct {
@@ -122,6 +122,9 @@ pub const OperationHost = struct {
     values: std.heap.ArenaAllocator,
 
     transaction_open: bool = false,
+    current_node: ?*const types.Node = null,
+    adapter_state: @import("adapter_context.zig").State = .{},
+    last_response: expression.Value = .none,
 
     /// Construct the context without connecting. Offline compilation remains
     /// available; the first database callback opens or borrows a session.
@@ -181,7 +184,14 @@ pub const OperationHost = struct {
     }
 
     pub fn host(self: *OperationHost) expression.Host {
-        return .{ .context = self, .resolve = resolveValue, .call = call };
+        return .{ .context = self, .resolve = resolveValue, .call = call, .set_node = setNode };
+    }
+
+    fn setNode(raw: *anyopaque, node: ?*const anyopaque) ?*const anyopaque {
+        const self: *OperationHost = @ptrCast(@alignCast(raw));
+        const previous = self.current_node;
+        self.current_node = if (node) |value| @ptrCast(@alignCast(value)) else null;
+        return previous;
     }
 
     pub fn deinit(self: *OperationHost) void {
@@ -193,6 +203,7 @@ pub const OperationHost = struct {
             self.runtime.allocator.destroy(pool);
         }
         self.stored.deinit(self.runtime.allocator);
+        self.adapter_state.deinit(self.values.allocator());
         self.values.deinit();
     }
 
@@ -202,6 +213,7 @@ pub const OperationHost = struct {
 
     fn call(raw: *anyopaque, name: []const u8, args: []const expression.Argument, allocator: std.mem.Allocator) anyerror!expression.Value {
         const self: *OperationHost = @ptrCast(@alignCast(raw));
+        if (try @import("adapter_context.zig").call(self.values.allocator(), self.graph, &self.adapter_state, .{ .context = self, .render = renderAdapterMacro }, name, args)) |value| return value;
         if (std.mem.eql(u8, name, "log") or std.mem.eql(u8, name, "print")) {
             const message = argument(args, "msg", 0) orelse return error.InvalidJinjaArguments;
             const is_print = std.mem.eql(u8, name, "print");
@@ -229,6 +241,7 @@ pub const OperationHost = struct {
             return .{ .string = "" };
         }
         if (std.mem.startsWith(u8, name, "dxt.values.")) {
+            if (args.len != 0) return error.InvalidJinjaArguments;
             for (self.stored.items) |stored| if (std.mem.eql(u8, name, stored.name)) return stored.value;
             return error.InvalidJinjaArguments;
         }
@@ -242,8 +255,48 @@ pub const OperationHost = struct {
         if (std.mem.eql(u8, name, "load_result")) {
             const key: expression.Value = argument(args, "name", 0) orelse return error.InvalidJinjaArguments;
             if (key != .string) return error.InvalidJinjaArguments;
-            for (self.stored.items) |stored| if (std.mem.eql(u8, key.string, stored.name)) return stored.value;
+            var index = self.stored.items.len;
+            while (index > 0) {
+                index -= 1;
+                const stored = &self.stored.items[index];
+                if (std.mem.eql(u8, key.string, stored.name)) {
+                    if (!std.mem.eql(u8, key.string, "main")) {
+                        if (stored.loaded) return error.MacroResultAlreadyLoaded;
+                        stored.loaded = true;
+                    }
+                    return stored.value;
+                }
+            }
             return .none;
+        }
+        if (std.mem.eql(u8, name, "store_result")) {
+            const key = argument(args, "name", 0) orelse return error.InvalidJinjaArguments;
+            const response = argument(args, "response", 1) orelse return error.InvalidJinjaArguments;
+            const authored_table = argument(args, "agate_table", 2) orelse .none;
+            if (key != .string) return error.InvalidJinjaArguments;
+            const table = if (authored_table == .none) try self.emptyTable() else authored_table;
+            const value: expression.Value = .{ .object = try self.values.allocator().dupe(expression.Entry, &.{
+                .{ .key = "table", .value = table },
+                .{ .key = "data", .value = table.attribute("__dxt_data") },
+                .{ .key = "response", .value = response },
+            }) };
+            try self.stored.append(self.runtime.allocator, .{ .name = try self.values.allocator().dupe(u8, key.string), .value = try @import("dbt_context.zig").cloneValue(self.values.allocator(), value) });
+            return .{ .string = "" };
+        }
+        if (std.mem.eql(u8, name, "adapter.execute")) {
+            const sql = argument(args, "sql", 0) orelse return error.InvalidJinjaArguments;
+            if (sql != .string) return error.InvalidJinjaArguments;
+            const auto_begin = argument(args, "auto_begin", 1) orelse expression.Value{ .boolean = false };
+            const fetch = argument(args, "fetch", 2) orelse expression.Value{ .boolean = false };
+            if (auto_begin.truthy() and !self.transaction_open) {
+                try self.ensureSession();
+                const session = self.currentSession() orelse return error.NativeDuckDbPoolRequired;
+                try session.begin();
+                self.transaction_open = true;
+            }
+            const queried = try self.query(sql.string, allocator);
+            const table = if (fetch.truthy() and queried != .none) queried else try self.emptyTable();
+            return .{ .list = try self.values.allocator().dupe(expression.Value, &.{ self.last_response, table }) };
         }
         if (std.mem.eql(u8, name, "run_query")) {
             const sql = argument(args, "sql", 0) orelse return error.InvalidJinjaArguments;
@@ -265,7 +318,7 @@ pub const OperationHost = struct {
             const fetch: expression.Value = argument(args, "fetch_result", 1) orelse .{ .boolean = false };
             const value: expression.Value = .{ .object = try self.values.allocator().dupe(expression.Entry, &.{
                 .{ .key = "table", .value = if (fetch.truthy()) table else .none },
-                .{ .key = "data", .value = if (fetch.truthy() and table != .none) table.attribute("rows") else .{ .list = &.{} } },
+                .{ .key = "data", .value = if (fetch.truthy() and table != .none) table.attribute("__dxt_data") else .{ .list = &.{} } },
                 .{ .key = "response", .value = .{ .object = &.{} } },
             }) };
             try self.stored.append(self.runtime.allocator, .{ .name = try self.values.allocator().dupe(u8, key.string), .value = value });
@@ -279,36 +332,92 @@ pub const OperationHost = struct {
         return error.UnresolvedMacro;
     }
 
+    fn renderAdapterMacro(raw: *anyopaque, allocator: std.mem.Allocator, name: []const u8, args: []const expression.Argument) anyerror!expression.Value {
+        const self: *OperationHost = @ptrCast(@alignCast(raw));
+        const fallback = types.Node{ .package_name = self.graph.project_name, .unique_id = "operation", .name = "operation", .resource_type = "operation", .path = "", .original_file_path = "", .raw_code = "" };
+        return try compiler.renderMacroForNode(allocator, self.graph, self.current_node orelse &fallback, name, args);
+    }
+
     fn query(self: *OperationHost, sql: []const u8, _: std.mem.Allocator) !expression.Value {
         try self.ensureSession();
         const allocator = self.values.allocator();
         var output = if (self.currentSession()) |session| try session.query(sql) else try adapter.queryForGraph(self.runtime, self.graph, self.db_path, sql);
         defer output.deinit(self.runtime.allocator);
         const trimmed = std.mem.trim(u8, sql, " \t\r\n;");
+        const message = if (output.command_tag) |tag| try allocator.dupe(u8, tag) else "OK";
+        var code: expression.Value = .none;
+        var affected: expression.Value = .none;
+        if (output.command_tag) |tag| {
+            var words = std.mem.tokenizeAny(u8, tag, " \t");
+            var label: std.ArrayList(u8) = .empty;
+            var has_count = false;
+            while (words.next()) |word| {
+                if (std.fmt.parseUnsigned(u64, word, 10)) |_| has_count = true else |_| {
+                    if (label.items.len != 0) try label.append(allocator, ' ');
+                    try label.appendSlice(allocator, word);
+                }
+            }
+            code = .{ .string = try label.toOwnedSlice(allocator) };
+            affected = .{ .number = if (has_count) @floatFromInt(output.rows_changed) else -1 };
+        }
+        self.last_response = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "__dxt_rendered", .value = .{ .string = message } }, .{ .key = "_message", .value = .{ .string = message } }, .{ .key = "code", .value = code }, .{ .key = "rows_affected", .value = affected } }) };
         if (std.ascii.eqlIgnoreCase(trimmed, "begin") or std.ascii.eqlIgnoreCase(trimmed, "begin transaction")) self.transaction_open = true;
         if (std.ascii.eqlIgnoreCase(trimmed, "commit") or std.ascii.eqlIgnoreCase(trimmed, "rollback")) self.transaction_open = false;
         // Native query results distinguish empty SELECTs from statements.
         if (output.columns.len == 0) return .none;
-        const rows = try allocator.alloc(expression.Value, output.rows.len);
-        const columns = try allocator.alloc(expression.Value, output.columns.len);
-        const names = try allocator.alloc(expression.Value, output.columns.len);
+        const rows = try expression.allocateValues(allocator, output.rows.len);
+        const data = try expression.allocateValues(allocator, output.rows.len);
+        const columns = try expression.allocateValues(allocator, output.columns.len);
+        const names = try expression.allocateValues(allocator, output.columns.len);
         for (output.columns, 0..) |column, column_index| {
             names[column_index] = .{ .string = try allocator.dupe(u8, column.name) };
-            const values = try allocator.alloc(expression.Value, output.rows.len);
-            for (output.rows, 0..) |row, row_index| values[row_index] = try cellValue(allocator, column.kind, row[column_index]);
-            const method = try std.fmt.allocPrint(allocator, "dxt.values.{d}", .{self.stored.items.len});
-            try self.stored.append(self.runtime.allocator, .{ .name = method, .value = .{ .list = values } });
-            columns[column_index] = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "name", .value = names[column_index] }, .{ .key = "values", .value = .{ .callable = method } } }) };
+            const cells = try expression.allocateValues(allocator, output.rows.len);
+            for (output.rows, 0..) |row, row_index| cells[row_index] = try cellValue(allocator, column.kind, row[column_index]);
+            columns[column_index] = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "name", .value = names[column_index] }, .{ .key = "values", .value = try self.callback(.{ .list = cells }) } }) };
         }
-        for (output.rows, rows) |row, *target| {
-            const values = try allocator.alloc(expression.Value, output.columns.len);
-            for (row, output.columns, values) |cell, column, *value| value.* = try cellValue(allocator, column.kind, cell);
-            target.* = .{ .list = values };
+        for (output.rows, rows, data) |row, *target, *raw_target| {
+            const cells = try expression.allocateValues(allocator, output.columns.len);
+            const entries = try expression.allocateEntries(allocator, output.columns.len + 3);
+            for (row, output.columns, cells, entries[0..output.columns.len]) |cell, column, *value, *entry| {
+                value.* = try cellValue(allocator, column.kind, cell);
+                entry.* = .{ .key = try allocator.dupe(u8, column.name), .value = value.* };
+            }
+            entries[output.columns.len] = .{ .key = "__dxt_iterable", .value = .{ .list = cells } };
+            entries[output.columns.len + 1] = .{ .key = "keys", .value = try self.callback(.{ .list = names }) };
+            entries[output.columns.len + 2] = .{ .key = "values", .value = try self.callback(.{ .list = cells }) };
+            target.* = .{ .object = entries };
+            raw_target.* = .{ .list = cells };
         }
+        const column_entries = try expression.allocateEntries(allocator, output.columns.len + 3);
+        for (output.columns, columns, column_entries[0..output.columns.len]) |column, value, *entry| entry.* = .{ .key = try allocator.dupe(u8, column.name), .value = value };
+        column_entries[output.columns.len] = .{ .key = "__dxt_iterable", .value = .{ .list = columns } };
+        column_entries[output.columns.len + 1] = .{ .key = "keys", .value = try self.callback(.{ .list = names }) };
+        column_entries[output.columns.len + 2] = .{ .key = "values", .value = try self.callback(.{ .list = columns }) };
         const method = try std.fmt.allocPrint(allocator, "dxt.print_table.{d}", .{self.stored.items.len});
-        try self.stored.append(self.runtime.allocator, .{ .name = method, .value = .{ .list = rows } });
+        try self.stored.append(self.runtime.allocator, .{ .name = method, .value = .{ .list = data } });
         return .{ .object = try allocator.dupe(expression.Entry, &.{
-            .{ .key = "rows", .value = .{ .list = rows } }, .{ .key = "columns", .value = .{ .list = columns } }, .{ .key = "column_names", .value = .{ .list = names } }, .{ .key = "print_table", .value = .{ .callable = method } },
+            .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
+            .{ .key = "__dxt_data", .value = .{ .list = data } },
+            .{ .key = "rows", .value = .{ .list = rows } },
+            .{ .key = "columns", .value = .{ .object = column_entries } },
+            .{ .key = "column_names", .value = .{ .list = names } },
+            .{ .key = "print_table", .value = .{ .callable = method } },
+        }) };
+    }
+
+    fn callback(self: *OperationHost, value: expression.Value) !expression.Value {
+        const method = try std.fmt.allocPrint(self.values.allocator(), "dxt.values.{d}", .{self.stored.items.len});
+        try self.stored.append(self.runtime.allocator, .{ .name = method, .value = value });
+        return .{ .callable = method };
+    }
+
+    fn emptyTable(self: *OperationHost) !expression.Value {
+        const allocator = self.values.allocator();
+        const empty: expression.Value = .{ .list = try expression.allocateValues(allocator, 0) };
+        return .{ .object = try allocator.dupe(expression.Entry, &.{
+            .{ .key = "__dxt_iterable", .value = empty },                                                                                          .{ .key = "__dxt_data", .value = empty },
+            .{ .key = "rows", .value = empty },                                                                                                    .{ .key = "column_names", .value = empty },
+            .{ .key = "columns", .value = .{ .object = try allocator.dupe(expression.Entry, &.{.{ .key = "__dxt_iterable", .value = empty }}) } },
         }) };
     }
 };

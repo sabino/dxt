@@ -7,9 +7,11 @@ pub const QueryResult = struct {
     columns: []Column = &.{},
     rows: [][]?[]const u8 = &.{},
     rows_changed: u64 = 0,
+    command_tag: ?[]const u8 = null,
 
     pub fn deinit(self: *QueryResult, allocator: std.mem.Allocator) void {
         const owner = self.owner_allocator orelse allocator;
+        if (self.command_tag) |tag| owner.free(tag);
         for (self.columns) |column| owner.free(column.name);
         owner.free(self.columns);
         for (self.rows) |row| {

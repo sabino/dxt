@@ -87,6 +87,7 @@ const CompileContext = struct {
     returned: ?native_expr.Value = null,
     parse_node: ?*Node = null,
     var_render_depth: usize = 0,
+    previous_host_node: ?*const anyopaque = null,
 
     const ValueBinding = struct {
         name: []const u8,
@@ -95,10 +96,14 @@ const CompileContext = struct {
     };
 
     fn init(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) CompileContext {
-        return .{ .allocator = allocator, .graph = graph, .node = node, .value_arena = std.heap.ArenaAllocator.init(allocator) };
+        const previous = if (graph.execution_hooks) |execution_host| if (execution_host.set_node) |set_node| set_node(execution_host.context, node) else null else null;
+        return .{ .allocator = allocator, .graph = graph, .node = node, .value_arena = std.heap.ArenaAllocator.init(allocator), .previous_host_node = previous };
     }
 
     fn deinit(self: *CompileContext) void {
+        if (self.graph.execution_hooks) |execution_host| if (execution_host.set_node) |set_node| {
+            _ = set_node(execution_host.context, self.previous_host_node);
+        };
         for (self.lists.items) |*list| {
             for (list.values.items) |value| self.allocator.free(value);
             list.values.deinit(self.allocator);
@@ -661,8 +666,6 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                 defer context.popScope();
                 try context.setValue("__dxt_caller_sql", .{ .string = try arena.dupe(u8, captured.items) });
                 try context.setValue("caller", .{ .callable = "__dxt_caller" });
-                if (std.mem.eql(u8, expression[0..call.open], "statement"))
-                    try arguments.append(arena, .{ .name = "caller_sql", .value = .{ .string = captured.items } });
                 const value = try callExpressionValue(context, std.mem.trim(u8, expression[0..call.open], " \t"), arguments.items, arena);
                 if (value != .none) try out.appendSlice(context.allocator, try value.text(arena));
                 index = afterTag(sql, block.close, end_index);
@@ -761,7 +764,7 @@ fn afterTag(sql: []const u8, end: usize, limit: usize) usize {
 }
 
 fn iterationValues(allocator: std.mem.Allocator, iterable: native_expr.Value) ![]const native_expr.Value {
-    if (iterable == .list) return iterable.list;
+    if (native_expr.sequence(iterable)) |items| return items;
     if (iterable == .undefined) return error.UndefinedJinjaValue;
     const count: usize = switch (iterable) {
         .object => |v| v.len,
@@ -1077,6 +1080,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     if (std.mem.eql(u8, name, "exceptions.raise_compiler_error")) return error.JinjaCompilerError;
     if (context.parse_node != null) {
+        if (try @import("adapter_context.zig").parseReplacement(allocator, name)) |value| return value;
         if (std.mem.eql(u8, name, "run_query") or std.mem.eql(u8, name, "load_result")) return .none;
         if (std.mem.eql(u8, name, "statement") or std.mem.eql(u8, name, "store_result") or std.mem.eql(u8, name, "log") or std.mem.eql(u8, name, "print")) return .{ .string = "" };
     }
@@ -1117,7 +1121,15 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         macro_id = resolve.findMacroIdByPackageAndName(context.graph, name[0..dot], name[dot + 1 ..]);
     } else macro_id = resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.current_macro_package orelse context.node.package_name, name);
     if (macro_id == null) {
-        if (context.graph.execution_hooks) |hooks| return try hooks.call(hooks.context, name, args, allocator);
+        if (context.graph.execution_hooks) |hooks| {
+            if (std.mem.eql(u8, name, "statement")) {
+                const forwarded = try allocator.alloc(native_expr.Argument, args.len + 1);
+                @memcpy(forwarded[0..args.len], args);
+                forwarded[args.len] = .{ .name = "caller_sql", .value = try resolveExpressionValue(context, "__dxt_caller_sql", allocator) };
+                return try hooks.call(hooks.context, name, forwarded, allocator);
+            }
+            return try hooks.call(hooks.context, name, args, allocator);
+        }
         return error.UnresolvedMacro;
     }
     const macro = findMacroByUniqueId(context.graph, macro_id.?) orelse return error.UnresolvedMacro;
@@ -1961,7 +1973,12 @@ fn parseIfBlock(context: *CompileContext, sql: []const u8, body_start: usize, sp
 
 fn parseStaticIfCondition(context: *CompileContext, span: []const u8) !bool {
     const keyword_len: usize = if (isIfStatement(span)) 2 else if (isElifStatement(span)) 4 else return error.UnsupportedJinja;
-    return (try context.evaluate(std.mem.trim(u8, span[keyword_len..], " \t\r\n"))).truthy();
+    return (try context.evaluate(controlExpression(span[keyword_len..]))).truthy();
+}
+
+fn controlExpression(raw: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    return std.mem.trimEnd(u8, if (std.mem.endsWith(u8, trimmed, ":")) trimmed[0 .. trimmed.len - 1] else trimmed, " \t\r\n");
 }
 
 fn parseStaticBooleanCondition(context: *const CompileContext, condition: []const u8) ?bool {
@@ -2055,7 +2072,7 @@ fn parseForBlock(sql: []const u8, body_start: usize, span: []const u8) !ForBlock
     const after_ok = after >= span.len or !jinja.isIdentChar(span[after]);
     if (!before_ok or !after_ok) return error.UnsupportedJinja;
     index = jinja.skipWs(span, after);
-    const list_name = std.mem.trim(u8, span[index..], " \t\r\n");
+    const list_name = controlExpression(span[index..]);
     if (list_name.len == 0) return error.UnsupportedJinja;
 
     const endfor = findMatchingEndFor(sql, body_start) orelse return error.UnsupportedJinja;
@@ -3611,4 +3628,37 @@ test "source expressions render source this identity and package variables" {
     const result = try renderSourceExpression(allocator, &graph, &source, "select max(loaded_at) from {{ this }} where id > {{ var('minimum') }} and '{{ this.schema }}' = 'landing'");
     defer allocator.free(result);
     try std.testing.expectEqualStrings("select max(loaded_at) from \"warehouse\".\"landing\".event_rows where id > 2 and 'landing' = 'landing'", result);
+}
+
+test "nested compiler frames restore the database host current resource" {
+    const TestHost = struct {
+        node: ?*const Node = null,
+        graph: *const Graph,
+        child: *const Node,
+        fn setNode(raw: *anyopaque, pointer: ?*const anyopaque) ?*const anyopaque {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const previous = self.node;
+            self.node = if (pointer) |node| @ptrCast(@alignCast(node)) else null;
+            return previous;
+        }
+        fn resolveValue(_: *anyopaque, _: []const u8, _: std.mem.Allocator) anyerror!native_expr.Value {
+            return .undefined;
+        }
+        fn call(raw: *anyopaque, name: []const u8, _: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (std.mem.eql(u8, name, "current_resource")) return .{ .string = self.node.?.name };
+            if (std.mem.eql(u8, name, "nested_resource")) return .{ .string = try compileModel(allocator, self.graph, self.child) };
+            return error.UnresolvedMacro;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    const child = Node{ .package_name = "demo", .unique_id = "model.demo.child", .name = "child", .path = "child.sql", .original_file_path = "models/child.sql", .raw_code = "{{ current_resource() }}" };
+    const parent = Node{ .package_name = "demo", .unique_id = "model.demo.parent", .name = "parent", .path = "parent.sql", .original_file_path = "models/parent.sql", .raw_code = "{{ current_resource() }} {{ nested_resource() }} {{ current_resource() }}" };
+    var host_state = TestHost{ .graph = &graph, .child = &child };
+    graph.execution_hooks = .{ .context = &host_state, .resolve = TestHost.resolveValue, .call = TestHost.call, .set_node = TestHost.setNode };
+    try std.testing.expectEqualStrings("parent child parent", try compileModel(allocator, &graph, &parent));
+    try std.testing.expect(host_state.node == null);
 }

@@ -69,6 +69,23 @@ class ConfigurationPair:
         return result, reference
 
 
+@pytest.fixture(scope="module")
+def configuration_postgres(tmp_path_factory):
+    import pgserver
+    with pgserver.get_server(tmp_path_factory.mktemp("configuration-postgres") / "data") as server:
+        yield server
+
+
+def configure_adapter(pair, request, adapter):
+    if adapter == 'postgres':
+        from urllib.parse import unquote, urlparse
+        assert version('dbt-postgres') == '1.9.1'
+        server = request.getfixturevalue('configuration_postgres')
+        info = server.get_postmaster_info()
+        user = unquote(urlparse(server.get_uri()).username or 'postgres')
+        pair.write('profiles.yml', "configuration_fixture:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      host: " + json.dumps(str(info.socket_dir)) + "\n      port: " + str(info.port) + "\n      dbname: postgres\n      user: " + user + "\n      password: ''\n      schema: main\n      threads: 1\n")
+
+
 @pytest.mark.parametrize("cli_vars", [None, "{options: {enabled: false, values: [7, 8], label: 'true'}, materialization: table}"])
 def test_nested_typed_vars_dynamic_config_and_cli_precedence(tmp_path, configuration_oracle, cli_vars):
     pair = ConfigurationPair(tmp_path, configuration_oracle)
@@ -597,3 +614,66 @@ def test_native_invalid_container_mutation_fails_like_core(tmp_path, configurati
     pair = ConfigurationPair(tmp_path, configuration_oracle)
     pair.write('models/marts/containers.sql', setup + "select '{{ " + expression + " }}' as value")
     pair.invoke('compile', success=False)
+
+
+@pytest.mark.parametrize('expression', [
+    "result | length",
+    "result is mapping",
+    "result[0][0]",
+    "result.rows[0]['id']",
+    "result.rows[0].id",
+    "result.columns[0].values() | join(',')",
+    "result.columns['id'].values() | join(',')",
+    "result.column_names | join(',')",
+    "result.columns | map(attribute='name') | join(',')",
+])
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_native_query_table_sequences_match_core(tmp_path, configuration_oracle, expression, request, adapter):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, adapter)
+    pair.write('models/marts/query.sql', "{% if execute %}{% set result = run_query('select 1 as id union all select 2 as id order by id') %}select '{{ " + expression + " }}' as value{% else %}select 0 as value{% endif %}")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.query']['compiled_code'] == expected['nodes']['model.configuration_fixture.query']['compiled_code']
+
+
+def test_native_query_rows_iterate_and_unpack_through_macros(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('macros/collect_rows.sql', "{% macro collect_rows(rows) %}{% set results = [] %}{% for row in rows %}{% do results.append(row[0] ~ ':' ~ row['label']) %}{% endfor %}{{ return(results) }}{% endmacro %}")
+    pair.write('models/marts/query.sql', "{% if execute %}{% set result = run_query(\"select 1 as id, 'one' as label union all select 2 as id, 'two' as label order by id\") %}select '{{ collect_rows(result) | join(',') }}' as value{% else %}select 0 as value{% endif %}")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.query']['compiled_code'] == expected['nodes']['model.configuration_fixture.query']['compiled_code']
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_native_adapter_introspection_uses_typed_columns_and_project_dispatch(tmp_path, configuration_oracle, request, adapter):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, adapter)
+    pair.write('models/marts/parent.sql', '{{ config(materialized="table") }}select 1::integer as id, \'hello\'::varchar as label')
+    pair.invoke('run')
+    pair.write('models/marts/describe.sql', "{% set dependency = ref('parent') %}{% if execute %}{% set existing = adapter.get_relation(database=dependency.database, schema=dependency.schema, identifier=dependency.identifier) %}{% set columns = adapter.get_columns_in_relation(existing) %}select '{{ existing.type }}' as relation_type, '{{ columns | map(attribute='name') | join(',') }}' as names, '{{ columns[0].dtype }}' as dtype, '{{ columns[0].is_integer() }}' as is_integer, '{{ columns[1].data_type }}' as label_type{% else %}select 0{% endif %}")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.describe']['compiled_code'] == expected['nodes']['model.configuration_fixture.describe']['compiled_code']
+    pair.write('macros/get_columns.sql', "{% macro " + adapter + "__get_columns_in_relation(relation) %}{{ return([api.Column('overridden', 'integer')]) }}{% endmacro %}")
+    pair.write('models/marts/describe.sql', "{% set dependency = ref('parent') %}{% if execute %}select '{{ adapter.get_columns_in_relation(dependency)[0].name }}' as value{% else %}select 0{% endif %}")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.describe']['compiled_code'] == expected['nodes']['model.configuration_fixture.describe']['compiled_code']
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_native_adapter_execute_and_named_statement_results_match_core(tmp_path, configuration_oracle, request, adapter):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, adapter)
+    pair.write('models/marts/query.sql', "{% if execute %}{% set response, table = adapter.execute('select 1 as id', fetch=true) %}{% call statement('named', fetch_result=true, auto_begin=false) %}select 1 as id{% endcall %}{% call statement('named', fetch_result=true, auto_begin=false) %}select 2 as id{% endcall %}select '{{ response }}' as message, '{{ response.code }}' as code, '{{ response.rows_affected }}' as count, '{{ table[0][0] }}' as row, '{{ load_result('named').data[0][0] }}' as latest{% else %}select 0{% endif %}")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.query']['compiled_code'] == expected['nodes']['model.configuration_fixture.query']['compiled_code']
+
+
+@pytest.mark.parametrize('name, success', [('named', False), ('main', True)])
+def test_native_statement_result_consumption_matches_core(tmp_path, configuration_oracle, name, success):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/query.sql', "{% if execute %}{% call statement('" + name + "', fetch_result=true, auto_begin=false) %}select 1 as id{% endcall %}{% set first = load_result('" + name + "') %}{% set second = load_result('" + name + "') %}select {{ second.data[0][0] }} as id{% else %}select 0{% endif %}")
+    if name == 'main':
+        # 'main' invokes the upstream runtime writer. Use a non-main named
+        # result with explicit store_result to test this provider contract.
+        pair.write('models/marts/query.sql', "{% if execute %}{% set table = run_query('select 1 as id') %}{% do store_result('main', response={}, agate_table=table) %}{% set first = load_result('main') %}{% set second = load_result('main') %}select {{ second.data[0][0] }} as id{% else %}select 0{% endif %}")
+    pair.invoke('compile', success=success)

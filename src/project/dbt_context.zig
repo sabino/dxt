@@ -63,6 +63,9 @@ fn columnStringSize(definition: ColumnDef) !u64 {
 }
 
 fn columnDataType(allocator: std.mem.Allocator, definition: ColumnDef) ![]const u8 {
+    if (std.mem.eql(u8, definition.adapter_type, "postgres") and
+        (std.ascii.eqlIgnoreCase(definition.dtype, "text") or
+            (std.ascii.eqlIgnoreCase(definition.dtype, "character varying") and definition.char_size == null))) return definition.dtype;
     if (isString(definition.dtype)) return try std.fmt.allocPrint(allocator, "character varying({d})", .{try columnStringSize(definition)});
     if (isNumeric(definition.dtype) and definition.numeric_precision != .null and definition.numeric_scale != .null) return try std.fmt.allocPrint(allocator, "{s}({s},{s})", .{ definition.dtype, try (try @import("config_value.zig").toExpression(allocator, definition.numeric_precision)).text(allocator), try (try @import("config_value.zig").toExpression(allocator, definition.numeric_scale)).text(allocator) });
     return definition.dtype;
