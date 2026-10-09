@@ -860,10 +860,12 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
-    try writer.writeAll(",\"version\":");
-    try std.json.Stringify.value(node.version, .{}, writer);
-    try writer.writeAll(",\"latest_version\":");
-    try std.json.Stringify.value(node.latest_version, .{}, writer);
+    if (std.mem.eql(u8, node.resource_type, "model")) {
+        try writer.writeAll(",\"version\":");
+        try std.json.Stringify.value(node.version, .{}, writer);
+        try writer.writeAll(",\"latest_version\":");
+        try std.json.Stringify.value(node.latest_version, .{}, writer);
+    }
     try writeUnrenderedNodeConfig(writer, graph, &node);
     try writeNodeIdentityFields(allocator, writer, graph, &node);
     try writer.writeAll(",\"path\":");
