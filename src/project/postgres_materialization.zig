@@ -7,7 +7,10 @@ const compiler = @import("compiler.zig");
 const config_value = @import("config_value.zig");
 const types = @import("types.zig");
 
-pub const ExecutionPolicy = struct { manage_transaction: bool = true };
+pub const ExecutionPolicy = struct {
+    manage_transaction: bool = true,
+    file_effects: ?*@import("materialization_journal.zig").Journal = null,
+};
 
 pub fn isSupported(value: []const u8) bool {
     return std.mem.eql(u8, value, "table") or std.mem.eql(u8, value, "view") or std.mem.eql(u8, value, "materialized_view");
@@ -18,6 +21,13 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, node: *const t
 }
 
 pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, sql: []const u8, policy: ExecutionPolicy) !void {
+    var result = try executeReturningWithPolicy(runtime, graph, node, sql, policy);
+    result.deinit(runtime.allocator);
+}
+
+// The main statement response remains available to callers that emit adapter
+// metadata; cleanup DDL must not replace its real server command tag.
+pub fn executeReturningWithPolicy(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, sql: []const u8, policy: ExecutionPolicy) !adapter.QueryResult {
     if (!std.mem.eql(u8, graph.adapter_type, "postgres") or !isSupported(node.materialized)) return error.UnsupportedModelMaterialization;
     if (!policy.manage_transaction and runtime.adapter_session == null) return error.NativeAdapterSessionRequired;
     var owned: ?adapter.Session = null;
@@ -28,11 +38,13 @@ pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, node
     };
     if (policy.manage_transaction) try session.begin();
     errdefer if (policy.manage_transaction) session.rollback() catch {};
-    try executeInTransaction(runtime.allocator, session, graph, node, sql);
+    var result = try executeInTransaction(runtime.allocator, session, graph, node, sql);
+    errdefer result.deinit(runtime.allocator);
     if (policy.manage_transaction) try session.commit();
+    return result;
 }
 
-fn executeInTransaction(allocator: std.mem.Allocator, session: *adapter.Session, graph: *const types.Graph, node: *const types.Node, sql: []const u8) !void {
+fn executeInTransaction(allocator: std.mem.Allocator, session: *adapter.Session, graph: *const types.Graph, node: *const types.Node, sql: []const u8) !adapter.QueryResult {
     if (compiler.relationDatabaseForNode(graph, node)) |database| {
         var current = try session.query("select current_database()");
         defer current.deinit(allocator);
@@ -54,8 +66,7 @@ fn executeInTransaction(allocator: std.mem.Allocator, session: *adapter.Session,
     const indexes = if (std.mem.eql(u8, node.materialized, "view")) try allocator.alloc(Index, 0) else try parseIndexes(allocator, node);
     defer allocator.free(indexes);
     if (std.mem.eql(u8, node.materialized, "materialized_view") and existing != null and std.mem.eql(u8, existing.?, "materialized_view") and !@import("incremental_config.zig").fullRefresh(graph, node)) {
-        try updateMaterializedView(allocator, session, schema, identifier, target, indexes, node);
-        return;
+        return updateMaterializedView(allocator, session, schema, identifier, target, indexes, node);
     }
     const intermediate_id = try suffixedIdentifier(allocator, identifier, "__dbt_tmp");
     defer allocator.free(intermediate_id);
@@ -69,11 +80,13 @@ fn executeInTransaction(allocator: std.mem.Allocator, session: *adapter.Session,
     try dropIfExists(allocator, session, schema, backup_id, backup);
     const creation = try renderCreate(allocator, node, intermediate, sql);
     defer allocator.free(creation);
-    try session.execute(creation);
+    var result = try session.query(creation);
+    errdefer result.deinit(allocator);
     if (!std.mem.eql(u8, node.materialized, "view")) for (indexes) |index| try createIndex(allocator, session, intermediate, index);
     if (existing) |kind| try rename(allocator, session, kind, target, backup_id);
     try rename(allocator, session, node.materialized, intermediate, identifier);
     if (existing) |kind| try drop(allocator, session, kind, backup);
+    return result;
 }
 
 pub fn renderCreate(allocator: std.mem.Allocator, node: *const types.Node, relation: []const u8, sql: []const u8) ![]const u8 {
@@ -164,7 +177,7 @@ fn createIndex(allocator: std.mem.Allocator, session: *adapter.Session, relation
     try session.execute(out.written());
 }
 
-fn updateMaterializedView(allocator: std.mem.Allocator, session: *adapter.Session, schema: []const u8, identifier: []const u8, target: []const u8, desired: []const Index, node: *const types.Node) !void {
+fn updateMaterializedView(allocator: std.mem.Allocator, session: *adapter.Session, schema: []const u8, identifier: []const u8, target: []const u8, desired: []const Index, node: *const types.Node) !adapter.QueryResult {
     const schema_literal = try adapter.quoteLiteral(allocator, schema);
     defer allocator.free(schema_literal);
     const name_literal = try adapter.quoteLiteral(allocator, identifier);
@@ -200,13 +213,12 @@ fn updateMaterializedView(allocator: std.mem.Allocator, session: *adapter.Sessio
     if (!changed) {
         const refresh = try std.fmt.allocPrint(allocator, "refresh materialized view {s}", .{target});
         defer allocator.free(refresh);
-        try session.execute(refresh);
-        return;
+        return session.query(refresh);
     }
     const policy_value: std.json.Value = config_value.get(node.effective_config, "on_configuration_change") orelse .{ .string = "apply" };
     if (policy_value != .string) return error.InvalidPostgresMaterializationConfig;
     const policy = policy_value.string;
-    if (std.mem.eql(u8, policy, "continue")) return;
+    if (std.mem.eql(u8, policy, "continue")) return .{};
     if (std.mem.eql(u8, policy, "fail")) return error.PostgresMaterializedViewConfigurationChanged;
     if (!std.mem.eql(u8, policy, "apply")) return error.InvalidPostgresMaterializationConfig;
     for (actual.rows, keep) |row, matched| if (!matched) {
@@ -218,6 +230,7 @@ fn updateMaterializedView(allocator: std.mem.Allocator, session: *adapter.Sessio
     };
     for (desired, matches) |index, matched| if (!matched) try createIndex(allocator, session, target, index);
     // Core's index-only configuration update does not refresh the data.
+    return .{};
 }
 fn sameColumns(desired: []const std.json.Value, actual: []const []const u8) bool {
     if (desired.len != actual.len) return false;
