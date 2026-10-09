@@ -26,6 +26,13 @@ def native_binary():
     "{}|tojson",
     "[]|tojson(indent=2)",
     "1e309|tojson",
+    "{10:'ten',2:'two'}|tojson",
+    "{none:'null'}|tojson",
+    "{1.5:'float',-1:'negative',2:'two'}|tojson",
+    "{9007199254740993:'exact',9007199254740992.0:'float'}|tojson",
+    "tojson({none:'null',true:'boolean',2.0:'float'})",
+    "[var('nan_text','nan')|float]|tojson",
+    "tojson([var('nan_text','nan')|float])",
 ])
 def test_native_tojson_matches_core(tmp_path, core_runner, expression):
     root = tmp_path / "project"
@@ -33,7 +40,7 @@ def test_native_tojson_matches_core(tmp_path, core_runner, expression):
     compare(root, core_runner)
 
 
-@pytest.mark.parametrize("expression", ["[1]|tojson(indent=2.0)", "missing|tojson", "{'a':1}.keys()|tojson", "[1]|tojson(1,2)", "[1]|tojson(foo=1)"])
+@pytest.mark.parametrize("expression", ["[1]|tojson(indent=2.0)", "missing|tojson", "{'a':1}.keys()|tojson", "[1]|tojson(1,2)", "[1]|tojson(foo=1)", "{1:'number','2':'string'}|tojson", "{none:'null',1:'number'}|tojson", "{true:'boolean',none:'null'}|tojson", "{(1,2):'tuple'}|tojson", "tojson({(1,2):'tuple'})"])
 def test_native_tojson_errors_match_core(tmp_path, core_runner, expression):
     root = tmp_path / "project"
     write_project(root, expression)

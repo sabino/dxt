@@ -40,23 +40,25 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Argume
         return .{ .original = receiver, .replacement = .{ .list = try ownedList(allocator, output.items) } };
     }
     if (receiver == .object) {
+        if (receiver.attribute("__dxt_noniterable").truthy() or receiver.attribute("__dxt_relation") != .undefined or @import("expression_sequence.zig").kind(receiver) != null) return null;
         var output: std.ArrayList(expression.Entry) = .empty;
         if (std.mem.eql(u8, method, "update")) {
             try output.appendSlice(allocator, receiver.object);
             var positional: usize = 0;
             for (args[1..]) |arg| {
                 if (arg.name) |key| {
-                    try put(allocator, &output, key, arg.value);
+                    try expression.mappingPut(allocator, &output, .{ .string = key }, arg.value);
                 } else {
                     positional += 1;
                     if (positional > 1) return error.InvalidJinjaArguments;
-                    if (arg.value == .object) {
-                        for (arg.value.object) |entry| try put(allocator, &output, entry.key, entry.value);
+                    if (arg.value == .object and @import("expression_sequence.zig").kind(arg.value) == null) {
+                        if (arg.value.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError;
+                        for (arg.value.object) |entry| try expression.mappingPut(allocator, &output, expression.entryKey(entry), entry.value);
                     } else {
                         for (try expression.iterableValues(allocator, arg.value)) |pair| {
                             const cells = try expression.iterableValues(allocator, pair);
-                            if (cells.len != 2 or cells[0] != .string) return error.JinjaTypeError;
-                            try put(allocator, &output, cells[0].string, cells[1]);
+                            if (cells.len != 2) return error.JinjaTypeError;
+                            try expression.mappingPut(allocator, &output, cells[0], cells[1]);
                         }
                     }
                 }
@@ -64,15 +66,33 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Argume
         } else if (std.mem.eql(u8, method, "clear")) {
             if (args.len != 1) return error.InvalidJinjaArguments;
         } else if (std.mem.eql(u8, method, "pop")) {
-            if (args.len < 2 or args.len > 3 or args[1].value != .string) return error.InvalidJinjaArguments;
-            const key = args[1].value.string;
+            if (args.len < 2 or args.len > 3) return error.InvalidJinjaArguments;
+            for (args[1..]) |arg| if (arg.name != null) return error.InvalidJinjaArguments;
+            const key = args[1].value;
+            try expression.hashableKey(key);
             var removed: ?Value = null;
             for (receiver.object) |entry| {
-                if (std.mem.eql(u8, entry.key, key)) removed = entry.value else try output.append(allocator, entry);
+                if (@import("mapping_keys.zig").matches(entry, key)) removed = entry.value else try output.append(allocator, entry);
             }
             if (removed) |value| return .{ .result = value, .original = receiver, .replacement = .{ .object = try ownedObject(allocator, output.items) } };
             if (args.len == 3) return .{ .result = args[2].value };
             return error.JinjaKeyError;
+        } else if (std.mem.eql(u8, method, "setdefault")) {
+            if (args.len < 2 or args.len > 3) return error.InvalidJinjaArguments;
+            for (args[1..]) |arg| if (arg.name != null) return error.InvalidJinjaArguments;
+            if (try expression.mappingEntry(receiver, args[1].value)) |entry| return .{ .result = entry.value };
+            const value = if (args.len == 3) args[2].value else Value.none;
+            try output.appendSlice(allocator, receiver.object);
+            try expression.mappingPut(allocator, &output, args[1].value, value);
+            return .{ .result = value, .original = receiver, .replacement = .{ .object = try ownedObject(allocator, output.items) } };
+        } else if (std.mem.eql(u8, method, "popitem")) {
+            if (args.len != 1) return error.InvalidJinjaArguments;
+            if (receiver.object.len == 0) return error.JinjaKeyError;
+            const entry = receiver.object[receiver.object.len - 1];
+            const pair = try expression.allocateValues(allocator, 2);
+            pair[0] = expression.entryKey(entry);
+            pair[1] = entry.value;
+            return .{ .result = .{ .tuple = pair }, .original = receiver, .replacement = .{ .object = try ownedObject(allocator, receiver.object[0 .. receiver.object.len - 1]) } };
         } else return null;
         return .{ .original = receiver, .replacement = .{ .object = try ownedObject(allocator, output.items) } };
     }
@@ -89,14 +109,6 @@ fn ownedObject(allocator: std.mem.Allocator, items: []const expression.Entry) ![
     const output = try allocator.alloc(expression.Entry, @max(items.len, 1));
     @memcpy(output[0..items.len], items);
     return output[0..items.len];
-}
-
-fn put(allocator: std.mem.Allocator, output: *std.ArrayList(expression.Entry), key: []const u8, value: Value) !void {
-    for (output.items) |*entry| if (std.mem.eql(u8, entry.key, key)) {
-        entry.value = value;
-        return;
-    };
-    try output.append(allocator, .{ .key = key, .value = value });
 }
 
 /// A mutable receiver can be shared by a local name, a macro argument and a
@@ -130,4 +142,21 @@ test "container mutations preserve nested shared receiver aliases" {
     const change = (try call(allocator, "__dxt_value.append", &.{ .{ .value = original }, .{ .value = .{ .number = 2 } } })).?;
     try replaceAliases(&alias, change.original.?, change.replacement.?, 0);
     try std.testing.expectEqual(@as(usize, 2), alias.attribute("child").list.len);
+}
+
+test "dictionary updates preserve first numeric key and undefined stored values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const original = try expression.evaluate(allocator, "{true:'first'}", null);
+    const update = try expression.evaluate(allocator, "{1.0:'new',none:'null'}", null);
+    const changed = (try call(allocator, "__dxt_value.update", &.{ .{ .value = original }, .{ .value = update } })).?;
+    const result = changed.replacement.?;
+    try std.testing.expectEqual(@as(usize, 2), result.object.len);
+    try std.testing.expectEqual(true, expression.entryKey(result.object[0]).boolean);
+    try std.testing.expectEqualStrings("new", (try expression.mappingGet(result, .{ .integer = "1" })).string);
+    const stored = expression.Value{ .object = try ownedObject(allocator, &.{.{ .key = "present", .value = .undefined }}) };
+    const existing = (try call(allocator, "__dxt_value.setdefault", &.{ .{ .value = stored }, .{ .value = .{ .string = "present" } }, .{ .value = .{ .string = "fallback" } } })).?;
+    try std.testing.expect(existing.result == .undefined);
+    try std.testing.expect(existing.replacement == null);
 }

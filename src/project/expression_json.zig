@@ -36,6 +36,11 @@ fn newline(w: *std.Io.Writer, indent: []const u8, depth: usize) !void {
 fn write(a: std.mem.Allocator, w: *std.Io.Writer, value: Value, indent: ?[]const u8, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
     if (expression.integerProtocol(value)) |number| return w.writeAll(number);
+    if (expression.floatProtocol(value)) |number| {
+        if (std.math.isNan(number)) return w.writeAll("NaN");
+        if (std.math.isInf(number)) return w.writeAll(if (number < 0) "-Infinity" else "Infinity");
+        return @import("native_repr.zig").float(a, w, number);
+    }
     switch (value) {
         .none => try w.writeAll("null"),
         .boolean => |v| try w.writeAll(if (v) "true" else "false"),
@@ -53,20 +58,15 @@ fn write(a: std.mem.Allocator, w: *std.Io.Writer, value: Value, indent: ?[]const
             try w.writeByte(']');
         },
         .object => |entries| {
-            if (value.attribute("__dxt_rendered") != .undefined or @import("expression_sequence.zig").kind(value) != null or expression.sequence(value) != null) return error.JinjaTypeError;
+            if (value.attribute("__dxt_noniterable").truthy() or value.attribute("__dxt_rendered") != .undefined or @import("expression_sequence.zig").kind(value) != null or expression.sequence(value) != null) return error.JinjaTypeError;
             const sorted = try a.dupe(expression.Entry, entries);
             defer a.free(sorted);
-            const Context = struct {
-                fn less(_: void, x: expression.Entry, y: expression.Entry) bool {
-                    return std.mem.order(u8, x.key, y.key) == .lt;
-                }
-            };
-            std.sort.block(expression.Entry, sorted, {}, Context.less);
+            try @import("mapping_keys.zig").sortJsonKeys(a, sorted);
             try w.writeByte('{');
             for (sorted, 0..) |entry, index| {
                 if (index != 0) try w.writeAll(if (indent != null) "," else ", ");
                 if (indent) |spacing| try newline(w, spacing, depth + 1);
-                try quote(w, entry.key);
+                try quote(w, try @import("mapping_keys.zig").jsonKey(a, expression.entryKey(entry)));
                 try w.writeAll(": ");
                 try write(a, w, entry.value, indent, depth + 1);
             }

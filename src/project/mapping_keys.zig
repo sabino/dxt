@@ -114,18 +114,18 @@ fn integerKey(candidate: Value) ?[]const u8 {
 pub fn jsonOrder(allocator: std.mem.Allocator, left: Value, right: Value) !std.math.Order {
     if (left == .string and right == .string) return std.mem.order(u8, left.string, right.string);
     if (left == .none and right == .none) return .eq;
-    const left_int = integerKey(left);
-    const right_int = integerKey(right);
-    const left_float = expression.floatProtocol(left);
-    const right_float = expression.floatProtocol(right);
+    const lhs_integer = integerKey(left);
+    const rhs_integer = integerKey(right);
+    const lhs_float = expression.floatProtocol(left);
+    const rhs_float = expression.floatProtocol(right);
     const numbers = @import("expression_number.zig");
-    if (left_int) |a| {
-        if (right_int) |b| return numbers.order(a, b);
-        if (right_float) |b| return if (std.math.isNan(b)) .eq else try numbers.orderFloat(allocator, a, b);
+    if (lhs_integer) |a| {
+        if (rhs_integer) |b| return numbers.order(a, b);
+        if (rhs_float) |b| return if (std.math.isNan(b)) .eq else try numbers.orderFloat(allocator, a, b);
     }
-    if (left_float) |a| {
-        if (right_int) |b| return if (std.math.isNan(a)) .eq else (try numbers.orderFloat(allocator, b, a)).invert();
-        if (right_float) |b| return if (std.math.isNan(a) or std.math.isNan(b)) .eq else std.math.order(a, b);
+    if (lhs_float) |a| {
+        if (rhs_integer) |b| return if (std.math.isNan(a)) .eq else (try numbers.orderFloat(allocator, b, a)).invert();
+        if (rhs_float) |b| return if (std.math.isNan(a) or std.math.isNan(b)) .eq else std.math.order(a, b);
     }
     return error.JinjaTypeError;
 }

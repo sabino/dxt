@@ -1259,7 +1259,10 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     if (std.mem.eql(u8, name, "tojson")) {
         if (args.len < 1 or args.len > 2) return error.InvalidJinjaArguments;
-        return .{ .string = @import("context_json.zig").stringify(allocator, args[0].value) catch return if (args.len == 2) args[1].value else .none };
+        return .{ .string = @import("context_json.zig").stringify(allocator, args[0].value) catch |err| switch (err) {
+            error.JinjaCircularReference => return if (args.len == 2) args[1].value else .none,
+            else => return err,
+        } };
     }
     if (std.mem.eql(u8, name, "fromjson")) {
         if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
