@@ -240,7 +240,8 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         }
         try writer.writeAll("},\n");
     }
-    try writer.writeAll("  \"groups\": {},\n  \"selectors\": {},\n  \"group_map\": {},\n  \"unit_tests\": {");
+    try @import("group_access.zig").writeManifest(writer, graph);
+    try writer.writeAll("  \"selectors\": {},\n  \"unit_tests\": {");
     var unit_test_index: usize = 0;
     for (graph.unit_tests.items) |unit_test| {
         if (!unit_test.enabled) continue;
@@ -892,6 +893,8 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
     if (std.mem.eql(u8, node.resource_type, "model")) {
+        try writer.writeAll(",\"access\":");
+        try json.string(writer, @import("group_access.zig").access(&node));
         try writer.writeAll(",\"version\":");
         try std.json.Stringify.value(node.version, .{}, writer);
         try writer.writeAll(",\"latest_version\":");

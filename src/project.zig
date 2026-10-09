@@ -3227,6 +3227,7 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
     try parseUnitTestsFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     var properties_document = try @import("project/yaml.zig").parse(runtime.allocator, text);
     defer properties_document.deinit();
+    try @import("project/group_access.zig").parse(runtime, properties_document.value, resource_root, relative_path, package_name, graph);
     try @import("project/source_properties.zig").parse(runtime, properties_document.value, relative_path, package_name, graph);
     try @import("project/properties.zig").parseModels(runtime, properties_document.value, relative_path, package_name, graph);
     try parseSingularTestPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
@@ -3731,6 +3732,7 @@ fn parseSingularTest(runtime: Runtime, project_dir: []const u8, test_root: []con
         .original_file_path = relative_path,
         .raw_code = sql,
         .config = try @import("project/resource_config.zig").cloneTestConfig(runtime.allocator, scan_node.test_config),
+        .config_values = try @import("project/config_value.zig").clone(runtime.allocator, scan_node.effective_config),
         .enabled = scan_node.enabled,
         .inline_enabled = scan_node.inline_enabled,
         .inline_store_failures = scan_node.inline_store_failures,

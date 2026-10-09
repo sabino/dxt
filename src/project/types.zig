@@ -604,6 +604,7 @@ pub const GenericTestNode = struct {
 };
 
 pub const SingularTestNode = struct {
+    config_values: std.json.Value = .null,
     package_name: []const u8,
     unique_id: []const u8,
     name: []const u8,
@@ -683,6 +684,7 @@ pub const Graph = struct {
     profile_name: ?[]const u8 = null,
     target_name: ?[]const u8 = null,
     vars: std.ArrayList(VarEntry) = .empty,
+    groups: std.ArrayList(std.json.Value) = .empty,
     semantic_resources: std.ArrayList(SemanticResource) = .empty,
     semantic_time_spines: std.ArrayList(SemanticTimeSpine) = .empty,
     semantic_project_configs: std.ArrayList(SemanticProjectConfig) = .empty,
@@ -721,6 +723,8 @@ pub const Graph = struct {
     }
 
     pub fn deinit(self: *Graph) void {
+        for (self.groups.items) |*definition| config_value.deinit(self.allocator, definition);
+        self.groups.deinit(self.allocator);
         for (self.semantic_resources.items) |*resource| {
             config_value.deinit(self.allocator, &resource.data);
             resource.tags.deinit(self.allocator);
@@ -901,6 +905,7 @@ pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTe
 }
 
 pub fn deinitSingularTestNode(allocator: std.mem.Allocator, test_node: *SingularTestNode) void {
+    config_value.deinit(allocator, &test_node.config_values);
     test_node.doc_blocks.deinit(allocator);
     test_node.tags.deinit(allocator);
     test_node.refs.deinit(allocator);

@@ -262,6 +262,7 @@ pub fn resolveDependencies(graph: *Graph) !void {
         try appendUnique(graph.allocator, &unit_test.depends_on, model_unique_id);
         sortStrings(unit_test.depends_on.items);
     }
+    try @import("group_access.zig").validate(graph);
 }
 
 pub fn sortGraphResources(graph: *Graph) void {

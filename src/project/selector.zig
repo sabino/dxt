@@ -222,6 +222,8 @@ fn validateSelectorMethod(part: []const u8) !void {
         "saved_query:",
         "config.materialized:",
         "version:",
+        "group:",
+        "access:",
         "fqn:",
         "source_status:",
         "result:",
@@ -537,6 +539,8 @@ fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value
 }
 
 fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "group:")) return if (@import("group_access.zig").group(node.effective_config)) |name| matchesSelectorPattern(value[6..], name) else false;
+    if (std.mem.startsWith(u8, value, "access:")) return std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, value[7..], @import("group_access.zig").access(node));
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "fqn:")) return matchesNodeFqnPattern(value[4..], node);
@@ -615,6 +619,10 @@ fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const Generi
 }
 
 fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "group:")) {
+        for (graph.nodes.items) |node| if (std.mem.eql(u8, node.unique_id, test_node.attached_node orelse "")) return if (@import("group_access.zig").group(node.effective_config)) |name| matchesSelectorPattern(value[6..], name) else false;
+        return false;
+    }
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(test_node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(test_node.unique_id, value, context);
     if (matchesSelectorPattern(value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id) or matchesGenericTestFqnPattern(value, test_node)) return true;
@@ -2002,6 +2010,7 @@ test "execution ID limits apply after indirect test selection" {
 }
 
 fn matchesSemanticSelectorTerm(graph: *const Graph, resource: *const types.SemanticResource, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "group:")) return std.mem.eql(u8, resource.resource_type, "metric") and (if (@import("group_access.zig").group(@import("config_value.zig").get(resource.data, "config") orelse .null)) |name| matchesSelectorPattern(value[6..], name) else false);
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(resource.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(resource.unique_id, value, context);
     if (matchesSelectorPattern(value, resource.name) or matchesUniqueIdFqnPattern(value, resource.unique_id)) return true;

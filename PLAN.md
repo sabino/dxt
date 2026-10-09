@@ -99,6 +99,10 @@ retained cross-database stages/catalog observations/adaptive scheduling. The
 supervisor owns legacy test reconciliation, public projects, release licenses,
 platform builds, complete integrated validation, support docs and publication.
 Native/static parser and macro third-party notices must ship in binary archives.
+The supervisor now owns native group definitions, model access validation and
+selection in focused group_access.zig plus narrow graph/parser/artifact hooks.
+The configuration worker retains adapter contexts, catalog, contracts and hooks;
+the CLI and adapter workers coordinate parser-cache persistence and controls.
 
 The developer performance harness compares complete artifacts and every compiled
 model before enforcing cold/warm budgets. Its first 250-model, three-repetition

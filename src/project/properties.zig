@@ -46,7 +46,14 @@ fn parseModelItem(runtime: types.Runtime, item: std.json.Value, path: []const u8
         }
     }
     for ([_][]const u8{ "meta", "docs", "tags", "group", "access", "contract" }) |key| {
-        if (values.get(item, key)) |value| try resource.mergeField(runtime.allocator, &property.config_values, key, value);
+        if (values.get(item, key)) |value| {
+            if (std.mem.eql(u8, key, "group") or std.mem.eql(u8, key, "access")) {
+                if (values.get(values.get(item, "config") orelse .null, key) != null) return error.DuplicateResourceConfiguration;
+                var rendered = try context.render(value);
+                defer values.deinit(runtime.allocator, &rendered);
+                try resource.mergeField(runtime.allocator, &property.config_values, key, rendered);
+            } else try resource.mergeField(runtime.allocator, &property.config_values, key, value);
+        }
     }
     try parseTestsWithArgumentsProperty(runtime.allocator, values.get(item, "data_tests") orelse values.get(item, "tests") orelse .null, &property.tests, graph.require_generic_test_arguments_property);
     try parseColumnsWithArgumentsProperty(runtime.allocator, values.get(item, "columns") orelse .null, &property.columns, graph.require_generic_test_arguments_property);
