@@ -124,6 +124,14 @@ def test_shared_duckdb_database_supports_simultaneous_writers(driver, tmp_path, 
     }
 
 
+def test_native_readonly_pool_promotes_only_after_readers_disconnect(driver, tmp_path, duckdb_environment):
+    database = tmp_path / "promotion.duckdb"
+    assert decoded(invoke(driver, "duckdb", "query", database, duckdb_environment, "select 1")) == [{"1": 1}]
+    assert decoded(invoke(driver, "duckdb", "promote", database, duckdb_environment)) == {
+        "readers_preserved": True, "promoted_after_disconnect": True,
+    }
+
+
 def test_native_transaction_script_preserves_selected_result_through_rollback(
     driver, tmp_path, duckdb_environment
 ):
@@ -258,3 +266,50 @@ unit_tests:
                           "select * from result")) == [{"id": 17}]
     for artifact in target.glob("*.json"):
         assert duckdb_environment["DXT_DUCKDB_LIBRARY"] not in artifact.read_text()
+
+
+def test_native_incremental_and_snapshot_workflows_without_external_cli(driver, tmp_path, duckdb_environment):
+    project = tmp_path / "native-workflow"
+    (project / "models").mkdir(parents=True)
+    (project / "snapshots").mkdir()
+    database = project / "warehouse.duckdb"
+    (project / "dbt_project.yml").write_text("name: native_demo\nversion: '1.0'\nprofile: native_demo\n")
+    (project / "profiles.yml").write_text(
+        "native_demo:\n  target: native\n  outputs:\n    native:\n"
+        f"      type: duckdb\n      schema: main\n      path: {database}\n"
+    )
+    (project / "models" / "events.sql").write_text(
+        "{{ config(materialized='incremental', unique_key='id') }} select * from raw_events\n"
+        "{% if is_incremental() %}where updated > (select max(updated) from main.events){% endif %}\n"
+    )
+    (project / "snapshots" / "history.sql").write_text(
+        "{% snapshot history %}\n"
+        "{{ config(strategy='timestamp', unique_key='id', updated_at='ts', target_schema='archive') }}\n"
+        "select * from {{ ref('events') }}\n{% endsnapshot %}\n"
+    )
+    empty_path = tmp_path / "empty-bin"
+    empty_path.mkdir()
+    environment = dict(duckdb_environment, PATH=str(empty_path))
+    assert decoded(invoke(driver, "duckdb", "query", database, environment,
+                          "create table raw_events(id integer, label varchar, ts timestamp, updated integer); "
+                          "insert into raw_events values (1,'old','2020-01-01',1); select count(*) as n from raw_events")) == [{"n": 1}]
+
+    def command(name):
+        result = subprocess.run([str(DXT), name, "--project-dir", str(project)], cwd=ROOT,
+                                env=environment, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+
+    command("run")
+    command("snapshot")
+    assert decoded(invoke(driver, "duckdb", "query", database, environment,
+                          "update raw_events set label='new', ts='2020-02-01', updated=2; select count(*) as n from raw_events")) == [{"n": 1}]
+    command("run")
+    command("snapshot")
+    command("run")
+    command("snapshot")
+    assert decoded(invoke(driver, "duckdb", "query", database, environment,
+                          "select label from main.events")) == [{"label": "new"}]
+    assert decoded(invoke(driver, "duckdb", "query", database, environment,
+                          "select label, dbt_valid_to is null as current from archive.history order by dbt_valid_from")) == [
+        {"label": "old", "current": False}, {"label": "new", "current": True},
+    ]

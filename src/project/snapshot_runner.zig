@@ -2,6 +2,7 @@
 // and dbt-duckdb 1.9.6 snapshot update/insert materialization. Each node is atomic.
 const std = @import("std");
 const compiler = @import("compiler.zig");
+const adapter = @import("adapter.zig");
 const duckdb = @import("duckdb.zig");
 const snapshot = @import("snapshot.zig");
 const types = @import("types.zig");
@@ -37,21 +38,7 @@ pub fn execute(runtime: Runtime, db_path: []const u8, graph: *const Graph, node:
 }
 
 fn queryJson(runtime: Runtime, db_path: []const u8, sql: []const u8) ![]const u8 {
-    const result = std.process.run(runtime.allocator, runtime.io, .{
-        .argv = &.{ "duckdb", db_path, "-json", "-batch", "-bail", "-c", sql },
-        .stdout_limit = .limited(8 * 1024 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
-    defer runtime.allocator.free(result.stderr);
-    switch (result.term) {
-        .exited => |code| if (code == 0) return result.stdout,
-        else => {},
-    }
-    runtime.allocator.free(result.stdout);
-    return error.DuckDbExecutionFailed;
+    return try adapter.queryJson(runtime, db_path, sql, false);
 }
 
 fn describe(runtime: Runtime, db_path: []const u8, sql: []const u8) !Columns {

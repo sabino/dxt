@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     var stderr_file_writer: Io.File.Writer = .init(.stderr(), init.io, &stderr_buffer);
     const stderr = &stderr_file_writer.interface;
 
-    var pool = dxt.DuckDBPool.init(arena, init.io, init.environ_map);
+    var pool = dxt.DuckDBPool.init(std.heap.smp_allocator, init.io, init.environ_map);
     const invocation = dxt.Invocation.init(init.io, init.environ_map);
     var pool_live = true;
     defer if (pool_live) pool.deinit();

@@ -3,18 +3,20 @@ const std = @import("std");
 pub const Kind = enum { boolean, integer, decimal, floating, text, date, time, timestamp, binary, other };
 pub const Column = struct { name: []const u8, kind: Kind, native_type: u32 = 0 };
 pub const QueryResult = struct {
+    owner_allocator: ?std.mem.Allocator = null,
     columns: []Column = &.{},
     rows: [][]?[]const u8 = &.{},
     rows_changed: u64 = 0,
 
     pub fn deinit(self: *QueryResult, allocator: std.mem.Allocator) void {
-        for (self.columns) |column| allocator.free(column.name);
-        allocator.free(self.columns);
+        const owner = self.owner_allocator orelse allocator;
+        for (self.columns) |column| owner.free(column.name);
+        owner.free(self.columns);
         for (self.rows) |row| {
-            for (row) |value| if (value) |text| allocator.free(text);
-            allocator.free(row);
+            for (row) |value| if (value) |text| owner.free(text);
+            owner.free(row);
         }
-        allocator.free(self.rows);
+        owner.free(self.rows);
         self.* = .{};
     }
 

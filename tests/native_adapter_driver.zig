@@ -38,6 +38,26 @@ fn run(init: std.process.Init) !void {
         try emit(init.io, "{\"shared_pool\":true,\"concurrent_writers\":true}\n");
         return;
     }
+    if (std.mem.eql(u8, args[2], "promote")) {
+        var reader = (try pool.acquire(args[3], true)).?;
+        var other_reader = (try pool.acquire(args[3], true)).?;
+        if (pool.acquire(args[3], false)) |_| return error.PromotedActiveReaders else |err| {
+            if (err != error.NativeDuckDbReadOnlyConnection) return err;
+        }
+        reader.deinit();
+        if (pool.acquire(args[3], false)) |_| return error.PromotedActiveReaders else |err| {
+            if (err != error.NativeDuckDbReadOnlyConnection) return err;
+        }
+        other_reader.deinit();
+        var writer = (try pool.acquire(args[3], false)).?;
+        defer writer.deinit();
+        try writer.execute("create table promoted(id integer); insert into promoted values (17)");
+        var result = try writer.query("select * from promoted");
+        defer result.deinit(allocator);
+        try expectScalar(&result, "17");
+        try emit(init.io, "{\"readers_preserved\":true,\"promoted_after_disconnect\":true}");
+        return;
+    }
     if (std.mem.eql(u8, args[2], "query") or std.mem.eql(u8, args[2], "profile")) {
         if (args.len != 5) return error.MissingSql;
         var output = try adapter.queryForGraph(runtime, &graph, args[3], args[4]);

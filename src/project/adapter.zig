@@ -78,6 +78,12 @@ pub const Session = union(enum) {
 };
 
 pub fn nativeDuckDbQuery(runtime: Runtime, path: []const u8, sql: []const u8, readonly: bool) !?QueryResult {
+    if (!readonly and !std.mem.eql(u8, path, ":memory:")) {
+        if (runtime.adapter_session) |session| switch (session.*) {
+            .duckdb => |*connection| return try connection.query(sql),
+            else => {},
+        };
+    }
     var temporary_pool = DuckDBPool.init(runtime.allocator, runtime.io, runtime.environment);
     defer temporary_pool.deinit();
     const pool = runtime.duckdb_pool orelse &temporary_pool;
@@ -100,6 +106,7 @@ pub fn openSession(runtime: Runtime, graph: *const Graph, db_path: []const u8) !
 }
 
 pub fn queryForGraph(runtime: Runtime, graph: *const Graph, db_path: []const u8, sql: []const u8) !QueryResult {
+    if (runtime.adapter_session) |session| return try session.query(sql);
     if (std.mem.eql(u8, graph.adapter_type, "duckdb")) {
         if (try nativeDuckDbQuery(runtime, db_path, sql, false)) |native| return native;
         return try cliDuckDbQuery(runtime, db_path, sql, false);

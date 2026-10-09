@@ -69,7 +69,7 @@ pub const Connection = struct {
         const sql_z = try self.allocator.dupeZ(u8, sql);
         defer self.allocator.free(sql_z);
         if (self.api.PQsendQuery(self.handle, sql_z) == 0) return error.PostgresExecutionFailed;
-        var output: QueryResult = .{};
+        var output: QueryResult = .{ .owner_allocator = self.allocator };
         errdefer output.deinit(self.allocator);
         var failed: ?anyerror = null;
         // Drain the protocol even on an error, so rollback and subsequent
@@ -138,7 +138,7 @@ pub const Connection = struct {
         const n_columns: usize = @intCast(self.api.PQnfields(raw));
         const n_rows: usize = @intCast(self.api.PQntuples(raw));
         if (n_columns > 65536 or n_rows > 10_000_000 or n_columns * n_rows > 10_000_000) return error.AdapterResultTooLarge;
-        var output: QueryResult = .{};
+        var output: QueryResult = .{ .owner_allocator = self.allocator };
         errdefer output.deinit(self.allocator);
         output.columns = try self.allocator.alloc(result.Column, n_columns);
         for (output.columns) |*column| column.* = .{ .name = "", .kind = .other };

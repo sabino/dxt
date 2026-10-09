@@ -56,7 +56,7 @@ const Library = struct {
     }
 };
 
-const Database = struct { path: []const u8, handle: Handle, readonly: bool };
+const Database = struct { path: []const u8, handle: Handle, readonly: bool, references: usize = 0 };
 
 /// One database instance per file; workers acquire independent connections to
 /// that instance, rather than opening conflicting external writer processes.
@@ -138,23 +138,21 @@ pub const Pool = struct {
         if (!std.mem.eql(u8, path, ":memory:")) {
             for (self.databases.items) |candidate| {
                 if (!std.mem.eql(u8, candidate.path, canonical_path)) continue;
-                if (candidate.readonly and !readonly) return error.NativeDuckDbReadOnlyConnection;
+                if (candidate.readonly and !readonly) {
+                    if (candidate.references != 0) return error.NativeDuckDbReadOnlyConnection;
+                    // Compiler introspection may have opened the file before
+                    // execution. Promote only after all readers disconnect.
+                    api.duckdb_close(&candidate.handle);
+                    candidate.handle = try self.openHandle(canonical_path, false);
+                    candidate.readonly = false;
+                }
+                if (candidate.handle == null) candidate.handle = try self.openHandle(canonical_path, readonly);
                 database = candidate;
                 break;
             }
         }
         if (database == null) {
-            const path_z = try self.allocator.dupeZ(u8, canonical_path);
-            defer self.allocator.free(path_z);
-            var config: Handle = null;
-            defer api.duckdb_destroy_config(&config);
-            if (api.duckdb_create_config(&config) != 0) return error.NativeDuckDbConnectionFailed;
-            if (readonly and api.duckdb_set_config(config, "access_mode", "READ_ONLY") != 0) return error.NativeDuckDbConnectionFailed;
-            var handle: Handle = null;
-            var message: ?[*:0]u8 = null;
-            const status = api.duckdb_open_ext(path_z, &handle, config, &message);
-            if (message) |text| api.duckdb_free(text);
-            if (status != 0) return error.NativeDuckDbConnectionFailed;
+            var handle = try self.openHandle(canonical_path, readonly);
             errdefer api.duckdb_close(&handle);
             const created = try self.allocator.create(Database);
             errdefer self.allocator.destroy(created);
@@ -166,7 +164,31 @@ pub const Pool = struct {
         }
         var connection: Handle = null;
         if (api.duckdb_connect(database.?.handle, &connection) != 0) return error.NativeDuckDbConnectionFailed;
-        return .{ .api = api, .handle = connection, .allocator = self.allocator, .readonly = readonly, .database_to_close = if (std.mem.eql(u8, path, ":memory:")) database else null };
+        database.?.references += 1;
+        return .{ .api = api, .handle = connection, .allocator = self.allocator, .readonly = readonly, .pool = self, .database = database.?, .memory = std.mem.eql(u8, path, ":memory:") };
+    }
+
+    fn openHandle(self: *Pool, path: []const u8, readonly: bool) !Handle {
+        const api = &self.library.?.api;
+        const path_z = try self.allocator.dupeZ(u8, path);
+        defer self.allocator.free(path_z);
+        var config: Handle = null;
+        defer api.duckdb_destroy_config(&config);
+        if (api.duckdb_create_config(&config) != 0) return error.NativeDuckDbConnectionFailed;
+        if (readonly and api.duckdb_set_config(config, "access_mode", "READ_ONLY") != 0) return error.NativeDuckDbConnectionFailed;
+        var handle: Handle = null;
+        var message: ?[*:0]u8 = null;
+        const status = api.duckdb_open_ext(path_z, &handle, config, &message);
+        if (message) |text| api.duckdb_free(text);
+        if (status != 0) return error.NativeDuckDbConnectionFailed;
+        return handle;
+    }
+
+    fn release(self: *Pool, database: *Database, memory: bool) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        database.references -= 1;
+        if (memory and database.references == 0) self.library.?.api.duckdb_close(&database.handle);
     }
 
     fn canonicalPath(self: *Pool, path: []const u8) ![]const u8 {
@@ -190,12 +212,14 @@ pub const Connection = struct {
     handle: Handle,
     allocator: std.mem.Allocator,
     readonly: bool,
-    database_to_close: ?*Database = null,
+    pool: *Pool,
+    database: *Database,
+    memory: bool,
 
     pub fn deinit(self: *Connection) void {
+        if (self.handle == null) return;
         self.api.duckdb_disconnect(&self.handle);
-        if (self.database_to_close) |database| self.api.duckdb_close(&database.handle);
-        self.database_to_close = null;
+        self.pool.release(self.database, self.memory);
     }
 
     pub fn cancel(self: *Connection) void {
@@ -275,7 +299,7 @@ pub const Connection = struct {
         const n_columns = self.api.duckdb_column_count(raw);
         const n_rows = self.api.duckdb_row_count(raw);
         if (n_columns > 65536 or n_rows > 10_000_000 or n_columns * n_rows > 10_000_000) return error.AdapterResultTooLarge;
-        var output: QueryResult = .{ .rows_changed = self.api.duckdb_rows_changed(raw) };
+        var output: QueryResult = .{ .owner_allocator = self.allocator, .rows_changed = self.api.duckdb_rows_changed(raw) };
         errdefer output.deinit(self.allocator);
         output.columns = try self.allocator.alloc(result.Column, n_columns);
         for (output.columns) |*column| column.* = .{ .name = "", .kind = .other };

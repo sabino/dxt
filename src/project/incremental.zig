@@ -1,5 +1,6 @@
 const std = @import("std");
 const compiler = @import("compiler.zig");
+const adapter = @import("adapter.zig");
 const config = @import("incremental_config.zig");
 const types = @import("types.zig");
 
@@ -7,25 +8,7 @@ pub const RelationKind = enum { missing, table, view };
 pub const Column = struct { column_name: []const u8, data_type: []const u8 };
 
 fn query(runtime: types.Runtime, db_path: []const u8, sql: []const u8, readonly: bool) ![]const u8 {
-    const argv = if (readonly)
-        &[_][]const u8{ "duckdb", "-readonly", db_path, "-json", "-batch", "-bail", "-c", sql }
-    else
-        &[_][]const u8{ "duckdb", db_path, "-json", "-batch", "-bail", "-c", sql };
-    const result = std.process.run(runtime.allocator, runtime.io, .{
-        .argv = argv,
-        .stdout_limit = .limited(4 * 1024 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
-    defer runtime.allocator.free(result.stderr);
-    errdefer runtime.allocator.free(result.stdout);
-    switch (result.term) {
-        .exited => |code| if (code == 0) return result.stdout,
-        else => {},
-    }
-    return error.DuckDbExecutionFailed;
+    return try adapter.queryJson(runtime, db_path, sql, readonly);
 }
 
 fn executeSql(runtime: types.Runtime, db_path: []const u8, sql: []const u8) !void {
@@ -178,6 +161,18 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
     defer runtime.allocator.free(schema_literal);
     const target_literal = try quoteString(runtime.allocator, compiler.relationIdentifierForNode(node));
     defer runtime.allocator.free(target_literal);
+    if (runtime.adapter_session) |session| switch (session.*) {
+        .duckdb => |*connection| return try executeNativeUpdate(runtime, connection, target, stage, compiled, stage_literal, schema_literal, target_literal, node.incremental),
+        else => {},
+    };
+    var temporary_pool = adapter.DuckDBPool.init(runtime.allocator, runtime.io, runtime.environment);
+    defer temporary_pool.deinit();
+    const pool = runtime.duckdb_pool orelse &temporary_pool;
+    if (try pool.acquire(db_path, false)) |native| {
+        var connection = native;
+        defer connection.deinit();
+        return try executeNativeUpdate(runtime, &connection, target, stage, compiled, stage_literal, schema_literal, target_literal, node.incremental);
+    }
     // A single persistent native-owned CLI connection holds the transaction
     // across staging, schema inspection, schema changes and the data update.
     // Temporary staging disappears and all target changes roll back on failure.
@@ -223,6 +218,36 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
         else => {},
     }
     return error.DuckDbExecutionFailed;
+}
+
+fn executeNativeUpdate(runtime: types.Runtime, connection: *adapter.DuckDBConnection, target: []const u8, stage: []const u8, compiled: []const u8, stage_literal: []const u8, schema_literal: []const u8, target_literal: []const u8, model_config: types.IncrementalConfig) !void {
+    try connection.begin();
+    errdefer connection.rollback() catch {};
+    const stage_sql = try std.fmt.allocPrint(runtime.allocator, "create temporary table {s} as (\n{s}\n)", .{ stage, compiled });
+    defer runtime.allocator.free(stage_sql);
+    try connection.execute(stage_sql);
+    const source_sql = try std.fmt.allocPrint(runtime.allocator, "select column_name, data_type from information_schema.columns where table_catalog='temp' and table_name={s} order by ordinal_position", .{stage_literal});
+    defer runtime.allocator.free(source_sql);
+    const target_sql = try std.fmt.allocPrint(runtime.allocator, "select column_name, data_type from information_schema.columns where table_catalog=current_database() and table_schema={s} and table_name={s} order by ordinal_position", .{ schema_literal, target_literal });
+    defer runtime.allocator.free(target_sql);
+    var source_result = try connection.query(source_sql);
+    defer source_result.deinit(runtime.allocator);
+    var target_result = try connection.query(target_sql);
+    defer target_result.deinit(runtime.allocator);
+    const source_json = try source_result.json(runtime.allocator);
+    defer runtime.allocator.free(source_json);
+    const target_json = try target_result.json(runtime.allocator);
+    defer runtime.allocator.free(target_json);
+    const source_columns = try std.json.parseFromSlice([]Column, runtime.allocator, source_json, .{});
+    defer source_columns.deinit();
+    const target_columns = try std.json.parseFromSlice([]Column, runtime.allocator, target_json, .{});
+    defer target_columns.deinit();
+    const sql = renderUpdateSql(runtime.allocator, target, stage, source_columns.value, target_columns.value, model_config, false) catch |err| switch (err) {
+        error.IncrementalSchemaMismatch => return error.DuckDbExecutionFailed,
+        else => return err,
+    };
+    defer runtime.allocator.free(sql);
+    try connection.execute(sql);
 }
 
 test "incremental update policies and composite keys preserve target changes in a transaction" {

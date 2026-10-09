@@ -8,6 +8,7 @@ pub const Runtime = struct {
     environment: ?*const std.process.Environ.Map = null,
     invocation: ?*const @import("invocation.zig").Metadata = null,
     duckdb_pool: ?*@import("native_duckdb.zig").Pool = null,
+    adapter_session: ?*@import("adapter.zig").Session = null,
 };
 
 pub const Options = struct {
