@@ -81,15 +81,31 @@ semantic, environment and cross-database commands. The supervisor owns the
 catalog writer's optional warehouse comments/owner fields; the configuration
 worker supplies PostgreSQL introspection and materialization persistence.
 
-Current verified evidence includes 384 integrated native tests, 41 combined
-configuration/semantic Core cases, the complete shared-YAML snapshot worker's
-69 cases, 16 live environment workflow cases, browser docs and Core-readable
-compile/docs retry artifacts. Combined threaded checks exposed a default
-DuckDB profile/catalog mismatch; it is an active adapter fix, not a passed
-release gate. The developer performance harness compares complete artifacts
-and every compiled model before enforcing cold/warm budgets. Its first
-250-model, three-repetition ReleaseSafe measurement passed both budgets;
-final release validation must rerun it on the final integrated tree.
+Current integrated work includes native DuckDB/PostgreSQL drivers and bounded
+threaded commands; Core CLI option/profile discovery behavior and JSON-line
+listing; full artifact schemas and docs application; versions and source
+freshness; native expression filters and slices; semantic planning/exports;
+typed dialect SQL analysis with lineage; and durable environment and
+cross-database plans. Focused reference gates include 28 expression comparisons,
+107 semantic cases (with three corrected diagnostic expectations rerun), 23
+SQL-analysis cases and the earlier snapshot/environment gates. These worker and
+focused results are integration evidence, not the final release claim.
+
+The remaining active integration wave owns unchanged public package execution,
+typed Relation/Column and bundled macros; complete unit fixtures and overrides;
+configuration/access/contracts/hooks/custom materializations; native microbatch
+execution; effective remaining command flags and parser/relation caches; and
+retained cross-database stages/catalog observations/adaptive scheduling. The
+supervisor owns legacy test reconciliation, public projects, release licenses,
+platform builds, complete integrated validation, support docs and publication.
+Native/static parser and macro third-party notices must ship in binary archives.
+
+The developer performance harness compares complete artifacts and every compiled
+model before enforcing cold/warm budgets. Its first 250-model, three-repetition
+ReleaseSafe measurement passed both budgets. Clean-install checks also passed
+with PATH empty and no Python/CLI product fallback. Both gates, the native test
+suite, mandatory Core/public project suite and safety scans must run again on the
+final integrated tree before publishing the PR and marking milestones complete.
 
 The initial adapter certification scope is DuckDB and PostgreSQL, as confirmed
 by the user. Remaining dbt adapters are a subsequent certification scope, with
