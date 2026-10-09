@@ -814,15 +814,21 @@ fn writeUnitTestNode(writer: *Io.Writer, unit_test: UnitTestDef) !void {
     try json.string(writer, unit_test.name);
     try writer.writeAll("],\"description\":");
     try json.string(writer, unit_test.description);
-    try writer.writeAll(",\"overrides\":null,\"depends_on\":{\"macros\":[],\"nodes\":");
+    try writer.writeAll(",\"overrides\":");
+    try std.json.Stringify.value(unit_test.overrides, .{}, writer);
+    try writer.writeAll(",\"depends_on\":{\"macros\":[],\"nodes\":");
     try json.stringArray(writer, unit_test.depends_on.items);
     try writer.writeAll("},\"config\":{\"tags\":");
     try json.stringArray(writer, unit_test.tags.items);
     try writer.writeAll(",\"meta\":");
-    try writeMetaObject(writer, unit_test.meta.items);
+    if (@import("config_value.zig").get(unit_test.config_values, "meta")) |meta| try std.json.Stringify.value(meta, .{}, writer) else try writeMetaObject(writer, unit_test.meta.items);
     try writer.writeAll(",\"enabled\":");
     try writer.writeAll(if (unit_test.enabled) "true" else "false");
-    try writer.writeAll(",\"static_analysis\":null},\"checksum\":null,\"schema\":null,\"created_at\":0.0,\"versions\":null,\"version\":null}");
+    try writer.writeAll(",\"static_analysis\":null},\"checksum\":null,\"schema\":null,\"created_at\":0.0,\"versions\":");
+    try std.json.Stringify.value(unit_test.versions, .{}, writer);
+    try writer.writeAll(",\"version\":");
+    try std.json.Stringify.value(unit_test.version, .{}, writer);
+    try writer.writeAll("}");
 }
 
 fn writeUnitTestGivenFixtures(writer: *Io.Writer, fixtures: []const types.UnitTestFixture) !void {
@@ -1592,7 +1598,7 @@ fn writeDocsConfig(writer: *Io.Writer, docs: DocsConfig) !void {
 fn writeJsonScalar(writer: *Io.Writer, value: JsonScalar) !void {
     switch (value.kind) {
         .string => try json.string(writer, value.text),
-        .number, .bool, .null => try writer.writeAll(value.text),
+        .number, .bool, .null, .json => try writer.writeAll(value.text),
     }
 }
 

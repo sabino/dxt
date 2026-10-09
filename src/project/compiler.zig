@@ -353,6 +353,7 @@ fn compileModelBody(allocator: std.mem.Allocator, graph: *const Graph, node: *co
 
 fn collectEphemeralDependencies(state: *EphemeralCompileState, node: *const Node) anyerror!void {
     for (node.depends_on.items) |dependency| {
+        if (state.graph.unitFixtureRelation(dependency) != null) continue;
         const dependency_node = findNodeByUniqueId(state.graph, dependency) orelse continue;
         if (!std.mem.eql(u8, dependency_node.resource_type, "model")) continue;
         if (!std.mem.eql(u8, dependency_node.materialized, "ephemeral")) continue;
@@ -801,6 +802,7 @@ pub fn relationNameForRefNode(allocator: std.mem.Allocator, graph: *const Graph,
 }
 
 pub fn relationNameForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
+    if (graph.unitFixtureRelation(node.unique_id)) |relation| return try allocator.dupe(u8, relation);
     if (std.mem.eql(u8, node.resource_type, "source")) if (node.relation_name) |relation| return try allocator.dupe(u8, relation);
     const schema = try relationSchemaForNode(allocator, graph, node);
     defer allocator.free(schema);
@@ -809,6 +811,13 @@ pub fn relationNameForNode(allocator: std.mem.Allocator, graph: *const Graph, no
 }
 
 pub fn relationValueForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, input: bool) !native_expr.Value {
+    if (graph.unitFixtureRelation(node.unique_id)) |alias| return try dbt_context.relationValue(allocator, .{
+        .adapter_type = graph.adapter_type,
+        .identifier = alias,
+        .relation_type = "cte",
+        .quote_policy = .{ .identifier = false },
+        .base_sql = alias,
+    });
     const ephemeral = input and std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, node.materialized, "ephemeral");
     var definition = dbt_context.RelationDef{
         .adapter_type = graph.adapter_type,
@@ -823,6 +832,13 @@ pub fn relationValueForNode(allocator: std.mem.Allocator, graph: *const Graph, n
 }
 
 pub fn relationValueForSource(allocator: std.mem.Allocator, graph: *const Graph, current: *const Node, source: *const SourceDef) !native_expr.Value {
+    if (graph.unitFixtureRelation(source.unique_id)) |alias| return try dbt_context.relationValue(allocator, .{
+        .adapter_type = graph.adapter_type,
+        .identifier = alias,
+        .relation_type = "cte",
+        .quote_policy = .{ .identifier = false },
+        .base_sql = alias,
+    });
     const base = try relationNameForSource(allocator, source);
     return try dbt_context.relationValue(allocator, .{
         .adapter_type = graph.adapter_type,
@@ -836,6 +852,7 @@ pub fn relationValueForSource(allocator: std.mem.Allocator, graph: *const Graph,
 }
 
 pub fn relationValueForInputNode(allocator: std.mem.Allocator, graph: *const Graph, current: *const Node, target: *const Node) !native_expr.Value {
+    if (graph.unitFixtureRelation(target.unique_id) != null) return try relationValueForNode(allocator, graph, target, true);
     var definition = try dbt_context.relationFromValue(allocator, try relationValueForNode(allocator, graph, target, true));
     const base = try dbt_context.renderRelation(allocator, definition);
     definition.rendered_sql = try @import("input_relations.zig").render(allocator, graph, current, target.effective_config, definition.identifier orelse target.name, base);
@@ -990,6 +1007,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
             }
         }
     }
+    if (context.parse_node == null) if (unitMacroOverride(context.graph, name)) |override| return try valueFromJson(allocator, override);
     if (std.mem.eql(u8, name, "__dxt_caller") or std.mem.eql(u8, name, "caller")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         return try resolveExpressionValue(context, "__dxt_caller_sql", allocator);
@@ -1025,6 +1043,10 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     if (std.mem.eql(u8, name, "var") or std.mem.eql(u8, name, "env_var")) {
         if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
         const key = args[0].value.string;
+        if (context.parse_node == null) if (unitValueOverride(context.graph, if (std.mem.eql(u8, name, "var")) "vars" else "env_vars", key)) |override| {
+            if (std.mem.startsWith(u8, key, "DBT_ENV_SECRET_") and std.mem.eql(u8, name, "env_var")) return error.SecretEnvironmentVariableForbidden;
+            return try valueFromJson(allocator, override);
+        };
         if (std.mem.eql(u8, name, "env_var")) {
             if (std.mem.startsWith(u8, key, "DBT_ENV_SECRET_")) return error.SecretEnvironmentVariableForbidden;
             if (context.graph.environment) |environment| {
@@ -1099,6 +1121,23 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         if (context.macro_render_depth == 0) try util.appendUnique(context.allocator, &node.macro_depends_on, macro.unique_id);
     }
     return try renderMacroValue(context, macro, args);
+}
+
+fn unitValueOverride(graph: *const Graph, category: []const u8, key: []const u8) ?std.json.Value {
+    const values = @import("config_value.zig");
+    return values.get(values.get(graph.unit_overrides, category) orelse return null, key);
+}
+fn unitMacroOverride(graph: *const Graph, name: []const u8) ?std.json.Value {
+    if (graph.unit_overrides != .object) return null;
+    if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
+        if (std.mem.eql(u8, name[0..dot], "dbt")) if (unitValueOverride(graph, "macros", name[dot + 1 ..])) |value| return value;
+        return unitValueOverride(graph, "macros", name);
+    }
+    if (unitValueOverride(graph, "macros", name)) |value| return value;
+    const dbt_name = std.fmt.allocPrint(graph.allocator, "dbt.{s}", .{name}) catch return null;
+    defer graph.allocator.free(dbt_name);
+    if (resolve.findMacroIdByPackageAndName(graph, "dbt", name) != null or std.mem.eql(u8, name, "is_incremental")) return unitValueOverride(graph, "macros", dbt_name);
+    return null;
 }
 
 fn refFromArguments(allocator: std.mem.Allocator, args: []const native_expr.Argument) !RefDep {
@@ -1431,6 +1470,11 @@ fn renderAdapterDispatchExpression(context: *CompileContext, span: []const u8) !
     const macro = findMacroByUniqueId(context.graph, macro_id) orelse return error.UnresolvedMacro;
     if (context.parse_node) |node| {
         if (context.macro_render_depth == 0) try util.appendUnique(context.allocator, &node.macro_depends_on, macro.unique_id);
+    }
+    if (context.parse_node == null) {
+        const full_name = try std.fmt.allocPrint(context.allocator, "{s}.{s}", .{ macro.package_name, macro.name });
+        defer context.allocator.free(full_name);
+        if (unitMacroOverride(context.graph, full_name)) |override| return try context.allocator.dupe(u8, try (try valueFromJson(context.value_arena.allocator(), override)).text(context.value_arena.allocator()));
     }
     return try renderMacroCall(context, macro, span[arg_open + 1 .. arg_close]);
 }

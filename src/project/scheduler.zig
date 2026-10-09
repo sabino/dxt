@@ -111,7 +111,9 @@ pub fn orderNodes(allocator: std.mem.Allocator, graph: *Graph, selected: []const
 }
 
 pub fn unitTargetsNode(unit_test: *const types.UnitTestDef, node: *const Node) bool {
-    return std.mem.eql(u8, unit_test.package_name, node.package_name) and std.mem.eql(u8, unit_test.model, node.name);
+    return std.mem.eql(u8, unit_test.package_name, node.package_name) and std.mem.eql(u8, unit_test.model, node.name) and
+        ((unit_test.version == .null and node.version == .null) or
+            (unit_test.version != .null and node.version != .null and (@import("model_versions.zig").equal(std.heap.page_allocator, unit_test.version, node.version) catch false)));
 }
 
 fn selectedContains(selected: []const SelectedResource, id: []const u8) bool {

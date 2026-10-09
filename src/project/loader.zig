@@ -221,6 +221,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     }
     applyProjectSeedDocs(&graph, config.name, config.seed_docs);
     try loadSingularTests(runtime, options.project_dir, config.name, config.test_paths.items, callbacks, &graph);
+    try @import("unit_yaml.zig").loadFixtures(runtime, options.project_dir, config.name, config.test_paths.items, &graph);
     try loadSnapshots(runtime, options.project_dir, config.name, config.snapshot_paths.items, callbacks, &graph);
     try @import("model_versions.zig").assign(&graph, config.name);
     try applyProjectModelPathConfigs(&graph, config.model_path_configs.items, true, null);
@@ -239,6 +240,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     try snapshot_yaml.finalize(runtime, &graph);
     try snapshot_yaml.rejectRelationCollisions(&graph);
     try callbacks.materialize_generic_tests(&graph);
+    try @import("unit_versions.zig").assign(&graph);
     sortGraphResources(&graph);
     try rejectDuplicateAnalyses(&graph);
     try rejectDuplicateModels(&graph);
@@ -446,6 +448,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
         }
         applyProjectSeedDocs(graph, package_config.name, package_config.seed_docs);
         try loadSingularTests(runtime, package_dir, package_config.name, package_config.test_paths.items, callbacks, graph);
+        try @import("unit_yaml.zig").loadFixtures(runtime, package_dir, package_config.name, package_config.test_paths.items, graph);
         try callbacks.apply_singular_test_properties(graph, package_config.name);
         try loadSnapshots(runtime, package_dir, package_config.name, package_config.snapshot_paths.items, callbacks, graph);
         try @import("model_versions.zig").assign(graph, package_config.name);

@@ -701,7 +701,7 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
         return error.UnsupportedTestSelection;
     }
 
-    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedTestExecution;
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb") and !(std.mem.eql(u8, graph.adapter_type, "postgres") and selected.len == 0)) return error.UnsupportedTestExecution;
     const test_nodes = try selectedDataTestExecutionOrder(runtime, &graph, selected);
     defer runtime.allocator.free(test_nodes);
     try validateDataTestExecution(test_nodes);
@@ -1345,6 +1345,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
     var log_events: std.ArrayList(run_results.LogMessage) = .empty;
     defer log_events.deinit(runtime.allocator);
     host.log_events = &log_events;
+    graph.log_collector = &log_events;
     graph.execution_hooks = host.host();
     var rows: std.ArrayList(run_results.NodeResult) = .empty;
     defer rows.deinit(runtime.allocator);
@@ -2024,7 +2025,7 @@ fn appendUnitTestExecutionResult(allocator: std.mem.Allocator, unit_test: *const
         return .{ .failed_tests = 1 };
     }
     const classification = classifyDefaultTestResult(execution.failures);
-    const message = if (classification.message_kind) |kind|
+    const message = if (execution.failure_message) |difference| difference else if (classification.message_kind) |kind|
         try formatTestThresholdMessage(allocator, execution.failures, kind, classification.condition orelse "!= 0")
     else
         null;

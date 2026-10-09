@@ -245,6 +245,10 @@ pub const UnitTestFixture = struct {
 };
 
 pub const UnitTestDef = struct {
+    overrides: std.json.Value = .null,
+    versions: std.json.Value = .null,
+    version: std.json.Value = .null,
+    config_values: std.json.Value = .null,
     package_name: []const u8,
     unique_id: []const u8 = "",
     name: []const u8,
@@ -272,6 +276,7 @@ pub const JsonScalar = struct {
         number,
         bool,
         null,
+        json,
     } = .string,
 };
 
@@ -655,6 +660,9 @@ pub const SemanticTimeSpine = struct {
 
 pub const Graph = struct {
     unit_fixture_relations: bool = false,
+    unit_overrides: std.json.Value = .null,
+    unit_fixture_aliases: []const DeferredRelation = &.{},
+    log_collector: ?*std.ArrayList(@import("run_results.zig").LogMessage) = null,
     invocation: ?*const @import("invocation.zig").Metadata = null,
     command_options: Options = .{},
     allocator: std.mem.Allocator,
@@ -696,6 +704,11 @@ pub const Graph = struct {
     validate_macro_args: bool = false,
     require_generic_test_arguments_property: bool = false,
     deferred_relations: std.ArrayList(DeferredRelation) = .empty,
+
+    pub fn unitFixtureRelation(self: *const Graph, unique_id: []const u8) ?[]const u8 {
+        for (self.unit_fixture_aliases) |relation| if (std.mem.eql(u8, relation.unique_id, unique_id)) return relation.relation_name;
+        return null;
+    }
 
     pub fn deferredRelation(self: *const Graph, unique_id: []const u8) ?[]const u8 {
         for (self.deferred_relations.items) |relation| {
@@ -921,6 +934,10 @@ fn deinitExposureDef(allocator: std.mem.Allocator, exposure: *ExposureDef) void 
 }
 
 pub fn deinitUnitTestDef(allocator: std.mem.Allocator, unit_test: *UnitTestDef) void {
+    config_value.deinit(allocator, &unit_test.overrides);
+    config_value.deinit(allocator, &unit_test.versions);
+    config_value.deinit(allocator, &unit_test.version);
+    config_value.deinit(allocator, &unit_test.config_values);
     for (unit_test.given.items) |*fixture| {
         deinitUnitTestFixture(allocator, fixture);
     }

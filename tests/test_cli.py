@@ -6753,7 +6753,8 @@ def test_test_command_executes_selected_duckdb_unit_tests(tmp_path: Path):
     assert result_row["status"] == "pass"
     assert result_row["failures"] == 0
     assert result_row["compiled"] is True
-    assert '"main"."stg_orders"' in result_row["compiled_code"]
+    assert 'with "__dxt_unit_input_0" as' in result_row["compiled_code"]
+    assert 'cast(true as BOOLEAN) as "has_food"' in result_row["compiled_code"]
     assert "except all" in result_row["compiled_code"]
 
 
@@ -6772,7 +6773,7 @@ def test_build_executes_selected_duckdb_unit_tests_and_records_failures(tmp_path
 
     assert result.returncode == 1
     assert "Built 1 test(s)" in result.stdout
-    assert "1 test(s) failed with 2 failure row(s)" in result.stdout
+    assert "1 test(s) failed with 1 failure row(s)" in result.stdout
     assert "one or more tests failed" in result.stderr
     assert_manifest_schema_slice(target / "manifest.json")
     assert_run_results_schema_slice(target / "run_results.json")
@@ -6780,8 +6781,8 @@ def test_build_executes_selected_duckdb_unit_tests_and_records_failures(tmp_path
     result_row = run_results["results"][0]
     assert result_row["unique_id"] == "unit_test.unit_test_execution_project.orders.assert_food_orders"
     assert result_row["status"] == "fail"
-    assert result_row["failures"] == 2
-    assert result_row["message"] == "Got 2 results, configured to fail if != 0"
+    assert result_row["failures"] == 1
+    assert "actual differs from expected" in result_row["message"]
 
 
 def test_dbt_core_unit_test_status_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):

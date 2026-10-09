@@ -255,9 +255,10 @@ pub fn resolveDependencies(graph: *Graph) !void {
     }
     for (graph.unit_tests.items) |*unit_test| {
         if (!unit_test.enabled) continue;
-        const model_unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ unit_test.package_name, unit_test.model });
-        if (hasDisabledNode(graph, model_unique_id)) return error.DisabledRef;
-        if (!hasNode(graph, model_unique_id)) return error.UnresolvedUnitTestModel;
+        const model_unique_id = resolveRefDependency(graph, unit_test.package_name, .{ .package = unit_test.package_name, .name = unit_test.model, .version = unit_test.version }) catch |err| switch (err) {
+            error.UnresolvedRef => return error.UnresolvedUnitTestModel,
+            else => return err,
+        };
         try appendUnique(graph.allocator, &unit_test.depends_on, model_unique_id);
         sortStrings(unit_test.depends_on.items);
     }

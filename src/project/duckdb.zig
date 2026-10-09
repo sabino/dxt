@@ -30,14 +30,7 @@ pub const GenericTestExecutionResult = struct {
     compile_completed_at: ?i96 = null,
 };
 
-pub const UnitTestExecutionResult = struct {
-    compiled_code: []const u8,
-    failures: u64,
-    execution_error: bool = false,
-    execution_cancelled: bool = false,
-    compile_started_at: ?i96 = null,
-    compile_completed_at: ?i96 = null,
-};
+pub const UnitTestExecutionResult = @import("unit_runtime.zig").Result;
 
 pub const queryJson = adapter.queryJson;
 
@@ -170,10 +163,10 @@ pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Gra
 }
 
 pub fn executeUnitTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, unit_test: *const UnitTestDef) !UnitTestExecutionResult {
+    if (runtime.adapter_session != null or std.mem.eql(u8, graph.adapter_type, "postgres")) return try @import("unit_runtime.zig").execute(runtime, db_path, graph, unit_test);
     const compilation_started = clock.now(runtime.io);
     // Supported dict fixtures construct every relation in an isolated connection.
     // Failed SQL must never replace or alter relations in the target database.
-    _ = db_path;
     const planned = try unit_test_plan.renderUnitTestSql(runtime.allocator, graph, unit_test);
     defer runtime.allocator.free(planned.execution_sql);
     errdefer runtime.allocator.free(planned.compiled_code);
@@ -182,7 +175,7 @@ pub fn executeUnitTest(runtime: Runtime, db_path: []const u8, graph: *const Grap
         error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = planned.compiled_code, .failures = 0, .execution_error = true },
         else => return err,
     };
-    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = planned.compiled_code, .failures = failures };
+    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = planned.compiled_code, .failures = if (failures == 0) 0 else 1 };
 }
 
 fn syncTestFailureRelation(runtime: Runtime, db_path: []const u8, config: types.GenericTestConfig, alias: []const u8, compiled_sql: []const u8, failures: u64) !?[]const u8 {

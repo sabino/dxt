@@ -22,7 +22,13 @@ pub fn parse(allocator: std.mem.Allocator, raw_csv: []const u8) !Document {
     return parseWithDelimiter(allocator, raw_csv, ",");
 }
 
+pub fn parseUnitFixture(allocator: std.mem.Allocator, raw_csv: []const u8) !Document {
+    return parseNative(allocator, raw_csv, ",", true);
+}
 pub fn parseWithDelimiter(allocator: std.mem.Allocator, raw_csv: []const u8, delimiter: []const u8) !Document {
+    return parseNative(allocator, raw_csv, delimiter, false);
+}
+fn parseNative(allocator: std.mem.Allocator, raw_csv: []const u8, delimiter: []const u8, unit_fixture: bool) !Document {
     if (delimiter.len == 0 or std.mem.indexOfAny(u8, delimiter, "\r\n\"") != null or !std.unicode.utf8ValidateSlice(delimiter)) return error.InvalidSeedDelimiter;
     var codepoints = std.unicode.Utf8View.initUnchecked(delimiter).iterator();
     _ = codepoints.nextCodepoint() orelse return error.InvalidSeedDelimiter;
@@ -87,14 +93,22 @@ pub fn parseWithDelimiter(allocator: std.mem.Allocator, raw_csv: []const u8, del
     }
     if (records.items.len == 0) return error.InvalidSeedCsv;
     const headers = try a.dupe([]const u8, records.items[0]);
-    for (headers, 0..) |*header, column| {
+    if (!unit_fixture) for (headers, 0..) |*header, column| {
         const base = if (header.*.len != 0) header.* else try alphabetName(a, column);
         var candidate = base;
         var suffix: usize = 2;
         while (contains(headers[0..column], candidate)) : (suffix += 1) candidate = try std.fmt.allocPrint(a, "{s}_{d}", .{ base, suffix });
         header.* = candidate;
+    };
+    for (records.items[1..]) |*row| {
+        if (unit_fixture and row.len < headers.len) {
+            const padded = try a.alloc([]const u8, headers.len);
+            @memcpy(padded[0..row.len], row.*);
+            @memset(padded[row.len..], "");
+            row.* = padded;
+        }
+        if (row.len != headers.len) return error.InvalidSeedColumnCount;
     }
-    for (records.items[1..]) |row| if (row.len != headers.len) return error.InvalidSeedColumnCount;
     return .{ .arena = arena, .headers = headers, .rows = records.items[1..] };
 }
 
