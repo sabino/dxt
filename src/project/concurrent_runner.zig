@@ -393,6 +393,11 @@ fn appendEdge(allocator: std.mem.Allocator, edges: *std.ArrayList(usize), index:
 fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !results.NodeResult {
     var output = source;
     output.message = null;
+    output.compiled_artifact_code = null;
+    output.owns_compiled_artifact_code = false;
+    output.preview = null;
+    output.owns_preview = false;
+    output.owns_adapter_response = false;
     output.owns_compiled_code = false;
     output.owns_relation_name = false;
     output.compiled_ctes = &.{};
@@ -405,6 +410,21 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
     output.owns_batch_results = false;
     errdefer freeResult(allocator, output);
     if (source.message) |value| output.message = try allocator.dupe(u8, value);
+    if (source.compiled_artifact_code) |value| {
+        output.compiled_artifact_code = try allocator.dupe(u8, value);
+        output.owns_compiled_artifact_code = true;
+    }
+    if (source.preview) |value| {
+        output.preview = try allocator.dupe(u8, value);
+        output.owns_preview = true;
+    }
+    if (source.adapter_response) |response| if (source.owns_adapter_response) {
+        output.adapter_response = .{ .include_nulls = response.include_nulls, .include_query_id = response.include_query_id };
+        output.owns_adapter_response = true;
+        if (response.message) |message| output.adapter_response.?.message = try allocator.dupe(u8, message);
+        if (response.code) |code| output.adapter_response.?.code = try allocator.dupe(u8, code);
+        output.adapter_response.?.rows_affected = response.rows_affected;
+    };
     if (source.batch_results) |batches| {
         output.batch_results = .{};
         output.owns_batch_results = true;
@@ -447,6 +467,12 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
     return output;
 }
 fn freeResult(allocator: std.mem.Allocator, output: results.NodeResult) void {
+    if (output.owns_compiled_artifact_code) if (output.compiled_artifact_code) |sql| allocator.free(sql);
+    if (output.owns_preview) if (output.preview) |preview| allocator.free(preview);
+    if (output.owns_adapter_response) if (output.adapter_response) |response| {
+        if (response.message) |message| allocator.free(message);
+        if (response.code) |code| allocator.free(code);
+    };
     if (output.owns_batch_results) if (output.batch_results) |batches| batches.deinit(allocator);
     if (output.owns_compiled_ctes) {
         for (output.compiled_ctes) |cte| if (cte.sql.len != 0) allocator.free(cte.sql);

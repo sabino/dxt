@@ -282,7 +282,64 @@ pub fn cleanProject(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     try clean.run(runtime, options, stdout);
 }
 
+pub fn show(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    return sqlOperation(runtime, options, stdout, stderr);
+}
+
+fn sqlOperation(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    const operations = @import("project/sql_operations.zig");
+    var graph = if (options.inline_direct != null) try project_loader.loadConnectionGraph(runtime, options) else try project_loader.loadGraph(runtime, options, loader_callbacks);
+    defer graph.deinit();
+    if (options.inline_direct != null) return operations.showDirect(runtime, options, &graph, stdout);
+    try resolveDependencies(&graph);
+    try writeWarnings(runtime, stderr, &graph);
+    const target_dir = try targetDir(runtime, options);
+    _ = try writeManifest(runtime, &graph, target_dir);
+    if (std.mem.eql(u8, options.which, "show") and options.select == null and (options.inline_sql == null or options.inline_sql.?.len == 0)) return error.MissingShowSelection;
+    const original_nodes = graph.nodes.items.len;
+    if (options.inline_sql) |sql| {
+        operations.appendInline(runtime, &graph, sql) catch |err| {
+            try stderr.print("error: Error parsing inline query: {s}\n", .{@errorName(err)});
+            return error.InlineParseFailure;
+        };
+        resolveDependencies(&graph) catch |err| {
+            try stderr.print("error: Error parsing inline query: {s}\n", .{@errorName(err)});
+            return error.InlineParseFailure;
+        };
+    }
+    defer if (graph.nodes.items.len > original_nodes) {
+        types.deinitNode(runtime.allocator, &graph.nodes.items[original_nodes]);
+        graph.nodes.shrinkRetainingCapacity(original_nodes);
+    };
+    var selection = try resolveSelection(runtime, options);
+    defer selection.deinit(runtime.allocator);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    defer selection_state.deinit(runtime.allocator);
+    try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
+    const selected = if (options.inline_sql != null) try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "sql_operation", selection.select, selection.exclude, selection_state.context()) else try commandSelection(runtime.allocator, try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context()), .compile);
+    if (selected.len == 0) return finishEmptySelection(runtime, target_dir, stderr);
+    try project_defer.apply(runtime, &graph, options, selected, target_dir);
+    var rows: std.ArrayList(run_results.NodeResult) = .empty;
+    defer {
+        deinitRunResults(runtime.allocator, rows.items);
+        rows.deinit(runtime.allocator);
+    }
+    _ = compileWithHost(runtime, options, &graph, selected, target_dir, &rows, stderr) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        try reportCompilationFailure(runtime, rows.items, err, stderr);
+        return error.SqlOperationFailure;
+    };
+    try writeRunResults(runtime, target_dir, rows.items);
+    try operations.emit(runtime, options, rows.items, stdout);
+    if (graph.nodes.items.len > original_nodes) {
+        types.deinitNode(runtime.allocator, &graph.nodes.items[original_nodes]);
+        graph.nodes.shrinkRetainingCapacity(original_nodes);
+    }
+    _ = try writeManifest(runtime, &graph, target_dir);
+}
+
 pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    if (options.inline_sql != null and options.inline_sql.?.len != 0) return sqlOperation(runtime, options, stdout, stderr);
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
     defer graph.deinit();
 
@@ -308,16 +365,13 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     }
     const compile_result = compileWithHost(runtime, options, &graph, selected, target_dir, &compile_rows, stderr) catch |err| {
         if (err == error.OutOfMemory) return err;
-        _ = try writeManifest(runtime, &graph, target_dir);
-        try writeRunResults(runtime, target_dir, compile_rows.items);
-        for (compile_rows.items) |row| if (std.mem.eql(u8, row.status, "error")) {
-            if (row.message) |message| try stderr.print("error: {s}\n", .{message});
-        };
-        return error.ExecutionFailure;
+        try reportCompilationFailure(runtime, compile_rows.items, err, stderr);
+        return error.SqlOperationFailure;
     };
 
     _ = try writeManifest(runtime, &graph, target_dir);
     try writeRunResults(runtime, target_dir, compile_rows.items);
+    try @import("project/sql_operations.zig").emit(runtime, options, compile_rows.items, stdout);
     if (compile_result.snapshot_count != 0) {
         try stdout.print("Compiled {d} model(s), {d} snapshot(s), {d} analysis(es), and {d} test(s) into {s}\n", .{
             compile_result.count, compile_result.snapshot_count, compile_result.analysis_count, compile_result.test_count, util.normalizeForDisplay(compile_result.compiled_base),
@@ -388,9 +442,8 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     }
     const compile_result = if (options.docs_compile) compileWithHost(runtime, options, &graph, selected, target_dir, &compile_rows, stderr) catch |err| {
         if (err == error.OutOfMemory) return err;
-        _ = try writeManifest(runtime, &graph, target_dir);
-        try writeRunResults(runtime, target_dir, compile_rows.items);
-        return error.ExecutionFailure;
+        try reportCompilationFailure(runtime, compile_rows.items, err, stderr);
+        return error.SqlOperationFailure;
     } else CompileResult{ .count = 0, .saw_model = false, .compiled_base = "" };
 
     _ = try writeManifestWithPolicy(runtime, &graph, target_dir, cli_options.writeJson(runtime) or options.docs_compile);
@@ -419,6 +472,15 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
         compile_result.count,
         util.normalizeForDisplay(target_dir),
     });
+}
+
+fn reportCompilationFailure(runtime: Runtime, rows: []const run_results.NodeResult, err: anyerror, stderr: *Io.Writer) !void {
+    var reported = false;
+    for (rows) |row| if (std.mem.eql(u8, row.status, "error")) if (row.message) |message| {
+        try @import("project/sql_operations.zig").emitError(runtime, message, stderr);
+        reported = true;
+    };
+    if (!reported) try @import("project/sql_operations.zig").emitError(runtime, @errorName(err), stderr);
 }
 
 pub fn docsServe(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
@@ -2335,6 +2397,12 @@ fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.N
             if (result.relation_name) |relation_name| allocator.free(relation_name);
         }
         if (result.message) |message| allocator.free(message);
+        if (result.owns_compiled_artifact_code) if (result.compiled_artifact_code) |sql| allocator.free(sql);
+        if (result.owns_preview) if (result.preview) |preview| allocator.free(preview);
+        if (result.owns_adapter_response) if (result.adapter_response) |response| {
+            if (response.message) |message| allocator.free(message);
+            if (response.code) |code| allocator.free(code);
+        };
         if (result.owns_log_output) if (result.log_output) |messages| allocator.free(messages);
         if (result.owns_log_events) {
             for (result.log_events) |entry| allocator.free(entry.message);

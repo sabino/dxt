@@ -40,6 +40,11 @@ pub const NodeResult = struct {
     compile_started_at: ?i96 = null,
     compile_completed_at: ?i96 = null,
     adapter_response: ?AdapterResponse = null,
+    owns_adapter_response: bool = false,
+    compiled_artifact_code: ?[]const u8 = null,
+    owns_compiled_artifact_code: bool = false,
+    preview: ?[]const u8 = null,
+    owns_preview: bool = false,
     compiled_ctes: []const types.ExtraCte = &.{},
     owns_compiled_ctes: bool = false,
     log_output: ?[]const u8 = null,
@@ -61,6 +66,8 @@ pub const BatchResults = struct {
 };
 
 pub const AdapterResponse = struct {
+    include_nulls: bool = false,
+    include_query_id: bool = false,
     message: ?[]const u8 = null,
     code: ?[]const u8 = null,
     rows_affected: ?i64 = null,
@@ -272,6 +279,15 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
         try writer.writeAll(",\"partial_parse_file_path\":");
         try json.string(writer, path);
     }
+    if (std.mem.eql(u8, opts.which, "compile") or std.mem.eql(u8, opts.which, "show")) {
+        try writer.print(",\"introspect\":{s},\"output\":", .{if (opts.introspect) "true" else "false"});
+        try json.string(writer, @tagName(opts.output));
+        if (opts.inline_sql) |sql| {
+            try writer.writeAll(",\"inline\":");
+            try json.string(writer, sql);
+        }
+        if (std.mem.eql(u8, opts.which, "show")) try writer.print(",\"limit\":{d}", .{opts.query_limit}) else try writer.print(",\"inject_ephemeral_ctes\":{s}", .{if (opts.inject_ephemeral_ctes) "true" else "false"});
+    }
     if (opts.log_cache_events) try writer.writeAll(",\"log_cache_events\":true");
     if (opts.single_threaded) try writer.writeAll(",\"single_threaded\":true");
     if (opts.record_timing_info) |path| {
@@ -343,10 +359,23 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
             try writer.writeAll("\"code\": ");
             try json.string(writer, code);
             fields += 1;
+        } else if (response.include_nulls) {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.writeAll("\"code\": null");
+            fields += 1;
         }
         if (response.rows_affected) |count| {
             if (fields != 0) try writer.writeAll(", ");
             try writer.print("\"rows_affected\": {d}", .{count});
+            fields += 1;
+        } else if (response.include_nulls) {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.writeAll("\"rows_affected\": null");
+            fields += 1;
+        }
+        if (response.include_query_id) {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.writeAll("\"query_id\": null");
         }
     }
     try writer.writeAll("}, \"message\": ");

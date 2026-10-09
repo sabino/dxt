@@ -200,6 +200,23 @@ pub const OperationHost = struct {
         return .{ .context = self, .resolve = resolveValue, .call = call, .set_node = setNode };
     }
 
+    /// SQL previews share the same held native session as compilation macros.
+    pub fn queryResult(self: *OperationHost, sql: []const u8) !adapter.QueryResult {
+        try self.ensureSession();
+        return if (self.currentSession()) |session| try session.query(sql) else try adapter.queryForGraph(self.runtime, self.graph, self.db_path, sql);
+    }
+
+    pub fn lastError(self: *OperationHost) ?[]const u8 {
+        return if (self.currentSession()) |session| session.lastError() else null;
+    }
+
+    pub fn heldRuntime(self: *OperationHost) !Runtime {
+        try self.ensureSession();
+        var runtime = self.runtime;
+        runtime.adapter_session = self.currentSession();
+        return runtime;
+    }
+
     fn setNode(raw: *anyopaque, node: ?*const anyopaque) ?*const anyopaque {
         const self: *OperationHost = @ptrCast(@alignCast(raw));
         const previous = self.current_node;
@@ -512,6 +529,15 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
     const which = try allocator.dupe(u8, which_value.string);
     var options = current;
     options.which = which;
+    inline for (.{ "introspect", "inject_ephemeral_ctes" }) |field| if (args.get(field)) |value| {
+        if (value != .bool) return error.MalformedRunResultsArtifact;
+        @field(options, field) = value.bool;
+    };
+    if (args.get("inline")) |value| options.inline_sql = try optionText(allocator, value, false);
+    if (args.get("output")) |value| {
+        if (value != .string) return error.MalformedRunResultsArtifact;
+        options.output = std.meta.stringToEnum(types.Output, value.string) orelse return error.MalformedRunResultsArtifact;
+    }
     if (args.get("partial_parse_file_path")) |value| {
         if (value != .string and value != .null) return error.MalformedRunResultsArtifact;
         options.partial_parse_file_path = if (value == .string) try allocator.dupe(u8, value.string) else null;

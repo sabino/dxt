@@ -998,9 +998,9 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(node.compiled_path orelse ""));
         try writer.writeAll(",\"extra_ctes\":");
-        try writeExtraCtes(writer, node.extra_ctes.items);
+        try writeExtraCtes(writer, node.extra_ctes.items, graph.command_options.inject_ephemeral_ctes);
         try writer.writeAll(",\"extra_ctes_injected\":");
-        try writer.writeAll("true");
+        try writer.writeAll(if (graph.command_options.inject_ephemeral_ctes) "true" else "false");
     }
     try writer.writeAll(",\"meta\":");
     if (@import("config_value.zig").get(node.effective_config, "meta")) |meta| try std.json.Stringify.value(meta, .{}, writer) else if (node.snapshot_meta_json) |meta| try writeJsonValue(writer, meta) else try writeMetaObject(writer, node.meta.items);
@@ -1096,14 +1096,14 @@ fn writeUnrenderedNodeConfig(writer: *Io.Writer, graph: *const Graph, node: *con
     try writer.writeAll("}");
 }
 
-fn writeExtraCtes(writer: *Io.Writer, extra_ctes: []const types.ExtraCte) !void {
+fn writeExtraCtes(writer: *Io.Writer, extra_ctes: []const types.ExtraCte, injected: bool) !void {
     try writer.writeAll("[");
     for (extra_ctes, 0..) |extra_cte, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("{\"id\":");
         try json.string(writer, extra_cte.id);
         try writer.writeAll(",\"sql\":");
-        try json.string(writer, extra_cte.sql);
+        if (injected) try json.string(writer, extra_cte.sql) else try writer.writeAll("null");
         try writer.writeAll("}");
     }
     try writer.writeAll("]");

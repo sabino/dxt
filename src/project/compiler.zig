@@ -401,7 +401,7 @@ pub fn compileModelWithInjectedCtes(allocator: std.mem.Allocator, graph: *const 
     const body = try compileModelBody(allocator, graph, node);
     errdefer allocator.free(body);
 
-    const compiled_code = if (state.extra_ctes.items.len == 0)
+    const compiled_code = if (state.extra_ctes.items.len == 0 or !graph.command_options.inject_ephemeral_ctes)
         body
     else blk: {
         const injected = try injectExtraCtes(allocator, body, state.extra_ctes.items);
@@ -433,7 +433,7 @@ fn compileModelBody(allocator: std.mem.Allocator, graph: *const Graph, node: *co
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    const end = node.raw_code.len - @as(usize, if (std.mem.endsWith(u8, node.raw_code, "\n")) 1 else 0);
+    const end = node.raw_code.len - @as(usize, if (!std.mem.eql(u8, node.resource_type, "sql_operation") and std.mem.endsWith(u8, node.raw_code, "\n")) 1 else 0);
     try renderRange(&context, node.raw_code, 0, end, &out);
     return try out.toOwnedSlice(allocator);
 }
@@ -452,6 +452,10 @@ fn collectEphemeralNode(state: *EphemeralCompileState, node: *const Node) anyerr
     if (extraCteContains(state.extra_ctes.items, node.unique_id)) return;
     if (stringListContains(state.stack.items, node.unique_id)) return error.CyclicModelDependency;
 
+    if (!state.graph.command_options.inject_ephemeral_ctes) {
+        try state.extra_ctes.append(state.allocator, .{ .id = node.unique_id, .sql = try state.allocator.dupe(u8, "") });
+        return;
+    }
     try state.stack.append(state.allocator, node.unique_id);
     errdefer _ = state.stack.pop();
 
@@ -461,11 +465,10 @@ fn collectEphemeralNode(state: *EphemeralCompileState, node: *const Node) anyerr
     defer state.allocator.free(cte_name);
     const compiled = try compileModelBody(state.allocator, state.graph, node);
     defer state.allocator.free(compiled);
-    const trimmed = trimTrailingSqlTerminator(compiled);
     const cte_sql = try std.fmt.allocPrint(
         state.allocator,
-        "{s} as (\n{s}\n)",
-        .{ cte_name, trimmed },
+        " {s} as (\n{s}\n)",
+        .{ cte_name, compiled },
     );
     errdefer state.allocator.free(cte_sql);
 
@@ -491,24 +494,33 @@ pub fn ephemeralCteName(allocator: std.mem.Allocator, node: *const Node) ![]cons
     return try std.fmt.allocPrint(allocator, "__dbt__cte__{s}", .{relationIdentifierForNode(node)});
 }
 
-fn injectExtraCtes(allocator: std.mem.Allocator, body: []const u8, extra_ctes: []const ExtraCte) ![]const u8 {
+pub fn injectExtraCtes(allocator: std.mem.Allocator, body: []const u8, extra_ctes: []const ExtraCte) ![]const u8 {
     var ctes: std.ArrayList(u8) = .empty;
     defer ctes.deinit(allocator);
     for (extra_ctes, 0..) |extra_cte, index| {
-        if (index != 0) try ctes.appendSlice(allocator, ",\n");
+        if (index != 0) try ctes.appendSlice(allocator, ", ");
         try ctes.appendSlice(allocator, extra_cte.sql);
     }
 
-    const body_start = skipSqlWhitespace(body, 0);
+    const leading_end = skipSqlWhitespace(body, 0);
+    var body_start = leading_end;
+    while (body_start < body.len) {
+        if (std.mem.startsWith(u8, body[body_start..], "--")) {
+            body_start = if (std.mem.indexOfScalarPos(u8, body, body_start, '\n')) |end| skipSqlWhitespace(body, end + 1) else body.len;
+        } else if (std.mem.startsWith(u8, body[body_start..], "/*")) {
+            body_start = if (std.mem.indexOfPos(u8, body, body_start + 2, "*/")) |end| skipSqlWhitespace(body, end + 2) else body.len;
+        } else break;
+    }
     if (startsWithSqlWith(body[body_start..])) {
-        const rest_start = skipSqlWhitespace(body, body_start + "with".len);
+        var rest_start = skipSqlWhitespace(body, body_start + "with".len);
+        if (body.len - rest_start >= "recursive".len and std.ascii.eqlIgnoreCase(body[rest_start..][0.."recursive".len], "recursive") and (body.len == rest_start + "recursive".len or !std.ascii.isAlphanumeric(body[rest_start + "recursive".len]))) rest_start = skipSqlWhitespace(body, rest_start + "recursive".len);
         return try std.fmt.allocPrint(
             allocator,
-            "{s}with {s},\n{s}",
-            .{ body[0..body_start], ctes.items, body[rest_start..] },
+            "{s}{s}, {s}",
+            .{ body[0..rest_start], ctes.items, body[rest_start..] },
         );
     }
-    return try std.fmt.allocPrint(allocator, "with {s}\n{s}", .{ ctes.items, body });
+    return try std.fmt.allocPrint(allocator, "{s}with{s} {s}", .{ body[0..leading_end], ctes.items, body[leading_end..] });
 }
 
 fn startsWithSqlWith(sql: []const u8) bool {
@@ -1048,13 +1060,13 @@ fn flagsValue(allocator: std.mem.Allocator, graph: *const Graph) !native_expr.Va
     var it = document.value.object.iterator();
     while (it.next()) |entry| {
         var exposed = false;
-        for ([_][]const u8{ "warn_error", "warn_error_options", "write_json", "use_colors", "profiles_dir", "log_format", "version_check", "fail_fast", "indirect_selection", "quiet", "target_path", "log_path", "which", "full_refresh", "store_failures", "debug", "cache_selected_only", "log_cache_events", "static_parser", "partial_parse" }) |key| if (std.mem.eql(u8, key, entry.key_ptr.*)) {
+        for ([_][]const u8{ "warn_error", "warn_error_options", "write_json", "use_colors", "profiles_dir", "log_format", "version_check", "fail_fast", "indirect_selection", "quiet", "target_path", "log_path", "which", "full_refresh", "store_failures", "debug", "cache_selected_only", "log_cache_events", "static_parser", "partial_parse", "introspect", "empty" }) |key| if (std.mem.eql(u8, key, entry.key_ptr.*)) {
             exposed = true;
             break;
         };
         if (!exposed) continue;
         const name = try std.ascii.allocUpperString(allocator, entry.key_ptr.*);
-        const value = if (std.mem.eql(u8, name, "FULL_REFRESH")) native_expr.Value{ .boolean = graph.full_refresh } else try valueFromJson(allocator, entry.value_ptr.*);
+        const value = if (std.mem.eql(u8, name, "FULL_REFRESH")) native_expr.Value{ .boolean = graph.full_refresh } else if (std.mem.eql(u8, name, "INTROSPECT") and !std.mem.eql(u8, graph.command_options.which, "compile") and !std.mem.eql(u8, graph.command_options.which, "show")) native_expr.Value.none else try valueFromJson(allocator, entry.value_ptr.*);
         try entries.append(allocator, .{ .key = name, .value = value });
     }
     for ([_]native_expr.Entry{
@@ -1222,6 +1234,9 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
             return .{ .string = try allocator.dupe(u8, rendered.items) };
         }
         if (args.len == 2) return args[1].value;
+        // Core ParseVar permits an unset model variable while discovering the
+        // graph; the execution context still requires it during compilation.
+        if (context.parse_node != null and std.mem.eql(u8, name, "var")) return .none;
         return if (std.mem.eql(u8, name, "var")) error.UnresolvedVar else error.EnvironmentVariableMissing;
     }
     if (std.mem.eql(u8, name, "return")) {
@@ -3700,10 +3715,10 @@ test "compileModelWithInjectedCtes orders chained ephemeral parents before downs
     try std.testing.expectEqual(@as(usize, 2), compiled.extra_ctes.items.len);
     try std.testing.expectEqualStrings("model.demo.base", compiled.extra_ctes.items[0].id);
     try std.testing.expectEqualStrings("model.demo.mid", compiled.extra_ctes.items[1].id);
-    try std.testing.expectEqualStrings("__dbt__cte__base as (\nselect 1 as id\n)", compiled.extra_ctes.items[0].sql);
-    try std.testing.expectEqualStrings("__dbt__cte__mid as (\nselect id + 1 as id from __dbt__cte__base\n)", compiled.extra_ctes.items[1].sql);
+    try std.testing.expectEqualStrings(" __dbt__cte__base as (\nselect 1 as id;\n)", compiled.extra_ctes.items[0].sql);
+    try std.testing.expectEqualStrings(" __dbt__cte__mid as (\nselect id + 1 as id from __dbt__cte__base\n)", compiled.extra_ctes.items[1].sql);
     try std.testing.expectEqualStrings(
-        "with __dbt__cte__base as (\nselect 1 as id\n),\n__dbt__cte__mid as (\nselect id + 1 as id from __dbt__cte__base\n)\nselect * from __dbt__cte__mid",
+        "with __dbt__cte__base as (\nselect 1 as id;\n),  __dbt__cte__mid as (\nselect id + 1 as id from __dbt__cte__base\n) select * from __dbt__cte__mid",
         compiled.compiled_code,
     );
 }

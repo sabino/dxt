@@ -292,9 +292,21 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
         project.analyze(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
+    if (equals(command, "show")) {
+        if (hasHelp(args[2..])) {
+            try stdout.writeAll("Usage: dxt show --select NAME | --inline SQL [project and selection options] [--limit COUNT] [--output text|json] [--[no-]introspect]\n");
+            return .ok;
+        }
+        const rt = runtime orelse return .usage;
+        var options = parseOptions(rt.allocator, rt.io, args[2..], stderr, .show, rt.global_options) catch |err| return commandError(err, stderr);
+        options.which = command;
+        project.show(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
+        return .ok;
+    }
     if (equals(command, "compile")) {
         if (hasHelp(args[2..])) {
             try printCommandHelp(command, stdout, .project_selection);
+            try stdout.writeAll("  --inline <SQL>\n  --output <text|json>\n  --[no-]introspect\n");
             return .ok;
         }
         const rt = runtime orelse {
@@ -451,6 +463,7 @@ const OptionMode = enum {
     common_and_select,
     clean,
     compile,
+    show,
     docs_generate,
     docs_serve,
     list,
@@ -494,8 +507,11 @@ fn printExtraCommandHelp(command: []const u8, writer: *Io.Writer) !void {
 
 fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
     if (@import("project/compile_diagnostics.zig").message(err)) |message| {
-        stderr.print("error: {s}\n", .{message}) catch {};
-        return .failure;
+        // Each line carries its severity through the buffered console/file
+        // loggers, including quiet mode and JSON event conversion.
+        var lines = std.mem.splitScalar(u8, message, '\n');
+        while (lines.next()) |line| stderr.print("error: {s}\n", .{line}) catch {};
+        return .usage;
     }
     if (err == error.SqlAnalysisFailure) {
         stderr.writeAll("error: SQL analysis failed\n") catch {};
@@ -553,8 +569,8 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingPackageEnvironmentVariable => stderr.writeAll("error: required package environment variable is missing\n") catch {},
         error.MissingProjectFile => stderr.writeAll("error: missing dbt_project.yml\n") catch {},
         error.InvalidProjectName => stderr.writeAll("error: dbt_project.yml must define a non-empty name\n") catch {},
-        error.DuplicateModelName => stderr.writeAll("error: duplicate model name in supported M1 parser subset\n") catch {},
-        error.DuplicateAnalysisName => stderr.writeAll("error: duplicate analysis name in supported M1 parser subset\n") catch {},
+        error.DuplicateModelName => stderr.writeAll("error: duplicate model name\n") catch {},
+        error.DuplicateAnalysisName => stderr.writeAll("error: duplicate analysis name\n") catch {},
         error.UnsupportedSnapshotRefCollision => stderr.writeAll("error: ref to a snapshot sharing a name with a model or seed is not supported\n") catch {},
         error.DuplicateSnapshotPatch => stderr.writeAll("error: a snapshot has multiple YAML property definitions\n") catch {},
         error.SnapshotRelationCollision => stderr.writeAll("error: snapshot and another resource resolve to the same database, schema, and identifier\n") catch {},
@@ -562,32 +578,32 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MalformedSnapshotBlock => stderr.writeAll("error: malformed SQL snapshot block\n") catch {},
         error.InvalidSnapshotConfig => stderr.writeAll("error: SQL snapshot requires a unique_key and a valid timestamp or check strategy configuration\n") catch {},
         error.UnsupportedProjectSnapshotConfig => stderr.writeAll("error: malformed or unsupported project snapshot configuration\n") catch {},
-        error.UnsupportedSnapshotConfig => stderr.writeAll("error: unsupported SQL snapshot config; only the documented literal config subset is supported\n") catch {},
-        error.UnsupportedSnapshotDefinition => stderr.writeAll("error: SQL snapshots support only named blocks with literal config, ref, and source calls\n") catch {},
+        error.UnsupportedSnapshotConfig => stderr.writeAll("error: malformed or unsupported snapshot configuration\n") catch {},
+        error.UnsupportedSnapshotDefinition => stderr.writeAll("error: malformed SQL snapshot definition; a named snapshot block is required\n") catch {},
         error.UnsupportedSnapshotYaml => stderr.writeAll("error: malformed or unsupported YAML snapshot definition or property\n") catch {},
-        error.UnsupportedSnapshotAdapter => stderr.writeAll("error: snapshot execution requires a DuckDB adapter\n") catch {},
-        error.UnsupportedSnapshotExecution => stderr.writeAll("error: snapshot resources currently support parse and ls only; snapshot compilation and execution are not supported\n") catch {},
-        error.DuplicateSeedName => stderr.writeAll("error: duplicate seed name in supported M1 parser subset\n") catch {},
-        error.DuplicateDocName => stderr.writeAll("error: duplicate docs block name in supported M1 parser subset\n") catch {},
-        error.DuplicateExposureName => stderr.writeAll("error: duplicate exposure name in supported M1 parser subset\n") catch {},
-        error.DuplicateMacroName => stderr.writeAll("error: duplicate macro name in supported M1 parser subset\n") catch {},
-        error.DuplicateMacroProperty => stderr.writeAll("error: duplicate macro property patch in supported M1 parser subset\n") catch {},
-        error.DuplicateUnitTestName => stderr.writeAll("error: duplicate unit test name for a model in supported M1 parser subset\n") catch {},
-        error.DuplicateSingularTestName => stderr.writeAll("error: duplicate singular SQL test name in supported M1 parser subset\n") catch {},
-        error.UnsupportedDynamicRef => stderr.writeAll("error: unsupported dynamic ref; M1 parser only supports literal ref calls\n") catch {},
-        error.UnsupportedDynamicSource => stderr.writeAll("error: unsupported dynamic source; M1 parser only supports literal source calls\n") catch {},
-        error.UnsupportedDynamicDoc => stderr.writeAll("error: unsupported dynamic doc; M1 parser only supports literal doc calls in descriptions\n") catch {},
-        error.UnsupportedYaml => stderr.writeAll("error: unsupported YAML shape in M1 parser subset\n") catch {},
-        error.UnsupportedJinja => stderr.writeAll("error: unsupported or malformed Jinja in M1 parser subset\n") catch {},
-        error.MalformedDocsBlock => stderr.writeAll("error: malformed docs block in M1 parser subset\n") catch {},
-        error.MalformedMacroBlock => stderr.writeAll("error: malformed macro block in M1 parser subset\n") catch {},
-        error.DisabledRef => stderr.writeAll("error: ref targets a disabled model, seed, or snapshot in the M1 parser subset\n") catch {},
-        error.UnresolvedRef => stderr.writeAll("error: unresolved ref in supported M1 parser subset\n") catch {},
-        error.UnresolvedSource => stderr.writeAll("error: unresolved source in supported M1 parser subset\n") catch {},
-        error.UnresolvedDoc => stderr.writeAll("error: unresolved doc reference in supported M1 parser subset\n") catch {},
-        error.UnresolvedMacro => stderr.writeAll("error: unresolved macro reference in supported M1 parser subset\n") catch {},
-        error.UnresolvedUnitTestModel => stderr.writeAll("error: unit test references a missing model in supported M1 parser subset\n") catch {},
-        error.UnresolvedVar => stderr.writeAll("error: unresolved var in supported M1 parser subset\n") catch {},
+        error.UnsupportedSnapshotAdapter => stderr.writeAll("error: snapshot execution requires a DuckDB or PostgreSQL adapter\n") catch {},
+        error.UnsupportedSnapshotExecution => stderr.writeAll("error: selected snapshot cannot be executed with this adapter or configuration\n") catch {},
+        error.DuplicateSeedName => stderr.writeAll("error: duplicate seed name\n") catch {},
+        error.DuplicateDocName => stderr.writeAll("error: duplicate docs block name\n") catch {},
+        error.DuplicateExposureName => stderr.writeAll("error: duplicate exposure name\n") catch {},
+        error.DuplicateMacroName => stderr.writeAll("error: duplicate macro name\n") catch {},
+        error.DuplicateMacroProperty => stderr.writeAll("error: duplicate macro property patch\n") catch {},
+        error.DuplicateUnitTestName => stderr.writeAll("error: duplicate unit test name for a model\n") catch {},
+        error.DuplicateSingularTestName => stderr.writeAll("error: duplicate singular SQL test name\n") catch {},
+        error.UnsupportedDynamicRef => stderr.writeAll("error: could not resolve ref arguments during parsing\n") catch {},
+        error.UnsupportedDynamicSource => stderr.writeAll("error: could not resolve source arguments during parsing\n") catch {},
+        error.UnsupportedDynamicDoc => stderr.writeAll("error: could not resolve doc arguments in a description\n") catch {},
+        error.UnsupportedYaml => stderr.writeAll("error: unsupported YAML shape\n") catch {},
+        error.UnsupportedJinja => stderr.writeAll("error: unsupported or malformed Jinja\n") catch {},
+        error.MalformedDocsBlock => stderr.writeAll("error: malformed docs block\n") catch {},
+        error.MalformedMacroBlock => stderr.writeAll("error: malformed macro block\n") catch {},
+        error.DisabledRef => stderr.writeAll("error: ref targets a disabled model, seed, or snapshot\n") catch {},
+        error.UnresolvedRef => stderr.writeAll("error: unresolved ref\n") catch {},
+        error.UnresolvedSource => stderr.writeAll("error: unresolved source\n") catch {},
+        error.UnresolvedDoc => stderr.writeAll("error: unresolved doc reference\n") catch {},
+        error.UnresolvedMacro => stderr.writeAll("error: unresolved macro reference\n") catch {},
+        error.UnresolvedUnitTestModel => stderr.writeAll("error: unit test references a missing model\n") catch {},
+        error.UnresolvedVar => stderr.writeAll("error: unresolved var\n") catch {},
         error.MissingProfileFile => stderr.writeAll("error: missing profiles.yml for selected profile target\n") catch {},
         error.MissingProfileName => stderr.writeAll("error: no profile was specified for profile-aware parsing\n") catch {},
         error.MissingProfile => stderr.writeAll("error: selected profile was not found in profiles.yml\n") catch {},
@@ -596,12 +612,15 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingProfileType => stderr.writeAll("error: selected profile target must define adapter type\n") catch {},
         error.MissingProfileSchema => stderr.writeAll("error: selected profile target must define a non-empty schema when schema is present\n") catch {},
         error.MissingProfileDatabasePath => stderr.writeAll("error: selected DuckDB profile target must define a non-empty path when path is present\n") catch {},
+        error.MissingShowSelection => stderr.writeAll("error: Either --select or --inline must be passed to show\n") catch {},
+        error.InvalidQueryLimit => stderr.writeAll("error: --limit must be an integer\n") catch {},
+        error.SqlOperationFailure, error.InlineParseFailure => return .usage,
         error.InvalidOutput => stderr.writeAll("error: --output must be text, json, name, path, or selector\n") catch {},
         error.UnsupportedCleanPath => stderr.writeAll("error: clean-targets must contain non-empty project-relative paths\n") catch {},
         error.UnsupportedCleanOutsideProject => stderr.writeAll("error: clean refuses absolute paths or paths outside the project\n") catch {},
         error.UnsupportedCleanSourcePath => stderr.writeAll("error: clean refuses to remove model, seed, or macro source paths\n") catch {},
-        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, analysis, snapshot, seed, source, exposure, test, or unit_test in the M1 parser subset\n") catch {},
-        error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by the M1 parser subset\n") catch {},
+        error.UnsupportedResourceType => stderr.writeAll("error: --resource-type supports only model, analysis, snapshot, seed, source, exposure, test, or unit_test\n") catch {},
+        error.UnsupportedSelector => stderr.writeAll("error: selector syntax is not supported by this command\n") catch {},
         error.MissingSourceStatusState => stderr.writeAll("error: source_status selectors require --state pointing to a directory containing sources.json\n") catch {},
         error.MissingSourcesArtifact => stderr.writeAll("error: --state must point to a directory containing sources.json for source_status selectors\n") catch {},
         error.MalformedSourcesArtifact => stderr.writeAll("error: sources.json is malformed or missing required freshness result fields\n") catch {},
@@ -620,13 +639,13 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingStateManifestArtifact => stderr.writeAll("error: --state must point to a directory containing manifest.json for state selectors\n") catch {},
         error.MalformedStateManifestArtifact => stderr.writeAll("error: manifest.json is malformed or missing required state fields\n") catch {},
         error.UnsupportedStateManifestSchemaVersion => stderr.writeAll("error: manifest.json must use dbt Manifest v12 schema for state selectors\n") catch {},
-        error.UnsupportedCompileSelection => stderr.writeAll("error: compile currently supports only selected SQL model or supported generic or singular SQL test resources\n") catch {},
-        error.UnsupportedCustomGenericTest => stderr.writeAll("error: custom generic test compilation currently supports only model, seed, or source column test blocks with static SQL plus {{ model }} and {{ column_name }}\n") catch {},
-        error.UnsupportedRunSelection => stderr.writeAll("error: run currently supports only selected SQL model resources\n") catch {},
-        error.UnsupportedSeedSelection => stderr.writeAll("error: seed currently supports only selected seed resources\n") catch {},
-        error.UnsupportedTestSelection => stderr.writeAll("error: test currently supports only supported DuckDB test resources\n") catch {},
-        error.UnsupportedBuildSelection => stderr.writeAll("error: build currently supports only selected model, seed, source, test, and supported unit test resources\n") catch {},
-        error.UnsupportedMixedBuildExecution => stderr.writeAll("error: build currently executes only seed-only, model-only, seed+model, seed+model+supported-test, model+supported-test, source+supported-test, or supported-test-only selections\n") catch {},
+        error.UnsupportedCompileSelection => stderr.writeAll("error: selected resource cannot be compiled by this command\n") catch {},
+        error.UnsupportedCustomGenericTest => stderr.writeAll("error: malformed or unsupported generic test macro definition\n") catch {},
+        error.UnsupportedRunSelection => stderr.writeAll("error: selected resource cannot be executed by run\n") catch {},
+        error.UnsupportedSeedSelection => stderr.writeAll("error: selected resource is not a seed\n") catch {},
+        error.UnsupportedTestSelection => stderr.writeAll("error: selected resource cannot be executed by test\n") catch {},
+        error.UnsupportedBuildSelection => stderr.writeAll("error: selected resource cannot be executed by build\n") catch {},
+        error.UnsupportedMixedBuildExecution => stderr.writeAll("error: selected resources cannot be executed together by build\n") catch {},
         error.UnsupportedAdapterExecution => stderr.writeAll("error: run requires a supported native execution adapter (duckdb or postgres)\n") catch {},
         error.UnsupportedBuildAdapterExecution => stderr.writeAll("error: build requires a supported native execution adapter (duckdb or postgres)\n") catch {},
         error.UnsupportedSeedAdapterExecution => stderr.writeAll("error: seed/build requires a supported seed adapter (duckdb or postgres)\n") catch {},
@@ -644,7 +663,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.PythonModelEphemeralDependency => stderr.writeAll("error: Python models cannot depend on ephemeral resources\n") catch {},
         error.UnsupportedIncrementalStrategy => stderr.writeAll("error: incremental strategy is unavailable for the selected adapter\n") catch {},
         error.UnsupportedBuildModelMaterialization => stderr.writeAll("error: unsupported build model materialization for the selected adapter\n") catch {},
-        error.UnsupportedDuckDbPath => stderr.writeAll("error: this DuckDB execution slice supports only local DuckDB database file paths\n") catch {},
+        error.UnsupportedDuckDbPath => stderr.writeAll("error: DuckDB connection requires a supported database path\n") catch {},
         error.CyclicModelDependency => stderr.writeAll("error: selected model graph contains a cycle\n") catch {},
         error.DuckDbCliNotFound => stderr.writeAll("error: DuckDB execution requires libduckdb or the duckdb CLI on PATH\n") catch {},
         error.NativeDuckDbLibraryNotFound => stderr.writeAll("error: native DuckDB library unavailable; set DXT_DUCKDB_LIBRARY to a compatible libduckdb library or use DXT_DUCKDB_BACKEND=cli\n") catch {},
@@ -694,10 +713,10 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         },
         error.UnsupportedModelExecution => stderr.writeAll("error: model execution is unavailable for the selected adapter\n") catch {},
         error.UnsupportedSeedExecution => stderr.writeAll("error: seed/build requires valid CSV seed configuration\n") catch {},
-        error.UnsupportedTestExecution => stderr.writeAll("error: test/build currently executes only selected DuckDB singular SQL tests, supported custom generic column tests, and model/seed/source not_null/unique/accepted_values/relationships column tests\n") catch {},
-        error.UnsupportedUnitTestExecution => stderr.writeAll("error: unit test execution currently supports only dict row fixtures for literal ref/source inputs and expected rows\n") catch {},
+        error.UnsupportedTestExecution => stderr.writeAll("error: malformed or unsupported data test configuration or macro\n") catch {},
+        error.UnsupportedUnitTestExecution => stderr.writeAll("error: malformed or unsupported unit test fixture or configuration\n") catch {},
         error.InvalidDocsServePort => stderr.writeAll("error: --port must be an integer between 1 and 65535\n") catch {},
-        error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by the implemented M1 parser command\n") catch {},
+        error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by this command\n") catch {},
         else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},
     }
     return .usage;
@@ -809,6 +828,12 @@ fn parseOptions(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
                 options.target = value;
             } else if (equals(arg, "--args")) {
                 options.command_args = value;
+            } else if (equals(arg, "--inline")) {
+                options.inline_sql = value;
+            } else if (equals(arg, "--inline-direct")) {
+                options.inline_direct = value;
+            } else if (equals(arg, "--limit")) {
+                options.query_limit = std.fmt.parseInt(i64, value, 10) catch return error.InvalidQueryLimit;
             } else if (equals(arg, "--sample")) {
                 if (!equals(options.which, "run") and !equals(options.which, "build")) return error.UnsupportedCommandOption;
                 options.sample = value;
@@ -850,15 +875,15 @@ fn parseOptions(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
                 if (!equals(value, "model") and !equals(value, "analysis") and !equals(value, "snapshot") and !equals(value, "seed") and !equals(value, "source") and !equals(value, "exposure") and !equals(value, "test") and !equals(value, "unit_test")) return error.UnsupportedResourceType;
                 options.resource_type = value;
             } else if (equals(arg, "--output")) {
-                if (equals(value, "text")) {
+                if (std.ascii.eqlIgnoreCase(value, "text")) {
                     options.output = .text;
-                } else if (equals(value, "json")) {
+                } else if (std.ascii.eqlIgnoreCase(value, "json")) {
                     options.output = .json;
-                } else if (equals(value, "name")) {
+                } else if (std.ascii.eqlIgnoreCase(value, "name")) {
                     options.output = .name;
-                } else if (equals(value, "path")) {
+                } else if (std.ascii.eqlIgnoreCase(value, "path")) {
                     options.output = .path;
-                } else if (equals(value, "selector")) {
+                } else if (std.ascii.eqlIgnoreCase(value, "selector")) {
                     options.output = .selector;
                 } else {
                     return error.InvalidOutput;
@@ -870,7 +895,11 @@ fn parseOptions(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
             continue;
         }
         if (isFlag(arg, mode)) {
-            if (equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast")) {
+            if (equals(arg, "--introspect") or equals(arg, "--no-introspect")) {
+                options.introspect = equals(arg, "--introspect");
+            } else if (equals(arg, "--inject-ephemeral-ctes") or equals(arg, "--no-inject-ephemeral-ctes")) {
+                options.inject_ephemeral_ctes = equals(arg, "--inject-ephemeral-ctes");
+            } else if (equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast")) {
                 options.fail_fast = equals(arg, "--fail-fast");
             } else if (equals(arg, "--full-refresh")) {
                 options.full_refresh = true;
@@ -920,6 +949,7 @@ fn parseOptions(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
         if (used_select or options.resource_types != null) return error.ConflictingListModels;
         options.resource_types = try allocator.dupe([]const u8, &.{"model"});
     }
+    if ((mode == .compile or mode == .show) and options.output != .text and options.output != .json) return error.InvalidOutput;
     if (options.sample) |value| options.sample_window = try @import("project/input_relations.zig").parseSample(.{ .allocator = allocator, .io = io }, value);
     if ((options.event_time_start == null) != (options.event_time_end == null)) return error.EventTimeBoundsRequired;
     if (options.event_time_start) |start| {
@@ -938,6 +968,8 @@ fn validateSelector(value: []const u8) !void {
 }
 
 fn requiresValue(arg: []const u8, mode: OptionMode) bool {
+    if ((mode == .compile or mode == .show) and (equals(arg, "--inline") or equals(arg, "--output"))) return true;
+    if (mode == .show and (equals(arg, "--inline-direct") or equals(arg, "--limit"))) return true;
     if ((mode == .build or mode == .common_and_select) and (equals(arg, "--sample") or equals(arg, "--event-time-start") or equals(arg, "--event-time-end"))) return true;
     if (mode == .deps) return equals(arg, "--project-dir") or equals(arg, "--profiles-dir") or equals(arg, "--profile") or equals(arg, "--target") or equals(arg, "--vars") or equals(arg, "--state") or equals(arg, "--defer-state") or equals(arg, "--indirect-selection");
     if (equals(arg, "--log-format")) return true;
@@ -958,7 +990,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
 
     if (mode == .operation and equals(arg, "--args")) return true;
     switch (mode) {
-        .common_and_select, .compile, .docs_generate, .list, .analysis, .seed, .test_command, .build, .source_freshness, .clone => {
+        .common_and_select, .compile, .show, .docs_generate, .list, .analysis, .seed, .test_command, .build, .source_freshness, .clone => {
             if (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude")) return true;
         },
         .common_only, .clean, .docs_serve, .debug, .init, .operation, .retry, .deps => {},
@@ -983,12 +1015,14 @@ fn isOptionLike(arg: []const u8) bool {
 }
 
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
+    if ((mode == .compile or mode == .show) and (equals(arg, "--introspect") or equals(arg, "--no-introspect"))) return true;
+    if (mode == .compile and (equals(arg, "--inject-ephemeral-ctes") or equals(arg, "--no-inject-ephemeral-ctes"))) return true;
     if ((mode == .seed or mode == .build) and equals(arg, "--show")) return true;
     if ((mode == .build or mode == .test_command) and equals(arg, "--store-failures")) return true;
     if (mode == .deps and (equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast"))) return true;
     if ((mode == .build or mode == .compile or mode == .common_and_select) and (equals(arg, "--empty") or equals(arg, "--no-empty"))) return true;
     if (mode == .docs_generate and equals(arg, "--empty-catalog")) return true;
-    if ((equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast")) and (mode == .build or mode == .seed or mode == .test_command or mode == .retry or mode == .compile or mode == .docs_generate or mode == .source_freshness)) return true;
+    if ((equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast")) and (mode == .build or mode == .seed or mode == .test_command or mode == .retry or mode == .compile or mode == .show or mode == .docs_generate or mode == .source_freshness)) return true;
     if (mode != .common_only and mode != .clean and mode != .docs_serve and mode != .init and mode != .debug and mode != .operation and mode != .clone and mode != .retry and (equals(arg, "--defer") or equals(arg, "--no-defer") or equals(arg, "--favor-state") or equals(arg, "--no-favor-state"))) return true;
     if ((mode == .build or mode == .compile or mode == .seed or mode == .clone) and equals(arg, "--full-refresh")) return true;
     if (mode == .init and equals(arg, "--skip-profile-setup")) return true;
@@ -1015,11 +1049,12 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  ls               List selected project resources.
         \\  clean            Delete configured generated project artifacts.
         \\  deps             Resolve and install local, Git, and Hub package dependencies.
+        \\  show             Execute a selected resource or inline SQL and preview its rows.
         \\  compile          Compile SQL and macros with the selected adapter context.
         \\  run              Execute selected DuckDB or PostgreSQL models.
         \\  analyze          Parse SQL, bind types and resolve column lineage.
         \\  explain          Write native plans and typed logical SQL analysis.
-        \\  snapshot         Maintain selected DuckDB timestamp and check snapshots.
+        \\  snapshot         Maintain timestamp and check snapshots on DuckDB or PostgreSQL.
         \\  seed             Load selected CSV seeds into DuckDB or PostgreSQL.
         \\  test             Execute data and unit tests on DuckDB or PostgreSQL.
         \\  build            Build seeds, models, snapshots, unit tests and data tests.
@@ -1240,7 +1275,7 @@ test "command errors include duplicate singular test diagnostic" {
 
     const code = commandError(error.DuplicateSingularTestName, &stderr.writer);
     try std.testing.expectEqual(ExitCode.usage, code);
-    try std.testing.expectEqualStrings("error: duplicate singular SQL test name in supported M1 parser subset\n", stderr.written());
+    try std.testing.expectEqualStrings("error: duplicate singular SQL test name\n", stderr.written());
 }
 
 test "compile command requires runtime I/O" {

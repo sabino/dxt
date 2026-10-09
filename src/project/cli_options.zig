@@ -12,7 +12,13 @@ pub fn prepare(runtime: types.Runtime, args: []const []const u8) !Prepared {
     var expanded: std.ArrayList([]const u8) = .empty;
     if (args.len == 0) return .{ .args = args, .options = try defaults(runtime, null) };
     try expanded.append(a, args[0]);
+    var literal_value = false;
     for (args[1..]) |arg| {
+        if (literal_value) {
+            try expanded.append(a, arg);
+            literal_value = false;
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--")) {
             if (std.mem.indexOfScalar(u8, arg, '=')) |equal| {
                 try expanded.append(a, alias(arg[0..equal]));
@@ -23,7 +29,11 @@ pub fn prepare(runtime: types.Runtime, args: []const []const u8) !Prepared {
         if (arg.len > 2 and arg[0] == '-' and arg[1] != '-' and (arg[1] == 's' or arg[1] == 'm' or arg[1] == 't' or arg[1] == 'r')) {
             try expanded.append(a, alias(arg[0..2]));
             try expanded.append(a, arg[2..]);
-        } else try expanded.append(a, alias(arg));
+        } else {
+            const normalized = alias(arg);
+            try expanded.append(a, normalized);
+            literal_value = valueOption(normalized);
+        }
     }
     var options = try defaults(runtime, commandHint(expanded.items));
     var before: std.ArrayList([]const u8) = .empty;
@@ -129,6 +139,7 @@ fn defaults(runtime: types.Runtime, command: ?[]const u8) !types.Options {
     options.partial_parse_file_diff = try environmentBool(runtime, "DBT_PARTIAL_PARSE_FILE_DIFF", true);
     options.partial_parse_file_path = environment(runtime, "DBT_PARTIAL_PARSE_FILE_PATH");
     options.static_parser = try environmentBool(runtime, "DBT_STATIC_PARSER", true);
+    if (eq(options.which, "compile") or eq(options.which, "show")) options.introspect = try environmentBool(runtime, "DBT_INTROSPECT", true);
     options.write_json = try environmentBool(runtime, "DBT_WRITE_JSON", true);
     options.warn_error = try environmentBool(runtime, "DBT_WARN_ERROR", false);
     options.version_check = try environmentBool(runtime, "DBT_VERSION_CHECK", true);
@@ -340,7 +351,7 @@ fn globalKey(arg: []const u8) ?[]const u8 {
 fn valueOption(arg: []const u8) bool {
     // Value options consume their next token, even when it resembles a global
     // flag. This preserves YAML/JSON macro arguments and quoted scalar vars.
-    for ([_][]const u8{ "--project-dir", "--profiles-dir", "--profile", "--target", "--target-path", "--vars", "--state", "--defer-state", "--indirect-selection", "--threads", "--args", "--selector", "--host", "--port", "--output", "--resource-type", "--environment", "--from-environment", "--plan", "--workflow-config", "--start", "--end", "--sample", "--event-time-start", "--event-time-end" }) |name| if (eq(arg, name)) return true;
+    for ([_][]const u8{ "--project-dir", "--profiles-dir", "--profile", "--target", "--target-path", "--vars", "--state", "--defer-state", "--indirect-selection", "--threads", "--args", "--selector", "--host", "--port", "--output", "--resource-type", "--environment", "--from-environment", "--plan", "--workflow-config", "--start", "--end", "--sample", "--event-time-start", "--event-time-end", "--inline", "--inline-direct", "--limit" }) |name| if (eq(arg, name)) return true;
     return false;
 }
 fn eq(lhs: []const u8, rhs: []const u8) bool {

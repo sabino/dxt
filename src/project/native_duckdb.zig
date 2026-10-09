@@ -36,6 +36,7 @@ const Api = struct {
     duckdb_rows_changed: *const fn (*CResult) callconv(.c) u64,
     duckdb_column_name: *const fn (*CResult, u64) callconv(.c) ?[*:0]const u8,
     duckdb_column_type: *const fn (*CResult, u64) callconv(.c) c_uint,
+    duckdb_column_data: *const fn (*CResult, u64) callconv(.c) Handle,
     duckdb_value_varchar: *const fn (*CResult, u64, u64) callconv(.c) ?[*:0]u8,
     duckdb_value_is_null: *const fn (*CResult, u64, u64) callconv(.c) bool,
     duckdb_free: *const fn (?*anyopaque) callconv(.c) void,
@@ -386,7 +387,7 @@ pub const Connection = struct {
         }
     }
 
-    fn copyResult(self: *Connection, raw: *CResult) !QueryResult {
+    fn copyResult(self: *Connection, raw: *CResult) anyerror!QueryResult {
         const n_columns = self.api.duckdb_column_count(raw);
         const n_rows = self.api.duckdb_row_count(raw);
         if (n_columns > 65536 or n_rows > 10_000_000 or n_columns * n_rows > 10_000_000) return error.AdapterResultTooLarge;
@@ -405,11 +406,37 @@ pub const Connection = struct {
             @memset(row.*, null);
             for (row.*, 0..) |*cell, c| {
                 if (self.api.duckdb_value_is_null(raw, c, r)) continue;
+                if (output.columns[c].native_type == 31) continue;
                 const value = self.api.duckdb_value_varchar(raw, c, r) orelse return error.DuckDbExecutionFailed;
                 defer self.api.duckdb_free(value);
                 cell.* = try self.allocator.dupe(u8, std.mem.span(value));
             }
         }
+        // The deprecated scalar C accessor cannot stringify TIMESTAMP_TZ.
+        // Read its signed microsecond transport, then let this connection's
+        // real timezone rules render values in bounded, read-only batches.
+        for (output.columns, 0..) |column, c| if (column.native_type == 31 and n_rows != 0) {
+            const data: [*]const i64 = @ptrCast(@alignCast(self.api.duckdb_column_data(raw, c) orelse return error.DuckDbExecutionFailed));
+            var start: usize = 0;
+            while (start < n_rows) {
+                const end = @min(start + 1000, n_rows);
+                var sql: std.Io.Writer.Allocating = .init(self.allocator);
+                defer sql.deinit();
+                try sql.writer.writeAll("select stamp::varchar from (values ");
+                for (start..end) |r| {
+                    if (r != start) try sql.writer.writeByte(',');
+                    if (self.api.duckdb_value_is_null(raw, c, r)) try sql.writer.print("({d},null::timestamptz)", .{r}) else try sql.writer.print("({d},make_timestamptz({d}))", .{ r, data[r] });
+                }
+                try sql.writer.writeAll(") as timestamp_values(position,stamp) order by position");
+                var values = try self.queryStatements(sql.written(), self.readonly);
+                defer values.deinit(self.allocator);
+                if (values.rows.len != end - start) return error.DuckDbExecutionFailed;
+                for (values.rows, start..) |row, r| if (row[0]) |value| {
+                    output.rows[r][c] = try self.allocator.dupe(u8, value);
+                };
+                start = end;
+            }
+        };
         return output;
     }
 };

@@ -348,8 +348,7 @@ fn clone(a: std.mem.Allocator, source: QueryResult) !QueryResult {
     return copy;
 }
 
-/// Configure warmup without opening a connection. Offline compilation stays
-/// offline until its first native database callback requests a session.
+/// Configure required physical relation schemas without opening a connection.
 pub fn configure(runtime: @import("types.zig").Runtime, graph: *const @import("types.zig").Graph, selected_ids: ?[]const []const u8) !void {
     const cache = graph.relation_cache orelse return;
     try cache.warm_mutex.lock(runtime.io);
@@ -365,7 +364,8 @@ pub fn configure(runtime: @import("types.zig").Runtime, graph: *const @import("t
     if (!cache.populate) return;
     const compiler = @import("compiler.zig");
     for (graph.nodes.items) |*node| {
-        if (!node.enabled or equal(node.materialized, "ephemeral") or equal(node.resource_type, "analysis")) continue;
+        if (!node.enabled or equal(node.materialized, "ephemeral")) continue;
+        if (!equal(node.resource_type, "model") and !equal(node.resource_type, "seed") and !equal(node.resource_type, "snapshot")) continue;
         if (graph.command_options.cache_selected_only and selected_ids != null and !contains(selected_ids.?, node.unique_id)) continue;
         const schema = try compiler.relationSchemaForNode(runtime.allocator, graph, node);
         defer runtime.allocator.free(schema);

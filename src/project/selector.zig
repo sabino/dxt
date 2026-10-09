@@ -252,7 +252,7 @@ fn validateSelectorMethod(part: []const u8) !void {
 }
 
 fn isSupportedResourceType(value: []const u8) bool {
-    return std.mem.eql(u8, value, "model") or
+    return std.mem.eql(u8, value, "sql_operation") or std.mem.eql(u8, value, "model") or
         std.mem.eql(u8, value, "analysis") or
         std.mem.eql(u8, value, "snapshot") or
         std.mem.eql(u8, value, "seed") or
