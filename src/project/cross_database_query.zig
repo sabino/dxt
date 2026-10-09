@@ -26,9 +26,15 @@ pub const QueryOptions = struct {
 };
 pub const QueryOutcome = struct {
     result: adapter.QueryResult,
+    columns: []@import("cross_database_read.zig").Column,
     movement_plan_json: []const u8,
     pub fn deinit(self: *QueryOutcome, allocator: std.mem.Allocator) void {
         self.result.deinit(allocator);
+        for (self.columns) |column| {
+            allocator.free(column.name);
+            allocator.free(column.type_sql);
+        }
+        allocator.free(self.columns);
         allocator.free(self.movement_plan_json);
         self.* = undefined;
     }
@@ -119,7 +125,8 @@ pub fn executeQueryPlan(runtime: Runtime, plan: *QueryPlan) !QueryOutcome {
     const json = try plan.json(runtime.allocator);
     errdefer runtime.allocator.free(json);
     const arena_runtime: Runtime = .{ .allocator = plan.arena.allocator(), .io = runtime.io, .environment = runtime.environment };
-    return .{ .result = try run.queryPlan(runtime, arena_runtime, plan.root, &plan.value), .movement_plan_json = json };
+    const output = try run.queryPlan(runtime, arena_runtime, plan.root, &plan.value);
+    return .{ .result = output.result, .columns = output.columns, .movement_plan_json = json };
 }
 
 /// Bind only lexical relation occurrences; string literals and unused semantic

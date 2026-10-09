@@ -135,6 +135,9 @@ pub const QueryPlan = @import("cross_database_query.zig").QueryPlan;
 pub const planQuery = @import("cross_database_query.zig").planQuery;
 pub const query = @import("cross_database_query.zig").query;
 pub const executeQueryPlan = @import("cross_database_query.zig").executeQueryPlan;
+pub const materializeQueryResult = @import("cross_database_run.zig").materializeQueryResult;
+pub const openConnection = @import("cross_database_run.zig").open;
+pub const DuckDBPool = adapter.DuckDBPool;
 
 pub fn command(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     var arena = std.heap.ArenaAllocator.init(runtime.allocator);

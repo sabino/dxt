@@ -7,7 +7,7 @@ const invocation = @import("invocation.zig");
 const Runtime = types.Runtime;
 const Dir = std.Io.Dir;
 
-const Record = struct {
+pub const Record = struct {
     model: []const u8,
     status: []const u8 = "pending",
     rows_moved: u64 = 0,
@@ -60,6 +60,8 @@ pub fn execute(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan:
 
 fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, directory: []const u8, run_id: []const u8, plan: *cross.Plan, model: cross.Model, record: *Record) !void {
     const allocator = runtime.allocator;
+    var target_lock = try @import("cross_database_lock.zig").acquire(runtime, root, plan.connections[model.destination], model.schema, model.identifier);
+    defer target_lock.deinit();
     var destination = try open(runtime, root, plan.connections[model.destination]);
     defer destination.deinit();
     var embedded: ?adapter.Session = null;
@@ -76,6 +78,7 @@ fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, dire
     try destination.begin();
     var transaction = true;
     defer if (transaction) destination.rollback() catch {};
+    try @import("cross_database_lock.zig").acquireDatabase(allocator, &destination, model.schema, model.identifier);
     try stageInputs(runtime, root, plan, model, record, workspace, spill_path);
     const query = try cross.renderSql(allocator, model, record.stages);
     defer allocator.free(query);
@@ -201,7 +204,9 @@ fn stageInputs(runtime: Runtime, root: []const u8, plan: *cross.Plan, model: cro
 
 /// Read a physical query plan through session-local stages; this path never
 /// creates a persistent output or commit marker. Returned rows own their memory.
-pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan: *cross.Plan) !adapter.QueryResult {
+pub const TypedQueryResult = struct { result: adapter.QueryResult, columns: []read.Column };
+
+pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan: *cross.Plan) !TypedQueryResult {
     const allocator = runtime.allocator;
     const model = plan.models[0];
     if (model.denied != null) return error.CrossDatabasePolicyDenied;
@@ -254,8 +259,38 @@ pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, pla
         batch.rows = &.{};
     }
     if (timer.expired.load(.acquire)) return error.CrossDatabaseTimeBudgetExceeded;
+    const columns = try allocator.alloc(read.Column, reader.columns.len);
+    for (columns) |*column| column.* = .{ .name = "", .kind = .other, .type_sql = "" };
+    errdefer {
+        for (columns) |column| {
+            allocator.free(column.name);
+            allocator.free(column.type_sql);
+        }
+        allocator.free(columns);
+    }
+    for (columns, reader.columns) |*column, source| {
+        column.name = try allocator.dupe(u8, source.name);
+        column.kind = source.kind;
+        column.type_sql = try allocator.dupe(u8, source.type_sql);
+    }
     output.rows = try rows.toOwnedSlice(allocator);
-    return output;
+    return .{ .result = output, .columns = columns };
+}
+
+/// Create/load an output inside the caller's destination-local transaction.
+/// relation is already SQL-quoted; the typed metadata comes from the final
+/// native reader, rather than inferred text or a lossy JSON conversion.
+pub fn materializeQueryResult(runtime: Runtime, destination: *adapter.Session, relation: []const u8, outcome: *const cross.QueryOutcome, source_adapter: []const u8) !void {
+    const allocator = runtime.allocator;
+    try createTypedTable(allocator, destination, relation, outcome.columns, false);
+    const shapes = try allocator.alloc(DecimalShape, outcome.columns.len);
+    defer allocator.free(shapes);
+    @memset(shapes, .{});
+    if (destination.* == .duckdb) for (outcome.columns, shapes, 0..) |column, *shape, c| {
+        if (std.mem.eql(u8, column.type_sql, "numeric")) for (outcome.result.rows) |row| if (row[c]) |text| try shape.observe(text);
+    };
+    try loadBatchSql(allocator, destination, relation, &outcome.result, source_adapter);
+    if (destination.* == .duckdb) try finishDecimalsSql(allocator, destination, relation, outcome.columns, shapes);
 }
 
 pub fn open(runtime: Runtime, root: []const u8, connection: cross.Connection) !adapter.Session {
@@ -269,7 +304,7 @@ pub fn open(runtime: Runtime, root: []const u8, connection: cross.Connection) !a
     return .{ .postgres = try adapter.PostgresConnection.open(runtime.allocator, connection.identity.connection_info orelse return error.MissingPostgresConnection, library) };
 }
 
-fn configure(runtime: Runtime, session: *adapter.Session, budget: cross.Budget, spill: []const u8) !void {
+pub fn configure(runtime: Runtime, session: *adapter.Session, budget: cross.Budget, spill: []const u8) !void {
     const allocator = runtime.allocator;
     if (session.* == .duckdb) {
         try Dir.cwd().createDirPath(runtime.io, spill);
@@ -332,6 +367,10 @@ const DecimalShape = struct {
 fn finishDecimals(allocator: std.mem.Allocator, destination: *adapter.Session, stage: []const u8, columns: []const read.Column, shapes: []const DecimalShape) !void {
     const relation = try adapter.quoteIdentifier(allocator, stage);
     defer allocator.free(relation);
+    try finishDecimalsSql(allocator, destination, relation, columns, shapes);
+}
+
+fn finishDecimalsSql(allocator: std.mem.Allocator, destination: *adapter.Session, relation: []const u8, columns: []const read.Column, shapes: []const DecimalShape) !void {
     for (columns, shapes) |column, shape| {
         if (!std.mem.eql(u8, column.type_sql, "numeric")) continue;
         const name = try adapter.quoteIdentifier(allocator, column.name);
@@ -467,20 +506,20 @@ fn writeState(runtime: Runtime, path: []const u8, id: []const u8, hash: []const 
     try cross.writeAtomic(runtime, path, out.written());
 }
 
-const Timer = struct {
+pub const Timer = struct {
     runtime: Runtime,
     session: *adapter.Session,
     seconds: u64,
     done: std.atomic.Value(bool) = .init(false),
     expired: std.atomic.Value(bool) = .init(false),
     worker: ?std.Thread = null,
-    fn init(runtime: Runtime, session: *adapter.Session, seconds: u64) Timer {
+    pub fn init(runtime: Runtime, session: *adapter.Session, seconds: u64) Timer {
         return .{ .runtime = runtime, .session = session, .seconds = seconds };
     }
-    fn start(self: *Timer) !void {
+    pub fn start(self: *Timer) !void {
         self.worker = try std.Thread.spawn(.{}, watch, .{self});
     }
-    fn deinit(self: *Timer) void {
+    pub fn deinit(self: *Timer) void {
         self.done.store(true, .release);
         if (self.worker) |thread| {
             thread.join();

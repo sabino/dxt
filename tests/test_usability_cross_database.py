@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -401,9 +402,67 @@ def test_shared_query_facade_postgres_aggregate_and_embedded_execution(project, 
     assert result.returncode == 0, result.stderr
     assert "leaked" not in result.stderr
     assert json.loads(result.stdout, parse_float=Decimal)["result"] == [{"amount": Decimal("1234567890123458.7891")}]
+
     request["options"].update(execution_connection="local", policy={"profiles_dir": str(project[0]), "allow_movement": True})
     request["bindings"][0]["source_query"] = f'select amount from "{project[2]}".customers'
     result = invoke_query(query_driver, project, request, native_environment)
     assert result.returncode == 0, result.stderr
     assert "leaked" not in result.stderr
     assert json.loads(result.stdout, parse_float=Decimal)["result"] == [{"amount": Decimal("1234567890123458.7891")}]
+
+
+def test_typed_metric_result_materializes_binary_decimal_uuid_and_timezone(project, native_environment, query_driver, postgres):
+    request = {"options": {"connection": "crm", "execution_connection": "local",
+                           "policy": {"profiles_dir": str(project[0]), "allow_movement": True}},
+               "sql": 'select amount,payload,uid,timestamp with time zone \'2024-02-29 12:00:00+02\' stamp from "logical"."typed"',
+               "bindings": [{"logical_id": "semantic.typed", "relation_name": '"logical"."typed"',
+                             "connection": "source", "source_relation": "main.typed",
+                             "source_query": "select amount,payload,uid from main.typed"}]}
+    result = invoke_query(query_driver, project, request, native_environment, "export")
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    with postgres.cursor() as cursor:
+        cursor.execute("select amount,encode(payload,'hex'),uid::text,stamp::text from public.typed_metric_export")
+        assert cursor.fetchone() == (Decimal("1234567890123456.7890"), "00ff275c",
+                                     "12345678-1234-5678-1234-567812345678", "2024-02-29 10:00:00+00")
+        cursor.execute("drop table public.typed_metric_export")
+
+
+@pytest.mark.parametrize("destination", ["duckdb", "postgres"])
+def test_process_owned_target_lock_rejects_overlap_and_recovers_after_termination(project, native_environment, destination):
+    config = project[1]
+    config["models"] = {"locked": {"destination": "warehouse" if destination == "duckdb" else "crm",
+        "inputs": {"wait": {"connection": "crm", "query": "select 1::bigint as id from pg_sleep(10)"}},
+        "sql": "select * from {{ input('wait') }}"}}
+    if destination == "postgres":
+        config["connections"]["crm_reader"] = {"profile": "cross", "target": "crm"}
+        config["models"]["locked"]["inputs"]["wait"]["connection"] = "crm_reader"
+    (project[0] / "dxt_connections.yml").write_text(json.dumps(config))
+    args = [str(DXT), "cross-database", "run", "--project-dir", str(project[0]),
+            "--profiles-dir", str(project[0]), "--allow-movement"]
+    process = subprocess.Popen(args, cwd=ROOT, env=native_environment, text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        # PostgreSQL activity proves the first run owns its target lock and has
+        # entered its source read; this avoids timing-only synchronization.
+        import psycopg2
+        profiles = json.loads((project[0] / "profiles.yml").read_text())
+        output = profiles["cross"]["outputs"]["crm"]
+        with psycopg2.connect(**{key: output[key] for key in ("host", "port", "dbname", "user")}) as monitor:
+            for _ in range(100):
+                with monitor.cursor() as cursor:
+                    cursor.execute("select pg_stat_clear_snapshot()")
+                    cursor.execute("select count(*) from pg_stat_activity where state='active' and query like 'fetch forward%__dxt_extract%'")
+                    if cursor.fetchone()[0]: break
+                time.sleep(0.02)
+            else: pytest.fail("First run did not reach its bounded source cursor")
+        result = subprocess.run(args, cwd=ROOT, env=native_environment, capture_output=True, text=True, timeout=5)
+        assert result.returncode != 0
+        assert "CrossDatabaseTargetLocked" in result.stderr
+    finally:
+        process.terminate()
+        process.communicate(timeout=5)
+    config["models"]["locked"]["inputs"]["wait"]["query"] = "select 17::bigint as id"
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
