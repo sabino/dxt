@@ -11,6 +11,7 @@ pub fn stringify(allocator: std.mem.Allocator, value: expression.Value) ![]const
 }
 
 fn write(allocator: std.mem.Allocator, writer: *std.Io.Writer, value: expression.Value) anyerror!void {
+    if (expression.integerProtocol(value)) |number| return writer.writeAll(number);
     switch (value) {
         .none => try writer.writeAll("null"),
         .boolean => |boolean| try writer.writeAll(if (boolean) "true" else "false"),

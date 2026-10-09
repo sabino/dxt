@@ -983,6 +983,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
             return value;
         }
     }
+    if (try @import("regex_context.zig").resolve(allocator, path)) |value| return value;
     if (context.getVar(path)) |value| return .{ .string = value };
     if (context.getList(path)) |strings| {
         const values = try native_expr.allocateValues(allocator, strings.len);
@@ -1118,6 +1119,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         if (mutation.original) |original| for (context.bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original, mutation.replacement.?, 0);
         return mutation.result;
     }
+    if (try @import("regex_context.zig").call(allocator, name, args, context.host())) |value| return value;
     if (try @import("grants_context.zig").call(allocator, name, args)) |value| return value;
     if (try dbt_context.call(allocator, context.graph.adapter_type, name, args)) |value| return value;
     if (std.mem.eql(u8, name, "adapter.type")) {
