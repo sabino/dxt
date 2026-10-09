@@ -804,7 +804,7 @@
         },
         "docs": {"$ref": "#/$defs/docs_config"},
         "config": {"$ref": "#/$defs/seed_config"},
-        "depends_on": {"$ref": "#/$defs/depends_on"}
+        "depends_on": {"$ref": "#/$defs/macro_depends_on"}
       }
     },
     "test_node": {

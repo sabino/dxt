@@ -109,3 +109,22 @@ def test_compile_database_jinja_and_statement_transactions_match_core(tmp_path, 
         observed[engine] = (artifact["compiled_code"].strip(), artifact["status"], count)
         contracts.assert_artifact(project / "target/run_results.json")
     assert observed["native"] == observed["core"] == ("select 7 as id", "success", int(commit))
+
+
+def test_nested_argument_fixture_is_valid_in_pinned_core(tmp_path, core_runner):
+    project = tmp_path / "arguments"
+    shutil.copytree(ROOT / "tests/fixtures/generic_test_arguments", project)
+    with (project / "dbt_project.yml").open("a") as stream:
+        stream.write("\nprofile: compile_tasks\n")
+    (project / "profiles.yml").write_text(f"compile_tasks:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: {project / 'warehouse.duckdb'}\n      schema: main\n")
+    common = ["compile", "--project-dir", str(project), "--profiles-dir", str(project), "--select", "test_type:generic"]
+    native = subprocess.run([DXT, *common, "--target-path", "native"], capture_output=True, text=True)
+    assert native.returncode == 0, native.stderr
+    oracle = core_runner.invoke(["--quiet", *common, "--target-path", "core", "--no-partial-parse"])
+    assert oracle.success, oracle.exception
+    actual = json.loads((project / "native/run_results.json").read_text())
+    expected = json.loads((project / "core/run_results.json").read_text())
+    assert {(row["unique_id"], row["status"]) for row in actual["results"]} == {(row["unique_id"], row["status"]) for row in expected["results"]}
+    for target in ["native", "core"]:
+        contracts.assert_artifact(project / target / "manifest.json")
+        contracts.assert_artifact(project / target / "run_results.json")

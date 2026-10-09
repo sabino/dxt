@@ -560,6 +560,9 @@ def test_compile_renders_custom_generic_test_control_flow(tmp_path: Path):
 select {{ column_name }} from {{ model }}
 {% endif %}
 {% endtest %}
+{% data_test nonzero_amount(model, column_name) %}
+select {{ column_name }} from {{ model }} where {{ column_name }} = 0
+{% enddata_test %}
 """
     )
     target = tmp_path / "compile-target"
@@ -571,7 +574,7 @@ select {{ column_name }} from {{ model }}
     )
     assert result.returncode == 0, result.stderr
     manifest = json.loads((target / "manifest.json").read_text())
-    compiled = next(node["compiled_code"] for node in manifest["nodes"].values() if node["resource_type"] == "test")
+    compiled = next(node["compiled_code"] for node in manifest["nodes"].values() if node["name"] == "positive_amount_orders_amount")
     assert 'select amount from "main"."orders"' in compiled
     assert "{%" not in compiled and "{{" not in compiled
 
@@ -835,6 +838,9 @@ def test_test_records_custom_generic_control_flow_missing_relation_error(tmp_pat
 select {{ column_name }} from {{ model }}
 {% endif %}
 {% endtest %}
+{% data_test nonzero_amount(model, column_name) %}
+select {{ column_name }} from {{ model }} where {{ column_name }} = 0
+{% enddata_test %}
 """
     )
     target = tmp_path / "test-target"
@@ -3261,6 +3267,8 @@ def write_seed_column_test_project(project: Path, seed_csv: str, schema_tests: s
 version: "1.0"
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "seeds" / "raw_customers.csv").write_text(seed_csv)
@@ -3335,6 +3343,8 @@ version: "1.0"
 model-paths: ["models"]
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "seeds" / "raw_customers.csv").write_text(
@@ -3798,6 +3808,8 @@ def write_accepted_values_model_test_project(project: Path, customers_sql: str) 
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "customers.sql").write_text(customers_sql)
@@ -3824,6 +3836,8 @@ def write_accepted_values_quote_false_model_test_project(project: Path, customer
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "customers.sql").write_text(customers_sql)
@@ -3851,6 +3865,8 @@ def write_source_column_test_project(project: Path) -> None:
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "schema.yml").write_text(
@@ -3879,6 +3895,8 @@ def write_source_column_quote_false_test_project(project: Path) -> None:
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "schema.yml").write_text(
@@ -3906,6 +3924,8 @@ def write_source_relationships_test_project(project: Path) -> None:
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "customers.sql").write_text(
@@ -3944,6 +3964,8 @@ def write_source_to_source_relationships_test_project(project: Path) -> None:
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "schema.yml").write_text(
@@ -3978,6 +4000,8 @@ version: "1.0"
 model-paths: ["models"]
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "orders_model.sql").write_text("select 1 as customer_id\n")
@@ -4033,6 +4057,8 @@ def write_relationships_model_test_project(project: Path, customers_sql: str, or
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "customers.sql").write_text(customers_sql)
@@ -4966,7 +4992,7 @@ def test_compile_writes_selected_generic_test_artifacts_without_duckdb(tmp_path:
     assert result.returncode == 0, result.stderr
     assert "Compiled 0 model(s) and 5 test(s)" in result.stdout
     assert not (target / "dxt.duckdb").exists()
-    assert not (target / "run_results.json").exists()
+    assert_run_results_schema_slice(target / "run_results.json")
 
     manifest_path = target / "manifest.json"
     assert_manifest_schema_slice(manifest_path)
@@ -6867,7 +6893,7 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
             if node["patch_path"] is not None:
                 assert not Path(node["patch_path"]).is_absolute()
         assert not Path(node["original_file_path"]).is_absolute()
-        assert set(node["depends_on"]) == {"macros", "nodes"}
+        assert set(node["depends_on"]) == ({"macros"} if node["resource_type"] == "seed" else {"macros", "nodes"})
     for unique_id, source in manifest["sources"].items():
         assert unique_id == source["unique_id"]
         assert source["resource_type"] == "source"
