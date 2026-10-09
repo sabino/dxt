@@ -26,6 +26,9 @@ pub const Options = struct {
     allow_retention: bool = false,
     full_refresh: bool = false,
     probe_cancellation: bool = false,
+    max_concurrent_tasks: ?u16 = null,
+    max_retries: ?u8 = null,
+    retry_delay_ms: ?u64 = null,
     max_rows: ?u64 = null,
     max_bytes: ?u64 = null,
     max_memory_bytes: ?u64 = null,
@@ -58,6 +61,9 @@ pub fn printHelp(writer: *std.Io.Writer) !void {
         \\  --run-id <uuid>          Recover one recorded run's cleanup/commit state.
         \\  --older-than-seconds <n> Cleanup retained stages older than n seconds.
         \\  --probe-cancellation     Verify native cancellation during connection debug.
+        \\  --max-concurrent-tasks <n> Bound the native task scheduler (1..32).
+        \\  --max-retries <n>        Retry known aborted transactions or target contention.
+        \\  --retry-delay-ms <n>     Initial exponential backoff (0..10000 ms).
         \\
     );
 }
@@ -73,7 +79,7 @@ pub fn parseOptions(args: []const []const u8) !Options {
             index += 1;
             if (index >= args.len or args[index].len == 0 or std.mem.startsWith(u8, args[index], "--")) return error.MissingCrossDatabaseOptionValue;
             const value = args[index];
-            if (eq(arg, "--project-dir")) options.project_dir = value else if (eq(arg, "--config")) options.config = value else if (eq(arg, "--profiles-dir")) options.profiles_dir = value else if (eq(arg, "--select")) options.select = value else if (eq(arg, "--output")) options.output = value else if (eq(arg, "--run-id")) options.run_id = value else if (eq(arg, "--plan-hash")) options.plan_hash = value else if (eq(arg, "--max-rows")) options.max_rows = try number(value) else if (eq(arg, "--max-bytes")) options.max_bytes = try number(value) else if (eq(arg, "--max-memory-bytes")) options.max_memory_bytes = try number(value) else if (eq(arg, "--max-spill-bytes")) options.max_spill_bytes = try number(value) else if (eq(arg, "--older-than-seconds")) options.older_than_seconds = try number(value) else return error.InvalidCrossDatabaseOption;
+            if (eq(arg, "--project-dir")) options.project_dir = value else if (eq(arg, "--config")) options.config = value else if (eq(arg, "--profiles-dir")) options.profiles_dir = value else if (eq(arg, "--select")) options.select = value else if (eq(arg, "--output")) options.output = value else if (eq(arg, "--run-id")) options.run_id = value else if (eq(arg, "--plan-hash")) options.plan_hash = value else if (eq(arg, "--max-rows")) options.max_rows = try number(value) else if (eq(arg, "--max-bytes")) options.max_bytes = try number(value) else if (eq(arg, "--max-memory-bytes")) options.max_memory_bytes = try number(value) else if (eq(arg, "--max-spill-bytes")) options.max_spill_bytes = try number(value) else if (eq(arg, "--older-than-seconds")) options.older_than_seconds = try number(value) else if (eq(arg, "--max-concurrent-tasks")) options.max_concurrent_tasks = std.math.cast(u16, try number(value)) orelse return error.InvalidCrossDatabaseScheduler else if (eq(arg, "--max-retries")) options.max_retries = std.math.cast(u8, try number(value)) orelse return error.InvalidCrossDatabaseScheduler else if (eq(arg, "--retry-delay-ms")) options.retry_delay_ms = try number(value) else return error.InvalidCrossDatabaseOption;
         }
     }
     if (options.mode == .recover and options.run_id == null) return error.MissingCrossDatabaseRunId;
@@ -99,6 +105,7 @@ pub const Connection = struct {
     trust_domain: []const u8,
     allowed_destinations: []const []const u8,
     egress_per_gib: f64 = 0,
+    limits: @import("cross_database_schedule.zig").Limits = .{},
     // Credentials and local paths remain in memory and are never serialized.
     identity: types.AdapterIdentity,
 };
@@ -146,10 +153,11 @@ pub const Model = struct {
     estimated_bytes: u64 = 0,
     estimated_cost: f64 = 0,
     estimate_confidence: []const u8 = "declared",
+    depends_on: []const []const u8 = &.{},
     alternatives: []const @import("cross_database_cost.zig").Alternative = &.{},
     denied: ?[]const u8 = null,
 };
-pub const Plan = struct { hash: []const u8, definition_hash: []const u8 = "", catalog_generation: u64 = 0, connections: []Connection, models: []Model };
+pub const Plan = struct { hash: []const u8, definition_hash: []const u8 = "", catalog_generation: u64 = 0, scheduler: @import("cross_database_schedule.zig").Settings = .{}, connections: []Connection, models: []Model };
 pub const RelationBinding = @import("cross_database_query.zig").RelationBinding;
 pub const QueryOptions = @import("cross_database_query.zig").QueryOptions;
 pub const QueryOutcome = @import("cross_database_query.zig").QueryOutcome;
@@ -205,6 +213,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
     if (config != .object) return error.InvalidCrossDatabaseConfig;
     const connection_config = values.get(config, "connections") orelse return error.MissingCrossDatabaseConnections;
     if (connection_config != .object or connection_config.object.count() == 0) return error.MissingCrossDatabaseConnections;
+    if (connection_config.object.count() > 64) return error.CrossDatabaseConnectionBudgetExceeded;
     const profiles_dir = options.profiles_dir orelse if (runtime.environment) |env| env.get("DBT_PROFILES_DIR") orelse root else root;
     const profiles_path = try std.fs.path.join(runtime.allocator, &.{ profiles_dir, "profiles.yml" });
     const profiles_text = try Dir.cwd().readFileAlloc(runtime.io, profiles_path, runtime.allocator, .limited(16 * 1024 * 1024));
@@ -220,6 +229,11 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
         if (identity.database_path != null) identity.database_path_base = profiles_dir;
         const role = try optionalFieldString(raw, "role") orelse "both";
         if (!eq(role, "both") and !eq(role, "source") and !eq(role, "destination") and !eq(role, "stage")) return error.InvalidCrossDatabaseConnectionRole;
+        const capacity = values.get(raw, "limits") orelse .null;
+        const queries = try optionalUnsigned(capacity, "max_queries") orelse 1;
+        const readers = try optionalUnsigned(capacity, "max_streaming_readers") orelse 1;
+        const loaders = try optionalUnsigned(capacity, "max_loaders") orelse 1;
+        if (queries == 0 or queries > 256 or readers == 0 or readers > 256 or loaders == 0 or loaders > 256) return error.InvalidCrossDatabaseConnectionLimit;
         try connections.append(runtime.allocator, .{
             .name = entry.key_ptr.*,
             .profile_name = profile_name,
@@ -230,10 +244,39 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
             .allowed_destinations = try strings(runtime.allocator, values.get(raw, "allowed_destinations") orelse .null),
             .egress_per_gib = try optionalFloat(raw, "egress_per_gib") orelse 0,
             .identity = identity,
+            .limits = .{ .max_queries = @intCast(queries), .max_streaming_readers = @intCast(readers), .max_loaders = @intCast(loaders) },
         });
     }
     const model_config = values.get(config, "models") orelse return error.MissingCrossDatabaseModels;
     if (model_config != .object or model_config.object.count() == 0) return error.MissingCrossDatabaseModels;
+    if (model_config.object.count() > 1024) return error.CrossDatabaseModelBudgetExceeded;
+    const scheduling = values.get(config, "scheduler") orelse .null;
+    const concurrency = options.max_concurrent_tasks orelse try optionalUnsigned(scheduling, "max_concurrent_tasks") orelse 1;
+    const retries = options.max_retries orelse try optionalUnsigned(scheduling, "max_retries") orelse 2;
+    const retry_delay = options.retry_delay_ms orelse try optionalUnsigned(scheduling, "retry_delay_ms") orelse 50;
+    const scheduling_memory = try optionalUnsigned(scheduling, "max_memory_bytes") orelse 512 * 1024 * 1024;
+    if (concurrency == 0 or concurrency > 32 or retries > 8 or retry_delay > 10000 or scheduling_memory == 0) return error.InvalidCrossDatabaseScheduler;
+    const scheduler_settings: @import("cross_database_schedule.zig").Settings = .{ .max_concurrent_tasks = @intCast(concurrency), .max_retries = @intCast(retries), .retry_delay_ms = retry_delay, .max_memory_bytes = scheduling_memory };
+    var selected_models: std.StringHashMap(void) = .init(runtime.allocator);
+    if (options.select) |selected| {
+        if (values.get(model_config, selected) == null) return error.MissingCrossDatabaseSelectedModel;
+        try selected_models.put(selected, {});
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var selected_iterator = model_config.object.iterator();
+            while (selected_iterator.next()) |entry| {
+                if (!selected_models.contains(entry.key_ptr.*)) continue;
+                for (try strings(runtime.allocator, values.get(entry.value_ptr.*, "depends_on") orelse .null)) |dependency| {
+                    if (values.get(model_config, dependency) == null) return error.MissingCrossDatabaseModelDependency;
+                    if (!selected_models.contains(dependency)) {
+                        try selected_models.put(dependency, {});
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
     var catalog = try @import("cross_database_catalog.zig").load(runtime, root);
     defer catalog.deinit();
     const catalog_age = try optionalUnsigned(values.get(config, "catalog") orelse .null, "max_age_seconds") orelse 86400;
@@ -251,7 +294,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
     while (model_iterator.next()) |entry| {
         const name = entry.key_ptr.*;
         if (!identifier(name) or entry.value_ptr.* != .object) return error.InvalidCrossDatabaseModel;
-        if (options.select) |selected| if (!eq(name, selected)) continue;
+        if (options.select != null and !selected_models.contains(name)) continue;
         const raw = entry.value_ptr.*;
         const destination = try connectionIndex(connections.items, try fieldString(raw, "destination"));
         const execution_connection = if (try optionalFieldString(raw, "execution_connection")) |name_value| try connectionIndex(connections.items, name_value) else destination;
@@ -337,6 +380,8 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
         };
         try fingerprint.writer.writeAll(sql);
         var model: Model = .{ .name = name, .destination = destination, .execution_connection = execution_connection, .schema = try optionalFieldString(raw, "schema") orelse connections.items[destination].identity.target_schema, .identifier = try optionalFieldString(raw, "alias") orelse name, .sql = sql, .inputs = inputs.items, .strategy = "single_engine_pushdown", .execution_engine = connections.items[execution_connection].adapter_type, .budget = budget };
+        model.depends_on = try strings(runtime.allocator, values.get(raw, "depends_on") orelse .null);
+        if (budget.max_memory_bytes > scheduler_settings.max_memory_bytes) model.denied = "model memory budget exceeds the global scheduler reservation limit";
         model.materialized = try optionalFieldString(raw, "materialized") orelse "table";
         if (!eq(model.materialized, "table") and !eq(model.materialized, "incremental")) return error.InvalidCrossDatabaseMaterialization;
         model.incremental_strategy = try optionalFieldString(raw, "incremental_strategy") orelse "merge";
@@ -390,7 +435,9 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
         try models.append(runtime.allocator, model);
     }
     if (models.items.len == 0) return error.MissingCrossDatabaseModels;
+    try @import("cross_database_schedule.zig").validate(runtime.allocator, models.items);
     const definition_hash = try digest(runtime.allocator, fingerprint.written());
+    try std.json.Stringify.value(scheduler_settings, .{}, &fingerprint.writer);
     // Evidence changes the reviewed plan, while recovery remains bound to the
     // unchanged project and physical profiles plus the recorded commit hash.
     for (models.items) |*model| {
@@ -430,7 +477,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
         model.alternatives = try @import("cross_database_cost.zig").alternatives(runtime.allocator, connections.items, model.*, options.allow_movement or try optionalBool(policy, "allow_movement", false), options.allow_sensitive, options.allow_raw_extract or try optionalBool(policy, "allow_raw_extract", false), options.allow_retention or try optionalBool(policy, "allow_retention", false));
         try std.json.Stringify.value(.{ .name = model.name, .inputs = model.inputs, .confidence = model.estimate_confidence }, .{}, &fingerprint.writer);
     }
-    return .{ .hash = try digest(runtime.allocator, fingerprint.written()), .definition_hash = definition_hash, .catalog_generation = catalog.value.generation, .connections = connections.items, .models = models.items };
+    return .{ .hash = try digest(runtime.allocator, fingerprint.written()), .definition_hash = definition_hash, .catalog_generation = catalog.value.generation, .scheduler = scheduler_settings, .connections = connections.items, .models = models.items };
 }
 
 pub fn renderSql(allocator: std.mem.Allocator, model: Model, stage_names: ?[]const []const u8) ![]const u8 {
@@ -621,17 +668,19 @@ pub fn planJson(allocator: std.mem.Allocator, plan: Plan) ![]const u8 {
     try std.json.Stringify.value(plan.hash, .{}, writer);
     try writer.writeAll(",\"definition_hash\":");
     try std.json.Stringify.value(plan.definition_hash, .{}, writer);
-    try writer.print(",\"catalog_generation\":{d},\"connections\":[", .{plan.catalog_generation});
+    try writer.print(",\"catalog_generation\":{d},\"scheduler\":", .{plan.catalog_generation});
+    try std.json.Stringify.value(plan.scheduler, .{}, writer);
+    try writer.writeAll(",\"connections\":[");
     for (plan.connections, 0..) |connection, i| {
         if (i != 0) try writer.writeByte(',');
-        try std.json.Stringify.value(.{ .name = connection.name, .profile = connection.profile_name, .target = connection.target, .adapter = connection.adapter_type, .role = connection.role, .trust_domain = connection.trust_domain, .allowed_destinations = connection.allowed_destinations, .capabilities = .{ .transactions = true, .transactional_ddl = true, .native_reads = true, .temporary_stages = true } }, .{}, writer);
+        try std.json.Stringify.value(.{ .name = connection.name, .profile = connection.profile_name, .target = connection.target, .adapter = connection.adapter_type, .role = connection.role, .trust_domain = connection.trust_domain, .allowed_destinations = connection.allowed_destinations, .limits = connection.limits, .native_upper_bounds = @import("cross_database_schedule.zig").effectiveLimits(connection), .scheduling_note = "physical aliases share the strictest limits; destination DDL writes serialize", .capabilities = .{ .transactions = true, .transactional_ddl = true, .native_reads = true, .temporary_stages = true } }, .{}, writer);
     }
     try writer.writeAll("],\"models\":[");
     for (plan.models, 0..) |model, i| {
         if (i != 0) try writer.writeByte(',');
         const query_sql = try renderSql(allocator, model, null);
         defer allocator.free(query_sql);
-        try std.json.Stringify.value(.{ .name = model.name, .destination = plan.connections[model.destination].name, .execution_connection = plan.connections[model.execution_connection].name, .output = .{ .schema = model.schema, .identifier = model.identifier }, .materialized = model.materialized, .unique_key = model.unique_key, .incremental_strategy = model.incremental_strategy, .full_refresh = model.full_refresh, .strategy = model.strategy, .execution_engine = model.execution_engine, .output_movement = model.execution_connection != model.destination, .budget = model.budget, .estimated_rows = model.estimated_rows, .estimated_scan_bytes = @as(?u64, null), .estimated_moved_bytes = model.estimated_bytes, .estimated_load_bytes = model.estimated_bytes, .estimated_egress_cost = model.estimated_cost, .confidence = model.estimate_confidence, .permitted = model.denied == null, .denial = model.denied, .query = query_sql, .inputs = model.inputs, .alternatives = model.alternatives, .largest_movement_contributor = @import("cross_database_cost.zig").largest(model), .suggested_changes = if (model.denied != null) @as([]const []const u8, &.{ "reduce source rows with a filter or partial aggregate", "project only required columns", "choose an authorized destination or adjust the declared budget" }) else @as([]const []const u8, &.{}) }, .{}, writer);
+        try std.json.Stringify.value(.{ .name = model.name, .destination = plan.connections[model.destination].name, .execution_connection = plan.connections[model.execution_connection].name, .output = .{ .schema = model.schema, .identifier = model.identifier }, .materialized = model.materialized, .unique_key = model.unique_key, .incremental_strategy = model.incremental_strategy, .full_refresh = model.full_refresh, .strategy = model.strategy, .execution_engine = model.execution_engine, .output_movement = model.execution_connection != model.destination, .budget = model.budget, .estimated_rows = model.estimated_rows, .estimated_scan_bytes = @as(?u64, null), .estimated_moved_bytes = model.estimated_bytes, .estimated_load_bytes = model.estimated_bytes, .estimated_egress_cost = model.estimated_cost, .confidence = model.estimate_confidence, .permitted = model.denied == null, .denial = model.denied, .query = query_sql, .inputs = model.inputs, .alternatives = model.alternatives, .depends_on = model.depends_on, .largest_movement_contributor = @import("cross_database_cost.zig").largest(model), .suggested_changes = if (model.denied != null) @as([]const []const u8, &.{ "reduce source rows with a filter or partial aggregate", "project only required columns", "choose an authorized destination or adjust the declared budget" }) else @as([]const []const u8, &.{}) }, .{}, writer);
     }
     try writer.writeAll("]}\n");
     return output.toOwnedSlice();

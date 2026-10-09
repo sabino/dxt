@@ -222,7 +222,8 @@ pub const Reader = struct {
         while (connection.api.PQgetResult(connection.handle)) |raw| {
             defer connection.api.PQclear(raw);
             if (connection.api.PQresultStatus(raw) != 2) {
-                failed = error.PostgresExecutionFailed;
+                const state = connection.api.PQresultErrorField(raw, 'C');
+                failed = @import("native_postgres.zig").classifySqlState(if (state) |code| std.mem.span(code) else null);
                 continue;
             }
             const count_columns: usize = @intCast(connection.api.PQnfields(raw));

@@ -21,6 +21,11 @@ pub const Record = struct {
     source_watermarks: []const @import("cross_database_incremental.zig").Watermark = &.{},
     watermarks_committed: bool = false,
     run_id: []const u8 = "",
+    attempt_count: u8 = 0,
+    attempts: []const @import("cross_database_schedule.zig").Attempt = &.{},
+    active_connection: ?[]const u8 = null,
+    throttled_connection: ?[]const u8 = null,
+    target_lock: []const u8 = "not acquired",
     destination_version: ?[]const u8 = null,
     destination_capabilities: ?adapter.Capabilities = null,
     stage_artifacts: []const @import("cross_database_cache.zig").Observation = &.{},
@@ -39,23 +44,13 @@ pub fn execute(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan:
     const allocator = gpa.allocator();
     var pool = adapter.DuckDBPool.init(allocator, runtime.io, runtime.environment);
     defer pool.deinit();
-    var failed = false;
     for (plan.models, records) |model, *record| {
-        record.status = "running";
         const names = try arena_runtime.allocator.alloc([]const u8, model.inputs.len);
         for (model.inputs, 0..) |input, index| names[index] = try std.fmt.allocPrint(arena_runtime.allocator, "__dxt_{s}_{s}", .{ run_id[0..8], input.name });
         record.stages = names;
-        try writeState(arena_runtime, path, run_id, plan.hash, plan.definition_hash, records);
-        executeModel(.{ .allocator = allocator, .io = runtime.io, .environment = runtime.environment, .duckdb_pool = &pool }, arena_runtime, root, directory, run_id, plan, model, record) catch |err| {
-            record.status = "error";
-            record.error_name = @errorName(err);
-            record.cleanup = "complete";
-            failed = true;
-            try stderr.print("error: cross-database model {s}: {s}; destination rolled back and temporary stages disconnected\n", .{ model.name, @errorName(err) });
-        };
-        try writeState(arena_runtime, path, run_id, plan.hash, plan.definition_hash, records);
-        try stdout.print("{s}: {s}; moved {d} rows / {d} bytes; run {s}\n", .{ model.name, record.status, record.rows_moved, record.bytes_moved, run_id });
     }
+    const execution_runtime: Runtime = .{ .allocator = allocator, .io = runtime.io, .environment = runtime.environment, .duckdb_pool = &pool };
+    const failed = try @import("cross_database_schedule.zig").execute(execution_runtime, arena_runtime, root, directory, run_id, path, plan, records, stdout, stderr);
     const spill = try std.fs.path.join(arena_runtime.allocator, &.{ directory, "spill" });
     Dir.cwd().deleteTree(runtime.io, spill) catch |err| {
         for (records) |*record| record.cleanup = "incomplete";
@@ -66,10 +61,19 @@ pub fn execute(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan:
     if (failed) return error.CrossDatabaseExecutionFailed;
 }
 
-fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, directory: []const u8, run_id: []const u8, plan: *cross.Plan, model: cross.Model, record: *Record) !void {
+pub fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, directory: []const u8, run_id: []const u8, plan: *cross.Plan, model: cross.Model, record: *Record) !void {
     const allocator = runtime.allocator;
-    var target_lock = try @import("cross_database_lock.zig").acquire(runtime, root, plan.connections[model.destination], model.schema, model.identifier);
-    defer target_lock.deinit();
+    record.active_connection = plan.connections[model.destination].name;
+    var target_lock = @import("cross_database_lock.zig").acquire(runtime, root, plan.connections[model.destination], model.schema, model.identifier) catch |err| {
+        record.target_lock = "contended";
+        return err;
+    };
+    record.target_lock = "held";
+    defer {
+        target_lock.deinit();
+        record.target_lock = "released";
+    }
+    try writeTask(arena_runtime, root, record);
     var destination = try open(runtime, root, plan.connections[model.destination]);
     defer destination.deinit();
     record.destination_version = try @import("cross_database_catalog.zig").version(arena_runtime.allocator, &destination);
@@ -105,6 +109,7 @@ fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, dire
         record.source_watermarks = progress;
     }
     try stageInputs(runtime, arena_runtime.allocator, root, plan, physical, record, workspace, spill_path);
+    record.active_connection = plan.connections[model.execution_connection].name;
     const query = try cross.renderSql(allocator, physical, record.stages);
     defer allocator.free(query);
     const schema = try adapter.quoteIdentifier(allocator, model.schema);
@@ -205,6 +210,7 @@ fn stageInputs(runtime: Runtime, observation_allocator: std.mem.Allocator, root:
     var observations: std.ArrayList(cache.Observation) = .empty;
     for (model.inputs, 0..) |input, index| {
         if (!input.moved) continue;
+        record.active_connection = plan.connections[input.connection].name;
         var retained: ?cache.Source = if (input.stage_connection != null) try cache.source(runtime, root, plan, model, input, record, spill_path) else null;
         defer if (retained) |*value| value.deinit();
         var original: ?adapter.Session = null;
@@ -214,6 +220,7 @@ fn stageInputs(runtime: Runtime, observation_allocator: std.mem.Allocator, root:
             break :blk &original.?;
         };
         const source_connection = plan.connections[input.stage_connection orelse input.connection];
+        record.active_connection = source_connection.name;
         const source_query = if (retained) |value| value.query else input.query;
         try configure(runtime, source, model.budget, spill_path);
         var timer = Timer.init(runtime, source, model.budget.max_query_seconds);
@@ -252,6 +259,12 @@ fn stageInputs(runtime: Runtime, observation_allocator: std.mem.Allocator, root:
         const location = if (retained) |value| try std.fmt.allocPrint(observation_allocator, "{s}.dxt_stage.{s}", .{ source_connection.name, value.manifest.dataset }) else record.stages[index];
         try observations.append(observation_allocator, try cache.observation(observation_allocator, .{ .input = input.name, .logical_id = input.logical_id, .location = location, .mode = input.stage_mode, .cache_hit = if (retained) |value| value.hit else false, .query_hash = if (retained) |value| value.manifest.query_hash else try cross.digest(observation_allocator, input.query), .rows = reader.guard.rows, .bytes = reader.guard.bytes, .checksum = &checksum, .sensitivity = input.sensitivity, .retention_until_epoch = if (retained) |value| value.manifest.expires_epoch else null, .columns = try physicalColumns(observation_allocator, workspace, reader.columns, decimal_shapes), .source_columns = reader.columns, .source_adapter = plan.connections[input.connection].adapter_type, .source_version = if (retained) |value| value.manifest.source_version else try @import("cross_database_catalog.zig").version(observation_allocator, source), .source_capabilities = if (retained) |value| value.manifest.source_capabilities else source.capabilities(), .data_as_of_epoch = if (retained) |value| value.manifest.created_epoch else @import("cross_database_catalog.zig").epoch(runtime.io), .cleanup = if (retained != null) "retained by declared policy" else "session scoped" }));
         record.stage_artifacts = observations.items;
+        if (record.run_id.len != 0) {
+            const stage_path = try std.fmt.allocPrint(observation_allocator, ".dxt/cross-runs/{s}/stages/{s}.json", .{ record.run_id, model.name });
+            const artifact_runtime: Runtime = .{ .allocator = observation_allocator, .io = runtime.io };
+            const ready = try std.json.Stringify.valueAlloc(observation_allocator, .{ .schema_version = 1, .run_id = record.run_id, .model = model.name, .stages = record.stage_artifacts }, .{});
+            try cross.writeAtomic(artifact_runtime, try cross.projectPath(artifact_runtime, root, stage_path), ready);
+        }
     }
 }
 
@@ -600,7 +613,13 @@ fn qualified(allocator: std.mem.Allocator, schema: []const u8, name: []const u8)
     defer allocator.free(b);
     return std.fmt.allocPrint(allocator, "{s}.{s}", .{ a, b });
 }
-fn writeState(runtime: Runtime, path: []const u8, id: []const u8, hash: []const u8, definition_hash: []const u8, records: []const Record) !void {
+pub fn writeTask(runtime: Runtime, root: []const u8, record: *const Record) !void {
+    const path = try std.fmt.allocPrint(runtime.allocator, ".dxt/cross-runs/{s}/tasks/{s}.json", .{ record.run_id, record.model });
+    const json = try std.json.Stringify.valueAlloc(runtime.allocator, record.*, .{});
+    try cross.writeAtomic(runtime, try cross.projectPath(runtime, root, path), json);
+}
+
+pub fn writeState(runtime: Runtime, path: []const u8, id: []const u8, hash: []const u8, definition_hash: []const u8, records: []const Record) !void {
     var out: std.Io.Writer.Allocating = .init(runtime.allocator);
     try std.json.Stringify.value(.{ .schema_version = 1, .run_id = id, .plan_hash = hash, .definition_hash = definition_hash, .models = records }, .{}, &out.writer);
     try cross.writeAtomic(runtime, path, out.written());

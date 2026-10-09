@@ -56,6 +56,8 @@ pub const Task = struct {
     estimated_bytes: u64,
     estimated_cost: f64,
     error_name: ?[]const u8,
+    attempt_count: u8 = 0,
+    throttled_connection: ?[]const u8 = null,
 };
 pub const Run = struct {
     run_id: []const u8,
@@ -176,7 +178,7 @@ pub fn record(runtime: cross.Runtime, root: []const u8, plan: *const cross.Plan,
     const tasks = try allocator.alloc(Task, records.len);
     const now = epoch(runtime.io);
     for (plan.models, records, tasks) |model, completed, *task| {
-        task.* = .{ .model = model.name, .status = completed.status, .strategy = model.strategy, .rows_moved = completed.rows_moved, .bytes_moved = completed.bytes_moved, .output_rows = completed.output_rows, .egress_cost = completed.egress_cost, .estimated_rows = model.estimated_rows, .estimated_bytes = model.estimated_bytes, .estimated_cost = model.estimated_cost, .error_name = completed.error_name };
+        task.* = .{ .model = model.name, .status = completed.status, .strategy = model.strategy, .rows_moved = completed.rows_moved, .bytes_moved = completed.bytes_moved, .output_rows = completed.output_rows, .egress_cost = completed.egress_cost, .estimated_rows = model.estimated_rows, .estimated_bytes = model.estimated_bytes, .estimated_cost = model.estimated_cost, .error_name = completed.error_name, .attempt_count = completed.attempt_count, .throttled_connection = completed.throttled_connection };
         const input_ids = try allocator.alloc([]const u8, model.inputs.len);
         for (model.inputs, input_ids) |input, *id| {
             id.* = input.logical_id;

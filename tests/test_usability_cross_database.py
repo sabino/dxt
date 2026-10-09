@@ -937,3 +937,135 @@ def test_alternative_policy_denials_include_concrete_budget_remedies(project, na
     local = next(item for item in model["alternatives"] if item["execution_connection"] == "local")
     assert local["permitted"] is False
     assert not (project[0] / ".dxt").exists()
+
+
+def literal_model(destination="warehouse", value=1):
+    return {"destination": destination, "inputs": {"one": {"connection": destination, "query": f"select {value}::bigint as id"}},
+            "sql": "select * from {{ input('one') }}"}
+
+
+def test_cross_task_dag_orders_ancestors_and_selected_dependency_closure(project, native_environment):
+    config = project[1]
+    child = {"destination": "warehouse", "depends_on": ["parent"],
+             "inputs": {"parent": {"connection": "warehouse", "relation": "marts.parent"}},
+             "sql": "select id+1 as id from {{ input('parent') }}"}
+    config["models"] = {"child": child, "independent": literal_model(value=9), "parent": literal_model()}
+    result = invoke(project, config, native_environment, "run", "--select", "child", "--max-concurrent-tasks", "2")
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert duck_rows(project[3], "select * from marts.child") == [(2,)]
+    assert duck_rows(project[3], "select table_name from information_schema.tables where table_schema='marts' order by table_name") == [("child",), ("parent",)]
+    assert len(state(project)[1]["models"]) == 2
+    assert all(record["status"] == "success" and record["target_lock"] == "released" for record in state(project)[1]["models"])
+
+
+@pytest.mark.parametrize("fault", ["missing", "cycle", "capacity", "memory"])
+def test_invalid_task_graph_and_capacities_fail_before_database_mutations(project, native_environment, fault):
+    config = project[1]
+    config["models"] = {"one": literal_model(), "two": literal_model(value=2)}
+    if fault == "missing": config["models"]["one"]["depends_on"] = ["missing"]
+    if fault == "cycle":
+        config["models"]["one"]["depends_on"] = ["two"]
+        config["models"]["two"]["depends_on"] = ["one"]
+    if fault == "capacity": config["connections"]["warehouse"]["limits"] = {"max_queries": 0}
+    if fault == "memory": config["scheduler"] = {"max_memory_bytes": 1}
+    result = invoke(project, config, native_environment)
+    assert result.returncode != 0
+    assert not (project[0] / ".dxt").exists()
+    assert duck_rows(project[3], "select table_name from information_schema.tables where table_schema='marts'") == []
+
+
+def test_failed_cross_task_skips_descendants_and_continues_independent_tasks(project, native_environment):
+    config = project[1]
+    config["models"] = {
+        "child": {"destination": "warehouse", "depends_on": ["broken"],
+                  "inputs": {"parent": {"connection": "warehouse", "relation": "marts.broken"}}, "sql": "select * from {{ input('parent') }}"},
+        "broken": {"destination": "warehouse", "inputs": {"bad": {"connection": "crm", "query": "select nonexistent_column"}}, "sql": "select * from {{ input('bad') }}"},
+        "independent": literal_model(value=17)}
+    result = invoke(project, config, native_environment, "run", "--allow-movement", "--max-concurrent-tasks", "3")
+    assert result.returncode != 0
+    assert "leaked" not in result.stderr
+    records = {record["model"]: record for record in state(project)[1]["models"]}
+    assert [records[name]["status"] for name in ("broken", "child", "independent")] == ["error", "skipped", "success"]
+    assert records["broken"]["attempt_count"] == 1
+    assert duck_rows(project[3], "select * from marts.independent") == [(17,)]
+
+
+@pytest.mark.parametrize("stream_limit", [1, 2])
+def test_native_task_concurrency_obeys_source_stream_pool_and_aliases(project, native_environment, postgres, stream_limit):
+    config = project[1]
+    limits = {"max_queries": 4, "max_streaming_readers": stream_limit, "max_loaders": 1}
+    config["connections"]["crm"]["limits"] = limits
+    config["connections"]["crm_reader"] = {"profile": "cross", "target": "crm", "limits": limits}
+    config["models"] = {
+        "duck_job": {"destination": "warehouse", "inputs": {"wait": {"connection": "crm", "query": "select 1::bigint id from pg_sleep(2)"}}, "sql": "select * from {{ input('wait') }}"},
+        "pg_job": {"destination": "crm", "inputs": {"wait": {"connection": "crm_reader", "query": "select 2::bigint id from pg_sleep(2)"}}, "sql": "select * from {{ input('wait') }}"}}
+    (project[0] / "dxt_connections.yml").write_text(json.dumps(config))
+    with postgres.cursor() as cursor:
+        cursor.execute("select clock_timestamp()")
+        started = cursor.fetchone()[0]
+    args = [str(DXT), "cross-database", "run", "--project-dir", str(project[0]), "--profiles-dir", str(project[0]), "--allow-movement", "--max-concurrent-tasks", "2"]
+    process = subprocess.Popen(args, cwd=ROOT, env=native_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    maximum = 0
+    try:
+        for _ in range(350):
+            with postgres.cursor() as cursor:
+                cursor.execute("select pg_stat_clear_snapshot()")
+                cursor.execute("select count(*) from pg_stat_activity where state='active' and query like 'fetch forward%%__dxt_extract%%' and backend_start>=%s", [started])
+                maximum = max(maximum, cursor.fetchone()[0])
+            if process.poll() is not None: break
+            time.sleep(0.02)
+        output, errors = process.communicate(timeout=10)
+        assert process.returncode == 0, errors
+        assert "leaked" not in errors
+        assert maximum == stream_limit
+    finally:
+        if process.poll() is None: process.terminate(); process.communicate(timeout=5)
+    assert duck_rows(project[3], "select * from marts.duck_job") == [(1,)]
+    with postgres.cursor() as cursor:
+        cursor.execute(f'select * from "{project[2]}".pg_job')
+        assert cursor.fetchall() == [(2,)]
+
+
+@pytest.mark.parametrize("sqlstate", ["40001", "40P01", "55P03"])
+def test_known_aborted_source_query_retries_with_adaptive_backpressure(project, native_environment, postgres, sqlstate):
+    import psycopg2
+    config = project[1]
+    config["connections"]["crm"]["limits"] = {"max_queries": 4, "max_streaming_readers": 4}
+    with postgres.cursor() as cursor:
+        cursor.execute(f'''create function "{project[2]}".retry_read() returns bigint language plpgsql as $$
+            begin
+                if not pg_try_advisory_lock(72833861) then
+                    raise exception 'private source diagnostic' using errcode='{sqlstate}';
+                end if;
+                perform pg_advisory_unlock(72833861);
+                return 41;
+            end $$''')
+    config["models"] = {"retried": {"destination": "warehouse", "inputs": {"one": {"connection": "crm", "query": f'select "{project[2]}".retry_read() as id'}}, "sql": "select * from {{ input('one') }}"}}
+    (project[0] / "dxt_connections.yml").write_text(json.dumps(config))
+    blocker = psycopg2.connect(postgres.dsn)
+    blocker.autocommit = True
+    with blocker.cursor() as cursor: cursor.execute("select pg_advisory_lock(72833861)")
+    args = [str(DXT), "cross-database", "run", "--project-dir", str(project[0]), "--profiles-dir", str(project[0]), "--allow-movement", "--max-retries", "8", "--retry-delay-ms", "100"]
+    process = subprocess.Popen(args, cwd=ROOT, env=native_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        for _ in range(200):
+            files = list((project[0] / ".dxt" / "cross-runs").glob("*/tasks/retried.json"))
+            if files and json.loads(files[0].read_text())["status"] == "retrying": break
+            if process.poll() is not None: pytest.fail(process.communicate()[1])
+            time.sleep(0.01)
+        else: pytest.fail("Source did not publish its known-abort retry state")
+        with blocker.cursor() as cursor: cursor.execute("select pg_advisory_unlock(72833861)")
+        output, errors = process.communicate(timeout=15)
+        assert process.returncode == 0, errors
+        assert "private source diagnostic" not in errors and "leaked" not in errors
+    finally:
+        blocker.close()
+        if process.poll() is None: process.terminate(); process.communicate(timeout=5)
+    record = state(project)[1]["models"][0]
+    assert record["status"] == "success" and record["attempt_count"] >= 2
+    assert record["throttled_connection"] == "crm"
+    assert record["attempts"][0]["status"] == "error"
+    assert duck_rows(project[3], "select * from marts.retried") == [(41,)]
+    stage_files = list((project[0] / ".dxt" / "cross-runs").glob("*/stages/retried.json"))
+    assert stage_files and json.loads(stage_files[0].read_text())["stages"][0]["readiness"] == "ready"

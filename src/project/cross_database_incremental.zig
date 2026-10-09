@@ -48,6 +48,7 @@ pub const State = struct {
         var keys: std.StringHashMap(void) = .init(allocator);
         var key_bytes: u64 = 0;
         for (model.inputs, state.watermarks) |input, *progress| {
+            record.active_connection = plan.connections[input.connection].name;
             var source = try run.open(runtime, root, plan.connections[input.connection]);
             defer source.deinit();
             try run.configure(runtime, &source, model.budget, spill);
