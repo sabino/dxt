@@ -872,3 +872,37 @@ def test_metricflow_nonadditive_balances_all_time_and_grain_offsets(tmp_path, co
     result = run_dxt(project, 'metric', 'query', *flags)
     assert result.returncode == 0, result.stderr
     assert canonical_rows(json.loads(result.stdout)) == canonical_rows(expected)
+
+
+@pytest.mark.parametrize('aggregation,params', [
+    ('min', ''), ('max', ''), ('count', ''), ('count_distinct', ''),
+    ('average', ''), ('median', ''), ('sum_boolean', ''),
+    ('percentile', 'agg_params: {percentile: 0.25}'),
+    ('percentile', 'agg_params: {percentile: 0.25, use_discrete_percentile: true}'),
+    ('percentile', 'agg_params: {percentile: 0.25, use_approximate_percentile: true}'),
+])
+@pytest.mark.parametrize('empty', [False, True])
+def test_metricflow_aggregation_nulls_and_empty_inputs(tmp_path, core_runner, aggregation, params, empty):
+    from test_usability_commands import query
+    project = metric_project(tmp_path / 'metric')
+    properties = project / 'models/semantic.yml'
+    expr = "status = 'paid'" if aggregation == 'sum_boolean' else 'amount'
+    measure = f'      - name: tested_aggregation\n        agg: {aggregation}\n        expr: "{expr}"\n'
+    if params:
+        measure += f'        {params}\n'
+    source = properties.read_text().replace('      - name: paid_count\n', measure + '      - name: paid_count\n')
+    source = source.replace('saved_queries:\n', '''  - name: tested_aggregation
+    label: Tested Aggregation
+    type: simple
+    type_params: {measure: tested_aggregation}
+saved_queries:
+''')
+    properties.write_text(source)
+    assert invoke_core(core_runner, project, 'parse').success
+    assert run_dxt(project, 'build').returncode == 0
+    where = ['1 = 0'] if empty else None
+    expected = query(project / 'warehouse.duckdb', metricflow_sql(project, ['tested_aggregation'], [], where=where))
+    flags = ['--metrics', 'tested_aggregation'] + (['--where', where[0]] if where else [])
+    result = run_dxt(project, 'metric', 'query', *flags)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == expected

@@ -932,6 +932,9 @@ fn grainRank(grain: []const u8) usize {
 fn aggregation(a: std.mem.Allocator, adapter_type: []const u8, measure: Value, expr: []const u8) ![]const u8 {
     const agg = text(measure, "agg") orelse return error.InvalidMetricQuery;
     if (eq(agg, "count_distinct")) return std.fmt.allocPrint(a, "COUNT(DISTINCT {s})", .{expr});
+    // The semantic manifest count-to-sum transform makes count measures
+    // additive across source groups. SUM also preserves its empty-input NULL.
+    if (eq(agg, "count")) return std.fmt.allocPrint(a, "SUM(CASE WHEN {s} IS NULL THEN 0 ELSE 1 END)", .{expr});
     if (eq(agg, "sum_boolean")) return std.fmt.allocPrint(a, "SUM(CASE WHEN {s} THEN 1 ELSE 0 END)", .{expr});
     if (eq(agg, "median")) return std.fmt.allocPrint(a, "PERCENTILE_CONT(0.5) WITHIN GROUP(ORDER BY {s})", .{expr});
     if (eq(agg, "percentile")) {
@@ -948,7 +951,7 @@ fn aggregation(a: std.mem.Allocator, adapter_type: []const u8, measure: Value, e
         }
         return std.fmt.allocPrint(a, "{s}({d}) WITHIN GROUP(ORDER BY {s})", .{ if (discrete == .bool and discrete.bool) "PERCENTILE_DISC" else "PERCENTILE_CONT", number, expr });
     }
-    const function = if (eq(agg, "average")) "AVG" else if (eq(agg, "sum")) "SUM" else if (eq(agg, "min")) "MIN" else if (eq(agg, "max")) "MAX" else if (eq(agg, "count")) "COUNT" else return error.InvalidMetricQuery;
+    const function = if (eq(agg, "average")) "AVG" else if (eq(agg, "sum")) "SUM" else if (eq(agg, "min")) "MIN" else if (eq(agg, "max")) "MAX" else return error.InvalidMetricQuery;
     return std.fmt.allocPrint(a, "{s}({s})", .{ function, expr });
 }
 fn writePredicates(w: *std.Io.Writer, predicates: []const []const u8) !void {
@@ -1082,4 +1085,13 @@ test "metric planner rejects finer grains unknown dimensions and invalid percent
     var raw = try std.json.parseFromSlice(Value, a, "{\"agg\":\"percentile\",\"agg_params\":{\"percentile\":1.5}}", .{});
     defer raw.deinit();
     try std.testing.expectError(error.InvalidMetricPercentile, aggregation(a, "duckdb", raw.value, "amount"));
+}
+
+test "semantic count measures use additive null-aware sums" {
+    const a = std.testing.allocator;
+    var raw = try std.json.parseFromSlice(Value, a, "{\"agg\":\"count\"}", .{});
+    defer raw.deinit();
+    const sql = try aggregation(a, "duckdb", raw.value, "amount");
+    defer a.free(sql);
+    try std.testing.expectEqualStrings("SUM(CASE WHEN amount IS NULL THEN 0 ELSE 1 END)", sql);
 }
