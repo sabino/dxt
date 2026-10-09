@@ -227,3 +227,55 @@ sources:
         assert actual[key] == expected[key], key
     assert "source.configuration_fixture.raw.hidden" not in manifests[0]["sources"]
     assert manifests[0]["disabled"]["source.configuration_fixture.raw.hidden"][0]["config"]["enabled"] is False
+
+
+@pytest.mark.parametrize("package", ["configuration_fixture", "util_pkg"])
+def test_table_custom_generic_tests_keep_typed_arguments_and_package_scope(tmp_path, configuration_oracle, package):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.append_project("flags: {require_generic_test_arguments_property: true}\n")
+    prefix = "" if package == "configuration_fixture" else "dbt_packages/util_pkg/"
+    if prefix:
+        pair.write(prefix + "dbt_project.yml", "name: util_pkg\nversion: '1.0'\n")
+    pair.write(prefix + "models/rendered.sql", "select 1 as id")
+    pair.write(prefix + "macros/custom.sql", "{% test custom_range(model, threshold=1, options=None) %}select * from {{ model }} where {% if options.enabled %}id > {{ threshold }}{% else %}false{% endif %}{% endtest %}")
+    pair.write(prefix + "models/properties.yml", """version: 2
+models:
+  - name: rendered
+    data_tests:
+      - custom_range:
+          arguments: {threshold: 2, options: {enabled: true, label: safe}}
+sources:
+  - name: raw
+    tables:
+      - name: events
+        data_tests:
+          - custom_range:
+              arguments: {threshold: 3, options: {enabled: true, label: source}}
+""")
+    manifests = pair.invoke(flags=["--select", "resource_type:test"])
+    actual, expected = [{uid: node for uid, node in m["nodes"].items() if node["resource_type"] == "test"} for m in manifests]
+    assert actual.keys() == expected.keys()
+    assert len(actual) == 2
+    for uid in expected:
+        for key in ["test_metadata", "compiled_code", "depends_on", "attached_node"]:
+            assert actual[uid][key] == expected[uid][key], (uid, key)
+
+
+def test_missing_custom_generic_test_macro_is_rejected_instead_of_omitted(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write("models/rendered.sql", "select 1 as id")
+    pair.write("models/properties.yml", "models: [{name: rendered, data_tests: [missing_test]}]\n")
+    actual, reference = pair.invoke("compile", success=False)
+    assert "macro" in actual.stderr.lower()
+
+
+def test_namespaced_builtin_name_uses_authored_generic_macro(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write("dbt_packages/util_pkg/dbt_project.yml", "name: util_pkg\nversion: '1.0'\n")
+    pair.write("dbt_packages/util_pkg/macros/tests.sql", "{% test not_null(model) %}select * from {{ model }} where false{% endtest %}")
+    pair.write("models/rendered.sql", "select 1 as id")
+    pair.write("models/properties.yml", "models: [{name: rendered, data_tests: [util_pkg.not_null]}]\n")
+    manifests = pair.invoke(flags=["--select", "resource_type:test"])
+    actual, expected = [next(node for node in m["nodes"].values() if node["resource_type"] == "test") for m in manifests]
+    for key in ["test_metadata", "compiled_code", "depends_on", "attached_node"]:
+        assert actual[key] == expected[key]

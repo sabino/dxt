@@ -449,6 +449,7 @@ pub fn compileSingularTest(allocator: std.mem.Allocator, graph: *const Graph, te
 }
 
 pub fn compileGenericTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
+    if (findCustomGenericTestMacro(graph, test_node) != null) return try compileCustomGenericTest(allocator, graph, test_node, genericTestNodeColumnName(test_node));
     const is_not_null = std.mem.eql(u8, test_node.test_name, "not_null");
     const is_unique = std.mem.eql(u8, test_node.test_name, "unique");
     const is_accepted_values = std.mem.eql(u8, test_node.test_name, "accepted_values");

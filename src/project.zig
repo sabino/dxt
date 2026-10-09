@@ -1569,7 +1569,8 @@ fn validateUnitTestExecution(runtime: Runtime, graph: *const Graph, nodes: []con
 }
 
 fn validateGenericTestExecution(test_node: *const GenericTestNode) !void {
-    if (isBuiltInGenericTestName(test_node.test_name) and genericTestNodeColumnName(test_node) == null) return error.UnsupportedTestExecution;
+    if (!isBuiltInGenericTestNode(test_node)) return;
+    if (isBuiltInGenericTestNode(test_node) and genericTestNodeColumnName(test_node) == null) return error.UnsupportedTestExecution;
     if (std.mem.eql(u8, test_node.test_name, "accepted_values")) {
         if (test_node.accepted_values.items.len == 0) return error.UnsupportedTestExecution;
         return;
@@ -2357,7 +2358,7 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
         for (graph.tests.items) |*test_node| {
             if (!selectionContains(selected, test_node.unique_id)) continue;
             saw_selected_generic_test = true;
-            if (isBuiltInGenericTestName(test_node.test_name)) {
+            if (isBuiltInGenericTestNode(test_node)) {
                 validateGenericTestExecution(test_node) catch return error.UnsupportedCompileSelection;
             }
 
@@ -3769,6 +3770,8 @@ fn materializeGenericTests(graph: *Graph) !void {
         for (node.tests.items) |test_def| {
             if (isSupportedGenericTest(test_def, null)) {
                 try appendGenericTestNode(graph, node, test_def, null);
+            } else if (try nodeColumnCustomGenericTestDef(graph, node, test_def, null)) |custom_test_def| {
+                try appendGenericTestNode(graph, node, custom_test_def, null);
             }
         }
         for (node.columns.items) |column| {
@@ -3784,8 +3787,10 @@ fn materializeGenericTests(graph: *Graph) !void {
     for (graph.sources.items) |*source| {
         if (!source.enabled) continue;
         for (source.tests.items) |test_def| {
-            if (isSupportedSourceGenericTest(test_def, null) and genericTestColumnName(test_def, null) != null) {
+            if (isSupportedSourceGenericTest(test_def, null)) {
                 try appendSourceGenericTestNode(graph, source, test_def, null);
+            } else if (try sourceColumnCustomGenericTestDef(graph, source, test_def, null)) |custom_test_def| {
+                try appendSourceGenericTestNode(graph, source, custom_test_def, null);
             }
         }
         for (source.columns.items) |column| {
@@ -3841,7 +3846,8 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
     for (test_def.accepted_values.items) |value| {
         try test_node.accepted_values.append(graph.allocator, value);
     }
-    if (std.mem.eql(u8, test_def.name, "relationships")) {
+    try appendGenericTestMacroDependency(graph, &test_node, test_def);
+    if (isBuiltInGenericTestNode(&test_node) and std.mem.eql(u8, test_def.name, "relationships")) {
         if (isSourceRelationshipTarget(test_def.relationship_to)) {
             const target_source = try sourceDepFromValue(graph.allocator, test_def.relationship_to);
             test_node.relationship_source_to = target_source;
@@ -3858,8 +3864,7 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
     }
     try test_node.refs.append(graph.allocator, .{ .package = null, .name = node.name });
     try appendUnique(graph.allocator, &test_node.depends_on, node.unique_id);
-    try appendGenericTestMacroDependency(graph, &test_node, test_def);
-    if (isBuiltInGenericTestName(test_def.name) and !std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
+    if (isBuiltInGenericTestNode(&test_node) and !std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
         try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
     }
     try graph.tests.append(graph.allocator, test_node);
@@ -3927,7 +3932,8 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         try test_node.accepted_values.append(graph.allocator, value);
     }
     const attached_source_dep = SourceDep{ .source_name = source.source_name, .table_name = source.table_name };
-    if (std.mem.eql(u8, test_def.name, "relationships")) {
+    try appendGenericTestMacroDependency(graph, &test_node, test_def);
+    if (isBuiltInGenericTestNode(&test_node) and std.mem.eql(u8, test_def.name, "relationships")) {
         if (isSourceRelationshipTarget(test_def.relationship_to)) {
             const target_source = try sourceDepFromValue(graph.allocator, test_def.relationship_to);
             test_node.relationship_source_to = target_source;
@@ -3949,8 +3955,7 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         try appendSourceDepUnique(graph.allocator, &test_node.source_refs, attached_source_dep);
         try appendUnique(graph.allocator, &test_node.depends_on, source.unique_id);
     }
-    try appendGenericTestMacroDependency(graph, &test_node, test_def);
-    if (isBuiltInGenericTestName(test_def.name) and !std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
+    if (isBuiltInGenericTestNode(&test_node) and !std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
         try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
     }
     try graph.tests.append(graph.allocator, test_node);
@@ -3991,6 +3996,15 @@ fn isSupportedSourceGenericTest(test_def: GenericTestDef, column_name: ?[]const 
         (std.mem.eql(u8, test_def.name, "relationships") and test_def.relationship_to.len != 0 and test_def.relationship_field.len != 0);
 }
 
+fn isBuiltInGenericTestNode(test_node: *const GenericTestNode) bool {
+    if (!isBuiltInGenericTestName(test_node.test_name)) return false;
+    for (test_node.macro_depends_on.items) |macro| {
+        const dot = std.mem.lastIndexOfScalar(u8, macro, '.') orelse continue;
+        if (std.mem.startsWith(u8, macro[dot + 1 ..], "test_") and !std.mem.startsWith(u8, macro, "macro.dbt.")) return false;
+    }
+    return true;
+}
+
 fn isBuiltInGenericTestName(test_name: []const u8) bool {
     return std.mem.eql(u8, test_name, "not_null") or
         std.mem.eql(u8, test_name, "unique") or
@@ -4011,37 +4025,34 @@ fn splitGenericTestNamespace(test_name: []const u8) !?GenericTestNamespace {
 }
 
 fn nodeColumnCustomGenericTestDef(graph: *const Graph, node: *const Node, test_def: GenericTestDef, column_name: ?[]const u8) !?GenericTestDef {
-    if (column_name == null) return null;
-    if (isBuiltInGenericTestName(test_def.name)) return null;
-    if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed")) return null;
+    _ = column_name;
+    if (isBuiltInGenericTestName(test_def.name)) return error.InvalidGenericTestConfiguration;
+    if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot")) return null;
 
     return try columnCustomGenericTestDef(graph, node.package_name, test_def);
 }
 
 fn sourceColumnCustomGenericTestDef(graph: *const Graph, source: *const SourceDef, test_def: GenericTestDef, column_name: ?[]const u8) !?GenericTestDef {
-    if (column_name == null) return null;
-    if (isBuiltInGenericTestName(test_def.name)) return null;
+    _ = column_name;
+    if (isBuiltInGenericTestName(test_def.name)) return error.InvalidGenericTestConfiguration;
 
     return try columnCustomGenericTestDef(graph, source.package_name, test_def);
 }
 
 fn columnCustomGenericTestDef(graph: *const Graph, package_name: []const u8, test_def: GenericTestDef) !?GenericTestDef {
     const namespace_parts = try splitGenericTestNamespace(test_def.name);
-    const macro_package = if (namespace_parts) |parts| parts.namespace else graph.project_name;
+    const macro_package = if (namespace_parts) |parts| parts.namespace else package_name;
     const macro_test_name = if (namespace_parts) |parts| parts.name else test_def.name;
-    if (namespace_parts == null and !std.mem.eql(u8, package_name, graph.project_name)) return null;
-    if (std.mem.eql(u8, macro_package, "dbt")) return error.UnsupportedCustomGenericTest;
 
     const macro_name = try std.fmt.allocPrint(graph.allocator, "test_{s}", .{macro_test_name});
     defer graph.allocator.free(macro_name);
-    if (findMacroIdByPackageAndName(graph, macro_package, macro_name) == null) {
-        if (namespace_parts != null) return error.UnresolvedMacro;
-        return null;
-    }
+    const macro_id = if (namespace_parts != null) findMacroIdByPackageAndName(graph, macro_package, macro_name) else project_resolve.findMacroIdForUnqualifiedNamespaceCall(graph, package_name, macro_name);
+    if (macro_id == null and !(std.mem.eql(u8, macro_package, "dbt") and isBuiltInGenericTestName(macro_test_name))) return error.UnresolvedMacro;
 
     return GenericTestDef{
         .name = macro_test_name,
         .arguments = test_def.arguments,
+        .accepted_values = test_def.accepted_values,
         .namespace = if (namespace_parts) |parts| parts.namespace else null,
         .column_name = test_def.column_name,
         .accepted_values_quote = test_def.accepted_values_quote,
@@ -4052,17 +4063,18 @@ fn columnCustomGenericTestDef(graph: *const Graph, package_name: []const u8, tes
 }
 
 fn appendGenericTestMacroDependency(graph: *Graph, test_node: *GenericTestNode, test_def: GenericTestDef) !void {
-    if (isBuiltInGenericTestName(test_def.name)) {
-        try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
-        return;
-    }
-
     const macro_name = try std.fmt.allocPrint(graph.allocator, "test_{s}", .{test_def.name});
     defer graph.allocator.free(macro_name);
-    const macro_package = test_def.namespace orelse graph.project_name;
-    const macro_id = findMacroIdByPackageAndName(graph, macro_package, macro_name) orelse return error.UnresolvedMacro;
-    try test_node.macro_depends_on.append(graph.allocator, macro_id);
-    try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
+    const macro_id = if (test_def.namespace) |package|
+        findMacroIdByPackageAndName(graph, package, macro_name)
+    else
+        project_resolve.findMacroIdForUnqualifiedNamespaceCall(graph, test_node.package_name, macro_name);
+    if (macro_id) |resolved| {
+        try test_node.macro_depends_on.append(graph.allocator, resolved);
+        if (!std.mem.startsWith(u8, resolved, "macro.dbt.")) try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
+    } else if (isBuiltInGenericTestName(test_def.name) and (test_def.namespace == null or std.mem.eql(u8, test_def.namespace.?, "dbt"))) {
+        try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
+    } else return error.UnresolvedMacro;
 }
 
 test "materializeGenericTests activates root project model column custom generic tests" {
