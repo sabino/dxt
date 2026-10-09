@@ -2116,6 +2116,7 @@ def test_compile_uses_selected_node_package_for_compiled_path(tmp_path: Path):
         [
             DXT,
             "compile",
+            "--no-populate-cache",
             "--project-dir",
             str(project),
             "--target-path",
@@ -4970,7 +4971,7 @@ def test_singular_sql_test_yaml_configs_drive_test_and_build_statuses(tmp_path: 
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for singular SQL test store_failures coverage")
-def test_singular_sql_test_store_failures_supports_inline_config_and_drop_on_pass(tmp_path: Path):
+def test_singular_sql_test_store_failures_supports_inline_config_and_retains_empty_audit_table(tmp_path: Path):
     project = tmp_path / "singular_store_failures"
     write_singular_test_config_project(
         project,
@@ -4996,10 +4997,10 @@ def test_singular_sql_test_store_failures_supports_inline_config_and_drop_on_pas
     result = run_results["results"][1]
     assert result["unique_id"] == "test.singular_test_configs.assert_customers"
     assert result["status"] == "fail"
-    assert result["relation_name"] == '"dbt_test__audit"."assert_customers"'
+    assert result["relation_name"] == '"main_dbt_test__audit"."assert_customers"'
     manifest = json.loads((target / "manifest.json").read_text())
     assert manifest["nodes"][result["unique_id"]]["config"]["store_failures"] is True
-    assert duckdb_scalar(db_path, 'select count(*) from "dbt_test__audit"."assert_customers"') == "1"
+    assert duckdb_scalar(db_path, 'select count(*) from "main_dbt_test__audit"."assert_customers"') == "1"
 
     (project / "tests" / "assert_customers.sql").write_text(
         "{{ config(store_failures=true) }}\nselect * from {{ ref('customers') }} where customer_id < 0;\n"
@@ -5013,14 +5014,15 @@ def test_singular_sql_test_store_failures_supports_inline_config_and_drop_on_pas
     assert pass_result.returncode == 0, pass_result.stderr
     pass_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in pass_results["results"]] == ["pass"]
-    assert pass_results["results"][0]["relation_name"] is None
+    assert pass_results["results"][0]["relation_name"] == '"main_dbt_test__audit"."assert_customers"'
     assert (
         duckdb_scalar(
             db_path,
-            "select count(*) from information_schema.tables where table_schema = 'dbt_test__audit' and table_name = 'assert_customers'",
+            "select count(*) from information_schema.tables where table_schema = 'main_dbt_test__audit' and table_name = 'assert_customers'",
         )
-        == "0"
+        == "1"
     )
+    assert duckdb_scalar(db_path, 'select count(*) from "main_dbt_test__audit"."assert_customers"') == "0"
 
 
 def test_compile_writes_selected_generic_test_artifacts_without_duckdb(tmp_path: Path):

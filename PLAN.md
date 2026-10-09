@@ -140,6 +140,31 @@ dbt-duckdb 1.9.6, dbt-postgres 1.9.1 and MetricFlow 0.208.1. Full artifact schem
 checks use the pinned upstream schema classes, which produce the published
 schemas, and run in mandatory CI alongside native driver fixtures.
 
+The current closure wave uses six isolated editing worktrees. The expression
+worker owns native regular expressions and ordinary/parse-time undefined
+semantics; the configuration worker owns contracts, constraints, authored
+materializations and lifecycle result metadata, plus the sequenced compiler
+and JSON companion for new expression values. The command worker owns inline
+show/compile operations, diagnostic exit codes, effective remaining flags and
+general SQL snapshot Jinja. The docs worker owns deferred description rendering
+and typed doc providers. The naming worker owns custom identity finalization,
+saved-query exports and generic-test compile dispatch. Its adapter child owns
+native DuckDB profile initialization and retry behavior. Shared compiler,
+context, facade and artifact changes integrate by reviewed cherry-picks.
+The supervisor retains project-hook session lifetimes, regression migrations,
+unchanged public project execution, archive notices and final release gates.
+
+Integrated project-hook comparisons now cover root-before-dependency ordering,
+global model indices, ephemeral end contexts, persisted-test audit schemas and
+start/end compilation failure artifacts. Parsed JSON rejects duplicate keys
+and non-finite numbers in the developer validator. The first full historical
+CLI run stopped after 20 failures and 220 passes; Core-grounded migrations and
+compiler error-code corrections precede a complete rerun. Seed view rejection,
+unquoted identifiers/types and retained passing audit tables receive fresh
+both-adapter Core comparisons. These partial runs do not establish release
+acceptance. Regular-expression runtime/provenance notices must accompany the
+existing grammar, adapter-macro and Unicode notices in actual archives.
+
 After its scheduling commit, the scheduler worker owns the focused native
 DuckDB/Postgres adapter contract in a second isolated worktree. Shared backend
 integration follows test-error, incremental and snapshot commits. Threaded
