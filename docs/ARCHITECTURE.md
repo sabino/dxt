@@ -5,8 +5,9 @@ selection, SQL planning, warehouse execution and artifact writing run inside the
 binary. Python belongs to developer fixtures, upstream comparisons and release
 checks. DuckDB and PostgreSQL are the initial execution targets; support for
 another adapter requires its own driver and warehouse certification.
-Python-authored model execution is outside that initial SQL scope; its resource
-and execution contract must be stated separately before claiming broader parity.
+The initial release executes SQL models. Python-authored models remain visible
+to discovery, parsing, selection and compilation; selecting them for execution
+fails before warehouse writes. Their authored code is never imported or run.
 
 ## Runtime Boundary
 
@@ -32,11 +33,20 @@ the parser, compiler, adapters, schedulers and artifact contracts.
 
 ## Project And Compiler Model
 
-The loader reads project/profile configuration, SQL, properties, seeds,
-snapshots, unit fixtures and installed packages into `types.Graph`. Resources
+The loader reads project/profile configuration, SQL and Python model files,
+properties, seeds, snapshots, unit fixtures and installed packages into
+`types.Graph`. Resources
 retain dbt unique IDs, raw and effective configuration, dependency edges,
 versions, groups and access metadata. `resolve.zig` resolves references and
 macro namespaces; selector expressions operate on that shared graph.
+
+`python_model.zig` inspects Python syntax through a statically linked
+Tree-sitter frontend. It records literal `dbt.ref()`, `dbt.source()` and
+`dbt.config()` metadata without evaluating authored code. Compilation appends
+the pinned dbt Python scaffold through the native macro compiler and preserves
+the model's language, source, dependencies and configuration in artifacts.
+Unsupported or dynamic metadata expressions fail visibly. This resource
+contract does not broaden the initial SQL execution scope.
 
 `yaml.zig` uses statically compiled libyaml events and constructs the document
 model in Zig, including tags, aliases, merges and source diagnostics. Project,
@@ -147,7 +157,7 @@ separate from dbt snapshots, dbt incremental materializations and dbt schemas.
 | Modules | Responsibility |
 | --- | --- |
 | `config`, `profile`, `project_config`, `resource_config`, `properties`, `yaml` | Shared configuration/document parsing and precedence. |
-| `loader`, `parse`, `resolve`, `model_versions`, `group_access` | Resource construction, dependency resolution and access validation. |
+| `loader`, `parse`, `python_model`, `resolve`, `model_versions`, `group_access` | Resource construction, static Python metadata, dependency resolution and access validation. |
 | `selector`, `selection_expression`, `selector_config`, `state`, `defer` | Selection and upstream artifact state. |
 | `compiler`, `expression`, `dbt_context`, `context_values`, `adapter_context` | Typed rendering and native database context. |
 | `adapter`, `adapter_result`, `native_duckdb`, `native_postgres`, `relation_cache`, `postgres_catalog` | Native connection/result boundary and warehouse metadata. |
@@ -178,6 +188,8 @@ the native HTTP server.
 | Zig 0.16.0 and libc | Binary implementation/build | Native executable. |
 | libyaml 0.2.5 | YAML event scanner/parser | Compiled into the binary; MIT notice. |
 | libpg_query 6.2.5, PostgreSQL 17.7 grammar | PostgreSQL SQL AST | Compiled into the binary; upstream and third-party notices. |
+| Tree-sitter 0.25.10 and tree-sitter-python 0.23.6 | Static Python model syntax | Compiled into the binary; MIT and retained Unicode/ICU notices. |
+| Unicode 15.0 tables | Typed string operations | Embedded tables; Unicode license and provenance. |
 | DuckDB C library | DuckDB execution/AST | External native library; CI pins 1.4.2. |
 | libpq | PostgreSQL execution | External native library. |
 | dbt SQL includes and docs browser | Macro defaults and documentation UI | Embedded sources; upstream licenses/provenance ship with releases. |
