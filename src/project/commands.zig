@@ -82,6 +82,8 @@ pub fn writeResults(runtime: Runtime, target_dir: []const u8, rows: []const resu
 }
 
 pub fn operation(runtime: Runtime, options: Options, graph: *types.Graph, target_dir: []const u8, stdout: *std.Io.Writer) !void {
+    try @import("relation_cache.zig").configure(runtime, graph, null);
+    defer @import("relation_cache.zig").writeEvents(runtime, graph, stdout) catch {};
     const name = options.command_name orelse return error.MissingCommandName;
     const id = if (std.mem.indexOfScalar(u8, name, '.')) |dot|
         resolve.findMacroIdByPackageAndName(graph, name[0..dot], name[dot + 1 ..])

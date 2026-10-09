@@ -1233,6 +1233,11 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
     };
     if (resources.items.len == 0) return error.UnsupportedBuildSelection;
     try validateConcurrentResources(runtime, graph, resources.items, label);
+    const cache_ids = try runtime.allocator.alloc([]const u8, selected.len);
+    defer runtime.allocator.free(cache_ids);
+    for (selected, cache_ids) |item, *id| id.* = item.unique_id;
+    try @import("project/relation_cache.zig").configure(runtime, graph, cache_ids);
+    defer @import("project/relation_cache.zig").writeEvents(runtime, graph, stderr) catch {};
     // Core creates all selected model and persisted-test schemas before jobs.
     // Serial preparation avoids DuckDB catalog conflicts between audit jobs.
     var preparation = try @import("project/adapter.zig").openSession(runtime, graph, db_path);
@@ -1259,6 +1264,7 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
             try preparation.execute(sql);
         }
     }
+    try @import("project/relation_cache.zig").warmSession(&preparation, true);
     const summary = try concurrent_runner.run(runtime, graph, options, resources.items, db_path, executeConcurrentResource, stderr);
     defer runtime.allocator.free(summary.rows);
     defer deinitRunResults(runtime.allocator, summary.rows);

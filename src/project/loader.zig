@@ -106,6 +106,10 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         .full_refresh = options.full_refresh,
     };
     errdefer graph.deinit();
+    graph.relation_cache = try runtime.allocator.create(@import("relation_cache.zig").Cache);
+    graph.relation_cache.?.* = @import("relation_cache.zig").Cache.init(std.heap.smp_allocator, runtime.io);
+    graph.relation_cache.?.log_events = options.log_cache_events;
+    graph.relation_cache.?.populate = options.populate_cache;
     if (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) |identity| {
         graph.adapter_type = identity.adapter_type;
         graph.target_schema = identity.target_schema;

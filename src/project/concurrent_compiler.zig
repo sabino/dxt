@@ -19,6 +19,11 @@ pub const Counts = struct {
 };
 
 pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Options, selected: []const selector.SelectedResource, target_dir: []const u8, destination: *std.ArrayList(results.NodeResult), events: *std.Io.Writer) !Counts {
+    const cache_ids = try runtime.allocator.alloc([]const u8, selected.len);
+    defer runtime.allocator.free(cache_ids);
+    for (selected, cache_ids) |item, *id| id.* = item.unique_id;
+    try @import("relation_cache.zig").configure(runtime, graph, cache_ids);
+    defer @import("relation_cache.zig").writeEvents(runtime, graph, events) catch {};
     var resources: std.ArrayList(runner.Resource) = .empty;
     defer resources.deinit(runtime.allocator);
     for (graph.nodes.items) |*node| {

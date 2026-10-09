@@ -108,6 +108,11 @@ const Worker = struct {
 /// A bounded pool continuously claims independent freshness checks. Every
 /// check owns its native read-only connection and result arena.
 pub fn run(runtime: types.Runtime, graph: *const types.Graph, options: types.Options, sources: []const *const types.SourceDef, database_path: []const u8, destination: *std.ArrayList(freshness.CheckResult), events: *std.Io.Writer) !bool {
+    const cache_ids = try runtime.allocator.alloc([]const u8, sources.len);
+    defer runtime.allocator.free(cache_ids);
+    for (sources, cache_ids) |source, *id| id.* = source.unique_id;
+    try @import("relation_cache.zig").configure(runtime, graph, cache_ids);
+    defer @import("relation_cache.zig").writeEvents(runtime, graph, events) catch {};
     const threads = try runner.threadCount(options, graph);
     const jobs = try runtime.allocator.alloc(Job, sources.len);
     defer runtime.allocator.free(jobs);

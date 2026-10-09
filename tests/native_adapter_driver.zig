@@ -24,6 +24,16 @@ fn run(init: std.process.Init) !void {
     var graph: adapter.Graph = .{ .allocator = allocator, .project_name = "native_demo", .adapter_type = args[1], .connection_info = init.environ_map.get("DXT_TEST_POSTGRES_CONNINFO") };
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+    if (std.mem.eql(u8, args[2], "cache") or std.mem.eql(u8, args[2], "cache-parallel")) {
+        var cache: adapter.RelationCache = .init(std.heap.smp_allocator, init.io);
+        defer cache.deinit();
+        graph.relation_cache = &cache;
+        if (std.mem.eql(u8, args[2], "cache")) try cacheConformance(runtime, &graph, args[3], &cache) else try cacheParallel(runtime, &graph, args[3], &cache);
+        const output = try std.json.Stringify.valueAlloc(allocator, cache.statistics(), .{});
+        defer allocator.free(output);
+        try emit(init.io, output);
+        return;
+    }
     if (std.mem.eql(u8, args[2], "profile")) {
         const config: adapter.ProjectConfig = .{ .name = "native_demo", .profile_name = "native_demo" };
         var profile_runtime = runtime;
@@ -144,6 +154,127 @@ fn run(init: std.process.Init) !void {
         try expectScalar(&output, "7");
         try emit(init.io, "{\"cancelled\":true,\"connection_recovered\":true}\n");
     } else return error.InvalidDriverMode;
+}
+
+fn cacheConformance(runtime: adapter.Runtime, graph: *const adapter.Graph, path: []const u8, cache: *adapter.RelationCache) !void {
+    const a = runtime.allocator;
+    var session = try adapter.openSession(runtime, graph, path);
+    defer session.deinit();
+    try session.execute("create schema cache_fixture");
+    defer session.execute("drop schema cache_fixture cascade") catch {};
+    if (try session.relationExists(a, "cache_fixture", "rows")) return error.UnexpectedCachedRelation;
+    try session.execute("create table cache_fixture.rows(id integer)");
+    if (!try session.relationExists(a, "cache_fixture", "rows")) return error.CacheCreateNotVisible;
+    const before = cache.statistics();
+    if (!try session.relationExists(a, "cache_fixture", "rows")) return error.CacheHitMissing;
+    if (cache.statistics().hits != before.hits + 1) return error.CacheRelationHitNotObserved;
+    var initial = try session.columns(a, "cache_fixture", "rows");
+    defer initial.deinit(a);
+    var cached = try session.columns(a, "cache_fixture", "rows");
+    defer cached.deinit(a);
+    if (cached.rows.len != 1) return error.CacheColumnsHitMissing;
+    try session.execute("alter table cache_fixture.rows add column note varchar(24)");
+    var changed = try session.columns(a, "cache_fixture", "rows");
+    defer changed.deinit(a);
+    if (changed.rows.len != 2) return error.CacheColumnsNotInvalidated;
+    if (cached.rows.len != 1 or !std.mem.eql(u8, cached.rows[0][0].?, "id")) return error.CacheHitStorageWasBorrowed;
+    try session.begin();
+    try session.execute("alter table cache_fixture.rows rename to uncommitted");
+    if (!try session.relationExists(a, "cache_fixture", "uncommitted")) return error.CacheOwnTransactionNotVisible;
+    var other = try adapter.openSession(runtime, graph, path);
+    defer other.deinit();
+    if (!try other.relationExists(a, "cache_fixture", "rows")) return error.CacheUncommittedRenameEscaped;
+    try session.rollback();
+    if (try other.relationExists(a, "cache_fixture", "uncommitted")) return error.CacheRollbackNotVisible;
+    if (!try other.relationExists(a, "cache_fixture", "rows")) return error.CacheRollbackLostRelation;
+    try session.execute("alter table cache_fixture.rows rename to renamed");
+    if (try other.relationExists(a, "cache_fixture", "rows")) return error.CacheRenameRetainedOldIdentity;
+    if (!try other.relationExists(a, "cache_fixture", "renamed")) return error.CacheRenameMissingNewIdentity;
+    // Warm an actual schema and prove both existing and absent names are hits.
+    try cache.requests.append(cache.allocator, .{ .database = null, .schema = try cache.allocator.dupe(u8, "cache_fixture") });
+    try adapter.warmRelationsCache(&other, true);
+    const warm_before = cache.statistics();
+    if (!try other.relationExists(a, "cache_fixture", "renamed")) return error.CacheWarmMissingRelation;
+    if (try other.relationExists(a, "cache_fixture", "absent")) return error.CacheWarmUnexpectedRelation;
+    if (cache.statistics().hits != warm_before.hits + 2 or cache.statistics().warm_queries != 1) return error.CacheWarmDidNotReplaceQueries;
+    if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
+        try session.execute("create function cache_fixture.cache_mutate() returns integer language plpgsql as $$begin execute 'alter table cache_fixture.renamed add column effect integer'; return 1; end$$");
+        var before_function = try other.columns(a, "cache_fixture", "renamed");
+        defer before_function.deinit(a);
+        if (before_function.rows.len != 2) return error.CacheFunctionInputColumnsInvalid;
+        try session.execute("select cache_fixture.\"cache_mutate\" /* deliberate gap */ ()");
+        var after_function = try other.columns(a, "cache_fixture", "renamed");
+        defer after_function.deinit(a);
+        if (after_function.rows.len != 3) return error.CacheSelectFunctionMutationNotInvalidated;
+        if (try other.relationExists(a, "cache_fixture", "selected_into")) return error.CacheSelectIntoAlreadyExists;
+        try session.execute("select 1 as id into cache_fixture.selected_into");
+        if (!try other.relationExists(a, "cache_fixture", "selected_into")) return error.CacheSelectIntoNotInvalidated;
+    }
+    try session.execute("drop table cache_fixture.renamed");
+    if (try other.relationExists(a, "cache_fixture", "renamed")) return error.CacheDropNotVisible;
+    var isolated = try adapter.openUnitSession(runtime, graph);
+    defer isolated.deinit();
+    if (isolated.cacheContext() != null) return error.UnitFixturesShareTargetCache;
+    if (cache.active_writes != 0) return error.CacheWriterGuardLeaked;
+}
+
+const CacheTask = struct {
+    runtime: adapter.Runtime,
+    graph: *const adapter.Graph,
+    path: []const u8,
+    index: usize,
+    failure: ?anyerror = null,
+    fn run(self: *CacheTask) void {
+        self.perform() catch |err| {
+            self.failure = err;
+        };
+    }
+    fn perform(self: *CacheTask) !void {
+        const a = self.runtime.allocator;
+        var session = try adapter.openSession(self.runtime, self.graph, self.path);
+        defer session.deinit();
+        for (0..8) |iteration| {
+            const original = try std.fmt.allocPrint(a, "rows_{d}_{d}", .{ self.index, iteration });
+            defer a.free(original);
+            const renamed = try std.fmt.allocPrint(a, "renamed_{d}_{d}", .{ self.index, iteration });
+            defer a.free(renamed);
+            const create = try std.fmt.allocPrint(a, "create table cache_parallel.{s}(id integer)", .{original});
+            defer a.free(create);
+            try session.execute(create);
+            if (!try session.relationExists(a, "cache_parallel", original)) return error.ParallelCacheCreateNotVisible;
+            var columns = try session.columns(a, "cache_parallel", original);
+            defer columns.deinit(a);
+            if (columns.rows.len != 1) return error.ParallelCacheColumnsMissing;
+            const rename = try std.fmt.allocPrint(a, "alter table cache_parallel.{s} rename to {s}", .{ original, renamed });
+            defer a.free(rename);
+            try session.execute(rename);
+            if (try session.relationExists(a, "cache_parallel", original)) return error.ParallelCacheRenameOldIdentity;
+            if (!try session.relationExists(a, "cache_parallel", renamed)) return error.ParallelCacheRenameNotVisible;
+            const drop = try std.fmt.allocPrint(a, "drop table cache_parallel.{s}", .{renamed});
+            defer a.free(drop);
+            try session.execute(drop);
+            if (try session.relationExists(a, "cache_parallel", renamed)) return error.ParallelCacheDropNotVisible;
+        }
+    }
+};
+fn cacheParallel(runtime: adapter.Runtime, graph: *const adapter.Graph, path: []const u8, cache: *adapter.RelationCache) !void {
+    var preparation = try adapter.openSession(runtime, graph, path);
+    defer preparation.deinit();
+    try preparation.execute("create schema cache_parallel");
+    defer preparation.execute("drop schema cache_parallel cascade") catch {};
+    var tasks: [4]CacheTask = undefined;
+    var workers: [4]std.Thread = undefined;
+    var count: usize = 0;
+    defer for (workers[0..count]) |worker| worker.join();
+    for (&tasks, &workers, 0..) |*task, *worker, i| {
+        task.* = .{ .runtime = runtime, .graph = graph, .path = path, .index = i };
+        worker.* = try std.Thread.spawn(.{}, CacheTask.run, .{task});
+        count += 1;
+    }
+    for (workers) |worker| worker.join();
+    count = 0;
+    for (tasks) |task| if (task.failure) |err| return err;
+    if (cache.active_writes != 0) return error.ParallelCacheWriterGuardLeaked;
 }
 
 fn qualifiedIntrospection(allocator: std.mem.Allocator, session: *adapter.Session, adapter_type: []const u8) !void {

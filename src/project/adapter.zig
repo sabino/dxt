@@ -5,6 +5,8 @@ pub const DuckDBPool = @import("native_duckdb.zig").Pool;
 pub const DuckDBConnection = @import("native_duckdb.zig").Connection;
 pub const PostgresConnection = @import("native_postgres.zig").Connection;
 pub const QueryResult = results.QueryResult;
+pub const RelationCache = @import("relation_cache.zig").Cache;
+pub const warmRelationsCache = @import("relation_cache.zig").warmSession;
 pub const Column = results.Column;
 pub const Kind = results.Kind;
 pub const Capabilities = results.Capabilities;
@@ -18,6 +20,12 @@ pub const ProjectConfig = types.ProjectConfig;
 pub const Session = union(enum) {
     duckdb: DuckDBConnection,
     postgres: PostgresConnection,
+
+    pub fn cacheContext(self: *Session) ?*@import("relation_cache.zig").Context {
+        return switch (self.*) {
+            inline else => |*connection| if (connection.cache_context) |*context| context else null,
+        };
+    }
 
     pub fn setCancellationToken(self: *Session, token: *const std.atomic.Value(bool)) void {
         switch (self.*) {
@@ -82,6 +90,9 @@ pub const Session = union(enum) {
         return self.columnsInDatabase(allocator, null, schema, relation);
     }
     pub fn columnsInDatabase(self: *Session, allocator: std.mem.Allocator, database: ?[]const u8, schema: []const u8, relation: []const u8) !QueryResult {
+        const context = self.cacheContext();
+        if (context) |cache| if (cache.usable()) if (try cache.cache.getColumns(allocator, &cache.scope, database, schema, relation)) |cached_columns| return cached_columns;
+        const generation = if (context) |cache| cache.cache.epoch() else 0;
         const schema_literal = try quoteLiteral(allocator, schema);
         defer allocator.free(schema_literal);
         const relation_literal = try quoteLiteral(allocator, relation);
@@ -93,7 +104,9 @@ pub const Session = union(enum) {
             .postgres => try std.fmt.allocPrint(allocator, "select a.attname as column_name, pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type, case when a.attnotnull then 'NO' else 'YES' end as is_nullable, a.attnum as ordinal_position from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace join pg_catalog.pg_attribute a on a.attrelid = c.oid where current_database() = {s} and n.nspname = {s} and c.relname = {s} and a.attnum > 0 and not a.attisdropped order by a.attnum", .{ database_expression, schema_literal, relation_literal }),
         };
         defer allocator.free(sql);
-        return try self.query(sql);
+        const column_result = try self.query(sql);
+        if (context) |cache| if (cache.usable()) try cache.cache.putColumns(&cache.scope, database, schema, relation, column_result, generation);
+        return column_result;
     }
     pub fn relationExists(self: *Session, allocator: std.mem.Allocator, schema: []const u8, relation: []const u8) !bool {
         return self.relationExistsInDatabase(allocator, null, schema, relation);
@@ -105,6 +118,9 @@ pub const Session = union(enum) {
     }
     /// Returns an owned dbt relation type: table, view or materialized_view.
     pub fn relationTypeInDatabase(self: *Session, allocator: std.mem.Allocator, database: ?[]const u8, schema: []const u8, relation: []const u8) !?[]const u8 {
+        const context = self.cacheContext();
+        const lookup = if (context) |cache| if (cache.usable()) try cache.cache.lookup(allocator, &cache.scope, database, schema, relation) else @import("relation_cache.zig").Lookup{} else @import("relation_cache.zig").Lookup{};
+        if (lookup.found) return lookup.kind;
         const schema_literal = try quoteLiteral(allocator, schema);
         defer allocator.free(schema_literal);
         const relation_literal = try quoteLiteral(allocator, relation);
@@ -118,8 +134,12 @@ pub const Session = union(enum) {
         defer allocator.free(sql);
         var result = try self.query(sql);
         defer result.deinit(allocator);
-        if (result.rows.len == 0) return null;
+        if (result.rows.len == 0) {
+            if (context) |cache| if (cache.usable()) try cache.cache.putRelation(&cache.scope, database, schema, relation, null, lookup.generation);
+            return null;
+        }
         if (result.rows.len != 1 or result.rows[0].len != 1 or result.rows[0][0] == null) return error.InvalidAdapterIntrospection;
+        if (context) |cache| if (cache.usable()) try cache.cache.putRelation(&cache.scope, database, schema, relation, result.rows[0][0].?, lookup.generation);
         return try allocator.dupe(u8, result.rows[0][0].?);
     }
 };
@@ -148,6 +168,27 @@ pub fn nativeDuckDbQuery(runtime: Runtime, path: []const u8, sql: []const u8, re
 }
 
 pub fn openSession(runtime: Runtime, graph: *const Graph, db_path: []const u8) !Session {
+    var session = try openSessionUncached(runtime, graph, db_path);
+    if (graph.relation_cache) |cache| {
+        var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
+        hash.update(graph.adapter_type);
+        hash.update("\x00");
+        hash.update(db_path);
+        hash.update("\x00");
+        if (graph.connection_info) |conninfo| hash.update(conninfo);
+        var digest: [32]u8 = undefined;
+        hash.final(&digest);
+        const context = @import("relation_cache.zig").Context{ .cache = cache, .scope = std.fmt.bytesToHex(digest, .lower) };
+        switch (session) {
+            inline else => |*connection| connection.cache_context = context,
+        }
+        errdefer session.deinit();
+        try @import("relation_cache.zig").warmSession(&session, false);
+    }
+    return session;
+}
+
+fn openSessionUncached(runtime: Runtime, graph: *const Graph, db_path: []const u8) !Session {
     if (std.mem.eql(u8, graph.adapter_type, "duckdb")) {
         const pool = runtime.duckdb_pool orelse return error.NativeDuckDbPoolRequired;
         const connection = if (std.mem.eql(u8, db_path, ":memory:")) try pool.acquireSharedMemory(if (runtime.invocation) |invocation| &invocation.id else graph.project_name, false) else try pool.acquire(db_path, false);
@@ -166,7 +207,7 @@ pub fn openUnitSession(runtime: Runtime, graph: *const Graph) !Session {
         const pool = runtime.duckdb_pool orelse return error.NativeDuckDbPoolRequired;
         return .{ .duckdb = (try pool.acquire(":memory:", false)) orelse return error.NativeDuckDbLibraryNotFound };
     }
-    return openSession(runtime, graph, ":memory:");
+    return openSessionUncached(runtime, graph, ":memory:");
 }
 
 pub fn queryForGraph(runtime: Runtime, graph: *const Graph, db_path: []const u8, sql: []const u8) !QueryResult {

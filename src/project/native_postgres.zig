@@ -33,6 +33,7 @@ const Api = struct {
 };
 
 pub const Connection = struct {
+    cache_context: ?@import("relation_cache.zig").Context = null,
     cancellation_token: ?*const std.atomic.Value(bool) = null,
     allocator: std.mem.Allocator,
     library: std.DynLib,
@@ -63,6 +64,7 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
+        if (self.cache_context) |*context| context.close();
         self.clearError();
         self.api.PQfreeCancel(self.cancellation);
         self.api.PQfinish(self.handle);
@@ -73,6 +75,9 @@ pub const Connection = struct {
     pub fn query(self: *Connection, sql: []const u8) !QueryResult {
         if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
         self.clearError();
+        const cache_change = if (self.cache_context) |*context| context.before(sql) else null;
+        var cache_success = false;
+        defer if (cache_change) |change| if (self.cache_context) |*context| context.after(change, cache_success);
         if (std.mem.indexOfScalar(u8, sql, 0) != null) return error.InvalidSqlText;
         const sql_z = try self.allocator.dupeZ(u8, sql);
         defer self.allocator.free(sql_z);
@@ -125,6 +130,7 @@ pub const Connection = struct {
             }
         }
         if (failed) |err| return err;
+        cache_success = true;
         return output;
     }
 

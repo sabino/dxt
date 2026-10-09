@@ -246,6 +246,7 @@ pub const Pool = struct {
 };
 
 pub const Connection = struct {
+    cache_context: ?@import("relation_cache.zig").Context = null,
     api: *const Api,
     handle: Handle,
     allocator: std.mem.Allocator,
@@ -262,6 +263,7 @@ pub const Connection = struct {
     cancellation_token: ?*const std.atomic.Value(bool) = null,
 
     pub fn deinit(self: *Connection) void {
+        if (self.cache_context) |*context| context.close();
         self.clearError();
         if (self.handle == null) return;
         self.api.duckdb_disconnect(&self.handle);
@@ -279,6 +281,9 @@ pub const Connection = struct {
     pub fn query(self: *Connection, sql: []const u8) !QueryResult {
         if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
         self.clearError();
+        const cache_change = if (self.cache_context) |*context| context.before(sql) else null;
+        var cache_success = false;
+        defer if (cache_change) |change| if (self.cache_context) |*context| context.after(change, cache_success);
         if (self.readonly) {
             var begin_result = try self.queryStatements("begin transaction read only", false);
             begin_result.deinit(self.allocator);
@@ -289,7 +294,9 @@ pub const Connection = struct {
                 if (rollback_result) |*owned| owned.deinit(self.allocator);
             }
         }
-        return self.queryStatements(sql, self.readonly);
+        const output = try self.queryStatements(sql, self.readonly);
+        cache_success = true;
+        return output;
     }
 
     fn queryStatements(self: *Connection, sql: []const u8, readonly: bool) !QueryResult {
