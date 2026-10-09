@@ -81,6 +81,11 @@ pub fn prepare(runtime: types.Runtime, args: []const []const u8) !Prepared {
             cursor += 1;
         }
     }
+    if (options.partial_parse_file_path) |path| {
+        const stat = std.Io.Dir.cwd().statFile(runtime.io, path, .{}) catch return error.InvalidPartialParseFilePath;
+        if (stat.kind != .file) return error.InvalidPartialParseFilePath;
+        options.partial_parse_file_path = std.Io.Dir.cwd().realPathFileAlloc(runtime.io, path, a) catch return error.InvalidPartialParseFilePath;
+    }
     try validateWarningOptions(runtime, options);
     if (options.resource_types) |kinds| for (kinds) |kind| if (!validResourceType(kind, false)) return error.UnsupportedResourceType;
     if (options.exclude_resource_types) |kinds| for (kinds) |kind| if (!validResourceType(kind, true)) return error.UnsupportedResourceType;
@@ -120,6 +125,10 @@ fn defaults(runtime: types.Runtime, command: ?[]const u8) !types.Options {
     options.populate_cache = try environmentBool(runtime, "DBT_POPULATE_CACHE", true);
     options.cache_selected_only = try environmentBool(runtime, "DBT_CACHE_SELECTED_ONLY", false);
     options.log_cache_events = try environmentBool(runtime, "DBT_LOG_CACHE_EVENTS", false);
+    options.partial_parse = try environmentBool(runtime, "DBT_PARTIAL_PARSE", true);
+    options.partial_parse_file_diff = try environmentBool(runtime, "DBT_PARTIAL_PARSE_FILE_DIFF", true);
+    options.partial_parse_file_path = environment(runtime, "DBT_PARTIAL_PARSE_FILE_PATH");
+    options.static_parser = try environmentBool(runtime, "DBT_STATIC_PARSER", true);
     options.write_json = try environmentBool(runtime, "DBT_WRITE_JSON", true);
     options.warn_error = try environmentBool(runtime, "DBT_WARN_ERROR", false);
     options.version_check = try environmentBool(runtime, "DBT_VERSION_CHECK", true);
@@ -138,11 +147,11 @@ fn defaults(runtime: types.Runtime, command: ?[]const u8) !types.Options {
 
 fn universal(options: *types.Options, args: []const []const u8, index: *usize) !bool {
     const arg = args[index.*];
-    if (eq(arg, "--quiet") or eq(arg, "--no-quiet")) options.quiet = eq(arg, "--quiet") else if (eq(arg, "--use-colors") or eq(arg, "--no-use-colors")) options.use_colors = eq(arg, "--use-colors") else if (eq(arg, "--use-colors-file") or eq(arg, "--no-use-colors-file")) options.use_colors_file = eq(arg, "--use-colors-file") else if (eq(arg, "--print") or eq(arg, "--no-print")) options.print_enabled = eq(arg, "--print") else if (eq(arg, "--write-json") or eq(arg, "--no-write-json")) options.write_json = eq(arg, "--write-json") else if (eq(arg, "--version-check") or eq(arg, "--no-version-check")) options.version_check = eq(arg, "--version-check") else if (eq(arg, "--warn-error") or eq(arg, "--no-warn-error")) options.warn_error = eq(arg, "--warn-error") else if (eq(arg, "--debug") or eq(arg, "--no-debug")) options.debug = eq(arg, "--debug") else if (eq(arg, "--single-threaded") or eq(arg, "--no-single-threaded")) options.single_threaded = eq(arg, "--single-threaded") else if (eq(arg, "--populate-cache") or eq(arg, "--no-populate-cache")) options.populate_cache = eq(arg, "--populate-cache") else if (eq(arg, "--cache-selected-only") or eq(arg, "--no-cache-selected-only")) options.cache_selected_only = eq(arg, "--cache-selected-only") else if (eq(arg, "--log-cache-events") or eq(arg, "--no-log-cache-events")) options.log_cache_events = eq(arg, "--log-cache-events") else if (eq(arg, "--log-format") or eq(arg, "--log-format-file") or eq(arg, "--log-level") or eq(arg, "--log-level-file") or eq(arg, "--log-path") or eq(arg, "--log-file-max-bytes") or eq(arg, "--warn-error-options") or eq(arg, "--record-timing-info")) {
+    if (eq(arg, "--quiet") or eq(arg, "--no-quiet")) options.quiet = eq(arg, "--quiet") else if (eq(arg, "--use-colors") or eq(arg, "--no-use-colors")) options.use_colors = eq(arg, "--use-colors") else if (eq(arg, "--use-colors-file") or eq(arg, "--no-use-colors-file")) options.use_colors_file = eq(arg, "--use-colors-file") else if (eq(arg, "--print") or eq(arg, "--no-print")) options.print_enabled = eq(arg, "--print") else if (eq(arg, "--write-json") or eq(arg, "--no-write-json")) options.write_json = eq(arg, "--write-json") else if (eq(arg, "--version-check") or eq(arg, "--no-version-check")) options.version_check = eq(arg, "--version-check") else if (eq(arg, "--warn-error") or eq(arg, "--no-warn-error")) options.warn_error = eq(arg, "--warn-error") else if (eq(arg, "--debug") or eq(arg, "--no-debug")) options.debug = eq(arg, "--debug") else if (eq(arg, "--single-threaded") or eq(arg, "--no-single-threaded")) options.single_threaded = eq(arg, "--single-threaded") else if (eq(arg, "--populate-cache") or eq(arg, "--no-populate-cache")) options.populate_cache = eq(arg, "--populate-cache") else if (eq(arg, "--cache-selected-only") or eq(arg, "--no-cache-selected-only")) options.cache_selected_only = eq(arg, "--cache-selected-only") else if (eq(arg, "--log-cache-events") or eq(arg, "--no-log-cache-events")) options.log_cache_events = eq(arg, "--log-cache-events") else if (eq(arg, "--partial-parse") or eq(arg, "--no-partial-parse")) options.partial_parse = eq(arg, "--partial-parse") else if (eq(arg, "--partial-parse-file-diff") or eq(arg, "--no-partial-parse-file-diff")) options.partial_parse_file_diff = eq(arg, "--partial-parse-file-diff") else if (eq(arg, "--static-parser") or eq(arg, "--no-static-parser")) options.static_parser = eq(arg, "--static-parser") else if (eq(arg, "--log-format") or eq(arg, "--log-format-file") or eq(arg, "--log-level") or eq(arg, "--log-level-file") or eq(arg, "--log-path") or eq(arg, "--log-file-max-bytes") or eq(arg, "--warn-error-options") or eq(arg, "--record-timing-info") or eq(arg, "--partial-parse-file-path")) {
         index.* += 1;
         if (index.* >= args.len) return error.InvalidOption;
         const value = args[index.*];
-        if (eq(arg, "--log-format")) options.log_format = try logFormat(value) else if (eq(arg, "--log-format-file")) options.log_format_file = try fileFormat(value) else if (eq(arg, "--log-level")) options.log_level = try logLevel(value) else if (eq(arg, "--log-level-file")) options.log_level_file = try logLevel(value) else if (eq(arg, "--log-path")) options.log_path = value else if (eq(arg, "--log-file-max-bytes")) options.log_file_max_bytes = try std.fmt.parseInt(u64, value, 10) else if (eq(arg, "--record-timing-info")) options.record_timing_info = value else options.warn_error_options = value;
+        if (eq(arg, "--log-format")) options.log_format = try logFormat(value) else if (eq(arg, "--log-format-file")) options.log_format_file = try fileFormat(value) else if (eq(arg, "--log-level")) options.log_level = try logLevel(value) else if (eq(arg, "--log-level-file")) options.log_level_file = try logLevel(value) else if (eq(arg, "--log-path")) options.log_path = value else if (eq(arg, "--log-file-max-bytes")) options.log_file_max_bytes = try std.fmt.parseInt(u64, value, 10) else if (eq(arg, "--record-timing-info")) options.record_timing_info = value else if (eq(arg, "--partial-parse-file-path")) options.partial_parse_file_path = value else options.warn_error_options = value;
     } else return false;
     return true;
 }
@@ -307,7 +316,7 @@ fn commandHint(args: []const []const u8) ?[]const u8 {
     return null;
 }
 fn universalValue(arg: []const u8) bool {
-    for ([_][]const u8{ "--log-format", "--log-format-file", "--log-level", "--log-level-file", "--log-path", "--log-file-max-bytes", "--warn-error-options", "--record-timing-info" }) |name| if (eq(arg, name)) return true;
+    for ([_][]const u8{ "--log-format", "--log-format-file", "--log-level", "--log-level-file", "--log-path", "--log-file-max-bytes", "--warn-error-options", "--record-timing-info", "--partial-parse-file-path" }) |name| if (eq(arg, name)) return true;
     return false;
 }
 fn splitTypes(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
@@ -321,11 +330,11 @@ fn globalFlag(arg: []const u8) bool {
 }
 fn globalKey(arg: []const u8) ?[]const u8 {
     if (globalValue(arg)) return arg;
-    for ([_][]const u8{ "quiet", "use-colors", "use-colors-file", "print", "write-json", "warn-error", "version-check", "debug", "defer", "favor-state", "fail-fast", "single-threaded", "populate-cache", "cache-selected-only", "log-cache-events" }) |name| {
+    for ([_][]const u8{ "quiet", "use-colors", "use-colors-file", "print", "write-json", "warn-error", "version-check", "debug", "defer", "favor-state", "fail-fast", "single-threaded", "populate-cache", "cache-selected-only", "log-cache-events", "partial-parse", "partial-parse-file-diff", "static-parser" }) |name| {
         if (std.mem.startsWith(u8, arg, "--") and eq(arg[2..], name)) return name;
         if (std.mem.startsWith(u8, arg, "--no-") and eq(arg[5..], name)) return name;
     }
-    for ([_][]const u8{ "--log-format", "--log-format-file", "--log-level", "--log-level-file", "--log-path", "--log-file-max-bytes", "--warn-error-options", "--record-timing-info" }) |name| if (eq(arg, name)) return name;
+    for ([_][]const u8{ "--log-format", "--log-format-file", "--log-level", "--log-level-file", "--log-path", "--log-file-max-bytes", "--warn-error-options", "--record-timing-info", "--partial-parse-file-path" }) |name| if (eq(arg, name)) return name;
     return null;
 }
 fn valueOption(arg: []const u8) bool {

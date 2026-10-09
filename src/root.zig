@@ -644,6 +644,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.NativeDuckDbConnectionFailed => stderr.writeAll("error: native DuckDB connection failed\n") catch {},
         error.NativeDuckDbReadOnlyConnection => stderr.writeAll("error: DuckDB connection permits read-only queries\n") catch {},
         error.InvalidThreadCount => stderr.writeAll("error: --threads must be an integer between 1 and 256\n") catch {},
+        error.InvalidPartialParseFilePath => stderr.writeAll("error: --partial-parse-file-path must identify an existing readable file\n") catch {},
         error.InvalidLogFormat => stderr.writeAll("error: --log-format must be text, debug or json\n") catch {},
         error.InvalidDuckDbBackend => stderr.writeAll("error: DXT_DUCKDB_BACKEND must be auto, native, or cli\n") catch {},
         error.NativePostgresLibraryNotFound => stderr.writeAll("error: native PostgreSQL library unavailable; install libpq or set DXT_POSTGRES_LIBRARY\n") catch {},

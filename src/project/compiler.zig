@@ -948,7 +948,7 @@ fn flagsValue(allocator: std.mem.Allocator, graph: *const Graph) !native_expr.Va
     var it = document.value.object.iterator();
     while (it.next()) |entry| {
         var exposed = false;
-        for ([_][]const u8{ "warn_error", "warn_error_options", "write_json", "use_colors", "profiles_dir", "log_format", "version_check", "fail_fast", "indirect_selection", "quiet", "target_path", "log_path", "which", "full_refresh", "store_failures", "debug", "cache_selected_only", "log_cache_events" }) |key| if (std.mem.eql(u8, key, entry.key_ptr.*)) {
+        for ([_][]const u8{ "warn_error", "warn_error_options", "write_json", "use_colors", "profiles_dir", "log_format", "version_check", "fail_fast", "indirect_selection", "quiet", "target_path", "log_path", "which", "full_refresh", "store_failures", "debug", "cache_selected_only", "log_cache_events", "static_parser", "partial_parse" }) |key| if (std.mem.eql(u8, key, entry.key_ptr.*)) {
             exposed = true;
             break;
         };

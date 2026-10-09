@@ -580,7 +580,7 @@ fn stemFromPath(path: []const u8) []const u8 {
 }
 
 fn writeSha256Checksum(writer: *Io.Writer, raw_code: []const u8) !void {
-    const checksum_input = trimTrailingNewlines(raw_code);
+    const checksum_input = std.mem.trim(u8, raw_code, " \t\r\n\x0b\x0c");
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(checksum_input, &digest, .{});
     var hex: [64]u8 = undefined;
@@ -592,14 +592,6 @@ fn writeSha256Checksum(writer: *Io.Writer, raw_code: []const u8) !void {
 
 fn writeNoneChecksum(writer: *Io.Writer) !void {
     try writer.writeAll("{\"name\":\"none\",\"checksum\":\"\"}");
-}
-
-fn trimTrailingNewlines(value: []const u8) []const u8 {
-    var end = value.len;
-    while (end != 0 and (value[end - 1] == '\n' or value[end - 1] == '\r')) {
-        end -= 1;
-    }
-    return value[0..end];
 }
 
 fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: MacroDef) !void {

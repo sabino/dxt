@@ -141,6 +141,13 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
 
     const parse_state = try @import("parse_cache.zig").prepare(runtime, options, &graph, &config);
     if (@import("parse_cache.zig").restore(runtime, parse_state, &graph)) return graph;
+    if (!options.partial_parse_file_diff) {
+        // Core's hidden no-file-diff option supplies an empty external diff:
+        // ReadFilesFromDiff reuses saved files and reads no files from disk.
+        // With no usable saved manifest, the supplied file set is empty.
+        try @import("parse_cache.zig").save(runtime, parse_state, &graph);
+        return graph;
+    }
 
     try @import("bundled_macros.zig").load(runtime.allocator, &graph);
     try loadProjectMacros(runtime, options.project_dir, config.name, config.macro_paths.items, true, callbacks, &graph);

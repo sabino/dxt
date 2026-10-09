@@ -267,6 +267,11 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
     try writer.print(",\"quiet\":{s},\"write_json\":{s},\"warn_error\":{s},\"version_check\":{s}", .{ if (opts.quiet) "true" else "false", if (opts.write_json) "true" else "false", if (opts.warn_error) "true" else "false", if (opts.version_check) "true" else "false" });
     try writer.print(",\"debug\":{s}", .{if (opts.debug) "true" else "false"});
     try writer.print(",\"populate_cache\":{s},\"cache_selected_only\":{s}", .{ if (opts.populate_cache) "true" else "false", if (opts.cache_selected_only) "true" else "false" });
+    try writer.print(",\"partial_parse\":{s},\"partial_parse_file_diff\":{s},\"static_parser\":{s}", .{ if (opts.partial_parse) "true" else "false", if (opts.partial_parse_file_diff) "true" else "false", if (opts.static_parser) "true" else "false" });
+    if (opts.partial_parse_file_path) |path| {
+        try writer.writeAll(",\"partial_parse_file_path\":");
+        try json.string(writer, path);
+    }
     if (opts.log_cache_events) try writer.writeAll(",\"log_cache_events\":true");
     if (opts.single_threaded) try writer.writeAll(",\"single_threaded\":true");
     if (opts.record_timing_info) |path| {

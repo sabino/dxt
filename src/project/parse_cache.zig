@@ -11,18 +11,19 @@ const schema = "dxt-native-parse-v1";
 
 pub const State = struct {
     path: []const u8,
+    write_path: ?[]const u8 = null,
     fingerprint: []const u8,
     context_fingerprint: []const u8 = "",
     files: Value,
-    enabled: bool,
+    enabled: bool, // Whether to read/reuse; Core still saves a fresh full parse.
 };
 
 pub fn prepare(runtime: types.Runtime, options: types.Options, graph: *const types.Graph, project: *const types.ProjectConfig) !State {
     const a = runtime.allocator;
     const target = options.target_path orelse project.target_path;
     const target_dir = if (std.fs.path.isAbsolute(target)) target else try fs.pathJoin(a, &.{ options.project_dir, target });
-    const path = options.partial_parse_file_path orelse try fs.pathJoin(a, &.{ target_dir, "dxt_parse_cache.json" });
-    if (!options.partial_parse) return .{ .path = path, .fingerprint = "", .files = .null, .enabled = false };
+    const write_path = try fs.pathJoin(a, &.{ target_dir, "dxt_parse_cache.json" });
+    const path = options.partial_parse_file_path orelse write_path;
     var files: std.ArrayList([]const u8) = .empty;
     try projectFiles(runtime, options.project_dir, project, &files);
     var cli_vars: Value = .{ .object = .empty };
@@ -62,7 +63,12 @@ pub fn prepare(runtime: types.Runtime, options: types.Options, graph: *const typ
     hashPart(&digest, try std.json.Stringify.valueAlloc(a, graph.vars.items, .{}));
     // Parse-time flags are observable inside macros. Selection/logging changes
     // do not require a rebuild unless an authored macro observes those flags.
-    hashPart(&digest, try std.json.Stringify.valueAlloc(a, options, .{}));
+    var parsing_options = options;
+    // This hidden flag chooses a reader, and is absent from Core's macro flag
+    // context. Copying a saved cache to another path preserves its identity.
+    parsing_options.partial_parse_file_path = null;
+    parsing_options.partial_parse_file_diff = true;
+    hashPart(&digest, try std.json.Stringify.valueAlloc(a, parsing_options, .{}));
     if (runtime.environment) |environment| {
         var names: std.ArrayList([]const u8) = .empty;
         var iterator = environment.iterator();
@@ -93,7 +99,7 @@ pub fn prepare(runtime: types.Runtime, options: types.Options, graph: *const typ
         try inputs.append(input);
     }
     const fingerprint = std.fmt.bytesToHex(digest.finalResult(), .lower);
-    return .{ .path = path, .fingerprint = try a.dupe(u8, &fingerprint), .context_fingerprint = try a.dupe(u8, &context_digest), .files = .{ .array = inputs }, .enabled = true };
+    return .{ .path = path, .write_path = write_path, .fingerprint = try a.dupe(u8, &fingerprint), .context_fingerprint = try a.dupe(u8, &context_digest), .files = .{ .array = inputs }, .enabled = options.partial_parse };
 }
 
 fn hashPart(digest: *std.crypto.hash.sha2.Sha256, bytes: []const u8) void {
@@ -150,7 +156,9 @@ pub fn restore(runtime: types.Runtime, state: State, graph: *types.Graph) bool {
         graph.parser_cache_reason = "incompatible";
         return false;
     }
-    if (!textEqual(stored.object.get("fingerprint"), state.fingerprint)) {
+    const supplied_empty_diff = !graph.command_options.partial_parse_file_diff and
+        textEqual(stored.object.get("context_fingerprint"), state.context_fingerprint);
+    if (!supplied_empty_diff and !textEqual(stored.object.get("fingerprint"), state.fingerprint)) {
         graph.parser_cache_reason = "changed";
         if (graph.command_options.partial_parse_file_diff) graph.parser_cache_changes = changedFiles(stored.object.get("files") orelse .null, state.files);
         if (graph.command_options.partial_parse_file_diff and textEqual(stored.object.get("context_fingerprint"), state.context_fingerprint)) {
@@ -208,7 +216,6 @@ fn changedFiles(old: Value, new: Value) usize {
 }
 
 pub fn save(runtime: types.Runtime, state: State, graph: *const types.Graph) !void {
-    if (!state.enabled) return;
     const a = runtime.allocator;
     var stored: Value = .{ .object = .empty };
     try values.put(a, &stored, "schema", .{ .string = schema });
@@ -217,12 +224,13 @@ pub fn save(runtime: types.Runtime, state: State, graph: *const types.Graph) !vo
     try values.put(a, &stored, "files", state.files);
     try stored.object.put(a, try a.dupe(u8, "graph"), try codec.encodeGraph(a, graph));
     const bytes = try std.json.Stringify.valueAlloc(a, stored, .{});
-    const parent = std.fs.path.dirname(state.path) orelse ".";
+    const write_path = state.write_path orelse state.path;
+    const parent = std.fs.path.dirname(write_path) orelse ".";
     try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
-    const temporary = try std.fmt.allocPrint(a, "{s}.{d}.{x}.tmp", .{ state.path, std.os.linux.getpid(), @intFromPtr(graph) });
+    const temporary = try std.fmt.allocPrint(a, "{s}.{d}.{x}.tmp", .{ write_path, std.os.linux.getpid(), @intFromPtr(graph) });
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = temporary, .data = bytes });
     defer std.Io.Dir.cwd().deleteFile(runtime.io, temporary) catch {};
-    try std.Io.Dir.cwd().rename(temporary, std.Io.Dir.cwd(), state.path, runtime.io);
+    try std.Io.Dir.cwd().rename(temporary, std.Io.Dir.cwd(), write_path, runtime.io);
 }
 
 /// Reuse only independently parsed literal models. Models executing macros,

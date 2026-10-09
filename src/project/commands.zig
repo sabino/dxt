@@ -497,6 +497,10 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
     const which = try allocator.dupe(u8, which_value.string);
     var options = current;
     options.which = which;
+    if (args.get("partial_parse_file_path")) |value| {
+        if (value != .string and value != .null) return error.MalformedRunResultsArtifact;
+        options.partial_parse_file_path = if (value == .string) try allocator.dupe(u8, value.string) else null;
+    }
     if (args.get("record_timing_info")) |value| {
         if (value != .string and value != .null) return error.MalformedRunResultsArtifact;
         options.record_timing_info = if (value == .string) try allocator.dupe(u8, value.string) else null;
@@ -565,7 +569,7 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
         if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
         options.full_refresh = value == .bool and value.bool;
     }
-    inline for (.{ .{ "defer", "defer_enabled" }, .{ "favor_state", "favor_state" }, .{ "fail_fast", "fail_fast" }, .{ "quiet", "quiet" }, .{ "debug", "debug" }, .{ "write_json", "write_json" }, .{ "warn_error", "warn_error" }, .{ "version_check", "version_check" }, .{ "use_colors", "use_colors" }, .{ "use_colors_file", "use_colors_file" }, .{ "print", "print_enabled" }, .{ "populate_cache", "populate_cache" }, .{ "cache_selected_only", "cache_selected_only" }, .{ "log_cache_events", "log_cache_events" } }) |field| {
+    inline for (.{ .{ "defer", "defer_enabled" }, .{ "favor_state", "favor_state" }, .{ "fail_fast", "fail_fast" }, .{ "quiet", "quiet" }, .{ "debug", "debug" }, .{ "write_json", "write_json" }, .{ "warn_error", "warn_error" }, .{ "version_check", "version_check" }, .{ "use_colors", "use_colors" }, .{ "use_colors_file", "use_colors_file" }, .{ "print", "print_enabled" }, .{ "populate_cache", "populate_cache" }, .{ "cache_selected_only", "cache_selected_only" }, .{ "log_cache_events", "log_cache_events" }, .{ "partial_parse", "partial_parse" }, .{ "partial_parse_file_diff", "partial_parse_file_diff" }, .{ "static_parser", "static_parser" } }) |field| {
         if (args.get(field[0])) |value| {
             if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
             @field(options, field[1]) = value == .bool and value.bool;

@@ -3785,9 +3785,17 @@ fn dupNormalizedSingularTestSeverity(allocator: std.mem.Allocator, value: []cons
     return error.UnsupportedYaml;
 }
 
+// dbt parser/read_files.py strips source contents before storing raw_code and
+// computing checksums. Preserve inner whitespace while dropping file padding.
+fn readSourceCode(runtime: Runtime, path: []const u8) ![]const u8 {
+    const contents = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(16 * 1024 * 1024));
+    defer runtime.allocator.free(contents);
+    return try runtime.allocator.dupe(u8, std.mem.trim(u8, contents, " \t\r\n\x0b\x0c"));
+}
+
 fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const full_path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
-    const sql = try std.Io.Dir.cwd().readFileAlloc(runtime.io, full_path, runtime.allocator, .limited(16 * 1024 * 1024));
+    const sql = try readSourceCode(runtime, full_path);
     const model_name = try modelNameFromPath(runtime.allocator, relative_path);
     const unique_id = try std.fmt.allocPrint(runtime.allocator, "model.{s}.{s}", .{ package_name, model_name });
     const model_path = relativeUnderResourcePath(relative_path, model_root);
@@ -3809,7 +3817,7 @@ fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8,
 
 fn parseAnalysis(runtime: Runtime, project_dir: []const u8, analysis_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const full_path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
-    const sql = try std.Io.Dir.cwd().readFileAlloc(runtime.io, full_path, runtime.allocator, .limited(16 * 1024 * 1024));
+    const sql = try readSourceCode(runtime, full_path);
     const analysis_name = try modelNameFromPath(runtime.allocator, relative_path);
     const unique_id = try std.fmt.allocPrint(runtime.allocator, "analysis.{s}.{s}", .{ package_name, analysis_name });
     const relative_analysis_path = relativeUnderResourcePath(relative_path, analysis_root);
@@ -3823,18 +3831,15 @@ fn parseAnalysis(runtime: Runtime, project_dir: []const u8, analysis_root: []con
         .path = analysis_path,
         .original_file_path = relative_path,
         .raw_code = sql,
-        .materialized = "analysis",
     };
     errdefer deinitNode(runtime.allocator, &node);
     try compiler.scanDependencies(runtime.allocator, sql, &node, graph);
-    node.materialized = "analysis";
-    node.inline_materialized = false;
     try graph.nodes.append(runtime.allocator, node);
 }
 
 fn parseSingularTest(runtime: Runtime, project_dir: []const u8, test_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const full_path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
-    const sql = try std.Io.Dir.cwd().readFileAlloc(runtime.io, full_path, runtime.allocator, .limited(16 * 1024 * 1024));
+    const sql = try readSourceCode(runtime, full_path);
     const test_name = try resourceNameFromPath(runtime.allocator, relative_path, ".sql");
     const unique_id = try std.fmt.allocPrint(runtime.allocator, "test.{s}.{s}", .{ package_name, test_name });
     const test_path = relativeUnderResourcePath(relative_path, test_root);
