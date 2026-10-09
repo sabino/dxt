@@ -31,8 +31,8 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
     defer owned_pool.deinit();
     if (local_runtime.duckdb_pool == null) local_runtime.duckdb_pool = &owned_pool;
     var session: adapter.Session = if (dialect == .duckdb) blk: {
-        if (!eq(db_path, ":memory:")) std.Io.Dir.cwd().access(runtime.io, db_path, .{}) catch break :blk .{ .duckdb = (try local_runtime.duckdb_pool.?.acquire(":memory:", true)) orelse return error.NativeDuckDbLibraryNotFound };
-        break :blk .{ .duckdb = (try local_runtime.duckdb_pool.?.acquire(db_path, true)) orelse return error.NativeDuckDbLibraryNotFound };
+        if (!eq(db_path, ":memory:")) std.Io.Dir.cwd().access(runtime.io, db_path, .{}) catch break :blk .{ .duckdb = (try local_runtime.duckdb_pool.?.acquireWithProfile(":memory:", true, graph.duckdb_credentials)) orelse return error.NativeDuckDbLibraryNotFound };
+        break :blk .{ .duckdb = (try local_runtime.duckdb_pool.?.acquireWithProfile(db_path, true, graph.duckdb_credentials)) orelse return error.NativeDuckDbLibraryNotFound };
     } else try adapter.openSession(local_runtime, graph, "");
     defer session.deinit();
     switch (session) {

@@ -76,6 +76,7 @@ pub fn loadConnectionGraph(base_runtime: Runtime, options: Options) !Graph {
     graph.database_path_base = identity.database_path_base;
     graph.connection_info = identity.connection_info;
     graph.target_context = identity.target_context;
+    graph.duckdb_credentials = identity.duckdb_credentials;
     graph.target_threads = identity.threads;
     graph.profile_name = identity.profile_name;
     graph.target_name = identity.target_name;
@@ -118,6 +119,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         graph.database_path_base = identity.database_path_base;
         graph.connection_info = identity.connection_info;
         graph.target_context = identity.target_context;
+        graph.duckdb_credentials = identity.duckdb_credentials;
         graph.target_threads = identity.threads;
         graph.profile_name = identity.profile_name;
         graph.target_name = identity.target_name;

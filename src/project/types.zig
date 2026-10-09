@@ -748,6 +748,8 @@ pub const Graph = struct {
     database_path_base: ?[]const u8 = null,
     connection_info: ?[]const u8 = null,
     target_context: std.json.Value = .null,
+    // Driver credentials remain private and never enter cached graph artifacts.
+    duckdb_credentials: std.json.Value = .null,
     target_threads: u16 = 1,
     profile_name: ?[]const u8 = null,
     target_name: ?[]const u8 = null,
@@ -819,6 +821,7 @@ pub const Graph = struct {
         }
         self.semantic_project_configs.deinit(self.allocator);
         config_value.deinit(self.allocator, &self.target_context);
+        config_value.deinit(self.allocator, &self.duckdb_credentials);
         for (self.nodes.items) |*node| {
             deinitNode(self.allocator, node);
         }
@@ -893,6 +896,7 @@ pub const AdapterIdentity = struct {
     database_path_base: ?[]const u8 = null,
     connection_info: ?[]const u8 = null,
     target_context: std.json.Value = .null,
+    duckdb_credentials: std.json.Value = .null,
     threads: u16 = 1,
 };
 

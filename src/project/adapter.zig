@@ -191,7 +191,7 @@ pub fn openSession(runtime: Runtime, graph: *const Graph, db_path: []const u8) !
 fn openSessionUncached(runtime: Runtime, graph: *const Graph, db_path: []const u8) !Session {
     if (std.mem.eql(u8, graph.adapter_type, "duckdb")) {
         const pool = runtime.duckdb_pool orelse return error.NativeDuckDbPoolRequired;
-        const connection = if (std.mem.eql(u8, db_path, ":memory:")) try pool.acquireSharedMemory(if (runtime.invocation) |invocation| &invocation.id else graph.project_name, false) else try pool.acquire(db_path, false);
+        const connection = if (std.mem.eql(u8, db_path, ":memory:")) try pool.acquireSharedMemoryWithProfile(if (runtime.invocation) |invocation| &invocation.id else graph.project_name, false, graph.duckdb_credentials) else try pool.acquireWithProfile(db_path, false, graph.duckdb_credentials);
         return .{ .duckdb = connection orelse return error.NativeDuckDbLibraryNotFound };
     }
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
@@ -205,7 +205,7 @@ fn openSessionUncached(runtime: Runtime, graph: *const Graph, db_path: []const u
 pub fn openUnitSession(runtime: Runtime, graph: *const Graph) !Session {
     if (std.mem.eql(u8, graph.adapter_type, "duckdb")) {
         const pool = runtime.duckdb_pool orelse return error.NativeDuckDbPoolRequired;
-        return .{ .duckdb = (try pool.acquire(":memory:", false)) orelse return error.NativeDuckDbLibraryNotFound };
+        return .{ .duckdb = (try pool.acquireWithProfile(":memory:", false, graph.duckdb_credentials)) orelse return error.NativeDuckDbLibraryNotFound };
     }
     return openSessionUncached(runtime, graph, ":memory:");
 }
@@ -213,13 +213,13 @@ pub fn openUnitSession(runtime: Runtime, graph: *const Graph) !Session {
 pub fn queryForGraph(runtime: Runtime, graph: *const Graph, db_path: []const u8, sql: []const u8) !QueryResult {
     if (runtime.adapter_session) |session| return try session.query(sql);
     if (std.mem.eql(u8, graph.adapter_type, "duckdb")) {
-        if (std.mem.eql(u8, db_path, ":memory:")) {
-            var session = try openSession(runtime, graph, db_path);
-            defer session.deinit();
-            return try session.query(sql);
-        }
-        if (try nativeDuckDbQuery(runtime, db_path, sql, false)) |native| return native;
-        return try cliDuckDbQuery(runtime, db_path, sql, false);
+        var temporary_pool = DuckDBPool.init(runtime.allocator, runtime.io, runtime.environment);
+        defer temporary_pool.deinit();
+        var configured_runtime = runtime;
+        if (configured_runtime.duckdb_pool == null) configured_runtime.duckdb_pool = &temporary_pool;
+        var session = try openSession(configured_runtime, graph, db_path);
+        defer session.deinit();
+        return try session.query(sql);
     }
     var session = try openSession(runtime, graph, db_path);
     defer session.deinit();

@@ -1,5 +1,7 @@
 const std = @import("std");
 const result = @import("adapter_result.zig");
+const profile_config = @import("duckdb_profile.zig");
+const config_values = @import("config_value.zig");
 pub const QueryResult = result.QueryResult;
 const Handle = ?*anyopaque;
 const CResult = extern struct {
@@ -59,7 +61,52 @@ const Library = struct {
     }
 };
 
-const Database = struct { path: []const u8, handle: Handle, readonly: bool, references: usize = 0 };
+fn exceptionName(error_type: u32) []const u8 {
+    return switch (error_type) {
+        1 => "OutOfRangeException",
+        2 => "ConversionException",
+        5 => "TypeMismatchException",
+        8 => "InvalidTypeException",
+        9 => "SerializationException",
+        10 => "TransactionException",
+        11 => "NotImplementedException",
+        13 => "CatalogException",
+        14 => "ParserException",
+        18 => "ConstraintException",
+        21 => "ConnectionException",
+        22 => "SyntaxException",
+        24 => "BinderException",
+        28 => "IOException",
+        29 => "InterruptException",
+        30 => "FatalException",
+        31 => "InternalException",
+        32 => "InvalidInputException",
+        33 => "OutOfMemoryException",
+        34 => "PermissionException",
+        37 => "DependencyException",
+        38 => "HTTPException",
+        41 => "SequenceException",
+        else => "Error",
+    };
+}
+
+fn messageErrorType(message: []const u8) u32 {
+    inline for (.{
+        .{ "IO Error", 28 },                 .{ "Binder Error", 24 },     .{ "Catalog Error", 13 },
+        .{ "Parser Error", 14 },             .{ "Conversion Error", 2 },  .{ "Invalid Input Error", 32 },
+        .{ "TransactionContext Error", 10 }, .{ "Constraint Error", 18 },
+    }) |entry| if (std.mem.startsWith(u8, message, entry[0])) return entry[1];
+    return 0;
+}
+
+const Database = struct {
+    path: []const u8,
+    handle: Handle,
+    readonly: bool,
+    references: usize = 0,
+    profile: std.json.Value = .null,
+    global_initialized: bool = false,
+};
 
 /// One database instance per file; workers acquire independent connections to
 /// that instance, rather than opening conflicting external writer processes.
@@ -71,6 +118,7 @@ pub const Pool = struct {
     library: ?Library = null,
     attempted: bool = false,
     load_error: ?anyerror = null,
+    last_open_error_type: u32 = 0,
     databases: std.ArrayList(*Database) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, environment: ?*const std.process.Environ.Map) Pool {
@@ -82,6 +130,7 @@ pub const Pool = struct {
             for (self.databases.items) |database| {
                 library.api.duckdb_close(&database.handle);
                 self.allocator.free(database.path);
+                config_values.deinit(self.allocator, &database.profile);
                 self.allocator.destroy(database);
             }
             library.dyn.close();
@@ -135,91 +184,159 @@ pub const Pool = struct {
     }
 
     pub fn acquire(self: *Pool, path: []const u8, readonly: bool) !?Connection {
+        return self.acquireConfigured(path, readonly, null, false);
+    }
+
+    pub fn acquireWithProfile(self: *Pool, path: []const u8, readonly: bool, profile: std.json.Value) !?Connection {
+        return self.acquireConfigured(path, readonly, profile, false);
+    }
+
+    pub fn acquireSharedMemory(self: *Pool, scope: []const u8, readonly: bool) !?Connection {
+        return self.acquireConfigured(scope, readonly, null, true);
+    }
+
+    pub fn acquireSharedMemoryWithProfile(self: *Pool, scope: []const u8, readonly: bool, profile: std.json.Value) !?Connection {
+        return self.acquireConfigured(scope, readonly, profile, true);
+    }
+
+    fn acquireConfigured(self: *Pool, path: []const u8, readonly: bool, requested_profile: ?std.json.Value, shared_memory: bool) !?Connection {
+        if (requested_profile) |profile| try profile_config.validate(profile);
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         if (!try self.load()) return null;
         if (std.mem.indexOfScalar(u8, path, 0) != null) return error.UnsupportedDuckDbPath;
-        const canonical_path = try self.canonicalPath(path);
+        const canonical_path = if (shared_memory) try std.fmt.allocPrint(self.allocator, "memory:{s}", .{path}) else try self.canonicalPath(path);
         defer self.allocator.free(canonical_path);
         const api = &self.library.?.api;
         var database: ?*Database = null;
         // Fresh memory instances ensure fixtures cannot affect another unit.
-        if (!std.mem.eql(u8, path, ":memory:")) {
+        if (shared_memory or !std.mem.eql(u8, path, ":memory:")) {
             for (self.databases.items) |candidate| {
                 if (!std.mem.eql(u8, candidate.path, canonical_path)) continue;
-                if (candidate.readonly and !readonly) {
+                if (requested_profile) |profile| {
+                    const boot = try profile_config.digest(self.allocator, profile, false);
+                    const existing_boot = try profile_config.digest(self.allocator, candidate.profile, false);
+                    const global = try profile_config.digest(self.allocator, profile, true);
+                    const existing_global = try profile_config.digest(self.allocator, candidate.profile, true);
+                    if (!std.mem.eql(u8, &boot, &existing_boot) or !std.mem.eql(u8, &global, &existing_global)) return error.NativeDuckDbProfileConflict;
+                }
+                if (candidate.readonly and !readonly and !shared_memory) {
                     if (candidate.references != 0) return error.NativeDuckDbReadOnlyConnection;
                     // Compiler introspection may have opened the file before
                     // execution. Promote only after all readers disconnect.
                     api.duckdb_close(&candidate.handle);
-                    candidate.handle = try self.openHandle(canonical_path, false);
+                    candidate.global_initialized = false;
+                    candidate.handle = try self.openHandle(canonical_path, false, candidate.profile);
                     candidate.readonly = false;
                 }
-                if (candidate.handle == null) candidate.handle = try self.openHandle(canonical_path, readonly);
+                if (candidate.handle == null) {
+                    candidate.global_initialized = false;
+                    candidate.handle = try self.openHandle(if (shared_memory) ":memory:" else canonical_path, if (shared_memory) false else readonly, candidate.profile);
+                }
                 database = candidate;
                 break;
             }
         }
         if (database == null) {
-            var handle = try self.openHandle(canonical_path, readonly);
+            const profile = requested_profile orelse .null;
+            var handle = try self.openHandle(if (shared_memory) ":memory:" else canonical_path, if (shared_memory) false else readonly, profile);
             errdefer api.duckdb_close(&handle);
             const created = try self.allocator.create(Database);
             errdefer self.allocator.destroy(created);
             const owned_path = try self.allocator.dupe(u8, canonical_path);
             errdefer self.allocator.free(owned_path);
-            created.* = .{ .path = owned_path, .handle = handle, .readonly = readonly };
+            var owned_profile = try config_values.clone(self.allocator, profile);
+            errdefer config_values.deinit(self.allocator, &owned_profile);
+            created.* = .{ .path = owned_path, .handle = handle, .readonly = if (shared_memory) false else readonly, .profile = owned_profile };
             try self.databases.append(self.allocator, created);
             database = created;
         }
         var connection: Handle = null;
         if (api.duckdb_connect(database.?.handle, &connection) != 0) return error.NativeDuckDbConnectionFailed;
         database.?.references += 1;
-        return .{ .api = api, .handle = connection, .allocator = self.allocator, .readonly = readonly, .pool = self, .database = database.?, .memory = std.mem.eql(u8, path, ":memory:"), .isolated_memory = std.mem.eql(u8, path, ":memory:") };
-    }
-
-    /// A project uses one invocation-local in-memory database across its
-    /// worker connections. Unit fixtures continue to use acquire(":memory:").
-    pub fn acquireSharedMemory(self: *Pool, scope: []const u8, readonly: bool) !?Connection {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        if (!try self.load()) return null;
-        const key = try std.fmt.allocPrint(self.allocator, "memory:{s}", .{scope});
-        defer self.allocator.free(key);
-        var database: ?*Database = null;
-        for (self.databases.items) |candidate| if (std.mem.eql(u8, candidate.path, key)) {
-            database = candidate;
-            break;
-        };
-        if (database == null) {
-            var handle = try self.openHandle(":memory:", false);
-            errdefer self.library.?.api.duckdb_close(&handle);
-            const created = try self.allocator.create(Database);
-            errdefer self.allocator.destroy(created);
-            const owned_key = try self.allocator.dupe(u8, key);
-            errdefer self.allocator.free(owned_key);
-            created.* = .{ .path = owned_key, .handle = handle, .readonly = false };
-            try self.databases.append(self.allocator, created);
-            database = created;
+        var initialized = Connection{ .api = api, .handle = connection, .allocator = self.allocator, .readonly = readonly, .pool = self, .database = database.?, .memory = shared_memory or std.mem.eql(u8, path, ":memory:"), .isolated_memory = !shared_memory and std.mem.eql(u8, path, ":memory:"), .shared_memory_scope = if (shared_memory) path else null };
+        errdefer {
+            initialized.clearError();
+            api.duckdb_disconnect(&initialized.handle);
+            database.?.references -= 1;
+            if (!database.?.global_initialized and database.?.references == 0) api.duckdb_close(&database.?.handle);
         }
-        var connection: Handle = null;
-        if (self.library.?.api.duckdb_connect(database.?.handle, &connection) != 0) return error.NativeDuckDbConnectionFailed;
-        database.?.references += 1;
-        return .{ .api = &self.library.?.api, .handle = connection, .allocator = self.allocator, .readonly = readonly, .pool = self, .database = database.?, .memory = true, .isolated_memory = false, .shared_memory_scope = scope };
+        // Database effects are serialized under the pool lock. Cursor settings
+        // are repeated for every connection, including compiler/unit readers.
+        initialized.readonly = false;
+        if (!database.?.global_initialized) {
+            try profile_config.initializeGlobal(&initialized, database.?.profile);
+            database.?.global_initialized = true;
+        }
+        try profile_config.initializeCursor(&initialized, requested_profile orelse database.?.profile);
+        initialized.readonly = readonly;
+        initialized.disable_transactions = profile_config.disableTransactions(requested_profile orelse database.?.profile);
+        initialized.retry_profile = requested_profile orelse database.?.profile;
+        return initialized;
     }
 
-    fn openHandle(self: *Pool, path: []const u8, readonly: bool) !Handle {
+    fn openHandle(self: *Pool, path: []const u8, readonly: bool, profile: std.json.Value) !Handle {
+        const count = profile_config.attempts(profile, true);
+        for (0..count) |attempt| {
+            self.last_open_error_type = 0;
+            return self.openHandleOnce(path, readonly, profile) catch |err| {
+                if (!profile_config.retryable(profile, exceptionName(self.last_open_error_type))) return err;
+                try self.pauseRetry(attempt, null);
+                if (attempt + 1 == count) return err;
+                continue;
+            };
+        }
+        return error.NativeDuckDbConnectionFailed;
+    }
+
+    fn pauseRetry(self: *Pool, attempt: usize, token: ?*const std.atomic.Value(bool)) !void {
+        // Capped individual sleeps avoid overflow; repeated cancellation-safe
+        // waits retain the pinned adapter's exponential retry interval.
+        var seconds = std.math.shl(u64, 1, @min(attempt, 62));
+        while (seconds != 0) {
+            const interval = @min(seconds, 30);
+            for (0..interval * 10) |_| {
+                if (token) |cancelled| if (cancelled.load(.acquire)) return error.AdapterQueryCancelled;
+                try std.Io.sleep(self.io, .fromMilliseconds(100), .awake);
+            }
+            seconds -= interval;
+        }
+    }
+
+    fn openHandleOnce(self: *Pool, path: []const u8, readonly: bool, profile: std.json.Value) !Handle {
         const api = &self.library.?.api;
         const path_z = try self.allocator.dupeZ(u8, path);
         defer self.allocator.free(path_z);
         var config: Handle = null;
         defer api.duckdb_destroy_config(&config);
         if (api.duckdb_create_config(&config) != 0) return error.NativeDuckDbConnectionFailed;
+        const options = profile_config.configuration(profile);
+        if (options == .object) {
+            var it = options.object.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.indexOfScalar(u8, entry.key_ptr.*, 0) != null) return error.InvalidDuckDbConfiguration;
+                const key = try self.allocator.dupeZ(u8, entry.key_ptr.*);
+                defer self.allocator.free(key);
+                const text = try config_values.scalarText(self.allocator, entry.value_ptr.*);
+                defer self.allocator.free(text);
+                if (std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidDuckDbConfiguration;
+                const value = try self.allocator.dupeZ(u8, text);
+                defer self.allocator.free(value);
+                if (api.duckdb_set_config(config, key, value) != 0) return error.InvalidDuckDbConfiguration;
+            }
+        }
         if (readonly and !std.mem.eql(u8, path, ":memory:") and api.duckdb_set_config(config, "access_mode", "READ_ONLY") != 0) return error.NativeDuckDbConnectionFailed;
         var handle: Handle = null;
         var message: ?[*:0]u8 = null;
         const status = api.duckdb_open_ext(path_z, &handle, config, &message);
-        if (message) |text| api.duckdb_free(text);
-        if (status != 0) return error.NativeDuckDbConnectionFailed;
+        if (message) |text| {
+            self.last_open_error_type = messageErrorType(std.mem.span(text));
+            api.duckdb_free(text);
+        }
+        if (status != 0) {
+            api.duckdb_close(&handle);
+            return error.NativeDuckDbConnectionFailed;
+        }
         return handle;
     }
 
@@ -227,7 +344,7 @@ pub const Pool = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         database.references -= 1;
-        if (memory and database.references == 0) self.library.?.api.duckdb_close(&database.handle);
+        if (database.references == 0 and (memory or (!std.mem.startsWith(u8, database.path, "memory:") and !profile_config.keepOpen(database.profile)))) self.library.?.api.duckdb_close(&database.handle);
     }
 
     fn canonicalPath(self: *Pool, path: []const u8) ![]const u8 {
@@ -258,6 +375,9 @@ pub const Connection = struct {
     isolated_memory: bool = false,
     shared_memory_scope: ?[]const u8 = null,
     binding_readonly: bool = false,
+    disable_transactions: bool = false,
+    retry_profile: std.json.Value = .null,
+    last_error_type: u32 = 0,
     // Raw SQL diagnostics are memory-only. Public formatters must redact
     // connection paths and secret values before publishing their projection.
     last_error: ?[]const u8 = null,
@@ -280,6 +400,20 @@ pub const Connection = struct {
     }
 
     pub fn query(self: *Connection, sql: []const u8) !QueryResult {
+        const count = profile_config.attempts(self.retry_profile, false);
+        for (0..count) |attempt| {
+            return self.queryOnce(sql) catch |err| {
+                if (err != error.DuckDbExecutionFailed or !profile_config.queryRetries(self.retry_profile) or !profile_config.retryable(self.retry_profile, exceptionName(self.last_error_type))) return err;
+                if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
+                try self.pool.pauseRetry(attempt, self.cancellation_token);
+                if (attempt + 1 == count) return err;
+                continue;
+            };
+        }
+        return error.DuckDbExecutionFailed;
+    }
+
+    fn queryOnce(self: *Connection, sql: []const u8) !QueryResult {
         if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
         self.clearError();
         const cache_change = if (self.cache_context) |*context| context.before(sql) else null;
@@ -329,6 +463,7 @@ pub const Connection = struct {
             defer self.api.duckdb_destroy_result(&raw);
             if (self.api.duckdb_execute_prepared(prepared, &raw) != 0) {
                 self.captureError(self.api.duckdb_result_error(&raw));
+                self.last_error_type = self.api.duckdb_result_error_type(&raw);
                 if (self.api.duckdb_result_error_type(&raw) == 29) return error.AdapterQueryCancelled;
                 return error.DuckDbExecutionFailed;
             }
@@ -353,14 +488,17 @@ pub const Connection = struct {
 
     pub fn begin(self: *Connection) !void {
         if (self.binding_readonly) return error.NativeDuckDbReadOnlyConnection;
+        if (self.disable_transactions) return;
         try self.execute("begin transaction");
     }
     pub fn commit(self: *Connection) !void {
         if (self.binding_readonly) return error.NativeDuckDbReadOnlyConnection;
+        if (self.disable_transactions) return;
         try self.execute("commit");
     }
     pub fn rollback(self: *Connection) !void {
         if (self.binding_readonly) return error.NativeDuckDbReadOnlyConnection;
+        if (self.disable_transactions) return;
         try self.execute("rollback");
     }
 
@@ -377,12 +515,14 @@ pub const Connection = struct {
     fn clearError(self: *Connection) void {
         if (self.last_error) |owned| self.allocator.free(owned);
         self.last_error = null;
+        self.last_error_type = 0;
     }
 
     fn captureError(self: *Connection, message: ?[*:0]const u8) void {
         self.clearError();
         if (message) |text| {
             const value = std.mem.span(text);
+            self.last_error_type = messageErrorType(value);
             self.last_error = self.allocator.dupe(u8, value[0..@min(value.len, 64 * 1024)]) catch null;
         }
     }

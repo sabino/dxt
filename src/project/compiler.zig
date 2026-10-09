@@ -1197,7 +1197,10 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     if (std.mem.eql(u8, path, "target") and context.graph.target_context != .null) return try valueFromJson(allocator, context.graph.target_context);
     if (std.mem.startsWith(u8, path, "target.")) {
         if (@import("config_value.zig").get(context.graph.target_context, path[7..])) |value| return try valueFromJson(allocator, value);
-        return .{ .string = try renderTargetAttribute(allocator, context.graph, path[7..]) };
+        return .{ .string = renderTargetAttribute(allocator, context.graph, path[7..]) catch |err| switch (err) {
+            error.UnsupportedJinja => return .undefined,
+            else => return err,
+        } };
     }
     if (context.graph.execution_hooks) |hooks| {
         const value = try hooks.resolve(hooks.context, path, allocator);

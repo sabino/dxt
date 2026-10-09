@@ -94,7 +94,7 @@ pub fn executeModelWithPolicy(runtime: Runtime, db_path: []const u8, graph: *con
     var owned: ?adapter.Session = null;
     defer if (owned) |*session| session.deinit();
     if (runtime.adapter_session == null) if (runtime.duckdb_pool) |pool| {
-        const connection = if (std.mem.eql(u8, db_path, ":memory:")) try pool.acquireSharedMemory(if (runtime.invocation) |invocation| &invocation.id else graph.project_name, false) else try pool.acquire(db_path, false);
+        const connection = if (std.mem.eql(u8, db_path, ":memory:")) try pool.acquireSharedMemoryWithProfile(if (runtime.invocation) |invocation| &invocation.id else graph.project_name, false, graph.duckdb_credentials) else try pool.acquireWithProfile(db_path, false, graph.duckdb_credentials);
         if (connection) |native| owned = .{ .duckdb = native };
     };
     const held: ?*adapter.Session = runtime.adapter_session orelse if (owned) |*session| session else null;

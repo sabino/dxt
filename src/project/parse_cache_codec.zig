@@ -7,7 +7,7 @@ const Value = std.json.Value;
 
 pub fn liveField(comptime name: []const u8) bool {
     @setEvalBranchQuota(100000);
-    for (.{ "allocator", "environment", "invocation", "command_options", "timing_profile", "relation_cache", "execution_hooks", "log_collector", "unit_fixture_relations", "unit_overrides", "unit_fixture_aliases", "connection_info", "target_context", "target_threads", "adapter_type", "target_schema", "database_path", "database_path_base", "profile_name", "target_name", "full_refresh", "parser_cache_hit", "parser_cache_reason", "parser_cache_changes", "parser_cache_reused_files" }) |key| if (std.mem.eql(u8, name, key)) return true;
+    for (.{ "allocator", "environment", "invocation", "command_options", "timing_profile", "relation_cache", "execution_hooks", "log_collector", "unit_fixture_relations", "unit_overrides", "unit_fixture_aliases", "connection_info", "target_context", "duckdb_credentials", "target_threads", "adapter_type", "target_schema", "database_path", "database_path_base", "profile_name", "target_name", "full_refresh", "parser_cache_hit", "parser_cache_reason", "parser_cache_changes", "parser_cache_reused_files" }) |key| if (std.mem.eql(u8, name, key)) return true;
     return false;
 }
 
@@ -145,17 +145,21 @@ test "native parse cache owns groups, singular configs and union containers" {
     const a = arena.allocator();
     var original: types.Graph = .{ .allocator = a, .project_name = "cached", .connection_info = "password=not-persisted" };
     defer original.deinit();
+    original.duckdb_credentials = try std.json.parseFromSliceLeaky(Value, a, "{\"secrets\":[{\"type\":\"http\",\"bearer_token\":\"private-cached-token\"}]}", .{});
     try original.groups.append(a, try std.json.parseFromSliceLeaky(Value, a, "{\"name\":\"finance\",\"owner\":{\"name\":\"Team\"}}", .{}));
     try original.singular_tests.append(a, .{ .package_name = "cached", .unique_id = "test.cached.verify", .name = "verify", .alias = "verify", .path = "tests/verify.sql", .original_file_path = "tests/verify.sql", .raw_code = "select 1", .config_values = try std.json.parseFromSliceLeaky(Value, a, "{\"group\":\"finance\"}", .{}) });
     var stored = try encodeGraph(a, &original);
     defer values.deinit(a, &stored);
     const bytes = try std.json.Stringify.valueAlloc(a, stored, .{});
     try std.testing.expect(std.mem.indexOf(u8, bytes, "not-persisted") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "private-cached-token") == null);
     var restored: types.Graph = .{ .allocator = a, .project_name = "live", .connection_info = "password=live" };
     defer restored.deinit();
+    restored.duckdb_credentials = try std.json.parseFromSliceLeaky(Value, a, "{\"secrets\":[{\"type\":\"http\",\"bearer_token\":\"private-live-token\"}]}", .{});
     try decodeGraph(a, &restored, stored);
     try std.testing.expectEqualStrings("cached", restored.project_name);
     try std.testing.expectEqualStrings("password=live", restored.connection_info.?);
+    try std.testing.expectEqualStrings("private-live-token", restored.duckdb_credentials.object.get("secrets").?.array.items[0].object.get("bearer_token").?.string);
     try std.testing.expectEqualStrings("finance", restored.groups.items[0].object.get("name").?.string);
     try std.testing.expectEqualStrings("finance", restored.singular_tests.items[0].config_values.object.get("group").?.string);
     try stored.object.getPtr("groups").?.array.append(.null);

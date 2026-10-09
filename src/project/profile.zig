@@ -99,7 +99,7 @@ pub fn parseAdapterIdentityTextWithEnvironment(allocator: std.mem.Allocator, tex
     var target_context: std.json.Value = .null;
     var it = output.object.iterator();
     while (it.next()) |entry| {
-        if (std.mem.eql(u8, entry.key_ptr.*, "password") or std.mem.eql(u8, entry.key_ptr.*, "pass") or std.mem.eql(u8, entry.key_ptr.*, "private_key") or std.mem.eql(u8, entry.key_ptr.*, "token")) continue;
+        if (std.mem.eql(u8, entry.key_ptr.*, "password") or std.mem.eql(u8, entry.key_ptr.*, "pass") or std.mem.eql(u8, entry.key_ptr.*, "private_key") or std.mem.eql(u8, entry.key_ptr.*, "token") or std.mem.eql(u8, entry.key_ptr.*, "secrets")) continue;
         try values.put(allocator, &target_context, entry.key_ptr.*, entry.value_ptr.*);
     }
     try values.put(allocator, &target_context, "name", .{ .string = target });
@@ -115,7 +115,7 @@ pub fn parseAdapterIdentityTextWithEnvironment(allocator: std.mem.Allocator, tex
         try values.put(allocator, &target_context, "database", .{ .string = database });
     }
     const connection_info = if (std.mem.eql(u8, normalized_adapter_type, "postgres")) try postgresConnectionInfoValue(allocator, output) else null;
-    return .{ .profile_name = try allocator.dupe(u8, selected_profile), .target_name = try allocator.dupe(u8, target), .adapter_type = normalized_adapter_type, .target_schema = target_schema, .database_path = path, .connection_info = connection_info, .threads = threads, .target_context = target_context };
+    return .{ .profile_name = try allocator.dupe(u8, selected_profile), .target_name = try allocator.dupe(u8, target), .adapter_type = normalized_adapter_type, .target_schema = target_schema, .database_path = path, .connection_info = connection_info, .threads = threads, .target_context = target_context, .duckdb_credentials = if (std.mem.eql(u8, normalized_adapter_type, "duckdb")) try values.clone(allocator, output) else .null };
 }
 
 fn postgresConnectionInfoValue(allocator: std.mem.Allocator, output: std.json.Value) ![]const u8 {
@@ -456,6 +456,24 @@ test "profile YAML anchors env target and native credential values stay in memor
     try std.testing.expect(identity.target_context.object.get("password") == null);
     try std.testing.expectEqualStrings("fixture", identity.target_context.object.get("database").?.string);
     try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "password='synthetic \\' escaped\\\\ password'") != null);
+}
+
+test "DuckDB secrets belong to native driver credentials and are absent from target" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const identity = try parseAdapterIdentityText(a,
+        \\fixture:
+        \\  target: dev
+        \\  outputs:
+        \\    dev:
+        \\      type: duckdb
+        \\      secrets: [{type: http, bearer_token: synthetic-private-token}]
+        \\      settings: {threads: 2}
+    , "fixture", null);
+    try std.testing.expect(identity.target_context.object.get("secrets") == null);
+    try std.testing.expectEqualStrings("synthetic-private-token", identity.duckdb_credentials.object.get("secrets").?.array.items[0].object.get("bearer_token").?.string);
+    try std.testing.expectEqual(@as(i64, 2), identity.target_context.object.get("settings").?.object.get("threads").?.integer);
 }
 
 test "profile parser reports missing profile target and type" {

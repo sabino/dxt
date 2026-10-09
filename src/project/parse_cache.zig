@@ -60,6 +60,7 @@ pub fn prepare(runtime: types.Runtime, options: types.Options, graph: *const typ
     hashPart(&digest, try std.Io.Dir.cwd().realPathFileAlloc(runtime.io, options.project_dir, a));
     hashPart(&digest, try std.json.Stringify.valueAlloc(a, project.rendered_project, .{}));
     hashPart(&digest, try std.json.Stringify.valueAlloc(a, graph.target_context, .{}));
+    hashPart(&digest, try std.json.Stringify.valueAlloc(a, graph.duckdb_credentials, .{}));
     hashPart(&digest, graph.connection_info orelse "");
     hashPart(&digest, graph.adapter_type);
     hashPart(&digest, try std.json.Stringify.valueAlloc(a, graph.vars.items, .{}));

@@ -205,7 +205,7 @@ pub fn executeWithPolicy(runtime: types.Runtime, db_path: []const u8, graph: *co
     var temporary_pool = adapter.DuckDBPool.init(runtime.allocator, runtime.io, runtime.environment);
     defer temporary_pool.deinit();
     const pool = runtime.duckdb_pool orelse &temporary_pool;
-    if (try pool.acquire(db_path, false)) |native| {
+    if (try pool.acquireWithProfile(db_path, false, graph.duckdb_credentials)) |native| {
         var connection = native;
         defer connection.deinit();
         return try executeNativeUpdate(runtime, &connection, target, stage, compiled, stage_literal, schema_literal, target_literal, node.incremental, policy);
