@@ -1,4 +1,48 @@
 const std = @import("std");
+const expression = @import("expression.zig");
+
+pub fn toExpression(allocator: std.mem.Allocator, value: std.json.Value) anyerror!expression.Value {
+    return switch (value) {
+        .null => .none,
+        .bool => |v| .{ .boolean = v },
+        .integer => |v| .{ .number = @floatFromInt(v) },
+        .float => |v| .{ .number = v },
+        .number_string => |v| .{ .number = try std.fmt.parseFloat(f64, v) },
+        .string => |v| .{ .string = v },
+        .array => |items| blk: {
+            const values = try allocator.alloc(expression.Value, items.items.len);
+            for (items.items, values) |item, *result| result.* = try toExpression(allocator, item);
+            break :blk .{ .list = values };
+        },
+        .object => |object| blk: {
+            const entries = try allocator.alloc(expression.Entry, object.count());
+            var it = object.iterator();
+            var i: usize = 0;
+            while (it.next()) |entry| : (i += 1) entries[i] = .{ .key = entry.key_ptr.*, .value = try toExpression(allocator, entry.value_ptr.*) };
+            break :blk .{ .object = entries };
+        },
+    };
+}
+
+pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) anyerror!std.json.Value {
+    return switch (value) {
+        .none => .null,
+        .undefined, .callable => error.InvalidConfiguration,
+        .boolean => |v| .{ .bool = v },
+        .number => |v| if (std.math.isFinite(v) and @abs(v) < 9007199254740992 and @floor(v) == v) .{ .integer = @intFromFloat(v) } else .{ .float = v },
+        .string => |v| .{ .string = try allocator.dupe(u8, v) },
+        .list => |items| blk: {
+            var array = std.json.Array.init(allocator);
+            for (items) |item| try array.append(try fromExpression(allocator, item));
+            break :blk .{ .array = array };
+        },
+        .object => |entries| blk: {
+            var object: std.json.ObjectMap = .empty;
+            for (entries) |entry| try object.put(allocator, try allocator.dupe(u8, entry.key), try fromExpression(allocator, entry.value));
+            break :blk .{ .object = object };
+        },
+    };
+}
 
 /// Configuration values own their storage, independent of YAML documents and
 /// temporary Jinja frames. This permits the raw and effective maps to survive

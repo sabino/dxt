@@ -1017,78 +1017,7 @@ pub fn deinitAdapterDispatchArgs(allocator: std.mem.Allocator, args: AdapterDisp
 }
 
 pub fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !void {
-    if (try parseConfigQuotedValue(allocator, args, "materialized")) |value| {
-        node.materialized = value;
-        node.inline_materialized = true;
-    }
-    if (try parseConfigBoolLiteral(args, "enabled")) |enabled| {
-        node.enabled = enabled;
-        node.inline_enabled = true;
-    }
-    if (findKeyword(args, "tags")) |pos| {
-        if (findValueStart(args, pos + "tags".len)) |value_pos| {
-            try parseTagList(allocator, args[value_pos..], &node.tags);
-            node.inline_tags = true;
-            sortStrings(node.tags.items);
-        }
-    }
-    if (try parseConfigQuotedValue(allocator, args, "schema")) |value| {
-        node.config_schema = value;
-    }
-    if (try parseConfigQuotedValue(allocator, args, "alias")) |value| {
-        node.config_alias = value;
-    }
-    if (findKeyword(args, "unique_key")) |pos| {
-        const value_pos = findValueStart(args, pos + "unique_key".len) orelse return error.UnsupportedJinja;
-        if (node.incremental.unique_key) |*old| old.deinit(allocator);
-        node.incremental.unique_key = null;
-        if (args[value_pos] == '[') {
-            var keys: std.ArrayList([]const u8) = .empty;
-            errdefer keys.deinit(allocator);
-            try parseTagList(allocator, args[value_pos..], &keys);
-            node.incremental.unique_key = .{ .list = keys };
-        } else if (args[value_pos] == '\'' or args[value_pos] == '"') {
-            const parsed = try parseQuoted(allocator, args, value_pos);
-            node.incremental.unique_key = .{ .string = parsed.value };
-        } else if (std.mem.startsWith(u8, args[value_pos..], "none") or std.mem.startsWith(u8, args[value_pos..], "None")) {
-            try validateConfigLiteralEnd(args, value_pos + 4);
-        } else return error.UnsupportedJinja;
-        node.incremental.configured.unique_key = true;
-        node.inline_incremental.unique_key = true;
-    }
-    if (findKeyword(args, "incremental_strategy") != null) {
-        node.incremental.strategy = if (try parseConfigNoneLiteral(args, "incremental_strategy")) null else try parseConfigQuotedValue(allocator, args, "incremental_strategy");
-        node.incremental.configured.strategy = true;
-        node.inline_incremental.strategy = true;
-    }
-    if (findKeyword(args, "on_schema_change") != null) {
-        node.incremental.on_schema_change = if (try parseConfigNoneLiteral(args, "on_schema_change")) null else try parseConfigQuotedValue(allocator, args, "on_schema_change");
-        node.incremental.configured.on_schema_change = true;
-        node.inline_incremental.on_schema_change = true;
-    }
-    if (findKeyword(args, "full_refresh")) |pos| {
-        const value_pos = findValueStart(args, pos + "full_refresh".len) orelse return error.UnsupportedJinja;
-        if (std.mem.startsWith(u8, args[value_pos..], "none") or std.mem.startsWith(u8, args[value_pos..], "None")) {
-            try validateConfigLiteralEnd(args, value_pos + 4);
-            node.incremental.full_refresh = null;
-        } else node.incremental.full_refresh = try parseConfigBoolLiteral(args, "full_refresh");
-        node.incremental.configured.full_refresh = true;
-        node.inline_incremental.full_refresh = true;
-    }
-    for ([_][]const u8{ "incremental_predicates", "predicates" }) |key| {
-        if (findKeyword(args, key)) |pos| {
-            const value_pos = findValueStart(args, pos + key.len) orelse return error.UnsupportedJinja;
-            node.incremental.predicates.clearRetainingCapacity();
-            node.incremental.predicates_null = try parseConfigNoneLiteral(args, key);
-            if (!node.incremental.predicates_null) try parseTagList(allocator, args[value_pos..], &node.incremental.predicates);
-            node.incremental.configured.predicates = true;
-            node.inline_incremental.predicates = true;
-        }
-    }
-    if (try parseConfigBoolLiteral(args, "store_failures")) |store_failures| {
-        node.test_config.store_failures = store_failures;
-        node.inline_store_failures = true;
-    }
+    return try @import("resource_config.zig").applyInline(allocator, args, node);
 }
 
 fn parseConfigQuotedValue(allocator: std.mem.Allocator, args: []const u8, key: []const u8) !?[]const u8 {
