@@ -24,8 +24,6 @@ pub const Journal = struct {
         if (self.finalized) return error.ExternalJournalFinalized;
         if (target.len == 0 or std.mem.indexOf(u8, target, "://") != null) return error.UnsupportedExternalPublication;
         for (self.entries.items) |entry| if (std.mem.eql(u8, entry.target, target)) return entry.staged;
-        const parent = std.fs.path.dirname(target) orelse ".";
-        try std.Io.Dir.cwd().createDirPath(self.io, parent);
         const lock_path = try std.fmt.allocPrint(self.allocator, "{s}.dxt-lock", .{target});
         defer self.allocator.free(lock_path);
         // Keep the inode stable: unlinking it would allow another writer to

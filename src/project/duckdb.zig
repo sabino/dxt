@@ -64,7 +64,8 @@ pub fn isSupportedMaterialization(value: []const u8) bool {
 }
 
 pub fn isSupportedMaterializationForAdapter(adapter_type: []const u8, value: []const u8) bool {
-    return isSupportedMaterialization(value) or (std.mem.eql(u8, adapter_type, "postgres") and postgres_materialization.isSupported(value));
+    return isSupportedMaterialization(value) or (std.mem.eql(u8, adapter_type, "postgres") and postgres_materialization.isSupported(value)) or
+        (std.mem.eql(u8, adapter_type, "duckdb") and (std.mem.eql(u8, value, "external") or std.mem.eql(u8, value, "table_function")));
 }
 
 fn isUnsupportedConnectionPath(value: []const u8) bool {
@@ -78,6 +79,7 @@ pub fn executeModel(runtime: Runtime, db_path: []const u8, graph: *const Graph, 
 
 pub const ExecutionPolicy = postgres_materialization.ExecutionPolicy;
 pub fn executeModelWithPolicy(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
+    if (std.mem.eql(u8, node.materialized, "external") or std.mem.eql(u8, node.materialized, "table_function")) return @import("duckdb_file_materialization.zig").execute(runtime, db_path, graph, node, policy);
     if (std.mem.eql(u8, node.materialized, "incremental")) return try incremental.executeWithPolicy(runtime, db_path, graph, node, policy);
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
         const sql = trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution);
