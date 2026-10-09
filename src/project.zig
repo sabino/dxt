@@ -170,7 +170,6 @@ const countActiveExposures = project_resolve.countActiveExposures;
 const countActiveNodes = project_resolve.countActiveNodes;
 const countActiveAnalyses = project_resolve.countActiveAnalyses;
 const countActiveSeeds = project_resolve.countActiveSeeds;
-const findDoc = project_resolve.findDoc;
 const findNodeIndexByResourceTypeAndName = project_resolve.findNodeIndexByResourceTypeAndName;
 const resolveDependencies = project_resolve.resolveDependencies;
 const findMacroIdByPackageAndName = project_resolve.findMacroIdByPackageAndName;
@@ -3423,35 +3422,7 @@ test "applySingularTestProperties applies config and preserves inline enabled pr
 fn parseDocBlocks(runtime: Runtime, project_dir: []const u8, model_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
-    var index: usize = 0;
-    while (std.mem.indexOfPos(u8, text, index, "{%")) |open| {
-        const close = std.mem.indexOfPos(u8, text, open + 2, "%}") orelse return error.MalformedDocsBlock;
-        const tag = std.mem.trim(u8, text[open + 2 .. close], " \t\r\n-");
-        if (!std.mem.startsWith(u8, tag, "docs")) {
-            index = close + 2;
-            continue;
-        }
-        if (tag.len <= "docs".len or !std.ascii.isWhitespace(tag["docs".len])) return error.MalformedDocsBlock;
-        const raw_name = std.mem.trim(u8, tag["docs".len..], " \t\r\n");
-        if (raw_name.len == 0 or std.mem.indexOfAny(u8, raw_name, " \t\r\n(){}") != null) return error.MalformedDocsBlock;
-
-        const end_open = std.mem.indexOfPos(u8, text, close + 2, "{%") orelse return error.MalformedDocsBlock;
-        const end_close = std.mem.indexOfPos(u8, text, end_open + 2, "%}") orelse return error.MalformedDocsBlock;
-        const end_tag = std.mem.trim(u8, text[end_open + 2 .. end_close], " \t\r\n-");
-        if (!std.mem.eql(u8, end_tag, "enddocs")) return error.MalformedDocsBlock;
-
-        const block_contents = std.mem.trim(u8, text[close + 2 .. end_open], " \t\r\n");
-        const unique_id = try std.fmt.allocPrint(runtime.allocator, "doc.{s}.{s}", .{ package_name, raw_name });
-        try graph.docs.append(runtime.allocator, .{
-            .package_name = package_name,
-            .unique_id = unique_id,
-            .name = try runtime.allocator.dupe(u8, raw_name),
-            .path = relativeUnderResourcePath(relative_path, model_root),
-            .original_file_path = relative_path,
-            .block_contents = try runtime.allocator.dupe(u8, block_contents),
-        });
-        index = end_close + 2;
-    }
+    try @import("project/doc_blocks.zig").parse(runtime.allocator, text, model_root, relative_path, package_name, graph);
 }
 
 fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
@@ -3468,7 +3439,7 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
     try @import("project/source_properties.zig").parse(runtime, properties_document.value, relative_path, package_name, graph);
     try @import("project/properties.zig").parseModels(runtime, properties_document.value, relative_path, package_name, graph);
     try parseSingularTestPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
-    try parseMacroPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
+    try @import("project/macro_properties.zig").parseWithRuntime(runtime, properties_document.value, relative_path, package_name, graph);
 }
 
 const TestTarget = enum {
@@ -4065,7 +4036,7 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
             };
             try @import("project/resource_config.zig").rebuild(graph.allocator, node);
         }
-        if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.package_name, property.description, &node.doc_blocks);
+        if (property.description.len != 0) node.description = property.description;
         if (std.mem.eql(u8, node.resource_type, "model") and property.materialized.len != 0 and !node.inline_materialized) node.materialized = property.materialized;
         if (std.mem.eql(u8, node.resource_type, "model")) try incremental_config.overlay(graph.allocator, &node.incremental, property.incremental, node.inline_incremental);
         if (std.mem.eql(u8, node.resource_type, "seed")) {
@@ -4105,7 +4076,7 @@ fn applySingularTestProperties(graph: *Graph, package_name: []const u8) !void {
         const test_index = findSingularTestIndexByPackageAndName(graph, property.package_name, property.name) orelse continue;
         var test_node = &graph.singular_tests.items[test_index];
         test_node.patch_path = property.patch_path;
-        if (property.description.len != 0) test_node.description = try resolveDocDescription(graph, property.package_name, property.description, &test_node.doc_blocks);
+        if (property.description.len != 0) test_node.description = property.description;
         if (property.enabled) |enabled| {
             if (!test_node.inline_enabled) test_node.enabled = enabled;
         }
@@ -4687,6 +4658,7 @@ fn appendSeedColumnType(allocator: std.mem.Allocator, property: *types.ModelProp
 }
 
 fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.ArrayList(ColumnDef), source: ColumnDef) !void {
+    _ = package_name;
     for (columns.items) |*existing| {
         if (std.mem.eql(u8, existing.name, source.name)) {
             if (source.properties != .null) {
@@ -4699,7 +4671,7 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
                 existing.tags.clearRetainingCapacity();
                 try existing.tags.appendSlice(graph.allocator, source.tags.items);
             }
-            if (source.description.len != 0) existing.description = try resolveDocDescription(graph, package_name, source.description, &existing.doc_blocks);
+            if (source.description.len != 0) existing.description = source.description;
             for (source.tests.items) |test_def| {
                 try appendGenericTestDefClone(graph, &existing.tests, test_def);
             }
@@ -4714,7 +4686,7 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
         column.doc_blocks.deinit(graph.allocator);
         column.tests.deinit(graph.allocator);
     }
-    if (source.description.len != 0) column.description = try resolveDocDescription(graph, package_name, source.description, &column.doc_blocks);
+    if (source.description.len != 0) column.description = source.description;
     for (source.tests.items) |test_def| {
         try appendGenericTestDefClone(graph, &column.tests, test_def);
     }
@@ -4727,28 +4699,6 @@ fn resolveMacroDependencies(graph: *Graph) !void {
         try project_jinja.scanMacroSqlForKnownMacroCalls(graph.allocator, macro.macro_sql, graph, macro.unique_id, &macro.macro_depends_on);
         sortStrings(macro.macro_depends_on.items);
     }
-}
-
-fn resolveDocDescription(graph: *Graph, package_name: []const u8, description: []const u8, doc_blocks: *std.ArrayList([]const u8)) ![]const u8 {
-    const trimmed = std.mem.trim(u8, description, " \t\r\n");
-    if (std.mem.indexOf(u8, trimmed, "{{") == null) return description;
-    if (!std.mem.startsWith(u8, trimmed, "{{") or !std.mem.endsWith(u8, trimmed, "}}")) return error.UnsupportedDynamicDoc;
-
-    const span = std.mem.trim(u8, trimmed[2 .. trimmed.len - 2], " \t\r\n-");
-    if (!std.mem.startsWith(u8, span, "doc")) return error.UnsupportedDynamicDoc;
-    const call_pos = skipWs(span, "doc".len);
-    if (call_pos >= span.len or span[call_pos] != '(') return error.UnsupportedDynamicDoc;
-    const close = findMatchingParen(span, call_pos) orelse return error.UnsupportedDynamicDoc;
-    if (std.mem.trim(u8, span[close + 1 ..], " \t\r\n").len != 0) return error.UnsupportedDynamicDoc;
-    var strings = try parseLiteralArgs(graph.allocator, span[call_pos + 1 .. close], error.UnsupportedDynamicDoc);
-    defer strings.deinit(graph.allocator);
-    if (strings.items.len != 1) return error.UnsupportedDynamicDoc;
-
-    const unique_id = try std.fmt.allocPrint(graph.allocator, "doc.{s}.{s}", .{ package_name, strings.items[0] });
-    const doc = findDoc(graph, unique_id) orelse return error.UnresolvedDoc;
-    try appendUnique(graph.allocator, doc_blocks, doc.unique_id);
-    sortStrings(doc_blocks.items);
-    return doc.block_contents;
 }
 
 fn currentGenericTestDef(graph: *Graph, model_index: usize, current_column: ?usize, target: TestTarget, test_index: usize) !*GenericTestDef {

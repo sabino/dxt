@@ -41,6 +41,14 @@ pub fn parseWithTarget(runtime: types.Runtime, text: []const u8, cli_vars: []con
     inline for (.{ .{ "model-paths", "model_paths", "models" }, .{ "seed-paths", "seed_paths", "seeds" }, .{ "macro-paths", "macro_paths", "macros" }, .{ "test-paths", "test_paths", "tests" }, .{ "analysis-paths", "analysis_paths", "analyses" }, .{ "snapshot-paths", "snapshot_paths", "snapshots" }, .{ "function-paths", "function_paths", "functions" } }) |path| {
         if (values.get(rendered, path[0])) |v| try stringList(allocator, v, &@field(config, path[1])) else try @field(config, path[1]).append(allocator, path[2]);
     }
+    const docs_paths = values.get(rendered, "docs-paths") orelse .null;
+    if (docs_paths != .null) {
+        try stringList(allocator, docs_paths, &config.docs_paths);
+    } else {
+        for ([_][]const []const u8{ config.model_paths.items, config.seed_paths.items, config.snapshot_paths.items, config.analysis_paths.items, config.macro_paths.items, config.test_paths.items }) |paths| for (paths) |path| {
+            try @import("util.zig").appendUnique(allocator, &config.docs_paths, std.mem.trimEnd(u8, path, "/"));
+        };
+    }
     config.macro_paths_set = values.get(rendered, "macro-paths") != null;
     config.test_paths_set = values.get(rendered, "test-paths") != null;
     config.snapshot_paths_set = values.get(rendered, "snapshot-paths") != null;

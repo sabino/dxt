@@ -120,6 +120,7 @@ pub const ProjectConfig = struct {
     name: []const u8,
     profile_name: ?[]const u8 = null,
     model_paths: std.ArrayList([]const u8) = .empty,
+    docs_paths: std.ArrayList([]const u8) = .empty,
     seed_paths: std.ArrayList([]const u8) = .empty,
     macro_paths: std.ArrayList([]const u8) = .empty,
     test_paths: std.ArrayList([]const u8) = .empty,
@@ -187,6 +188,7 @@ pub const DocsConfig = struct {
 };
 
 pub const SourceDef = struct {
+    doc_blocks: std.ArrayList([]const u8) = .empty,
     enabled: bool = true,
     description: []const u8 = "",
     source_description: []const u8 = "",
@@ -398,6 +400,7 @@ pub const MacroDef = struct {
 pub const MacroArgument = struct {
     name: []const u8,
     type: []const u8 = "",
+    has_type: bool = false,
     description: []const u8 = "",
 };
 
@@ -619,6 +622,7 @@ pub const SnapshotConfig = struct {
 pub const GenericTestNode = struct {
     extra_ctes: std.ArrayList(ExtraCte) = .empty,
     resolved_identity: ?ResolvedIdentity = null,
+    doc_blocks: std.ArrayList([]const u8) = .empty,
     config_values: std.json.Value = .null,
     builder_config: std.json.Value = .null,
     unrendered_config: std.json.Value = .null,
@@ -910,6 +914,7 @@ pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig)
         config_value.deinit(allocator, &path_config.raw_values);
     }
     config.model_paths.deinit(allocator);
+    config.docs_paths.deinit(allocator);
     config.seed_paths.deinit(allocator);
     config.macro_paths.deinit(allocator);
     config.test_paths.deinit(allocator);
@@ -982,6 +987,7 @@ pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTe
     for (test_node.extra_ctes.items) |cte| allocator.free(cte.sql);
     test_node.extra_ctes.deinit(allocator);
     if (test_node.resolved_identity) |*identity| identity.deinit(allocator);
+    test_node.doc_blocks.deinit(allocator);
     config_value.deinit(allocator, &test_node.arguments);
     config_value.deinit(allocator, &test_node.config_values);
     config_value.deinit(allocator, &test_node.builder_config);
@@ -1015,6 +1021,7 @@ fn deinitSingularTestProperty(allocator: std.mem.Allocator, property: *SingularT
 }
 
 pub fn deinitSourceDef(allocator: std.mem.Allocator, source: *SourceDef) void {
+    source.doc_blocks.deinit(allocator);
     config_value.deinit(allocator, &source.properties);
     config_value.deinit(allocator, &source.source_properties);
     config_value.deinit(allocator, &source.raw_config);

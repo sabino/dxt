@@ -718,6 +718,8 @@ fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *con
     try json.string(writer, source.description);
     try writer.writeAll(",\"source_description\":");
     try json.string(writer, source.source_description);
+    try writer.writeAll(",\"doc_blocks\":");
+    try json.stringArray(writer, source.doc_blocks.items);
     try writer.writeAll(",\"loader\":");
     try json.string(writer, source.loader);
     try writer.writeAll(",\"loaded_at_field\":");
@@ -1295,6 +1297,8 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try json.string(writer, raw_code);
     try writer.writeAll(",\"description\":");
     try json.string(writer, test_node.description);
+    try writer.writeAll(",\"doc_blocks\":");
+    try json.stringArray(writer, test_node.doc_blocks.items);
     try writer.writeAll(",\"tags\":");
     try json.stringArray(writer, test_node.tags.items);
     try writer.writeAll(",\"meta\":");
@@ -1662,7 +1666,7 @@ fn writeMacroArguments(writer: *Io.Writer, arguments: []const MacroArgument) !vo
         try writer.writeAll("{\"name\":");
         try json.string(writer, argument.name);
         try writer.writeAll(",\"type\":");
-        if (argument.type.len == 0) {
+        if (argument.type.len == 0 and !argument.has_type) {
             try writer.writeAll("null");
         } else {
             try json.string(writer, argument.type);

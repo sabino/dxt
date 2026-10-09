@@ -155,6 +155,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     try loadProjectMacros(runtime, options.project_dir, config.name, config.macro_paths.items, true, callbacks, &graph);
     try loadInstalledPackageMacros(runtime, options.project_dir, callbacks, &graph);
     try loadInstalledPackageResources(runtime, options.project_dir, callbacks, &graph);
+    try @import("doc_blocks.zig").load(runtime, options.project_dir, &config, &graph);
 
     for (config.model_paths.items) |model_path| {
         var sql_files: std.ArrayList([]const u8) = .empty;
@@ -174,9 +175,6 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         sortStrings(yaml_files.items);
         sortStrings(md_files.items);
 
-        for (md_files.items) |md_path| {
-            try callbacks.parse_doc_blocks(runtime, options.project_dir, model_path, md_path, config.name, &graph);
-        }
         for (yaml_files.items) |yaml_path| {
             try callbacks.parse_yaml_properties(runtime, options.project_dir, model_path, yaml_path, config.name, &graph);
         }
@@ -202,9 +200,6 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         sortStrings(yaml_files.items);
         sortStrings(md_files.items);
 
-        for (md_files.items) |md_path| {
-            try callbacks.parse_doc_blocks(runtime, options.project_dir, analysis_path, md_path, config.name, &graph);
-        }
         for (yaml_files.items) |yaml_path| {
             try callbacks.parse_yaml_properties(runtime, options.project_dir, analysis_path, yaml_path, config.name, &graph);
         }
@@ -277,14 +272,15 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     try @import("unit_metadata.zig").checksums(&graph);
     try @import("unit_versions.zig").assign(&graph);
     try @import("hook_operations.zig").load(runtime, &graph);
+    try rejectDuplicateDocs(&graph);
     try @import("naming.zig").finalize(runtime, &graph);
     try snapshot_yaml.rejectRelationCollisions(&graph);
+    try @import("doc_context.zig").finalize(runtime, &graph);
     sortGraphResources(&graph);
     try rejectDuplicateAnalyses(&graph);
     try rejectDuplicateModels(&graph);
     try rejectDuplicateSeeds(&graph);
     try rejectDuplicateSingularTests(&graph);
-    try rejectDuplicateDocs(&graph);
     try rejectDuplicateExposures(&graph);
     try rejectDuplicateUnitTests(&graph);
     try rejectDuplicateMacros(&graph);
@@ -401,6 +397,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
         };
         defer deinitProjectConfig(runtime.allocator, &package_config);
         try @import("semantic.zig").captureProject(graph, &package_config);
+        try @import("doc_blocks.zig").load(runtime, package_dir, &package_config, graph);
 
         for (package_config.model_paths.items) |model_path| {
             var sql_files: std.ArrayList([]const u8) = .empty;
@@ -420,9 +417,6 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
             sortStrings(yaml_files.items);
             sortStrings(md_files.items);
 
-            for (md_files.items) |md_path| {
-                try callbacks.parse_doc_blocks(runtime, package_dir, model_path, md_path, package_config.name, graph);
-            }
             for (yaml_files.items) |yaml_path| {
                 try callbacks.parse_yaml_properties(runtime, package_dir, model_path, yaml_path, package_config.name, graph);
             }
@@ -449,9 +443,6 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
             sortStrings(yaml_files.items);
             sortStrings(md_files.items);
 
-            for (md_files.items) |md_path| {
-                try callbacks.parse_doc_blocks(runtime, package_dir, analysis_path, md_path, package_config.name, graph);
-            }
             for (yaml_files.items) |yaml_path| {
                 try callbacks.parse_yaml_properties(runtime, package_dir, analysis_path, yaml_path, package_config.name, graph);
             }

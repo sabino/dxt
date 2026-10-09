@@ -591,132 +591,9 @@ fn macroDefFromParts(allocator: std.mem.Allocator, package_name: []const u8, mac
 }
 
 pub fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
-    var in_macros = false;
-    var in_arguments = false;
-    var in_docs = false;
-    var in_meta = false;
-    var macros_indent: usize = 0;
-    var macro_item_indent: ?usize = null;
-    var arguments_indent: usize = 0;
-    var argument_item_indent: ?usize = null;
-    var docs_indent: usize = 0;
-    var meta_indent: usize = 0;
-    var current_macro: ?usize = null;
-    var current_argument: ?usize = null;
-
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw_line| {
-        const line = stripYamlComment(raw_line);
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0) continue;
-        const indent = leadingSpaces(line);
-
-        if (std.mem.eql(u8, trimmed, "macros:")) {
-            in_macros = true;
-            in_arguments = false;
-            in_docs = false;
-            in_meta = false;
-            macros_indent = indent;
-            macro_item_indent = null;
-            argument_item_indent = null;
-            current_macro = null;
-            current_argument = null;
-            continue;
-        }
-        if (!in_macros) continue;
-        if (indent <= macros_indent and !std.mem.eql(u8, trimmed, "macros:")) break;
-
-        if (in_arguments and indent <= arguments_indent and !std.mem.eql(u8, trimmed, "arguments:")) {
-            in_arguments = false;
-            argument_item_indent = null;
-            current_argument = null;
-        }
-        if (in_docs and indent <= docs_indent) in_docs = false;
-        if (in_meta and indent <= meta_indent) in_meta = false;
-
-        if (std.mem.startsWith(u8, trimmed, "- name:")) {
-            const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
-            if (in_arguments and current_macro != null and indent > (macro_item_indent orelse 0)) {
-                const macro_index = current_macro.?;
-                try graph.macro_properties.items[macro_index].arguments.append(allocator, .{ .name = name });
-                current_argument = graph.macro_properties.items[macro_index].arguments.items.len - 1;
-                argument_item_indent = indent;
-            } else {
-                try graph.macro_properties.append(allocator, .{ .package_name = package_name, .name = name, .patch_path = relative_path });
-                current_macro = graph.macro_properties.items.len - 1;
-                macro_item_indent = indent;
-                in_arguments = false;
-                in_docs = false;
-                in_meta = false;
-                argument_item_indent = null;
-                current_argument = null;
-            }
-            continue;
-        }
-
-        const macro_index = current_macro orelse continue;
-        if (in_docs and indent > docs_indent) {
-            const kv = splitKeyValue(trimmed) orelse return error.UnsupportedYaml;
-            try applyMacroDocsConfigKeyValue(allocator, &graph.macro_properties.items[macro_index].docs, kv);
-            continue;
-        }
-        if (in_meta and indent > meta_indent) {
-            const kv = splitKeyValue(trimmed) orelse return error.UnsupportedYaml;
-            if (std.mem.trim(u8, kv.value, " \t").len == 0) return error.UnsupportedYaml;
-            try appendMetaEntry(allocator, &graph.macro_properties.items[macro_index].meta, kv.key, try parseJsonScalar(allocator, kv.value));
-            continue;
-        }
-        if (splitKeyValue(trimmed)) |kv| {
-            if (in_arguments and current_argument != null and indent > (argument_item_indent orelse 0)) {
-                var argument = &graph.macro_properties.items[macro_index].arguments.items[current_argument.?];
-                if (std.mem.eql(u8, kv.key, "type")) {
-                    argument.type = try dupTrimmedScalar(allocator, kv.value);
-                } else if (std.mem.eql(u8, kv.key, "description")) {
-                    argument.description = try dupTrimmedScalar(allocator, kv.value);
-                } else {
-                    return error.UnsupportedYaml;
-                }
-                continue;
-            }
-
-            if (std.mem.eql(u8, kv.key, "description")) {
-                graph.macro_properties.items[macro_index].description = try dupTrimmedScalar(allocator, kv.value);
-            } else if (std.mem.eql(u8, kv.key, "arguments")) {
-                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
-                in_arguments = true;
-                in_docs = false;
-                in_meta = false;
-                arguments_indent = indent;
-                argument_item_indent = null;
-                current_argument = null;
-            } else if (std.mem.eql(u8, kv.key, "docs")) {
-                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
-                in_arguments = false;
-                in_docs = true;
-                in_meta = false;
-                docs_indent = indent;
-                graph.macro_properties.items[macro_index].docs.configured = true;
-            } else if (std.mem.eql(u8, kv.key, "meta")) {
-                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
-                in_arguments = false;
-                in_docs = false;
-                in_meta = true;
-                meta_indent = indent;
-            }
-        }
-    }
-}
-
-fn applyMacroDocsConfigKeyValue(allocator: std.mem.Allocator, docs: *types.DocsConfig, kv: util.KeyValue) !void {
-    if (std.mem.eql(u8, kv.key, "show")) {
-        docs.configured = true;
-        docs.show = try parseBool(kv.value);
-    } else if (std.mem.eql(u8, kv.key, "node_color")) {
-        docs.configured = true;
-        docs.node_color = try parseDocsNodeColor(allocator, kv.value);
-    } else {
-        return error.UnsupportedYaml;
-    }
+    var document = try @import("yaml.zig").parse(allocator, text);
+    defer document.deinit();
+    try @import("macro_properties.zig").parse(allocator, document.value, relative_path, package_name, graph);
 }
 
 fn parseDocsNodeColor(allocator: std.mem.Allocator, value: []const u8) !?[]const u8 {
@@ -732,9 +609,10 @@ pub fn applyMacroProperties(graph: *Graph) !void {
             continue;
         };
         var macro = &graph.macros.items[macro_index];
+        if (macro.patch_path != null) return error.DuplicateMacroPatch;
         macro.patch_path = property.patch_path;
-        if (property.description.len != 0) macro.description = property.description;
-        if (property.docs.configured) macro.docs = property.docs;
+        macro.description = property.description;
+        macro.docs = property.docs;
         for (property.meta.items) |entry| {
             try appendMetaEntry(graph.allocator, &macro.meta, entry.key, entry.value);
         }
@@ -791,6 +669,7 @@ fn appendMacroArgumentClones(graph: *Graph, arguments: *std.ArrayList(MacroArgum
         try arguments.append(graph.allocator, .{
             .name = argument.name,
             .type = argument.type,
+            .has_type = argument.has_type,
             .description = argument.description,
         });
     }
@@ -2516,7 +2395,7 @@ test "parseMacroPropertiesFromText records descriptions and arguments" {
     try std.testing.expect(graph.macro_properties.items[1].docs.node_color == null);
 }
 
-test "parseMacroPropertiesFromText rejects nested macro meta" {
+test "parseMacroPropertiesFromText retains nested macro meta" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2533,10 +2412,10 @@ test "parseMacroPropertiesFromText rejects nested macro meta" {
         \\        team: analytics
     ;
 
-    try std.testing.expectError(
-        error.UnsupportedYaml,
-        parseMacroPropertiesFromText(allocator, yaml, "macros/schema.yml", "demo", &graph),
-    );
+    try parseMacroPropertiesFromText(allocator, yaml, "macros/schema.yml", "demo", &graph);
+    const owner = graph.macro_properties.items[0].meta.items[0].value;
+    try std.testing.expectEqual(.json, owner.kind);
+    try std.testing.expectEqualStrings("{\"team\":\"analytics\"}", owner.text);
 }
 
 test "applyMacroProperties applies descriptions patch paths and replaces arguments" {

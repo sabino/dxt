@@ -95,6 +95,8 @@ const CompileContext = struct {
     loop_break: bool = false,
     loop_continue: bool = false,
     previous_host_node: ?*const anyopaque = null,
+    documentation: bool = false,
+    documentation_block: bool = false,
 
     const ValueBinding = struct {
         name: []const u8,
@@ -253,6 +255,28 @@ pub fn recordGenericCompilationDependency(allocator: std.mem.Allocator, graph: *
 pub fn renderTextForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, text: []const u8) ![]const u8 {
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try renderRange(&context, text, 0, text.len, &out);
+    return try out.toOwnedSlice(allocator);
+}
+
+pub fn renderDocumentation(allocator: std.mem.Allocator, graph: *const Graph, package: []const u8, unique_id: []const u8, path: []const u8, text: []const u8) ![]const u8 {
+    return renderDocumentationContext(allocator, graph, package, unique_id, path, text, false);
+}
+
+pub fn renderDocumentationBlock(allocator: std.mem.Allocator, graph: *const Graph, package: []const u8, unique_id: []const u8, path: []const u8, text: []const u8) ![]const u8 {
+    return renderDocumentationContext(allocator, graph, package, unique_id, path, text, true);
+}
+
+fn renderDocumentationContext(allocator: std.mem.Allocator, graph: *const Graph, package: []const u8, unique_id: []const u8, path: []const u8, text: []const u8, block: bool) ![]const u8 {
+    var node = Node{ .package_name = package, .unique_id = unique_id, .name = unique_id, .path = path, .original_file_path = path, .raw_code = text };
+    defer types.deinitNode(allocator, &node);
+    var context = CompileContext.init(allocator, graph, &node);
+    defer context.deinit();
+    context.documentation = true;
+    context.documentation_block = block;
+    context.parse_node = &node;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try renderRange(&context, text, 0, text.len, &out);
@@ -1130,7 +1154,7 @@ pub fn relationValueForInputNode(allocator: std.mem.Allocator, graph: *const Gra
 fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
     // Dispatch returns a callable macro in dbt's context. Preserve its existing
     // namespace resolution while ordinary expressions use native typed values.
-    if (std.mem.startsWith(u8, span, "adapter.dispatch")) return try renderAdapterDispatchExpression(context, span);
+    if (!context.documentation and std.mem.startsWith(u8, span, "adapter.dispatch")) return try renderAdapterDispatchExpression(context, span);
     const value = try context.evaluate(span);
     if (context.returned != null) return try context.allocator.dupe(u8, "");
     const rendered = value.text(context.value_arena.allocator()) catch |err| {
@@ -1157,12 +1181,19 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
             return value;
         }
     }
-    if (try @import("regex_context.zig").resolve(allocator, path)) |value| return value;
     if (context.getVar(path)) |value| return .{ .string = value };
     if (context.getList(path)) |strings| {
         const values = try native_expr.allocateValues(allocator, strings.len);
         for (strings, values) |s, *v| v.* = .{ .string = s };
         return .{ .list = values };
+    }
+    if (context.documentation_block) return if (std.mem.indexOfScalar(u8, path, '.') == null) .conditional_undefined else error.UndefinedJinjaValue;
+    if (try @import("regex_context.zig").resolve(allocator, path)) |value| return value;
+    if (context.documentation) {
+        if (@import("doc_context.zig").baseCallable(path)) return .{ .callable = path };
+        inline for (.{ "execute", "this", "model", "config", "adapter", "api", "graph", "sql", "compiled_code", "results", "schemas", "database_schemas", "pre_hooks", "post_hooks" }) |unavailable| {
+            if (std.mem.eql(u8, name, unavailable)) return if (std.mem.eql(u8, path, name)) .conditional_undefined else error.UndefinedJinjaValue;
+        }
     }
     if (std.mem.eql(u8, path, "execute")) return .{ .boolean = context.execute_override orelse (context.parse_node == null) };
     if (std.mem.eql(u8, path, "sql") or std.mem.eql(u8, path, "compiled_code")) return if (context.node.compiled_code) |sql| .{ .string = sql } else .undefined;
@@ -1210,6 +1241,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         if (std.mem.eql(u8, path, "results") or std.mem.eql(u8, path, "schemas") or std.mem.eql(u8, path, "database_schemas")) return .conditional_undefined;
         if (std.mem.eql(u8, path, "index")) return .conditional_undefined;
     }
+    if (context.documentation) return if (std.mem.indexOfScalar(u8, path, '.') == null) .conditional_undefined else error.UndefinedJinjaValue;
     const macro_id = if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot|
         resolve.findMacroIdByPackageAndName(context.graph, path[0..dot], path[dot + 1 ..])
     else
@@ -1281,6 +1313,13 @@ fn configProxy(allocator: std.mem.Allocator, context: *CompileContext) !native_e
 
 fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
+    if (context.documentation_block) {
+        if (try @import("container_methods.zig").call(allocator, name, args)) |mutation| {
+            if (mutation.original) |original| for (context.bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original, mutation.replacement.?, 0);
+            return mutation.result;
+        }
+        return error.UnresolvedMacro;
+    }
     const root_end = std.mem.indexOfScalar(u8, name, '.') orelse name.len;
     var binding_index = context.bindings.items.len;
     while (binding_index != 0) {
@@ -1291,6 +1330,10 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         if (callable) |function| if (!std.mem.eql(u8, function, name)) return try callExpressionValue(context, function, args, allocator);
         if (root_end == name.len and callable == null) return error.JinjaTypeError;
         break;
+    }
+    if (context.documentation) {
+        if (try @import("doc_context.zig").call(allocator, context.graph, context.node.package_name, name, args)) |value| return value;
+        if (!@import("doc_context.zig").allowsCall(name)) return error.UnresolvedMacro;
     }
     if (try @import("bundled_macros.zig").callColumn(allocator, name, args)) |value| return value;
     if (try @import("container_methods.zig").call(allocator, name, args)) |mutation| {
@@ -1482,6 +1525,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         const source = findSourceByUniqueId(context.graph, unique_id) orelse return error.UnresolvedSource;
         return try relationValueForSource(allocator, context.graph, context.node, source);
     }
+    if (context.documentation) return error.UnresolvedMacro;
     var macro_id: ?[]const u8 = null;
     if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
         macro_id = resolve.findMacroIdByPackageAndName(context.graph, name[0..dot], name[dot + 1 ..]);
