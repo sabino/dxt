@@ -1,104 +1,152 @@
 # Release Process
 
-Releases publish native `dxt` binaries from GitHub Actions. The product runtime
-remains Zig; release packaging must not introduce Python product behavior.
+Releases package a native Zig executable, public documentation and upstream
+license/provenance notices. Python scripts build and verify release artifacts
+in developer/CI environments; they are not part of product execution. The
+initial adapter scope is DuckDB and PostgreSQL. A tag or successful binary build
+alone does not establish full dbt compatibility: the integrated release gates
+must pass for each published platform.
 
-## Versioning
+## Versions And Targets
 
-dxt is pre-alpha. Use semantic-version-like tags with a leading `v`, for
-example:
+Use tags with a leading `v`, such as `v0.0.0` or `v0.1.0-alpha.1`. The tag's
+version must match `dxt version` and `.version` in `build.zig.zon`. The current
+source version is **0.0.0**; update the native CLI version and package metadata
+in the same release-preparation commit before using another version.
 
-```sh
-git tag v0.0.0
-git push origin v0.0.0
-```
+| Target | Native runner | Archive |
+| --- | --- | --- |
+| `x86_64-linux-gnu` | `ubuntu-24.04` | `dxt-v<version>-x86_64-linux-gnu.tar.gz` |
+| `aarch64-linux-gnu` | `ubuntu-24.04-arm` | `dxt-v<version>-aarch64-linux-gnu.tar.gz` |
 
-The tag must match both `dxt version` and `.version` in `build.zig.zon`. Today
-that means `v0.0.0`; before tagging `v0.1.0` or a suffix such as
-`v0.1.0-alpha.1`, bump `src/root.zig` and `build.zig.zon` in the same release
-prep commit.
+Each target runs on its actual architecture. These are Linux GNU/libc binaries.
+macOS, Windows and other database adapters need separate portability and
+warehouse certification before publication as supported targets.
 
-## GitHub Actions Workflow
+## Runtime Dependencies
 
-The release workflow is `.github/workflows/release.yml`.
+Install DuckDB's native library for DuckDB execution, and libpq for PostgreSQL.
+The libraries are external to the dxt archive. Native CI pins DuckDB **1.4.2**
+and downloads architecture-specific CLI/library archives with SHA-256 checks.
+The CLI is a fixture/fallback dependency, not required by the certified native
+installation path.
 
-Triggers:
+DuckDB discovery can load `libduckdb.so`; `DXT_DUCKDB_LIBRARY` selects a specific
+installed file. Set `DXT_DUCKDB_BACKEND=native` to require that driver and fail
+clearly when its library is unavailable. PostgreSQL loads `libpq.so.5` by
+default; `DXT_POSTGRES_LIBRARY` selects an explicit library. Database/profile
+credentials are supplied by the project or environment and never bundled.
 
-- `push` tags matching `v*.*.*`
-- manual `workflow_dispatch` with an existing tag and dry-run option
+The YAML parser, PostgreSQL SQL grammar, default SQL macro sources and docs
+application are embedded in the executable. End users do not install dbt,
+MetricFlow, a Python interpreter or developer requirements to run dxt.
 
-Each release job:
+## Workflow Gates
 
-1. Checks out the repository.
-2. Installs Zig `0.16.0`.
-3. Runs `zig fmt --check`, `zig build test`, runtime-boundary checks, and
-   public-safety checks.
-4. Blocks if the tag version does not match `dxt version` and `build.zig.zon`.
-5. Builds `dxt` in `ReleaseSafe` mode for supported targets.
-6. Packages each binary with `README.md`, `LICENSE` if present, and release
-   notes pointers.
-7. Validates release archive contents, expected filenames, executable binary
-   metadata, binary/doc string safety, and checksum coverage.
-8. Writes `SHA256SUMS.txt`.
-9. Uploads artifacts to a draft GitHub Release.
+[Release](../.github/workflows/release.yml) triggers for `v*.*.*` tags and manual
+dispatch with an existing tag. Manual runs default to a dry run that builds and
+packages without creating/updating a GitHub Release. Publication creates or
+updates a **draft** release only after verification and both package jobs.
 
-## Initial Targets
+The candidate verification job checks whitespace/formatting, repository safety,
+the native runtime boundary, Debug/ReleaseSafe builds, native tests, complete
+Python/Core fixtures, clean installation, performance budgets and version
+consistency. The compatibility contract pins dbt Core **1.10.5**, dbt-duckdb
+**1.9.6**, dbt-postgres **1.9.1**, MetricFlow **0.208.1** and semantic interfaces
+**0.9.0**. Those are developer-only oracle dependencies.
 
-| Target | Artifact |
-| --- | --- |
-| `x86_64-linux-gnu` | `dxt-<version>-x86_64-linux-gnu.tar.gz` |
-| `aarch64-linux-gnu` | `dxt-<version>-aarch64-linux-gnu.tar.gz` |
+Each architecture's package job then:
 
-Linux is the only honest initial platform family because current deterministic
-file discovery uses Linux syscalls. macOS and Windows packaging are planned
-after discovery and CLI path behavior are made portable and validated.
+1. Builds and smoke-tests the native ReleaseSafe target with Zig **0.16.0**.
+2. Installs the complete pinned compatibility/native fixtures for that runner.
+3. Runs native tests and the full compatibility suite on the actual target.
+4. Rebuilds ReleaseSafe after integration tests, which may build a Debug binary.
+5. Creates the real archive with `scripts/package_release.py` and validates its
+   contents, binary architecture/executable metadata, notices and public-safe
+   bytes.
+6. Extracts that archive and checks `debug`, `build`, static docs, actual rows
+   and complete artifacts against both live adapters with PATH empty.
+7. Uploads the exact validated archive for the draft-release job.
 
-## Safety Rules
+The extracted-installation gate uses `scripts/check_install.py --archive` with
+`--require-postgres`; its disposable PostgreSQL service is a CI fixture. Full
+compatibility fixtures use `scripts/postgres_fixture.py` for isolated native
+clusters. Linux ARM selects installed PostgreSQL tools through
+`DXT_POSTGRES_BIN`, because the pinned `pgserver` wheel is available only on
+Linux x86_64. No emulated database or skipped adapter gate replaces these tests.
 
-- Do not include `target/`, `zig-out/`, caches, logs, `.agent/runs/`,
-  `dbt_packages/`, virtualenvs, or local profiles in release archives.
-- Run `python scripts/check_public_safety.py` before upload.
-- Run `python scripts/check_runtime_boundary.py` before upload.
-- Release archives should contain only the binary and public documentation.
-- Run `python scripts/check_release_archive.py <archive.tar.gz> --version
-  <version>` before upload when validating a local package.
-- Checksums must be generated from the exact uploaded archive files.
-- Until version injection is implemented, release tags must match both
-  `dxt version` and `.version` in `build.zig.zon`.
+[CI](../.github/workflows/ci.yml) also configures native tests/safety, Python
+3.11/3.12 integration, public Jaffle/package projects, performance and actual
+Linux x86_64/ARM installation gates. Its full platform compatibility jobs and
+the release jobs are configured gates; their results must be checked on the
+release candidate. See [Performance](PERFORMANCE.md) for artifact/compiled-SQL
+comparisons and cold/warm budgets.
 
-## Local Dry Run
+## Archive Contents And Licenses
 
-Before tagging, run:
+`scripts/package_release.py` creates sorted tar entries with fixed timestamps,
+ownership and modes, and a gzip header with a fixed timestamp. Identical input
+binary/docs produce identical archive bytes. Non-Debug builds strip debug
+symbols; C build flags map source-directory paths before compilation.
+
+Each archive has one `dxt-v<version>-<target>/` root containing `dxt`, README,
+CHANGELOG, SECURITY, the public `docs/` tree and a project LICENSE if present.
+`docs/licenses/` contains:
+
+- libyaml **0.2.5** MIT license and upstream reference.
+- libpg_query **6.2.5** license, PostgreSQL/other third-party notices and
+  provenance for its PostgreSQL **17.7** grammar sources.
+- The embedded dbt docs application's Apache-2.0 license/upstream reference;
+  its original third-party notices remain embedded.
+- dbt Core/DuckDB/PostgreSQL macro-source licenses and checksum provenance for
+  the exact pinned source bundles.
+
+The archive checker requires those notices and rejects unexpected roots,
+unsafe paths, links, generated/private files, invalid binaries and uncovered
+checksums. Archives exclude credentials, local profiles, caches, logs, virtual
+environments, developer scripts, Python dependencies and generated project
+artifacts. Upstream dependencies must retain their notices when a release
+changes the embedded sources.
+
+The publish job downloads the validated archives, generates
+`dxt-v<version>-SHA256SUMS.txt` from their exact bytes, checks every archive and
+checksum entry again, and attaches them to the draft release.
+
+## Local Release Check
+
+Install the pinned developer requirements and native database/browser fixtures
+for complete oracle checks. From the repository, run:
 
 ```sh
 zig build
 zig build test
-zig build -Doptimize=ReleaseSafe
-pytest -q tests/test_cli.py::test_name_for_the_changed_behavior
+pytest -q
 python scripts/check_runtime_boundary.py
 python scripts/check_public_safety.py
-```
-
-When validating a locally built package, run:
-
-```sh
+zig build -Doptimize=ReleaseSafe
+python scripts/check_performance.py
+python scripts/package_release.py --version 0.0.0 --target x86_64-linux-gnu
 python scripts/check_release_archive.py dist/dxt-v0.0.0-x86_64-linux-gnu.tar.gz --version 0.0.0 --target x86_64-linux-gnu
+python scripts/check_install.py --archive dist/dxt-v0.0.0-x86_64-linux-gnu.tar.gz --version 0.0.0 --require-postgres
 ```
 
-Use full `pytest -q` locally before broad runner/artifact release changes. The
-GitHub CI workflow repeats the native and safety gates, runs the full pytest
-matrix with JUnit reports, and runs the public Jaffle parse/build/run/docs gate
-with a pinned, checksum-verified DuckDB CLI. Release jobs focus on portable
-binary build validation, repository safety, release archive safety, and
-checksum coverage. Native Zig test coverage maps are collected by the separate
-GitHub `Coverage` workflow on Zig source/build PRs, pushes to `main`, and
-manual dispatch, so release prep can inspect coverage artifacts without making
-local release validation heavier.
+Set `DXT_DUCKDB_LIBRARY` to the installed native DuckDB library and
+`DXT_INSTALL_POSTGRES_URI` to a disposable PostgreSQL fixture URI before the
+installation check. Choose the target matching the host for actual execution;
+a cross-compiled binary alone cannot satisfy the other platform's test gates.
+Native coverage maps are optional artifacts from the separate Coverage
+workflow, rather than a substitute for compatibility or installation checks.
 
-Verify downloaded artifacts with:
+After all candidate gates pass, create and push the matching version tag. To
+verify downloaded artifacts, keep the checksum file beside its archives:
 
 ```sh
 sha256sum -c dxt-v0.0.0-SHA256SUMS.txt
 tar -xzf dxt-v0.0.0-x86_64-linux-gnu.tar.gz
 ./dxt-v0.0.0-x86_64-linux-gnu/dxt version
 ```
+
+Review draft assets, checksums and candidate gate results before making a
+release public. Announce the tested platform/adapter contract and any remaining
+compatibility limits; do not infer universal dbt support from the initial
+DuckDB/PostgreSQL certification scope.
