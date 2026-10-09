@@ -248,7 +248,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             return .ok;
         }
         const rt = runtime orelse return .usage;
-        var options = parseOptions(rt.allocator, args[2..], stderr, .list) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .list, rt.global_options) catch |err| return commandError(err, stderr);
         if (options.output != .text and options.output != .json) return .usage;
         options.which = command;
         project.analyze(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
