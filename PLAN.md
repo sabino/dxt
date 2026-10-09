@@ -165,6 +165,19 @@ both-adapter Core comparisons. These partial runs do not establish release
 acceptance. Regular-expression runtime/provenance notices must accompany the
 existing grammar, adapter-macro and Unicode notices in actual archives.
 
+The next integrated closure includes typed dictionary keys and JSON errors,
+ephemeral generic/singular data-test CTEs, custom relation naming, enforced
+contracts/constraints, typed documentation providers and native DuckDB profile
+settings, retries and transaction policies. All 501 integrated native tests pass.
+The supervisor's typed JSON slice passed 30 actual Core comparisons; workers
+bring additional focused both-adapter evidence. Full historical CLI/project-hook
+and ephemeral-test reruns are now running on a frozen product tree.
+The unchanged PostgreSQL dbt-utils parse advanced beyond Relation-keyed maps
+and stopped on a missing required macro argument: Core binds an Undefined value
+where the native binder rejects the call. The expression/configuration workers
+own the sequenced Undefined and macro-binding closure. This public workflow
+failure remains an acceptance blocker; no project files or gate scope are changed.
+
 After its scheduling commit, the scheduler worker owns the focused native
 DuckDB/Postgres adapter contract in a second isolated worktree. Shared backend
 integration follows test-error, incremental and snapshot commits. Threaded
