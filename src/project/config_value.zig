@@ -5,9 +5,9 @@ pub fn toExpression(allocator: std.mem.Allocator, value: std.json.Value) anyerro
     return switch (value) {
         .null => .none,
         .bool => |v| .{ .boolean = v },
-        .integer => |v| .{ .number = @floatFromInt(v) },
+        .integer => |v| try expression.integerValue(allocator, v),
         .float => |v| .{ .number = v },
-        .number_string => |v| .{ .number = try std.fmt.parseFloat(f64, v) },
+        .number_string => |v| if (std.mem.indexOfAny(u8, v, ".eE") != null) .{ .number = try std.fmt.parseFloat(f64, v) } else .{ .integer = try @import("expression_number.zig").canonical(allocator, v, 10) },
         .string => |v| .{ .string = v },
         .array => |items| blk: {
             const values = try expression.allocateValues(allocator, items.items.len);
@@ -29,9 +29,10 @@ pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) any
         .none => .null,
         .undefined, .callable => error.InvalidConfiguration,
         .boolean => |v| .{ .bool = v },
-        .number => |v| if (std.math.isFinite(v) and @abs(v) < 9007199254740992 and @floor(v) == v) .{ .integer = @intFromFloat(v) } else .{ .float = v },
+        .integer => |v| if (std.fmt.parseInt(i64, v, 10)) |number| .{ .integer = number } else |_| .{ .number_string = try allocator.dupe(u8, v) },
+        .number => |v| .{ .float = v },
         .string => |v| .{ .string = try allocator.dupe(u8, v) },
-        .list => |items| blk: {
+        .list, .tuple => |items| blk: {
             var array = std.json.Array.init(allocator);
             for (items) |item| try array.append(try fromExpression(allocator, item));
             break :blk .{ .array = array };
