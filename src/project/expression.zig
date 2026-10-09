@@ -46,6 +46,9 @@ pub const Value = union(enum) {
                 break :blk try out.toOwnedSlice(allocator);
             },
             .object => |entries| blk: {
+                // Adapter relation objects retain typed attributes for package
+                // macros while their string conversion is the SQL identity.
+                for (entries) |entry| if (std.mem.eql(u8, entry.key, "__dxt_rendered") and entry.value == .string) break :blk entry.value.string;
                 var out: std.ArrayList(u8) = .empty;
                 try out.append(allocator, '{');
                 for (entries, 0..) |entry, i| {
@@ -99,11 +102,39 @@ pub fn repr(value: Value, allocator: std.mem.Allocator) ![]const u8 {
 }
 
 pub fn evaluate(allocator: std.mem.Allocator, input: []const u8, host: ?Host) !Value {
+    if (topLevelKeyword(input, "if")) |condition_at| {
+        const remainder = input[condition_at + 2 ..];
+        const else_at = topLevelKeyword(remainder, "else") orelse return error.InvalidJinjaExpression;
+        const condition = try evaluate(allocator, remainder[0..else_at], host);
+        return try evaluate(allocator, if (condition.truthy()) input[0..condition_at] else remainder[else_at + 4 ..], host);
+    }
     var parser = Parser{ .allocator = allocator, .input = input, .host = host };
     const value = try parser.binary(0);
     parser.space();
     if (parser.index != input.len) return error.InvalidJinjaExpression;
     return value;
+}
+
+fn topLevelKeyword(input: []const u8, keyword: []const u8) ?usize {
+    var depth: usize = 0;
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < input.len) : (i += 1) {
+        const c = input[i];
+        if (quote != 0) {
+            if (c == '\\') i += 1 else if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '\'' or c == '"') {
+            quote = c;
+            continue;
+        }
+        if (c == '(' or c == '[' or c == '{') depth += 1 else if (c == ')' or c == ']' or c == '}') {
+            if (depth != 0) depth -= 1;
+        }
+        if (depth == 0 and std.mem.startsWith(u8, input[i..], keyword) and (i == 0 or std.ascii.isWhitespace(input[i - 1])) and (i + keyword.len == input.len or std.ascii.isWhitespace(input[i + keyword.len]))) return i;
+    }
+    return null;
 }
 
 pub fn evaluateArguments(allocator: std.mem.Allocator, input: []const u8, host: ?Host) ![]const Argument {
@@ -165,7 +196,8 @@ const Parser = struct {
             if (std.mem.eql(u8, operator, "is")) {
                 const negate = self.take("not");
                 const test_name = try self.name();
-                const result = if (std.mem.eql(u8, test_name, "defined")) lhs != .undefined else if (std.mem.eql(u8, test_name, "undefined")) lhs == .undefined else if (std.mem.eql(u8, test_name, "none") or std.mem.eql(u8, test_name, "None")) lhs == .none else if (std.mem.eql(u8, test_name, "string")) lhs == .string else if (std.mem.eql(u8, test_name, "number")) lhs == .number else if (std.mem.eql(u8, test_name, "boolean")) lhs == .boolean else if (std.mem.eql(u8, test_name, "iterable")) (lhs == .list or lhs == .object or lhs == .string) else return error.UnsupportedJinjaTest;
+                const args = if (self.take("(")) try self.arguments() else &.{};
+                const result = if (self.active) try testValue(test_name, lhs, args) else false;
                 lhs = .{ .boolean = if (negate) !result else result };
                 continue;
             }
@@ -213,9 +245,21 @@ const Parser = struct {
                     value = try host.call(host.context, value.callable, args, self.allocator);
                 }
             } else if (self.take("[")) {
-                const key = try self.binary(0);
-                try self.expect("]");
-                if (self.active) value = try indexValue(self.allocator, value, key);
+                const start: ?Value = if (self.take(":")) null else try self.binary(0);
+                const sliced = start == null or self.take(":");
+                if (sliced) {
+                    self.space();
+                    const end: ?Value = if (std.mem.startsWith(u8, self.input[self.index..], "]") or std.mem.startsWith(u8, self.input[self.index..], ":")) null else try self.binary(0);
+                    const step: ?Value = if (self.take(":")) blk: {
+                        self.space();
+                        break :blk if (std.mem.startsWith(u8, self.input[self.index..], "]")) null else try self.binary(0);
+                    } else null;
+                    try self.expect("]");
+                    if (self.active) value = try sliceValue(self.allocator, value, start, end, step);
+                } else {
+                    try self.expect("]");
+                    if (self.active) value = try indexValue(self.allocator, value, start.?);
+                }
             } else if (self.take(".")) {
                 const attribute = try self.name();
                 if (self.active) value = value.attribute(attribute);
@@ -436,7 +480,144 @@ fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
         else => unreachable,
     };
 }
+
+fn integer(value: Value) !i64 {
+    const n = try numeric(value);
+    if (!std.math.isFinite(n) or @floor(n) != n or @abs(n) > 2147483647) return error.JinjaTypeError;
+    return @intFromFloat(n);
+}
+
+fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?Value, step: ?Value) !Value {
+    const values = try iterableValues(allocator, value);
+    const length: i64 = @intCast(values.len);
+    const stride = if (step) |v| try integer(v) else 1;
+    if (stride == 0) return error.InvalidJinjaArguments;
+    var first = if (start) |v| try integer(v) else if (stride > 0) @as(i64, 0) else length - 1;
+    var last = if (stop) |v| try integer(v) else if (stride > 0) length else @as(i64, -1);
+    if (start != null and first < 0) first += length;
+    if (stop != null and last < 0) last += length;
+    first = std.math.clamp(first, if (stride > 0) @as(i64, 0) else -1, if (stride > 0) length else length - 1);
+    last = std.math.clamp(last, if (stride > 0) @as(i64, 0) else -1, if (stride > 0) length else length - 1);
+    var result: std.ArrayList(Value) = .empty;
+    var i = first;
+    while (if (stride > 0) i < last else i > last) : (i += stride) try result.append(allocator, values[@intCast(i)]);
+    if (value == .string) {
+        var text_result: std.ArrayList(u8) = .empty;
+        for (result.items) |v| try text_result.appendSlice(allocator, v.string);
+        return .{ .string = try text_result.toOwnedSlice(allocator) };
+    }
+    return .{ .list = try result.toOwnedSlice(allocator) };
+}
+
+fn iterableValues(allocator: std.mem.Allocator, value: Value) ![]const Value {
+    if (value == .list) return value.list;
+    if (value == .undefined or value == .none) return &.{};
+    if (value == .object) {
+        const result = try allocator.alloc(Value, value.object.len);
+        for (value.object, result) |entry, *v| v.* = .{ .string = entry.key };
+        return result;
+    }
+    if (value == .string) {
+        var result: std.ArrayList(Value) = .empty;
+        var index: usize = 0;
+        while (index < value.string.len) {
+            const size = std.unicode.utf8ByteSequenceLength(value.string[index]) catch return error.JinjaTypeError;
+            if (index + size > value.string.len) return error.JinjaTypeError;
+            try result.append(allocator, .{ .string = value.string[index .. index + size] });
+            index += size;
+        }
+        return try result.toOwnedSlice(allocator);
+    }
+    return error.JinjaTypeError;
+}
+
+fn argument(args: []const Argument, name: []const u8, position: usize, fallback: Value) Value {
+    var index: usize = 0;
+    for (args) |arg| {
+        if (arg.name) |key| {
+            if (std.mem.eql(u8, key, name)) return arg.value;
+        } else {
+            if (index == position) return arg.value;
+            index += 1;
+        }
+    }
+    return fallback;
+}
+
+fn attributeValue(allocator: std.mem.Allocator, value: Value, attribute: Value) !Value {
+    if (attribute == .none) return value;
+    if (attribute == .number) return try indexValue(allocator, value, attribute);
+    if (attribute != .string) return error.JinjaTypeError;
+    var parts = std.mem.splitScalar(u8, attribute.string, '.');
+    var result = value;
+    while (parts.next()) |part| {
+        if (result == .undefined) return result;
+        if (std.fmt.parseInt(i64, part, 10)) |i| {
+            result = try indexValue(allocator, result, .{ .number = @floatFromInt(i) });
+        } else |_| result = result.attribute(part);
+    }
+    return result;
+}
+
+fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
+    if (std.mem.eql(u8, name, "defined")) return value != .undefined;
+    if (std.mem.eql(u8, name, "undefined")) return value == .undefined;
+    if (std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "None")) return value == .none;
+    if (std.mem.eql(u8, name, "string")) return value == .string;
+    if (std.mem.eql(u8, name, "number")) return value == .number or value == .boolean;
+    if (std.mem.eql(u8, name, "boolean")) return value == .boolean;
+    if (std.mem.eql(u8, name, "true")) return value == .boolean and value.boolean;
+    if (std.mem.eql(u8, name, "false")) return value == .boolean and !value.boolean;
+    if (std.mem.eql(u8, name, "mapping")) return value == .object;
+    if (std.mem.eql(u8, name, "iterable") or std.mem.eql(u8, name, "sequence")) return value == .list or value == .object or value == .string;
+    if (std.mem.eql(u8, name, "callable")) return value == .callable;
+    if (std.mem.eql(u8, name, "equalto") or std.mem.eql(u8, name, "eq") or std.mem.eql(u8, name, "==")) {
+        if (args.len != 1) return error.InvalidJinjaArguments;
+        return equal(value, args[0].value);
+    }
+    if (std.mem.eql(u8, name, "ne") or std.mem.eql(u8, name, "!=")) {
+        if (args.len != 1) return error.InvalidJinjaArguments;
+        return !equal(value, args[0].value);
+    }
+    if (std.mem.eql(u8, name, "in")) {
+        if (args.len != 1) return error.InvalidJinjaArguments;
+        return try contains(args[0].value, value);
+    }
+    if (std.mem.eql(u8, name, "odd") or std.mem.eql(u8, name, "even")) {
+        const odd = @mod(try numeric(value), 2) != 0;
+        return if (std.mem.eql(u8, name, "odd")) odd else !odd;
+    }
+    if (std.mem.eql(u8, name, "divisibleby")) {
+        if (args.len != 1) return error.InvalidJinjaArguments;
+        const divisor = try numeric(args[0].value);
+        if (divisor == 0) return error.JinjaDivisionByZero;
+        return @mod(try numeric(value), divisor) == 0;
+    }
+    if (std.mem.eql(u8, name, "lt") or std.mem.eql(u8, name, "lessthan") or std.mem.eql(u8, name, "gt") or std.mem.eql(u8, name, "greaterthan") or std.mem.eql(u8, name, "le") or std.mem.eql(u8, name, "ge")) {
+        if (args.len != 1) return error.InvalidJinjaArguments;
+        const operator = if (std.mem.eql(u8, name, "lt") or std.mem.eql(u8, name, "lessthan")) "<" else if (std.mem.eql(u8, name, "gt") or std.mem.eql(u8, name, "greaterthan")) ">" else if (std.mem.eql(u8, name, "le")) "<=" else ">=";
+        return (try apply(std.heap.page_allocator, operator, value, args[0].value)).boolean;
+    }
+    return error.UnsupportedJinjaTest;
+}
 fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argument) !?Value {
+    if (std.mem.eql(u8, name, "zip")) {
+        var inputs: std.ArrayList([]const Value) = .empty;
+        var length: usize = if (args.len == 0) 0 else std.math.maxInt(usize);
+        for (args) |arg| {
+            if (arg.name != null) return error.InvalidJinjaArguments;
+            const values = try iterableValues(allocator, arg.value);
+            length = @min(length, values.len);
+            try inputs.append(allocator, values);
+        }
+        const rows = try allocator.alloc(Value, length);
+        for (rows, 0..) |*row, i| {
+            const fields = try allocator.alloc(Value, inputs.items.len);
+            for (inputs.items, fields) |input, *field| field.* = input[i];
+            row.* = .{ .list = fields };
+        }
+        return .{ .list = rows };
+    }
     if (std.mem.eql(u8, name, "range")) {
         if (args.len < 1 or args.len > 3) return error.InvalidJinjaArguments;
         var bounds: [3]i64 = .{ 0, 0, 1 };
@@ -461,7 +642,18 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
     if (std.mem.eql(u8, name, "dict") or std.mem.eql(u8, name, "namespace")) {
         var entries: std.ArrayList(Entry) = .empty;
         for (args) |arg| {
-            const key = arg.name orelse return error.InvalidJinjaArguments;
+            const key = arg.name orelse {
+                if (arg.value != .object) return error.InvalidJinjaArguments;
+                try entries.appendSlice(allocator, arg.value.object);
+                continue;
+            };
+            var updated = false;
+            for (entries.items) |*entry| if (std.mem.eql(u8, entry.key, key)) {
+                entry.value = arg.value;
+                updated = true;
+                break;
+            };
+            if (updated) continue;
             try entries.append(allocator, .{ .key = key, .value = arg.value });
         }
         return .{ .object = try entries.toOwnedSlice(allocator) };
@@ -469,6 +661,98 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
     return null;
 }
 fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []const Argument) !Value {
+    if (std.mem.eql(u8, name, "attr")) {
+        if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
+        return value.attribute(args[0].value.string);
+    }
+    if (std.mem.eql(u8, name, "map")) {
+        const values = try iterableValues(allocator, value);
+        const attribute = argument(args, "attribute", std.math.maxInt(usize), .none);
+        const fallback = argument(args, "default", std.math.maxInt(usize), .undefined);
+        const mapped = try allocator.alloc(Value, values.len);
+        if (attribute != .none) {
+            for (values, mapped) |v, *out| {
+                out.* = try attributeValue(allocator, v, attribute);
+                if (out.* == .undefined and fallback != .undefined) out.* = fallback;
+            }
+        } else {
+            if (args.len == 0 or args[0].name != null or args[0].value != .string) return error.InvalidJinjaArguments;
+            for (values, mapped) |v, *out| out.* = try filter(allocator, args[0].value.string, v, args[1..]);
+        }
+        return .{ .list = mapped };
+    }
+    if (std.mem.eql(u8, name, "select") or std.mem.eql(u8, name, "reject") or std.mem.eql(u8, name, "selectattr") or std.mem.eql(u8, name, "rejectattr")) {
+        const values = try iterableValues(allocator, value);
+        const has_attribute = std.mem.endsWith(u8, name, "attr");
+        const reject = std.mem.startsWith(u8, name, "reject");
+        if (has_attribute and args.len == 0) return error.InvalidJinjaArguments;
+        const offset: usize = if (has_attribute) 1 else 0;
+        var result: std.ArrayList(Value) = .empty;
+        for (values) |v| {
+            const tested = if (has_attribute) try attributeValue(allocator, v, args[0].value) else v;
+            const accepted = if (args.len > offset) blk: {
+                if (args[offset].value != .string) return error.InvalidJinjaArguments;
+                break :blk try testValue(args[offset].value.string, tested, args[offset + 1 ..]);
+            } else tested.truthy();
+            if (accepted != reject) try result.append(allocator, v);
+        }
+        return .{ .list = try result.toOwnedSlice(allocator) };
+    }
+    if (std.mem.eql(u8, name, "sort") or std.mem.eql(u8, name, "unique") or std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
+        const values = try iterableValues(allocator, value);
+        const sorted = std.mem.eql(u8, name, "sort");
+        const case_sensitive = argument(args, "case_sensitive", if (sorted) 1 else 0, .{ .boolean = false }).truthy();
+        const attribute = argument(args, "attribute", if (sorted) 2 else 1, .none);
+        const Item = struct { value: Value, key: Value };
+        var items: std.ArrayList(Item) = .empty;
+        for (values) |v| {
+            var key = try attributeValue(allocator, v, attribute);
+            if (!case_sensitive and key == .string) key = .{ .string = try std.ascii.allocLowerString(allocator, key.string) };
+            if (std.mem.eql(u8, name, "unique")) {
+                var duplicate = false;
+                for (items.items) |item| if (equal(item.key, key)) {
+                    duplicate = true;
+                    break;
+                };
+                if (duplicate) continue;
+            }
+            try items.append(allocator, .{ .value = v, .key = key });
+        }
+        if (!std.mem.eql(u8, name, "unique")) {
+            const reverse = sorted and argument(args, "reverse", 0, .{ .boolean = false }).truthy();
+            if (items.items.len > 1) {
+                const first = items.items[0].key;
+                for (items.items[1..]) |item| _ = try apply(allocator, "<", item.key, first);
+            }
+            const Context = struct {
+                descending: bool,
+                fn less(context: @This(), a: Item, b: Item) bool {
+                    const order = if (a.key == .string) std.mem.order(u8, a.key.string, b.key.string) else std.math.order(numeric(a.key) catch unreachable, numeric(b.key) catch unreachable);
+                    return if (context.descending) order == .gt else order == .lt;
+                }
+            };
+            std.sort.block(Item, items.items, Context{ .descending = reverse }, Context.less);
+        }
+        if (std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
+            if (items.items.len == 0) return .undefined;
+            return items.items[if (std.mem.eql(u8, name, "min")) 0 else items.items.len - 1].value;
+        }
+        const result = try allocator.alloc(Value, items.items.len);
+        for (items.items, result) |item, *v| v.* = item.value;
+        return .{ .list = result };
+    }
+    if (std.mem.eql(u8, name, "sum")) {
+        var result = argument(args, "start", 1, .{ .number = 0 });
+        const attribute = argument(args, "attribute", 0, .none);
+        for (try iterableValues(allocator, value)) |v| result = try apply(allocator, "+", result, try attributeValue(allocator, v, attribute));
+        return result;
+    }
+    if (std.mem.eql(u8, name, "reverse")) {
+        if (value == .string) return sliceValue(allocator, value, null, null, .{ .number = -1 });
+        const values = try allocator.dupe(Value, try iterableValues(allocator, value));
+        std.mem.reverse(Value, values);
+        return .{ .list = values };
+    }
     if (std.mem.eql(u8, name, "as_text")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         return .{ .string = try value.text(allocator) };
@@ -486,8 +770,8 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
     }
     if (std.mem.eql(u8, name, "default") or std.mem.eql(u8, name, "d")) {
         if (args.len > 2) return error.InvalidJinjaArguments;
-        const replacement: Value = if (args.len > 0) args[0].value else .{ .string = "" };
-        return if (value == .undefined or (args.len == 2 and args[1].value.truthy() and !value.truthy())) replacement else value;
+        const replacement = argument(args, "default_value", 0, .{ .string = "" });
+        return if (value == .undefined or (argument(args, "boolean", 1, .{ .boolean = false }).truthy() and !value.truthy())) replacement else value;
     }
     if (std.mem.eql(u8, name, "length") or std.mem.eql(u8, name, "count")) return .{ .number = @floatFromInt(switch (value) {
         .string => |v| v.len,
@@ -523,12 +807,13 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
         return .{ .string = try out.toOwnedSlice(allocator) };
     }
     if (std.mem.eql(u8, name, "join")) {
-        if (value != .list or args.len > 1) return error.JinjaTypeError;
-        const separator = if (args.len == 1) try args[0].value.text(allocator) else "";
+        if (args.len > 2) return error.InvalidJinjaArguments;
+        const separator = try argument(args, "d", 0, .{ .string = "" }).text(allocator);
+        const attribute = argument(args, "attribute", 1, .none);
         var out: std.ArrayList(u8) = .empty;
-        for (value.list, 0..) |v, i| {
+        for (try iterableValues(allocator, value), 0..) |v, i| {
             if (i != 0) try out.appendSlice(allocator, separator);
-            try out.appendSlice(allocator, try v.text(allocator));
+            try out.appendSlice(allocator, try (try attributeValue(allocator, v, attribute)).text(allocator));
         }
         return .{ .string = try out.toOwnedSlice(allocator) };
     }
@@ -542,12 +827,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
         return try indexValue(allocator, value, .{ .number = if (std.mem.eql(u8, name, "first")) 0 else -1 });
     }
     if (std.mem.eql(u8, name, "list")) {
-        if (value == .list) return value;
-        if (value == .object) {
-            const values = try allocator.alloc(Value, value.object.len);
-            for (value.object, values) |entry, *v| v.* = .{ .string = entry.key };
-            return .{ .list = values };
-        }
+        return .{ .list = try iterableValues(allocator, value) };
     }
     return error.UnsupportedJinjaFilter;
 }
@@ -579,4 +859,22 @@ test "typed Jinja calls expand positional lists and keyword maps" {
     try std.testing.expectError(error.InvalidJinjaArguments, evaluateArguments(allocator, "a=1, **{'a':2}", null));
     try std.testing.expectError(error.InvalidJinjaArguments, evaluateArguments(allocator, "**[1,2]", null));
     try std.testing.expect(!(try evaluate(allocator, "false and missing_call(**unknown)", null)).truthy());
+}
+
+test "collection expressions preserve ordering, missing values and lazy branches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("['a', 'b']", try (try evaluate(a, "['A','B'] | map('lower') | list", null)).text(a));
+    try std.testing.expectEqualStrings("[1, 9]", try (try evaluate(a, "[{'x':1},{}] | map(attribute='x', default=9) | list", null)).text(a));
+    try std.testing.expectEqualStrings("[3, 1]", try (try evaluate(a, "[1,2,3] | select('odd') | reverse | list", null)).text(a));
+    try std.testing.expectEqualStrings("[2, 3]", try (try evaluate(a, "[3,1,2] | sort | reject('equalto', 1) | list", null)).text(a));
+    try std.testing.expectEqualStrings("[0, 2, 4]", try (try evaluate(a, "[0,1,2,3,4][::2]", null)).text(a));
+    try std.testing.expectEqualStrings("[3, 2, 1]", try (try evaluate(a, "[0,1,2,3,4][-2:0:-1]", null)).text(a));
+    try std.testing.expectEqualStrings("好é", (try evaluate(a, "'aé好'[1:][::-1]", null)).string);
+    try std.testing.expectEqualStrings("chosen", (try evaluate(a, "1 / 0 if false else 'chosen'", null)).string);
+    try std.testing.expectEqualStrings("chosen", (try evaluate(a, "'chosen' if true else 1 / 0", null)).string);
+    try std.testing.expect((try evaluate(a, "{} is mapping and [1,2] is sequence and 3 is odd", null)).boolean);
+    try std.testing.expectError(error.InvalidJinjaArguments, evaluate(a, "[1,2][::0]", null));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "[1,'a'] | sort", null));
 }
