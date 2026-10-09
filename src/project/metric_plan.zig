@@ -42,10 +42,23 @@ pub const Query = struct {
     export_saved_query: bool = false,
 };
 
+pub const RelationBinding = struct {
+    logical_id: []const u8,
+    relation_name: []const u8,
+    connection: ?[]const u8 = null,
+    source_relation: []const u8,
+    source_query: ?[]const u8 = null,
+    sensitivity: []const u8 = "public",
+    estimated_rows: ?u64 = null,
+    estimated_bytes: ?u64 = null,
+    mapped: bool = false,
+};
+
 pub const Plan = struct {
     arena: std.heap.ArenaAllocator,
     sql: []const u8,
     logical: Value,
+    bindings: []const RelationBinding,
     pub fn deinit(self: *Plan) void {
         self.arena.deinit();
     }
@@ -124,8 +137,11 @@ pub fn build(allocator: std.mem.Allocator, graph: *const Graph, request: Query) 
     try values.put(a, &logical, "group_by", try stringArray(a, query.group_by));
     try values.put(a, &logical, "relations", ctx.relations);
     try values.put(a, &logical, "joins", ctx.joins);
+    try ctx.finalizeBindings();
+    try values.put(a, &logical, "bindings", try std.json.parseFromSliceLeaky(Value, a, try std.json.Stringify.valueAlloc(a, ctx.bindings.items, .{}), .{}));
     try values.put(a, &logical, "movement", .{ .array = std.json.Array.init(a) });
-    return .{ .arena = arena, .sql = sql, .logical = try values.clone(a, logical) };
+    const owned_logical = try values.clone(a, logical);
+    return .{ .arena = arena, .sql = sql, .logical = owned_logical, .bindings = ctx.bindings.items };
 }
 fn stringArray(a: std.mem.Allocator, items: []const []const u8) !Value {
     var result: Value = .{ .array = std.json.Array.init(a) };
@@ -186,17 +202,99 @@ const Context = struct {
     relations: Value,
     joins: Value,
     time_windows: std.ArrayList(Value) = .empty,
+    bindings: std.ArrayList(RelationBinding) = .empty,
+    columns: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty,
 
     fn add(self: *Context, sql: []const u8) ![]const u8 {
         const name = try std.fmt.allocPrint(self.allocator, "metric_{d}", .{self.ctes.items.len});
         try self.ctes.append(self.allocator, .{ .name = name, .sql = sql });
         return name;
     }
+    fn registerRelation(self: *Context, logical_id: []const u8, relation: Value, meta: Value) ![]const u8 {
+        const a = self.allocator;
+        const name = text(relation, "relation_name") orelse return error.MissingSemanticModelTarget;
+        const connection = text(meta, "connection");
+        for (self.bindings.items) |binding| if (eq(binding.relation_name, name)) {
+            if (!optionalEq(binding.connection, connection)) return error.AmbiguousMetricRelation;
+            return binding.relation_name;
+        };
+        const source = field(meta, "source");
+        var source_name: []const u8 = undefined;
+        if (source != .null) {
+            const parts = list(source);
+            if (parts.len != 2) return error.InvalidMetricSource;
+            source_name = try std.fmt.allocPrint(a, "{s}.{s}", .{ try ident(a, sem.string(parts[0]) orelse return error.InvalidMetricSource), try ident(a, sem.string(parts[1]) orelse return error.InvalidMetricSource) });
+        } else source_name = try std.fmt.allocPrint(a, "{s}.{s}", .{ try ident(a, text(relation, "schema_name") orelse return error.MissingSemanticModelTarget), try ident(a, text(relation, "alias") orelse return error.MissingSemanticModelTarget) });
+        try self.bindings.append(a, .{
+            .logical_id = try a.dupe(u8, logical_id),
+            .relation_name = try a.dupe(u8, name),
+            .connection = if (connection) |value| try a.dupe(u8, value) else null,
+            .source_relation = source_name,
+            .source_query = if (text(meta, "source_query")) |value| try a.dupe(u8, value) else null,
+            .sensitivity = try a.dupe(u8, text(meta, "sensitivity") orelse "public"),
+            .estimated_rows = try estimate(field(meta, "estimated_rows")),
+            .estimated_bytes = try estimate(field(meta, "estimated_bytes")),
+            .mapped = connection != null or source != .null or field(meta, "source_query") != .null,
+        });
+        try self.relations.array.append(.{ .string = name });
+        return self.bindings.items[self.bindings.items.len - 1].relation_name;
+    }
     fn relationFor(self: *Context, model: *const Resource) ![]const u8 {
+        const dependencies = list(field(field(model.data, "depends_on"), "nodes"));
+        if (dependencies.len != 1) return error.MissingSemanticModelTarget;
+        return self.registerRelation(sem.string(dependencies[0]).?, field(model.data, "node_relation"), field(field(model.data, "config"), "meta"));
+    }
+    fn trackColumn(self: *Context, relation: []const u8, column: []const u8) !void {
+        const entry = try self.columns.getOrPut(self.allocator, relation);
+        if (!entry.found_existing) entry.value_ptr.* = .empty;
+        for (entry.value_ptr.items) |prior| if (eq(prior, column)) return;
+        try entry.value_ptr.append(self.allocator, try self.allocator.dupe(u8, column));
+    }
+    fn qualifyFor(self: *Context, model: *const Resource, alias: []const u8, raw: []const u8) ![]const u8 {
+        const a = self.allocator;
+        const sql = try qualify(a, alias, raw);
         const relation = text(field(model.data, "node_relation"), "relation_name") orelse return error.MissingSemanticModelTarget;
-        for (list(self.relations)) |prior| if (eq(prior.string, relation)) return relation;
-        try self.relations.array.append(.{ .string = relation });
-        return relation;
+        const prefix = try std.fmt.allocPrint(a, "{s}.\"", .{alias});
+        var at: usize = 0;
+        while (at < sql.len) {
+            if (sql[at] == '\'') {
+                at += 1;
+                while (at < sql.len) : (at += 1) if (sql[at] == '\'') {
+                    at += 1;
+                    if (at < sql.len and sql[at] == '\'') continue;
+                    break;
+                };
+                continue;
+            }
+            if (std.mem.startsWith(u8, sql[at..], prefix)) {
+                at += prefix.len;
+                var column: std.Io.Writer.Allocating = .init(a);
+                while (at < sql.len) : (at += 1) {
+                    if (sql[at] == '"') {
+                        at += 1;
+                        if (at >= sql.len or sql[at] != '"') break;
+                    }
+                    try column.writer.writeByte(sql[at]);
+                }
+                try self.trackColumn(relation, column.written());
+            } else at += 1;
+        }
+        return sql;
+    }
+    fn finalizeBindings(self: *Context) !void {
+        const a = self.allocator;
+        for (self.bindings.items) |*binding| {
+            if (binding.source_query != null) continue;
+            var projection: std.Io.Writer.Allocating = .init(a);
+            try projection.writer.writeAll("SELECT ");
+            const columns = if (self.columns.get(binding.relation_name)) |items| items.items else &.{};
+            if (columns.len == 0) try projection.writer.writeAll("1 AS __dxt_row") else for (columns, 0..) |column, i| {
+                if (i != 0) try projection.writer.writeByte(',');
+                try projection.writer.writeAll(try ident(a, column));
+            }
+            try projection.writer.print(" FROM {s}", .{binding.source_relation});
+            binding.source_query = try projection.toOwnedSlice();
+        }
     }
     fn compileMetric(self: *Context, resource: *const Resource, extra: []const Value, depth: usize) anyerror![]const u8 {
         if (depth > self.graph.semantic_resources.items.len) return error.CyclicMetricDependency;
@@ -389,10 +487,10 @@ const Context = struct {
             }
             cumulative_join = try join.toOwnedSlice();
         }
-        const time_expr = if (cumulative) groups.items[metric_time_index.?] else try source.time();
+        const time_expr = if (cumulative) groups.items[metric_time_index.?] else if (self.query.start_time != null or self.query.end_time != null) try source.time() else "";
         if (self.query.start_time) |start| try predicates.append(a, try std.fmt.allocPrint(a, "{s} >= {s}", .{ time_expr, try self.boundSql(start, false) }));
         if (self.query.end_time) |end| try predicates.append(a, try std.fmt.allocPrint(a, "{s} < {s}", .{ time_expr, try self.boundSql(end, true) }));
-        const aggregate = try aggregation(a, self.graph.adapter_type, measure, try qualify(a, "s", text(measure, "expr") orelse name));
+        const aggregate = try aggregation(a, self.graph.adapter_type, measure, try self.qualifyFor(source_model, "s", text(measure, "expr") orelse name));
         var out: std.Io.Writer.Allocating = .init(a);
         const w = &out.writer;
         try w.writeAll("SELECT ");
@@ -448,12 +546,17 @@ const Context = struct {
         for (self.graph.semantic_time_spines.items) |spine_raw| {
             for (self.graph.nodes.items) |*node| if (node.enabled and eq(node.name, text(spine_raw.raw, "name").?) and eq(node.package_name, spine_raw.package_name)) {
                 const relation = try sem.nodeRelation(a, self.graph, node);
-                return .{ .relation = text(relation, "relation_name").?, .column = text(field(spine_raw.raw, "time_spine"), "standard_granularity_column").? };
+                const physical = try self.registerRelation(node.unique_id, relation, field(node.effective_config, "meta"));
+                const column = text(field(spine_raw.raw, "time_spine"), "standard_granularity_column").?;
+                try self.trackColumn(physical, column);
+                return .{ .relation = physical, .column = column };
             };
         }
         for (self.graph.nodes.items) |*node| if (node.enabled and eq(node.name, "metricflow_time_spine")) {
             const relation = try sem.nodeRelation(a, self.graph, node);
-            return .{ .relation = text(relation, "relation_name").?, .column = "date_day" };
+            const physical = try self.registerRelation(node.unique_id, relation, field(node.effective_config, "meta"));
+            try self.trackColumn(physical, "date_day");
+            return .{ .relation = physical, .column = "date_day" };
         };
         return error.MissingSemanticTimeSpine;
     }
@@ -518,7 +621,7 @@ const Context = struct {
         var base_sql: std.Io.Writer.Allocating = .init(a);
         var conv_sql: std.Io.Writer.Allocating = .init(a);
         try base_sql.writer.print("SELECT {s} AS event_entity,{s} AS event_time", .{ base_entity, base_time });
-        try conv_sql.writer.print("SELECT ROW_NUMBER() OVER () AS event_id,{s} AS event_entity,{s} AS event_time,{s} AS event_value", .{ converted_entity, converted_time, try conversionWeight(a, converted.measure) });
+        try conv_sql.writer.print("SELECT ROW_NUMBER() OVER () AS event_id,{s} AS event_entity,{s} AS event_time,{s} AS event_value", .{ converted_entity, converted_time, try conversionWeight(self, converted.model, converted.measure) });
         for (base_groups.items, self.query.group_by) |group, name| try base_sql.writer.print(",{s} AS {s}", .{ group, try ident(a, name) });
         for (list(field(params, "constant_properties")), 0..) |property, i| {
             const base_property = text(property, "base_property") orelse return error.InvalidMetricQuery;
@@ -575,7 +678,7 @@ const Source = struct {
     joined: std.ArrayList(struct { model: *const Resource, alias: []const u8, source_alias: []const u8, entity: []const u8 }) = .empty,
     fn time(self: *Source) ![]const u8 {
         const name = text(self.measure, "agg_time_dimension") orelse text(field(self.model.data, "defaults"), "agg_time_dimension") orelse return error.MissingAggregationTimeDimension;
-        for (list(field(self.model.data, "dimensions"))) |dimension| if (eq(text(dimension, "name").?, name)) return qualify(self.context.allocator, "s", text(dimension, "expr") orelse name);
+        for (list(field(self.model.data, "dimensions"))) |dimension| if (eq(text(dimension, "name").?, name)) return self.context.qualifyFor(self.model, "s", text(dimension, "expr") orelse name);
         return error.MissingAggregationTimeDimension;
     }
     fn resolveDimension(self: *Source, requested: []const u8) anyerror![]const u8 {
@@ -629,7 +732,7 @@ const Source = struct {
             };
             const next_alias = found orelse try std.fmt.allocPrint(a, "j{d}", .{self.joined.items.len});
             if (found == null) {
-                const clause = try std.fmt.allocPrint(a, " LEFT JOIN {s} {s} ON {s} = {s}", .{ try self.context.relationFor(destination), next_alias, try qualify(a, alias, text(local, "expr") orelse entity_name), try qualify(a, next_alias, text(target_entity, "expr") orelse entity_name) });
+                const clause = try std.fmt.allocPrint(a, " LEFT JOIN {s} {s} ON {s} = {s}", .{ try self.context.relationFor(destination), next_alias, try self.context.qualifyFor(model, alias, text(local, "expr") orelse entity_name), try self.context.qualifyFor(destination, next_alias, text(target_entity, "expr") orelse entity_name) });
                 try self.joins.appendSlice(a, clause);
                 try self.joined.append(a, .{ .model = destination, .alias = next_alias, .source_alias = alias, .entity = entity_name });
                 var logical: Value = .{ .object = .empty };
@@ -654,7 +757,7 @@ const Source = struct {
             return std.fmt.allocPrint(a, "DATE_TRUNC('{s}',{s})", .{ granularity, base });
         }
         for (list(field(model.data, "dimensions"))) |dimension| if (eq(text(dimension, "name").?, name)) {
-            const expr = try qualify(a, alias, text(dimension, "expr") orelse name);
+            const expr = try self.context.qualifyFor(model, alias, text(dimension, "expr") orelse name);
             if (eq(text(dimension, "type").?, "time")) {
                 const minimum = text(field(dimension, "type_params"), "time_granularity") orelse return error.InvalidMetricGrain;
                 const granularity = grain orelse minimum;
@@ -666,7 +769,7 @@ const Source = struct {
         };
         for (list(field(model.data, "entities"))) |entity| if (eq(text(entity, "name").?, name)) {
             if (grain != null) return error.InvalidMetricGrain;
-            return qualify(a, alias, text(entity, "expr") orelse name);
+            return self.context.qualifyFor(model, alias, text(entity, "expr") orelse name);
         };
         return error.InvalidMetricDimension;
     }
@@ -683,7 +786,7 @@ const Source = struct {
             cursor = end + 2;
         }
         try out.writer.writeAll(template[cursor..]);
-        return out.toOwnedSlice();
+        return self.context.qualifyFor(self.model, "s", try out.toOwnedSlice());
     }
     fn filters(self: *Source, predicates: *std.ArrayList([]const u8), filter_set: Value) !void {
         for (list(field(filter_set, "where_filters"))) |entry| try predicates.append(self.context.allocator, try self.filter(text(entry, "where_sql_template") orelse return error.InvalidMetricFilter));
@@ -697,6 +800,15 @@ const Source = struct {
         return .{ .string = try self.resolveDimension(result.string) };
     }
 };
+fn optionalEq(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left) |value| return if (right) |other| eq(value, other) else false;
+    return right == null;
+}
+fn estimate(value: Value) !?u64 {
+    if (value == .null) return null;
+    if (value != .integer or value.integer < 0) return error.InvalidMetricSource;
+    return @intCast(value.integer);
+}
 fn grainRank(grain: []const u8) usize {
     for ([_][]const u8{ "nanosecond", "microsecond", "millisecond", "second", "minute", "hour", "day", "week", "month", "quarter", "year" }, 0..) |candidate, i| if (eq(grain, candidate)) return i;
     return 100;
@@ -745,6 +857,11 @@ fn qualify(a: std.mem.Allocator, alias: []const u8, expr: []const u8) ![]const u
                 if (cursor < expr.len and expr[cursor] == quote) continue;
                 break;
             };
+            if (quote == '"') {
+                var next = cursor;
+                while (next < expr.len and std.ascii.isWhitespace(expr[next])) next += 1;
+                if ((start == 0 or expr[start - 1] != '.') and (next == expr.len or expr[next] != '.')) try out.writer.print("{s}.", .{alias});
+            }
             try out.writer.writeAll(expr[start..cursor]);
         } else if (std.ascii.isAlphabetic(c) or c == '_') {
             const start = cursor;
@@ -773,9 +890,10 @@ fn findMeasure(graph: *const Graph, name: []const u8) !struct { model: *const Re
     }
     return error.MissingSemanticMeasure;
 }
-fn conversionWeight(a: std.mem.Allocator, measure: Value) ![]const u8 {
+fn conversionWeight(context: *Context, model: *const Resource, measure: Value) ![]const u8 {
+    const a = context.allocator;
     const agg = text(measure, "agg").?;
-    const expr = try qualify(a, "s", text(measure, "expr") orelse text(measure, "name").?);
+    const expr = try context.qualifyFor(model, "s", text(measure, "expr") orelse text(measure, "name").?);
     if (eq(agg, "count")) return std.fmt.allocPrint(a, "CASE WHEN {s} IS NULL THEN 0 ELSE 1 END", .{expr});
     if (eq(agg, "count_distinct")) return expr;
     if (eq(agg, "sum") and eq(std.mem.trim(u8, expr, " "), "1")) return expr;
@@ -826,6 +944,17 @@ test "metric logical plan validates joins and owns its SQL and relational IR" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings(plan.sql, text(parsed.value, "sql").?);
     try std.testing.expectEqual(@as(usize, 0), list(field(parsed.value, "movement")).len);
+    try std.testing.expectEqual(@as(usize, 2), plan.bindings.len);
+    var found = false;
+    for (plan.bindings) |binding| if (eq(binding.logical_id, "model.demo.orders")) {
+        found = true;
+        const query_sql = binding.source_query.?;
+        try std.testing.expect(std.mem.indexOf(u8, query_sql, "\"amount\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, query_sql, "\"customer_id\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, query_sql, "\"created_at\"") == null);
+        try std.testing.expect(std.mem.indexOf(u8, query_sql, "SELECT *") == null);
+    };
+    try std.testing.expect(found);
 }
 
 test "metric planner rejects finer grains unknown dimensions and invalid percentiles" {
