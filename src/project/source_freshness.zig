@@ -21,6 +21,7 @@ pub const CheckResult = struct {
 pub const SourceStatusRow = struct {
     unique_id: []const u8,
     status: []const u8,
+    max_loaded_at: ?[]const u8 = null,
 };
 
 pub const SourceStatusIndex = struct {
@@ -30,6 +31,7 @@ pub const SourceStatusIndex = struct {
         for (self.rows) |row| {
             allocator.free(row.unique_id);
             allocator.free(row.status);
+            if (row.max_loaded_at) |value| allocator.free(value);
         }
         allocator.free(self.rows);
         self.* = .{};
@@ -41,9 +43,63 @@ pub const SourceStatusIndex = struct {
         }
         return null;
     }
+
+    pub fn isFresherThan(self: *const SourceStatusIndex, previous: *const SourceStatusIndex, unique_id: []const u8) bool {
+        for (self.rows) |current| {
+            if (!std.mem.eql(u8, current.unique_id, unique_id) or std.mem.eql(u8, current.status, "runtime error")) continue;
+            const current_time = parseFreshnessTimestamp(current.max_loaded_at orelse return false) catch return false;
+            for (previous.rows) |prior| {
+                if (!std.mem.eql(u8, prior.unique_id, unique_id)) continue;
+                if (prior.max_loaded_at == null or std.mem.eql(u8, prior.status, "runtime error")) return true;
+                const prior_time = parseFreshnessTimestamp(prior.max_loaded_at.?) catch return false;
+                return current_time > prior_time;
+            }
+            return true;
+        }
+        return false;
+    }
 };
 
 pub const unsupported_metadata_freshness_message = "source freshness requires loaded_at_field or loaded_at_query because the DuckDB adapter does not support metadata-based freshness";
+
+pub fn parseFreshnessTimestamp(text: []const u8) !i128 {
+    if (text.len < 19 or text[4] != '-' or text[7] != '-' or (text[10] != 'T' and text[10] != ' ') or text[13] != ':' or text[16] != ':') return error.MalformedSourcesArtifact;
+    const year = std.fmt.parseInt(i64, text[0..4], 10) catch return error.MalformedSourcesArtifact;
+    const month = std.fmt.parseInt(usize, text[5..7], 10) catch return error.MalformedSourcesArtifact;
+    const day = std.fmt.parseInt(i64, text[8..10], 10) catch return error.MalformedSourcesArtifact;
+    const hour = std.fmt.parseInt(i64, text[11..13], 10) catch return error.MalformedSourcesArtifact;
+    const minute = std.fmt.parseInt(i64, text[14..16], 10) catch return error.MalformedSourcesArtifact;
+    const second = std.fmt.parseInt(i64, text[17..19], 10) catch return error.MalformedSourcesArtifact;
+    if (year < 1 or month < 1 or month > 12 or hour > 23 or minute > 59 or second > 59 or hour < 0 or minute < 0 or second < 0) return error.MalformedSourcesArtifact;
+    var months = [_]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (@mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0)) months[1] = 29;
+    if (day < 1 or day > months[month - 1]) return error.MalformedSourcesArtifact;
+    const prior_year = year - 1;
+    var days = prior_year * 365 + @divFloor(prior_year, 4) - @divFloor(prior_year, 100) + @divFloor(prior_year, 400) + day - 1;
+    for (months[0 .. month - 1]) |count| days += count;
+    var nanos: i128 = @as(i128, days * 86400 + hour * 3600 + minute * 60 + second) * 1_000_000_000;
+    var position: usize = 19;
+    if (position < text.len and text[position] == '.') {
+        position += 1;
+        const start = position;
+        var scale: i128 = 100_000_000;
+        while (position < text.len and std.ascii.isDigit(text[position])) : (position += 1) {
+            // Core's datetime artifacts retain microsecond precision.
+            if (position - start < 6) nanos += @as(i128, text[position] - '0') * scale;
+            scale = @divTrunc(scale, 10);
+        }
+        if (position == start) return error.MalformedSourcesArtifact;
+    }
+    if (position == text.len) return nanos;
+    if (std.mem.eql(u8, text[position..], "Z")) return nanos;
+    const offset = text[position..];
+    if (offset.len != 6 or (offset[0] != '+' and offset[0] != '-') or offset[3] != ':') return error.MalformedSourcesArtifact;
+    const offset_hour = std.fmt.parseInt(i64, offset[1..3], 10) catch return error.MalformedSourcesArtifact;
+    const offset_minute = std.fmt.parseInt(i64, offset[4..6], 10) catch return error.MalformedSourcesArtifact;
+    if (offset_hour < 0 or offset_hour > 23 or offset_minute < 0 or offset_minute > 59) return error.MalformedSourcesArtifact;
+    const offset_nanos: i128 = @as(i128, offset_hour * 3600 + offset_minute * 60) * 1_000_000_000;
+    return if (offset[0] == '+') nanos - offset_nanos else nanos + offset_nanos;
+}
 
 pub fn deinitResults(allocator: std.mem.Allocator, results: []const CheckResult) void {
     for (results) |result| {
@@ -83,6 +139,7 @@ pub fn parseSourceStatusIndex(allocator: std.mem.Allocator, text: []const u8) !S
         for (rows.items) |row| {
             allocator.free(row.unique_id);
             allocator.free(row.status);
+            if (row.max_loaded_at) |value| allocator.free(value);
         }
         rows.deinit(allocator);
     }
@@ -94,10 +151,21 @@ pub fn parseSourceStatusIndex(allocator: std.mem.Allocator, text: []const u8) !S
         const unique_id = if (unique_id_value == .string) unique_id_value.string else return error.MalformedSourcesArtifact;
         const status = if (status_value == .string) status_value.string else return error.MalformedSourcesArtifact;
         if (!isSupportedSourceStatus(status)) return error.MalformedSourcesArtifact;
-        try rows.append(allocator, .{
-            .unique_id = try allocator.dupe(u8, unique_id),
-            .status = try allocator.dupe(u8, status),
-        });
+        const timestamp = if (result.get("max_loaded_at")) |value| switch (value) {
+            .string => blk: {
+                _ = try parseFreshnessTimestamp(value.string);
+                break :blk value.string;
+            },
+            .null => null,
+            else => return error.MalformedSourcesArtifact,
+        } else null;
+        const owned_id = try allocator.dupe(u8, unique_id);
+        errdefer allocator.free(owned_id);
+        const owned_status = try allocator.dupe(u8, status);
+        errdefer allocator.free(owned_status);
+        const owned_timestamp = if (timestamp) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (owned_timestamp) |value| allocator.free(value);
+        try rows.append(allocator, .{ .unique_id = owned_id, .status = owned_status, .max_loaded_at = owned_timestamp });
     }
 
     return .{ .rows = try rows.toOwnedSlice(allocator) };
@@ -385,4 +453,12 @@ test "sources v3 status loader rejects malformed and version mismatched artifact
         \\  "results": [{"unique_id": "source.demo.raw.orders"}]
         \\}
     ));
+}
+
+test "freshness timestamp comparison respects offsets and fractional seconds" {
+    try std.testing.expectEqual(try parseFreshnessTimestamp("2026-01-01T00:00:00Z"), try parseFreshnessTimestamp("2025-12-31T21:00:00-03:00"));
+    try std.testing.expect((try parseFreshnessTimestamp("2026-01-01T00:00:00.000001Z")) > (try parseFreshnessTimestamp("2026-01-01T00:00:00Z")));
+    try std.testing.expectEqual(try parseFreshnessTimestamp("2026-01-01T00:00:00Z"), try parseFreshnessTimestamp("2026-01-01T00:00:00.0000001Z"));
+    try std.testing.expectError(error.MalformedSourcesArtifact, parseFreshnessTimestamp("2026-02-29T00:00:00Z"));
+    try std.testing.expectError(error.MalformedSourcesArtifact, parseFreshnessTimestamp("invalid"));
 }

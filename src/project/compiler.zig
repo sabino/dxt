@@ -757,6 +757,13 @@ fn validateSkippedLoopBody(context: *CompileContext, sql: []const u8, block: For
     context.popScope();
 }
 
+pub fn relationNameForRefNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
+    if (!std.mem.eql(u8, node.materialized, "ephemeral")) {
+        if (graph.deferredRelation(node.unique_id)) |name| return try allocator.dupe(u8, name);
+    }
+    return try relationNameForNode(allocator, graph, node);
+}
+
 pub fn relationNameForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
     const schema = try relationSchemaForNode(allocator, graph, node);
     defer allocator.free(schema);
@@ -1052,7 +1059,7 @@ fn renderLegacyExpression(context: *CompileContext, span: []const u8) ![]const u
         if (std.mem.eql(u8, target.resource_type, "model") and std.mem.eql(u8, target.materialized, "ephemeral")) {
             return try ephemeralCteName(allocator, target);
         }
-        return try relationNameForNode(allocator, graph, target);
+        return try relationNameForRefNode(allocator, graph, target);
     }
     if (std.mem.eql(u8, call.name, "source")) {
         var strings = try parseCompileStringArgs(context, args, error.UnsupportedDynamicSource);
@@ -1893,7 +1900,7 @@ fn genericTestRelationName(allocator: std.mem.Allocator, graph: *const Graph, te
     if (test_node.attached_node) |attached_unique_id| {
         const attached_node = findNodeByUniqueId(graph, attached_unique_id) orelse return error.UnsupportedTestExecution;
         if (attached_node.relation_name) |relation_name| return try allocator.dupe(u8, relation_name);
-        return try relationNameForNode(allocator, graph, attached_node);
+        return try relationNameForRefNode(allocator, graph, attached_node);
     }
     if (test_node.attached_source_unique_id) |unique_id| {
         const source = findSourceByUniqueId(graph, unique_id) orelse return error.UnsupportedTestExecution;
@@ -1918,7 +1925,7 @@ fn relationshipTargetRelationName(allocator: std.mem.Allocator, graph: *const Gr
     }
     const parent_node = findRelationshipTargetNode(graph, test_node) orelse return error.UnsupportedTestExecution;
     if (parent_node.relation_name) |relation_name| return try allocator.dupe(u8, relation_name);
-    return try relationNameForNode(allocator, graph, parent_node);
+    return try relationNameForRefNode(allocator, graph, parent_node);
 }
 
 fn findRelationshipTargetNode(graph: *const Graph, test_node: *const GenericTestNode) ?*const Node {

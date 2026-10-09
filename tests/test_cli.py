@@ -9508,7 +9508,7 @@ def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_pa
         return [item["unique_id"] for item in json.loads(result.stdout)]
 
     assert selected_ids("success") == ["model.selector_graph.stg_customers"]
-    assert selected_ids("error") == ["model.selector_graph.customers"]
+    assert selected_ids("error") == ["model.selector_graph.customers", test_id]
     assert selected_ids("skipped") == ["model.selector_graph.orders"]
     assert selected_ids("fail") == [test_id]
 
@@ -10681,7 +10681,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     assert "--resource-type supports only model, analysis, snapshot, seed, source, exposure, test, or unit_test" in unsupported_type.stderr
 
     for selector in [
-        "state:modified",
+        "state:unsupported",
         "config.schema:audit",
         "resource_type:function",
         "tag:nightly,",
@@ -10720,7 +10720,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     assert "option `--select` requires a value" in missing_selector.stderr
 
     unsupported_in_list = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "customers", "state:modified"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "customers", "state:unsupported"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10767,7 +10767,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
                 "  - name: stateful",
                 "    definition:",
                 "      method: state",
-                "      value: modified",
+                "      value: unsupported",
             ]
         )
         + "\n"

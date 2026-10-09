@@ -21,6 +21,7 @@ const selector = @import("project/selector.zig");
 const scheduler = @import("project/scheduler.zig");
 const source_freshness = @import("project/source_freshness.zig");
 const state_artifacts = @import("project/state.zig");
+const project_defer = @import("project/defer.zig");
 const types = @import("project/types.zig");
 const util = @import("project/util.zig");
 
@@ -146,7 +147,7 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
     try resolveDependencies(&graph);
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const resource_type = if (options.resource_type) |value| try runtime.allocator.dupe(u8, value) else null;
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, resource_type, selection.select, selection.exclude, selection_state.context());
@@ -189,11 +190,12 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
 
     const target_dir = try targetDir(runtime, options);
+    try project_defer.apply(runtime, &graph, options, selected, target_dir);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, true, true);
     if (selected.len != 0 and !compile_result.saw_model and !compile_result.saw_snapshot and !compile_result.saw_analysis and !compile_result.saw_generic_test and !compile_result.saw_singular_test) return error.UnsupportedCompileSelection;
 
@@ -230,11 +232,12 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
 
     const target_dir = try targetDir(runtime, options);
+    try project_defer.apply(runtime, &graph, options, selected, target_dir);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
 
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
@@ -277,7 +280,7 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
     const selected_sources = try selector.selectResourcesWithContext(runtime.allocator, &graph, "source", selection.select, selection.exclude, selection_context);
@@ -369,7 +372,7 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
     const selected_models = try selector.selectResourcesWithContext(runtime.allocator, &graph, "model", selection.select, selection.exclude, selection_context);
@@ -384,6 +387,7 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     try validateRunMaterializations(execution_order);
 
     const target_dir = try targetDir(runtime, options);
+    try project_defer.apply(runtime, &graph, options, selected_models, target_dir);
     const compile_result = try compileSelectedModels(runtime, &graph, selected_models, target_dir, false, false);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     if (compile_result.count == 0) return error.UnsupportedRunSelection;
@@ -423,7 +427,7 @@ pub fn snapshotRun(runtime: Runtime, options: Options, stdout: *Io.Writer, stder
     try writeWarnings(stderr, &graph);
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, "snapshot", selection.select, selection.exclude, selection_state.context());
     const ordered = try selectedModelExecutionOrder(runtime, &graph, selected);
@@ -462,7 +466,7 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
     const selected_seeds = try selector.selectResourcesWithContext(runtime.allocator, &graph, "seed", selection.select, selection.exclude, selection_context);
@@ -511,7 +515,7 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, "test", selection.select, selection.exclude, selection_context);
@@ -540,6 +544,7 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
         deinitRunResults(runtime.allocator, executed.items);
         executed.deinit(runtime.allocator);
     }
+    try project_defer.apply(runtime, &graph, options, selected, target_dir);
     const test_summary = try appendDataTestResults(runtime, db_path, &graph, test_nodes, &executed);
     const unit_test_summary = try appendUnitTestResults(runtime, db_path, &graph, unit_test_nodes, &executed);
 
@@ -566,11 +571,12 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
 
     const target_dir = try targetDir(runtime, options);
+    try project_defer.apply(runtime, &graph, options, selected, target_dir);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
     const manifest_path = try writeManifest(runtime, &graph, target_dir);
     const selected_kinds = classifyBuildSelection(selected);
@@ -693,6 +699,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             deinitRunResults(runtime.allocator, executed.items);
             executed.deinit(runtime.allocator);
         }
+        try project_defer.apply(runtime, &graph, options, selected, target_dir);
         const test_summary = try appendDataTestResults(runtime, db_path, &graph, test_nodes, &executed);
         const unit_test_summary = try appendUnitTestResults(runtime, db_path, &graph, unit_test_nodes, &executed);
 
@@ -722,6 +729,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
             deinitRunResults(runtime.allocator, executed.items);
             executed.deinit(runtime.allocator);
         }
+        try project_defer.apply(runtime, &graph, options, selected, target_dir);
         const test_summary = try appendDataTestResults(runtime, db_path, &graph, test_nodes, &executed);
 
         try writeRunResults(runtime, target_dir, executed.items);
@@ -1021,11 +1029,17 @@ const SelectionState = struct {
     source_status_index: ?source_freshness.SourceStatusIndex = null,
     result_status_index: ?run_results.ResultStatusIndex = null,
     prior_manifest_index: ?state_artifacts.PriorManifestIndex = null,
+    current_manifest_index: ?state_artifacts.PriorManifestIndex = null,
+    current_source_status_index: ?source_freshness.SourceStatusIndex = null,
+    indirect_selection: []const u8 = "eager",
+    expression: ?*const selector.SelectionExpression = null,
 
     fn deinit(self: *SelectionState, allocator: std.mem.Allocator) void {
         if (self.source_status_index) |*index| index.deinit(allocator);
         if (self.result_status_index) |*index| index.deinit(allocator);
         if (self.prior_manifest_index) |*index| index.deinit(allocator);
+        if (self.current_manifest_index) |*index| index.deinit(allocator);
+        if (self.current_source_status_index) |*index| index.deinit(allocator);
         self.* = .{};
     }
 
@@ -1034,15 +1048,19 @@ const SelectionState = struct {
         if (self.source_status_index) |*index| ctx.source_status_index = index;
         if (self.result_status_index) |*index| ctx.result_status_index = index;
         if (self.prior_manifest_index) |*index| ctx.prior_manifest_index = index;
+        if (self.current_manifest_index) |*index| ctx.current_manifest_index = index;
+        if (self.current_source_status_index) |*index| ctx.current_source_status_index = index;
+        ctx.indirect_selection = self.indirect_selection;
+        ctx.expression = self.expression;
         return ctx;
     }
 };
 
-fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_config.ResolvedSelection) !SelectionState {
+fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_config.ResolvedSelection, graph: *const Graph) !SelectionState {
     const needs_source_status = selector.usesSourceStatusSelector(selection.select, selection.exclude);
     const needs_result = selector.usesResultSelector(selection.select, selection.exclude);
     const needs_state = selector.usesStateSelector(selection.select, selection.exclude);
-    if (!needs_source_status and !needs_result and !needs_state) return .{};
+    if (!needs_source_status and !needs_result and !needs_state) return .{ .indirect_selection = options.indirect_selection, .expression = selection.expression };
 
     const state_dir = options.state orelse {
         if (needs_state) return error.MissingStateManifestState;
@@ -1050,10 +1068,23 @@ fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_co
         return error.MissingSourceStatusState;
     };
 
-    var state: SelectionState = .{};
+    var state: SelectionState = .{ .indirect_selection = options.indirect_selection, .expression = selection.expression };
     errdefer state.deinit(runtime.allocator);
-    if (needs_state) state.prior_manifest_index = try state_artifacts.loadPriorManifestIndex(runtime, state_dir);
+    if (needs_state) {
+        state.prior_manifest_index = try state_artifacts.loadPriorManifestIndex(runtime, state_dir);
+        const current_json = try manifest.renderManifest(runtime.allocator, graph);
+        defer runtime.allocator.free(current_json);
+        state.current_manifest_index = try state_artifacts.parsePriorManifestIndex(runtime.allocator, current_json);
+    }
     if (needs_source_status) state.source_status_index = try source_freshness.loadSourceStatusIndex(runtime, state_dir);
+    if (selector.usesFresherSelector(selection.select, selection.exclude)) {
+        const current_dir = try targetDir(runtime, options);
+        defer runtime.allocator.free(current_dir);
+        state.current_source_status_index = source_freshness.loadSourceStatusIndex(runtime, current_dir) catch |err| switch (err) {
+            error.MissingSourcesArtifact => return error.MissingCurrentSourcesArtifact,
+            else => return err,
+        };
+    }
     if (needs_result) state.result_status_index = try run_results.loadResultStatusIndex(runtime, state_dir);
     return state;
 }
@@ -2714,6 +2745,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
     var in_columns = false;
     var in_config = false;
     var in_seed_column_types = false;
+    var persist_docs_indent: ?usize = null;
     var active_resource_type: []const u8 = "model";
     var test_target: TestTarget = .none;
     var active_test_target: TestTarget = .none;
@@ -2917,6 +2949,15 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                 if (try applyGenericTestConfigValue(allocator, test_def, kv.key, kv.value)) continue;
             }
 
+            if (persist_docs_indent) |docs_indent| {
+                if (indent > docs_indent) {
+                    var docs = graph.model_properties.items[model_index].persist_docs orelse types.PersistDocs{};
+                    if (std.mem.eql(u8, kv.key, "relation")) docs.relation = try parseBool(kv.value) else if (std.mem.eql(u8, kv.key, "columns")) docs.columns = try parseBool(kv.value) else return error.UnsupportedYaml;
+                    graph.model_properties.items[model_index].persist_docs = docs;
+                    continue;
+                }
+                persist_docs_indent = null;
+            }
             if (in_config and indent > config_indent) {
                 if (std.mem.eql(u8, active_resource_type, "model") and try incremental_config.applyYaml(allocator, &graph.model_properties.items[model_index].incremental, kv.key, kv.value)) {
                     if (std.mem.trim(u8, kv.value, " \t").len == 0 and (std.mem.eql(u8, kv.key, "unique_key") or std.mem.eql(u8, kv.key, "predicates") or std.mem.eql(u8, kv.key, "incremental_predicates"))) {
@@ -2926,6 +2967,12 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
                     continue;
                 }
 
+                if (std.mem.eql(u8, kv.key, "persist_docs")) {
+                    if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
+                    persist_docs_indent = indent;
+                    graph.model_properties.items[model_index].persist_docs = .{};
+                    continue;
+                }
                 if (std.mem.eql(u8, kv.key, "enabled")) {
                     graph.model_properties.items[model_index].enabled = try parseBool(kv.value);
                 } else if (std.mem.eql(u8, kv.key, "materialized")) {
@@ -3065,28 +3112,34 @@ fn parseSingularTestPropertiesFromText(allocator: std.mem.Allocator, text: []con
 
 fn applySingularTestConfigValue(allocator: std.mem.Allocator, property: *types.SingularTestProperty, key: []const u8, value: []const u8) !bool {
     if (std.mem.eql(u8, key, "where")) {
+        property.config.markConfigured(.where);
         property.config.where = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "limit")) {
         const limit_text = try dupTrimmedScalar(allocator, value);
         defer allocator.free(limit_text);
+        property.config.markConfigured(.limit);
         property.config.limit = std.fmt.parseUnsigned(u64, limit_text, 10) catch return error.UnsupportedYaml;
         return true;
     }
     if (std.mem.eql(u8, key, "severity")) {
+        property.config.markConfigured(.severity);
         property.config.severity = try dupNormalizedSingularTestSeverity(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "warn_if")) {
+        property.config.markConfigured(.warn_if);
         property.config.warn_if = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "error_if")) {
+        property.config.markConfigured(.error_if);
         property.config.error_if = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "store_failures")) {
+        property.config.markConfigured(.store_failures);
         property.config.store_failures = try parseBool(value);
         return true;
     }
@@ -3225,6 +3278,12 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
         };
         var node = &graph.nodes.items[node_index];
         node.patch_path = property.patch_path;
+        if (property.persist_docs) |docs| {
+            var current = node.persist_docs orelse types.PersistDocs{};
+            current.relation = current.relation orelse docs.relation;
+            current.columns = current.columns orelse docs.columns;
+            node.persist_docs = current;
+        }
         if (property.description.len != 0) node.description = try resolveDocDescription(graph, property.package_name, property.description, &node.doc_blocks);
         if (std.mem.eql(u8, node.resource_type, "model") and property.materialized.len != 0 and !node.inline_materialized) node.materialized = property.materialized;
         if (std.mem.eql(u8, node.resource_type, "model")) try incremental_config.overlay(graph.allocator, &node.incremental, property.incremental, node.inline_incremental);
@@ -3265,6 +3324,10 @@ fn applySingularTestProperties(graph: *Graph, package_name: []const u8) !void {
         if (property.description.len != 0) test_node.description = try resolveDocDescription(graph, property.package_name, property.description, &test_node.doc_blocks);
         if (property.enabled) |enabled| {
             if (!test_node.inline_enabled) test_node.enabled = enabled;
+        }
+        inline for (std.meta.fields(types.GenericTestConfigField)) |field| {
+            const key = @field(types.GenericTestConfigField, field.name);
+            if (property.config.configured.contains(key)) test_node.config.markConfigured(key);
         }
         if (property.config.where) |where_sql| test_node.config.where = where_sql;
         if (property.config.limit) |limit| test_node.config.limit = limit;

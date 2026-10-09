@@ -52,6 +52,7 @@ const SourceDefaults = struct {
     loaded_at_field: ?[]const u8 = null,
     loaded_at_query: ?[]const u8 = null,
     freshness: ?types.FreshnessThreshold = null,
+    freshness_set: bool = false,
 };
 
 pub fn parseBool(value: []const u8) !bool {
@@ -154,28 +155,34 @@ pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTes
 
 pub fn applyGenericTestConfigValue(allocator: std.mem.Allocator, test_def: *GenericTestDef, key: []const u8, value: []const u8) !bool {
     if (std.mem.eql(u8, key, "where")) {
+        test_def.config.markConfigured(.where);
         test_def.config.where = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "limit")) {
         const limit_text = try dupTrimmedScalar(allocator, value);
         defer allocator.free(limit_text);
+        test_def.config.markConfigured(.limit);
         test_def.config.limit = std.fmt.parseUnsigned(u64, limit_text, 10) catch return error.UnsupportedYaml;
         return true;
     }
     if (std.mem.eql(u8, key, "severity")) {
+        test_def.config.markConfigured(.severity);
         test_def.config.severity = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "warn_if")) {
+        test_def.config.markConfigured(.warn_if);
         test_def.config.warn_if = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "error_if")) {
+        test_def.config.markConfigured(.error_if);
         test_def.config.error_if = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "store_failures")) {
+        test_def.config.markConfigured(.store_failures);
         test_def.config.store_failures = try parseBool(value);
         return true;
     }
@@ -1149,6 +1156,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                     .loaded_at_field = table_defaults.loaded_at_field,
                     .loaded_at_query = table_defaults.loaded_at_query,
                     .freshness = table_defaults.freshness,
+                    .freshness_set = table_defaults.freshness_set,
                 });
                 current_table_index = graph.sources.items.len - 1;
                 in_columns = false;
@@ -1328,6 +1336,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 active_values_index = null;
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "freshness")) {
+                source.freshness_set = true;
                 try beginFreshnessBlock(&source.freshness, kv.value);
                 freshness_scope = if (source.freshness == null and isYamlNull(kv.value)) .none else .table;
                 freshness_indent = indent;
@@ -1413,6 +1422,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 freshness_scope = .none;
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "freshness")) {
+                source_defaults.freshness_set = true;
                 try beginFreshnessBlock(&source_defaults.freshness, kv.value);
                 freshness_scope = if (source_defaults.freshness == null and isYamlNull(kv.value)) .none else .source;
                 freshness_indent = indent;
@@ -1824,6 +1834,7 @@ fn applyProjectSourceDefaults(allocator: std.mem.Allocator, graph: *const Graph,
             defaults.loaded_at_query = config.loaded_at_query;
         }
         if (config.freshness_set) {
+            defaults.freshness_set = true;
             mergeProjectFreshness(&defaults.freshness, config.freshness);
         }
     }

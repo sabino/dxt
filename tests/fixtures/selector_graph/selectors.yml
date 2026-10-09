@@ -24,6 +24,6 @@ selectors:
       union:
         - method: fqn
           value: "*customers"
-      exclude:
-        - method: fqn
-          value: stg_customers
+        - exclude:
+            - method: fqn
+              value: stg_customers

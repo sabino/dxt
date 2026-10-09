@@ -103,6 +103,16 @@ pub fn apply(allocator: std.mem.Allocator, node: *types.Node) !void {
         if (values.get(v, "show")) |show| node.docs.show = try boolean(show);
         if (values.get(v, "node_color")) |color| node.docs.node_color = try nullableString(color);
     }
+    if (values.get(config, "persist_docs")) |v| {
+        if (v == .null) node.persist_docs = null else {
+            if (v != .object) return error.InvalidConfiguration;
+            var docs: types.PersistDocs = .{};
+            if (values.get(v, "relation")) |value| docs.relation = try boolean(value);
+            if (values.get(v, "columns")) |value| docs.columns = try boolean(value);
+            node.persist_docs = docs;
+        }
+    }
+    if (values.get(node.inline_config, "store_failures") != null) node.test_config.markConfigured(.store_failures);
     if (values.get(config, "unique_key")) |v| {
         if (node.incremental.unique_key) |*old| old.deinit(allocator);
         node.incremental.unique_key = null;

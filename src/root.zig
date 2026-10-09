@@ -332,6 +332,12 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingRunResultsArtifact => stderr.writeAll("error: --state must point to a directory containing run_results.json for result selectors\n") catch {},
         error.MalformedRunResultsArtifact => stderr.writeAll("error: run_results.json is malformed or missing required result fields\n") catch {},
         error.UnsupportedRunResultsSchemaVersion => stderr.writeAll("error: run_results.json must use dbt Run Results v6 schema for result selectors\n") catch {},
+        error.MissingCurrentSourcesArtifact => stderr.writeAll("error: source_status:fresher requires current target sources.json\n") catch {},
+        error.MissingDeferState => stderr.writeAll("error: --defer requires --state or --defer-state containing manifest.json\n") catch {},
+        error.MalformedDeferRelation => stderr.writeAll("error: deferral manifest resource requires schema and alias relation fields\n") catch {},
+        error.DeferRelationLookupFailed => stderr.writeAll("error: could not inspect the current target relation for deferral\n") catch {},
+        error.UnsupportedDeferAdapter => stderr.writeAll("error: deferral relation lookup requires the DuckDB adapter\n") catch {},
+        error.UnsupportedIndirectSelection => stderr.writeAll("error: --indirect-selection must be eager, cautious, buildable, or empty\n") catch {},
         error.MissingStateManifestState => stderr.writeAll("error: state selectors require --state pointing to a directory containing manifest.json\n") catch {},
         error.MissingStateManifestArtifact => stderr.writeAll("error: --state must point to a directory containing manifest.json for state selectors\n") catch {},
         error.MalformedStateManifestArtifact => stderr.writeAll("error: manifest.json is malformed or missing required state fields\n") catch {},
@@ -471,11 +477,17 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             } else if (equals(arg, "--state")) {
                 if (mode == .common_only or mode == .clean or mode == .docs_serve) return error.UnsupportedCommandOption;
                 options.state = value;
+            } else if (equals(arg, "--defer-state")) {
+                if (mode == .common_only or mode == .clean or mode == .docs_serve) return error.UnsupportedCommandOption;
+                options.defer_state = value;
+            } else if (equals(arg, "--indirect-selection")) {
+                if (mode == .common_only or mode == .clean or mode == .docs_serve) return error.UnsupportedCommandOption;
+                if (!equals(value, "eager") and !equals(value, "cautious") and !equals(value, "buildable") and !equals(value, "empty")) return error.UnsupportedIndirectSelection;
+                options.indirect_selection = value;
             } else if (equals(arg, "--threads")) {
                 if (mode == .common_only or mode == .clean) return error.UnsupportedCommandOption;
                 options.threads = value;
             } else if (equals(arg, "--target-path")) {
-                if (mode == .list) return error.UnsupportedCommandOption;
                 options.target_path = value;
             } else if (equals(arg, "--host")) {
                 if (mode != .docs_serve) return error.UnsupportedCommandOption;
@@ -512,6 +524,10 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
         if (isFlag(arg, mode)) {
             if (equals(arg, "--full-refresh")) {
                 options.full_refresh = true;
+            } else if (equals(arg, "--defer") or equals(arg, "--no-defer")) {
+                options.defer_enabled = equals(arg, "--defer");
+            } else if (equals(arg, "--favor-state") or equals(arg, "--no-favor-state")) {
+                options.favor_state = equals(arg, "--favor-state");
             } else if (equals(arg, "--browser")) {
                 options.docs_open_browser = true;
             } else if (equals(arg, "--no-browser") or equals(arg, "--no-open")) {
@@ -549,7 +565,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
         equals(arg, "--target") or
         equals(arg, "--target-path") or
         equals(arg, "--vars") or
-        equals(arg, "--state") or
+        equals(arg, "--state") or equals(arg, "--defer-state") or equals(arg, "--indirect-selection") or
         equals(arg, "--threads"))
     {
         return true;
@@ -581,6 +597,7 @@ fn isOptionLike(arg: []const u8) bool {
 }
 
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
+    if (mode != .common_only and mode != .clean and mode != .docs_serve and (equals(arg, "--defer") or equals(arg, "--no-defer") or equals(arg, "--favor-state") or equals(arg, "--no-favor-state"))) return true;
     if ((mode == .build or mode == .compile) and equals(arg, "--full-refresh")) return true;
     if (mode == .docs_serve and (equals(arg, "--browser") or equals(arg, "--no-browser") or equals(arg, "--no-open"))) return true;
     if (mode == .clean and (equals(arg, "--clean-project-files-only") or equals(arg, "--no-clean-project-files-only"))) return true;
@@ -660,6 +677,10 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\  --selector <name> [name ...]
                 \\  --exclude <selector> [selector ...]
                 \\  --state <path>
+                \\  --defer, --no-defer
+                \\  --defer-state <path>
+                \\  --favor-state, --no-favor-state
+                \\  --indirect-selection <eager|cautious|buildable|empty>
                 \\
             );
         }
@@ -714,6 +735,10 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
                 \\  --selector <name> [name ...]
                 \\  --exclude <selector> [selector ...]
                 \\  --state <path>
+                \\  --defer, --no-defer
+                \\  --defer-state <path>
+                \\  --favor-state, --no-favor-state
+                \\  --indirect-selection <eager|cautious|buildable|empty>
                 \\
             );
         },

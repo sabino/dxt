@@ -147,6 +147,7 @@
         "enabled": {"type": "boolean"},
         "materialized": {"type": "string"},
         "tags": {"$ref": "#/$defs/unique_id_array"},
+        "persist_docs": {"type": "object", "additionalProperties": false, "properties": {"relation": {"type": "boolean"}, "columns": {"type": "boolean"}}},
         "docs": {"$ref": "#/$defs/docs_config"}
       }
     },
@@ -158,6 +159,7 @@
         "enabled": {"type": "boolean"},
         "materialized": {"type": "string"},
         "tags": {"$ref": "#/$defs/unique_id_array"},
+        "persist_docs": {"type": "object", "additionalProperties": false, "properties": {"relation": {"type": "boolean"}, "columns": {"type": "boolean"}}},
         "docs": {"$ref": "#/$defs/docs_config"},
         "quote_columns": {"type": ["boolean", "null"]},
         "column_types": {
@@ -386,6 +388,7 @@
         "sources"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {
           "type": "string"
         },
@@ -613,6 +616,7 @@
         "sources"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "model"},
         "package_name": {"type": "string"},
@@ -683,6 +687,7 @@
         "sources"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "analysis"},
         "package_name": {"type": "string"},
@@ -749,6 +754,7 @@
         "depends_on"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "seed"},
         "package_name": {"type": "string"},
@@ -799,6 +805,7 @@
         "sources"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "test"},
         "package_name": {"type": "string"},
@@ -863,6 +870,7 @@
         "sources"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "test"},
         "package_name": {"type": "string"},
@@ -926,6 +934,7 @@
         "columns"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "source"},
         "package_name": {"type": "string"},

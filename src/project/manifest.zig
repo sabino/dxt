@@ -161,7 +161,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, source.unique_id);
         try writer.writeAll(": ");
-        try writeSourceNode(allocator, writer, source);
+        try writeSourceNode(allocator, writer, graph, source);
     }
     try writer.writeAll("\n  },\n  \"macros\": {");
     for (graph.macros.items, 0..) |macro, index| {
@@ -533,8 +533,8 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
     try writer.writeAll("}");
 }
 
-fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: SourceDef) !void {
-    const database_name = compiler.sourceDatabaseName(&source);
+fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, source: SourceDef) !void {
+    const database_name = compiler.sourceDatabaseName(&source) orelse databaseNameForGraph(graph);
     const schema_name = compiler.sourceSchemaName(&source);
     const relation_name = try compiler.relationNameForSource(allocator, &source);
     defer allocator.free(relation_name);
@@ -572,16 +572,25 @@ fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: Sou
     try writer.writeAll(",\"loaded_at_query\":");
     try writeNullableString(writer, source.loaded_at_query);
     try writer.writeAll(",\"freshness\":");
-    try writeFreshnessThreshold(writer, source.freshness);
+    if (source.freshness == null and source.freshness_set) try writer.writeAll("null") else try writeSourceFreshnessThreshold(writer, source.freshness orelse .{});
     try writer.writeAll(",\"columns\":");
     try writeColumns(writer, source.columns.items);
     try writer.writeAll(",\"config\":{\"enabled\":true,\"freshness\":");
-    try writeFreshnessThreshold(writer, source.freshness);
+    if (source.freshness == null and source.freshness_set) try writer.writeAll("null") else try writeSourceFreshnessThreshold(writer, source.freshness orelse .{});
     try writer.writeAll(",\"loaded_at_field\":");
     try writeNullableString(writer, source.loaded_at_field);
     try writer.writeAll(",\"loaded_at_query\":");
     try writeNullableString(writer, source.loaded_at_query);
-    try writer.writeAll(",\"meta\":{},\"tags\":[]}}");
+    try writer.writeAll(",\"meta\":{},\"tags\":[]},\"unrendered_config\":{\"loaded_at_field\":");
+    try writeNullableString(writer, source.loaded_at_field);
+    try writer.writeAll(",\"loaded_at_query\":");
+    try writeNullableString(writer, source.loaded_at_query);
+    try writer.writeAll(",\"meta\":{},\"tags\":[]");
+    if (source.freshness != null or source.freshness_set) {
+        try writer.writeAll(",\"freshness\":");
+        if (source.freshness) |freshness| try writeSourceFreshnessThreshold(writer, freshness) else try writer.writeAll("null");
+    }
+    try writer.writeAll("}}");
 }
 
 fn writeSourceQuoting(writer: *Io.Writer, quoting: types.SourceQuoting) !void {
@@ -740,6 +749,7 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
+    try writeUnrenderedNodeConfig(writer, graph, &node);
     try writeNodeIdentityFields(allocator, writer, graph, &node);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(node.path));
@@ -785,6 +795,10 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
             if (node.incremental.predicates_null) try writer.writeAll("null") else try json.stringArray(writer, node.incremental.predicates.items);
         }
     }
+    if (node.persist_docs) |docs| {
+        try writer.writeAll(",\"persist_docs\":");
+        try writePersistDocs(writer, docs);
+    }
     if (node.snapshot_config) |config| try writeSnapshotConfig(writer, &node, config);
     try writer.writeAll("},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, node.macro_depends_on.items);
@@ -813,6 +827,95 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try writer.writeAll("}");
 }
 
+fn writePersistDocs(writer: *Io.Writer, docs: types.PersistDocs) !void {
+    try writer.writeAll("{");
+    var wrote = false;
+    if (docs.relation) |value| {
+        try writer.writeAll("\"relation\":");
+        try json.boolValue(writer, value);
+        wrote = true;
+    }
+    if (docs.columns) |value| {
+        if (wrote) try writer.writeAll(",");
+        try writer.writeAll("\"columns\":");
+        try json.boolValue(writer, value);
+    }
+    try writer.writeAll("}");
+}
+
+fn writeUnrenderedNodeConfig(writer: *Io.Writer, graph: *const Graph, node: *const Node) !void {
+    if (node.raw_config == .object) {
+        try writer.writeAll(",\"unrendered_config\":");
+        try std.json.Stringify.value(node.raw_config, .{}, writer);
+        return;
+    }
+    try writer.writeAll(",\"unrendered_config\":{");
+    var wrote = false;
+    var configured_materialized = node.inline_materialized;
+    var configured_enabled = node.inline_enabled;
+    for (graph.model_properties.items) |property| {
+        if (!std.mem.eql(u8, property.package_name, node.package_name) or !std.mem.eql(u8, property.resource_type, node.resource_type) or !std.mem.eql(u8, property.name, node.name)) continue;
+        configured_materialized = configured_materialized or property.materialized.len != 0;
+        configured_enabled = configured_enabled or property.enabled != null;
+    }
+    if (configured_materialized or (std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.materialized, "view"))) try json.stringField(writer, "materialized", node.materialized, &wrote);
+    if (configured_enabled) {
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try writer.writeAll("\"enabled\":");
+        try json.boolValue(writer, node.enabled);
+    }
+    if (node.snapshot_config) |config| {
+        if (!wrote) {
+            try writer.writeAll("\"strategy\":");
+            try writeNullableString(writer, config.strategy);
+        } else {
+            try writer.writeAll(",\"strategy\":");
+            try writeNullableString(writer, config.strategy);
+        }
+        wrote = true;
+        try writer.writeAll(",\"unique_key\":");
+        try writeSnapshotColumns(writer, config.unique_key);
+        if (config.target_schema) |value| try json.stringField(writer, "target_schema", value, &wrote);
+        if (config.target_database) |value| try json.stringField(writer, "target_database", value, &wrote);
+        if (config.updated_at) |value| try json.stringField(writer, "updated_at", value, &wrote);
+        if (config.check_cols != null) {
+            try writer.writeAll(",\"check_cols\":");
+            try writeSnapshotColumns(writer, config.check_cols);
+        }
+        if (config.invalidate_hard_deletes) |value| {
+            try writer.writeAll(",\"invalidate_hard_deletes\":");
+            try json.boolValue(writer, value);
+        }
+    }
+    if (node.config_schema) |value| try json.stringField(writer, "schema", value, &wrote);
+    if (node.config_alias) |value| try json.stringField(writer, "alias", value, &wrote);
+    if (node.persist_docs) |docs| {
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try writer.writeAll("\"persist_docs\":");
+        try writePersistDocs(writer, docs);
+    }
+    if (node.docs.configured) {
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try writer.writeAll("\"docs\":");
+        try writeDocsConfig(writer, node.docs);
+    }
+    if (node.quote_columns) |quote_columns| {
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try writer.writeAll("\"quote_columns\":");
+        try json.boolValue(writer, quote_columns);
+    }
+    if (node.seed_column_types.items.len != 0) {
+        if (wrote) try writer.writeAll(",");
+        try writer.writeAll("\"column_types\":");
+        try writeSeedColumnTypes(writer, node.seed_column_types.items);
+    }
+    try writer.writeAll("}");
+}
+
 fn writeExtraCtes(writer: *Io.Writer, extra_ctes: []const types.ExtraCte) !void {
     try writer.writeAll("[");
     for (extra_ctes, 0..) |extra_cte, index| {
@@ -833,6 +936,7 @@ fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const
     try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
+    try writeUnrenderedNodeConfig(writer, graph, &node);
     try writeNodeIdentityFields(allocator, writer, graph, &node);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(node.path));
@@ -904,6 +1008,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try json.string(writer, test_node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, test_node.name);
+    try writeUnrenderedTestConfig(writer, test_node.config);
     try writer.writeAll(",\"alias\":");
     try json.string(writer, test_node.alias);
     try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, null);
@@ -912,7 +1017,9 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try writer.writeAll(",\"original_file_path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.original_file_path));
     try writer.writeAll(",\"patch_path\":null,\"language\":\"sql\",\"raw_code\":");
-    try json.string(writer, test_node.raw_code);
+    const raw_code = try genericTestRawCode(allocator, test_node);
+    defer allocator.free(raw_code);
+    try json.string(writer, raw_code);
     try writer.writeAll(",\"attached_node\":");
     if (test_node.attached_node) |attached_node| {
         try json.string(writer, attached_node);
@@ -1022,6 +1129,7 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     try json.string(writer, test_node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, test_node.name);
+    try writeUnrenderedTestConfig(writer, test_node.config);
     try writer.writeAll(",\"alias\":");
     try json.string(writer, test_node.alias);
     try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, test_node.raw_code);
@@ -1091,6 +1199,79 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     try writer.writeAll("}");
 }
 
+fn genericTestRawCode(allocator: std.mem.Allocator, node: GenericTestNode) ![]const u8 {
+    if (node.config.configured_order_len == 0) return try allocator.dupe(u8, node.raw_code);
+    var out: Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    const writer = &out.writer;
+    const config_start = std.mem.indexOf(u8, node.raw_code, "{{ config(");
+    try writer.writeAll(if (config_start) |index| node.raw_code[0..index] else node.raw_code);
+    try writer.writeAll("{{ config(");
+    for (node.config.configured_order[0..node.config.configured_order_len], 0..) |key, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll(@tagName(key));
+        try writer.writeAll("=");
+        switch (key) {
+            .where => try writeGenericConfigString(writer, node.config.where orelse ""),
+            .severity => try writeGenericConfigString(writer, node.config.severity),
+            .warn_if => try writeGenericConfigString(writer, node.config.warn_if),
+            .error_if => try writeGenericConfigString(writer, node.config.error_if),
+            .limit => if (node.config.limit) |limit| try writer.print("{d}", .{limit}) else try writer.writeAll("None"),
+            .store_failures => if (node.config.store_failures) |value| try writer.writeAll(if (value) "True" else "False") else try writer.writeAll("None"),
+        }
+    }
+    if (config_start) |start| {
+        const args_start = start + "{{ config(".len;
+        const args_end = std.mem.indexOfPos(u8, node.raw_code, args_start, ") }}") orelse return error.UnsupportedManifest;
+        if (args_end > args_start) {
+            try writer.writeAll(",");
+            try writer.writeAll(node.raw_code[args_start..args_end]);
+        }
+    }
+    try writer.writeAll(") }}");
+    return try out.toOwnedSlice();
+}
+
+fn writeGenericConfigString(writer: *Io.Writer, value: []const u8) !void {
+    try writer.writeAll("\"");
+    for (value) |byte| {
+        if (byte == '"') try writer.writeAll("\\");
+        try writer.writeByte(byte);
+    }
+    try writer.writeAll("\"");
+}
+
+fn writeUnrenderedTestConfig(writer: *Io.Writer, config: types.GenericTestConfig) !void {
+    try writer.writeAll(",\"unrendered_config\":{");
+    var wrote = false;
+    inline for (std.meta.fields(types.GenericTestConfigField)) |field| {
+        const key = @field(types.GenericTestConfigField, field.name);
+        const non_default = switch (key) {
+            .where => config.where != null,
+            .limit => config.limit != null,
+            .severity => !std.mem.eql(u8, config.severity, "ERROR"),
+            .warn_if => !std.mem.eql(u8, config.warn_if, "!= 0"),
+            .error_if => !std.mem.eql(u8, config.error_if, "!= 0"),
+            .store_failures => config.store_failures != null,
+        };
+        if (config.configured.contains(key) or non_default) {
+            if (wrote) try writer.writeAll(",");
+            wrote = true;
+            try json.string(writer, field.name);
+            try writer.writeAll(":");
+            switch (key) {
+                .where => try writeNullableString(writer, config.where),
+                .limit => if (config.limit) |limit| try writer.print("{d}", .{limit}) else try writer.writeAll("null"),
+                .severity => try json.string(writer, config.severity),
+                .warn_if => try json.string(writer, config.warn_if),
+                .error_if => try json.string(writer, config.error_if),
+                .store_failures => try writeNullableBool(writer, config.store_failures),
+            }
+        }
+    }
+    try writer.writeAll("}");
+}
+
 fn genericTestNodeColumnName(test_node: *const GenericTestNode) ?[]const u8 {
     return test_node.argument_column_name orelse test_node.column_name;
 }
@@ -1125,15 +1306,11 @@ fn writeNullableBool(writer: *Io.Writer, value: ?bool) !void {
     }
 }
 
-fn writeFreshnessThreshold(writer: *Io.Writer, value: ?types.FreshnessThreshold) !void {
-    const threshold = value orelse {
-        try writer.writeAll("null");
-        return;
-    };
+fn writeSourceFreshnessThreshold(writer: *Io.Writer, threshold: types.FreshnessThreshold) !void {
     try writer.writeAll("{\"warn_after\":");
-    try writeFreshnessTime(writer, threshold.warn_after);
+    if (threshold.warn_after) |time| try writeFreshnessTime(writer, time) else try writer.writeAll("{\"count\":null,\"period\":null}");
     try writer.writeAll(",\"error_after\":");
-    try writeFreshnessTime(writer, threshold.error_after);
+    if (threshold.error_after) |time| try writeFreshnessTime(writer, time) else try writer.writeAll("{\"count\":null,\"period\":null}");
     try writer.writeAll(",\"filter\":");
     try writeNullableString(writer, threshold.filter);
     try writer.writeAll("}");

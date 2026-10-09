@@ -18,6 +18,10 @@ pub const Options = struct {
     target_path: ?[]const u8 = null,
     vars: ?[]const u8 = null,
     state: ?[]const u8 = null,
+    defer_state: ?[]const u8 = null,
+    defer_enabled: bool = false,
+    favor_state: bool = false,
+    indirect_selection: []const u8 = "eager",
     threads: ?[]const u8 = null,
     full_refresh: bool = false,
     docs_host: []const u8 = "127.0.0.1",
@@ -121,6 +125,7 @@ pub const SourceDef = struct {
     loaded_at_field: ?[]const u8 = null,
     loaded_at_query: ?[]const u8 = null,
     freshness: ?FreshnessThreshold = null,
+    freshness_set: bool = false,
     tests: std.ArrayList(GenericTestDef) = .empty,
     columns: std.ArrayList(ColumnDef) = .empty,
 };
@@ -236,13 +241,26 @@ pub const GenericTestDef = struct {
 };
 
 pub const GenericTestConfig = struct {
+    configured: std.enums.EnumSet(GenericTestConfigField) = .initEmpty(),
+    configured_order: [6]GenericTestConfigField = undefined,
+    configured_order_len: usize = 0,
     where: ?[]const u8 = null,
     limit: ?u64 = null,
     severity: []const u8 = "ERROR",
     warn_if: []const u8 = "!= 0",
     error_if: []const u8 = "!= 0",
     store_failures: ?bool = null,
+
+    pub fn markConfigured(self: *GenericTestConfig, key: GenericTestConfigField) void {
+        if (!self.configured.contains(key)) {
+            self.configured_order[self.configured_order_len] = key;
+            self.configured_order_len += 1;
+            self.configured.insert(key);
+        }
+    }
 };
+
+pub const GenericTestConfigField = enum { where, limit, severity, warn_if, error_if, store_failures };
 
 pub const DocBlock = struct {
     package_name: []const u8,
@@ -294,6 +312,7 @@ pub const ModelProperty = struct {
     seed_column_types: std.ArrayList(SeedColumnType) = .empty,
     config_values: std.json.Value = .null,
     properties: std.json.Value = .null,
+    persist_docs: ?PersistDocs = null,
 };
 
 pub const SeedColumnType = struct {
@@ -359,6 +378,7 @@ pub const Node = struct {
     inline_incremental: IncrementalConfigMask = .{},
     config_schema: ?[]const u8 = null,
     config_alias: ?[]const u8 = null,
+    persist_docs: ?PersistDocs = null,
     quote_columns: ?bool = null,
     seed_column_types: std.ArrayList(SeedColumnType) = .empty,
     test_config: GenericTestConfig = .{},
@@ -405,6 +425,11 @@ pub const IncrementalConfig = struct {
         if (self.unique_key) |*key| key.deinit(allocator);
         self.predicates.deinit(allocator);
     }
+};
+
+pub const PersistDocs = struct {
+    relation: ?bool = null,
+    columns: ?bool = null,
 };
 
 pub const SnapshotColumns = union(enum) {
@@ -531,6 +556,14 @@ pub const Graph = struct {
     dispatch_configs: std.ArrayList(DispatchConfig) = .empty,
     source_project_configs: std.ArrayList(SourceProjectConfig) = .empty,
     validate_macro_args: bool = false,
+    deferred_relations: std.ArrayList(DeferredRelation) = .empty,
+
+    pub fn deferredRelation(self: *const Graph, unique_id: []const u8) ?[]const u8 {
+        for (self.deferred_relations.items) |relation| {
+            if (std.mem.eql(u8, relation.unique_id, unique_id)) return relation.relation_name;
+        }
+        return null;
+    }
 
     pub fn deinit(self: *Graph) void {
         for (self.nodes.items) |*node| {
@@ -580,7 +613,17 @@ pub const Graph = struct {
         deinitDispatchConfigs(self.allocator, &self.dispatch_configs);
         self.source_project_configs.deinit(self.allocator);
         deinitVars(self.allocator, &self.vars);
+        for (self.deferred_relations.items) |relation| {
+            self.allocator.free(relation.unique_id);
+            self.allocator.free(relation.relation_name);
+        }
+        self.deferred_relations.deinit(self.allocator);
     }
+};
+
+pub const DeferredRelation = struct {
+    unique_id: []const u8,
+    relation_name: []const u8,
 };
 
 pub const AdapterIdentity = struct {
