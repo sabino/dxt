@@ -2,6 +2,7 @@ const std = @import("std");
 const numbers = @import("expression_number.zig");
 const sequences = @import("expression_sequence.zig");
 const unicode = @import("expression_unicode.zig");
+const complex_numbers = @import("expression_complex.zig");
 
 /// Native Jinja expression values. Allocations belong to the caller's render
 /// arena; values can cross macro returns without borrowing a temporary frame.
@@ -12,6 +13,7 @@ pub const Value = union(enum) {
     boolean: bool,
     integer: []const u8,
     number: f64,
+    complex: complex_numbers.Complex,
     string: []const u8,
     list: []const Value,
     tuple: []const Value,
@@ -25,6 +27,7 @@ pub const Value = union(enum) {
             .undefined, .conditional_undefined, .none => false,
             .boolean => |v| v,
             .number => |v| v != 0,
+            .complex => |v| v.real != 0 or v.imaginary != 0,
             .integer => |v| !std.mem.eql(u8, v, "0"),
             .string => |v| v.len != 0,
             .list, .tuple => |v| v.len != 0,
@@ -42,6 +45,7 @@ pub const Value = union(enum) {
             .boolean => |v| if (v) "True" else "False",
             .integer => |v| v,
             .number => |v| try numbers.floatText(allocator, v),
+            .complex => |v| try complex_numbers.text(allocator, v),
             .string => |v| v,
             .list, .tuple => |values| blk: {
                 var out: std.ArrayList(u8) = .empty;
@@ -75,6 +79,7 @@ pub const Value = union(enum) {
 
     pub fn attribute(self: Value, name: []const u8) Value {
         return switch (self) {
+            .complex => |v| if (std.mem.eql(u8, name, "real")) .{ .number = v.real } else if (std.mem.eql(u8, name, "imag")) .{ .number = v.imaginary } else .undefined,
             .object => |entries| blk: {
                 for (entries) |entry| if (std.mem.eql(u8, name, entry.key)) break :blk entry.value;
                 break :blk .undefined;
@@ -321,13 +326,14 @@ const Parser = struct {
         var value: Value = if (self.take("-")) blk: {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
+            if (operand == .complex) break :blk .{ .complex = .{ .real = -operand.complex.real, .imaginary = -operand.complex.imaginary } };
             if (integerText(operand)) |number| break :blk .{ .integer = try numbers.negate(self.allocator, number) };
             break :blk .{ .number = -(try numeric(operand)) };
         } else if (self.take("+")) blk: {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
             if (operand == .boolean) break :blk try integerValue(self.allocator, @as(u8, @intFromBool(operand.boolean)));
-            if (operand != .integer and operand != .number) return error.JinjaTypeError;
+            if (operand != .integer and operand != .number and operand != .complex) return error.JinjaTypeError;
             break :blk operand;
         } else try self.atom();
         while (true) {
@@ -505,7 +511,7 @@ const Parser = struct {
             const host = self.host orelse return error.UnsupportedJinjaCall;
             if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| {
                 const receiver = try host.resolve(host.context, path[0..dot], self.allocator);
-                if (receiver == .object or receiver == .list or receiver == .tuple or receiver == .string) return try self.method(receiver, path[dot + 1 ..], args);
+                if (receiver == .object or receiver == .list or receiver == .tuple or receiver == .string or receiver == .complex) return try self.method(receiver, path[dot + 1 ..], args);
             }
             return try host.call(host.context, path, args, self.allocator);
         }
@@ -598,6 +604,10 @@ fn ownedEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry)) ![
 }
 
 fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument) !?Value {
+    if (receiver == .complex and std.mem.eql(u8, name_, "conjugate")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        return .{ .complex = .{ .real = receiver.complex.real, .imaginary = -receiver.complex.imaginary } };
+    }
     const positional_only = if (receiver == .object) isMethod(name_, &.{ "get", "keys", "values", "items", "copy" }) else if (receiver == .list or receiver == .tuple) isMethod(name_, &.{ "copy", "count", "index" }) else if (receiver == .string) isMethod(name_, &.{ "lower", "upper", "casefold", "startswith", "endswith", "find", "rfind", "count", "index", "rindex", "strip", "lstrip", "rstrip", "join", "replace" }) else false;
     if (positional_only) for (args) |arg| if (arg.name != null) return error.InvalidJinjaArguments;
     if (receiver == .object) {
@@ -908,6 +918,13 @@ fn equal(a: Value, b: Value) bool {
     return equalValues(a, b);
 }
 pub fn equalValues(a: Value, b: Value) bool {
+    if (a == .complex or b == .complex) {
+        if (a == .complex and b == .complex) return a.complex.real == b.complex.real and a.complex.imaginary == b.complex.imaginary;
+        const number = if (a == .complex) a.complex else b.complex;
+        const other = if (a == .complex) b else a;
+        if (number.imaginary != 0) return false;
+        return (numericOrder(std.heap.page_allocator, .{ .number = number.real }, other) catch return false) == .eq;
+    }
     if (sequences.kind(a)) |kind_a| {
         const kind_b = sequences.kind(b) orelse return false;
         if (!std.mem.eql(u8, kind_a, kind_b)) return false;
@@ -928,6 +945,7 @@ pub fn equalValues(a: Value, b: Value) bool {
         .undefined, .conditional_undefined, .none => true,
         .string => |s| std.mem.eql(u8, s, b.string),
         .number => |n| n == b.number,
+        .complex => unreachable,
         .integer => |n| std.mem.eql(u8, n, b.integer),
         .boolean => |v| v == b.boolean,
         .callable => |v| std.mem.eql(u8, v, b.callable),
@@ -965,6 +983,11 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     if (std.mem.eql(u8, op, "in")) return .{ .boolean = try contains(allocator, b, a) };
     if (std.mem.eql(u8, op, "not in")) return .{ .boolean = !(try contains(allocator, b, a)) };
     if (std.mem.eql(u8, op, "~") or (std.mem.eql(u8, op, "+") and a == .string and b == .string)) return .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ try a.text(allocator), try b.text(allocator) }) };
+    if (a == .complex or b == .complex) {
+        const x = if (a == .complex) a.complex else complex_numbers.Complex{ .real = try numeric(a), .imaginary = 0 };
+        const y = if (b == .complex) b.complex else complex_numbers.Complex{ .real = try numeric(b), .imaginary = 0 };
+        return .{ .complex = if (std.mem.eql(u8, op, "+")) complex_numbers.add(x, y) else if (std.mem.eql(u8, op, "-")) complex_numbers.subtract(x, y) else if (std.mem.eql(u8, op, "*")) complex_numbers.multiply(x, y) else if (std.mem.eql(u8, op, "/")) try complex_numbers.divide(x, y) else if (std.mem.eql(u8, op, "**")) try complex_numbers.power(x, y) else return error.JinjaTypeError };
+    }
     if (std.mem.eql(u8, op, "+") and a == .list and b == .list) return .{ .list = try std.mem.concat(allocator, Value, &.{ a.list, b.list }) };
     if (std.mem.eql(u8, op, "+") and a == .tuple and b == .tuple) return .{ .tuple = try std.mem.concat(allocator, Value, &.{ a.tuple, b.tuple }) };
     if (std.mem.eql(u8, op, "*")) {
@@ -1001,6 +1024,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     const y = try numeric(b);
     if (std.mem.eql(u8, op, "**")) {
         if (x == 0 and y < 0) return error.JinjaDivisionByZero;
+        if (x < 0 and std.math.isFinite(y) and @floor(y) != y) return .{ .complex = try complex_numbers.power(.{ .real = x, .imaginary = 0 }, .{ .real = y, .imaginary = 0 }) };
         const powered = std.math.pow(f64, x, y);
         if (std.math.isNan(powered)) return error.JinjaTypeError;
         if (std.math.isFinite(x) and std.math.isFinite(y) and !std.math.isFinite(powered)) return error.JinjaNumericOverflow;
@@ -1115,7 +1139,7 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "undefined")) return value == .undefined or value == .conditional_undefined;
     if (std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "None")) return value == .none;
     if (std.mem.eql(u8, name, "string")) return value == .string;
-    if (std.mem.eql(u8, name, "number")) return value == .integer or value == .number or value == .boolean;
+    if (std.mem.eql(u8, name, "number")) return value == .integer or value == .number or value == .boolean or value == .complex;
     if (std.mem.eql(u8, name, "integer")) return value == .integer;
     if (std.mem.eql(u8, name, "float")) return value == .number;
     if (std.mem.eql(u8, name, "boolean")) return value == .boolean;
@@ -1366,7 +1390,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
             break :blk evaluate(allocator, text_value, null) catch value;
         } else value;
         if (std.mem.eql(u8, name, "as_bool") and converted != .boolean) return error.JinjaTypeError;
-        if (std.mem.eql(u8, name, "as_number") and converted != .number and converted != .integer) return error.JinjaTypeError;
+        if (std.mem.eql(u8, name, "as_number") and converted != .number and converted != .integer and converted != .complex) return error.JinjaTypeError;
         return if (converted == .undefined) value else converted;
     }
     if (std.mem.eql(u8, name, "default") or std.mem.eql(u8, name, "d")) {
