@@ -492,9 +492,24 @@ fn cellValue(allocator: std.mem.Allocator, kind: adapter.Kind, cell: ?[]const u8
     return switch (kind) {
         .boolean => .{ .boolean = std.mem.eql(u8, text, "true") or std.mem.eql(u8, text, "t") or std.mem.eql(u8, text, "1") },
         .integer => .{ .integer = try allocator.dupe(u8, text) },
-        .decimal, .floating => .{ .number = try std.fmt.parseFloat(f64, text) },
+        .decimal, .floating => try expression.floatValue(allocator, try std.fmt.parseFloat(f64, text)),
         else => .{ .string = try allocator.dupe(u8, text) },
     };
+}
+
+test "database floating NaNs preserve identity as dictionary keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const first = try cellValue(allocator, .floating, "nan");
+    const second = try cellValue(allocator, .decimal, "NaN");
+    try std.testing.expect(std.math.isNan(expression.floatProtocol(first).?));
+    try std.testing.expect(std.math.isNan(expression.floatProtocol(second).?));
+    var entries: std.ArrayList(expression.Entry) = .empty;
+    try expression.mappingPut(allocator, &entries, first, .{ .string = "same cell" });
+    const dictionary: expression.Value = .{ .object = entries.items };
+    try std.testing.expectEqualStrings("same cell", (try expression.mappingGet(dictionary, first)).string);
+    try std.testing.expect((try expression.mappingGet(dictionary, second)) == .undefined);
 }
 
 pub fn parseArgs(allocator: std.mem.Allocator, text: []const u8) !std.json.Value {

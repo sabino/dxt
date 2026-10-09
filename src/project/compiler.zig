@@ -306,6 +306,16 @@ pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *No
 fn requiresNativeRendering(sql: []const u8) bool {
     for ([_][]const u8{ "var(", "var (", "env_var(", "env_var (", "{% set", "{%- set", "{% call", "{%- call", "{% for", "{%- for", "run_query(", "statement(", "log(", "print(", "exceptions." }) |needle|
         if (std.mem.indexOf(u8, sql, needle) != null) return true;
+    // A positional configuration map is an expression, including its key
+    // types. The literal keyword scanner cannot apply or validate that map.
+    var position: usize = 0;
+    while (std.mem.indexOfPos(u8, sql, position, "config")) |start| {
+        position = start + "config".len;
+        const call = std.mem.trimStart(u8, sql[position..], " \t\r\n");
+        if (call.len == 0 or call[0] != '(') continue;
+        const arguments = std.mem.trimStart(u8, call[1..], " \t\r\n");
+        if (arguments.len != 0 and arguments[0] == '{') return true;
+    }
     return false;
 }
 
@@ -1190,7 +1200,11 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
                 if (arg.name) |key| {
                     try upsertConfigArgument(allocator, &values, key, arg.value);
                 } else if (arg.value == .object) {
-                    for (arg.value.object) |entry| try upsertConfigArgument(allocator, &values, entry.key, entry.value);
+                    for (arg.value.object) |entry| {
+                        const key = native_expr.entryKey(entry);
+                        if (key != .string) return error.InvalidJinjaArguments;
+                        try upsertConfigArgument(allocator, &values, key.string, entry.value);
+                    }
                 } else return error.InvalidJinjaArguments;
             }
             var raw: std.ArrayList(u8) = .empty;
@@ -3967,4 +3981,27 @@ test "compiler calls aliases of typed regex class objects" {
     const sql = try compileModel(allocator, &graph, &node);
     defer allocator.free(sql);
     try std.testing.expectEqualStrings("select 're.IGNORECASE|re.MULTILINE|bad'", sql);
+}
+
+test "compiler retains typed keys returned by a macro and iterated by a model" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "fixture" };
+    defer graph.deinit();
+    try @import("parse.zig").parseMacrosFromText(allocator, "{% macro typed_keys() %}{{ return({(1,2): 'tuple', 7: 'integer'}) }}{% endmacro %}", "keys.sql", "fixture", &graph);
+    const node = Node{ .unique_id = "model.fixture.keys", .package_name = "fixture", .name = "keys", .path = "keys.sql", .original_file_path = "models/keys.sql", .raw_code = "{% set keys = typed_keys() %}{% for key in keys %}{{ key }}={{ keys[key] }};{% endfor %}" };
+    try std.testing.expectEqualStrings("(1, 2)=tuple;7=integer;", try compileModel(allocator, &graph, &node));
+}
+
+test "compiler rejects positional config dictionaries with nonstring keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "fixture" };
+    defer graph.deinit();
+    try @import("parse.zig").parseMacrosFromText(allocator, "{% macro invalid_config() %}{{ config({1: 'table'}) }}{% endmacro %}", "invalid.sql", "fixture", &graph);
+    var node = Node{ .unique_id = "model.fixture.keys", .package_name = "fixture", .name = "keys", .path = "keys.sql", .original_file_path = "models/keys.sql", .raw_code = "" };
+    try std.testing.expectError(error.InvalidJinjaArguments, scanMacroDependencies(allocator, &graph, &node, "invalid_config", &.{}));
+    try std.testing.expectError(error.InvalidJinjaArguments, scanDependencies(allocator, "{{ config ( {1: 'table'}) }}select 1", &node, &graph));
 }

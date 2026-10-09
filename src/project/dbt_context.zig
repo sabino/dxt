@@ -17,7 +17,11 @@ pub fn cloneValue(allocator: std.mem.Allocator, value: Value) anyerror!Value {
         },
         .object => |entries| blk: {
             const copied = try expression.allocateEntries(allocator, entries.len);
-            for (entries, copied) |entry, *copy| copy.* = .{ .key = try allocator.dupe(u8, entry.key), .value = try cloneValue(allocator, entry.value) };
+            for (entries, copied) |entry, *copy| copy.* = .{
+                .key = try allocator.dupe(u8, entry.key),
+                .typed_key = if (entry.typed_key) |key| try cloneValue(allocator, key) else null,
+                .value = try cloneValue(allocator, entry.value),
+            };
             break :blk .{ .object = copied };
         },
         else => value,
@@ -252,10 +256,13 @@ pub fn renderRelation(allocator: std.mem.Allocator, definition: RelationDef) ![]
 
 pub fn relationValue(allocator: std.mem.Allocator, definition: RelationDef) !Value {
     const serialized = try std.json.Stringify.valueAlloc(allocator, definition, .{});
+    const rendered = try renderRelation(allocator, definition);
+    const class_name = if (definition.information_schema_relation) "InformationSchema" else if (std.mem.eql(u8, definition.adapter_type, "postgres")) "PostgresRelation" else "DuckDBRelation";
     var entries: std.ArrayList(expression.Entry) = .empty;
     try entries.appendSlice(allocator, &.{
         .{ .key = "__dxt_relation", .value = .{ .string = serialized } },
-        .{ .key = "__dxt_rendered", .value = .{ .string = definition.rendered_sql orelse try renderRelation(allocator, definition) } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = definition.rendered_sql orelse rendered } },
+        .{ .key = "__dxt_repr", .value = .{ .string = try std.fmt.allocPrint(allocator, "<{s} {s}>", .{ class_name, rendered }) } },
         .{ .key = "database", .value = optional(definition.database) },
         .{ .key = "schema", .value = optional(definition.schema) },
         .{ .key = "identifier", .value = optional(definition.identifier) },
@@ -453,4 +460,22 @@ test "typed relations retain methods across immutable transformations" {
     const changed = (try call(allocator, "duckdb", relation.attribute("include").callable, &.{.{ .name = "database", .value = .{ .boolean = false } }})).?;
     try std.testing.expectEqualStrings("(select * from \"main\".\"events\" where false limit 0)", try changed.text(allocator));
     try std.testing.expectEqualStrings("events", changed.attribute("identifier").string);
+    try std.testing.expectEqualStrings("<DuckDBRelation \"warehouse\".\"main\".\"events\">", try expression.repr(relation, allocator));
+}
+
+test "macro value cloning preserves tuple keys and NaN key identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const tuple: Value = .{ .tuple = try allocator.dupe(Value, &.{ .{ .integer = "1" }, .{ .string = "key" } }) };
+    const nan = try expression.floatValue(allocator, std.math.nan(f64));
+    var entries: std.ArrayList(expression.Entry) = .empty;
+    try expression.mappingPut(allocator, &entries, tuple, .{ .string = "tuple" });
+    try expression.mappingPut(allocator, &entries, nan, .{ .string = "nan" });
+    const original: Value = .{ .object = try entries.toOwnedSlice(allocator) };
+    const copied = try cloneValue(allocator, original);
+    try std.testing.expectEqualStrings("tuple", (try expression.mappingGet(copied, tuple)).string);
+    try std.testing.expectEqualStrings("nan", (try expression.mappingGet(copied, nan)).string);
+    const another_nan = try expression.floatValue(allocator, std.math.nan(f64));
+    try std.testing.expect((try expression.mappingGet(copied, another_nan)) == .undefined);
 }
