@@ -51,7 +51,7 @@ fn run(init: std.process.Init) !void {
         }
         const result = try outcome.result.json(allocator);
         defer allocator.free(result);
-        try stdout.interface.print("{{\"result\":{s},\"movement_plan\":{s}}}\n", .{ result, outcome.movement_plan_json });
+        try stdout.interface.print("{{\"result\":{s},\"movement_plan\":{s},\"execution\":{s}}}\n", .{ result, outcome.movement_plan_json, outcome.execution_json orelse "null" });
     }
     try stdout.interface.flush();
 }

@@ -1069,3 +1069,75 @@ def test_known_aborted_source_query_retries_with_adaptive_backpressure(project, 
     assert duck_rows(project[3], "select * from marts.retried") == [(41,)]
     stage_files = list((project[0] / ".dxt" / "cross-runs").glob("*/stages/retried.json"))
     assert stage_files and json.loads(stage_files[0].read_text())["stages"][0]["readiness"] == "ready"
+
+
+def test_shared_query_accounts_managed_movement_and_client_result_separately(project, native_environment, query_driver):
+    request = {"options": {"connection": "warehouse", "budget": {"max_rows": 1},
+                           "policy": {"profiles_dir": str(project[0]), "allow_movement": True}},
+               "sql": 'select id from "logical"."customer"',
+               "bindings": [{"logical_id": "semantic.customer", "relation_name": '"logical"."customer"',
+                             "source_relation": f"{project[2]}.customers", "connection": "crm",
+                             "source_query": f'select id from "{project[2]}".customers where enabled'}]}
+    result = invoke_query(query_driver, project, request, native_environment)
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    artifact = json.loads(result.stdout)
+    assert artifact["result"] == [{"id": 1}]
+    execution = artifact["execution"]
+    assert execution["rows_moved"] == 1 and execution["output_rows"] == 1
+    assert execution["bytes_moved"] == 1 and execution["result_bytes"] == 1
+    assert execution["attempt_count"] == 1
+    assert str(project[0]) not in json.dumps(execution)
+
+
+def test_shared_query_retries_confirmed_source_abort_and_records_actual_attempts(project, native_environment, query_driver, postgres):
+    import psycopg2
+    with postgres.cursor() as cursor:
+        cursor.execute(f'''create function "{project[2]}".retry_query() returns bigint language plpgsql as $$
+            begin
+                if not pg_try_advisory_lock(72833862) then
+                    perform pg_sleep(0.3);
+                    raise exception 'private query diagnostic' using errcode='40001';
+                end if;
+                perform pg_advisory_unlock(72833862);
+                return 42;
+            end $$''')
+    request = {"options": {"connection": "warehouse", "policy": {"profiles_dir": str(project[0]), "allow_movement": True, "max_retries": 8}},
+               "sql": 'select id from "logical"."customer"',
+               "bindings": [{"logical_id": "semantic.customer", "relation_name": '"logical"."customer"',
+                             "source_relation": f"{project[2]}.customers", "connection": "crm",
+                             "source_query": f'select "{project[2]}".retry_query() as id'}]}
+    (project[0] / "dxt_connections.yml").write_text(json.dumps(project[1]))
+    request_path = project[0] / "query_request.json"
+    request_path.write_text(json.dumps(request))
+    blocker = psycopg2.connect(postgres.dsn)
+    blocker.autocommit = True
+    with blocker.cursor() as cursor: cursor.execute("select pg_advisory_lock(72833862)")
+    with postgres.cursor() as cursor:
+        cursor.execute("select clock_timestamp()")
+        started = cursor.fetchone()[0]
+    process = subprocess.Popen([str(query_driver), "query", str(project[0]), str(request_path)], cwd=ROOT, env=native_environment,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        for _ in range(200):
+            with postgres.cursor() as cursor:
+                cursor.execute("select pg_stat_clear_snapshot()")
+                cursor.execute("select count(*) from pg_stat_activity where state='active' and query like 'fetch forward%%__dxt_extract%%' and backend_start >= %s", [started])
+                if cursor.fetchone()[0]: break
+            if process.poll() is not None: pytest.fail(process.communicate()[1])
+            time.sleep(0.01)
+        else: pytest.fail("Query did not enter its controlled source read")
+        with blocker.cursor() as cursor: cursor.execute("select pg_advisory_unlock(72833862)")
+        output, errors = process.communicate(timeout=15)
+        assert process.returncode == 0, errors
+        assert "private query diagnostic" not in errors and "leaked" not in errors
+    finally:
+        blocker.close()
+        if process.poll() is None: process.terminate(); process.communicate(timeout=5)
+    artifact = json.loads(output)
+    assert artifact["result"] == [{"id": 42}]
+    assert artifact["execution"]["attempt_count"] >= 2
+    assert artifact["execution"]["attempts"][0]["error_name"] == "PostgresSerializationFailure"
+    assert artifact["execution"]["rows_moved"] == 1
+    catalog = json.loads((project[0] / ".dxt" / "cross-catalog.json").read_text())
+    assert catalog["runs"][-1]["tasks"][0]["attempt_count"] >= 2

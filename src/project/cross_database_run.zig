@@ -13,6 +13,7 @@ pub const Record = struct {
     rows_moved: u64 = 0,
     bytes_moved: u64 = 0,
     output_rows: u64 = 0,
+    result_bytes: u64 = 0,
     egress_cost: f64 = 0,
     stages: []const []const u8 = &.{},
     cleanup: []const u8 = "pending",
@@ -272,12 +273,11 @@ fn stageInputs(runtime: Runtime, observation_allocator: std.mem.Allocator, root:
 /// creates a persistent output or commit marker. Returned rows own their memory.
 pub const TypedQueryResult = struct { result: adapter.QueryResult, columns: []read.Column };
 
-pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan: *cross.Plan) !TypedQueryResult {
+pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan: *cross.Plan, record: *Record) !TypedQueryResult {
     const allocator = runtime.allocator;
     const model = plan.models[0];
     if (model.denied != null) return error.CrossDatabasePolicyDenied;
-    var metadata = invocation.Metadata.init(runtime.io, runtime.environment);
-    const directory = try runDirectory(arena_runtime, root, &metadata.id);
+    const directory = try runDirectory(arena_runtime, root, record.run_id);
     const spill = try std.fs.path.join(arena_runtime.allocator, &.{ directory, "spill" });
     defer Dir.cwd().deleteTree(runtime.io, directory) catch {};
     var pool = adapter.DuckDBPool.init(allocator, runtime.io, runtime.environment);
@@ -286,19 +286,23 @@ pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, pla
     var workspace = try open(rt, root, plan.connections[model.execution_connection]);
     defer workspace.deinit();
     try configure(rt, &workspace, model.budget, spill);
-    var record: Record = .{ .model = model.name, .run_id = &metadata.id };
     const names = try arena_runtime.allocator.alloc([]const u8, model.inputs.len);
-    for (model.inputs, 0..) |input, index| names[index] = try std.fmt.allocPrint(arena_runtime.allocator, "__dxt_{s}_{s}", .{ metadata.id[0..8], input.name });
+    for (model.inputs, 0..) |input, index| names[index] = try std.fmt.allocPrint(arena_runtime.allocator, "__dxt_{s}_{s}", .{ record.run_id[0..8], input.name });
     record.stages = names;
-    try stageInputs(rt, arena_runtime.allocator, root, plan, model, &record, &workspace, spill);
+    try stageInputs(rt, arena_runtime.allocator, root, plan, model, record, &workspace, spill);
     const sql = try cross.renderSql(allocator, model, names);
     defer allocator.free(sql);
     var timer = Timer.init(rt, &workspace, model.budget.max_query_seconds);
     try timer.start();
     defer timer.deinit();
-    var reader = try read.Reader.open(allocator, &workspace, sql, .{ .max_rows = model.budget.max_rows -| record.rows_moved, .max_bytes = model.budget.max_bytes -| record.bytes_moved, .max_memory_bytes = model.budget.max_memory_bytes }, model.budget.max_query_seconds);
+    var reader = try read.Reader.open(allocator, &workspace, sql, .{ .max_rows = if (model.execution_connection == model.destination) model.budget.max_rows else model.budget.max_rows -| record.rows_moved, .max_bytes = if (model.execution_connection == model.destination) model.budget.max_bytes else model.budget.max_bytes -| record.bytes_moved, .max_memory_bytes = model.budget.max_memory_bytes }, model.budget.max_query_seconds);
     defer {
         timer.deinit();
+        if (model.execution_connection != model.destination) {
+            record.rows_moved +|= reader.guard.rows;
+            record.bytes_moved +|= reader.guard.bytes;
+            record.egress_cost += @as(f64, @floatFromInt(reader.guard.bytes)) / (1024 * 1024 * 1024) * plan.connections[model.execution_connection].egress_per_gib;
+        }
         reader.deinit();
     }
     var output: adapter.QueryResult = .{ .owner_allocator = allocator };
@@ -318,6 +322,9 @@ pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, pla
         var batch = result;
         defer batch.deinit(allocator);
         if (timer.expired.load(.acquire)) return error.CrossDatabaseTimeBudgetExceeded;
+        if (model.execution_connection != model.destination) {
+            if (model.budget.max_cost) |cost| if (record.egress_cost + @as(f64, @floatFromInt(reader.guard.bytes)) / (1024 * 1024 * 1024) * plan.connections[model.execution_connection].egress_per_gib > cost) return error.CrossDatabaseCostBudgetExceeded;
+        }
         const overhead = (rows.items.len + batch.rows.len) * (reader.columns.len * @sizeOf(?[]const u8) + @sizeOf([]?[]const u8));
         if (reader.guard.bytes +| overhead > model.budget.max_memory_bytes / 8) return error.CrossDatabaseMemoryBudgetExceeded;
         try rows.appendSlice(allocator, batch.rows);
@@ -343,11 +350,11 @@ pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, pla
     record.status = "success";
     record.cleanup = "complete";
     record.output_rows = output.rows.len;
+    record.result_bytes = reader.guard.bytes;
     if (model.execution_connection == model.destination) {
         record.destination_version = try @import("cross_database_catalog.zig").version(arena_runtime.allocator, &workspace);
         record.destination_capabilities = workspace.capabilities();
     }
-    try @import("cross_database_catalog.zig").record(runtime, root, plan, &metadata.id, &.{record});
     return .{ .result = output, .columns = columns };
 }
 

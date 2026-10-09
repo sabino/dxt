@@ -28,6 +28,7 @@ pub const QueryOutcome = struct {
     result: adapter.QueryResult,
     columns: []@import("cross_database_read.zig").Column,
     movement_plan_json: []const u8,
+    execution_json: ?[]const u8 = null,
     pub fn deinit(self: *QueryOutcome, allocator: std.mem.Allocator) void {
         self.result.deinit(allocator);
         for (self.columns) |column| {
@@ -36,6 +37,7 @@ pub const QueryOutcome = struct {
         }
         allocator.free(self.columns);
         allocator.free(self.movement_plan_json);
+        if (self.execution_json) |json| allocator.free(json);
         self.* = undefined;
     }
 };
@@ -125,8 +127,49 @@ pub fn executeQueryPlan(runtime: Runtime, plan: *QueryPlan) !QueryOutcome {
     const json = try plan.json(runtime.allocator);
     errdefer runtime.allocator.free(json);
     const arena_runtime: Runtime = .{ .allocator = plan.arena.allocator(), .io = runtime.io, .environment = runtime.environment };
-    const output = try run.queryPlan(runtime, arena_runtime, plan.root, &plan.value);
-    return .{ .result = output.result, .columns = output.columns, .movement_plan_json = json };
+    var metadata = @import("invocation.zig").Metadata.init(runtime.io, runtime.environment);
+    var record: run.Record = .{ .model = plan.value.models[0].name, .run_id = &metadata.id, .target_lock = "not required for read-only query" };
+    var attempts: std.ArrayList(@import("cross_database_schedule.zig").Attempt) = .empty;
+    while (true) {
+        record.attempt_count += 1;
+        record.stage_artifacts = &.{};
+        record.status = "running";
+        record.error_name = null;
+        const started = @import("cross_database_catalog.zig").epoch(runtime.io);
+        const before_rows = record.rows_moved;
+        const before_bytes = record.bytes_moved;
+        var failure: ?anyerror = null;
+        var output = run.queryPlan(runtime, arena_runtime, plan.root, &plan.value, &record) catch |err| blk: {
+            failure = err;
+            break :blk run.TypedQueryResult{ .result = .{}, .columns = &.{} };
+        };
+        errdefer {
+            output.result.deinit(runtime.allocator);
+            for (output.columns) |column| {
+                runtime.allocator.free(column.name);
+                runtime.allocator.free(column.type_sql);
+            }
+            runtime.allocator.free(output.columns);
+        }
+        try attempts.append(arena_runtime.allocator, .{ .number = record.attempt_count, .started_epoch = started, .finished_epoch = @import("cross_database_catalog.zig").epoch(runtime.io), .status = if (failure == null) "success" else "error", .error_name = if (failure) |err| @errorName(err) else null, .rows_moved = record.rows_moved -| before_rows, .bytes_moved = record.bytes_moved -| before_bytes });
+        record.attempts = attempts.items;
+        if (failure) |err| {
+            record.status = "error";
+            record.error_name = @errorName(err);
+            if (!@import("cross_database_schedule.zig").retryable(err) or record.attempt_count > plan.value.scheduler.max_retries) {
+                record.cleanup = "complete";
+                try @import("cross_database_catalog.zig").record(runtime, plan.root, &plan.value, record.run_id, &.{record});
+                return err;
+            }
+            record.throttled_connection = record.active_connection;
+            const delay = @min(5000, plan.value.scheduler.retry_delay_ms *| (@as(u64, 1) << @intCast(record.attempt_count - 1)));
+            try std.Io.sleep(runtime.io, .fromMilliseconds(@intCast(delay)), .awake);
+            continue;
+        }
+        try @import("cross_database_catalog.zig").record(runtime, plan.root, &plan.value, record.run_id, &.{record});
+        const execution_json = try std.json.Stringify.valueAlloc(runtime.allocator, record, .{});
+        return .{ .result = output.result, .columns = output.columns, .movement_plan_json = json, .execution_json = execution_json };
+    }
 }
 
 /// Bind only lexical relation occurrences; string literals and unused semantic
