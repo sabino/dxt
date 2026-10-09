@@ -34,6 +34,7 @@ pub fn hashable(candidate: Value) anyerror!void {
 
 fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (@import("yaml_values.zig").isHashable(candidate)) return;
     if (expression.integerProtocol(candidate) != null) return;
     if (expression.floatProtocol(candidate) != null) return;
     if (expression.complexProtocol(candidate) != null) return;
@@ -62,6 +63,9 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
 }
 
 pub fn keyEqual(left: Value, right: Value) bool {
+    const yaml_values = @import("yaml_values.zig");
+    if (yaml_values.isHashable(left) or yaml_values.isHashable(right))
+        return yaml_values.keyEqual(left, right);
     if (expression.complexProtocol(left)) |a| {
         if (expression.complexProtocol(right)) |b| {
             const a_nan = std.math.isNan(a.real) or std.math.isNan(a.imaginary);
@@ -241,6 +245,27 @@ test "capture Undefined dictionary keys retain Python class equality" {
     try std.testing.expect(keyEqual(ordinary_first, ordinary_second));
     try std.testing.expect(!keyEqual(first, ordinary_first));
     try std.testing.expectError(error.JinjaTypeError, jsonKey(allocator, ordinary_first));
+}
+
+test "YAML bytes and timestamps retain Python dictionary key identities" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const scalars = @import("yaml_values.zig");
+    const dates = @import("timestamp_context.zig");
+    const bytes = try scalars.binary(a, "SGVsbG8=");
+    try hashable(bytes);
+    try std.testing.expect(matches(try create(bytes, .none), try scalars.binary(a, "SGVsbG8=")));
+    try std.testing.expect(!keyEqual(bytes, .{ .string = "Hello" }));
+    const utc = try dates.fromYaml(a, "2020-01-02T03:04:05+00:00");
+    try hashable(utc);
+    try std.testing.expect(keyEqual(utc, try dates.fromYaml(a, "2020-01-02T04:04:05+01:00")));
+    try std.testing.expect(!keyEqual(utc, try dates.fromYaml(a, "2020-01-02T03:04:05")));
+    const date = try dates.fromYaml(a, "2020-01-02");
+    try hashable(date);
+    try std.testing.expect(!keyEqual(date, utc));
+    try std.testing.expectError(error.JinjaTypeError, jsonKey(a, date));
+    try std.testing.expectError(error.JinjaTypeError, jsonKey(a, bytes));
 }
 
 test "JSON keys stringify primitives and sort original numeric types exactly" {
