@@ -333,7 +333,10 @@ fn hasColumns(columns: types.SnapshotColumns) bool {
 /// Rebuild the runtime snapshot configuration from the final typed config map.
 /// Strings borrow the map's lifetime; column-list containers belong to the node.
 /// Semantic strategy validation runs after every precedence layer is applied.
-pub fn applyJsonConfig(allocator: std.mem.Allocator, value: std.json.Value, node: *types.Node) !void {
+pub fn applyJsonConfig(allocator: std.mem.Allocator, input: std.json.Value, node: *types.Node) !void {
+    // Parse-mode extraction may have no inline config before YAML properties
+    // and project defaults are applied. Treat that neutral layer as an empty map.
+    const value: std.json.Value = if (input == .null) .{ .object = .{} } else input;
     if (value != .object or node.snapshot_config == null) return error.InvalidSnapshotConfig;
     if (node.snapshot_config.?.unique_key) |*columns| columns.deinit(allocator);
     if (node.snapshot_config.?.check_cols) |*columns| columns.deinit(allocator);

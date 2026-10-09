@@ -3094,7 +3094,7 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
 
     try @import("project/semantic.zig").parseProperties(runtime, text, resource_root, relative_path, package_name, graph);
-    try snapshot_yaml.parseProperties(runtime.allocator, text, resource_root, relative_path, package_name, graph);
+    try snapshot_yaml.parseProperties(runtime, text, resource_root, relative_path, package_name, graph);
     try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseUnitTestsFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     var properties_document = try @import("project/yaml.zig").parse(runtime.allocator, text);
@@ -3155,12 +3155,12 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             incremental_list_key = null;
         }
 
-        if (std.mem.eql(u8, trimmed, "models:") or std.mem.eql(u8, trimmed, "seeds:") or std.mem.eql(u8, trimmed, "analyses:") or std.mem.eql(u8, trimmed, "snapshots:")) {
+        if (std.mem.eql(u8, trimmed, "models:") or std.mem.eql(u8, trimmed, "seeds:") or std.mem.eql(u8, trimmed, "analyses:")) {
             in_models = true;
             in_columns = false;
             in_config = false;
             in_seed_column_types = false;
-            active_resource_type = if (std.mem.eql(u8, trimmed, "seeds:")) "seed" else if (std.mem.eql(u8, trimmed, "analyses:")) "analysis" else if (std.mem.eql(u8, trimmed, "snapshots:")) "snapshot" else "model";
+            active_resource_type = if (std.mem.eql(u8, trimmed, "seeds:")) "seed" else if (std.mem.eql(u8, trimmed, "analyses:")) "analysis" else "model";
             test_target = .none;
             active_test_target = .none;
             active_values_target = .none;
@@ -3174,7 +3174,7 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
             continue;
         }
         if (!in_models) continue;
-        if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:") and !std.mem.eql(u8, trimmed, "seeds:") and !std.mem.eql(u8, trimmed, "analyses:") and !std.mem.eql(u8, trimmed, "snapshots:")) {
+        if (indent <= models_indent and !std.mem.eql(u8, trimmed, "models:") and !std.mem.eql(u8, trimmed, "seeds:") and !std.mem.eql(u8, trimmed, "analyses:")) {
             in_models = false;
             in_columns = false;
             in_config = false;

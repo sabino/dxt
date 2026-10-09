@@ -216,7 +216,6 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     applyProjectSeedDocs(&graph, config.name, config.seed_docs);
     try loadSingularTests(runtime, options.project_dir, config.name, config.test_paths.items, callbacks, &graph);
     try loadSnapshots(runtime, options.project_dir, config.name, config.snapshot_paths.items, callbacks, &graph);
-    if (config.snapshot_config_text) |text| try graph.snapshot_project_configs.append(runtime.allocator, .{ .package_name = config.name, .text = text });
     try applyProjectModelPathConfigs(&graph, config.model_path_configs.items, true, null);
 
     try rejectDuplicateMacroProperties(&graph);
@@ -230,7 +229,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         node.source_refs.clearRetainingCapacity();
         try compiler.scanDependencies(runtime.allocator, node.raw_code, node, &graph);
     }
-    try snapshot_yaml.finalize(&graph);
+    try snapshot_yaml.finalize(runtime, &graph);
     try snapshot_yaml.rejectRelationCollisions(&graph);
     try callbacks.materialize_generic_tests(&graph);
     sortGraphResources(&graph);
@@ -438,13 +437,12 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
                 try callbacks.parse_seed(runtime, package_dir, seed_path, relative_path, package_config.name, graph);
             }
         }
-        try applyProjectModelPathConfigs(graph, package_config.model_path_configs.items, false, package_config.name);
         applyProjectSeedDocs(graph, package_config.name, package_config.seed_docs);
         try loadSingularTests(runtime, package_dir, package_config.name, package_config.test_paths.items, callbacks, graph);
         try callbacks.apply_singular_test_properties(graph, package_config.name);
         try loadSnapshots(runtime, package_dir, package_config.name, package_config.snapshot_paths.items, callbacks, graph);
+        try applyProjectModelPathConfigs(graph, package_config.model_path_configs.items, false, package_config.name);
         try callbacks.apply_model_properties(graph, package_config.name);
-        if (package_config.snapshot_config_text) |text| try graph.snapshot_project_configs.append(runtime.allocator, .{ .package_name = package_config.name, .text = text });
     }
 }
 

@@ -45,7 +45,12 @@ pub fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathCon
             if (restrict_package_name) |package| if (!std.mem.eql(u8, package, node.package_name)) continue;
             if (!std.mem.eql(u8, config.resource_type, node.resource_type)) continue;
             if (config.package_name.len != 0 and !std.mem.eql(u8, node.package_name, config.package_name)) continue;
-            if (!modelPathConfigMatches(config.path, node.path)) continue;
+            const resource_path = if (node.snapshot_config != null) path: {
+                const source = node.snapshot_fqn_path orelse node.path;
+                const extension = std.mem.lastIndexOfScalar(u8, source, '.') orelse source.len;
+                break :path if (node.snapshot_yaml_definition) source[0..extension] else try std.fmt.allocPrint(graph.allocator, "{s}/{s}", .{ source[0..extension], node.name });
+            } else node.path;
+            if (!modelPathConfigMatches(config.path, resource_path)) continue;
             typed_path = true;
             const layer = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) &node.root_override_config else &node.project_config;
             try @import("resource_config.zig").merge(graph.allocator, layer, config.values);

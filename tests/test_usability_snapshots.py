@@ -334,6 +334,102 @@ def test_modern_yaml_pinned_dbt_snapshot_oracle(tmp_path):
     jsonschema.validate(own_node,json.loads((ROOT/'tests/schemas/dbt_manifest_v12_snapshot.schema.json').read_text()))
 
 
+def anchored_yaml_project(path: Path):
+    project = yaml_project(path)
+    config_path=project/'dbt_project.yml'
+    config_path.write_text(config_path.read_text()+"flags:\n  require_generic_test_arguments_property: true\n")
+    (project/'snapshots/nested/definitions.yml').write_text("""version: 2
+history_config: &history_config
+  strategy: !!str timestamp
+  unique_key: id
+  updated_at: ts
+  hard_deletes: "{{ var('delete_behavior', 'new_record') }}"
+history_columns: &history_columns
+  - name: id
+    description: >-
+      Customer key
+      across history
+    data_type: !!str integer
+    data_tests:
+      - not_null
+      - accepted_values:
+          arguments: {values: [1, 2], quote: false}
+snapshots:
+  - name: history
+    relation: ref('input_model')
+    config:
+      <<: *history_config
+      target_schema: "{{ env_var('DXT_SNAPSHOT_SCHEMA', 'archive') }}"
+      meta: {enabled: "{{ var('meta_enabled', true) }}", revision: !!int 2}
+    columns: *history_columns
+""")
+    return project
+
+
+def test_snapshot_yaml_alias_merge_tags_and_typed_rendering_match_core(tmp_path, monkeypatch):
+    dbt = pinned_dbt()
+    monkeypatch.setenv('DXT_SNAPSHOT_SCHEMA','history_archive')
+    own = anchored_yaml_project(tmp_path/'dxt')
+    upstream = anchored_yaml_project(tmp_path/'dbt')
+    for project, executable in ((own,DXT),(upstream,dbt)):
+        result=run(project,'build',executable=executable)
+        assert result.returncode==0,result.stdout+result.stderr
+    actual=json.loads((own/'target/manifest.json').read_text())
+    expected=json.loads((upstream/'target/manifest.json').read_text())
+    node_id='snapshot.snapshot_runtime.history'
+    for field in ('schema','fqn','raw_code','columns','meta'):
+        if field=='columns':
+            for key in ('name','description','data_type','quote','meta','tags','config'):
+                assert actual['nodes'][node_id][field]['id'][key]==expected['nodes'][node_id][field]['id'][key],key
+        else:
+            assert actual['nodes'][node_id][field]==expected['nodes'][node_id][field],field
+    assert actual['nodes'][node_id]['config']['meta']=={'enabled':True,'revision':2}
+    assert set(k for k in actual['nodes'] if k.startswith('test.'))==set(k for k in expected['nodes'] if k.startswith('test.'))
+    assert query(own,'select * from history_archive.history order by id')==query(upstream,'select * from history_archive.history order by id')
+
+
+def test_snapshot_yaml_config_forbids_secret_environment_values(tmp_path, monkeypatch):
+    project=anchored_yaml_project(tmp_path/'dxt')
+    path=project/'snapshots/nested/definitions.yml'
+    path.write_text(path.read_text().replace("env_var('DXT_SNAPSHOT_SCHEMA', 'archive')", "env_var('DBT_ENV_SECRET_SNAPSHOT_SCHEMA')"))
+    monkeypatch.setenv('DBT_ENV_SECRET_SNAPSHOT_SCHEMA','synthetic_secret')
+    result=run(project,'build')
+    assert result.returncode!=0 and 'synthetic_secret' not in result.stderr+result.stdout
+    assert query(project,"select count(*) n from information_schema.tables where table_schema='history_archive'")==[{'n':0}]
+
+
+def package_yaml_project(path: Path):
+    project=project_at(path,'')
+    # Core embeds snapshot SQL in a subquery and does not accept a trailing
+    # statement delimiter; the lifecycle fixture separately checks dxt's trim.
+    snapshot_file=project/'snapshots/history.sql'
+    snapshot_file.write_text(snapshot_file.read_text().replace('; -- supported trailing comment', ''))
+    config=project/'dbt_project.yml'
+    config.write_text(config.read_text()+"vars:\n  archive_schema: global_archive\n  history_pkg:\n    archive_schema: scoped_archive\n")
+    package=project/'dbt_packages/history_pkg'
+    (package/'models').mkdir(parents=True)
+    (package/'snapshots').mkdir()
+    (package/'dbt_project.yml').write_text("name: history_pkg\nversion: '1.0'\nconfig-version: 2\nvars: {archive_schema: package_archive}\nsnapshots:\n  +strategy: timestamp\n  +unique_key: id\n  +updated_at: ts\n")
+    (package/'models/package_input.sql').write_text("{{ config(materialized='view') }} select * from main.input")
+    (package/'snapshots/definitions.yml').write_text("version: 2\nsnapshots:\n  - name: package_history\n    relation: ref('package_input')\n    config:\n      target_schema: \"{{ var('archive_schema') }}\"\n")
+    return project
+
+
+def test_package_yaml_snapshot_scoped_vars_and_project_defaults_match_core(tmp_path):
+    dbt=pinned_dbt()
+    own=package_yaml_project(tmp_path/'dxt')
+    upstream=package_yaml_project(tmp_path/'dbt')
+    for project, executable in ((own,DXT),(upstream,dbt)):
+        result=run(project,'build',executable=executable)
+        assert result.returncode==0,result.stdout+result.stderr
+    actual=json.loads((own/'target/manifest.json').read_text())['nodes']['snapshot.history_pkg.package_history']
+    expected=json.loads((upstream/'target/manifest.json').read_text())['nodes']['snapshot.history_pkg.package_history']
+    assert actual['schema']==expected['schema']=='scoped_archive'
+    for field in ('path','original_file_path','fqn','refs','depends_on','raw_code'):
+        assert actual[field]==expected[field],field
+    assert query(own,'select * from scoped_archive.package_history order by id')==query(upstream,'select * from scoped_archive.package_history order by id')
+
+
 def test_snapshot_general_jinja_macros_vars_and_scopes(tmp_path):
     project=project_at(tmp_path/'dxt','')
     (project/'models').mkdir()

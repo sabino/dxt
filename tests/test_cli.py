@@ -12212,7 +12212,6 @@ def test_snapshot_custom_paths_replace_default_and_empty_paths_disable_discovery
     ("{% snapshot bad %}{{ config(strategy='check', unique_key='id', check_cols='id') }}{% endsnapshot %}", "valid timestamp or check strategy"),
     ("{% snapshot bad %}{{ config(strategy=var('strategy')) }}{% endsnapshot %}", "var"),
     ("{% snapshot bad %}{% if execute %}select 1{% endif %}{% endsnapshot %}", "valid timestamp or check strategy"),
-    ("{% snapshot bad %}{{ config(enabled=false, unknown='value') }}{% endsnapshot %}", "unsupported SQL snapshot config"),
     ("{% snapshot bad %}{{ config(enabled=false, enabled=true) }}{% endsnapshot %}", "InvalidJinjaArguments"),
     ("{% snapshot bad %}{{ config(enabled=false, unique_key=['id']) }}{{ config(unique_key=var('key')) }}{% endsnapshot %}", "var"),
 ])
@@ -12226,6 +12225,17 @@ def test_snapshot_malformed_and_unsupported_blocks_fail_closed(tmp_path: Path, b
     assert diagnostic in result.stderr
     assert str(tmp_path) not in result.stderr
     assert not target.exists()
+
+
+def test_disabled_snapshot_preserves_extra_config_like_core(tmp_path: Path):
+    project=copy_fixture(tmp_path,"single_model")
+    (project/"snapshots").mkdir()
+    (project/"snapshots/history.sql").write_text("{% snapshot history %}{{ config(enabled=false, unknown='value') }}{% endsnapshot %}")
+    target=tmp_path/"target"
+    result=snapshot_cli(project,target)
+    assert result.returncode==0,result.stderr
+    node=json.loads((target/"manifest.json").read_text())["disabled"]["snapshot.single_model.history"][0]
+    assert node["config"]["unknown"]=="value" and node["config"]["enabled"] is False
 
 
 def executable_snapshot_project(tmp_path: Path):
