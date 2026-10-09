@@ -79,6 +79,9 @@ def write_release_archive(path: Path, *, leaked_binary_text: bytes = b""):
         add_tar_file(archive, f"{root}/CHANGELOG.md", b"# Changelog\n")
         add_tar_file(archive, f"{root}/SECURITY.md", b"# Security\n")
         add_tar_file(archive, f"{root}/docs/RELEASES.md", b"# Release Process\n")
+        for notice in sorted(release_archive.REQUIRED_MEMBERS):
+            if notice.startswith('docs/licenses/'):
+                add_tar_file(archive, f"{root}/{notice}", b"Public upstream notice\n")
 
 
 def test_release_archive_check_accepts_expected_shape(tmp_path):
@@ -107,3 +110,13 @@ def test_release_archive_check_rejects_binary_path_leak(tmp_path):
     write_release_archive(archive, leaked_binary_text=b"/home/example/private")
 
     assert release_archive.main([str(archive), "--version", "0.0.0"]) == 1
+
+
+def test_release_archive_rejects_duplicate_binary(tmp_path):
+    archive_path = tmp_path / 'dxt-v0.0.0-x86_64-linux-gnu.tar.gz'
+    with tarfile.open(archive_path, 'w:gz') as archive:
+        add_tar_file(archive, 'dxt-v0.0.0-x86_64-linux-gnu/dxt', b'first', 0o755)
+        add_tar_file(archive, 'dxt-v0.0.0-x86_64-linux-gnu/dxt', b'second', 0o755)
+    findings = release_archive.check_archive(archive_path, release_archive.infer_expectation(archive_path, '0.0.0', None))
+    assert any('duplicate member' in finding for finding in findings)
+    assert any('missing required member' in finding and 'LICENSE' in finding for finding in findings)

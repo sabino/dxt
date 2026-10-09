@@ -168,33 +168,8 @@ jobs:
       - name: Run all native tests on the actual target
         run: zig build test -Dtarget=${{ matrix.target }} --summary all
 
-      - name: Certify extracted target with both live adapters and PATH empty
-        run: python scripts/check_install.py --version "${{ needs.verify.outputs.version }}" --require-postgres
-
-      - name: Package
-        shell: bash
-        run: |
-          version="${{ needs.verify.outputs.version }}"
-          name="dxt-v${version}-${{ matrix.target }}"
-          mkdir -p "dist/${name}"
-          cp zig-out/bin/dxt "dist/${name}/dxt"
-          cp README.md CHANGELOG.md SECURITY.md "dist/${name}/"
-          cp -R docs "dist/${name}/docs"
-          mkdir -p "dist/${name}/docs/licenses"
-          cp vendor/libyaml/LICENSE "dist/${name}/docs/licenses/libyaml-LICENSE"
-          cp vendor/libyaml/UPSTREAM "dist/${name}/docs/licenses/libyaml-UPSTREAM"
-          cp vendor/dbt-docs/LICENSE "dist/${name}/docs/licenses/dbt-docs-LICENSE"
-          cp vendor/dbt-docs/UPSTREAM "dist/${name}/docs/licenses/dbt-docs-UPSTREAM"
-          cp vendor/libpg_query/LICENSE "dist/${name}/docs/licenses/libpg_query-LICENSE"
-          cp vendor/libpg_query/THIRD_PARTY_LICENSES.txt "dist/${name}/docs/licenses/libpg_query-THIRD_PARTY_LICENSES.txt"
-          cp vendor/libpg_query/provenance.json "dist/${name}/docs/licenses/libpg_query-provenance.json"
-          cp vendor/dbt-includes/provenance.json "dist/${name}/docs/licenses/dbt-includes-provenance.json"
-          for package in dbt dbt_duckdb dbt_postgres; do
-            cp "vendor/dbt-includes/${package}/LICENSE" "dist/${name}/docs/licenses/${package}-LICENSE"
-          done
-          test ! -f LICENSE || cp LICENSE "dist/${name}/"
-          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
-          tar -tzf "dist/${name}.tar.gz"
+      - name: Package the actual release target with docs and upstream licenses
+        run: python scripts/package_release.py --version "${{ needs.verify.outputs.version }}" --target "${{ matrix.target }}"
 
       - name: Check release archive safety
         run: |
@@ -202,6 +177,9 @@ jobs:
             "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" \
             --version "${{ needs.verify.outputs.version }}" \
             --target "${{ matrix.target }}"
+
+      - name: Certify extracted archive with both live adapters and PATH empty
+        run: python scripts/check_install.py --archive "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" --version "${{ needs.verify.outputs.version }}" --require-postgres
 
       - name: Upload packaged binary
         uses: actions/upload-artifact@v4

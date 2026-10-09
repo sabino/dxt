@@ -20,6 +20,17 @@ REQUIRED_MEMBERS = {
     "CHANGELOG.md",
     "SECURITY.md",
     "docs/RELEASES.md",
+    "docs/licenses/libyaml-LICENSE",
+    "docs/licenses/libyaml-UPSTREAM",
+    "docs/licenses/dbt-docs-LICENSE",
+    "docs/licenses/dbt-docs-UPSTREAM",
+    "docs/licenses/libpg_query-LICENSE",
+    "docs/licenses/libpg_query-THIRD_PARTY_LICENSES.txt",
+    "docs/licenses/libpg_query-provenance.json",
+    "docs/licenses/dbt-includes-provenance.json",
+    "docs/licenses/dbt-LICENSE",
+    "docs/licenses/dbt_duckdb-LICENSE",
+    "docs/licenses/dbt_postgres-LICENSE",
 }
 
 ALLOWED_TOP_LEVEL_FILES = {
@@ -159,6 +170,8 @@ def check_archive(path: Path, expectation: ArchiveExpectation) -> list[str]:
                     findings.append(f"{path}: member {normalized!r} is outside expected root {expectation.root_name!r}")
                     continue
 
+                if relative_name in seen:
+                    findings.append(f"{path}: duplicate member {normalized!r}")
                 seen.add(relative_name)
 
                 path_finding = check_member_path(relative_name)

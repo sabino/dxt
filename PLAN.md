@@ -99,6 +99,9 @@ retained cross-database stages/catalog observations/adaptive scheduling. The
 supervisor owns legacy test reconciliation, public projects, release licenses,
 platform builds, complete integrated validation, support docs and publication.
 Native/static parser and macro third-party notices must ship in binary archives.
+Release packaging now uses one deterministic developer archive builder. Native
+installation certification extracts that exact, safety-validated archive with all
+upstream notices and runs both adapters with PATH empty on each actual target.
 The supervisor now owns native group definitions, model access validation and
 selection in focused group_access.zig plus narrow graph/parser/artifact hooks.
 The configuration worker retains adapter contexts, catalog, contracts and hooks;

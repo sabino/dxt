@@ -7,11 +7,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+import tarfile
 from pathlib import Path
 
 import duckdb
 
 from validate_dbt_artifacts import assert_artifact
+from check_release_archive import check_archive, infer_expectation
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -79,6 +81,8 @@ def certify_adapter(install, binary, library, version, postgres_uri=None):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dxt", type=Path, default=ROOT / "zig-out/bin/dxt")
+    parser.add_argument("--archive", type=Path,
+                        help="Validate and extract the actual release archive before adapter certification")
     parser.add_argument("--version", default="0.0.0")
     parser.add_argument("--postgres-uri", default=os.environ.get("DXT_INSTALL_POSTGRES_URI"),
                         help="Also certify an isolated PostgreSQL fixture supplied by the developer/CI")
@@ -91,9 +95,18 @@ def main() -> int:
         parser.error("PostgreSQL installation certification requires its isolated fixture URI")
     with tempfile.TemporaryDirectory(prefix="dxt-clean-install-") as temporary:
         install = Path(temporary)
-        binary = install / "bin/dxt"
-        binary.parent.mkdir()
-        shutil.copy2(args.dxt.resolve(), binary)
+        if args.archive:
+            expectation = infer_expectation(args.archive, args.version, None)
+            findings = check_archive(args.archive, expectation)
+            if findings:
+                raise ValueError('\n'.join(findings))
+            with tarfile.open(args.archive, 'r:gz') as archive:
+                archive.extractall(install, filter='data')
+            binary = install / expectation.root_name / 'dxt'
+        else:
+            binary = install / "bin/dxt"
+            binary.parent.mkdir()
+            shutil.copy2(args.dxt.resolve(), binary)
         certify_adapter(install, binary, library, args.version)
         if args.postgres_uri:
             certify_adapter(install, binary, library, args.version, args.postgres_uri)

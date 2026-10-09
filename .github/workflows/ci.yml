@@ -66,8 +66,10 @@ jobs:
         run: zig build test -Dtarget=${{ matrix.target }} --summary all
       - name: Build the release-safe target
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
-      - name: Certify both adapters from an extracted binary with PATH empty
-        run: python scripts/check_install.py --require-postgres
+      - name: Package the actual release target with docs and upstream licenses
+        run: python scripts/package_release.py --target ${{ matrix.target }}
+      - name: Certify both adapters from the actual release archive with PATH empty
+        run: python scripts/check_install.py --archive dist/dxt-v0.0.0-${{ matrix.target }}.tar.gz --require-postgres
 
   public-package:
     name: unchanged public dbt-utils PostgreSQL project
