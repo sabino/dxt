@@ -59,7 +59,6 @@ def test_complete_upstream_contracts_validate_pipeline_and_reject_seed_node_depe
 def test_documentation_browser_search_columns_and_compiled_sql(documented_project, offline):
     from playwright.sync_api import sync_playwright
     browser_path = next((path for command in ["chromium", "chromium-browser", "google-chrome"] if (path := shutil.which(command))), None)
-    assert browser_path, "Documentation certification requires Chromium or Chrome"
     server = None
     served_dir = documented_project / "target"
     if offline:
@@ -81,6 +80,8 @@ def test_documentation_browser_search_columns_and_compiled_sql(documented_projec
             time.sleep(0.05)
     try:
         with sync_playwright() as playwright:
+            browser_path = browser_path or playwright.chromium.executable_path
+            assert Path(browser_path).is_file(), "Documentation certification requires an installed Chromium or Chrome"
             browser = playwright.chromium.launch(executable_path=browser_path, args=["--no-sandbox"])
             try:
                 page = browser.new_page()

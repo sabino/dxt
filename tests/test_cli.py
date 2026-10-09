@@ -2419,7 +2419,7 @@ target-path: target
     assert query.stdout.strip() == "3"
 
 
-def test_run_prepare_rejects_non_model_selection(tmp_path: Path):
+def test_run_non_model_selection_finishes_without_execution(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     target = tmp_path / "run-target"
     result = subprocess.run(
@@ -2428,9 +2428,11 @@ def test_run_prepare_rejects_non_model_selection(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "run currently supports only selected SQL model resources" in result.stderr
-    assert not (target / "run_results.json").exists()
+    assert result.returncode == 0, result.stderr
+    assert "Nothing to do" in result.stdout + result.stderr
+    assert json.loads((target / "run_results.json").read_text())["results"] == []
+    assert (target / "manifest.json").exists()
+    assert not (target / "dxt.duckdb").exists()
 
 
 def test_run_rejects_unsupported_model_materialization_before_duckdb(tmp_path: Path):
@@ -2847,7 +2849,7 @@ def test_seed_command_filters_mixed_selection_to_seed_resources(tmp_path: Path):
     assert [item["unique_id"] for item in run_results["results"]] == ["seed.seed_ref.raw_customers"]
 
 
-def test_seed_command_rejects_non_seed_selection_before_duckdb(tmp_path: Path):
+def test_seed_non_seed_selection_finishes_without_execution(tmp_path: Path):
     project = copy_fixture(tmp_path, "seed_ref")
     target = tmp_path / "seed-target"
     result = subprocess.run(
@@ -2856,9 +2858,10 @@ def test_seed_command_rejects_non_seed_selection_before_duckdb(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "seed currently supports only selected seed resources" in result.stderr
-    assert not (target / "run_results.json").exists()
+    assert result.returncode == 0, result.stderr
+    assert "Nothing to do" in result.stdout + result.stderr
+    assert json.loads((target / "run_results.json").read_text())["results"] == []
+    assert (target / "manifest.json").exists()
     assert not (target / "dxt.duckdb").exists()
 
 

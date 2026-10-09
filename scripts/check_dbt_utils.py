@@ -57,7 +57,24 @@ def comparable(value, database):
 
 def assert_same(label, actual, expected):
     if actual != expected:
-        raise AssertionError(f"{label} differs from Core:\nnative={actual!r}\nCore={expected!r}")
+        differences = []
+
+        def inspect(left, right, path):
+            if left == right or len(differences) >= 20:
+                return
+            if isinstance(left, dict) and isinstance(right, dict):
+                for key in sorted(left.keys() | right.keys()):
+                    if key not in left or key not in right:
+                        differences.append(f'{path}/{key}: missing from {"native" if key not in left else "Core"}')
+                    else:
+                        inspect(left[key], right[key], f'{path}/{key}')
+                    if len(differences) >= 20:
+                        break
+            else:
+                differences.append(f'{path}: native={repr(left)[:600]} Core={repr(right)[:600]}')
+
+        inspect(actual, expected, '')
+        raise AssertionError(f'{label} differs from Core (first 20 differences):\n' + '\n'.join(differences))
 
 
 def manifest_contract(manifest, database):
@@ -93,9 +110,9 @@ def certify(source, temporary, binary, core, adapter):
     environment = dict(os.environ, DBT_SEND_ANONYMOUS_USAGE_STATS='false',
                        DXT_DUCKDB_BACKEND='native')
     with ExitStack() as stack:
-        runs = []
+        runs = {}
         original = authored_files(source)
-        for engine, executable in [('Core', core), ('native', binary)]:
+        for engine, executable in [('native', binary), ('Core', core)]:
             package = temporary / adapter / engine / 'dbt-utils'
             shutil.copytree(source, package, ignore=shutil.ignore_patterns(
                 '.git', 'target', 'logs', 'dbt_packages', 'package-lock.yml', '__pycache__'))
@@ -138,9 +155,9 @@ def certify(source, temporary, binary, core, adapter):
                         build_results = json.loads((project / 'target/run_results.json').read_text())
             assert_same(f'{adapter}/{engine} unchanged authored project', authored_files(package), original)
             artifact = lambda name: json.loads((project / 'target' / name).read_text())
-            runs.append((artifact('manifest.json'), artifact('catalog.json'),
-                         artifact('run_results.json'), connect, database_name, compiled, build_results))
-        expected, actual = runs
+            runs[engine] = (artifact('manifest.json'), artifact('catalog.json'),
+                            artifact('run_results.json'), connect, database_name, compiled, build_results)
+        expected, actual = runs['Core'], runs['native']
         assert_same(f'{adapter} complete resource identities/config/dependencies',
                     manifest_contract(actual[0], actual[4]), manifest_contract(expected[0], expected[4]))
         assert_same(f'{adapter} catalog relation identities', set(actual[1]['nodes']), set(expected[1]['nodes']))
