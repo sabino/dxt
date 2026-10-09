@@ -567,6 +567,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.InvalidPackageProvider => stderr.writeAll("error: private package provider must be github, gitlab, or bitbucket\n") catch {},
         error.PackageRegistryRedirectCycle => stderr.writeAll("error: package Hub redirect contains a cycle or exceeds the redirect limit\n") catch {},
         error.MissingPackageEnvironmentVariable => stderr.writeAll("error: required package environment variable is missing\n") catch {},
+        error.ConflictingProjectProfileFlags => stderr.writeAll("error: Do not specify both config in profiles.yml and flags in dbt_project.yml; profile config is deprecated.\n") catch {},
         error.MissingProjectFile => stderr.writeAll("error: missing dbt_project.yml\n") catch {},
         error.InvalidProjectName => stderr.writeAll("error: dbt_project.yml must define a non-empty name\n") catch {},
         error.DuplicateModelName => stderr.writeAll("error: duplicate model name\n") catch {},

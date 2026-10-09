@@ -67,7 +67,8 @@ pub fn loadConnectionGraph(base_runtime: Runtime, options: Options) !Graph {
     runtime.global_options = &options;
     var config = try loadProjectConfig(runtime, options.project_dir);
     defer deinitProjectConfig(runtime.allocator, &config);
-    var graph = Graph{ .allocator = runtime.allocator, .environment = runtime.environment, .invocation = runtime.invocation, .command_options = options, .timing_profile = runtime.timing_profile, .project_name = config.name };
+    const profile_flags_moved = try @import("project_flags.zig").apply(runtime, options, &config);
+    var graph = Graph{ .allocator = runtime.allocator, .environment = runtime.environment, .invocation = runtime.invocation, .command_options = options, .timing_profile = runtime.timing_profile, .project_name = config.name, .project_flags_moved_deprecation = profile_flags_moved };
     errdefer graph.deinit();
     const identity = (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) orelse return error.MissingProfileFile;
     graph.adapter_type = identity.adapter_type;
@@ -93,6 +94,8 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     if (options.vars) |text| try parseVarsText(runtime.allocator, text, &cli_vars);
     var config = try project_config.loadProjectConfigWithContext(runtime, options.project_dir, cli_vars.items, .null);
     defer deinitProjectConfig(runtime.allocator, &config);
+    const adapter_requires_batched = config.require_batched_execution_for_custom_microbatch_strategy;
+    const profile_flags_moved = try @import("project_flags.zig").apply(runtime, options, &config);
 
     var graph = Graph{
         .allocator = runtime.allocator,
@@ -101,9 +104,11 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         .command_options = options,
         .timing_profile = runtime.timing_profile,
         .project_name = config.name,
+        .project_flags_moved_deprecation = profile_flags_moved,
         .validate_macro_args = config.validate_macro_args,
         .require_generic_test_arguments_property = config.require_generic_test_arguments_property,
         .require_batched_execution_for_custom_microbatch_strategy = config.require_batched_execution_for_custom_microbatch_strategy,
+        .adapter_require_batched_execution_for_custom_microbatch_strategy = adapter_requires_batched,
         .enable_truthy_nulls_equals_macro = config.enable_truthy_nulls_equals_macro,
         .full_refresh = options.full_refresh,
     };

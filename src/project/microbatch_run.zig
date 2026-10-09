@@ -155,7 +155,7 @@ pub fn executeBatch(runtime: types.Runtime, graph: *const types.Graph, node: *co
         try session.commit();
         return;
     }
-    if (std.mem.eql(u8, graph.adapter_type, "duckdb") and strategyMacro(graph, node) != null and !graph.require_batched_execution_for_custom_microbatch_strategy) return error.UnsupportedIncrementalStrategy;
+    if (std.mem.eql(u8, graph.adapter_type, "duckdb") and strategyMacro(graph, node) != null and !(graph.adapter_require_batched_execution_for_custom_microbatch_strategy orelse graph.require_batched_execution_for_custom_microbatch_strategy)) return error.UnsupportedIncrementalStrategy;
     const stage = "\"__dxt_microbatch_stage\"";
     try session.execute(try std.fmt.allocPrint(a, "create temporary table {s} as ({s})", .{ stage, compiled }));
     const source_columns = try columns(a, graph.adapter_type, session, true, schema, compiler.relationIdentifierForNode(node));

@@ -781,9 +781,13 @@ pub const Graph = struct {
     constraint_warnings: std.ArrayList([]const u8) = .empty,
     dispatch_configs: std.ArrayList(DispatchConfig) = .empty,
     source_project_configs: std.ArrayList(SourceProjectConfig) = .empty,
+    project_flags_moved_deprecation: bool = false,
     validate_macro_args: bool = false,
     require_generic_test_arguments_property: bool = false,
     require_batched_execution_for_custom_microbatch_strategy: bool = false,
+    // Core's adapter behavior reads authored project flags, while its runner
+    // also consumes the deprecated profile ProjectFlags fallback.
+    adapter_require_batched_execution_for_custom_microbatch_strategy: ?bool = null,
     enable_truthy_nulls_equals_macro: bool = false,
     deferred_relations: std.ArrayList(DeferredRelation) = .empty,
 

@@ -11,7 +11,11 @@ const leadingSpaces = util.leadingSpaces;
 const splitKeyValue = util.splitKeyValue;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 
-pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *const ProjectConfig, options: Options) !?AdapterIdentity {
+/// Use the same explicit/CWD/HOME/project discovery for credentials and Core's
+/// deprecated root profile configuration. The returned file text is owned.
+pub fn loadProfileText(runtime: Runtime, project_dir: []const u8, options: Options) !?[]const u8 {
+    var owned_default_base: ?[]const u8 = null;
+    defer if (owned_default_base) |directory| runtime.allocator.free(directory);
     const environment_profiles = if (runtime.environment) |environment| environment.get("DBT_PROFILES_DIR") else null;
     const profiles_dir = options.profiles_dir orelse environment_profiles;
     const explicit_profile_lookup = profiles_dir != null or options.profile != null or options.target != null;
@@ -23,7 +27,9 @@ pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *c
             error.FileNotFound => {
                 if (runtime.environment) |environment| if (environment.get("HOME")) |home| {
                     const directory = try std.fs.path.join(runtime.allocator, &.{ home, ".dbt" });
+                    owned_default_base = directory;
                     const candidate = try std.fs.path.join(runtime.allocator, &.{ directory, "profiles.yml" });
+                    defer runtime.allocator.free(candidate);
                     if (std.Io.Dir.cwd().access(runtime.io, candidate, .{})) |_| default_base = directory else |failure| switch (failure) {
                         error.FileNotFound => {},
                         else => return failure,
@@ -33,35 +39,35 @@ pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *c
             else => return err,
         }
     }
-    var profiles_path = if (profiles_dir) |directory|
+    const profiles_path = if (profiles_dir) |directory|
         try std.fs.path.join(runtime.allocator, &.{ directory, "profiles.yml" })
     else
         try std.fs.path.join(runtime.allocator, &.{ default_base, "profiles.yml" });
 
-    const text = std.Io.Dir.cwd().readFileAlloc(runtime.io, profiles_path, runtime.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+    defer runtime.allocator.free(profiles_path);
+    return std.Io.Dir.cwd().readFileAlloc(runtime.io, profiles_path, runtime.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => {
             if (explicit_profile_lookup) return error.MissingProfileFile;
             if (runtime.environment) |environment| if (environment.get("HOME")) |home| {
-                profiles_path = try std.fs.path.join(runtime.allocator, &.{ home, ".dbt", "profiles.yml" });
-                const fallback = std.Io.Dir.cwd().readFileAlloc(runtime.io, profiles_path, runtime.allocator, .limited(1024 * 1024)) catch |failure| switch (failure) {
+                const fallback_path = try std.fs.path.join(runtime.allocator, &.{ home, ".dbt", "profiles.yml" });
+                defer runtime.allocator.free(fallback_path);
+                return std.Io.Dir.cwd().readFileAlloc(runtime.io, fallback_path, runtime.allocator, .limited(1024 * 1024)) catch |failure| switch (failure) {
                     error.FileNotFound => return null,
                     else => return failure,
                 };
-                const profile_name = options.profile orelse config.profile_name orelse return error.MissingProfileName;
-                var identity = try parseAdapterIdentityTextWithEnvironment(runtime.allocator, fallback, profile_name, options.target, runtime.environment);
-                if (identity.database_path != null) identity.database_path_base = try std.process.currentPathAlloc(runtime.io, runtime.allocator);
-                return identity;
             };
             return null;
         },
         else => return err,
     };
+}
 
+pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *const ProjectConfig, options: Options) !?AdapterIdentity {
+    const text = (try loadProfileText(runtime, project_dir, options)) orelse return null;
+    defer runtime.allocator.free(text);
     const selected_profile = options.profile orelse config.profile_name orelse return error.MissingProfileName;
     var identity = try parseAdapterIdentityTextWithEnvironment(runtime.allocator, text, selected_profile, options.target, runtime.environment);
-    if (identity.database_path != null) {
-        identity.database_path_base = try std.process.currentPathAlloc(runtime.io, runtime.allocator);
-    }
+    if (identity.database_path != null) identity.database_path_base = try std.process.currentPathAlloc(runtime.io, runtime.allocator);
     return identity;
 }
 

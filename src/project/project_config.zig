@@ -14,6 +14,7 @@ pub fn parseWithTarget(runtime: types.Runtime, text: []const u8, cli_vars: []con
     var document = try yaml.parse(allocator, text);
     defer document.deinit();
     if (document.value != .object) return error.InvalidProjectConfiguration;
+    if (values.get(document.value, "flags")) |flags| if (flags != .object) return error.InvalidProjectConfiguration;
     var config = types.ProjectConfig{ .name = "" };
     std.crypto.hash.sha2.Sha256.hash(std.mem.trim(u8, text, " \t\r\n\x0b\x0c"), &config.file_checksum, .{});
     errdefer types.deinitProjectConfig(allocator, &config);

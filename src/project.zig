@@ -4640,6 +4640,7 @@ test "materializeGenericTests rejects missing package custom generic test macro"
 }
 
 fn writeWarnings(runtime: Runtime, stderr: *Io.Writer, graph: *const Graph) !void {
+    if (graph.project_flags_moved_deprecation) try @import("project/selection_warnings.zig").warning(runtime, stderr, "ProjectFlagsMovedDeprecation", "D013", "User config should be moved from the 'config' key in profiles.yml to the 'flags' key in dbt_project.yml.", null);
     for (graph.tests.items) |test_node| for (test_node.reference_warnings.items) |warning| try @import("project/selection_warnings.zig").warning(runtime, stderr, "NodeNotFoundOrDisabled", "I060", warning, null);
     if (graph.command_options.debug or graph.command_options.log_level == .debug) {
         try stderr.writeAll("{\"data\":{\"hit\":");
