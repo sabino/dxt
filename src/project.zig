@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const catalog = @import("project/catalog.zig");
+const commands = @import("project/commands.zig");
 const clean = @import("project/clean.zig");
 const compiler = @import("project/compiler.zig");
 const docs_serve = @import("project/docs_serve.zig");
@@ -31,7 +32,59 @@ const execution_failure_message = "DuckDB execution failed";
 pub const Runtime = types.Runtime;
 pub const Options = types.Options;
 pub const Output = types.Output;
+pub const debug = commands.debug;
+pub const initProject = commands.initProject;
 pub const validateSelectorSyntax = selector.validateSelectorSyntax;
+
+pub fn runOperation(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
+    defer graph.deinit();
+    try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+    const target_dir = try targetDir(runtime, options);
+    _ = try writeManifest(runtime, &graph, target_dir);
+    try commands.operation(runtime, options, &graph, target_dir, stdout);
+}
+
+pub fn clone(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    if (options.state == null) return error.MissingCloneState;
+    var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
+    defer graph.deinit();
+    try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+    var selection = try resolveSelection(runtime, options);
+    defer selection.deinit(runtime.allocator);
+    var state = try loadSelectionState(runtime, options, selection, &graph);
+    defer state.deinit(runtime.allocator);
+    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, state.context());
+    const target_dir = try targetDir(runtime, options);
+    commands.cloneRelations(runtime, options, &graph, selected, target_dir, stdout) catch |err| {
+        if (err == error.ExecutionFailure) _ = try writeManifest(runtime, &graph, target_dir);
+        return err;
+    };
+    _ = try writeManifest(runtime, &graph, target_dir);
+}
+
+pub fn retry(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    const target_dir = try targetDir(runtime, options);
+    var plan = try commands.prepareRetry(runtime, options, target_dir);
+    const supported = std.mem.eql(u8, plan.options.which, "run") or std.mem.eql(u8, plan.options.which, "seed") or std.mem.eql(u8, plan.options.which, "test") or std.mem.eql(u8, plan.options.which, "build") or std.mem.eql(u8, plan.options.which, "clone") or std.mem.eql(u8, plan.options.which, "run-operation") or std.mem.eql(u8, plan.options.which, "snapshot");
+    if (!supported) return error.UnsupportedRetryCommand;
+    var invocation = runtime;
+    invocation.invocation_options = &plan.options;
+    if (plan.count == 0) {
+        try commands.writeResults(invocation, target_dir, &.{});
+        try stdout.writeAll("Nothing to retry\n");
+        return;
+    }
+    if (std.mem.eql(u8, plan.options.which, "run")) return runPreflight(invocation, plan.options, stdout, stderr);
+    if (std.mem.eql(u8, plan.options.which, "seed")) return seedPreflight(invocation, plan.options, stdout, stderr);
+    if (std.mem.eql(u8, plan.options.which, "test")) return testPreflight(invocation, plan.options, stdout, stderr);
+    if (std.mem.eql(u8, plan.options.which, "build")) return buildPreflight(invocation, plan.options, stdout, stderr);
+    if (std.mem.eql(u8, plan.options.which, "snapshot")) return snapshotRun(invocation, plan.options, stdout, stderr);
+    if (std.mem.eql(u8, plan.options.which, "clone")) return clone(invocation, plan.options, stdout, stderr);
+    return runOperation(invocation, plan.options, stdout, stderr);
+}
 
 const ColumnDef = types.ColumnDef;
 const GenericTestDef = types.GenericTestDef;
@@ -1023,10 +1076,12 @@ fn buildWithUnitTests(runtime: Runtime, options: Options, graph: *Graph, selecte
 }
 
 fn resolveSelection(runtime: Runtime, options: Options) !selector_config.ResolvedSelection {
+    if (options.execution_select) |selection| return .{ .select = try runtime.allocator.dupe(u8, selection) };
     return try selector_config.resolveSelection(runtime, options.project_dir, options.select, options.exclude, options.selector);
 }
 
 const SelectionState = struct {
+    allowed_ids: ?[]const []const u8 = null,
     source_status_index: ?source_freshness.SourceStatusIndex = null,
     result_status_index: ?run_results.ResultStatusIndex = null,
     prior_manifest_index: ?state_artifacts.PriorManifestIndex = null,
@@ -1046,6 +1101,7 @@ const SelectionState = struct {
 
     fn context(self: *const SelectionState) selector.SelectionContext {
         var ctx: selector.SelectionContext = .{};
+        ctx.allowed_ids = self.allowed_ids;
         if (self.source_status_index) |*index| ctx.source_status_index = index;
         if (self.result_status_index) |*index| ctx.result_status_index = index;
         if (self.prior_manifest_index) |*index| ctx.prior_manifest_index = index;
@@ -1061,7 +1117,7 @@ fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_co
     const needs_source_status = selector.usesSourceStatusSelector(selection.select, selection.exclude);
     const needs_result = selector.usesResultSelector(selection.select, selection.exclude);
     const needs_state = selector.usesStateSelector(selection.select, selection.exclude);
-    if (!needs_source_status and !needs_result and !needs_state) return .{ .indirect_selection = options.indirect_selection, .expression = selection.expression };
+    if (!needs_source_status and !needs_result and !needs_state) return .{ .allowed_ids = options.execution_ids, .indirect_selection = options.indirect_selection, .expression = selection.expression };
 
     const state_dir = options.state orelse {
         if (needs_state) return error.MissingStateManifestState;
@@ -1069,7 +1125,7 @@ fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_co
         return error.MissingSourceStatusState;
     };
 
-    var state: SelectionState = .{ .indirect_selection = options.indirect_selection, .expression = selection.expression };
+    var state: SelectionState = .{ .allowed_ids = options.execution_ids, .indirect_selection = options.indirect_selection, .expression = selection.expression };
     errdefer state.deinit(runtime.allocator);
     if (needs_state) {
         state.prior_manifest_index = try state_artifacts.loadPriorManifestIndex(runtime, state_dir);
@@ -1766,7 +1822,7 @@ fn appendUniqueString(allocator: std.mem.Allocator, values: *std.ArrayList([]con
 
 fn writeRunResults(runtime: Runtime, target_dir: []const u8, results: []const run_results.NodeResult) !void {
     const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
-    const run_results_json = try run_results.renderRunResultsWithInvocation(runtime.allocator, results, runtime.invocation);
+    const run_results_json = try run_results.renderRunResultsForRuntime(runtime, results);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
 }
 

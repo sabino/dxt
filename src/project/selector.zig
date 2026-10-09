@@ -16,6 +16,7 @@ const ExposureDef = types.ExposureDef;
 const UnitTestDef = types.UnitTestDef;
 
 pub const SelectionContext = struct {
+    allowed_ids: ?[]const []const u8 = null,
     source_status_index: ?*const source_freshness.SourceStatusIndex = null,
     result_status_index: ?*const run_results.ResultStatusIndex = null,
     prior_manifest_index: ?*const state.PriorManifestIndex = null,
@@ -428,6 +429,18 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
             return std.mem.lessThan(u8, a.unique_id, b.unique_id);
         }
     }.lessThan);
+    if (context.allowed_ids) |allowed| {
+        var kept: usize = 0;
+        for (selected.items) |resource| {
+            for (allowed) |id| {
+                if (!std.mem.eql(u8, id, resource.unique_id)) continue;
+                selected.items[kept] = resource;
+                kept += 1;
+                break;
+            }
+        }
+        selected.shrinkRetainingCapacity(kept);
+    }
     return try selected.toOwnedSlice(allocator);
 }
 
@@ -1892,4 +1905,20 @@ test "snapshot file and block FQN selects separate nodes and expands dependencie
     try std.testing.expectEqual(@as(usize, 2), expanded.len);
     const snapshots = try selectResources(allocator, &graph, null, "config.materialized:snapshot", null);
     try std.testing.expectEqual(@as(usize, 2), snapshots.len);
+}
+
+test "execution ID limits apply after indirect test selection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "retry" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{ .package_name = "retry", .unique_id = "model.retry.parent", .name = "parent", .path = "parent.sql", .original_file_path = "models/parent.sql", .raw_code = "select 1 as id" });
+    try graph.singular_tests.append(allocator, .{ .package_name = "retry", .unique_id = "test.retry.attached", .name = "attached", .alias = "attached", .path = "attached.sql", .original_file_path = "tests/attached.sql", .raw_code = "select 1 where false", .depends_on = .empty });
+    try graph.singular_tests.items[0].depends_on.append(allocator, "model.retry.parent");
+    const limited = try selectResourcesWithContext(allocator, &graph, null, "parent+", null, .{ .allowed_ids = &.{"model.retry.parent"} });
+    try std.testing.expectEqual(@as(usize, 1), limited.len);
+    try std.testing.expectEqualStrings("model.retry.parent", limited[0].unique_id);
+    const empty = try selectResourcesWithContext(allocator, &graph, null, null, null, .{ .allowed_ids = &.{} });
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
 }

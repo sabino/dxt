@@ -53,14 +53,45 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
         return .ok;
     }
 
+    if (equals(command, "debug") or equals(command, "init") or equals(command, "run-operation") or equals(command, "retry") or equals(command, "clone")) {
+        if (hasHelp(args[2..])) {
+            try printExtraCommandHelp(command, stdout);
+            return .ok;
+        }
+        const rt = runtime orelse {
+            try stderr.writeAll("error: runtime I/O is required for this command\n");
+            return .usage;
+        };
+        const mode: OptionMode = if (equals(command, "debug")) .debug else if (equals(command, "init")) .init else if (equals(command, "run-operation")) .operation else if (equals(command, "retry")) .retry else .clone;
+        var options = parseOptions(rt.allocator, args[2..], stderr, mode) catch |err| return commandError(err, stderr);
+        options.which = command;
+        const invocation = commandRuntime(rt, &options);
+        if (mode == .debug) {
+            project.debug(invocation, options, stdout, stderr) catch |err| {
+                _ = commandError(err, stderr);
+                return .failure;
+            };
+        } else if (mode == .init) {
+            project.initProject(invocation, options, stdout) catch |err| return commandError(err, stderr);
+        } else if (mode == .operation) {
+            project.runOperation(invocation, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        } else if (mode == .retry) {
+            project.retry(invocation, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        } else {
+            project.clone(invocation, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        }
+        return .ok;
+    }
+
     if (equals(command, "snapshot")) {
         if (hasHelp(args[2..])) {
             try printCommandHelp(command, stdout, .build);
             return .ok;
         }
         const rt = runtime orelse return .usage;
-        const options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
-        project.snapshotRun(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
+        options.which = command;
+        project.snapshotRun(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
 
@@ -73,8 +104,9 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for parse\n");
             return .usage;
         };
-        const options = parseOptions(rt.allocator, args[2..], stderr, .common_and_select) catch |err| return commandError(err, stderr);
-        project.parse(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .common_and_select) catch |err| return commandError(err, stderr);
+        options.which = command;
+        project.parse(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
     if (equals(command, "compile")) {
@@ -86,8 +118,9 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for compile\n");
             return .usage;
         };
-        const options = parseOptions(rt.allocator, args[2..], stderr, .compile) catch |err| return commandError(err, stderr);
-        project.compile(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .compile) catch |err| return commandError(err, stderr);
+        options.which = command;
+        project.compile(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
     if (equals(command, "ls")) {
@@ -99,8 +132,9 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for ls\n");
             return .usage;
         };
-        const options = parseOptions(rt.allocator, args[2..], stderr, .list) catch |err| return commandError(err, stderr);
-        project.list(rt, options, stdout) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .list) catch |err| return commandError(err, stderr);
+        options.which = command;
+        project.list(commandRuntime(rt, &options), options, stdout) catch |err| return commandError(err, stderr);
         return .ok;
     }
     if (equals(command, "clean")) {
@@ -112,8 +146,9 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for clean\n");
             return .usage;
         };
-        const options = parseOptions(rt.allocator, args[2..], stderr, .clean) catch |err| return commandError(err, stderr);
-        project.cleanProject(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .clean) catch |err| return commandError(err, stderr);
+        options.which = command;
+        project.cleanProject(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
     if (equals(command, "run")) {
@@ -125,8 +160,9 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for run\n");
             return .usage;
         };
-        const options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
-        project.runPreflight(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
+        options.which = command;
+        project.runPreflight(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
     if (equals(command, "seed")) {
@@ -138,8 +174,9 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for seed\n");
             return .usage;
         };
-        const options = parseOptions(rt.allocator, args[2..], stderr, .seed) catch |err| return commandError(err, stderr);
-        project.seedPreflight(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .seed) catch |err| return commandError(err, stderr);
+        options.which = command;
+        project.seedPreflight(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
     if (equals(command, "test")) {
@@ -151,8 +188,9 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for test\n");
             return .usage;
         };
-        const options = parseOptions(rt.allocator, args[2..], stderr, .test_command) catch |err| return commandError(err, stderr);
-        project.testPreflight(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .test_command) catch |err| return commandError(err, stderr);
+        options.which = command;
+        project.testPreflight(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
     if (equals(command, "build")) {
@@ -164,8 +202,9 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
             try stderr.writeAll("error: runtime I/O is required for build\n");
             return .usage;
         };
-        const options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
-        project.buildPreflight(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
+        options.which = command;
+        project.buildPreflight(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
     if (equals(command, "source")) {
@@ -233,6 +272,11 @@ const OptionMode = enum {
     test_command,
     build,
     source_freshness,
+    debug,
+    init,
+    operation,
+    retry,
+    clone,
 };
 
 const HelpMode = enum {
@@ -246,6 +290,21 @@ const HelpMode = enum {
     docs_serve,
     source_freshness,
 };
+
+fn commandRuntime(runtime: Runtime, options: *const project.Options) Runtime {
+    var result = runtime;
+    result.invocation_options = options;
+    return result;
+}
+
+fn printExtraCommandHelp(command: []const u8, writer: *Io.Writer) !void {
+    try writer.print("Usage: dxt {s}{s} [options]\n\n", .{ command, if (equals(command, "init")) " <project-name>" else if (equals(command, "run-operation")) " <macro-name>" else "" });
+    try writer.writeAll("Options:\n  --project-dir <path>\n  --profiles-dir <path>\n  --profile <name>\n  --target <name>\n  --target-path <path>\n");
+    if (equals(command, "run-operation")) try writer.writeAll("  --args <yaml-or-json>\n  --vars <yaml-or-json>\n");
+    if (equals(command, "clone")) try writer.writeAll("  --state <path> (required)\n  --select <selector>\n  --exclude <selector>\n  --full-refresh\n");
+    if (equals(command, "retry")) try writer.writeAll("  --state <path>\n  --vars <yaml-or-json>\n  --threads <count>\n");
+    if (equals(command, "init")) try writer.writeAll("  --skip-profile-setup\n");
+}
 
 fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
     switch (err) {
@@ -374,6 +433,18 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.PostgresExecutionFailed => stderr.writeAll("error: PostgreSQL query failed\n") catch {},
         error.AdapterQueryCancelled => stderr.writeAll("error: database query cancelled\n") catch {},
         error.DuckDbExecutionFailed => stderr.writeAll("error: DuckDB execution failed\n") catch {},
+        error.MissingCommandName => stderr.writeAll("error: a project or macro name is required\n") catch {},
+        error.InvalidInitName => stderr.writeAll("error: project name must contain only letters, digits, and underscores and start with a letter or underscore\n") catch {},
+        error.ProjectAlreadyExists => stderr.writeAll("error: project directory already exists\n") catch {},
+        error.ProfileAlreadyExists => stderr.writeAll("error: profiles.yml already exists; use --skip-profile-setup to preserve it\n") catch {},
+        error.InvalidOperationArgs => stderr.writeAll("error: --args must be a YAML or JSON mapping\n") catch {},
+        error.MissingRetryCommand => stderr.writeAll("error: prior run_results.json must include args.which\n") catch {},
+        error.UnsupportedRetryCommand => stderr.writeAll("error: previous command cannot be retried by this executable\n") catch {},
+        error.MissingCloneState => stderr.writeAll("error: clone requires --state containing manifest.json\n") catch {},
+        error.OperationFailure => {
+            stderr.writeAll("error: operation failed\n") catch {};
+            return .failure;
+        },
         error.ExecutionFailure => {
             stderr.writeAll("error: one or more selected resources failed\n") catch {};
             return .failure;
@@ -420,6 +491,12 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
     while (i < args.len) {
         const arg = args[i];
         if (equals(arg, "-h") or equals(arg, "--help")) return options;
+        if (!isOptionLike(arg) and (mode == .init or mode == .operation)) {
+            if (options.command_name != null or arg.len == 0) return error.InvalidOption;
+            options.command_name = arg;
+            i += 1;
+            continue;
+        }
         if (equals(arg, "--output-keys")) {
             if (mode != .list) return error.UnsupportedCommandOption;
             i += 1;
@@ -474,6 +551,8 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             } else if (equals(arg, "--target")) {
                 if (mode == .common_only) return error.UnsupportedCommandOption;
                 options.target = value;
+            } else if (equals(arg, "--args")) {
+                options.command_args = value;
             } else if (equals(arg, "--vars")) {
                 options.vars = value;
             } else if (equals(arg, "--state")) {
@@ -530,6 +609,8 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
                 options.defer_enabled = equals(arg, "--defer");
             } else if (equals(arg, "--favor-state") or equals(arg, "--no-favor-state")) {
                 options.favor_state = equals(arg, "--favor-state");
+            } else if (equals(arg, "--skip-profile-setup")) {
+                options.skip_profile_setup = true;
             } else if (equals(arg, "--browser")) {
                 options.docs_open_browser = true;
             } else if (equals(arg, "--no-browser") or equals(arg, "--no-open")) {
@@ -561,6 +642,9 @@ fn validateSelector(value: []const u8) !void {
 }
 
 fn requiresValue(arg: []const u8, mode: OptionMode) bool {
+    if (mode == .init) return equals(arg, "--project-dir") or equals(arg, "--profiles-dir");
+    if (mode == .debug) return equals(arg, "--project-dir") or equals(arg, "--profiles-dir") or equals(arg, "--profile") or equals(arg, "--target");
+    if (mode == .operation and (equals(arg, "--state") or equals(arg, "--defer-state") or equals(arg, "--indirect-selection"))) return false;
     if (equals(arg, "--project-dir") or
         equals(arg, "--profiles-dir") or
         equals(arg, "--profile") or
@@ -573,11 +657,12 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
         return true;
     }
 
+    if (mode == .operation and equals(arg, "--args")) return true;
     switch (mode) {
-        .common_and_select, .compile, .docs_generate, .list, .seed, .test_command, .build, .source_freshness => {
+        .common_and_select, .compile, .docs_generate, .list, .seed, .test_command, .build, .source_freshness, .clone => {
             if (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude")) return true;
         },
-        .common_only, .clean, .docs_serve => {},
+        .common_only, .clean, .docs_serve, .debug, .init, .operation, .retry => {},
     }
 
     if (mode == .list and (equals(arg, "--resource-type") or equals(arg, "--output"))) {
@@ -591,7 +676,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
 }
 
 fn isSelectorOption(arg: []const u8, mode: OptionMode) bool {
-    return mode != .common_only and mode != .clean and mode != .docs_serve and (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude"));
+    return mode != .common_only and mode != .clean and mode != .docs_serve and mode != .debug and mode != .init and mode != .operation and mode != .retry and (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude"));
 }
 
 fn isOptionLike(arg: []const u8) bool {
@@ -599,8 +684,9 @@ fn isOptionLike(arg: []const u8) bool {
 }
 
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
-    if (mode != .common_only and mode != .clean and mode != .docs_serve and (equals(arg, "--defer") or equals(arg, "--no-defer") or equals(arg, "--favor-state") or equals(arg, "--no-favor-state"))) return true;
-    if ((mode == .build or mode == .compile) and equals(arg, "--full-refresh")) return true;
+    if (mode != .common_only and mode != .clean and mode != .docs_serve and mode != .init and mode != .debug and mode != .operation and mode != .clone and mode != .retry and (equals(arg, "--defer") or equals(arg, "--no-defer") or equals(arg, "--favor-state") or equals(arg, "--no-favor-state"))) return true;
+    if ((mode == .build or mode == .compile or mode == .clone) and equals(arg, "--full-refresh")) return true;
+    if (mode == .init and equals(arg, "--skip-profile-setup")) return true;
     if (mode == .docs_serve and (equals(arg, "--browser") or equals(arg, "--no-browser") or equals(arg, "--no-open"))) return true;
     if (mode == .clean and (equals(arg, "--clean-project-files-only") or equals(arg, "--no-clean-project-files-only"))) return true;
     return false;
@@ -613,6 +699,11 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\Data eXecution & Transformation: a dbt-project-compatible transformation engine.
         \\
         \\Commands:
+        \\  debug            Validate project/profile and test the database connection.
+        \\  init             Create a runnable DuckDB project.
+        \\  run-operation    Invoke a project macro with typed arguments.
+        \\  retry            Retry failed and skipped resources from prior results.
+        \\  clone            Create views over prior state relations.
         \\  version          Print the dxt version.
         \\  parse            Parse a supported dbt project subset and emit manifest artifacts.
         \\  ls               List resources from the supported parser graph.

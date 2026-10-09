@@ -1,0 +1,515 @@
+const std = @import("std");
+const types = @import("types.zig");
+const loader = @import("loader.zig");
+const duckdb = @import("duckdb.zig");
+const expression = @import("expression.zig");
+const yaml = @import("yaml.zig");
+const config_values = @import("config_value.zig");
+const adapter = @import("adapter.zig");
+const results = @import("run_results.zig");
+const compiler = @import("compiler.zig");
+const resolve = @import("resolve.zig");
+const selector = @import("selector.zig");
+const Runtime = types.Runtime;
+const Options = types.Options;
+
+pub fn debug(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    _ = stderr;
+    var graph = try loader.loadConnectionGraph(runtime, options);
+    defer graph.deinit();
+    const db_path = try duckdb.databasePath(runtime.allocator, options.project_dir, &graph);
+    defer runtime.allocator.free(db_path);
+    try stdout.writeAll("Project configuration: OK\nProfile configuration: OK\n");
+    try adapter.executeForGraph(runtime, &graph, db_path, "select 1");
+    try stdout.writeAll("Connection test: OK\nAll checks passed\n");
+}
+
+pub fn validProjectName(name: []const u8) bool {
+    if (name.len == 0 or !(std.ascii.isAlphabetic(name[0]) or name[0] == '_')) return false;
+    for (name) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_')) return false;
+    return true;
+}
+
+pub fn initProject(runtime: Runtime, options: Options, stdout: *std.Io.Writer) !void {
+    const name = options.command_name orelse return error.MissingCommandName;
+    if (!validProjectName(name)) return error.InvalidInitName;
+    const allocator = runtime.allocator;
+    const root = try std.fs.path.join(allocator, &.{ options.project_dir, name });
+    const profiles_dir = options.profiles_dir orelse root;
+    const profiles_path = try std.fs.path.join(allocator, &.{ profiles_dir, "profiles.yml" });
+    if (!options.skip_profile_setup) {
+        if (std.Io.Dir.cwd().access(runtime.io, profiles_path, .{})) |_| return error.ProfileAlreadyExists else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+    }
+    std.Io.Dir.cwd().createDir(runtime.io, root, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.ProjectAlreadyExists,
+        else => return err,
+    };
+    errdefer std.Io.Dir.cwd().deleteTree(runtime.io, root) catch {};
+    inline for (.{ "models", "seeds", "macros", "tests" }) |folder| {
+        const path = try std.fs.path.join(allocator, &.{ root, folder });
+        try std.Io.Dir.cwd().createDir(runtime.io, path, .default_dir);
+    }
+    const config = try std.fmt.allocPrint(allocator, "name: {s}\nversion: '1.0.0'\nconfig-version: 2\nprofile: {s}\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntest-paths: ['tests']\nclean-targets: ['target', 'dbt_packages']\nmodels:\n  {s}:\n    +materialized: table\n", .{ name, name, name });
+    try writeProjectFile(runtime, root, "dbt_project.yml", config);
+    try writeProjectFile(runtime, root, "seeds/raw_customers.csv", "id,name\n1,Ada\n2,Grace\n");
+    try writeProjectFile(runtime, root, "models/customers.sql", "select id, name from {{ ref('raw_customers') }}\n");
+    try writeProjectFile(runtime, root, "models/schema.yml", "version: 2\nmodels:\n  - name: customers\n    columns:\n      - name: id\n        data_tests:\n          - not_null\n          - unique\n");
+    try writeProjectFile(runtime, root, ".gitignore", "target/\ndbt_packages/\nlogs/\n*.duckdb\n*.duckdb.wal\n");
+    if (!options.skip_profile_setup) {
+        try std.Io.Dir.cwd().createDirPath(runtime.io, profiles_dir);
+        const profile = try std.fmt.allocPrint(allocator, "{s}:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: {s}.duckdb\n      schema: main\n      threads: 1\n", .{ name, name });
+        var file = try std.Io.Dir.cwd().createFile(runtime.io, profiles_path, .{ .exclusive = true });
+        defer file.close(runtime.io);
+        try file.writeStreamingAll(runtime.io, profile);
+    }
+    try stdout.print("Created project {s}\nRun dxt build --project-dir {s}\n", .{ name, root });
+}
+
+fn writeProjectFile(runtime: Runtime, root: []const u8, name: []const u8, content: []const u8) !void {
+    const path = try std.fs.path.join(runtime.allocator, &.{ root, name });
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = path, .data = content });
+}
+
+pub fn writeResults(runtime: Runtime, target_dir: []const u8, rows: []const results.NodeResult) !void {
+    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
+    const path = try std.fs.path.join(runtime.allocator, &.{ target_dir, "run_results.json" });
+    const content = try results.renderRunResultsForRuntime(runtime, rows);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = path, .data = content });
+}
+
+pub fn operation(runtime: Runtime, options: Options, graph: *types.Graph, target_dir: []const u8, stdout: *std.Io.Writer) !void {
+    const name = options.command_name orelse return error.MissingCommandName;
+    const id = if (std.mem.indexOfScalar(u8, name, '.')) |dot|
+        resolve.findMacroIdByPackageAndName(graph, name[0..dot], name[dot + 1 ..])
+    else
+        resolve.findMacroIdForUnqualifiedNamespaceCall(graph, graph.project_name, name);
+    const macro_id = id orelse return error.UnresolvedMacro;
+    var kwargs = try parseArgs(runtime.allocator, options.command_args orelse "{}");
+    defer config_values.deinit(runtime.allocator, &kwargs);
+    const db_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
+    var context = try OperationHost.init(runtime, graph, db_path, stdout);
+    defer context.deinit();
+    graph.execution_hooks = context.host();
+    defer graph.execution_hooks = null;
+    const output = compiler.renderOperation(runtime, graph, name, kwargs) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        try writeResults(runtime, target_dir, &.{.{ .operation_id = macro_id, .status = "error", .failures = 1 }});
+        return error.OperationFailure;
+    };
+    defer runtime.allocator.free(output);
+    // dbt invokes the macro. Returned SQL is a value, not an executable job.
+    try writeResults(runtime, target_dir, &.{.{ .operation_id = macro_id, .failures = 0 }});
+    try stdout.print("Completed operation {s}\n", .{name});
+}
+
+const StoredValue = struct { name: []const u8, value: expression.Value };
+/// A native SQL host for operation macros and executable compiler contexts.
+/// Results live for the host lifetime, including values retained by load_result.
+pub const OperationHost = struct {
+    runtime: Runtime,
+    graph: *const types.Graph,
+    db_path: []const u8,
+    stdout: *std.Io.Writer,
+    stored: std.ArrayList(StoredValue) = .empty,
+    session: ?adapter.Session = null,
+    owned_pool: ?*adapter.DuckDBPool = null,
+    values: std.heap.ArenaAllocator,
+
+    transaction_open: bool = false,
+
+    pub fn init(runtime: Runtime, graph: *const types.Graph, db_path: []const u8, stdout: *std.Io.Writer) !OperationHost {
+        var self = OperationHost{ .runtime = runtime, .graph = graph, .db_path = db_path, .stdout = stdout, .values = std.heap.ArenaAllocator.init(runtime.allocator) };
+        errdefer self.deinit();
+        if (self.runtime.duckdb_pool == null and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
+            const pool = try runtime.allocator.create(adapter.DuckDBPool);
+            pool.* = adapter.DuckDBPool.init(runtime.allocator, runtime.io, runtime.environment);
+            self.owned_pool = pool;
+            self.runtime.duckdb_pool = pool;
+        }
+        self.session = adapter.openSession(self.runtime, graph, db_path) catch |err| switch (err) {
+            error.NativeDuckDbLibraryNotFound => blk: {
+                if (runtime.environment) |environment| {
+                    if (environment.get("DXT_DUCKDB_LIBRARY") != null) return err;
+                    if (environment.get("DXT_DUCKDB_BACKEND")) |backend| if (std.mem.eql(u8, backend, "native")) return err;
+                }
+                break :blk null;
+            },
+            else => return err,
+        };
+        return self;
+    }
+
+    pub fn host(self: *OperationHost) expression.Host {
+        return .{ .context = self, .resolve = resolveValue, .call = call };
+    }
+
+    pub fn deinit(self: *OperationHost) void {
+        if (self.session) |*session| session.deinit();
+        if (self.owned_pool) |pool| {
+            pool.deinit();
+            self.runtime.allocator.destroy(pool);
+        }
+        self.stored.deinit(self.runtime.allocator);
+        self.values.deinit();
+    }
+
+    fn resolveValue(_: *anyopaque, _: []const u8, _: std.mem.Allocator) anyerror!expression.Value {
+        return .undefined;
+    }
+
+    fn call(raw: *anyopaque, name: []const u8, args: []const expression.Argument, allocator: std.mem.Allocator) anyerror!expression.Value {
+        const self: *OperationHost = @ptrCast(@alignCast(raw));
+        if (std.mem.eql(u8, name, "log") or std.mem.eql(u8, name, "print")) {
+            const message = argument(args, "msg", 0) orelse return error.InvalidJinjaArguments;
+            try self.stdout.print("{s}\n", .{try message.text(allocator)});
+            return .{ .string = "" };
+        }
+        if (std.mem.startsWith(u8, name, "dxt.values.")) {
+            for (self.stored.items) |stored| if (std.mem.eql(u8, name, stored.name)) return stored.value;
+            return error.InvalidJinjaArguments;
+        }
+        if (std.mem.startsWith(u8, name, "dxt.print_table.")) {
+            for (self.stored.items) |stored| if (std.mem.eql(u8, name, stored.name)) {
+                try self.stdout.print("{s}\n", .{try stored.value.text(allocator)});
+                return .none;
+            };
+            return error.InvalidJinjaArguments;
+        }
+        if (std.mem.eql(u8, name, "load_result")) {
+            const key: expression.Value = argument(args, "name", 0) orelse return error.InvalidJinjaArguments;
+            if (key != .string) return error.InvalidJinjaArguments;
+            for (self.stored.items) |stored| if (std.mem.eql(u8, key.string, stored.name)) return stored.value;
+            return .none;
+        }
+        if (std.mem.eql(u8, name, "run_query")) {
+            const sql = argument(args, "sql", 0) orelse return error.InvalidJinjaArguments;
+            if (sql != .string) return error.InvalidJinjaArguments;
+            return self.query(sql.string, allocator);
+        }
+        if (std.mem.eql(u8, name, "statement")) {
+            const sql = argument(args, "caller_sql", args.len) orelse return error.InvalidJinjaArguments;
+            const key: expression.Value = argument(args, "name", 0) orelse .{ .string = "main" };
+            if (sql != .string or key != .string) return error.InvalidJinjaArguments;
+            const auto_begin: expression.Value = argument(args, "auto_begin", 2) orelse .{ .boolean = true };
+            if (auto_begin.truthy() and !self.transaction_open) {
+                const session = if (self.session) |*value| value else return error.NativeDuckDbPoolRequired;
+                try session.begin();
+                self.transaction_open = true;
+            }
+            const table = try self.query(sql.string, allocator);
+            const fetch: expression.Value = argument(args, "fetch_result", 1) orelse .{ .boolean = false };
+            const value: expression.Value = .{ .object = try self.values.allocator().dupe(expression.Entry, &.{
+                .{ .key = "table", .value = if (fetch.truthy()) table else .none },
+                .{ .key = "data", .value = if (fetch.truthy() and table != .none) table.attribute("rows") else .{ .list = &.{} } },
+                .{ .key = "response", .value = .{ .object = &.{} } },
+            }) };
+            try self.stored.append(self.runtime.allocator, .{ .name = try self.values.allocator().dupe(u8, key.string), .value = value });
+            return .{ .string = "" };
+        }
+        if (std.mem.eql(u8, name, "adapter.type")) return .{ .string = self.graph.adapter_type };
+        if (std.mem.eql(u8, name, "adapter.commit") or std.mem.eql(u8, name, "adapter.clear_transaction")) {
+            if (self.transaction_open) {
+                const session = if (self.session) |*value| value else return error.NativeDuckDbPoolRequired;
+                try session.commit();
+                self.transaction_open = false;
+            }
+            return .none;
+        }
+        return error.UnresolvedMacro;
+    }
+
+    fn query(self: *OperationHost, sql: []const u8, _: std.mem.Allocator) !expression.Value {
+        const allocator = self.values.allocator();
+        var output = if (self.session) |*session| try session.query(sql) else try adapter.queryForGraph(self.runtime, self.graph, self.db_path, sql);
+        defer output.deinit(self.runtime.allocator);
+        const trimmed = std.mem.trim(u8, sql, " \t\r\n;");
+        if (std.ascii.eqlIgnoreCase(trimmed, "begin") or std.ascii.eqlIgnoreCase(trimmed, "begin transaction")) self.transaction_open = true;
+        if (std.ascii.eqlIgnoreCase(trimmed, "commit") or std.ascii.eqlIgnoreCase(trimmed, "rollback")) self.transaction_open = false;
+        // Native query results distinguish empty SELECTs from statements.
+        if (output.columns.len == 0) return .none;
+        const rows = try allocator.alloc(expression.Value, output.rows.len);
+        const columns = try allocator.alloc(expression.Value, output.columns.len);
+        const names = try allocator.alloc(expression.Value, output.columns.len);
+        for (output.columns, 0..) |column, column_index| {
+            names[column_index] = .{ .string = try allocator.dupe(u8, column.name) };
+            const values = try allocator.alloc(expression.Value, output.rows.len);
+            for (output.rows, 0..) |row, row_index| values[row_index] = try cellValue(allocator, column.kind, row[column_index]);
+            const method = try std.fmt.allocPrint(allocator, "dxt.values.{d}", .{self.stored.items.len});
+            try self.stored.append(self.runtime.allocator, .{ .name = method, .value = .{ .list = values } });
+            columns[column_index] = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "name", .value = names[column_index] }, .{ .key = "values", .value = .{ .callable = method } } }) };
+        }
+        for (output.rows, rows) |row, *target| {
+            const values = try allocator.alloc(expression.Value, output.columns.len);
+            for (row, output.columns, values) |cell, column, *value| value.* = try cellValue(allocator, column.kind, cell);
+            target.* = .{ .list = values };
+        }
+        const method = try std.fmt.allocPrint(allocator, "dxt.print_table.{d}", .{self.stored.items.len});
+        try self.stored.append(self.runtime.allocator, .{ .name = method, .value = .{ .list = rows } });
+        return .{ .object = try allocator.dupe(expression.Entry, &.{
+            .{ .key = "rows", .value = .{ .list = rows } }, .{ .key = "columns", .value = .{ .list = columns } }, .{ .key = "column_names", .value = .{ .list = names } }, .{ .key = "print_table", .value = .{ .callable = method } },
+        }) };
+    }
+};
+
+fn argument(args: []const expression.Argument, name: []const u8, position: usize) ?expression.Value {
+    var index: usize = 0;
+    for (args) |arg| {
+        if (arg.name) |key| {
+            if (std.mem.eql(u8, name, key)) return arg.value;
+        } else {
+            if (index == position) return arg.value;
+            index += 1;
+        }
+    }
+    return null;
+}
+
+fn cellValue(allocator: std.mem.Allocator, kind: adapter.Kind, cell: ?[]const u8) !expression.Value {
+    const text = cell orelse return .none;
+    return switch (kind) {
+        .boolean => .{ .boolean = std.mem.eql(u8, text, "true") or std.mem.eql(u8, text, "t") or std.mem.eql(u8, text, "1") },
+        .integer, .decimal, .floating => .{ .number = try std.fmt.parseFloat(f64, text) },
+        else => .{ .string = try allocator.dupe(u8, text) },
+    };
+}
+
+pub fn parseArgs(allocator: std.mem.Allocator, text: []const u8) !std.json.Value {
+    var document = yaml.parse(allocator, text) catch return error.InvalidOperationArgs;
+    defer document.deinit();
+    if (document.value != .object) return error.InvalidOperationArgs;
+    return config_values.clone(allocator, document.value);
+}
+
+pub const RetryPlan = struct { options: Options, count: usize };
+
+pub fn prepareRetry(runtime: Runtime, current: Options, default_state_dir: []const u8) !RetryPlan {
+    const path = try std.fs.path.join(runtime.allocator, &.{ current.state orelse default_state_dir, "run_results.json" });
+    const text = std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return error.MissingRunResultsArtifact,
+        else => return err,
+    };
+    defer runtime.allocator.free(text);
+    return parseRetry(runtime.allocator, text, current);
+}
+
+pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Options) !RetryPlan {
+    var status_index = try results.parseResultStatusIndex(allocator, text);
+    defer status_index.deinit(allocator);
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, text, .{}) catch return error.MalformedRunResultsArtifact;
+    defer parsed.deinit();
+    const args_value = parsed.value.object.get("args") orelse return error.MissingRetryCommand;
+    if (args_value != .object) return error.MissingRetryCommand;
+    const args = args_value.object;
+    const which_value = args.get("which") orelse return error.MissingRetryCommand;
+    if (which_value != .string or which_value.string.len == 0) return error.MissingRetryCommand;
+    const which = try allocator.dupe(u8, which_value.string);
+    var options = current;
+    options.which = which;
+    inline for (.{ "profile", "target", "state", "defer_state", "select", "selector", "exclude" }) |field| {
+        if (args.get(field)) |value| @field(options, field) = try optionText(allocator, value, std.mem.eql(u8, field, "select") or std.mem.eql(u8, field, "exclude"));
+    }
+    if (current.vars == null) if (args.get("vars")) |value| {
+        options.vars = try optionText(allocator, value, false);
+    };
+    if (current.threads == null) if (args.get("threads")) |value| {
+        options.threads = try optionText(allocator, value, false);
+    };
+    if (args.get("full_refresh")) |value| {
+        if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
+        options.full_refresh = value == .bool and value.bool;
+    }
+    inline for (.{ .{ "defer", "defer_enabled" }, .{ "favor_state", "favor_state" } }) |field| {
+        if (args.get(field[0])) |value| {
+            if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
+            @field(options, field[1]) = value == .bool and value.bool;
+        }
+    }
+    if (args.get("indirect_selection")) |value| {
+        if (value != .string) return error.MalformedRunResultsArtifact;
+        options.indirect_selection = try allocator.dupe(u8, value.string);
+    }
+    options.command_name = if (args.get("macro") orelse args.get("command_name")) |value| try optionText(allocator, value, false) else null;
+    options.command_args = if (args.get("args") orelse args.get("command_args")) |value| try optionText(allocator, value, false) else null;
+    var ids: std.ArrayList([]const u8) = .empty;
+    defer ids.deinit(allocator);
+    var exact_ids: std.ArrayList([]const u8) = .empty;
+    defer exact_ids.deinit(allocator);
+    var count: usize = 0;
+    for (status_index.rows) |row| {
+        if (!isRetryableStatus(row.status)) continue;
+        if (std.mem.startsWith(u8, row.unique_id, "operation.") and !std.mem.eql(u8, which, "run-operation")) continue;
+        const dot = std.mem.indexOfScalar(u8, row.unique_id, '.') orelse return error.MalformedRunResultsArtifact;
+        try ids.append(allocator, try std.fmt.allocPrint(allocator, "{s},resource_type:{s}", .{ row.unique_id, row.unique_id[0..dot] }));
+        try exact_ids.append(allocator, try allocator.dupe(u8, row.unique_id));
+        count += 1;
+    }
+    options.execution_select = try std.mem.join(allocator, " ", ids.items);
+    options.execution_ids = try exact_ids.toOwnedSlice(allocator);
+    return .{ .options = options, .count = count };
+}
+
+pub fn isRetryableStatus(status: []const u8) bool {
+    for ([_][]const u8{ "error", "fail", "skipped", "runtime error", "partial success" }) |candidate| if (std.mem.eql(u8, status, candidate)) return true;
+    return false;
+}
+
+fn optionText(allocator: std.mem.Allocator, value: std.json.Value, selector_list: bool) !?[]const u8 {
+    if (value == .null) return null;
+    if (value == .string) return try allocator.dupe(u8, value.string);
+    if (selector_list and value == .array) {
+        var strings: std.ArrayList([]const u8) = .empty;
+        defer strings.deinit(allocator);
+        for (value.array.items) |item| {
+            if (item != .string) return error.MalformedRunResultsArtifact;
+            try strings.append(allocator, item.string);
+        }
+        if (strings.items.len == 0) return null;
+        return try std.mem.join(allocator, " ", strings.items);
+    }
+    return try std.json.Stringify.valueAlloc(allocator, value, .{});
+}
+
+pub fn cloneRelations(runtime: Runtime, options: Options, graph: *types.Graph, selected: []const selector.SelectedResource, target_dir: []const u8, stdout: *std.Io.Writer) !void {
+    const state_dir = options.state orelse return error.MissingCloneState;
+    const path = try std.fs.path.join(runtime.allocator, &.{ state_dir, "manifest.json" });
+    const text = std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return error.MissingStateManifestArtifact,
+        else => return err,
+    };
+    defer runtime.allocator.free(text);
+    var parsed = std.json.parseFromSlice(std.json.Value, runtime.allocator, text, .{}) catch return error.MalformedStateManifestArtifact;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.MalformedStateManifestArtifact;
+    const metadata = parsed.value.object.get("metadata") orelse return error.MalformedStateManifestArtifact;
+    if (metadata != .object) return error.MalformedStateManifestArtifact;
+    const version = metadata.object.get("dbt_schema_version") orelse return error.MalformedStateManifestArtifact;
+    if (version != .string) return error.MalformedStateManifestArtifact;
+    if (!std.mem.eql(u8, version.string, "https://schemas.getdbt.com/dbt/manifest/v12.json")) return error.UnsupportedStateManifestSchemaVersion;
+    const nodes = parsed.value.object.get("nodes") orelse return error.MalformedStateManifestArtifact;
+    if (nodes != .object) return error.MalformedStateManifestArtifact;
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
+    const db_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
+    var rows: std.ArrayList(results.NodeResult) = .empty;
+    defer rows.deinit(runtime.allocator);
+    var failed = false;
+    for (graph.nodes.items) |*node| {
+        if (!node.enabled or std.mem.eql(u8, node.materialized, "ephemeral")) continue;
+        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot")) continue;
+        var chosen = false;
+        for (selected) |item| if (std.mem.eql(u8, item.unique_id, node.unique_id)) {
+            chosen = true;
+            break;
+        };
+        if (!chosen) continue;
+        cloneOne(runtime, options, graph, node, nodes.object.get(node.unique_id), db_path) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            failed = true;
+            try rows.append(runtime.allocator, .{ .node = node, .status = "error", .message = "DuckDB execution failed" });
+            continue;
+        };
+        try rows.append(runtime.allocator, .{ .node = node, .message = "OK" });
+    }
+    try writeResults(runtime, target_dir, rows.items);
+    try stdout.print("Cloned {d} relation(s)\n", .{rows.items.len});
+    if (failed) return error.ExecutionFailure;
+}
+
+fn cloneOne(runtime: Runtime, options: Options, graph: *const types.Graph, node: *types.Node, prior_value: ?std.json.Value, db_path: []const u8) !void {
+    const allocator = runtime.allocator;
+    const schema = try compiler.relationSchemaForNode(allocator, graph, node);
+    const target = try compiler.relationNameForNode(allocator, graph, node);
+    const database = std.fs.path.stem(std.fs.path.basename(db_path));
+    if (std.mem.eql(u8, node.resource_type, "model")) {
+        node.compiled = false;
+        node.compiled_code = null;
+        node.relation_name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ try compiler.quoteIdentifier(allocator, database), target });
+    }
+    const prior = prior_value orelse return;
+    if (prior != .object) return error.MalformedStateManifestArtifact;
+    if (prior.object.get("relation_name")) |relation_value| {
+        if (relation_value == .null) return;
+    }
+    const schema_value = prior.object.get("schema") orelse return error.MalformedStateManifestArtifact;
+    const alias_value = prior.object.get("alias") orelse return error.MalformedStateManifestArtifact;
+    if (schema_value != .string or alias_value != .string) return error.MalformedStateManifestArtifact;
+    const quoted_schema = try compiler.quoteIdentifier(allocator, schema);
+    const prior_schema = try compiler.quoteIdentifier(allocator, schema_value.string);
+    const prior_alias = try compiler.quoteIdentifier(allocator, alias_value.string);
+    const database_value = prior.object.get("database") orelse .null;
+    const source = if (database_value == .string)
+        try std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{ try compiler.quoteIdentifier(allocator, database_value.string), prior_schema, prior_alias })
+    else
+        try std.fmt.allocPrint(allocator, "{s}.{s}", .{ prior_schema, prior_alias });
+    const sql = try std.fmt.allocPrint(allocator, "select * from {s}", .{source});
+    // Avoid a self-referential replacement when source and destination coincide.
+    if (std.mem.eql(u8, schema, schema_value.string) and std.mem.eql(u8, compiler.relationIdentifierForNode(node), alias_value.string)) return;
+    const lookup = try std.fmt.allocPrint(allocator, "select table_type from information_schema.tables where table_schema = {s} and table_name = {s}", .{ try sqlLiteral(allocator, schema), try sqlLiteral(allocator, compiler.relationIdentifierForNode(node)) });
+    var existing_result = try adapter.queryForGraph(runtime, graph, db_path, lookup);
+    defer existing_result.deinit(allocator);
+    const existing_json = try existing_result.json(allocator);
+    defer allocator.free(existing_json);
+    var existing = std.json.parseFromSlice(std.json.Value, allocator, if (std.mem.trim(u8, existing_json, " \t\r\n").len == 0) "[]" else existing_json, .{}) catch return error.DuckDbExecutionFailed;
+    defer existing.deinit();
+    if (existing.value != .array) return error.DuckDbExecutionFailed;
+    const exists = existing.value.array.items.len != 0;
+    if (exists and !options.full_refresh) return;
+    const drop = if (exists) blk: {
+        const kind = existing.value.array.items[0].object.get("table_type") orelse return error.DuckDbExecutionFailed;
+        break :blk try std.fmt.allocPrint(allocator, "drop {s} {s};\n", .{ if (kind == .string and std.mem.eql(u8, kind.string, "VIEW")) "view" else "table", target });
+    } else "";
+    const create = try std.fmt.allocPrint(allocator, "begin;\ncreate schema if not exists {s};\n{s}create view {s} as {s};\ncommit;", .{ quoted_schema, drop, target, sql });
+    try adapter.executeForGraph(runtime, graph, db_path, create);
+}
+
+fn sqlLiteral(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(allocator, '\'');
+    for (value) |c| {
+        try out.append(allocator, c);
+        if (c == '\'') try out.append(allocator, c);
+    }
+    try out.append(allocator, '\'');
+    return try out.toOwnedSlice(allocator);
+}
+
+test "retry statuses follow the pinned dbt task contract" {
+    for ([_][]const u8{ "error", "fail", "skipped", "runtime error", "partial success" }) |status| try std.testing.expect(isRetryableStatus(status));
+    for ([_][]const u8{ "success", "pass", "warn" }) |status| try std.testing.expect(!isRetryableStatus(status));
+}
+
+test "initialization names never escape the new project directory" {
+    try std.testing.expect(validProjectName("analytics_42"));
+    for ([_][]const u8{ "", "../existing", "a/b", ".", "1project", "hyphen-name" }) |name| try std.testing.expect(!validProjectName(name));
+}
+
+test "retry restores typed Core arguments while excluding successful IDs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const text =
+        \\{"metadata":{"dbt_schema_version":"https://schemas.getdbt.com/dbt/run-results/v6.json"},"args":{"which":"run","select":["broken+","independent"],"exclude":[],"target":"prod","vars":{"limit":7},"threads":2},"results":[{"unique_id":"model.retry.broken","status":"error"},{"unique_id":"model.retry.child","status":"skipped"},{"unique_id":"model.retry.independent","status":"success"}]}
+    ;
+    const plan = try parseRetry(allocator, text, .{ .project_dir = "project", .profiles_dir = "profiles", .threads = "4" });
+    try std.testing.expectEqualStrings("run", plan.options.which);
+    try std.testing.expectEqualStrings("prod", plan.options.target.?);
+    try std.testing.expectEqualStrings("4", plan.options.threads.?);
+    try std.testing.expectEqualStrings("broken+ independent", plan.options.select.?);
+    try std.testing.expectEqual(@as(usize, 2), plan.count);
+    try std.testing.expectEqualStrings("model.retry.broken", plan.options.execution_ids.?[0]);
+    try std.testing.expectEqualStrings("model.retry.child", plan.options.execution_ids.?[1]);
+    const vars = try parseArgs(allocator, plan.options.vars.?);
+    try std.testing.expectEqual(@as(i64, 7), vars.object.get("limit").?.integer);
+}
+
+test "operation args parse nested YAML with native owned documents" {
+    const allocator = std.testing.allocator;
+    var value = try parseArgs(allocator, "n: 7\nflags:\n  enabled: true\nnames: [Ada, Grace]\n");
+    defer config_values.deinit(allocator, &value);
+    try std.testing.expectEqual(@as(i64, 7), value.object.get("n").?.integer);
+    try std.testing.expect(value.object.get("flags").?.object.get("enabled").?.bool);
+    try std.testing.expectEqualStrings("Ada", value.object.get("names").?.array.items[0].string);
+    try std.testing.expectError(error.InvalidOperationArgs, parseArgs(allocator, "[]"));
+}

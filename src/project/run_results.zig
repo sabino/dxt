@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const project_fs = @import("fs.zig");
 const json = @import("json.zig");
+const yaml = @import("yaml.zig");
 const types = @import("types.zig");
 
 const Node = types.Node;
@@ -12,6 +13,7 @@ const Runtime = types.Runtime;
 const clock = @import("execution_clock.zig");
 
 pub const NodeResult = struct {
+    operation_id: ?[]const u8 = null,
     node: ?*const Node = null,
     test_node: ?*const GenericTestNode = null,
     singular_test_node: ?*const SingularTestNode = null,
@@ -120,10 +122,22 @@ pub fn isSupportedResultSelectorStatus(status: []const u8) bool {
 }
 
 pub fn renderRunResults(allocator: std.mem.Allocator, results: []const NodeResult) ![]const u8 {
-    return renderRunResultsWithInvocation(allocator, results, null);
+    return renderRunResultsWithContext(allocator, results, null, null);
+}
+
+pub fn renderRunResultsForRuntime(runtime: Runtime, results: []const NodeResult) ![]const u8 {
+    return renderRunResultsWithContext(runtime.allocator, results, runtime.invocation_options, runtime.invocation);
 }
 
 pub fn renderRunResultsWithInvocation(allocator: std.mem.Allocator, results: []const NodeResult, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
+    return renderRunResultsWithContext(allocator, results, null, metadata);
+}
+
+pub fn renderRunResultsWithArgs(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options) ![]const u8 {
+    return renderRunResultsWithContext(allocator, results, options, null);
+}
+
+fn renderRunResultsWithContext(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
@@ -136,7 +150,9 @@ pub fn renderRunResultsWithInvocation(allocator: std.mem.Allocator, results: []c
         if (index != 0) try writer.writeAll(",");
         try writeResult(writer, result);
     }
-    try writer.print("\n  ],\n  \"elapsed_time\": {d}\n}}\n", .{if (metadata) |value| value.elapsed() else @as(f64, 0)});
+    try writer.print("\n  ],\n  \"elapsed_time\": {d},\n  \"args\": ", .{if (metadata) |value| value.elapsed() else @as(f64, 0)});
+    try writeArgs(writer, allocator, options);
+    try writer.writeAll("\n}\n");
     return try out.toOwnedSlice();
 }
 
@@ -148,6 +164,64 @@ fn writeTiming(writer: *Io.Writer, name: []const u8, start: ?i96, finish: ?i96) 
     try writer.writeAll(", \"completed_at\": ");
     try clock.writeTimestamp(writer, finish);
     try writer.writeByte('}');
+}
+
+fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const types.Options) !void {
+    const opts = options orelse {
+        try writer.writeAll("{}");
+        return;
+    };
+    try writer.writeAll("{\"which\":");
+    try json.string(writer, opts.which);
+    inline for (.{ "profile", "target", "state", "defer_state", "selector" }) |key| {
+        try writer.print(",\"{s}\":", .{key});
+        if (@field(opts, key)) |value| try json.string(writer, value) else try writer.writeAll("null");
+    }
+    inline for (.{ "select", "exclude" }) |key| {
+        try writer.print(",\"{s}\":", .{key});
+        if (std.mem.eql(u8, opts.which, "run-operation")) {
+            try writer.writeAll("null");
+        } else {
+            try writer.writeByte('[');
+            if (@field(opts, key)) |value| {
+                var parts = std.mem.tokenizeAny(u8, value, " \t\r\n");
+                var first = true;
+                while (parts.next()) |part| {
+                    if (!first) try writer.writeByte(',');
+                    first = false;
+                    try json.string(writer, part);
+                }
+            }
+            try writer.writeByte(']');
+        }
+    }
+    try writer.writeAll(",\"vars\":");
+    try writeMapping(writer, allocator, opts.vars);
+    try writer.writeAll(",\"threads\":");
+    if (opts.threads) |value| {
+        const threads = std.fmt.parseInt(u32, value, 10) catch return error.InvalidOption;
+        if (threads == 0) return error.InvalidOption;
+        try writer.print("{d}", .{threads});
+    } else try writer.writeAll("null");
+    try writer.print(",\"full_refresh\":{s}", .{if (opts.full_refresh) "true" else "false"});
+    try writer.print(",\"defer\":{s},\"favor_state\":{s},\"indirect_selection\":", .{ if (opts.defer_enabled) "true" else "false", if (opts.favor_state) "true" else "false" });
+    try json.string(writer, opts.indirect_selection);
+    if (std.mem.eql(u8, opts.which, "run-operation")) {
+        try writer.writeAll(",\"macro\":");
+        if (opts.command_name) |value| try json.string(writer, value) else try writer.writeAll("null");
+        try writer.writeAll(",\"args\":");
+        try writeMapping(writer, allocator, opts.command_args);
+    }
+    try writer.writeAll("}");
+}
+
+fn writeMapping(writer: *Io.Writer, allocator: std.mem.Allocator, text: ?[]const u8) !void {
+    if (text) |value| {
+        var document = try yaml.parse(allocator, value);
+        defer document.deinit();
+        if (document.value != .object) return error.InvalidOperationArgs;
+        try std.json.Stringify.value(document.value, .{}, writer);
+    } else try writer.writeAll("{}");
 }
 
 fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
@@ -198,7 +272,9 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     try json.string(writer, resultUniqueId(result));
     try writer.writeAll(", \"compiled\": ");
     const skipped = std.mem.eql(u8, result.status, "skipped");
-    if (skipped) {
+    if (result.operation_id != null) {
+        try writer.writeAll("false");
+    } else if (skipped) {
         if (result.test_node != null or result.singular_test_node != null) {
             try writer.writeAll("false");
         } else if (result.node) |node| {
@@ -237,6 +313,7 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
 }
 
 fn resultUniqueId(result: NodeResult) []const u8 {
+    if (result.operation_id) |id| return id;
     if (result.node) |node| return node.unique_id;
     if (result.test_node) |test_node| return test_node.unique_id;
     if (result.singular_test_node) |test_node| return test_node.unique_id;

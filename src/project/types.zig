@@ -9,9 +9,16 @@ pub const Runtime = struct {
     invocation: ?*const @import("invocation.zig").Metadata = null,
     duckdb_pool: ?*@import("native_duckdb.zig").Pool = null,
     adapter_session: ?*@import("adapter.zig").Session = null,
+    invocation_options: ?*const Options = null,
 };
 
 pub const Options = struct {
+    which: []const u8 = "",
+    command_name: ?[]const u8 = null,
+    command_args: ?[]const u8 = null,
+    skip_profile_setup: bool = false,
+    execution_select: ?[]const u8 = null,
+    execution_ids: ?[]const []const u8 = null,
     project_dir: []const u8 = ".",
     profiles_dir: ?[]const u8 = null,
     profile: ?[]const u8 = null,

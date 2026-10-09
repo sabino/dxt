@@ -60,6 +60,25 @@ pub fn graphDefaultTarget(runtime: Runtime, project_dir: []const u8) ![]const u8
     return config.target_path;
 }
 
+/// Connection diagnostics deliberately do not parse model SQL or packages.
+pub fn loadConnectionGraph(runtime: Runtime, options: Options) !Graph {
+    var config = try loadProjectConfig(runtime, options.project_dir);
+    defer deinitProjectConfig(runtime.allocator, &config);
+    var graph = Graph{ .allocator = runtime.allocator, .environment = runtime.environment, .invocation = runtime.invocation, .project_name = config.name };
+    errdefer graph.deinit();
+    const identity = (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) orelse return error.MissingProfileFile;
+    graph.adapter_type = identity.adapter_type;
+    graph.target_schema = identity.target_schema;
+    graph.database_path = identity.database_path;
+    graph.database_path_base = identity.database_path_base;
+    graph.connection_info = identity.connection_info;
+    graph.target_context = identity.target_context;
+    graph.target_threads = identity.threads;
+    graph.profile_name = identity.profile_name;
+    graph.target_name = identity.target_name;
+    return graph;
+}
+
 pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Graph {
     var cli_vars: std.ArrayList(types.VarEntry) = .empty;
     defer types.deinitVars(runtime.allocator, &cli_vars);
