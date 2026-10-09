@@ -214,6 +214,31 @@ const Parser = struct {
                 lhs = .{ .boolean = if (negate) !result else result };
                 continue;
             }
+            if (comparisonOperator(operator)) {
+                var previous = lhs;
+                var comparison = operator;
+                var matched = true;
+                while (true) {
+                    const previous_active = self.active;
+                    if (!matched) self.active = false;
+                    const right = self.binary(4) catch |err| {
+                        self.active = previous_active;
+                        return err;
+                    };
+                    self.active = previous_active;
+                    if (self.active and matched) matched = (try apply(self.allocator, comparison, previous, right)).truthy();
+                    previous = right;
+                    const next_at = self.index;
+                    const next = self.readOperator() orelse break;
+                    if (!comparisonOperator(next)) {
+                        self.index = next_at;
+                        break;
+                    }
+                    comparison = next;
+                }
+                lhs = if (self.active) .{ .boolean = matched } else .none;
+                continue;
+            }
             const previous_active = self.active;
             const short = (std.mem.eql(u8, operator, "and") and !lhs.truthy()) or (std.mem.eql(u8, operator, "or") and lhs.truthy());
             if (short) self.active = false;
@@ -234,7 +259,10 @@ const Parser = struct {
     }
 
     fn readOperator(self: *Parser) ?[]const u8 {
-        for ([_][]const u8{ "or", "and", "not in", "in", "is", "==", "!=", "<=", ">=", "<", ">", "~", "+", "-", "//", "**", "*", "/", "%" }) |op| {
+        const saved = self.index;
+        if (self.take("not") and self.take("in")) return "not in";
+        self.index = saved;
+        for ([_][]const u8{ "or", "and", "in", "is", "==", "!=", "<=", ">=", "<", ">", "~", "+", "-", "//", "**", "*", "/", "%" }) |op| {
             if (self.take(op)) return op;
         }
         return null;
@@ -724,6 +752,10 @@ fn expressionFinish(input: []const u8, start: usize) usize {
 
 fn ident(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
+}
+fn comparisonOperator(op: []const u8) bool {
+    for ([_][]const u8{ "==", "!=", "<=", ">=", "<", ">", "in", "not in" }) |candidate| if (std.mem.eql(u8, op, candidate)) return true;
+    return false;
 }
 fn rank(op: []const u8) u8 {
     if (std.mem.eql(u8, op, "or")) return 1;
@@ -1223,4 +1255,14 @@ test "power follows Core Jinja precedence, associativity and lazy evaluation" {
     try std.testing.expectEqual(@as(f64, 0.5), (try evaluate(a, "2 ** -1", null)).number);
     try std.testing.expect(!(try evaluate(a, "false and 0 ** -1", null)).truthy());
     try std.testing.expectError(error.JinjaDivisionByZero, evaluate(a, "0 ** -1", null));
+}
+
+test "chained comparisons retain adjacent operands and skip later effects" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evaluate(a, "3 > 2 > 1", null)).truthy());
+    try std.testing.expect(!(try evaluate(a, "3 > 2 < 1", null)).truthy());
+    try std.testing.expect(!(try evaluate(a, "1 > 2 > (1 / 0)", null)).truthy());
+    try std.testing.expect((try evaluate(a, "1 not   in [2,3]", null)).truthy());
 }

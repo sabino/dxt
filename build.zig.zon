@@ -11,6 +11,7 @@
         "vendor/libyaml",
         "vendor/libpg_query",
         "vendor/dbt-docs",
+        "vendor/dbt-includes",
         "README.md",
         "PLAN.md",
         "AGENTS.md",
