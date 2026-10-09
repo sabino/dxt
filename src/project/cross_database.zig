@@ -134,6 +134,7 @@ pub const QueryOutcome = @import("cross_database_query.zig").QueryOutcome;
 pub const QueryPlan = @import("cross_database_query.zig").QueryPlan;
 pub const planQuery = @import("cross_database_query.zig").planQuery;
 pub const query = @import("cross_database_query.zig").query;
+pub const executeQueryPlan = @import("cross_database_query.zig").executeQueryPlan;
 
 pub fn command(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     var arena = std.heap.ArenaAllocator.init(runtime.allocator);

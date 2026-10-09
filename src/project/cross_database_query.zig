@@ -109,6 +109,13 @@ pub fn query(runtime: Runtime, project_dir: []const u8, options: QueryOptions, s
     defer plan.deinit();
     for (plan.value.models) |model| if (model.denied != null) return error.CrossDatabasePolicyDenied;
     if (options.policy.plan_hash) |hash| if (!std.mem.eql(u8, hash, plan.value.hash)) return error.CrossDatabasePlanChanged;
+    return executeQueryPlan(runtime, &plan);
+}
+
+/// Execute one already-reviewed physical query plan, retaining its exact hash
+/// and JSON. The document must remain alive until this call returns.
+pub fn executeQueryPlan(runtime: Runtime, plan: *QueryPlan) !QueryOutcome {
+    for (plan.value.models) |model| if (model.denied != null) return error.CrossDatabasePolicyDenied;
     const json = try plan.json(runtime.allocator);
     errdefer runtime.allocator.free(json);
     const arena_runtime: Runtime = .{ .allocator = plan.arena.allocator(), .io = runtime.io, .environment = runtime.environment };
