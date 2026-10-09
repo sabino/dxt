@@ -75,6 +75,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         graph.target_schema = identity.target_schema;
         graph.database_path = identity.database_path;
         graph.database_path_base = identity.database_path_base;
+        graph.connection_info = identity.connection_info;
         graph.profile_name = identity.profile_name;
         graph.target_name = identity.target_name;
     }

@@ -1,0 +1,251 @@
+"""Actual native-library conformance; Python only drives developer fixtures."""
+from __future__ import annotations
+
+import ctypes.util
+import importlib.util
+import json
+import os
+import subprocess
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+DXT = ROOT / "zig-out" / "bin" / "dxt"
+CERTIFY = os.environ.get("DXT_NATIVE_ADAPTER_CERTIFY") == "1"
+
+
+@pytest.fixture(scope="module")
+def driver(tmp_path_factory):
+    output = tmp_path_factory.mktemp("native-driver") / "adapter-driver"
+    compiled = subprocess.run(
+        ["zig", "build-exe", "-lc", "--dep", "adapter",
+         "-Mroot=tests/native_adapter_driver.zig", "-Madapter=src/project/adapter.zig",
+         f"-femit-bin={output}"],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    built = subprocess.run(["zig", "build"], cwd=ROOT, text=True, capture_output=True)
+    assert built.returncode == 0, built.stderr
+    return output
+
+
+@pytest.fixture(scope="module")
+def duckdb_environment():
+    library = os.environ.get("DXT_DUCKDB_LIBRARY") or ctypes.util.find_library("duckdb")
+    if not library:
+        if CERTIFY:
+            pytest.fail("Native certification requires DXT_DUCKDB_LIBRARY")
+        pytest.skip("Native DuckDB fixture requires libduckdb")
+    return dict(os.environ, DXT_DUCKDB_LIBRARY=library, DXT_DUCKDB_BACKEND="native")
+
+
+@pytest.fixture(scope="module")
+def postgres_fixture(tmp_path_factory):
+    if importlib.util.find_spec("pgserver") is None:
+        if CERTIFY:
+            pytest.fail("Native certification requires pinned pgserver developer fixture")
+        pytest.skip("Native PostgreSQL fixture requires pgserver")
+    import pgserver
+    with pgserver.get_server(tmp_path_factory.mktemp("native-postgres") / "data") as server:
+        environment = dict(os.environ, DXT_TEST_POSTGRES_CONNINFO=server.get_uri())
+        yield server, environment
+
+
+def invoke(driver, adapter, mode, database, environment, sql=None):
+    arguments = [str(driver), adapter, mode, str(database)]
+    if sql is not None:
+        arguments.append(sql)
+    return subprocess.run(arguments, cwd=ROOT, env=environment,
+                          capture_output=True, text=True, timeout=15)
+
+
+def decoded(result):
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout, parse_float=Decimal)
+
+
+@pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
+def test_actual_native_types_nulls_quoted_names_and_exact_numeric_values(
+    driver, tmp_path, request, adapter
+):
+    environment = (request.getfixturevalue("duckdb_environment") if adapter == "duckdb"
+                   else request.getfixturevalue("postgres_fixture")[1])
+    result = invoke(driver, adapter, "query", tmp_path / "typed.duckdb", environment,
+                    "select 9223372036854775807::bigint as id, true as enabled, "
+                    "null::text as missing, 'O''Brien' as \"quoted\"\"name\", "
+                    "1234567890123456.7890::decimal(20,4) as amount, "
+                    "date '2024-02-29' as day")
+    assert decoded(result) == [{"id": 9223372036854775807, "enabled": True,
+                               "missing": None, 'quoted"name': "O'Brien",
+                               "amount": Decimal("1234567890123456.7890"), "day": "2024-02-29"}]
+
+
+@pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
+def test_actual_native_transactions_introspection_and_error_recovery(
+    driver, tmp_path, request, adapter
+):
+    environment = (request.getfixturevalue("duckdb_environment") if adapter == "duckdb"
+                   else request.getfixturevalue("postgres_fixture")[1])
+    capabilities = decoded(invoke(driver, adapter, "conformance", tmp_path / "transaction.duckdb", environment))
+    assert capabilities["transactions"] is True
+    assert capabilities["transactional_ddl"] is True
+    assert capabilities["schemas"] is True
+    assert capabilities["cancellation"] is True
+    assert capabilities["concurrent_connections"] is True
+    assert capabilities["merge"] is True
+    assert capabilities["savepoints"] is (adapter == "postgres")
+    assert capabilities["catalogs"] is (adapter == "duckdb")
+    assert capabilities["replace_table"] is (adapter == "duckdb")
+
+
+@pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
+def test_actual_native_cancellation_and_reusable_connection(driver, tmp_path, request, adapter):
+    environment = (request.getfixturevalue("duckdb_environment") if adapter == "duckdb"
+                   else request.getfixturevalue("postgres_fixture")[1])
+    assert decoded(invoke(driver, adapter, "cancel", tmp_path / "cancel.duckdb", environment)) == {
+        "cancelled": True, "connection_recovered": True,
+    }
+
+
+def test_shared_duckdb_database_supports_simultaneous_writers(driver, tmp_path, duckdb_environment):
+    assert decoded(invoke(driver, "duckdb", "pool", tmp_path / "shared.duckdb", duckdb_environment)) == {
+        "shared_pool": True, "concurrent_writers": True,
+    }
+
+
+def test_native_transaction_script_preserves_selected_result_through_rollback(
+    driver, tmp_path, duckdb_environment
+):
+    database = tmp_path / "rollback.duckdb"
+    sql = "begin; create table fixture as select 17 as id; select count(*) as failures from fixture where id <> 17; rollback"
+    assert decoded(invoke(driver, "duckdb", "query", database, duckdb_environment, sql)) == [{"failures": 0}]
+    assert decoded(invoke(driver, "duckdb", "query", database, duckdb_environment,
+                          "select count(*) as n from information_schema.tables where table_name='fixture'")) == [{"n": 0}]
+
+
+@pytest.mark.parametrize("sql", ["insert into guard values (1)", "select nextval('native_sequence')",
+                                  "explain analyze insert into guard values (1)"])
+def test_pooled_native_readonly_queries_cannot_write(driver, tmp_path, duckdb_environment, sql):
+    database = tmp_path / "readonly.duckdb"
+    result = invoke(driver, "duckdb", "readonly", database, duckdb_environment, sql)
+    assert result.returncode == 1
+    assert result.stderr in {"error: DuckDbExecutionFailed\n", "error: NativeDuckDbReadOnlyConnection\n"}
+    assert decoded(invoke(driver, "duckdb", "query", database, duckdb_environment,
+                          "select count(*) as n from guard")) == [{"n": 0}]
+
+
+def test_native_readonly_zero_rows_preserve_empty_result(driver, tmp_path, duckdb_environment):
+    assert decoded(invoke(driver, "duckdb", "readonly", tmp_path / "readonly.duckdb", duckdb_environment,
+                          "select id from guard where false")) == []
+
+
+def test_postgres_profile_environment_credentials_feed_actual_native_query(
+    driver, tmp_path, postgres_fixture
+):
+    server, environment = postgres_fixture
+    info = server.get_postmaster_info()
+    secret = "synthetic-profile-secret-a'b\\c"
+    environment = dict(environment, DXT_TEST_PG_HOST=str(info.socket_dir),
+                       DXT_TEST_PG_PORT=str(info.port), DXT_TEST_PG_USER="postgres", DXT_TEST_PG_SECRET=secret)
+    (tmp_path / "profiles.yml").write_text("""native_demo:
+  target: native
+  outputs:
+    native:
+      type: postgres
+      schema: public
+      host: "{{ env_var('DXT_TEST_PG_HOST') }}"
+      port: "{{ env_var('DXT_TEST_PG_PORT') }}"
+      dbname: postgres
+      user: "{{ env_var('DXT_TEST_PG_USER') }}"
+      password: "{{ env_var('DXT_TEST_PG_SECRET') }}"
+""")
+    result = invoke(driver, "postgres", "profile", tmp_path, environment,
+                    "select current_user as role, current_database() as database")
+    assert decoded(result) == [{"role": "postgres", "database": "postgres"}]
+    assert secret not in result.stdout + result.stderr
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_postgres_failure_diagnostics_never_echo_connection_credentials(driver, tmp_path, postgres_fixture):
+    _, environment = postgres_fixture
+    secret = "synthetic-connection-secret"
+    environment = dict(environment, DXT_TEST_POSTGRES_CONNINFO=f"host=127.0.0.1 port=1 password={secret} connect_timeout=1")
+    result = invoke(driver, "postgres", "query", tmp_path, environment, "select 1")
+    assert result.returncode == 1
+    assert result.stderr == "error: PostgresConnectionFailed\n"
+    assert secret not in result.stdout + result.stderr
+
+
+def test_postgres_server_notices_do_not_escape_native_result_channel(driver, tmp_path, postgres_fixture):
+    environment = postgres_fixture[1]
+    secret = "synthetic-notice-secret"
+    result = invoke(driver, "postgres", "query", tmp_path, environment,
+                    f"do $$ begin raise notice '{secret}'; end $$; select 1 as id")
+    assert decoded(result) == [{"id": 1}]
+    assert result.stderr == ""
+
+
+def test_explicit_missing_native_library_fails_closed(driver, tmp_path):
+    environment = dict(os.environ, DXT_DUCKDB_LIBRARY=str(tmp_path / "unavailable-library"), DXT_DUCKDB_BACKEND="native")
+    result = invoke(driver, "duckdb", "query", tmp_path / "missing.duckdb", environment, "select 1")
+    assert result.returncode == 1
+    assert result.stderr == "error: NativeDuckDbLibraryNotFound\n"
+    assert not (tmp_path / "missing.duckdb").exists()
+
+
+def test_explicit_missing_postgres_library_fails_closed(driver, tmp_path):
+    environment = dict(os.environ, DXT_POSTGRES_LIBRARY=str(tmp_path / "unavailable-library"),
+                       DXT_TEST_POSTGRES_CONNINFO="dbname=postgres")
+    result = invoke(driver, "postgres", "query", tmp_path, environment, "select 1")
+    assert result.returncode == 1
+    assert result.stderr == "error: NativePostgresLibraryNotFound\n"
+
+
+def test_cli_fallback_remains_available_and_normalizes_empty_rows(driver, tmp_path):
+    environment = dict(os.environ, DXT_DUCKDB_BACKEND="cli")
+    environment.pop("DXT_DUCKDB_LIBRARY", None)
+    assert decoded(invoke(driver, "duckdb", "query", tmp_path / "fallback.duckdb", environment,
+                          "select 1 as id where false")) == []
+    assert decoded(invoke(driver, "duckdb", "query", tmp_path / "fallback.duckdb", environment,
+                          "select 17 as id, null::text as absent")) == [{"id": 17, "absent": None}]
+
+
+def test_native_cli_build_runs_without_external_duckdb_executable(driver, tmp_path, duckdb_environment):
+    project = tmp_path / "project"
+    (project / "models").mkdir(parents=True)
+    (project / "seeds").mkdir()
+    (project / "dbt_project.yml").write_text("name: native_demo\nversion: '1.0'\n")
+    (project / "seeds" / "raw.csv").write_text("id\n17\n")
+    (project / "models" / "result.sql").write_text("{{ config(materialized='table') }} select * from {{ ref('raw') }}")
+    (project / "models" / "schema.yml").write_text("""version: 2
+models:
+  - name: result
+    columns:
+      - name: id
+        data_tests: [not_null]
+unit_tests:
+  - name: native_fixture
+    model: result
+    given:
+      - input: ref('raw')
+        rows:
+          - {id: 17}
+    expect:
+      rows:
+        - {id: 17}
+""")
+    empty_path = tmp_path / "empty-bin"
+    empty_path.mkdir()
+    environment = dict(duckdb_environment, PATH=str(empty_path))
+    target = tmp_path / "target"
+    result = subprocess.run([str(DXT), "build", "--project-dir", str(project), "--target-path", str(target)],
+                            cwd=ROOT, env=environment, text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    rows = json.loads((target / "run_results.json").read_text())["results"]
+    assert sorted(row["status"] for row in rows) == ["pass", "pass", "success", "success"]
+    assert decoded(invoke(driver, "duckdb", "query", target / "dxt.duckdb", environment,
+                          "select * from result")) == [{"id": 17}]
+    for artifact in target.glob("*.json"):
+        assert duckdb_environment["DXT_DUCKDB_LIBRARY"] not in artifact.read_text()

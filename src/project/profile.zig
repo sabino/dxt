@@ -27,7 +27,7 @@ pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *c
     };
 
     const selected_profile = options.profile orelse config.profile_name orelse return error.MissingProfileName;
-    var identity = try parseAdapterIdentityText(runtime.allocator, text, selected_profile, options.target);
+    var identity = try parseAdapterIdentityTextWithEnvironment(runtime.allocator, text, selected_profile, options.target, runtime.environment);
     if (identity.database_path != null) {
         const base = std.fs.path.dirname(profiles_path) orelse ".";
         identity.database_path_base = try runtime.allocator.dupe(u8, base);
@@ -36,6 +36,10 @@ pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *c
 }
 
 pub fn parseAdapterIdentityText(allocator: std.mem.Allocator, text: []const u8, selected_profile: []const u8, target_override: ?[]const u8) !AdapterIdentity {
+    return try parseAdapterIdentityTextWithEnvironment(allocator, text, selected_profile, target_override, null);
+}
+
+pub fn parseAdapterIdentityTextWithEnvironment(allocator: std.mem.Allocator, text: []const u8, selected_profile: []const u8, target_override: ?[]const u8, environment: ?*const std.process.Environ.Map) !AdapterIdentity {
     const profile_name = try dupTrimmedScalar(allocator, selected_profile);
     if (profile_name.len == 0) return error.MissingProfileName;
 
@@ -59,7 +63,12 @@ pub fn parseAdapterIdentityText(allocator: std.mem.Allocator, text: []const u8, 
         try findProfileOutputScalar(allocator, text, profile_name, target_name, "path", error.MissingProfileDatabasePath)
     else
         null;
+    const connection_info = if (std.mem.eql(u8, normalized_adapter_type, "postgres"))
+        try postgresConnectionInfo(allocator, text, profile_name, target_name, environment)
+    else
+        null;
     return .{
+        .connection_info = connection_info,
         .profile_name = profile_name,
         .target_name = target_name,
         .adapter_type = normalized_adapter_type,
@@ -110,6 +119,57 @@ fn findProfileTarget(allocator: std.mem.Allocator, text: []const u8, selected_pr
 
     if (!profile_found) return error.MissingProfile;
     return null;
+}
+
+fn postgresConnectionInfo(allocator: std.mem.Allocator, text: []const u8, profile_name: []const u8, target_name: []const u8, environment: ?*const std.process.Environ.Map) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "connect_timeout=10 application_name=dxt ");
+    inline for (.{ "host", "port", "dbname", "user", "password", "sslmode", "connect_timeout", "keepalives_idle" }) |key| {
+        if (try findProfileOutputScalar(allocator, text, profile_name, target_name, key, error.InvalidPostgresProfile)) |raw| {
+            const value = try resolveProfileEnvironment(allocator, raw, environment);
+            if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidPostgresProfile;
+            try out.appendSlice(allocator, key ++ "='");
+            for (value) |byte| {
+                if (byte == '\'' or byte == '\\') try out.append(allocator, '\\');
+                try out.append(allocator, byte);
+            }
+            try out.appendSlice(allocator, "' ");
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn resolveProfileEnvironment(allocator: std.mem.Allocator, value: []const u8, environment: ?*const std.process.Environ.Map) ![]const u8 {
+    if (std.mem.indexOf(u8, value, "{{") == null) return value;
+    if (!std.mem.startsWith(u8, value, "{{") or !std.mem.endsWith(u8, value, "}}")) return error.UnsupportedProfileExpression;
+    const expression = std.mem.trim(u8, value[2 .. value.len - 2], " \t\r\n");
+    if (!std.mem.startsWith(u8, expression, "env_var(") or !std.mem.endsWith(u8, expression, ")")) return error.UnsupportedProfileExpression;
+    var arguments = try @import("jinja.zig").parseLiteralArgs(allocator, expression[8 .. expression.len - 1], error.UnsupportedProfileExpression);
+    defer arguments.deinit(allocator);
+    if (arguments.items.len != 1 and arguments.items.len != 2) return error.UnsupportedProfileExpression;
+    if (environment) |map| if (map.get(arguments.items[0])) |resolved| return try allocator.dupe(u8, resolved);
+    if (arguments.items.len == 2) return arguments.items[1];
+    return error.MissingProfileEnvironmentVariable;
+}
+
+test "postgres profile credentials use libpq escaping and stay in memory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const text =
+        \\demo:
+        \\  target: dev
+        \\  outputs:
+        \\    dev:
+        \\      type: postgres
+        \\      schema: analytics
+        \\      host: localhost
+        \\      user: "{{ env_var('DXT_SYNTHETIC_USER', 'fixture_user') }}"
+        \\      password: a'b\c
+    ;
+    const identity = try parseAdapterIdentityText(arena.allocator(), text, "demo", null);
+    try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "user='fixture_user'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "password='a\\'b\\\\c'") != null);
 }
 
 fn findProfileOutputScalar(

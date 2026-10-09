@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const DuckDBPool = @import("project/native_duckdb.zig").Pool;
 const Io = std.Io;
 const project = @import("project.zig");
 const dependencies = @import("project/dependencies.zig");
@@ -347,7 +348,17 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedBuildModelMaterialization => stderr.writeAll("error: unsupported build model materialization; DuckDB supports table, view, and incremental\n") catch {},
         error.UnsupportedDuckDbPath => stderr.writeAll("error: this DuckDB execution slice supports only local DuckDB database file paths\n") catch {},
         error.CyclicModelDependency => stderr.writeAll("error: selected model graph contains a cycle\n") catch {},
-        error.DuckDbCliNotFound => stderr.writeAll("error: DuckDB execution requires the duckdb CLI on PATH for this M3 slice\n") catch {},
+        error.DuckDbCliNotFound => stderr.writeAll("error: DuckDB execution requires libduckdb or the duckdb CLI on PATH\n") catch {},
+        error.NativeDuckDbLibraryNotFound => stderr.writeAll("error: native DuckDB library unavailable; set DXT_DUCKDB_LIBRARY to a compatible libduckdb library or use DXT_DUCKDB_BACKEND=cli\n") catch {},
+        error.NativeDuckDbAbiMismatch => stderr.writeAll("error: native DuckDB library does not provide the required C API\n") catch {},
+        error.NativeDuckDbConnectionFailed => stderr.writeAll("error: native DuckDB connection failed\n") catch {},
+        error.NativeDuckDbReadOnlyConnection => stderr.writeAll("error: DuckDB connection permits read-only queries\n") catch {},
+        error.InvalidDuckDbBackend => stderr.writeAll("error: DXT_DUCKDB_BACKEND must be auto, native, or cli\n") catch {},
+        error.NativePostgresLibraryNotFound => stderr.writeAll("error: native PostgreSQL library unavailable; install libpq or set DXT_POSTGRES_LIBRARY\n") catch {},
+        error.NativePostgresAbiMismatch => stderr.writeAll("error: native PostgreSQL library does not provide the required libpq API\n") catch {},
+        error.PostgresConnectionFailed => stderr.writeAll("error: PostgreSQL connection failed\n") catch {},
+        error.PostgresExecutionFailed => stderr.writeAll("error: PostgreSQL query failed\n") catch {},
+        error.AdapterQueryCancelled => stderr.writeAll("error: database query cancelled\n") catch {},
         error.DuckDbExecutionFailed => stderr.writeAll("error: DuckDB execution failed\n") catch {},
         error.ExecutionFailure => {
             stderr.writeAll("error: one or more selected resources failed\n") catch {};

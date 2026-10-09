@@ -1,4 +1,5 @@
 const std = @import("std");
+const adapter = @import("adapter.zig");
 const catalog = @import("catalog.zig");
 const incremental = @import("incremental.zig");
 const compiler = @import("compiler.zig");
@@ -29,6 +30,8 @@ pub const UnitTestExecutionResult = struct {
     failures: u64,
     execution_error: bool = false,
 };
+
+pub const queryJson = adapter.queryJson;
 
 pub const FreshnessQueryResult = struct {
     max_loaded_at: []const u8,
@@ -178,27 +181,9 @@ pub fn querySourceFreshness(runtime: Runtime, db_path: []const u8, source: *cons
     const sql = try renderSourceFreshnessSql(runtime.allocator, source);
     defer runtime.allocator.free(sql);
 
-    const result = std.process.run(runtime.allocator, runtime.io, .{
-        .argv = &.{ "duckdb", "-readonly", db_path, "-json", "-batch", "-bail", "-c", sql },
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
-    errdefer runtime.allocator.free(result.stdout);
-    defer runtime.allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| if (code == 0) {
-            const parsed = try parseFreshnessQueryJson(runtime.allocator, result.stdout);
-            runtime.allocator.free(result.stdout);
-            return parsed;
-        },
-        else => {},
-    }
-    runtime.allocator.free(result.stdout);
-    return error.DuckDbExecutionFailed;
+    const rows_json = try adapter.queryJson(runtime, db_path, sql, true);
+    defer runtime.allocator.free(rows_json);
+    return try parseFreshnessQueryJson(runtime.allocator, rows_json);
 }
 
 pub fn renderSourceFreshnessSql(allocator: std.mem.Allocator, source: *const SourceDef) ![]const u8 {
@@ -283,22 +268,7 @@ fn queryCatalogColumnsJson(runtime: Runtime, db_path: []const u8) ![]const u8 {
         \\where c.table_schema not in ('information_schema', 'pg_catalog')
         \\order by c.table_schema, c.table_name, c.ordinal_position;
     ;
-    const result = std.process.run(runtime.allocator, runtime.io, .{
-        .argv = &.{ "duckdb", "-readonly", db_path, "-json", "-batch", "-bail", "-c", sql },
-        .stdout_limit = .limited(4 * 1024 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
-    errdefer runtime.allocator.free(result.stdout);
-    defer runtime.allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| if (code == 0) return result.stdout,
-        else => {},
-    }
-    return error.DuckDbExecutionFailed;
+    return try adapter.queryJson(runtime, db_path, sql, true);
 }
 
 fn catalogEntryForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, rows: []const std.json.Value) !?catalog.CatalogEntry {
@@ -414,6 +384,11 @@ fn selectionContains(selected: []const selector.SelectedResource, unique_id: []c
 }
 
 pub fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
+    if (try adapter.nativeDuckDbQuery(runtime, db_path, sql, false)) |native| {
+        var output = native;
+        output.deinit(runtime.allocator);
+        return;
+    }
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
@@ -430,6 +405,11 @@ pub fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void 
 }
 
 fn queryGenericTestFailures(runtime: Runtime, db_path: []const u8, sql: []const u8) !u64 {
+    if (try adapter.nativeDuckDbQuery(runtime, db_path, sql, false)) |native| {
+        var output = native;
+        defer output.deinit(runtime.allocator);
+        return parseTestFailureCount(output.firstScalar() orelse return error.DuckDbExecutionFailed);
+    }
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
@@ -448,6 +428,11 @@ fn queryGenericTestFailures(runtime: Runtime, db_path: []const u8, sql: []const 
 }
 
 fn queryUnitTestFailures(runtime: Runtime, db_path: []const u8, sql: []const u8) !u64 {
+    if (try adapter.nativeDuckDbQuery(runtime, db_path, sql, false)) |native| {
+        var output = native;
+        defer output.deinit(runtime.allocator);
+        return parseTestFailureCount(output.firstScalar() orelse return error.DuckDbExecutionFailed);
+    }
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
@@ -505,6 +490,13 @@ fn relationObjectExists(runtime: Runtime, db_path: []const u8, graph: *const Gra
         },
     );
     defer runtime.allocator.free(query);
+
+    if (try adapter.nativeDuckDbQuery(runtime, db_path, query, false)) |native| {
+        var output = native;
+        defer output.deinit(runtime.allocator);
+        const count = try parseTestFailureCount(output.firstScalar() orelse return error.DuckDbExecutionFailed);
+        return count != 0;
+    }
 
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", query },

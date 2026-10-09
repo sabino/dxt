@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const mod = b.addModule("dxt", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .link_libc = true,
     });
 
     const exe = b.addExecutable(.{
@@ -14,6 +15,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
+            .link_libc = true,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "dxt", .module = mod },

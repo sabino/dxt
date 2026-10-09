@@ -15,12 +15,18 @@ pub fn main(init: std.process.Init) !void {
     var stderr_file_writer: Io.File.Writer = .init(.stderr(), init.io, &stderr_buffer);
     const stderr = &stderr_file_writer.interface;
 
+    var pool = dxt.DuckDBPool.init(arena, init.io, init.environ_map);
+    var pool_live = true;
+    defer if (pool_live) pool.deinit();
     const code = try dxt.run(args, stdout, stderr, .{
         .allocator = arena,
         .io = init.io,
         .environment = init.environ_map,
+        .duckdb_pool = &pool,
     });
     try stdout.flush();
     try stderr.flush();
+    pool.deinit();
+    pool_live = false;
     std.process.exit(@intFromEnum(code));
 }
