@@ -110,6 +110,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         deinitProjectConfig(runtime.allocator, &config);
         config = rendered_config;
     }
+    try @import("semantic.zig").captureProject(&graph, &config);
     try appendDispatchConfigsToGraph(runtime.allocator, &graph, config.dispatch_configs.items);
     try appendSourceProjectConfigsToGraph(runtime.allocator, &graph, config.source_project_configs.items);
     for (config.vars.items) |entry| try graph.vars.append(runtime.allocator, .{
@@ -345,6 +346,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
             else => return err,
         };
         defer deinitProjectConfig(runtime.allocator, &package_config);
+        try @import("semantic.zig").captureProject(graph, &package_config);
 
         for (package_config.model_paths.items) |model_path| {
             var sql_files: std.ArrayList([]const u8) = .empty;

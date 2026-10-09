@@ -201,7 +201,21 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll(": ");
         try writeExposureNode(writer, exposure);
     }
-    try writer.writeAll("\n  },\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"group_map\": {},\n  \"saved_queries\": {},\n  \"semantic_models\": {},\n  \"unit_tests\": {");
+    try writer.writeAll("\n  },\n");
+    for ([_][]const u8{ "metrics", "saved_queries", "semantic_models" }, [_][]const u8{ "metric", "saved_query", "semantic_model" }) |key, kind| {
+        try writer.print("  \"{s}\": {{", .{key});
+        var semantic_first = true;
+        for (graph.semantic_resources.items) |resource| {
+            if (!resource.enabled or !std.mem.eql(u8, resource.resource_type, kind)) continue;
+            if (!semantic_first) try writer.writeByte(',');
+            semantic_first = false;
+            try json.string(writer, resource.unique_id);
+            try writer.writeByte(':');
+            try std.json.Stringify.value(resource.data, .{}, writer);
+        }
+        try writer.writeAll("},\n");
+    }
+    try writer.writeAll("  \"groups\": {},\n  \"selectors\": {},\n  \"group_map\": {},\n  \"unit_tests\": {");
     var unit_test_index: usize = 0;
     for (graph.unit_tests.items) |unit_test| {
         if (!unit_test.enabled) continue;
@@ -233,6 +247,15 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll(": [");
         try writeSingularTestNode(allocator, writer, graph, test_node);
         try writer.writeAll("]");
+    }
+    for (graph.semantic_resources.items) |resource| {
+        if (resource.enabled) continue;
+        if (disabled_index != 0) try writer.writeByte(',');
+        disabled_index += 1;
+        try json.string(writer, resource.unique_id);
+        try writer.writeAll(":[");
+        try std.json.Stringify.value(resource.data, .{}, writer);
+        try writer.writeByte(']');
     }
     try writer.writeAll("\n  },\n  \"parent_map\": {");
     var parent_index: usize = 0;
@@ -280,6 +303,17 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll(": ");
         try json.stringArray(writer, unit_test.depends_on.items);
     }
+    for (graph.semantic_resources.items) |resource| {
+        if (!resource.enabled) continue;
+        if (parent_index != 0) try writer.writeByte(',');
+        parent_index += 1;
+        try json.string(writer, resource.unique_id);
+        try writer.writeByte(':');
+        const dependencies = try allocator.dupe([]const u8, resource.depends_on.items);
+        defer allocator.free(dependencies);
+        util.sortStrings(dependencies);
+        try json.stringArray(writer, dependencies);
+    }
     try writer.writeAll("\n  },\n  \"child_map\": {");
     try writeChildMap(writer, graph);
     try writer.writeAll("\n  }\n}\n");
@@ -319,6 +353,10 @@ fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
     for (graph.unit_tests.items) |candidate| {
         if (!candidate.enabled) continue;
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+    }
+    for (graph.semantic_resources.items) |resource| {
+        if (!resource.enabled) continue;
+        try writeChildMapEntry(writer, graph, resource.unique_id, &first);
     }
 }
 
@@ -367,6 +405,12 @@ fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []cons
             child_first = false;
             try json.string(writer, unit_test.unique_id);
         }
+    }
+    for (graph.semantic_resources.items) |resource| {
+        if (!resource.enabled or !util.containsString(resource.depends_on.items, unique_id)) continue;
+        if (!child_first) try writer.writeByte(',');
+        child_first = false;
+        try json.string(writer, resource.unique_id);
     }
     try writer.writeAll("]");
 }

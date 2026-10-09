@@ -187,6 +187,7 @@ pub fn resolveSourceDependency(graph: *const Graph, current_package: []const u8,
 }
 
 pub fn resolveDependencies(graph: *Graph) !void {
+    try @import("semantic.zig").resolve(graph);
     for (graph.nodes.items) |*node| {
         if (!node.enabled) continue;
         for (node.macro_depends_on.items) |macro_dep| {

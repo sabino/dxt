@@ -181,9 +181,7 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     else
         try pathJoin(runtime.allocator, &.{ options.project_dir, target_path });
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
-    const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
-    const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
-    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const manifest_path = try writeManifest(runtime, &graph, target_dir);
     try stdout.print("Parsed {d} model(s), {d} analysis(es), {d} snapshot(s), {d} seed(s), {d} source(s), {d} exposure(s), and {d} unit test(s) into {s}\n", .{
         active_models,
         active_analyses,
@@ -2171,6 +2169,11 @@ fn writeManifest(runtime: Runtime, graph: *const Graph, target_dir: []const u8) 
     const manifest_json = try manifest.renderManifest(runtime.allocator, graph);
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const semantic_path = try pathJoin(runtime.allocator, &.{ target_dir, "semantic_manifest.json" });
+    defer runtime.allocator.free(semantic_path);
+    const semantic_json = try @import("project/semantic.zig").renderManifest(runtime.allocator, graph);
+    defer runtime.allocator.free(semantic_json);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = semantic_path, .data = semantic_json });
     return manifest_path;
 }
 
@@ -2870,6 +2873,7 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
 
+    try @import("project/semantic.zig").parseProperties(runtime, text, resource_root, relative_path, package_name, graph);
     try snapshot_yaml.parseProperties(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseSourcesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);

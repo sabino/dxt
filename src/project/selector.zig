@@ -216,6 +216,9 @@ fn validateSelectorMethod(part: []const u8) !void {
         "source:",
         "exposure:",
         "unit_test:",
+        "metric:",
+        "semantic_model:",
+        "saved_query:",
         "config.materialized:",
         "source_status:",
         "result:",
@@ -244,7 +247,10 @@ fn isSupportedResourceType(value: []const u8) bool {
         std.mem.eql(u8, value, "source") or
         std.mem.eql(u8, value, "exposure") or
         std.mem.eql(u8, value, "test") or
-        std.mem.eql(u8, value, "unit_test");
+        std.mem.eql(u8, value, "unit_test") or
+        std.mem.eql(u8, value, "metric") or
+        std.mem.eql(u8, value, "semantic_model") or
+        std.mem.eql(u8, value, "saved_query");
 }
 
 fn isSupportedTestType(value: []const u8) bool {
@@ -423,6 +429,25 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
                 .has_depends_on = true,
             });
         }
+    }
+    for (graph.semantic_resources.items) |*resource| {
+        if (!resource.enabled or !matchesResourceType(resource_type, resource.resource_type) or !evaluateExpression(graph, resource.unique_id, expression, context).direct) continue;
+        try selected.append(allocator, .{
+            .unique_id = resource.unique_id,
+            .name = resource.name,
+            .resource_type = resource.resource_type,
+            .package_name = resource.package_name,
+            .search_name = resource.name,
+            .path = resource.path,
+            .original_file_path = resource.original_file_path,
+            .selector = try std.fmt.allocPrint(allocator, "{s}:{s}.{s}", .{ resource.resource_type, resource.package_name, resource.name }),
+            .config_tags = resource.tags.items,
+            .has_config_tags = true,
+            .config_enabled = resource.enabled,
+            .has_config_enabled = true,
+            .depends_on_nodes = resource.depends_on.items,
+            .has_depends_on = true,
+        });
     }
     std.mem.sort(SelectedResource, selected.items, {}, struct {
         fn lessThan(_: void, a: SelectedResource, b: SelectedResource) bool {
@@ -673,6 +698,9 @@ fn resourceDirectlyMatches(graph: *const Graph, unique_id: []const u8, value: []
     for (graph.singular_tests.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesSingularTestSelector(graph, node, spec, context);
     for (graph.unit_tests.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesUnitTestSelector(graph, node, spec, context);
     for (graph.exposures.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesExposureSelector(graph, node, spec, context);
+    for (graph.semantic_resources.items) |*resource| if (resource.enabled and std.mem.eql(u8, resource.unique_id, unique_id)) {
+        return (!spec.active or spec.value.len == 0) or matchesSemanticSelectorExpression(graph, resource, spec.value, context);
+    };
     return false;
 }
 
@@ -1348,6 +1376,12 @@ fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, s
         if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
+    for (graph.semantic_resources.items) |*target| {
+        if (!target.enabled or !matchesSemanticSelectorTerm(graph, target, spec.value, context)) continue;
+        if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
+        if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
+        if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
+    }
     return false;
 }
 
@@ -1388,7 +1422,7 @@ fn resourceDependsOnDepth(graph: *const Graph, resource_unique_id: []const u8, d
 }
 
 fn graphDepthLimit(graph: *const Graph) usize {
-    return graph.nodes.items.len + graph.tests.items.len + graph.singular_tests.items.len + graph.sources.items.len + graph.exposures.items.len + graph.unit_tests.items.len + 1;
+    return graph.nodes.items.len + graph.tests.items.len + graph.singular_tests.items.len + graph.sources.items.len + graph.exposures.items.len + graph.unit_tests.items.len + graph.semantic_resources.items.len + 1;
 }
 
 fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8, remaining_depth: usize) bool {
@@ -1415,6 +1449,10 @@ fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, 
         if (!unit_test.enabled) continue;
         if (!std.mem.eql(u8, unit_test.unique_id, resource_unique_id)) continue;
         return dependencyListContainsTransitive(graph, unit_test.depends_on.items, dependency_unique_id, remaining_depth - 1);
+    }
+    for (graph.semantic_resources.items) |resource| {
+        if (!resource.enabled or !std.mem.eql(u8, resource.unique_id, resource_unique_id)) continue;
+        return dependencyListContainsTransitive(graph, resource.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
     return false;
 }
@@ -1921,4 +1959,40 @@ test "execution ID limits apply after indirect test selection" {
     try std.testing.expectEqualStrings("model.retry.parent", limited[0].unique_id);
     const empty = try selectResourcesWithContext(allocator, &graph, null, null, null, .{ .allowed_ids = &.{} });
     try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+fn matchesSemanticSelectorTerm(graph: *const Graph, resource: *const types.SemanticResource, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(resource.unique_id, value, context);
+    if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(resource.unique_id, value, context);
+    if (matchesSelectorPattern(value, resource.name) or matchesUniqueIdFqnPattern(value, resource.unique_id)) return true;
+    if (std.mem.startsWith(u8, value, "resource_type:")) return std.mem.eql(u8, value["resource_type:".len..], resource.resource_type);
+    if (std.mem.startsWith(u8, value, "package:")) return matchesUniqueIdPackage(graph, resource.unique_id, value["package:".len..]);
+    for ([_][]const u8{ "metric", "semantic_model", "saved_query" }) |kind| {
+        if (std.mem.startsWith(u8, value, kind) and value.len > kind.len and value[kind.len] == ':') return std.mem.eql(u8, kind, resource.resource_type) and (matchesSelectorPattern(value[kind.len + 1 ..], resource.name) or matchesUniqueIdFqnPattern(value[kind.len + 1 ..], resource.unique_id));
+    }
+    if (std.mem.startsWith(u8, value, "tag:")) for (resource.tags.items) |tag| {
+        if (matchesSelectorPattern(value["tag:".len..], tag)) return true;
+    };
+    if (std.mem.startsWith(u8, value, "path:")) return matchesPathSelector(value["path:".len..], resource.original_file_path);
+    if (std.mem.startsWith(u8, value, "file:")) return matchesFileSelector(value["file:".len..], resource.original_file_path);
+    return false;
+}
+
+fn matchesSemanticSelectorExpression(graph: *const Graph, resource: *const types.SemanticResource, value: []const u8, context: SelectionContext) bool {
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (expressions.next()) |expression| {
+        var terms = std.mem.splitScalar(u8, expression, ',');
+        var all = true;
+        while (terms.next()) |raw_term| {
+            const negated = std.mem.startsWith(u8, raw_term, "!");
+            const term = parseSelectorTerm(if (negated) raw_term[1..] else raw_term);
+            const matches = matchesSemanticSelectorTerm(graph, resource, term.value, context) or matchesGraphExpansion(graph, resource.unique_id, term, context);
+            if (matches == negated) {
+                all = false;
+                break;
+            }
+        }
+        if (all) return true;
+    }
+    return false;
 }

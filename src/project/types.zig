@@ -571,6 +571,30 @@ pub const SnapshotPatch = struct {
 };
 pub const SnapshotProjectConfig = struct { package_name: []const u8, text: []const u8 };
 
+pub const SemanticResource = struct {
+    data: std.json.Value,
+    name: []const u8,
+    unique_id: []const u8,
+    resource_type: []const u8,
+    package_name: []const u8,
+    path: []const u8,
+    original_file_path: []const u8,
+    enabled: bool = true,
+    tags: std.ArrayList([]const u8) = .empty,
+    depends_on: std.ArrayList([]const u8) = .empty,
+};
+
+pub const SemanticProjectConfig = struct {
+    package_name: []const u8,
+    raw: std.json.Value,
+    rendered: std.json.Value,
+};
+
+pub const SemanticTimeSpine = struct {
+    package_name: []const u8,
+    raw: std.json.Value,
+};
+
 pub const Graph = struct {
     invocation: ?*const @import("invocation.zig").Metadata = null,
     allocator: std.mem.Allocator,
@@ -588,6 +612,9 @@ pub const Graph = struct {
     profile_name: ?[]const u8 = null,
     target_name: ?[]const u8 = null,
     vars: std.ArrayList(VarEntry) = .empty,
+    semantic_resources: std.ArrayList(SemanticResource) = .empty,
+    semantic_time_spines: std.ArrayList(SemanticTimeSpine) = .empty,
+    semantic_project_configs: std.ArrayList(SemanticProjectConfig) = .empty,
     nodes: std.ArrayList(Node) = .empty,
     tests: std.ArrayList(GenericTestNode) = .empty,
     singular_tests: std.ArrayList(SingularTestNode) = .empty,
@@ -618,6 +645,23 @@ pub const Graph = struct {
     }
 
     pub fn deinit(self: *Graph) void {
+        for (self.semantic_resources.items) |*resource| {
+            config_value.deinit(self.allocator, &resource.data);
+            resource.tags.deinit(self.allocator);
+            resource.depends_on.deinit(self.allocator);
+        }
+        self.semantic_resources.deinit(self.allocator);
+        for (self.semantic_time_spines.items) |*spine| {
+            self.allocator.free(spine.package_name);
+            config_value.deinit(self.allocator, &spine.raw);
+        }
+        self.semantic_time_spines.deinit(self.allocator);
+        for (self.semantic_project_configs.items) |*config| {
+            self.allocator.free(config.package_name);
+            config_value.deinit(self.allocator, &config.raw);
+            config_value.deinit(self.allocator, &config.rendered);
+        }
+        self.semantic_project_configs.deinit(self.allocator);
         config_value.deinit(self.allocator, &self.target_context);
         for (self.nodes.items) |*node| {
             deinitNode(self.allocator, node);
