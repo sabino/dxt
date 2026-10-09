@@ -327,6 +327,14 @@ pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, pla
         column.type_sql = try allocator.dupe(u8, source.type_sql);
     }
     output.rows = try rows.toOwnedSlice(allocator);
+    record.status = "success";
+    record.cleanup = "complete";
+    record.output_rows = output.rows.len;
+    if (model.execution_connection == model.destination) {
+        record.destination_version = try @import("cross_database_catalog.zig").version(arena_runtime.allocator, &workspace);
+        record.destination_capabilities = workspace.capabilities();
+    }
+    try @import("cross_database_catalog.zig").record(runtime, root, plan, &metadata.id, &.{record});
     return .{ .result = output, .columns = columns };
 }
 

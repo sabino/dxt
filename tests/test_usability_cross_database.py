@@ -855,3 +855,54 @@ def test_catalog_stale_or_changed_credentials_do_not_authorize_estimates(project
     assert "private-credential-fixture" not in rendered
     assert "private-credential-fixture" not in result.stderr
     assert json.loads(rendered)["models"][0]["confidence"] == "unknown"
+
+
+def test_native_capability_probes_are_versioned_readonly_and_clean(project, native_environment, postgres):
+    config = project[1]
+    config["connections"]["source"]["role"] = "source"
+    config["connections"]["crm"]["role"] = "source"
+    result = invoke(project, config, native_environment, "debug", "--probe-cancellation")
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    text = (project[0] / "target" / "dxt_capabilities.json").read_text()
+    assert str(project[0]) not in text
+    results = {item["connection"]: item for item in json.loads(text)["connections"]}
+    assert all(item["status"] == "success" and item["version"] and item["read_only_transaction"] and item["cancellation"] for item in results.values())
+    assert results["crm"]["transactional_ddl"] is None
+    assert results["source"]["typed_temporary_table"] is None
+    assert results["warehouse"]["transactional_ddl"] is True
+    assert results["warehouse"]["binary_roundtrip"] is True
+    assert duck_rows(project[3], "select table_name from information_schema.tables where table_name like '__dxt_probe_%'") == []
+    assert duck_rows(project[4], "select count(*) from typed") == [(1,)]
+    with postgres.cursor() as cursor:
+        cursor.execute(f'select count(*) from "{project[2]}".customers')
+        assert cursor.fetchone()[0] == 2
+
+
+def test_capability_failure_is_sanitized_and_independent_connections_continue(project, native_environment):
+    config = project[1]
+    path = project[0] / "profiles.yml"
+    profiles = json.loads(path.read_text())
+    private_host = str(project[0] / "unavailable-private-socket")
+    profiles["cross"]["outputs"]["crm"]["host"] = private_host
+    path.write_text(json.dumps(profiles))
+    result = invoke(project, config, native_environment, "debug")
+    assert result.returncode != 0
+    text = (project[0] / "target" / "dxt_capabilities.json").read_text()
+    assert private_host not in text and private_host not in result.stderr
+    results = {item["connection"]: item for item in json.loads(text)["connections"]}
+    assert results["crm"]["status"] == "error"
+    assert results["source"]["status"] == "success"
+    assert results["local"]["status"] == "success"
+
+
+def test_namespaced_catalog_export_contains_observed_metadata(project, native_environment):
+    assert invoke(project, project[1], native_environment, "run", "--allow-movement").returncode == 0
+    result = invoke(project, project[1], native_environment, "catalog")
+    assert result.returncode == 0, result.stderr
+    text = (project[0] / "target" / "dxt_catalog.json").read_text()
+    assert str(project[0]) not in text
+    catalog = json.loads(text)
+    assert catalog["generation"] == 1
+    assert catalog["relation_stats"][0]["rows"] == 1
+    assert catalog["connections"][0]["capabilities"]["transactional_ddl"] is True

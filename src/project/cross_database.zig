@@ -10,7 +10,7 @@ const invocation = @import("invocation.zig");
 pub const Runtime = types.Runtime;
 const Dir = std.Io.Dir;
 
-pub const Mode = enum { plan, run, recover, cleanup };
+pub const Mode = enum { plan, run, recover, cleanup, debug, catalog };
 pub const Options = struct {
     mode: Mode = .plan,
     project_dir: []const u8 = ".",
@@ -25,6 +25,7 @@ pub const Options = struct {
     allow_raw_extract: bool = false,
     allow_retention: bool = false,
     full_refresh: bool = false,
+    probe_cancellation: bool = false,
     max_rows: ?u64 = null,
     max_bytes: ?u64 = null,
     max_memory_bytes: ?u64 = null,
@@ -34,7 +35,7 @@ pub const Options = struct {
 
 pub fn printHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll(
-        \\Usage: dxt cross-database <plan|run|recover|cleanup> [options]
+        \\Usage: dxt cross-database <plan|run|recover|cleanup|debug|catalog> [options]
         \\
         \\Plan and execute declared source reductions through native DuckDB/PostgreSQL
         \\connections, with explicit movement policy and destination-local transactions.
@@ -56,6 +57,7 @@ pub fn printHelp(writer: *std.Io.Writer) !void {
         \\  --full-refresh           Rebuild incremental output and reset source watermarks.
         \\  --run-id <uuid>          Recover one recorded run's cleanup/commit state.
         \\  --older-than-seconds <n> Cleanup retained stages older than n seconds.
+        \\  --probe-cancellation     Verify native cancellation during connection debug.
         \\
     );
 }
@@ -67,7 +69,7 @@ pub fn parseOptions(args: []const []const u8) !Options {
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (eq(arg, "--allow-movement")) options.allow_movement = true else if (eq(arg, "--allow-sensitive")) options.allow_sensitive = true else if (eq(arg, "--allow-raw-extract")) options.allow_raw_extract = true else if (eq(arg, "--allow-retention")) options.allow_retention = true else if (eq(arg, "--full-refresh")) options.full_refresh = true else {
+        if (eq(arg, "--allow-movement")) options.allow_movement = true else if (eq(arg, "--allow-sensitive")) options.allow_sensitive = true else if (eq(arg, "--allow-raw-extract")) options.allow_raw_extract = true else if (eq(arg, "--allow-retention")) options.allow_retention = true else if (eq(arg, "--full-refresh")) options.full_refresh = true else if (eq(arg, "--probe-cancellation")) options.probe_cancellation = true else {
             index += 1;
             if (index >= args.len or args[index].len == 0 or std.mem.startsWith(u8, args[index], "--")) return error.MissingCrossDatabaseOptionValue;
             const value = args[index];
@@ -172,6 +174,15 @@ pub fn command(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stder
     };
     defer document.deinit();
     var plan = try buildPlan(rt, options, root, source, document.value);
+    if (options.mode == .debug) return @import("cross_database_probe.zig").execute(runtime, rt, root, &plan, options, stdout, stderr);
+    if (options.mode == .catalog) {
+        var store = try @import("cross_database_catalog.zig").load(rt, root);
+        defer store.deinit();
+        const json = try std.json.Stringify.valueAlloc(rt.allocator, store.value, .{});
+        try writeAtomic(rt, try projectPath(rt, root, options.output orelse "target/dxt_catalog.json"), json);
+        try stdout.print("Catalog generation {d}: {d} observed source boundaries / {d} indexed runs\n", .{ store.value.generation, store.value.relation_stats.len, store.value.runs.len });
+        return;
+    }
     const plan_path = try projectPath(rt, root, options.output orelse "target/dxt_plan.json");
     try writePlan(rt, plan_path, plan);
     if (options.mode == .plan) {
