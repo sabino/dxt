@@ -1,96 +1,108 @@
 # Roadmap To A dbt Replacement
 
-`dxt` is pre-alpha. A successful Jaffle Shop build proves a useful subset; it
-does not establish drop-in compatibility. This roadmap turns the remaining dbt
-Core work and proposed features into observable release gates. The support
-matrix in [COMPATIBILITY.md](COMPATIBILITY.md) describes shipped behavior;
-[PLAN.md](../PLAN.md) remains the implementation and sequencing contract.
+The Core delivery ladder and proposed feature tracks now have native
+implementations and focused compatibility evidence. This document tracks their
+coverage and the remaining acceptance work. It does **not** declare the entire
+roadmap or release complete before the final integrated gates pass.
 
-## Compatibility Contract
+The initial release executes **SQL models on DuckDB and PostgreSQL**, as
+confirmed for this project. Python resources are discovered, parsed, selected
+and compiled without evaluating authored code; execution rejects before
+warehouse writes. Additional adapters and platforms require their own drivers
+and certification.
 
-A release must name its dbt Core version, artifact versions, adapters and
-adapter versions. The snapshot foundation is checked against dbt Core 1.10.5,
-dbt-duckdb 1.9.6, and Manifest v12. That fixture-level evidence does not claim
-compatibility with every 1.10 feature or newer Core releases. Expand and update
-the pinned oracle before advertising a wider version range.
+[Compatibility](COMPATIBILITY.md) records the support boundary and intentional
+differences. [PLAN.md](../PLAN.md) remains the active integration/sequencing
+contract.
 
-For a claimed project surface, run the same unchanged project, profiles,
-packages, selectors and command arguments with dbt and dxt. Compare selected
-IDs, dependencies, compiled SQL, relation contents, schema, exit codes,
-pass/warn/fail/error/skipped outcomes and artifacts. Normalize only documented
-volatile fields such as invocation IDs, timing and generated timestamps.
-Validate complete artifacts against the published schemas before claiming
-complete artifact compatibility; the existing schema slices remain partial
-gates. Performance and binary packaging are separate acceptance gates.
+## Versioned Acceptance Contract
 
-Drop-in support also requires command/flag behavior, environment variables,
-logs consumed by integrations, project/profile discovery, package resolution,
-and existing orchestration workflows. Accepting an argument is insufficient
-when its effect is missing. Unsupported behavior must produce a deterministic
-diagnostic before warehouse mutations rather than silently changing results.
+The declared comparison targets are dbt Core **1.10.5**, dbt-duckdb **1.9.6**,
+dbt-postgres **1.9.1**, native DuckDB **1.4.2**, MetricFlow **0.208.1** and
+semantic interfaces **0.9.0**, built with Zig **0.16.0**.
 
-## Immediate Correctness Queue
+For each claimed surface, compare unchanged project files, profiles, packages
+and command arguments against the pinned upstream implementation. Evidence
+must cover resource IDs, dependencies, configuration, compiled SQL, relation
+contents/schema, exit codes and pass/warn/fail/error/skipped outcomes.
+Normalize only documented volatile metadata such as invocation IDs,
+timestamps and timings.
 
-These findings come from the implementation audit, not completed fixes in the
-snapshot PR. Address them before widening execution claims.
+Manifest v12, Run Results v6, Catalog v1 and Sources v3 are validated with the
+complete pinned upstream artifact schema classes. Semantic manifests also use
+the semantic-interface schema/validator. These are complete schema checks,
+rather than the former partial schema slices; schema validity still does not
+replace runtime and field-parity comparisons.
 
-| Priority | Missing behavior | Owner and regression gate |
-| --- | --- | --- |
-| P0 | Physical dependency readiness and failure propagation through ephemeral chains. The current run/build helpers skip the immediate ephemeral dependency without checking its selected physical ancestors. | `project.zig` readiness/blocked-descendant helpers and `resolve.zig`; a physical parent whose name sorts after its consumer, multiple ephemeral levels, and parent failure must preserve dependency order and skip affected consumers while allowing independent work. |
-| P0 | Runtime-error results for built-in generic and singular tests. Their DuckDB errors can escape before final run-results emission; only the static custom generic-test error path currently records rows. | `duckdb.zig`, `project.zig`, `run_results.zig`; a missing relation and invalid SQL must record error rows, preserve earlier rows, continue independent resources where dbt does, and exit nonzero. |
-| P1 | Mixed `build` scheduling with unit tests. Test-only dict-fixture unit tests work, but adding selected seeds/models rejects the selection. | `project.zig`, `unit_test.zig`; unit tests run before their model materialization, failed units block that model and its descendants, rollback leaves target data intact, independent branches continue, and downstream data tests run after successful materialization. |
-| P1 | Flag semantics. `--threads` is stored without execution semantics; `build --full-refresh` is accepted and discarded. | `main.zig`, `types.zig`, runner; implement or explicitly reject unsupported values. Verify actual concurrency and first-run/repeated-run/full-refresh relation contents rather than checking argument parsing alone. |
-| P1 | Snapshot graph foundation, issue #213. SQL snapshots were undiscovered resources. | `snapshot.zig`, loader, graph, selector, manifest and command preflight; named blocks, multiple resources per file, configured paths, literal configs, disabled nodes, references and Manifest v12 fields. This PR adds read/list support; execution remains gated. |
+Product behavior remains native Zig, with embedded native grammar/data
+dependencies where needed. Python is restricted to developer comparisons,
+fixtures and release tooling. An accepted flag, preserved configuration value,
+empty artifact map or discovered macro is insufficient evidence for execution.
 
 ## Core Delivery Ladder
 
-Each row is a group of small source-grounded PRs, with its own dbt oracle
-fixtures. Run independent slices in isolated worktrees; sequence shared
-compiler/runner/artifact ownership in PLAN before editing.
+“Implemented” here means native code plus focused evidence exist. The final
+integrated release run remains a separate gate.
 
-| Order | Work to complete | Evidence required to leave the milestone |
+| Ladder | Current implementation | Evidence and remaining work |
 | --- | --- | --- |
-| 1. Reliable DuckDB execution | Resolve the correctness queue; unify dependency scheduling and cancellation; implement `--threads`, fail-fast, transaction/rollback and relation replacement semantics; finish built-in/custom/singular/unit test error and config behavior. | Mixed seed/model/ephemeral/unit/data-test DAGs match dbt outcomes, ordering constraints and final relations under success, warning, failure, execution error and cancellation. Every selected executed or blocked resource has the correct result row. |
-| 2. Parser and configuration | Complete YAML/project/profile/env/var handling and precedence; project/package resource overlays; disabled resources; model versions, groups/access, contracts/constraints, functions where supported by the chosen Core version; full source, analysis, seed, test and snapshot properties. | Unchanged projects parse to equivalent resource sets, dependencies, relation identities and configs. Invalid and unsupported definitions fail deterministically; they are never silently omitted. Full Manifest schema and normalized field comparisons pass for the claimed resource family. |
-| 3. Jinja and macro runtime | General expressions, filters, scoped sets/loops and whitespace; parse `execute=false` versus compile/run context; macro calls, return values, namespace/dispatch; bundled dbt macros; `env_var`, `log`, exceptions, `graph`, `model`, flags, selected resources; database-backed `run_query`, statements and adapter introspection. | Package-heavy projects compile and run without changing their SQL or macros. Hidden dependencies and parse/runtime branches match Core. Database-backed Jinja uses the native adapter boundary; Python stays exclusively in developer tooling. |
-| 4. Materializations | Incremental first/repeated/full-refresh execution, unique keys, schema changes and supported adapter strategies; finish ephemeral readiness; seed replacement; snapshot timestamp/check strategies, deletes and history; hooks, grants, contracts, persistence and custom materializations. | Repeated runs with inserted/updated/deleted rows and schema changes match dbt tables and history. Failed materializations preserve the documented transaction boundary. Snapshot YAML definitions and newer snapshot configs are included before claiming that version's full snapshot support. |
-| 5. Dependencies | Implement `deps` for the declared local/Git/registry dependency surface, transitive resolution, versions, lock files, reproducible installs, package config and executable package macros/tests. | A clean checkout can resolve and build a pinned package-heavy public project. Offline/invalid/conflicting dependency cases fail clearly; installed-package parity does not depend on manually prepared directories. |
-| 6. CI workflows | YAML selector unions/intersections/excludes, defaults and indirect-selection modes; remaining selector methods; state modified/old/unmodified and submethods; defer/favor-state/separate defer-state; result statuses and retries. | Baseline/current fixtures select the same IDs and use the same deferred relations as Core. Snapshot/source/unit resources participate correctly. `source_status:fresher` is grounded in Core; current `source_status:pass/warn/error` extensions must not be mistaken for Core parity. |
-| 7. Commands and integration | Complete `debug`, `init`, `run-operation`, `snapshot`, `retry`, `clone` and command-specific flags; profiles and environment behavior; docs UI, catalog metadata, source freshness capabilities, structured logging, exit codes and orchestration contracts. | Scripted end-to-end workflows use unchanged dbt-style commands and projects through the declared executable interface. Debug validates real connection readiness; retry/clone and docs/freshness artifacts match their chosen Core/adapter contract. |
-| 8. Native adapter contract | Move the DuckDB CLI backend to a native embedded boundary; explicit relation/introspection/type/quoting/transaction/capability APIs; certify Postgres, then each cloud adapter independently. | Adapter contract tests cover DDL, data types, schema changes, tests, freshness, transactions, credentials and query errors. A Postgres fixture ladder passes; unsupported capabilities fail before execution. One adapter's success never implies another's support. |
-| 9. Release claim | Complete artifact schema validation and oracle CI, wider pinned public projects, installation and orchestration tests, platform portability, version stamping, diagnostics and performance budgets. | An explicit Core/adapter compatibility manifest accompanies the release. Clean-install smoke tests, binary safety scans and the full compatibility suite pass on each published platform. Unimplemented flags/resources remain visible in the support matrix. |
+| 1. Reliable execution | Physical/ephemeral readiness, mixed seed/model/snapshot/unit/data-test graphs, durable errors/skips, independent continuation, bounded workers, cancellation and transactional replacement. [Scheduler](../src/project/scheduler.zig), [workers](../src/project/concurrent_runner.zig). | [Scheduler fixtures](../tests/test_usability_scheduler.py), [test errors](../tests/test_usability_test_errors.py), [threading/cancellation](../tests/test_usability_threading.py). Final combined suite rerun remains. |
+| 2. Parser/configuration | Shared YAML and typed env/vars; layered project/package/property/inline configs; sources, tests, snapshots, versions, groups/access and Python static resources. [Loader](../src/project/loader.zig), [config](../src/project/resource_config.zig), [groups](../src/project/group_access.zig). | [Configuration](../tests/test_usability_configuration.py), [groups](../tests/test_usability_groups.py), [Python resources](../tests/test_usability_python_models.py). Runtime enforcement of declared contracts is tracked in ladder 4. Newer-Core resources require a new version contract. |
+| 3. Jinja/macros | Typed expressions/containers, filters/control/capture/call blocks, defaults/kwargs/returns, namespaces/dispatch, bundled macros and database-backed Relation/Column/query contexts. [Compiler](../src/project/compiler.zig), [context](../src/project/dbt_context.zig). | [Jinja](../tests/test_usability_jinja.py), [expression types](../tests/test_usability_expression_types.py), [context](../tests/test_usability_configuration.py). The unchanged public dbt-utils ladder awaits regular-expression provider completion and rerun. |
+| 4. Materializations | Table/view, PostgreSQL materialized views, adapter-specific incremental/schema policies, microbatch, seeds, SQL/YAML snapshots, clone and DuckDB local external/table functions; native resource/project hooks, grants and persisted docs. [Lifecycle](../src/project/materialization_runtime.zig), [microbatch](../src/project/microbatch_run.zig), [snapshots](../src/project/snapshot_runner.zig). | [Materializations](../tests/test_usability_materializations.py), [microbatch](../tests/test_usability_microbatch.py), [PostgreSQL snapshots](../tests/test_usability_postgres_snapshots.py), [hooks](../tests/test_usability_resource_hooks.py), [grants/docs](../tests/test_usability_grants_docs.py). Runtime contracts/constraints, warning deduplication and authored custom-materialization execution remain active completion work. |
+| 5. Dependencies | Local/Git/registry/tarball declarations, transitive resolution/conflicts, lock files, upgrade/offline behavior, safe installs and executable installed-package macros. [Dependencies](../src/project/dependencies.zig). | [Dependency fixtures](../tests/test_usability_dependencies.py). Actual package-heavy public project validation remains a final gate; live transport availability is distinct from deterministic registry fixture evidence. |
+| 6. State/CI workflows | Recursive YAML selectors, defaults/indirect modes, graph/config/version/group/access selectors, state comparisons, result statuses, Core fresher comparison and defer/favor-state/separate-state. [Selection](../src/project/selection_expression.zig), [state](../src/project/state.zig), [defer](../src/project/defer.zig). | [State and selector oracles](../tests/test_usability_state.py), [CLI controls](../tests/test_usability_cli_options.py). Native caches use their own format; no Core MessagePack interchange claim. |
+| 7. Commands/integration | Debug/init/operations, snapshots/retry/clone, effective flags/env precedence, structured logs, docs browser/catalog, freshness and native metadata. [Commands](../src/project/commands.zig), [CLI](../src/project/cli_options.zig), [global hooks](../src/project/hook_operations.zig). | [Commands](../tests/test_usability_commands.py), [compile retry](../tests/test_usability_compile_artifacts.py), [CLI](../tests/test_usability_cli_execution.py), [global hooks](../tests/test_usability_global_hooks.py), [docs browser](../tests/test_usability_artifacts.py). Final orchestration/archive run remains. |
+| 8. Native adapters | DuckDB C API and libpq sessions, typed results, quoting/introspection, transactions, cancellation, readonly boundaries and recovery. [Adapter](../src/project/adapter.zig), [DuckDB](../src/project/native_duckdb.zig), [PostgreSQL](../src/project/native_postgres.zig). | [Actual driver fixtures](../tests/test_usability_adapters.py). DuckDB attach/extensions/settings/secrets initialization is active completion work. Other adapters and remote DuckLake/MotherDuck remain later certification scope. |
+| 9. Release acceptance | Complete artifact validation, actual-platform CI, deterministic archives/notices/checksums, extracted installation with both adapters and PATH empty, browser fixtures and correctness-aware performance budgets. | [CI](../.github/workflows/ci.yml), [release](../.github/workflows/release.yml), [installation](../scripts/check_install.py), [performance](../scripts/check_performance.py). Final integrated/local and remote platform results are pending; no completion claim yet. |
 
-The milestones overlap only when their dependencies and module ownership are
-clear. Package execution depends on the macro engine; state/defer depends on
-stable relation identity and artifacts; snapshot execution depends on the
-snapshot graph and adapter/materialization contract. A broader adapter must
-not bypass the DuckDB correctness gates.
+The former immediate correctness queue is implemented: ephemeral ancestry,
+built-in/singular/unit SQL error outcomes, mixed unit build gates, effective
+threads/full-refresh and snapshot execution all have regression fixtures.
+Those historical missing-queue descriptions no longer describe the current
+runtime.
 
-## Proposed Features Beyond Core Parity
+## Proposed Feature Tracks
 
-These are planned product capabilities, not shipped functionality. Keep dxt
-planning/state extensions in namespaced commands and artifacts, preserving
-dbt-visible outputs and semantics. Use the existing reference maps as starting
-points and pin inspected upstream versions for each implementation slice.
+These tracks are implemented dxt capabilities with namespaced commands and
+artifacts. Their focused gates are distinct from the remaining release
+acceptance run and from certification of another product's entire runtime.
 
-| Track | Implementation sequence | Acceptance gate |
+| Track | Native implementation | Observable evidence |
 | --- | --- | --- |
-| Semantic resources and MetricFlow-style planning | Parse semantic models, entities, measures, dimensions, metrics and saved queries; resolve relation/metric dependencies; emit and validate `semantic_manifest.json`; implement grain/join/fanout checks, simple metrics, then derived/ratio/cumulative/conversion metrics, time spines and saved-query exports. | Normalized semantic artifacts match the declared semantic-interface version. Invalid grain and fanout fail before execution. Single-engine metric queries and time-window edge cases match pinned MetricFlow fixture outputs before cross-engine planning is added. |
-| Fusion-style static analysis | Native dialect-aware SQL parser and logical IR; resolved column/type lineage; location-aware diagnostics; incremental parsing/cache invalidation; explain output and performance budgets. | Correct diagnostics on positive and negative fixtures, invalidation after source/macro/config/package changes, equivalent compiled/executed results and measured cold/warm performance. A lexical scanner alone is insufficient evidence for typed SQL analysis. |
-| Cross-database transformation | Named secret-free connections and adapter capabilities; preserve logical relation identity; plan pushdown, filter/projection reduction, staging, destination joins and bounded local execution; cost confidence, sensitivity and movement policy; runtime byte/row/spill guards, cleanup and recovery. | Same-engine work causes no dxt-managed movement. A two-engine join has a reviewable plan and correct output. Policy denial occurs before source execution; budget overruns cancel and clean stages; retry is idempotent without assuming distributed transactions. |
-| Stateful planning inspired by SQLMesh | Persist namespaced model-version/run-state fingerprints; environment namespaces and physical table reuse; plan/apply explanations; processed interval accounting and backfills; audit gates; promotion/rollback and multi-engine gateways. | Repeated apply is idempotent, changed upstreams invalidate appropriate consumers, interval boundaries and late arrivals are covered, blocking audits prevent promotion and rollback restores the declared environment. These features never reinterpret dbt snapshot resources or change Core incremental behavior. |
+| Semantic resources and MetricFlow-style planning | Semantic models/entities/measures/dimensions/metrics/saved queries; simple, derived, ratio, cumulative and conversion SQL; joins/entity grain/fanout checks, time spines, non-additive dimensions, offsets/windows, query execution and locked transactional exports. [Resources](../src/project/semantic.zig), [planner](../src/project/metric_plan.zig), [commands](../src/project/metric_command.zig). | [Core/MetricFlow query and artifact fixtures](../tests/test_usability_semantics.py), [export locks](../tests/test_usability_metric_export_locks.py), including both-adapter and cross-database metric execution. Upstream-assertion edge cases are explicit differences, not positive parity. |
+| Typed static analysis | Native PostgreSQL grammar and DuckDB AST, normalized logical IR, warehouse/project binding, types/column lineage, source-location diagnostics, readonly analysis/explain and dependency-aware caches. [Grammar](../src/project/sql_parser.zig), [IR](../src/project/sql_ir.zig), [analysis](../src/project/sql_analysis.zig). | [Positive/negative analysis and invalidation fixtures](../tests/test_usability_sql_analysis.py), complete compiled/executed comparisons and the [performance gate](PERFORMANCE.md). This does not claim dbt Fusion binary compatibility. |
+| Cross-database transformation | Named profile-bound connections, logical identity preservation, source reduction and same-engine pushdown, broadcast/staged/embedded execution, typed movement, trust/sensitivity/row/byte/memory/spill/cost guards, retained cache/snapshot stages, source watermarks, task/resource limits, locks and recoverable run records. [Facade](../src/project/cross_database.zig), [execution](../src/project/cross_database_run.zig), [retention](../src/project/cross_database_cache.zig), [scheduler](../src/project/cross_database_schedule.zig). | [Actual DuckDB/PostgreSQL movement fixtures](../tests/test_usability_cross_database.py) cover exact rows/types, early policy denial, rollback/cleanup, idempotent recovery, catalog/cost confidence and adaptive retries of confirmed aborted source transactions. Plans preserve unknown estimates; retries do not assume distributed transactions or replay ambiguous commits. |
+| Versioned stateful planning | Immutable model-version fingerprints, physical reuse, isolated environment views, direct/indirect changes, half-open UTC intervals, lookback/backfills, audits, promotion and rollback. [Workflow](../src/project/workflow.zig), [intervals](../src/project/workflow_intervals.zig). | [Warehouse/state fixtures](../tests/test_usability_workflow.py) prove idempotency, environment isolation, interval coverage, blocking audits and rollback. Dxt versions/intervals do not reinterpret Core snapshots or incremental models and do not claim SQLMesh runtime interchange. |
 
-Reference maps:
+Reference maps remain source/design context:
 
 - [dbt Core and Fusion](../.agent/research/dbt-upstream-reference-map.md)
 - [Semantic layer and MetricFlow](../.agent/research/semantic-layer-metricflow-compatibility-map.md)
 - [Cross-database architecture](../.agent/research/cross-database-architecture.md)
-- [SQLMesh future reference](../.agent/research/sqlmesh-future-reference-map.md)
+- [SQLMesh reference](../.agent/research/sqlmesh-future-reference-map.md)
+
+## Remaining Acceptance Work
+
+| Gate | Current status | Required completion evidence |
+| --- | --- | --- |
+| Lifecycle/identity closure | Runtime contracts/constraints, cross-host warning deduplication, authored custom materializations, custom naming policies and native DuckDB profile initialization are in active implementation. | Actual Core first/repeated/failure cases, parsed/compiled/warm-cache identities, effective configuration and complete artifacts, with no accepted-but-ignored settings. |
+| Package-heavy public project | Unchanged PostgreSQL dbt-utils ladder is configured; native regex provider completion is pending after an observed stock `slugify` stop. | Successful unchanged dependency/compile/build/artifact/row ladder against Core. |
+| Public Jaffle project | Earlier parse/list/compile/build/run/docs gates passed. | Rerun all six steps on the final integrated tree and retain their outputs. |
+| Complete integrated checks | Focused worker and integration gates have passed; final whole-tree reruns remain. | Debug/ReleaseSafe builds, native tests, full pytest with pinned real adapters/browser, complete schema checks, safety/runtime scans and reviewed skips. |
+| Installation/archives | Deterministic real archive packaging and extracted native checks have earlier evidence; both-adapter final candidate rerun remains. | Exact archive notices/checksums/architecture verified; debug/build/static docs/rows/artifacts pass after extraction with PATH empty on both adapters. |
+| Actual platforms | Linux x86_64/ARM full compatibility and installation jobs are configured; remote ARM acceptance remains pending. | Native execution of the full suite and real archive on each published architecture, including PostgreSQL/browser fixtures. |
+| Performance | Earlier correctness-aware cold/warm budget passed. | Final ReleaseSafe rerun compares every compiled model and full artifacts before accepting measured budgets. |
+| Publication | Final verified counts, candidate timings and CI links have not yet been recorded. | Document exact candidate versions/scope/results, then publish the reviewed PR and release only through their green-gate workflow. |
+
+Cloud adapters, remote external publication/plugin registration and non-Linux
+platforms remain explicit later certification targets. The initial SQL scope
+does not authorize or require authored Python execution.
 
 ## Completion Rule
 
-Close a gap only when its native implementation, negative cases, dbt oracle
-evidence, applicable complete artifact schemas and public fixture gate pass.
-Record the supported versions, limitations and validation in the PR and matrix.
-Do not mark the entire replacement complete from a read-only resource slice,
-a single adapter, empty artifact maps, accepted flags, or architecture notes.
+Close a feature only when its native implementation, negative cases, pinned
+oracle evidence and applicable complete schemas pass. Close the release only
+after the integrated public-project, installation, platform and performance
+gates also pass. Record remaining differences plainly; one successful adapter,
+fixture or accepted argument cannot establish universal replacement parity.
