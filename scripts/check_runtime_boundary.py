@@ -25,6 +25,10 @@ def main() -> int:
     }
     for path in sorted((ROOT / "src").rglob("*.zig")):
         text = path.read_text(encoding="utf-8", errors="ignore")
+        if path.relative_to(ROOT).as_posix() == "src/project/docs_serve.zig":
+            # Desktop browser launch is part of docs serve. Permit only this
+            # child handle signature; parser/compiler process uses stay banned.
+            text = text.replace("fn waitBrowser(io: Io, process: std.process.Child) void {", "")
         for token, reason in forbidden_runtime_tokens.items():
             if token in text:
                 findings.append(f"{path.relative_to(ROOT)} contains {token}; {reason}")
