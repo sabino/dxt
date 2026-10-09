@@ -104,9 +104,10 @@ pub fn repr(value: Value, allocator: std.mem.Allocator) ![]const u8 {
 pub fn evaluate(allocator: std.mem.Allocator, input: []const u8, host: ?Host) !Value {
     if (topLevelKeyword(input, "if")) |condition_at| {
         const remainder = input[condition_at + 2 ..];
-        const else_at = topLevelKeyword(remainder, "else") orelse return error.InvalidJinjaExpression;
-        const condition = try evaluate(allocator, remainder[0..else_at], host);
-        return try evaluate(allocator, if (condition.truthy()) input[0..condition_at] else remainder[else_at + 4 ..], host);
+        const else_at = topLevelKeyword(remainder, "else");
+        const condition = try evaluate(allocator, remainder[0 .. else_at orelse remainder.len], host);
+        if (condition.truthy()) return try evaluate(allocator, input[0..condition_at], host);
+        return if (else_at) |position| try evaluate(allocator, remainder[position + 4 ..], host) else .undefined;
     }
     var parser = Parser{ .allocator = allocator, .input = input, .host = host };
     const value = try parser.binary(0);
@@ -181,6 +182,18 @@ const Parser = struct {
     }
 
     fn binary(self: *Parser, minimum: u8) anyerror!Value {
+        // A conditional has lower precedence than every binary operator. Locate
+        // its complete argument/list/group expression before evaluating either
+        // branch, so inactive branches never call the database or a macro.
+        if (minimum == 0) {
+            const finish = expressionFinish(self.input, self.index);
+            const input = self.input[self.index..finish];
+            if (topLevelKeyword(input, "if") != null) {
+                const value = if (self.active) try evaluate(self.allocator, input, self.host) else Value.none;
+                self.index = finish;
+                return value;
+            }
+        }
         self.depth += 1;
         defer self.depth -= 1;
         if (self.depth > 64) return error.JinjaExpressionDepthExceeded;
@@ -397,6 +410,30 @@ const Parser = struct {
         return try args.toOwnedSlice(self.allocator);
     }
 };
+
+fn expressionFinish(input: []const u8, start: usize) usize {
+    var depth: usize = 0;
+    var quote: u8 = 0;
+    var index = start;
+    while (index < input.len) : (index += 1) {
+        const character = input[index];
+        if (quote != 0) {
+            if (character == '\\') index += 1 else if (character == quote) quote = 0;
+            continue;
+        }
+        if (character == '\'' or character == '"') {
+            quote = character;
+            continue;
+        }
+        if (character == '(' or character == '[' or character == '{') {
+            depth += 1;
+        } else if (character == ')' or character == ']' or character == '}') {
+            if (depth == 0) return index;
+            depth -= 1;
+        } else if (depth == 0 and (character == ',' or character == ':')) return index;
+    }
+    return index;
+}
 
 fn ident(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';

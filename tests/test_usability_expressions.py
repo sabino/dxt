@@ -43,6 +43,14 @@ EXPRESSIONS = [
     "'chosen' if true else 1 / 0",
     "missing | default(default_value='fallback')",
     "0 | default(boolean=true,default_value=7)",
+    "('chosen' if true else 1 / 0) ~ '!'",
+    "[1 if false else 2, 3 if true else 1 / 0]",
+    "dict(a=1 if true else 1 / 0,b='yes' if true)",
+    "{'a': 7 if true else 1 / 0}",
+    "false and 1 / 0",
+    "true or 1 / 0",
+    "'chosen' or missing_function()",
+    "none if false else 'selected' if true else 1 / 0",
 ]
 
 
