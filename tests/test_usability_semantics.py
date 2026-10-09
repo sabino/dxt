@@ -906,3 +906,75 @@ saved_queries:
     result = run_dxt(project, 'metric', 'query', *flags)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == expected
+
+
+@pytest.mark.parametrize('metric,grain,bounded', [
+    ('revenue', 'day', False), ('rolling_revenue', 'day', False),
+    ('rolling_revenue', 'month', False), ('rolling_revenue_last', 'month', False),
+    ('rolling_revenue_average', 'month', False), ('revenue_change', 'day', False),
+    ('current_balance', 'day', False), ('current_balance', 'month', False),
+    ('complete_revenue', 'day', False), ('month_start_revenue', 'day', False),
+    ('rolling_revenue', 'month', True),
+])
+def test_metricflow_own_aggregation_time_dimension_groups(tmp_path, core_runner, metric, grain, bounded):
+    from test_usability_commands import query
+    project = edge_metric_project(tmp_path / 'metric')
+    assert invoke_core(core_runner, project, 'parse').success
+    assert run_dxt(project, 'build').returncode == 0
+    group = f'order_key__ordered_at__{grain}'
+    start, end = ('2024-01-03', '2024-01-08') if bounded else (None, None)
+    sql = metricflow_sql(project, [metric], [group], start_time=start, end_time=end)
+    expected = query(project / 'warehouse.duckdb', sql)
+    flags = ['--metrics', metric, '--group-by', group]
+    if bounded:
+        flags += ['--start-time', start, '--end-time', end]
+    result = run_dxt(project, 'metric', 'query', *flags)
+    assert result.returncode == 0, result.stderr
+    assert canonical_rows(json.loads(result.stdout)) == canonical_rows(expected)
+
+
+def test_native_bounded_own_time_offsets_cover_metricflow_assertion_divergence(tmp_path, core_runner):
+    from test_usability_commands import query
+    project = edge_metric_project(tmp_path / 'metric')
+    assert invoke_core(core_runner, project, 'parse').success
+    assert run_dxt(project, 'build').returncode == 0
+    group = 'order_key__ordered_at__day'
+    with pytest.raises(AssertionError, match='No metric time dimensions with standard granularities'):
+        metricflow_sql(project, ['revenue_change'], [group], start_time='2024-01-03', end_time='2024-01-08')
+    # The pinned planner cannot render this alias with a time bound. Its supported
+    # metric_time alias is the same aggregation-time dimension and remains a
+    # complete result oracle for the native extension.
+    sql = metricflow_sql(project, ['revenue_change'], ['metric_time__day'], start_time='2024-01-03', end_time='2024-01-08')
+    expected = query(project / 'warehouse.duckdb', sql)
+    expected = [{group: row.pop('metric_time__day'), **row} for row in expected]
+    result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue_change', '--group-by', group,
+                     '--start-time', '2024-01-03', '--end-time', '2024-01-08')
+    assert result.returncode == 0, result.stderr
+    assert canonical_rows(json.loads(result.stdout)) == canonical_rows(expected)
+
+
+@pytest.mark.parametrize('bound', ['not-a-date', '2024-02-30', '2023-02-29', '2024-01-01T25:00:00'])
+def test_invalid_metric_timestamp_fails_before_warehouse_or_plan(tmp_path, core_runner, bound):
+    from datetime import datetime
+    with pytest.raises(ValueError):
+        datetime.fromisoformat(bound)
+    project = metric_project(tmp_path / 'metric')
+    result = run_dxt(project, 'metric', 'explain', '--metrics', 'revenue', '--start-time', bound)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'InvalidMetricTimestamp' in result.stderr
+    assert not (project / 'warehouse.duckdb').exists()
+    assert not (project / 'target/metric_plan.json').exists()
+
+
+@pytest.mark.parametrize('group', ['order_key__day', 'customer__day', 'order_key__ordered_at__hour'])
+def test_metric_entity_grains_and_finer_source_time_fail_before_execution(tmp_path, core_runner, group):
+    from metricflow_semantics.errors.error_classes import InvalidQueryException
+    project = metric_project(tmp_path / 'metric')
+    assert invoke_core(core_runner, project, 'parse').success
+    with pytest.raises(InvalidQueryException):
+        metricflow_sql(project, ['revenue'], [group])
+    result = run_dxt(project, 'metric', 'explain', '--metrics', 'revenue', '--group-by', group)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'metric time grain is invalid or finer than its source dimension' in result.stderr
+    assert not (project / 'warehouse.duckdb').exists()
+    assert not (project / 'target/metric_plan.json').exists()
