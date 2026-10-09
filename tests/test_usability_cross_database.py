@@ -1155,3 +1155,51 @@ def test_shared_query_retries_confirmed_source_abort_and_records_actual_attempts
         assert record["attempt_count"] == 2
         assert record["rows_moved"] == 33 and record["output_rows"] == 0
         assert record["attempts"][1]["error_name"] == "CrossDatabaseRowBudgetExceeded"
+
+
+def test_declared_query_cannot_bypass_raw_extraction_policy(project, native_environment):
+    config, schema = project[1], project[2]
+    cases = [
+        {"query": f'select * from "{schema}".customers'},
+        {"query": f'select c.* from "{schema}".customers c'},
+        {"query": f'with c as (select id from "{schema}".customers) select id from c'},
+        {"query": f'select id from (select * from "{schema}".customers) c'},
+        {"query": f'select * from "{schema}".customers where enabled'},
+        {"query": f'select row_to_json(c) as payload from "{schema}".customers c'},
+        {"query": f'select U&"c\\0064" from "{schema}".customers cd'},
+        {"query": f'select * from "{schema}".customers /* where enabled */'},
+        {"relation": f"{schema}.customers", "columns": []},
+        {"relation": f"{schema}.customers", "filter": "enabled"},
+    ]
+    profiles = json.loads((project[0] / "profiles.yml").read_text())
+    profiles["cross"]["outputs"]["crm"]["host"] = "invalid.invalid"
+    (project[0] / "profiles.yml").write_text(json.dumps(profiles))
+    for declaration in cases:
+        config["models"] = {"raw": {"destination": "warehouse", "inputs": {"customers": {
+            "connection": "crm", **declaration}}, "sql": "select * from {{ input('customers') }}"}}
+        result = invoke(project, config, native_environment, "run", "--allow-movement")
+        assert result.returncode != 0
+        assert "denied before source execution" in result.stderr
+        assert "allow-raw-extract" in result.stderr
+        plan = json.loads((project[0] / "target" / "dxt_plan.json").read_text())
+        assert plan["models"][0]["inputs"][0]["raw_extract"] is True
+        assert not (project[0] / ".dxt").exists()
+    assert duck_rows(project[3], "select table_name from information_schema.tables where table_schema='marts'") == []
+
+
+def test_explicit_raw_query_authorization_and_scalar_projection_are_native(project, native_environment, postgres):
+    config, schema = project[1], project[2]
+    config["models"] = {"raw": {"destination": "warehouse", "inputs": {"customers": {
+        "connection": "crm", "query": f'select * from "{schema}".customers'}},
+        "sql": "select id,name from {{ input('customers') }}"}}
+    result = invoke(project, config, native_environment, "run", "--allow-movement", "--allow-raw-extract")
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert duck_rows(project[3], "select id,name from marts.raw order by id") == [(1, "O'Brien"), (2, "second")]
+    for source_query, expected in [(f'select count(*)::bigint as amount from "{schema}".customers', [(2,)]),
+                                   (f'select id * 2 as amount from "{schema}".customers where enabled', [(2,)])]:
+        config["models"]["raw"]["inputs"]["customers"]["query"] = source_query
+        config["models"]["raw"]["sql"] = "select amount from {{ input('customers') }}"
+        result = invoke(project, config, native_environment, "run", "--allow-movement")
+        assert result.returncode == 0, result.stderr
+        assert duck_rows(project[3], "select amount from marts.raw") == expected

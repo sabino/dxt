@@ -318,7 +318,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
             if (source_reference.len != 0 and source_reference.len != 2) return error.InvalidCrossDatabaseInput;
             const moved = connection != execution_connection;
             const sensitivity = try optionalFieldString(input_raw, "sensitivity") orelse "public";
-            const raw_extract = values.get(input_raw, "query") == null and values.get(input_raw, "columns") == null and values.get(input_raw, "projection") == null and values.get(input_raw, "filter") == null and values.get(input_raw, "group_by") == null;
+            const raw_extract = try @import("cross_database_reduction.zig").requiresRawAuthorization(runtime.allocator, query_sql);
             const incremental_config = values.get(input_raw, "incremental") orelse .null;
             if (incremental_config != .null and incremental_config != .object) return error.InvalidCrossDatabaseInput;
             var input: Input = .{
@@ -330,7 +330,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
                 .query = query_sql,
                 .query_hash = try digest(runtime.allocator, query_sql),
                 .sensitivity = sensitivity,
-                .reduction = if (values.get(input_raw, "query") != null) "declared source subquery" else if (!raw_extract) "source projection/filter/aggregate" else "raw extraction",
+                .reduction = if (raw_extract) "raw or unproved extraction" else if (values.get(input_raw, "query") != null) "declared source projection" else "source projection/filter/aggregate",
                 .estimated_rows = try optionalUnsigned(input_raw, "estimated_rows"),
                 .estimated_bytes = try optionalUnsigned(input_raw, "estimated_bytes"),
                 .raw_extract = raw_extract,
@@ -345,7 +345,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
                 if (!options.allow_movement and !try optionalBool(policy, "allow_movement", false)) input.denied = "data movement requires --allow-movement or policy.allow_movement";
                 if (origin.allowed_destinations.len != 0 and !contains(origin.allowed_destinations, target.name)) input.denied = "destination is outside the source connection's allowed destinations";
                 if (!eq(sensitivity, "public") and !eq(sensitivity, "internal") and (!options.allow_sensitive or !eq(origin.trust_domain, target.trust_domain))) input.denied = "sensitive data movement requires explicit authorization inside one trust domain";
-                if (raw_extract and !options.allow_raw_extract and !try optionalBool(policy, "allow_raw_extract", false)) input.denied = "full-table extraction requires --allow-raw-extract or policy.allow_raw_extract";
+                if (raw_extract and !options.allow_raw_extract and !try optionalBool(policy, "allow_raw_extract", false)) input.denied = "full-width or unproved extraction requires --allow-raw-extract or policy.allow_raw_extract";
             }
             if (values.get(input_raw, "stage")) |stage| {
                 if (stage != .object) return error.InvalidCrossDatabaseStage;
