@@ -10,13 +10,13 @@ pub fn cloneValue(allocator: std.mem.Allocator, value: Value) anyerror!Value {
         .string => |text| .{ .string = try allocator.dupe(u8, text) },
         .integer => |text| .{ .integer = try allocator.dupe(u8, text) },
         .callable => |name| .{ .callable = try allocator.dupe(u8, name) },
-        .capture_undefined => |original| blk: {
+        .capture_undefined, .ordinary_undefined => |original| blk: {
             const copied = try allocator.create(expression.CaptureUndefined);
             copied.* = original.*;
             copied.allocator = allocator;
             copied.name = if (original.name) |name| try allocator.dupe(u8, name) else null;
             copied.hint = if (original.hint) |hint| try allocator.dupe(u8, hint) else null;
-            break :blk .{ .capture_undefined = copied };
+            break :blk if (value == .capture_undefined) Value{ .capture_undefined = copied } else Value{ .ordinary_undefined = copied };
         },
         .list, .tuple => |items| blk: {
             const copied = try expression.allocateValues(allocator, items.len);
@@ -500,4 +500,9 @@ test "capture Undefined cloning owns payload and preserves scalar identity" {
     try std.testing.expectEqualStrings("missing", copied.capture_undefined.name.?);
     try std.testing.expectEqualStrings("context", copied.capture_undefined.hint.?);
     try std.testing.expectError(error.JinjaTypeError, @import("context_json.zig").stringify(allocator, copied));
+    const missing = try expression.undefinedValue(allocator, "missing");
+    const duplicate = try cloneValue(allocator, missing);
+    try std.testing.expect(duplicate == .ordinary_undefined);
+    try std.testing.expectEqual(missing.ordinary_undefined.identity, duplicate.ordinary_undefined.identity);
+    try std.testing.expectError(error.JinjaTypeError, @import("context_json.zig").stringify(allocator, duplicate));
 }

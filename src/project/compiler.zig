@@ -90,6 +90,7 @@ const CompileContext = struct {
     returned: ?native_expr.Value = null,
     parse_node: ?*Node = null,
     execute_override: ?bool = null,
+    capture_undefined_override: ?bool = null,
     var_render_depth: usize = 0,
     loop_depth: usize = 0,
     loop_break: bool = false,
@@ -190,7 +191,11 @@ const CompileContext = struct {
     }
 
     fn host(self: *CompileContext) native_expr.Host {
-        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue, .capture_undefined = self.parse_node != null };
+        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue, .capture_undefined = self.capturesUndefined() };
+    }
+
+    fn capturesUndefined(self: *const CompileContext) bool {
+        return self.parse_node != null and (self.capture_undefined_override orelse true);
     }
 
     fn evaluate(self: *CompileContext, span: []const u8) !native_expr.Value {
@@ -1212,9 +1217,9 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         if (std.mem.eql(u8, binding.name, name)) {
             var value = binding.value;
             while (parts.next()) |attribute| {
-                if (value == .undefined and context.parse_node != null) value = try native_expr.captureUndefined(allocator, binding.name);
+                if (value == .undefined and context.capturesUndefined()) value = try native_expr.captureUndefined(allocator, binding.name);
                 value = try native_expr.checkedAttribute(value, attribute);
-                if (value == .undefined and context.parse_node != null) value = try native_expr.captureUndefined(allocator, attribute);
+                if (value == .undefined and context.capturesUndefined()) value = try native_expr.captureUndefined(allocator, attribute);
             }
             return value;
         }
@@ -1589,11 +1594,11 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
                 return try hooks.call(hooks.context, name, forwarded, allocator);
             }
             return hooks.call(hooks.context, name, args, allocator) catch |err| {
-                if (err == error.UnresolvedMacro and context.parse_node != null) return try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name);
+                if (err == error.UnresolvedMacro and context.capturesUndefined()) return try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name);
                 return err;
             };
         }
-        if (context.parse_node != null) return try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name);
+        if (context.capturesUndefined()) return try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name);
         return error.UnresolvedMacro;
     }
     const macro = findMacroByUniqueId(context.graph, macro_id.?) orelse return error.UnresolvedMacro;

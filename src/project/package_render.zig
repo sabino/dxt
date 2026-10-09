@@ -66,7 +66,7 @@ pub const Context = struct {
         if (std.mem.startsWith(u8, trimmed, "{{") and std.mem.endsWith(u8, trimmed, "}}") and (prefix == 0 or std.mem.startsWith(u8, trimmed, "{{-")) and (suffix == 0 or std.mem.endsWith(u8, trimmed, "-}}")) and (findEnd(trimmed, 2, "}}") orelse 0) == trimmed.len - 2) {
             const input = std.mem.trim(u8, trimmed[2 .. trimmed.len - 2], "- \t\r\n");
             const result = try self.evaluate(input);
-            if (result == .undefined) return error.UndefinedJinjaValue;
+            if (expression.isUndefined(result)) return error.UndefinedJinjaValue;
             const has_marker = std.mem.indexOf(u8, input, "as_native") != null or std.mem.indexOf(u8, input, "as_number") != null or std.mem.indexOf(u8, input, "as_bool") != null or std.mem.indexOf(u8, input, "as_text") != null;
             if (has_marker and (result == .number or result == .integer)) {
                 const pipe = std.mem.indexOfScalar(u8, input, '|') orelse input.len;
@@ -79,7 +79,7 @@ pub const Context = struct {
             // Core folds constant expression output to text, while a dynamic
             // context value or a native marker retains its type.
             const constant = expression.evaluate(self.runtime.allocator, input, null) catch .undefined;
-            if (!has_marker and constant != .undefined) {
+            if (!has_marker and !expression.isUndefined(constant)) {
                 if (constant == .number or constant == .integer) {
                     var literal = yaml.parse(self.runtime.allocator, input) catch null;
                     if (literal) |*document| {
