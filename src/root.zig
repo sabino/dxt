@@ -171,7 +171,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
 
     if (equals(command, "metric")) {
         if (args.len < 3 or hasHelp(args[2..])) {
-            try stdout.writeAll("Usage: dxt metric <query|explain|export> --metrics <names> [--group-by <dimensions>] [--where <SQL>] [--order-by <names>] [--limit <rows>] [--start-time <timestamp>] [--end-time <timestamp>] [--saved-query <name>] [--project-dir <path>] [--profiles-dir <path>] [--target <name>]\n");
+            try @import("project/metric_command.zig").printHelp(stdout);
             return .ok;
         }
         const mode = args[2];

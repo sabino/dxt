@@ -560,3 +560,235 @@ def test_saved_query_order_builder_honors_boolean(tmp_path, core_runner, descend
     result = run_dxt(project, 'metric', 'query', '--saved-query', 'daily_revenue')
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == expected
+
+
+@pytest.fixture
+def cross_metric_project(tmp_path, monkeypatch, core_runner):
+    import os
+    import ctypes.util
+    import pgserver
+    import psycopg2
+    import yaml
+    library = os.environ.get('DXT_DUCKDB_LIBRARY') or ctypes.util.find_library('duckdb')
+    assert library, 'Metric movement acceptance requires the pinned standalone native DuckDB library'
+    monkeypatch.setenv('DXT_DUCKDB_LIBRARY', library)
+    monkeypatch.setenv('DXT_DUCKDB_BACKEND', 'native')
+    with pgserver.get_server(tmp_path / 'postgres-data') as server:
+        project = metric_project(tmp_path / 'metric')
+        properties = project / 'models/semantic.yml'
+        properties.write_text(properties.read_text().replace("  - name: customers\n    model: ref('customers')\n", """  - name: customers
+    model: ref('customers')
+    config:
+      meta:
+        connection: crm
+        source: [analytics, customers]
+        sensitivity: public
+        estimated_rows: 3
+        estimated_bytes: 64
+"""))
+        profiles = yaml.safe_load((project / 'profiles.yml').read_text())
+        info = server.get_postmaster_info()
+        profiles['commands']['outputs']['crm'] = {
+            'type': 'postgres', 'host': str(info.socket_dir), 'port': info.port,
+            'dbname': 'postgres', 'user': 'postgres', 'password': 'metric-fixture-secret', 'schema': 'analytics',
+        }
+        profiles['commands']['outputs']['embedded'] = {'type': 'duckdb', 'path': ':memory:', 'schema': 'main'}
+        (project / 'profiles.yml').write_text(json.dumps(profiles))
+        with psycopg2.connect(server.get_uri()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute('create schema analytics; create table analytics.customers(id bigint,country text,unused_private text)')
+                cursor.execute("insert into analytics.customers values(1,'CA','private'),(2,'AU','private'),(3,'NZ','private')")
+        configuration = {'connections': {
+            'warehouse': {'profile': 'commands', 'target': 'dev', 'role': 'both', 'trust_domain': 'analytics', 'allowed_destinations': ['embedded']},
+            'crm': {'profile': 'commands', 'target': 'crm', 'role': 'source', 'trust_domain': 'analytics', 'allowed_destinations': ['warehouse', 'embedded']},
+            'embedded': {'profile': 'commands', 'target': 'embedded', 'role': 'both', 'trust_domain': 'analytics'},
+        }}
+        (project / 'dxt_connections.yml').write_text(json.dumps(configuration))
+        assert invoke_core(core_runner, project, 'parse').success
+        result = run_dxt(project, 'build')
+        assert result.returncode == 0, result.stderr
+        yield project, configuration, server
+
+
+def canonical_rows(rows):
+    return sorted(rows, key=lambda row: json.dumps(row, sort_keys=True))
+
+
+@pytest.mark.parametrize('embedded', [False, True])
+def test_metric_cross_database_query_uses_reviewed_native_plan(cross_metric_project, embedded):
+    from test_usability_commands import query
+    project, configuration, server = cross_metric_project
+    flags = ['--connection', 'warehouse', '--allow-movement']
+    if embedded:
+        flags += ['--execution-connection', 'embedded']
+    result = run_dxt(project, 'metric', 'explain', '--metrics', 'revenue', '--group-by', 'customer__country', *flags)
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    physical = plan['cross_database']
+    model = physical['models'][0]
+    assert model['permitted']
+    assert model['execution_connection'] == ('embedded' if embedded else 'warehouse')
+    customer = next(item for item in model['inputs'] if item['logical_id'] == 'model.commands.customers')
+    assert customer['moved']
+    assert customer['raw_extract'] is False
+    assert '"id"' in customer['query'] and '"country"' in customer['query']
+    assert 'unused_private' not in customer['query']
+    assert 'metric-fixture-secret' not in result.stdout
+    reviewed_hash = physical['plan_hash']
+    result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue', '--group-by', 'customer__country',
+                     *flags, '--plan-hash', reviewed_hash)
+    assert result.returncode == 0, result.stderr
+    assert canonical_rows(json.loads(result.stdout)) == canonical_rows([
+        {'customer__country': 'CA', 'revenue': 30}, {'customer__country': 'AU', 'revenue': 5},
+        {'customer__country': 'NZ', 'revenue': None}, {'customer__country': None, 'revenue': 0},
+    ])
+    executed = json.loads((project / 'target/metric_plan.json').read_text())
+    assert executed['cross_database']['plan_hash'] == reviewed_hash
+    assert query(project / 'warehouse.duckdb', "select table_name from information_schema.tables where table_name like '__dxt_%'") == []
+    assert not list((project / '.dxt/cross-runs').glob('*/state.json'))
+
+
+@pytest.mark.parametrize('flags,diagnostic', [
+    (['--connection', 'warehouse'], 'CrossDatabasePolicyDenied'),
+    (['--connection', 'warehouse', '--allow-movement', '--max-rows', '1'], 'CrossDatabasePolicyDenied'),
+    (['--connection', 'warehouse', '--allow-movement', '--max-rows', '5'], 'CrossDatabaseRowBudgetExceeded'),
+    (['--connection', 'missing'], 'MissingCrossDatabaseConnection'),
+    (['--allow-movement'], 'MissingMetricConnection'),
+    ([], 'MissingMetricConnection'),
+])
+def test_metric_cross_database_failures_are_bounded_and_leave_no_stages(cross_metric_project, flags, diagnostic):
+    from test_usability_commands import query
+    project, configuration, server = cross_metric_project
+    result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue', '--group-by', 'customer__country', *flags)
+    assert result.returncode != 0, result.stderr
+    assert diagnostic in result.stderr, result.stderr
+    assert 'metric-fixture-secret' not in result.stderr
+    assert query(project / 'warehouse.duckdb', "select table_name from information_schema.tables where table_name like '__dxt_%'") == []
+
+
+def test_metric_cross_database_saved_table_export_and_view_preflight(cross_metric_project):
+    from test_usability_commands import query
+    project, configuration, server = cross_metric_project
+    properties = project / 'models/semantic.yml'
+    original = properties.read_text().replace('group_by: ["TimeDimension(\'metric_time\', \'day\')"]', 'group_by: ["Dimension(\'customer__country\')"]').replace('order_by: ["TimeDimension(\'metric_time\', \'day\')"]', 'order_by: ["Dimension(\'customer__country\')"]')
+    properties.write_text(original)
+    result = run_dxt(project, 'metric', 'export', '--saved-query', 'daily_revenue', '--connection', 'warehouse', '--allow-movement')
+    assert result.returncode == 0, result.stderr
+    expected = query(project / 'warehouse.duckdb', 'select * from reporting.daily_revenue_export order by customer__country')
+    assert {row['customer__country'] for row in expected} == {'CA', 'AU', 'NZ', None}
+    properties.write_text(original.replace('export_as: table', 'export_as: view'))
+    result = run_dxt(project, 'metric', 'export', '--saved-query', 'daily_revenue', '--connection', 'warehouse', '--allow-movement')
+    assert result.returncode != 0, result.stderr
+    assert 'CrossDatabaseMetricViewUnavailable' in result.stderr
+    assert query(project / 'warehouse.duckdb', 'select * from reporting.daily_revenue_export order by customer__country') == expected
+    properties.write_text(original.replace('source: [analytics, customers]', 'source: [analytics, absent_customers]'))
+    result = run_dxt(project, 'metric', 'export', '--saved-query', 'daily_revenue', '--connection', 'warehouse', '--allow-movement')
+    assert result.returncode != 0, result.stderr
+    assert query(project / 'warehouse.duckdb', 'select * from reporting.daily_revenue_export order by customer__country') == expected
+
+
+def test_metric_named_local_views_recompute_without_movement(cross_metric_project):
+    from test_usability_commands import query
+    project, configuration, server = cross_metric_project
+    properties = project / 'models/semantic.yml'
+    source = properties.read_text()
+    source = source.replace('        connection: crm\n', '').replace('        source: [analytics, customers]\n', '')
+    properties.write_text(source.replace('export_as: table', 'export_as: view'))
+    result = run_dxt(project, 'metric', 'export', '--saved-query', 'daily_revenue', '--connection', 'warehouse')
+    assert result.returncode == 0, result.stderr
+    assert query(project / 'warehouse.duckdb', "select revenue from reporting.daily_revenue_export where metric_time__day=date '2024-01-01'") == [{'revenue': 30}]
+    query(project / 'warehouse.duckdb', "update dev.orders set amount=amount+1 where ordered_at=date '2024-01-01'")
+    assert query(project / 'warehouse.duckdb', "select revenue from reporting.daily_revenue_export where metric_time__day=date '2024-01-01'") == [{'revenue': 32}]
+    assert json.loads((project / 'target/metric_plan.json').read_text())['movement'] == []
+
+
+def test_metric_cross_database_source_reduction_and_budget_flags(cross_metric_project):
+    project, configuration, server = cross_metric_project
+    properties = project / 'models/semantic.yml'
+    properties.write_text(properties.read_text().replace('        source: [analytics, customers]\n', "        source: [analytics, customers]\n        source_query: \"SELECT id,country FROM analytics.customers WHERE country <> 'NZ'\"\n"))
+    flags = ['--connection', 'warehouse', '--allow-movement', '--max-rows', '20', '--max-bytes', '2048',
+             '--max-memory-bytes', '33554432', '--max-spill-bytes', '0', '--max-objects', '8', '--max-query-seconds', '10', '--max-cost', '0']
+    result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue', '--group-by', 'customer__country', *flags)
+    assert result.returncode == 0, result.stderr
+    assert {row['customer__country'] for row in json.loads(result.stdout)} == {'CA', 'AU', None}
+    plan = json.loads((project / 'target/metric_plan.json').read_text())
+    assert "WHERE country <> 'NZ'" in plan['movement'][0]['query']
+    assert plan['cross_database']['models'][0]['budget'] == {
+        'max_rows': 20, 'max_bytes': 2048, 'max_memory_bytes': 33554432, 'max_spill_bytes': 0,
+        'max_objects': 8, 'max_query_seconds': 10, 'max_cost': 0,
+    }
+    configuration['connections']['crm']['egress_per_gib'] = 1
+    (project / 'dxt_connections.yml').write_text(json.dumps(configuration))
+    result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue', '--group-by', 'customer__country', *flags)
+    assert result.returncode != 0
+    assert 'CrossDatabasePolicyDenied' in result.stderr
+
+
+def test_metric_saved_export_database_is_validated_before_execution(tmp_path):
+    project = metric_project(tmp_path / 'metric')
+    properties = project / 'models/semantic.yml'
+    properties.write_text(properties.read_text().replace('export_as: table', 'export_as: table\n          database: absent_database'))
+    result = run_dxt(project, 'metric', 'export', '--saved-query', 'daily_revenue')
+    assert result.returncode != 0
+    assert 'MetricExportDatabaseMismatch' in result.stderr
+    assert not (project / 'warehouse.duckdb').exists()
+    assert not (project / 'target/metric_plan.json').exists()
+
+
+def test_metric_cross_database_duckdb_to_postgres_exact_decimal_export(tmp_path, monkeypatch, core_runner):
+    import os
+    import ctypes.util
+    import pgserver
+    import psycopg2
+    import duckdb
+    from decimal import Decimal
+    library = os.environ.get('DXT_DUCKDB_LIBRARY') or ctypes.util.find_library('duckdb')
+    assert library, 'Metric movement acceptance requires the pinned standalone native DuckDB library'
+    monkeypatch.setenv('DXT_DUCKDB_LIBRARY', library)
+    monkeypatch.setenv('DXT_DUCKDB_BACKEND', 'native')
+    with pgserver.get_server(tmp_path / 'postgres-data') as server:
+        project = metric_project(tmp_path / 'metric')
+        properties = project / 'models/semantic.yml'
+        source = properties.read_text().replace("  - name: customers\n    model: ref('customers')\n", """  - name: customers
+    model: ref('customers')
+    config:
+      meta:
+        connection: dims
+        source: [main, customers]
+        estimated_rows: 1
+        estimated_bytes: 16
+""")
+        source = source.replace('group_by: ["TimeDimension(\'metric_time\', \'day\')"]', 'group_by: ["Dimension(\'customer__country\')"]').replace('order_by: ["TimeDimension(\'metric_time\', \'day\')"]', 'order_by: ["Dimension(\'customer__country\')"]')
+        properties.write_text(source)
+        dim_database = project / 'dims.duckdb'
+        with duckdb.connect(str(dim_database)) as connection:
+            connection.execute("create table customers as select 1::bigint id,'US'::varchar country")
+        info = server.get_postmaster_info()
+        profiles = {'commands': {'target': 'dev', 'outputs': {
+            'dev': {'type': 'postgres', 'host': str(info.socket_dir), 'port': info.port,
+                    'dbname': 'postgres', 'user': 'postgres', 'password': '', 'schema': 'dev'},
+            'dims': {'type': 'duckdb', 'path': str(dim_database), 'schema': 'main'},
+        }}}
+        (project / 'profiles.yml').write_text(json.dumps(profiles))
+        (project / 'dxt_connections.yml').write_text(json.dumps({'connections': {
+            'warehouse': {'profile': 'commands', 'target': 'dev', 'role': 'both'},
+            'dims': {'profile': 'commands', 'target': 'dims', 'role': 'source', 'allowed_destinations': ['warehouse']},
+        }}))
+        with psycopg2.connect(server.get_uri()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute('create schema dev;create table dev.orders(id bigint,customer_id bigint,amount numeric(20,4),ordered_at date,status text)')
+                cursor.execute("insert into dev.orders values(1,1,1234567890123456.7890,'2024-01-01','paid'),(2,1,2.0001,'2024-01-03','paid')")
+        assert invoke_core(core_runner, project, 'parse').success
+        result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue', '--group-by', 'customer__country', '--connection', 'warehouse', '--allow-movement')
+        assert result.returncode == 0, result.stderr
+        expected = Decimal('1234567890123458.7891')
+        assert json.loads(result.stdout, parse_float=Decimal) == [{'customer__country': 'US', 'revenue': expected}]
+        for attempt in range(2):
+            result = run_dxt(project, 'metric', 'export', '--saved-query', 'daily_revenue', '--connection', 'warehouse', '--allow-movement')
+            assert result.returncode == 0, result.stderr
+        with psycopg2.connect(server.get_uri()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute('select * from reporting.daily_revenue_export')
+                assert cursor.fetchall() == [('US', expected)]
+                cursor.execute("select data_type from information_schema.columns where table_schema='reporting' and table_name='daily_revenue_export' and column_name='revenue'")
+                assert cursor.fetchone() == ('numeric',)

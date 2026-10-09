@@ -4,6 +4,7 @@ const sem = @import("semantic.zig");
 const compiler = @import("compiler.zig");
 const values = @import("config_value.zig");
 const expression = @import("expression.zig");
+const cross = @import("cross_database.zig");
 const Value = std.json.Value;
 const Graph = types.Graph;
 const Resource = types.SemanticResource;
@@ -40,6 +41,11 @@ pub const Query = struct {
     saved_query: ?[]const u8 = null,
     explain: bool = false,
     export_saved_query: bool = false,
+    connection: ?[]const u8 = null,
+    execution_connection: ?[]const u8 = null,
+    movement_policy: cross.Options = .{},
+    movement_budget: cross.Budget = .{},
+    movement_configured: bool = false,
 };
 
 pub const RelationBinding = struct {
@@ -214,6 +220,7 @@ const Context = struct {
         const a = self.allocator;
         const name = text(relation, "relation_name") orelse return error.MissingSemanticModelTarget;
         const connection = text(meta, "connection");
+        if (connection == null and !eq(text(relation, "database") orelse sem.databaseForGraph(self.graph), sem.databaseForGraph(self.graph))) return error.MissingMetricConnection;
         for (self.bindings.items) |binding| if (eq(binding.relation_name, name)) {
             if (!optionalEq(binding.connection, connection)) return error.AmbiguousMetricRelation;
             return binding.relation_name;
