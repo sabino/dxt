@@ -155,7 +155,7 @@ pub fn discoverChildDirectories(runtime: Runtime, absolute_dir: []const u8, dire
         const child_abs = try std.fs.path.join(runtime.allocator, &.{ absolute_dir, entry.name });
         const is_dir = if (entry.kind == .directory)
             true
-        else if (entry.kind == .unknown)
+        else if (entry.kind == .unknown or entry.kind == .sym_link)
             try linuxPathIsDirectory(runtime.allocator, child_abs)
         else
             false;

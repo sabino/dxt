@@ -15,6 +15,8 @@ import threading
 import pytest
 import yaml
 
+from test_usability_commands import core_runner
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DXT = ROOT / "zig-out" / "bin" / "dxt"
@@ -546,3 +548,34 @@ def test_invalid_dependency_yaml_reports_file_and_source_mark(tmp_path):
     assert result.returncode != 0
     assert "invalid YAML in packages.yml at line 3, column 1" in result.stderr
     assert not (root / "dbt_packages").exists()
+
+
+def test_parent_local_package_matches_core_links_and_preserves_live_edits(tmp_path, core_runner):
+    parent = project(tmp_path / "package", "parent_utils")
+    consumer = project(parent / "integration_tests", "consumer", "profile: consumer\n")
+    (parent / "macros").mkdir()
+    macro = parent / "macros/answer.sql"
+    macro.write_text("{% macro answer() %}41{% endmacro %}")
+    (consumer / "models").mkdir()
+    (consumer / "models/value.sql").write_text("select {{ parent_utils.answer() }} as id")
+    (consumer / "packages.yml").write_text("packages: [{local: ../}]\n")
+    (consumer / "profiles.yml").write_text(f"consumer:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: {consumer / 'warehouse.duckdb'}\n      schema: main\n")
+    common = ["--project-dir", str(consumer), "--profiles-dir", str(consumer)]
+    oracle = core_runner.invoke(["--quiet", "deps", *common])
+    assert oracle.success, oracle.exception
+    installed = consumer / "dbt_packages/parent_utils"
+    assert installed.is_symlink() and installed.resolve() == parent
+    require_success(run(consumer))
+    assert installed.is_symlink() and installed.resolve() == parent
+    macro.write_text("{% macro answer() %}42{% endmacro %}")
+    require_success(run(consumer, "compile", "--profiles-dir", str(consumer), "--target-path", "native"))
+    oracle = core_runner.invoke(["--quiet", "compile", *common, "--target-path", "core", "--no-partial-parse"])
+    assert oracle.success, oracle.exception
+    actual = json.loads((consumer / "native/manifest.json").read_text())
+    expected = json.loads((consumer / "core/manifest.json").read_text())
+    assert actual["nodes"]["model.consumer.value"]["compiled_code"].strip() == expected["nodes"]["model.consumer.value"]["compiled_code"].strip() == "select 42 as id"
+    # Replacing a local install must remove only its link, never source data.
+    (consumer / "packages.yml").write_text("packages: []\n")
+    require_success(run(consumer))
+    assert macro.read_text() == "{% macro answer() %}42{% endmacro %}"
+    assert not installed.exists()

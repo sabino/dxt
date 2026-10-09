@@ -98,6 +98,7 @@ jobs:
 
       - name: Certify clean native installation and performance budgets
         run: |
+          zig build -Doptimize=ReleaseSafe --summary all
           python scripts/check_install.py --version "${{ steps.version.outputs.version }}"
           python scripts/check_performance.py
 

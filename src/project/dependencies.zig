@@ -142,7 +142,12 @@ pub fn install(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stder
         errdefer removeTree(rt, stage) catch {};
         for (resolved) |package| {
             const path = try join(rt, &.{ stage, package.name });
-            try solver.copyPackage(package.directory, path);
+            if (package.requirement.spec.kind == .local) {
+                // Core links local packages, including a parent package's own
+                // integration project. Linking preserves edits and cannot
+                // recurse into the generated installation stage.
+                try Dir.cwd().symLink(rt.io, package.directory, path, .{ .is_directory = true });
+            } else try solver.copyPackage(package.directory, path);
         }
         const backup = try join(rt, &.{ root, ".dxt-deps", "install-backup" });
         try removeTree(rt, backup);
@@ -416,7 +421,6 @@ const Solver = struct {
         switch (request.spec.kind) {
             .local => {
                 directory = try Dir.cwd().realPathFileAlloc(self.runtime.io, try rootedPath(self.runtime, self.root, request.spec.source), self.runtime.allocator);
-                if (containsPath(directory, self.root)) return error.InvalidLocalPackage;
             },
             .git, .private => {
                 const requested_revision = request.spec.revision orelse "HEAD";
