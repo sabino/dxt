@@ -38,6 +38,6 @@ fn write(allocator: std.mem.Allocator, writer: *std.Io.Writer, value: expression
             }
             try writer.writeByte('}');
         },
-        .undefined, .callable => return error.JinjaTypeError,
+        .undefined, .conditional_undefined, .callable => return error.JinjaTypeError,
     }
 }
