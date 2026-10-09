@@ -98,6 +98,7 @@ const CompileContext = struct {
     previous_host_node: ?*const anyopaque = null,
     documentation: bool = false,
     documentation_block: bool = false,
+    caller_blocks: std.ArrayList(*CallerBlock) = .empty,
 
     const ValueBinding = struct {
         name: []const u8,
@@ -985,22 +986,36 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                 index = afterTag(sql, block.close, end_index);
                 continue;
             }
-            if (std.mem.startsWith(u8, span, "call ")) {
+            if (std.mem.startsWith(u8, span, "call") and span.len > 4 and (std.ascii.isWhitespace(span[4]) or span[4] == '(')) {
                 const block = try findCaptureBlock(sql, close + 2, end_index, "call", "endcall");
-                var captured: std.ArrayList(u8) = .empty;
-                defer captured.deinit(context.allocator);
-                try renderRange(context, sql, afterTag(sql, close + 2, end_index), block.start, &captured);
-                const expression = std.mem.trim(u8, span[5..], " \t\r\n");
-                const call = try parseSingleCall(expression);
                 const arena = context.value_arena.allocator();
+                var expression = std.mem.trim(u8, span[4..], " \t\r\n");
+                var parameters: []const MacroParameter = &.{};
+                if (expression.len != 0 and expression[0] == '(') {
+                    const finish = findMatchingParen(expression, 0) orelse return error.UnsupportedJinja;
+                    parameters = try macroParameters(arena, expression[1..finish]);
+                    expression = std.mem.trim(u8, expression[finish + 1 ..], " \t\r\n");
+                }
+                const call = try parseSingleCall(expression);
                 const args = try native_expr.evaluateArguments(arena, expression[call.open + 1 .. call.close], context.host());
-                var arguments: std.ArrayList(native_expr.Argument) = .empty;
-                try arguments.appendSlice(arena, args);
-                context.pushScope();
-                defer context.popScope();
-                try context.setValue("__dxt_caller_sql", .{ .string = try arena.dupe(u8, captured.items) });
-                try context.setValue("caller", .{ .callable = "__dxt_caller" });
-                const value = try callExpressionValue(context, std.mem.trim(u8, expression[0..call.open], " \t"), arguments.items, arena);
+                const caller = try arena.create(CallerBlock);
+                caller.* = .{
+                    .sql = sql,
+                    .body = .{ .start = afterTag(sql, close + 2, end_index), .end = block.start },
+                    .parameters = parameters,
+                    .bindings = try arena.dupe(CompileContext.ValueBinding, context.bindings.items),
+                    .vars = try arena.dupe(StaticVar, context.vars.items),
+                    .lists = try arena.dupe(StaticList, context.lists.items),
+                    .scope_depth = context.scope_depth,
+                    .macro_package = context.current_macro_package,
+                    .capture_undefined = context.capturesUndefined(),
+                };
+                const caller_name = try std.fmt.allocPrint(arena, "__dxt_caller:{d}", .{context.caller_blocks.items.len});
+                try context.caller_blocks.append(arena, caller);
+                const arguments = try arena.alloc(native_expr.Argument, args.len + 1);
+                @memcpy(arguments[0..args.len], args);
+                arguments[args.len] = .{ .name = "caller", .value = .{ .callable = caller_name } };
+                const value = try callExpressionValue(context, std.mem.trim(u8, expression[0..call.open], " \t"), arguments, arena);
                 if (value != .none) try out.appendSlice(context.allocator, try value.text(arena));
                 index = afterTag(sql, block.close, end_index);
                 continue;
@@ -1088,7 +1103,7 @@ fn findCaptureBlock(sql: []const u8, start: usize, limit: usize, opening: []cons
         if (std.mem.eql(u8, span, ending)) {
             depth -= 1;
             if (depth == 0) return .{ .start = tag, .close = close + 2 };
-        } else if (std.mem.startsWith(u8, span, opening) and (span.len == opening.len or std.ascii.isWhitespace(span[opening.len]))) {
+        } else if (std.mem.startsWith(u8, span, opening) and (span.len == opening.len or std.ascii.isWhitespace(span[opening.len]) or (std.mem.eql(u8, opening, "call") and span[opening.len] == '('))) {
             if (!std.mem.eql(u8, opening, "set") or std.mem.indexOfScalar(u8, span, '=') == null) depth += 1;
         }
         index = close + 2;
@@ -1379,6 +1394,11 @@ fn configProxy(allocator: std.mem.Allocator, context: *CompileContext) !native_e
 
 fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
+    if (std.mem.startsWith(u8, name, "__dxt_caller:")) {
+        const index = std.fmt.parseUnsigned(usize, name[13..], 10) catch return error.InvalidJinjaArguments;
+        if (index >= context.caller_blocks.items.len) return error.InvalidJinjaArguments;
+        return try renderCallerValue(context, context.caller_blocks.items[index], args);
+    }
     if (context.documentation_block) {
         if (try @import("container_methods.zig").call(allocator, name, args)) |mutation| {
             if (mutation.original) |original| for (context.bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original, mutation.replacement.?, 0);
@@ -1604,10 +1624,20 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     if (macro_id == null) {
         if (context.graph.execution_hooks) |hooks| {
             if (std.mem.eql(u8, name, "statement")) {
-                const forwarded = try allocator.alloc(native_expr.Argument, args.len + 1);
-                @memcpy(forwarded[0..args.len], args);
-                forwarded[args.len] = .{ .name = "caller_sql", .value = try resolveExpressionValue(context, "__dxt_caller_sql", allocator) };
-                return try hooks.call(hooks.context, name, forwarded, allocator);
+                var forwarded: std.ArrayList(native_expr.Argument) = .empty;
+                var caller: ?native_expr.Value = null;
+                for (args) |arg| {
+                    if (arg.name != null and std.mem.eql(u8, arg.name.?, "caller")) {
+                        if (caller != null) return error.InvalidJinjaArguments;
+                        caller = arg.value;
+                    } else try forwarded.append(allocator, arg);
+                }
+                const caller_sql = if (caller) |value|
+                    try callExpressionValue(context, native_expr.callableName(value) orelse return error.JinjaTypeError, &.{}, allocator)
+                else
+                    try resolveExpressionValue(context, "__dxt_caller_sql", allocator);
+                try forwarded.append(allocator, .{ .name = "caller_sql", .value = caller_sql });
+                return try hooks.call(hooks.context, name, forwarded.items, allocator);
             }
             return hooks.call(hooks.context, name, args, allocator) catch |err| {
                 if (err == error.UnresolvedMacro and context.capturesUndefined()) return try native_expr.callUndefined(try native_expr.captureUndefined(allocator, if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name));
@@ -1669,6 +1699,235 @@ fn refFromArguments(allocator: std.mem.Allocator, args: []const native_expr.Argu
 
 const MacroParameter = struct { name: []const u8, default: ?[]const u8 = null };
 
+const CallerBlock = struct {
+    sql: []const u8,
+    body: MacroBodyRange,
+    parameters: []const MacroParameter,
+    bindings: []CompileContext.ValueBinding,
+    vars: []const StaticVar,
+    lists: []const StaticList,
+    scope_depth: usize,
+    macro_package: ?[]const u8,
+    capture_undefined: bool,
+};
+
+fn macroParameters(allocator: std.mem.Allocator, declaration: []const u8) ![]const MacroParameter {
+    var parameters: std.ArrayList(MacroParameter) = .empty;
+    var saw_default = false;
+    var offset: usize = 0;
+    while (offset < declaration.len) {
+        const finish = expressionBoundary(declaration, offset, declaration.len);
+        const part = std.mem.trim(u8, declaration[offset..finish], " \t\r\n");
+        if (part.len != 0) {
+            const eq = std.mem.indexOfScalar(u8, part, '=');
+            if (eq != null) saw_default = true else if (saw_default) return error.InvalidJinjaArguments;
+            if (eq) |at| if (std.mem.trim(u8, part[at + 1 ..], " \t\r\n").len == 0) return error.InvalidJinjaArguments;
+            const name = std.mem.trim(u8, if (eq) |at| part[0..at] else part, " \t\r\n");
+            if (name.len == 0 or !jinja.isIdentStart(name[0])) return error.InvalidJinjaArguments;
+            for (name) |char| if (!jinja.isIdentChar(char)) return error.InvalidJinjaArguments;
+            for (parameters.items) |previous| if (std.mem.eql(u8, previous.name, name)) return error.InvalidJinjaArguments;
+            try parameters.append(allocator, .{ .name = name, .default = if (eq) |at| std.mem.trim(u8, part[at + 1 ..], " \t\r\n") else null });
+        } else if (finish < declaration.len) return error.InvalidJinjaArguments;
+        offset = finish + 1;
+    }
+    return try parameters.toOwnedSlice(allocator);
+}
+
+const MacroSpecials = struct { caller: bool = false, kwargs: bool = false, varargs: bool = false };
+
+/// Jinja collects extras only for undeclared special names loaded by the body.
+/// Literal text, quoted strings, comments and declared local names do not opt in.
+fn macroSpecials(sql: []const u8, body: MacroBodyRange) !MacroSpecials {
+    var result: MacroSpecials = .{};
+    var declared: MacroSpecials = .{};
+    var index = body.start;
+    while (index < body.end) {
+        const start = std.mem.indexOfScalarPos(u8, sql, index, '{') orelse break;
+        if (start + 1 >= body.end) break;
+        const kind = sql[start + 1];
+        const marker: []const u8 = switch (kind) {
+            '{' => "}}",
+            '%' => "%}",
+            '#' => "#}",
+            else => {
+                index = start + 1;
+                continue;
+            },
+        };
+        const close = (if (kind == '{') jinja.findExpressionClose(sql, start + 2) else std.mem.indexOfPos(u8, sql, start + 2, marker)) orelse return error.UnsupportedJinja;
+        if (close >= body.end) break;
+        index = close + 2;
+        if (kind == '#') continue;
+        const span = tagContent(sql, start, close);
+        if (kind == '%' and std.mem.eql(u8, span, "raw")) {
+            const raw = try findCaptureBlock(sql, close + 2, body.end, "raw", "endraw");
+            index = raw.close;
+            continue;
+        }
+        var target_end: usize = 0;
+        var target_start: usize = 0;
+        if (kind == '%' and std.mem.startsWith(u8, span, "set ")) {
+            target_start = 4;
+            target_end = std.mem.indexOfScalar(u8, span, '=') orelse span.len;
+        } else if (kind == '%' and std.mem.startsWith(u8, span, "for ")) {
+            target_start = 4;
+            target_end = std.mem.indexOf(u8, span, " in ") orelse 0;
+        }
+        var offset: usize = 0;
+        while (offset < span.len) {
+            if (span[offset] == '\'' or span[offset] == '"') {
+                offset = jinja.skipQuotedSpan(span, offset) orelse span.len;
+                continue;
+            }
+            if (!jinja.isIdentStart(span[offset])) {
+                offset += 1;
+                continue;
+            }
+            const begin = offset;
+            offset += 1;
+            while (offset < span.len and jinja.isIdentChar(span[offset])) offset += 1;
+            const name = span[begin..offset];
+            const stored = begin >= target_start and begin < target_end;
+            const remainder = std.mem.trimStart(u8, span[offset..], " \t\r\n");
+            const named_argument = std.mem.startsWith(u8, remainder, "=") and !std.mem.startsWith(u8, remainder, "==");
+            const prefix = std.mem.trimEnd(u8, span[0..begin], " \t\r\n");
+            const attribute = prefix.len != 0 and prefix[prefix.len - 1] == '.';
+            inline for (.{ "caller", "kwargs", "varargs" }) |special| {
+                if (std.mem.eql(u8, name, special)) {
+                    if (stored) @field(declared, special) = true else if (!attribute and !named_argument and !@field(declared, special)) @field(result, special) = true;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+fn bindMacroArguments(context: *CompileContext, parameters: []const MacroParameter, args: []const native_expr.Argument, specials: MacroSpecials) !void {
+    const allocator = context.value_arena.allocator();
+    const assigned = try allocator.alloc(bool, parameters.len);
+    @memset(assigned, false);
+    var catch_kwargs = specials.kwargs;
+    var catch_varargs = specials.varargs;
+    var explicit_caller = false;
+    for (parameters) |parameter| {
+        if (std.mem.eql(u8, parameter.name, "kwargs")) catch_kwargs = false;
+        if (std.mem.eql(u8, parameter.name, "varargs")) catch_varargs = false;
+        if (std.mem.eql(u8, parameter.name, "caller")) {
+            explicit_caller = true;
+            if (specials.caller and parameter.default == null) return error.InvalidJinjaArguments;
+        }
+    }
+    var extra_positional: std.ArrayList(native_expr.Value) = .empty;
+    var extra_keywords: std.ArrayList(native_expr.Entry) = .empty;
+    var position: usize = 0;
+    // Positional arguments are consumed before keyword arguments in Jinja.
+    for (args) |arg| {
+        if (arg.name != null) continue;
+        if (position < parameters.len) {
+            assigned[position] = true;
+            try context.setValue(parameters[position].name, arg.value);
+        } else if (catch_varargs) try extra_positional.append(allocator, arg.value) else return error.InvalidJinjaArguments;
+        position += 1;
+    }
+    var caller: ?native_expr.Value = null;
+    for (args, 0..) |arg, argument_index| {
+        const keyword = arg.name orelse continue;
+        for (args[0..argument_index]) |previous| if (previous.name != null and std.mem.eql(u8, previous.name.?, keyword)) return error.InvalidJinjaArguments;
+        var parameter_index: ?usize = null;
+        for (parameters, 0..) |parameter, i| if (std.mem.eql(u8, parameter.name, keyword)) {
+            parameter_index = i;
+            break;
+        };
+        if (parameter_index) |i| {
+            if (!assigned[i]) {
+                assigned[i] = true;
+                try context.setValue(parameters[i].name, arg.value);
+                continue;
+            }
+        } else if (specials.caller and !explicit_caller and std.mem.eql(u8, keyword, "caller")) {
+            caller = arg.value;
+            continue;
+        }
+        if (!catch_kwargs) return error.InvalidJinjaArguments;
+        try extra_keywords.append(allocator, .{ .key = keyword, .value = arg.value });
+    }
+    for (parameters, assigned) |parameter, present| {
+        if (!present) try context.setValue(parameter.name, if (parameter.default) |default| try context.evaluate(default) else try missingMacroArgument(context, parameter.name, false));
+    }
+    if (specials.caller and !explicit_caller) try context.setValue("caller", if (caller != null and caller.? != .none) caller.? else try missingMacroArgument(context, "caller", true));
+    if (catch_kwargs) {
+        const entries = try native_expr.allocateEntries(allocator, extra_keywords.items.len);
+        @memcpy(entries, extra_keywords.items);
+        try context.setValue("kwargs", .{ .object = entries });
+    }
+    if (catch_varargs) try context.setValue("varargs", .{ .tuple = try extra_positional.toOwnedSlice(allocator) });
+}
+
+fn missingMacroArgument(context: *CompileContext, name: []const u8, caller: bool) !native_expr.Value {
+    const allocator = context.value_arena.allocator();
+    const value = if (context.capturesUndefined()) try native_expr.captureUndefined(allocator, name) else try native_expr.undefinedValue(allocator, name);
+    const payload = if (value == .capture_undefined) value.capture_undefined else value.ordinary_undefined;
+    payload.hint = if (caller) "No caller defined" else try std.fmt.allocPrint(allocator, "parameter '{s}' was not provided", .{name});
+    return value;
+}
+
+fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args: []const native_expr.Argument) anyerror!native_expr.Value {
+    if (context.macro_render_depth >= max_macro_render_depth) return error.JinjaExpressionDepthExceeded;
+    const previous_bindings = context.bindings;
+    const previous_vars = context.vars;
+    const previous_lists = context.lists;
+    const previous_scope = context.scope_depth;
+    const previous_package = context.current_macro_package;
+    const previous_return = context.returned;
+    const previous_loop_depth = context.loop_depth;
+    const previous_capture = context.capture_undefined_override;
+    context.bindings = .empty;
+    context.vars = .empty;
+    context.lists = .empty;
+    context.scope_depth = caller.scope_depth;
+    context.current_macro_package = caller.macro_package;
+    context.returned = null;
+    context.loop_depth = 0;
+    context.capture_undefined_override = caller.capture_undefined;
+    context.macro_render_depth += 1;
+    defer {
+        context.bindings.deinit(context.allocator);
+        context.vars.deinit(context.allocator);
+        context.lists.deinit(context.allocator);
+        context.bindings = previous_bindings;
+        context.vars = previous_vars;
+        context.lists = previous_lists;
+        context.scope_depth = previous_scope;
+        context.current_macro_package = previous_package;
+        context.returned = context.returned orelse previous_return;
+        context.loop_depth = previous_loop_depth;
+        context.capture_undefined_override = previous_capture;
+        context.macro_render_depth -= 1;
+    }
+    try context.bindings.appendSlice(context.allocator, caller.bindings);
+    try context.vars.appendSlice(context.allocator, caller.vars);
+    try context.lists.appendSlice(context.allocator, caller.lists);
+    context.pushScope();
+    defer context.popScope();
+    try bindMacroArguments(context, caller.parameters, args, try macroSpecials(caller.sql, caller.body));
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(context.allocator);
+    try renderRange(context, caller.sql, caller.body.start, caller.body.end, &out);
+    // Mutation helpers replace immutable container payloads in aliases. Keep
+    // those changes visible in suspended frames and repeated caller closures.
+    for (caller.bindings, context.bindings.items[0..caller.bindings.len]) |original, current| {
+        const changed = switch (original.value) {
+            .list => |items| current.value != .list or items.ptr != current.value.list.ptr or items.len != current.value.list.len,
+            .object => |entries| current.value != .object or entries.ptr != current.value.object.ptr or entries.len != current.value.object.len,
+            else => false,
+        };
+        if (!changed) continue;
+        for (previous_bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original.value, current.value, 0);
+        for (context.caller_blocks.items) |block| for (block.bindings) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original.value, current.value, 0);
+    }
+    return context.returned orelse .{ .string = try context.value_arena.allocator().dupe(u8, out.items) };
+}
+
 fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []const native_expr.Argument) anyerror!native_expr.Value {
     const timing = try @import("timing_profile.zig").start(context.graph.timing_profile, .{ .filename = @src().file, .line = @src().line, .function = "renderMacroValue" });
     defer timing.finish();
@@ -1680,24 +1939,15 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     const materialization = std.mem.startsWith(u8, declaration, "materialization ");
     const paren = if (materialization) declaration.len else std.mem.indexOfScalar(u8, declaration, '(') orelse return error.UnsupportedJinja;
     const close = if (materialization) declaration.len else findMatchingParen(declaration, paren) orelse return error.UnsupportedJinja;
-    var parameters: std.ArrayList(MacroParameter) = .empty;
-    var offset = paren + 1;
-    while (offset < close) {
-        const finish = expressionBoundary(declaration, offset, close);
-        const part = std.mem.trim(u8, declaration[offset..finish], " \t\r\n");
-        if (part.len != 0) {
-            const eq = std.mem.indexOfScalar(u8, part, '=');
-            const param_name = std.mem.trim(u8, if (eq) |at| part[0..at] else part, " \t\r\n");
-            if (param_name.len == 0 or !jinja.isIdentStart(param_name[0])) return error.InvalidJinjaArguments;
-            for (param_name) |c| if (!jinja.isIdentChar(c)) return error.InvalidJinjaArguments;
-            try parameters.append(allocator, .{ .name = param_name, .default = if (eq) |at| std.mem.trim(u8, part[at + 1 ..], " \t\r\n") else null });
-        }
-        offset = finish + 1;
-    }
+    const parameters = if (materialization) &.{} else try macroParameters(allocator, declaration[paren + 1 .. close]);
     const previous_package = context.current_macro_package;
     const previous_return = context.returned;
     const previous_loop_depth = context.loop_depth;
+    const previous_capture = context.capture_undefined_override;
     context.loop_depth = 0;
+    // dbt's separately cached macro template uses the ordinary environment,
+    // including when invoked by a model's capture-mode parser.
+    context.capture_undefined_override = false;
     const binding_start = context.bindings.items.len;
     context.returned = null;
     context.current_macro_package = macro.package_name;
@@ -1710,24 +1960,7 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
         context.current_macro_package = previous_package;
         context.returned = previous_return;
         context.loop_depth = previous_loop_depth;
-    }
-    const assigned = try allocator.alloc(bool, parameters.items.len);
-    @memset(assigned, false);
-    for (args, 0..) |arg, position| {
-        var parameter_index: usize = position;
-        if (arg.name) |keyword| {
-            parameter_index = parameters.items.len;
-            for (parameters.items, 0..) |parameter, i| if (std.mem.eql(u8, parameter.name, keyword)) {
-                parameter_index = i;
-                break;
-            };
-        }
-        if (parameter_index >= parameters.items.len or assigned[parameter_index]) return error.InvalidJinjaArguments;
-        assigned[parameter_index] = true;
-        try context.setValue(parameters.items[parameter_index].name, arg.value);
-    }
-    for (parameters.items, assigned) |parameter, present| {
-        if (!present) try context.setValue(parameter.name, if (parameter.default) |default| try context.evaluate(default) else return error.InvalidJinjaArguments);
+        context.capture_undefined_override = previous_capture;
     }
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(context.allocator);
@@ -1739,8 +1972,53 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
         findEndGenericTestTag(macro.macro_sql, open_end + 2, "endtest") orelse return error.UnsupportedJinja
     else
         findEndMacroTag(macro.macro_sql, open_end + 2) orelse return error.UnsupportedJinja;
+    try bindMacroArguments(context, parameters, args, try macroSpecials(macro.macro_sql, .{ .start = open_end + 2, .end = body_end }));
     try renderRange(context, macro.macro_sql, afterTag(macro.macro_sql, open_end + 2, body_end), body_end, &out);
     return context.returned orelse .{ .string = try allocator.dupe(u8, out.items) };
+}
+
+test "macro argument collection and lexical caller callbacks" {
+    const cases = [_]struct { macro: []const u8, template: []const u8, expected: []const u8 }{
+        .{ .macro = "{% macro probe() %}{{ return('}}' ~ kwargs.label) }}{% endmacro %}", .template = "{{ probe(label='bound') }}", .expected = "}}bound" },
+        .{ .macro = "{% macro probe(value) %}{{ return('prefix:' ~ value) }}{% endmacro %}", .template = "{{ probe() }}", .expected = "prefix:" },
+        .{ .macro = "{% macro probe(value) %}{{ return(value|string ~ ':' ~ varargs|join(',') ~ ':' ~ kwargs.label) }}{% endmacro %}", .template = "{{ probe(1,2,3,label='ok') }}", .expected = "1:2,3:ok" },
+        .{ .macro = "{% macro probe(value) %}{{ return(value|string ~ ':' ~ kwargs.value|string) }}{% endmacro %}", .template = "{{ probe(1,value=2) }}", .expected = "1:2" },
+        .{ .macro = "{% macro probe() %}{% if false %}{{ caller() }}{% endif %}ok{% endmacro %}", .template = "{% call probe() %}{{ missing() }}{% endcall %}", .expected = "ok" },
+        .{ .macro = "{% macro probe() %}{{ caller(1) }}|{{ caller(value=2,prefix='other') }}{% endmacro %}", .template = "{% call(value,prefix='row') probe() %}{{ prefix }}:{{ value }}{% endcall %}", .expected = "row:1|other:2" },
+        .{ .macro = "{% macro probe() %}{% set label='inner' %}{{ caller(1) }}{% endmacro %}", .template = "{% set label='outer' %}{% call(value) probe() %}{{ label }}:{{ value }}{% endcall %}", .expected = "outer:1" },
+        .{ .macro = "{% macro probe(value) %}[{{ caller(value) }}]{% endmacro %}", .template = "{% call(a) probe(1) %}{{ a }}{% call(b) probe(2) %}{{ a }}:{{ b }}{% endcall %}{% endcall %}", .expected = "[1[1:2]]" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+        defer graph.deinit();
+        try graph.macros.append(allocator, .{ .package_name = "demo", .unique_id = "macro.demo.probe", .name = "probe", .path = "macros/probe.sql", .original_file_path = "macros/probe.sql", .macro_sql = case.macro });
+        const node = Node{ .package_name = "demo", .unique_id = "model.demo.rendered", .name = "rendered", .path = "rendered.sql", .original_file_path = "models/rendered.sql", .raw_code = case.template };
+        const rendered = try compileModel(allocator, &graph, &node);
+        try std.testing.expectEqualStrings(case.expected, rendered);
+    }
+}
+
+test "literal and local special names do not collect macro extras" {
+    const cases = [_]struct { macro: []const u8, template: []const u8 }{
+        .{ .macro = "{% macro probe(mapping) %}{{ mapping . kwargs }}{% endmacro %}", .template = "{{ probe({'kwargs':'value'},extra=2) }}" },
+        .{ .macro = "{% macro probe() %}{{ return('kwargs varargs') }}{% endmacro %}", .template = "{{ probe(1,label='extra') }}" },
+        .{ .macro = "{% macro probe() %}{# {{ kwargs }} #}ok{% endmacro %}", .template = "{{ probe(label='extra') }}" },
+        .{ .macro = "{% macro probe() %}{% set kwargs={'label':'local'} %}{{ kwargs.label }}{% endmacro %}", .template = "{{ probe(label='extra') }}" },
+        .{ .macro = "{% macro probe(value) %}{{ value }}{% endmacro %}", .template = "{{ probe(1,value=2) }}" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+        defer graph.deinit();
+        try graph.macros.append(allocator, .{ .package_name = "demo", .unique_id = "macro.demo.probe", .name = "probe", .path = "macros/probe.sql", .original_file_path = "macros/probe.sql", .macro_sql = case.macro });
+        const node = Node{ .package_name = "demo", .unique_id = "model.demo.rendered", .name = "rendered", .path = "rendered.sql", .original_file_path = "models/rendered.sql", .raw_code = case.template };
+        try std.testing.expectError(error.InvalidJinjaArguments, compileModel(allocator, &graph, &node));
+    }
 }
 
 fn expressionBoundary(text: []const u8, start: usize, end: usize) usize {
