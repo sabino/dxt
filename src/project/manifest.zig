@@ -389,15 +389,16 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
     const alias = compiler.relationIdentifierForNode(node);
 
     try writer.writeAll(",\"database\":");
-    try writeNullableString(writer, databaseNameForGraph(graph));
+    const snapshot_config = node.snapshot_config;
+    try writeNullableString(writer, if (snapshot_config) |config| config.target_database orelse databaseNameForGraph(graph) else databaseNameForGraph(graph));
     try writer.writeAll(",\"schema\":");
-    try json.string(writer, schema_name);
+    try json.string(writer, if (snapshot_config) |config| config.target_schema orelse schema_name else schema_name);
     try writer.writeAll(",\"alias\":");
     try json.string(writer, alias);
     try writer.writeAll(",\"fqn\":");
-    try writeFqnFromPath(writer, node.package_name, node.path, node.name);
+    try writeFqnFromPath(writer, node.package_name, node.path, node.name, if (snapshot_config != null) node.name else null);
     try writer.writeAll(",\"checksum\":");
-    try writeSha256Checksum(writer, node.raw_code);
+    try writeSha256Checksum(writer, if (node.snapshot_file_code) |file_code| std.mem.trim(u8, file_code, " \t\r\n\x0b\x0c") else node.raw_code);
 }
 
 fn writeTestNodeIdentityFields(
@@ -417,7 +418,7 @@ fn writeTestNodeIdentityFields(
     try writer.writeAll(",\"schema\":");
     try json.string(writer, schema_name);
     try writer.writeAll(",\"fqn\":");
-    try writeFqnFromPath(writer, package_name, path, name);
+    try writeFqnFromPath(writer, package_name, path, name, null);
     try writer.writeAll(",\"checksum\":");
     if (raw_code) |code| {
         try writeSha256Checksum(writer, code);
@@ -439,7 +440,7 @@ fn databaseNameForGraph(graph: *const Graph) ?[]const u8 {
     return basename;
 }
 
-fn writeFqnFromPath(writer: *Io.Writer, package_name: []const u8, path: []const u8, fallback_name: []const u8) !void {
+fn writeFqnFromPath(writer: *Io.Writer, package_name: []const u8, path: []const u8, fallback_name: []const u8, append_name: ?[]const u8) !void {
     try writer.writeAll("[");
     try json.string(writer, package_name);
 
@@ -454,6 +455,10 @@ fn writeFqnFromPath(writer: *Io.Writer, package_name: []const u8, path: []const 
         wrote_path_part = true;
     }
 
+    if (append_name) |name| {
+        try writer.writeAll(",");
+        try json.string(writer, name);
+    }
     if (!wrote_path_part) {
         try writer.writeAll(",");
         try json.string(writer, fallback_name);
@@ -770,6 +775,7 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try json.stringArray(writer, node.tags.items);
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
+    if (node.snapshot_config) |config| try writeSnapshotConfig(writer, &node, config);
     try writer.writeAll("},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
@@ -2066,4 +2072,64 @@ test "manifest writer filters disabled resources and writes graph maps" {
     try std.testing.expect(child_map.get("model.demo.disabled") == null);
     try std.testing.expect(child_map.get("test.demo.disabled_assert_customers") == null);
     try std.testing.expect(child_map.get("exposure.demo.hidden") == null);
+}
+
+fn writeSnapshotColumns(writer: *Io.Writer, columns: ?types.SnapshotColumns) !void {
+    if (columns) |value| {
+        switch (value) {
+            .string => |text| try json.string(writer, text),
+            .list => |list| try json.stringArray(writer, list.items),
+        }
+    } else try writer.writeAll("null");
+}
+
+fn writeSnapshotConfig(writer: *Io.Writer, node: *const Node, config: types.SnapshotConfig) !void {
+    try writer.writeAll(",\"strategy\":");
+    try writeNullableString(writer, config.strategy);
+    try writer.writeAll(",\"unique_key\":");
+    try writeSnapshotColumns(writer, config.unique_key);
+    try writer.writeAll(",\"target_schema\":");
+    try writeNullableString(writer, config.target_schema);
+    try writer.writeAll(",\"target_database\":");
+    try writeNullableString(writer, config.target_database);
+    try writer.writeAll(",\"updated_at\":");
+    try writeNullableString(writer, config.updated_at);
+    try writer.writeAll(",\"check_cols\":");
+    try writeSnapshotColumns(writer, config.check_cols);
+    if (config.invalidate_hard_deletes) |value| {
+        try writer.writeAll(",\"invalidate_hard_deletes\":");
+        try writer.writeAll(if (value) "true" else "false");
+    }
+    if (node.config_schema) |value| {
+        try writer.writeAll(",\"schema\":");
+        try json.string(writer, value);
+    }
+    if (node.config_alias) |value| {
+        try writer.writeAll(",\"alias\":");
+        try json.string(writer, value);
+    }
+}
+
+test "snapshot manifest identity retains file checksum and block FQN" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    const sql = " \x0b\n{% snapshot history %}\n{{ config(strategy='timestamp', unique_key='id', updated_at='ts', target_schema='archive', target_database='warehouse') }}\nselect 1\n{% endsnapshot %}\n{% snapshot off %}{{ config(enabled=false) }}{% endsnapshot %}\x0c ";
+    try @import("snapshot.zig").parseBlocks(allocator, sql, "snapshots", "snapshots/nested/many.sql", "demo", &graph);
+    const rendered = try renderManifest(allocator, &graph);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+    const node = parsed.value.object.get("nodes").?.object.get("snapshot.demo.history").?.object;
+    const disabled = parsed.value.object.get("disabled").?.object.get("snapshot.demo.off").?.array.items[0].object;
+    try std.testing.expectEqualStrings("warehouse", node.get("database").?.string);
+    try std.testing.expectEqualStrings("archive", node.get("schema").?.string);
+    try std.testing.expectEqual(@as(usize, 4), node.get("fqn").?.array.items.len);
+    try std.testing.expectEqualStrings("many", node.get("fqn").?.array.items[2].string);
+    try std.testing.expectEqualStrings("history", node.get("fqn").?.array.items[3].string);
+    try std.testing.expectEqualStrings(node.get("checksum").?.object.get("checksum").?.string, disabled.get("checksum").?.object.get("checksum").?.string);
+    try std.testing.expectEqualStrings("097ad32ce920143de83bc07e2bdd8a3825c89545a9edf0bab98c93500b1518e9", node.get("checksum").?.object.get("checksum").?.string);
+    try std.testing.expectEqualStrings("timestamp", node.get("config").?.object.get("strategy").?.string);
+    try std.testing.expect(!disabled.get("config").?.object.get("enabled").?.bool);
 }

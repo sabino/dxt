@@ -164,7 +164,7 @@ pub fn resolveRefDependency(graph: *const Graph, current_package: []const u8, re
     var found: ?[]const u8 = null;
     for (graph.nodes.items) |node| {
         if (!std.mem.eql(u8, node.name, ref_dep.name)) continue;
-        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed")) continue;
+        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot")) continue;
         if (!node.enabled) continue;
         if (found != null) return error.UnresolvedRef;
         found = node.unique_id;
@@ -387,6 +387,18 @@ fn hasSource(graph: *const Graph, unique_id: []const u8) bool {
 }
 
 fn resolveRefInPackage(graph: *const Graph, package: []const u8, name: []const u8) !?[]const u8 {
+    var refable_count: usize = 0;
+    var has_snapshot = false;
+    for (graph.nodes.items) |node| {
+        if (!node.enabled or !std.mem.eql(u8, node.package_name, package) or !std.mem.eql(u8, node.name, name)) continue;
+        if (std.mem.eql(u8, node.resource_type, "snapshot")) {
+            has_snapshot = true;
+            refable_count += 1;
+        } else if (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "seed")) refable_count += 1;
+    }
+    // Core's parse-order precedence for colliding names is outside this read-only slice.
+    if (has_snapshot and refable_count > 1) return error.UnsupportedSnapshotRefCollision;
+
     const model_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, name });
     if (hasDisabledNode(graph, model_id)) return error.DisabledRef;
     if (hasNode(graph, model_id)) return model_id;
@@ -394,6 +406,10 @@ fn resolveRefInPackage(graph: *const Graph, package: []const u8, name: []const u
     const seed_id = try std.fmt.allocPrint(graph.allocator, "seed.{s}.{s}", .{ package, name });
     if (hasDisabledNode(graph, seed_id)) return error.DisabledRef;
     if (hasNode(graph, seed_id)) return seed_id;
+
+    const snapshot_id = try std.fmt.allocPrint(graph.allocator, "snapshot.{s}.{s}", .{ package, name });
+    if (hasDisabledNode(graph, snapshot_id)) return error.DisabledRef;
+    if (hasNode(graph, snapshot_id)) return snapshot_id;
     return null;
 }
 
@@ -925,4 +941,31 @@ test "graph resource sorting preserves deterministic unique id order" {
     try std.testing.expectEqualStrings("doc.demo.z_doc", graph.docs.items[1].unique_id);
     try std.testing.expectEqualStrings("macro.demo.a_macro", graph.macros.items[0].unique_id);
     try std.testing.expectEqualStrings("macro.demo.z_macro", graph.macros.items[1].unique_id);
+}
+
+pub fn rejectDuplicateSnapshots(graph: *const Graph) !void {
+    for (graph.nodes.items, 0..) |node, index| {
+        if (!std.mem.eql(u8, node.resource_type, "snapshot")) continue;
+        for (graph.nodes.items[index + 1 ..]) |other| {
+            if (std.mem.eql(u8, node.unique_id, other.unique_id)) return error.DuplicateSnapshotName;
+        }
+    }
+}
+
+test "snapshot refs resolve and disabled or colliding snapshot refs fail closed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try appendNode(&graph, "model", "demo", "model.demo.base", "base", true);
+    try appendNode(&graph, "snapshot", "demo", "snapshot.demo.history", "history", true);
+    try appendNode(&graph, "snapshot", "demo", "snapshot.demo.disabled", "disabled", false);
+    try graph.nodes.items[1].refs.append(allocator, .{ .package = null, .name = "base" });
+    try resolveDependencies(&graph);
+    try std.testing.expectEqualStrings("model.demo.base", graph.nodes.items[1].depends_on.items[0]);
+    try std.testing.expectEqualStrings("snapshot.demo.history", try resolveRefDependency(&graph, "demo", .{ .package = null, .name = "history" }));
+    try std.testing.expectError(error.DisabledRef, resolveRefDependency(&graph, "demo", .{ .package = null, .name = "disabled" }));
+    try appendNode(&graph, "model", "demo", "model.demo.history", "history", true);
+    try std.testing.expectError(error.UnsupportedSnapshotRefCollision, resolveRefDependency(&graph, "demo", .{ .package = null, .name = "history" }));
 }

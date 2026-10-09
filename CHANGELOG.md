@@ -9,6 +9,19 @@ compatibility.
 
 ### Added
 
+- Read-only legacy SQL snapshot parsing and listing for root projects and
+  installed packages, with Manifest v12 snapshot nodes, literal timestamp/check
+  configs, disabled nodes, static dependencies, whole-file checksums and
+  file/block FQN selectors. Unsupported snapshot compilation, execution,
+  dynamic definitions and YAML snapshot properties fail explicitly.
+- A pinned dbt Core 1.10.5/dbt-duckdb 1.9.6 snapshot oracle CI gate, comparing
+  supported artifact/listing fields and validating active/disabled Snapshot
+  nodes against the full published Manifest v12 Snapshot schema.
+
+- A dbt replacement roadmap with audited execution gaps, versioned Core
+  compatibility gates, and sequenced semantic, static-analysis, stateful
+  planning, adapter, and cross-database work.
+
 - Release archive safety validation now checks packaged binary tarballs for the
   expected archive shape, version/target naming, denylisted paths, binary/doc
   string leaks, executable metadata, and checksum coverage before upload.
@@ -82,6 +95,14 @@ compatibility.
   Run Results v6 pass/fail rows.
 
 ### Fixed
+
+- Source built-in generic-test IDs now hash their original test metadata and
+  arguments while retaining source-prefixed node names, matching dbt Core
+  identity for `not_null`, `unique`, `relationships` and `accepted_values`.
+
+- Optional dbt oracle logging now supports both Protobuf JSON keyword variants;
+  source-status tests distinguish dxt status extensions from Core's `fresher`
+  method, and build-order assertions reflect tests running before descendants.
 
 - DuckDB `source freshness` now reports selected sources that have freshness
   thresholds but no `loaded_at_field` or `loaded_at_query` as dbt-shaped

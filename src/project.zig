@@ -8,6 +8,7 @@ const duckdb = @import("project/duckdb.zig");
 const project_fs = @import("project/fs.zig");
 const project_jinja = @import("project/jinja.zig");
 const project_loader = @import("project/loader.zig");
+const project_snapshot = @import("project/snapshot.zig");
 const project_parse = @import("project/parse.zig");
 const project_resolve = @import("project/resolve.zig");
 const selector_config = @import("project/selector_config.zig");
@@ -108,6 +109,10 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     const active_models = countActiveNodes(&graph);
     const active_analyses = countActiveAnalyses(&graph);
     const active_seeds = countActiveSeeds(&graph);
+    var active_snapshots: usize = 0;
+    for (graph.nodes.items) |node| {
+        if (node.enabled and std.mem.eql(u8, node.resource_type, "snapshot")) active_snapshots += 1;
+    }
 
     const target_path = options.target_path orelse project_loader.graphDefaultTarget(runtime, options.project_dir) catch "target";
     const target_dir = if (std.fs.path.isAbsolute(target_path))
@@ -118,9 +123,10 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
-    try stdout.print("Parsed {d} model(s), {d} analysis(es), {d} seed(s), {d} source(s), {d} exposure(s), and {d} unit test(s) into {s}\n", .{
+    try stdout.print("Parsed {d} model(s), {d} analysis(es), {d} snapshot(s), {d} seed(s), {d} source(s), {d} exposure(s), and {d} unit test(s) into {s}\n", .{
         active_models,
         active_analyses,
+        active_snapshots,
         active_seeds,
         graph.sources.items.len,
         countActiveExposures(&graph),
@@ -182,6 +188,7 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
+    try project_snapshot.rejectSelectedResources(&graph, selected);
 
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, true, true);
@@ -219,6 +226,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
+    try project_snapshot.rejectSelectedResources(&graph, selected);
 
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
@@ -266,6 +274,10 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
+    if (selection.select != null) {
+        const requested = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
+        try project_snapshot.rejectSelectedResources(&graph, requested);
+    }
     const selected_sources = try selector.selectResourcesWithContext(runtime.allocator, &graph, "source", selection.select, selection.exclude, selection_context);
     if (selected_sources.len == 0 and selection.select != null) {
         const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
@@ -358,6 +370,10 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
+    if (selection.select != null) {
+        const requested = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
+        try project_snapshot.rejectSelectedResources(&graph, requested);
+    }
     const selected_models = try selector.selectResourcesWithContext(runtime.allocator, &graph, "model", selection.select, selection.exclude, selection_context);
     if (selected_models.len == 0 and selection.select != null) {
         const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
@@ -414,6 +430,10 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
+    if (selection.select != null) {
+        const requested = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
+        try project_snapshot.rejectSelectedResources(&graph, requested);
+    }
     const selected_seeds = try selector.selectResourcesWithContext(runtime.allocator, &graph, "seed", selection.select, selection.exclude, selection_context);
     if (selected_seeds.len == 0) {
         if (selection.select != null) {
@@ -463,8 +483,14 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
+    if (selection.select != null) {
+        const requested = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
+        try project_snapshot.rejectSelectedResources(&graph, requested);
+    }
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, "test", selection.select, selection.exclude, selection_context);
     const selected_unit_tests = try selector.selectResourcesWithContext(runtime.allocator, &graph, "unit_test", selection.select, selection.exclude, selection_context);
+    try project_snapshot.rejectSelectedResources(&graph, selected);
+    try project_snapshot.rejectSelectedResources(&graph, selected_unit_tests);
     if (selected.len == 0 and selected_unit_tests.len == 0) {
         if (selection.select != null) {
             const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
@@ -518,6 +544,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
+    try project_snapshot.rejectSelectedResources(&graph, selected);
 
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
@@ -1737,6 +1764,7 @@ fn targetDir(runtime: Runtime, options: Options) ![]const u8 {
 }
 
 fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, include_singular_tests: bool, include_analyses: bool) !CompileResult {
+    try project_snapshot.rejectSelectedResources(graph, selected);
     const compiled_base = try pathJoin(runtime.allocator, &.{ target_dir, "compiled" });
     try std.Io.Dir.cwd().createDirPath(runtime.io, compiled_base);
 
@@ -2545,6 +2573,7 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
     const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
 
+    try project_snapshot.rejectYamlDefinitions(text);
     try parseSourcesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseUnitTestsFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
@@ -3231,8 +3260,8 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .config = test_def.config,
     };
     const names = try synthesizeGenericTestNames(graph.allocator, source_test_def, source_target_name, effective_column_name);
-    const unique_id_metadata = if (isBuiltInGenericTestName(test_def.name)) source_test_def else test_def;
-    const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, source.package_name, names.full, unique_id_metadata, source_model_kwarg, effective_column_name);
+    // Source prefixes belong to node names; dbt hashes the original test metadata.
+    const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, source.package_name, names.full, test_def, source_model_kwarg, effective_column_name);
     for (graph.tests.items) |existing| {
         if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
     }

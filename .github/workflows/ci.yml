@@ -116,6 +116,37 @@ jobs:
           path: reports/pytest-${{ matrix.python-version }}.xml
           if-no-files-found: ignore
 
+  snapshot-oracle:
+    name: dbt snapshot oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-oracle.txt
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install pinned oracle dependencies
+        run: python -m pip install -r requirements-dev.txt -r requirements-oracle.txt
+
+      - name: Compare SQL snapshots with dbt Core and the full Snapshot schema
+        run: pytest -q tests/test_cli.py::test_snapshot_dbt_core_1105_oracle
+
   public-fixtures:
     # Keep this context name stable for branch protection; the job now runs
     # public Jaffle parse, ls, compile, DuckDB build/run, and docs-generate gates.

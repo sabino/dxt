@@ -1,0 +1,3 @@
+# Optional developer/CI oracle dependencies; never part of the dxt runtime.
+dbt-core==1.10.5
+dbt-duckdb==1.9.6

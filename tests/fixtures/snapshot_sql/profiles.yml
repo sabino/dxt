@@ -1,0 +1,8 @@
+snapshot_sql:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ':memory:'
+      schema: main
+      threads: 1

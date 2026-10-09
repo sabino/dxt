@@ -57,6 +57,7 @@ pub const ProjectConfig = struct {
     seed_docs: DocsConfig = .{},
     macro_paths_set: bool = false,
     test_paths_set: bool = false,
+    snapshot_paths_set: bool = false,
     clean_targets_set: bool = false,
     validate_macro_args: bool = false,
     target_path: []const u8 = "target",
@@ -332,6 +333,9 @@ pub const Node = struct {
     original_file_path: []const u8,
     patch_path: ?[]const u8 = null,
     raw_code: []const u8,
+    // SQL snapshot blocks retain the source file for dbt's file-level checksum.
+    snapshot_file_code: ?[]const u8 = null,
+    snapshot_config: ?SnapshotConfig = null,
     description: []const u8 = "",
     materialized: []const u8 = "view",
     inline_materialized: bool = false,
@@ -358,6 +362,28 @@ pub const Node = struct {
     compiled_path: ?[]const u8 = null,
     relation_name: ?[]const u8 = null,
     extra_ctes: std.ArrayList(ExtraCte) = .empty,
+};
+
+pub const SnapshotColumns = union(enum) {
+    string: []const u8,
+    list: std.ArrayList([]const u8),
+
+    pub fn deinit(self: *SnapshotColumns, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .string => {},
+            .list => |*items| items.deinit(allocator),
+        }
+    }
+};
+
+pub const SnapshotConfig = struct {
+    strategy: ?[]const u8 = null,
+    unique_key: ?SnapshotColumns = null,
+    target_schema: ?[]const u8 = null,
+    target_database: ?[]const u8 = null,
+    updated_at: ?[]const u8 = null,
+    check_cols: ?SnapshotColumns = null,
+    invalidate_hard_deletes: ?bool = null,
 };
 
 pub const GenericTestNode = struct {
@@ -544,6 +570,10 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     node.depends_on.deinit(allocator);
     node.macro_depends_on.deinit(allocator);
     node.seed_column_types.deinit(allocator);
+    if (node.snapshot_config) |*config| {
+        if (config.unique_key) |*columns| columns.deinit(allocator);
+        if (config.check_cols) |*columns| columns.deinit(allocator);
+    }
     for (node.extra_ctes.items) |extra_cte| {
         allocator.free(extra_cte.sql);
     }
