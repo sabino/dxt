@@ -146,6 +146,7 @@ pub const Model = struct {
     estimated_bytes: u64 = 0,
     estimated_cost: f64 = 0,
     estimate_confidence: []const u8 = "declared",
+    alternatives: []const @import("cross_database_cost.zig").Alternative = &.{},
     denied: ?[]const u8 = null,
 };
 pub const Plan = struct { hash: []const u8, definition_hash: []const u8 = "", catalog_generation: u64 = 0, connections: []Connection, models: []Model };
@@ -426,6 +427,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
         if (model.budget.max_cost) |cost| if (model.estimated_cost > cost) {
             model.denied = "estimated egress exceeds the cost budget";
         };
+        model.alternatives = try @import("cross_database_cost.zig").alternatives(runtime.allocator, connections.items, model.*, options.allow_movement or try optionalBool(policy, "allow_movement", false), options.allow_sensitive, options.allow_raw_extract or try optionalBool(policy, "allow_raw_extract", false), options.allow_retention or try optionalBool(policy, "allow_retention", false));
         try std.json.Stringify.value(.{ .name = model.name, .inputs = model.inputs, .confidence = model.estimate_confidence }, .{}, &fingerprint.writer);
     }
     return .{ .hash = try digest(runtime.allocator, fingerprint.written()), .definition_hash = definition_hash, .catalog_generation = catalog.value.generation, .connections = connections.items, .models = models.items };
@@ -629,7 +631,7 @@ pub fn planJson(allocator: std.mem.Allocator, plan: Plan) ![]const u8 {
         if (i != 0) try writer.writeByte(',');
         const query_sql = try renderSql(allocator, model, null);
         defer allocator.free(query_sql);
-        try std.json.Stringify.value(.{ .name = model.name, .destination = plan.connections[model.destination].name, .execution_connection = plan.connections[model.execution_connection].name, .output = .{ .schema = model.schema, .identifier = model.identifier }, .materialized = model.materialized, .unique_key = model.unique_key, .incremental_strategy = model.incremental_strategy, .full_refresh = model.full_refresh, .strategy = model.strategy, .execution_engine = model.execution_engine, .output_movement = model.execution_connection != model.destination, .budget = model.budget, .estimated_rows = model.estimated_rows, .estimated_scan_bytes = @as(?u64, null), .estimated_moved_bytes = model.estimated_bytes, .estimated_load_bytes = model.estimated_bytes, .estimated_egress_cost = model.estimated_cost, .confidence = model.estimate_confidence, .permitted = model.denied == null, .denial = model.denied, .query = query_sql, .inputs = model.inputs, .rejected_strategies = [_][]const u8{"automatic external federation is unavailable; explicit native staging preserves source identity"} }, .{}, writer);
+        try std.json.Stringify.value(.{ .name = model.name, .destination = plan.connections[model.destination].name, .execution_connection = plan.connections[model.execution_connection].name, .output = .{ .schema = model.schema, .identifier = model.identifier }, .materialized = model.materialized, .unique_key = model.unique_key, .incremental_strategy = model.incremental_strategy, .full_refresh = model.full_refresh, .strategy = model.strategy, .execution_engine = model.execution_engine, .output_movement = model.execution_connection != model.destination, .budget = model.budget, .estimated_rows = model.estimated_rows, .estimated_scan_bytes = @as(?u64, null), .estimated_moved_bytes = model.estimated_bytes, .estimated_load_bytes = model.estimated_bytes, .estimated_egress_cost = model.estimated_cost, .confidence = model.estimate_confidence, .permitted = model.denied == null, .denial = model.denied, .query = query_sql, .inputs = model.inputs, .alternatives = model.alternatives, .largest_movement_contributor = @import("cross_database_cost.zig").largest(model), .suggested_changes = if (model.denied != null) @as([]const []const u8, &.{ "reduce source rows with a filter or partial aggregate", "project only required columns", "choose an authorized destination or adjust the declared budget" }) else @as([]const []const u8, &.{}) }, .{}, writer);
     }
     try writer.writeAll("]}\n");
     return output.toOwnedSlice();

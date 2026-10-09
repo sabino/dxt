@@ -906,3 +906,34 @@ def test_namespaced_catalog_export_contains_observed_metadata(project, native_en
     assert catalog["generation"] == 1
     assert catalog["relation_stats"][0]["rows"] == 1
     assert catalog["connections"][0]["capabilities"]["transactional_ddl"] is True
+
+
+def test_cost_alternatives_log_known_movement_and_unknown_join_output(project, native_environment):
+    result = invoke(project, project[1], native_environment, "plan", "--allow-movement", "--allow-raw-extract")
+    assert result.returncode == 0, result.stderr
+    model = json.loads((project[0] / "target" / "dxt_plan.json").read_text())["models"][0]
+    alternatives = {item["execution_connection"]: item for item in model["alternatives"]}
+    assert alternatives["warehouse"]["selected"] is True
+    assert alternatives["warehouse"]["estimated_moved_bytes"] == 16
+    assert alternatives["warehouse"]["estimated_rows"] == 1
+    assert alternatives["local"]["permitted"] is True
+    assert alternatives["local"]["estimated_moved_bytes"] is None
+    assert "unknown output cardinality" in alternatives["local"]["reason"]
+    assert alternatives["crm"]["permitted"] is False
+    assert model["largest_movement_contributor"] == {"input": "customers", "rows": 1, "bytes": 16}
+
+
+def test_alternative_policy_denials_include_concrete_budget_remedies(project, native_environment):
+    config = project[1]
+    config["connections"]["local"]["trust_domain"] = "other"
+    config["models"]["joined"]["inputs"]["customers"]["sensitivity"] = "restricted"
+    config["models"]["joined"]["budget"] = {"max_bytes": 8}
+    result = invoke(project, config, native_environment, "plan", "--allow-movement", "--allow-sensitive", "--allow-raw-extract")
+    assert result.returncode == 0, result.stderr
+    model = json.loads((project[0] / "target" / "dxt_plan.json").read_text())["models"][0]
+    assert model["permitted"] is False
+    assert model["largest_movement_contributor"]["bytes"] == 16
+    assert model["suggested_changes"]
+    local = next(item for item in model["alternatives"] if item["execution_connection"] == "local")
+    assert local["permitted"] is False
+    assert not (project[0] / ".dxt").exists()
