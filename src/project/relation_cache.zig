@@ -175,6 +175,11 @@ pub const Context = struct {
     }
     pub fn after(self: *Context, change: Change, success: bool) void {
         const final_transaction = if (success and change.ends) false else self.transaction_open or change.begins;
+        self.afterTransaction(change, final_transaction);
+    }
+    /// Native drivers with transaction status report the server's state, also
+    /// after errors and COMMIT/ROLLBACK AND CHAIN scripts.
+    pub fn afterTransaction(self: *Context, change: Change, final_transaction: bool) void {
         if (change.write and !self.write_transaction) {
             if (final_transaction) self.write_transaction = true else self.cache.endWrite();
         }

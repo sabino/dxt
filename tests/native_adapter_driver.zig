@@ -198,6 +198,20 @@ fn cacheConformance(runtime: adapter.Runtime, graph: *const adapter.Graph, path:
     if (try other.relationExists(a, "cache_fixture", "absent")) return error.CacheWarmUnexpectedRelation;
     if (cache.statistics().hits != warm_before.hits + 2 or cache.statistics().warm_queries != 1) return error.CacheWarmDidNotReplaceQueries;
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
+        for ([_][]const u8{ "commit and chain", "rollback and chain" }) |chain| {
+            try session.begin();
+            try session.execute(chain);
+            try session.execute("alter table cache_fixture.renamed add column chain_pending integer");
+            var own_columns = try session.columns(a, "cache_fixture", "renamed");
+            defer own_columns.deinit(a);
+            var committed_columns = try other.columns(a, "cache_fixture", "renamed");
+            defer committed_columns.deinit(a);
+            if (own_columns.rows.len != 3 or committed_columns.rows.len != 2) return error.CacheChainedTransactionEscaped;
+            try session.rollback();
+            var rolled_back = try other.columns(a, "cache_fixture", "renamed");
+            defer rolled_back.deinit(a);
+            if (rolled_back.rows.len != 2) return error.CacheChainedRollbackRetainedColumns;
+        }
         try session.execute("create function cache_fixture.cache_mutate() returns integer language plpgsql as $$begin execute 'alter table cache_fixture.renamed add column effect integer'; return 1; end$$");
         var before_function = try other.columns(a, "cache_fixture", "renamed");
         defer before_function.deinit(a);

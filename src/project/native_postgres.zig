@@ -27,6 +27,7 @@ const Api = struct {
     PQcmdStatus: *const fn (Handle) callconv(.c) [*:0]const u8,
     PQresultErrorField: *const fn (Handle, c_int) callconv(.c) ?[*:0]const u8,
     PQserverVersion: *const fn (Handle) callconv(.c) c_int,
+    PQtransactionStatus: *const fn (Handle) callconv(.c) c_int,
     PQgetCancel: *const fn (Handle) callconv(.c) Handle,
     PQcancel: *const fn (Handle, [*]u8, c_int) callconv(.c) c_int,
     PQfreeCancel: *const fn (Handle) callconv(.c) void,
@@ -76,8 +77,7 @@ pub const Connection = struct {
         if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
         self.clearError();
         const cache_change = if (self.cache_context) |*context| context.before(sql) else null;
-        var cache_success = false;
-        defer if (cache_change) |change| if (self.cache_context) |*context| context.after(change, cache_success);
+        defer if (cache_change) |change| if (self.cache_context) |*context| context.afterTransaction(change, self.api.PQtransactionStatus(self.handle) != 0);
         if (std.mem.indexOfScalar(u8, sql, 0) != null) return error.InvalidSqlText;
         const sql_z = try self.allocator.dupeZ(u8, sql);
         defer self.allocator.free(sql_z);
@@ -130,7 +130,6 @@ pub const Connection = struct {
             }
         }
         if (failed) |err| return err;
-        cache_success = true;
         return output;
     }
 
