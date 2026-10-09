@@ -1090,23 +1090,26 @@ def test_shared_query_accounts_managed_movement_and_client_result_separately(pro
     assert str(project[0]) not in json.dumps(execution)
 
 
-def test_shared_query_retries_confirmed_source_abort_and_records_actual_attempts(project, native_environment, query_driver, postgres):
+@pytest.mark.parametrize("partial_read,max_rows,succeeds", [(False, 100000, True), (True, 100000, True), (True, 32, False)])
+def test_shared_query_retries_confirmed_source_abort_and_records_actual_attempts(project, native_environment, query_driver, postgres, partial_read, max_rows, succeeds):
     import psycopg2
     with postgres.cursor() as cursor:
-        cursor.execute(f'''create function "{project[2]}".retry_query() returns bigint language plpgsql as $$
+        cursor.execute(f'''create function "{project[2]}".retry_query(value bigint) returns bigint language plpgsql as $$
             begin
-                if not pg_try_advisory_lock(72833862) then
+                if value in (17, 42) and not pg_try_advisory_lock(72833862) then
                     perform pg_sleep(0.3);
                     raise exception 'private query diagnostic' using errcode='40001';
                 end if;
-                perform pg_advisory_unlock(72833862);
-                return 42;
+                if value in (17, 42) then perform pg_advisory_unlock(72833862); end if;
+                return value;
             end $$''')
-    request = {"options": {"connection": "warehouse", "policy": {"profiles_dir": str(project[0]), "allow_movement": True, "max_retries": 8}},
+    source_query = (f'select "{project[2]}".retry_query(id) as id from generate_series(1,17) as rows(id)' if partial_read
+                    else f'select "{project[2]}".retry_query(42) as id')
+    request = {"options": {"connection": "warehouse", "budget": {"max_rows": max_rows}, "policy": {"profiles_dir": str(project[0]), "allow_movement": True, "max_retries": 8}},
                "sql": 'select id from "logical"."customer"',
                "bindings": [{"logical_id": "semantic.customer", "relation_name": '"logical"."customer"',
                              "source_relation": f"{project[2]}.customers", "connection": "crm",
-                             "source_query": f'select "{project[2]}".retry_query() as id'}]}
+                             "source_query": source_query}]}
     (project[0] / "dxt_connections.yml").write_text(json.dumps(project[1]))
     request_path = project[0] / "query_request.json"
     request_path.write_text(json.dumps(request))
@@ -1122,22 +1125,33 @@ def test_shared_query_retries_confirmed_source_abort_and_records_actual_attempts
         for _ in range(200):
             with postgres.cursor() as cursor:
                 cursor.execute("select pg_stat_clear_snapshot()")
-                cursor.execute("select count(*) from pg_stat_activity where state='active' and query like 'fetch forward%%__dxt_extract%%' and backend_start >= %s", [started])
+                cursor.execute("select count(*) from pg_stat_activity where state='active' and wait_event='PgSleep' and query like 'fetch forward%%__dxt_extract%%' and backend_start >= %s", [started])
                 if cursor.fetchone()[0]: break
             if process.poll() is not None: pytest.fail(process.communicate()[1])
             time.sleep(0.01)
         else: pytest.fail("Query did not enter its controlled source read")
         with blocker.cursor() as cursor: cursor.execute("select pg_advisory_unlock(72833862)")
         output, errors = process.communicate(timeout=15)
-        assert process.returncode == 0, errors
+        assert (process.returncode == 0) is succeeds, errors
         assert "private query diagnostic" not in errors and "leaked" not in errors
     finally:
         blocker.close()
         if process.poll() is None: process.terminate(); process.communicate(timeout=5)
-    artifact = json.loads(output)
-    assert artifact["result"] == [{"id": 42}]
-    assert artifact["execution"]["attempt_count"] >= 2
-    assert artifact["execution"]["attempts"][0]["error_name"] == "PostgresSerializationFailure"
-    assert artifact["execution"]["rows_moved"] == 1
     catalog = json.loads((project[0] / ".dxt" / "cross-catalog.json").read_text())
-    assert catalog["runs"][-1]["tasks"][0]["attempt_count"] >= 2
+    summary = catalog["runs"][-1]
+    record = json.loads((project[0] / ".dxt" / "cross-runs" / summary["run_id"] / "tasks" / "metric_query.json").read_text())
+    assert record["attempt_count"] >= 2
+    assert record["attempts"][0]["error_name"] == "PostgresSerializationFailure"
+    assert record["attempts"][0]["rows_moved"] == (16 if partial_read else 0)
+    if succeeds:
+        artifact = json.loads(output)
+        assert artifact["result"] == ([{"id": value} for value in range(1, 18)] if partial_read else [{"id": 42}])
+        assert artifact["execution"]["rows_moved"] == (33 if partial_read else 1)
+        assert artifact["execution"]["output_rows"] == (17 if partial_read else 1)
+        assert artifact["execution"]["attempts"] == record["attempts"]
+    else:
+        assert "CrossDatabaseRowBudgetExceeded" in errors
+        assert record["status"] == "error" and record["cleanup"] == "complete"
+        assert record["attempt_count"] == 2
+        assert record["rows_moved"] == 33 and record["output_rows"] == 0
+        assert record["attempts"][1]["error_name"] == "CrossDatabaseRowBudgetExceeded"

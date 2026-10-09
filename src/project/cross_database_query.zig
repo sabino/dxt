@@ -158,14 +158,19 @@ pub fn executeQueryPlan(runtime: Runtime, plan: *QueryPlan) !QueryOutcome {
             record.error_name = @errorName(err);
             if (!@import("cross_database_schedule.zig").retryable(err) or record.attempt_count > plan.value.scheduler.max_retries) {
                 record.cleanup = "complete";
+                try run.writeTask(arena_runtime, plan.root, &record);
                 try @import("cross_database_catalog.zig").record(runtime, plan.root, &plan.value, record.run_id, &.{record});
                 return err;
             }
+            record.status = "retrying";
+            record.cleanup = "complete";
             record.throttled_connection = record.active_connection;
+            try run.writeTask(arena_runtime, plan.root, &record);
             const delay = @min(5000, plan.value.scheduler.retry_delay_ms *| (@as(u64, 1) << @intCast(record.attempt_count - 1)));
             try std.Io.sleep(runtime.io, .fromMilliseconds(@intCast(delay)), .awake);
             continue;
         }
+        try run.writeTask(arena_runtime, plan.root, &record);
         try @import("cross_database_catalog.zig").record(runtime, plan.root, &plan.value, record.run_id, &.{record});
         const execution_json = try std.json.Stringify.valueAlloc(runtime.allocator, record, .{});
         return .{ .result = output.result, .columns = output.columns, .movement_plan_json = json, .execution_json = execution_json };
