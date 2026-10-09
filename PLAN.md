@@ -165,18 +165,46 @@ both-adapter Core comparisons. These partial runs do not establish release
 acceptance. Regular-expression runtime/provenance notices must accompany the
 existing grammar, adapter-macro and Unicode notices in actual archives.
 
-The next integrated closure includes typed dictionary keys and JSON errors,
+The integrated closure includes typed dictionary keys and JSON errors,
 ephemeral generic/singular data-test CTEs, custom relation naming, enforced
 contracts/constraints, typed documentation providers and native DuckDB profile
-settings, retries and transaction policies. All 501 integrated native tests pass.
-The supervisor's typed JSON slice passed 30 actual Core comparisons; workers
-bring additional focused both-adapter evidence. Full historical CLI/project-hook
-and ephemeral-test reruns are now running on a frozen product tree.
+settings, retries and transaction policies. Its earlier 501-test native gate
+passed. The supervisor's typed JSON slice passed 30 actual Core comparisons;
+the exact integrated profile candidate passed all 24 actual Core profile cases.
+The frozen historical CLI/project-hook/ephemeral run completed with all 40
+hook/ephemeral Core comparisons passing and 175 historical CLI failures.
+Most historical failures share a subsequently fixed profileless naming
+regression; remaining expectations are being reconciled with fresh Core
+parse/compile probes before the complete rerun. This run is not release evidence.
 The unchanged PostgreSQL dbt-utils parse advanced beyond Relation-keyed maps
 and stopped on a missing required macro argument: Core binds an Undefined value
 where the native binder rejects the call. The expression/configuration workers
 own the sequenced Undefined and macro-binding closure. This public workflow
 failure remains an acceptance blocker; no project files or gate scope are changed.
+
+Ordinary and parse-time Undefined values now retain identity through typed
+expressions. The supervisor owns dictionary-key and JSON switch companions
+and historical native/CLI assertion migrations; the configuration worker owns
+value cloning, package-render constant probing and compiler host overrides;
+the adapter child owns macro argument and callback binding. The expression
+worker owns a complete phase matrix. Actual Core confirms missing macro
+parameters use ordinary Undefined even in model parse, while model callback
+parameters use capture values. Two historical loop-error expectations are
+replaced with Core's empty SQL result. The combined native gate awaits the
+package-render companion; no weaker gate replaces it.
+
+The docs worker owns native SafeLoader/SafeDumper-compatible runtime YAML and
+JSON loading, including immutable bytes/date key protocols. The supervisor
+will route those protocols through the shared mapping-key module after the
+worker's narrow helper API lands. The command worker owns deprecated profile
+behavior-flag fallback and executed generic-test materialization helpers,
+including complete compiled SQL/CTE/file publication. The naming worker owns
+the paired final identity fixtures and public support docs; final acceptance
+counts and publication remain with the supervisor. The unchanged pinned
+Jaffle project requires an explicit Core version-check override and an external
+profile flag for nested generic-test arguments under Core 1.10.5. The shared
+developer harness provides the same external profile to both engines without
+editing authored project/profile files; this is not a Core 1.11 claim.
 
 After its scheduling commit, the scheduler worker owns the focused native
 DuckDB/Postgres adapter contract in a second isolated worktree. Shared backend
