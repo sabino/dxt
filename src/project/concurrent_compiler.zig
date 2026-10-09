@@ -118,8 +118,8 @@ fn render(runtime: types.Runtime, graph: *const types.Graph, resource: runner.Re
         .node => |original| {
             if (std.mem.eql(u8, original.resource_type, "seed")) return;
             var node = original.*;
-            if (std.mem.eql(u8, node.materialized, "incremental") and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
-                try incremental_config.validate(node.incremental);
+            if (std.mem.eql(u8, node.materialized, "incremental")) {
+                try incremental_config.validateForAdapter(graph.adapter_type, node.incremental);
                 node.runtime_is_incremental = try incremental.isIncremental(runtime, database_path, graph, &node);
             }
             const compiled = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, &node);

@@ -1297,7 +1297,7 @@ fn validateConcurrentResources(runtime: Runtime, graph: *const Graph, resources:
                     if (std.mem.eql(u8, label, "Build")) return error.UnsupportedBuildModelMaterialization;
                     return error.UnsupportedModelMaterialization;
                 }
-                if (std.mem.eql(u8, node.materialized, "incremental") and std.mem.eql(u8, graph.adapter_type, "duckdb")) try incremental_config.validate(node.incremental);
+                if (std.mem.eql(u8, node.materialized, "incremental")) try incremental_config.validateForAdapter(graph.adapter_type, node.incremental);
             }
         },
         .generic => |node| try validateGenericTestExecution(node),
@@ -2393,8 +2393,8 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
         if (std.mem.eql(u8, node.resource_type, "snapshot")) saw_selected_snapshot = true else saw_selected_model = true;
         if (std.mem.eql(u8, node.materialized, "ephemeral") and compile_rows == null) continue;
 
-        if (std.mem.eql(u8, node.materialized, "incremental") and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
-            try incremental_config.validate(node.incremental);
+        if (std.mem.eql(u8, node.materialized, "incremental")) {
+            try incremental_config.validateForAdapter(graph.adapter_type, node.incremental);
             const incremental_db_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
             defer runtime.allocator.free(incremental_db_path);
             node.runtime_is_incremental = try incremental.isIncremental(runtime, incremental_db_path, graph, node);

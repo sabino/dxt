@@ -29,6 +29,19 @@ fn quoteString(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
 }
 
 pub fn relationKind(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node) !RelationKind {
+    if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
+        const schema = try compiler.relationSchemaForNode(runtime.allocator, graph, node);
+        defer runtime.allocator.free(schema);
+        var owned: ?adapter.Session = null;
+        defer if (owned) |*session| session.deinit();
+        const session = runtime.adapter_session orelse blk: {
+            owned = try adapter.openSession(runtime, graph, db_path);
+            break :blk &owned.?;
+        };
+        const kind = try session.relationTypeInDatabase(runtime.allocator, compiler.relationDatabaseForNode(graph, node), schema, compiler.relationIdentifierForNode(node));
+        defer if (kind) |value| runtime.allocator.free(value);
+        return if (kind) |value| if (std.mem.eql(u8, value, "table")) .table else .view else .missing;
+    }
     if (!std.mem.eql(u8, db_path, ":memory:")) {
         const file = std.Io.Dir.cwd().openFile(runtime.io, db_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return .missing,
@@ -73,6 +86,10 @@ fn schemaChanged(source: []const Column, target: []const Column) bool {
 }
 
 pub fn renderUpdateSql(allocator: std.mem.Allocator, target: []const u8, stage: []const u8, source_columns: []const Column, target_columns: []const Column, model_config: types.IncrementalConfig, begin_transaction: bool) ![]const u8 {
+    return renderUpdateSqlWithPolicy(allocator, target, stage, source_columns, target_columns, model_config, begin_transaction, true);
+}
+
+pub fn renderUpdateSqlWithPolicy(allocator: std.mem.Allocator, target: []const u8, stage: []const u8, source_columns: []const Column, target_columns: []const Column, model_config: types.IncrementalConfig, begin_transaction: bool, commit_transaction: bool) ![]const u8 {
     try config.validate(model_config);
     const policy = config.schemaPolicy(model_config);
     if (std.mem.eql(u8, policy, "fail") and schemaChanged(source_columns, target_columns)) return error.IncrementalSchemaMismatch;
@@ -131,11 +148,21 @@ pub fn renderUpdateSql(allocator: std.mem.Allocator, target: []const u8, stage: 
         defer allocator.free(name);
         try column_names.writer.writeAll(name);
     }
-    try writer.print("insert into {s} ({s}) select {s} from {s};\ndrop table {s};\ncommit;\n", .{ target, column_names.written(), column_names.written(), stage, stage });
+    try writer.print("insert into {s} ({s}) select {s} from {s};\ndrop table {s};\n", .{ target, column_names.written(), column_names.written(), stage, stage });
+    if (commit_transaction) try writer.writeAll("commit;\n");
     return try out.toOwnedSlice();
 }
 
 pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node) !void {
+    return executeWithPolicy(runtime, db_path, graph, node, .{});
+}
+
+pub fn executeWithPolicy(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node, policy: @import("postgres_materialization.zig").ExecutionPolicy) !void {
+    if (std.mem.eql(u8, graph.adapter_type, "postgres")) return @import("postgres_incremental.zig").executeWithPolicy(runtime, graph, node, policy) catch |err| switch (err) {
+        error.PostgresExecutionFailed, error.IncrementalSchemaMismatch => error.DuckDbExecutionFailed,
+        else => err,
+    };
+    if (!policy.manage_transaction and runtime.adapter_session == null) return error.NativeAdapterSessionRequired;
     try config.validate(node.incremental);
     const existing = try relationKind(runtime, db_path, graph, node);
     const schema = try compiler.relationSchemaForNode(runtime.allocator, graph, node);
@@ -147,7 +174,7 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
     const compiled = std.mem.trimEnd(u8, node.compiled_code orelse return error.UnsupportedModelExecution, " \t\r\n;");
     if (existing == .missing or existing == .view or config.fullRefresh(graph, node)) {
         // CTAS and replacement share one transaction, including view-to-table changes.
-        const sql = try std.fmt.allocPrint(runtime.allocator, "begin transaction;\ncreate schema if not exists {s};\n{s}{s}{s}create or replace table {s} as (\n{s}\n);\ncommit;\n", .{ schema_quoted, if (existing == .view) "drop view " else "", if (existing == .view) target else "", if (existing == .view) ";\n" else "", target, compiled });
+        const sql = try std.fmt.allocPrint(runtime.allocator, "{s}create schema if not exists {s};\n{s}{s}{s}create or replace table {s} as (\n{s}\n);\n{s}", .{ if (policy.manage_transaction) "begin transaction;\n" else "", schema_quoted, if (existing == .view) "drop view " else "", if (existing == .view) target else "", if (existing == .view) ";\n" else "", target, compiled, if (policy.manage_transaction) "commit;\n" else "" });
         defer runtime.allocator.free(sql);
         return try executeSql(runtime, db_path, sql);
     }
@@ -164,7 +191,7 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
     const target_literal = try quoteString(runtime.allocator, compiler.relationIdentifierForNode(node));
     defer runtime.allocator.free(target_literal);
     if (runtime.adapter_session) |session| switch (session.*) {
-        .duckdb => |*connection| return try executeNativeUpdate(runtime, connection, target, stage, compiled, stage_literal, schema_literal, target_literal, node.incremental),
+        .duckdb => |*connection| return try executeNativeUpdate(runtime, connection, target, stage, compiled, stage_literal, schema_literal, target_literal, node.incremental, policy),
         else => {},
     };
     var temporary_pool = adapter.DuckDBPool.init(runtime.allocator, runtime.io, runtime.environment);
@@ -173,7 +200,7 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
     if (try pool.acquire(db_path, false)) |native| {
         var connection = native;
         defer connection.deinit();
-        return try executeNativeUpdate(runtime, &connection, target, stage, compiled, stage_literal, schema_literal, target_literal, node.incremental);
+        return try executeNativeUpdate(runtime, &connection, target, stage, compiled, stage_literal, schema_literal, target_literal, node.incremental, policy);
     }
     // A single persistent native-owned CLI connection holds the transaction
     // across staging, schema inspection, schema changes and the data update.
@@ -222,9 +249,9 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
     return error.DuckDbExecutionFailed;
 }
 
-fn executeNativeUpdate(runtime: types.Runtime, connection: *adapter.DuckDBConnection, target: []const u8, stage: []const u8, compiled: []const u8, stage_literal: []const u8, schema_literal: []const u8, target_literal: []const u8, model_config: types.IncrementalConfig) !void {
-    try connection.begin();
-    errdefer connection.rollback() catch {};
+fn executeNativeUpdate(runtime: types.Runtime, connection: *adapter.DuckDBConnection, target: []const u8, stage: []const u8, compiled: []const u8, stage_literal: []const u8, schema_literal: []const u8, target_literal: []const u8, model_config: types.IncrementalConfig, policy: @import("postgres_materialization.zig").ExecutionPolicy) !void {
+    if (policy.manage_transaction) try connection.begin();
+    errdefer if (policy.manage_transaction) connection.rollback() catch {};
     const stage_sql = try std.fmt.allocPrint(runtime.allocator, "create temporary table {s} as (\n{s}\n)", .{ stage, compiled });
     defer runtime.allocator.free(stage_sql);
     try connection.execute(stage_sql);
@@ -244,7 +271,7 @@ fn executeNativeUpdate(runtime: types.Runtime, connection: *adapter.DuckDBConnec
     defer source_columns.deinit();
     const target_columns = try std.json.parseFromSlice([]Column, runtime.allocator, target_json, .{});
     defer target_columns.deinit();
-    const sql = renderUpdateSql(runtime.allocator, target, stage, source_columns.value, target_columns.value, model_config, false) catch |err| switch (err) {
+    const sql = renderUpdateSqlWithPolicy(runtime.allocator, target, stage, source_columns.value, target_columns.value, model_config, false, policy.manage_transaction) catch |err| switch (err) {
         error.IncrementalSchemaMismatch => return error.DuckDbExecutionFailed,
         else => return err,
     };
@@ -269,4 +296,13 @@ test "incremental update policies and composite keys preserve target changes in 
     try std.testing.expect(std.mem.indexOf(u8, sql, "stage.id = DBT_INCREMENTAL_TARGET.id and stage.new = DBT_INCREMENTAL_TARGET.new") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "insert into events (\"id\", \"new\")") != null);
     try std.testing.expect(std.mem.endsWith(u8, sql, "drop table stage;\ncommit;\n"));
+}
+
+test "incremental caller-managed transaction emits no begin or commit" {
+    const columns = [_]Column{.{ .column_name = "id", .data_type = "INTEGER" }};
+    const sql = try renderUpdateSqlWithPolicy(std.testing.allocator, "target", "stage", &columns, &columns, .{}, false, false);
+    defer std.testing.allocator.free(sql);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "begin transaction") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "commit;") == null);
+    try std.testing.expect(std.mem.endsWith(u8, sql, "drop table stage;\n"));
 }

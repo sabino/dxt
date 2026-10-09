@@ -75,7 +75,7 @@ pub fn executeModel(runtime: Runtime, db_path: []const u8, graph: *const Graph, 
 
 pub const ExecutionPolicy = postgres_materialization.ExecutionPolicy;
 pub fn executeModelWithPolicy(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
-    if (std.mem.eql(u8, node.materialized, "incremental")) return try incremental.execute(runtime, db_path, graph, node);
+    if (std.mem.eql(u8, node.materialized, "incremental")) return try incremental.executeWithPolicy(runtime, db_path, graph, node, policy);
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
         const sql = trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution);
         return postgres_materialization.executeWithPolicy(runtime, graph, node, sql, policy) catch |err| switch (err) {
