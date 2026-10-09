@@ -292,7 +292,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     const target_dir = try targetDir(runtime, options);
     try project_defer.apply(runtime, &graph, options, selected, target_dir);
-    const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
+    const compile_result = if (options.docs_compile) try compileSelectedModels(runtime, &graph, selected, target_dir, false, false) else CompileResult{ .count = 0, .saw_model = false, .compiled_base = "" };
 
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
@@ -312,6 +312,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     const catalog_path = try pathJoin(runtime.allocator, &.{ target_dir, "catalog.json" });
     const catalog_json = try catalog.renderCatalogWithInvocation(runtime.allocator, catalog_entries.nodes.items, catalog_entries.sources.items, runtime.invocation);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = catalog_path, .data = catalog_json });
+    try docs_serve.writeIndex(runtime, target_dir, options.docs_static);
 
     try stdout.print("Generated docs artifacts for {d} compiled model(s) into {s}\n", .{
         compile_result.count,

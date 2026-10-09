@@ -234,8 +234,9 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
                 try stderr.writeAll("error: runtime I/O is required for docs generate\n");
                 return .usage;
             };
-            const options = parseOptions(rt.allocator, args[3..], stderr, .docs_generate) catch |err| return commandError(err, stderr);
-            project.docsGenerate(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+            var options = parseOptions(rt.allocator, args[3..], stderr, .docs_generate) catch |err| return commandError(err, stderr);
+            options.which = "generate";
+            project.docsGenerate(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
             return .ok;
         }
         if (args.len >= 3 and equals(args[2], "serve")) {
@@ -463,7 +464,6 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedSeedExecution => stderr.writeAll("error: seed/build currently executes only DuckDB CSV seeds with supported quote_columns and column_types settings\n") catch {},
         error.UnsupportedTestExecution => stderr.writeAll("error: test/build currently executes only selected DuckDB singular SQL tests, supported custom generic column tests, and model/seed/source not_null/unique/accepted_values/relationships column tests\n") catch {},
         error.UnsupportedUnitTestExecution => stderr.writeAll("error: unit test execution currently supports only dict row fixtures for literal ref/source inputs and expected rows\n") catch {},
-        error.UnsupportedDocsBrowserOpen => stderr.writeAll("error: docs serve browser opening is not implemented yet; use --no-browser\n") catch {},
         error.InvalidDocsServePort => stderr.writeAll("error: --port must be an integer between 1 and 65535\n") catch {},
         error.UnsupportedCommandOption => stderr.writeAll("error: option is not supported by the implemented M1 parser command\n") catch {},
         else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},
@@ -615,6 +615,10 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
                 options.skip_profile_setup = true;
             } else if (equals(arg, "--browser")) {
                 options.docs_open_browser = true;
+            } else if (equals(arg, "--static")) {
+                options.docs_static = true;
+            } else if (equals(arg, "--compile") or equals(arg, "--no-compile")) {
+                options.docs_compile = equals(arg, "--compile");
             } else if (equals(arg, "--no-browser") or equals(arg, "--no-open")) {
                 options.docs_open_browser = false;
             } else if (equals(arg, "--clean-project-files-only")) {
@@ -690,6 +694,7 @@ fn isFlag(arg: []const u8, mode: OptionMode) bool {
     if ((mode == .build or mode == .compile or mode == .clone) and equals(arg, "--full-refresh")) return true;
     if (mode == .init and equals(arg, "--skip-profile-setup")) return true;
     if (mode == .docs_serve and (equals(arg, "--browser") or equals(arg, "--no-browser") or equals(arg, "--no-open"))) return true;
+    if (mode == .docs_generate and (equals(arg, "--static") or equals(arg, "--compile") or equals(arg, "--no-compile"))) return true;
     if (mode == .clean and (equals(arg, "--clean-project-files-only") or equals(arg, "--no-clean-project-files-only"))) return true;
     return false;
 }
@@ -876,6 +881,8 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         .docs_generate => {
             try writer.writeAll(
                 \\  --threads <count>
+                \\  --static
+                \\  --compile / --no-compile
                 \\
             );
         },

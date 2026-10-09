@@ -149,6 +149,8 @@ jobs:
           mkdir -p "dist/${name}/docs/licenses"
           cp vendor/libyaml/LICENSE "dist/${name}/docs/licenses/libyaml-LICENSE"
           cp vendor/libyaml/UPSTREAM "dist/${name}/docs/licenses/libyaml-UPSTREAM"
+          cp vendor/dbt-docs/LICENSE "dist/${name}/docs/licenses/dbt-docs-LICENSE"
+          cp vendor/dbt-docs/UPSTREAM "dist/${name}/docs/licenses/dbt-docs-UPSTREAM"
           test ! -f LICENSE || cp LICENSE "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           tar -tzf "dist/${name}.tar.gz"
