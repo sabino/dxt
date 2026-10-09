@@ -23,6 +23,7 @@ pub const Value = union(enum) {
 
     pub fn truthy(self: Value) bool {
         if (floatProtocol(self)) |number| return number != 0;
+        if (complexProtocol(self)) |number| return number.real != 0 or number.imaginary != 0;
         if (integerProtocol(self)) |number| return !std.mem.eql(u8, number, "0");
         if (sequences.truthy(self)) |result| return result;
         if (self == .object) if (sequence(self)) |items| return items.len != 0;
@@ -84,6 +85,10 @@ pub const Value = union(enum) {
         if (floatProtocol(self) != null) {
             if (std.mem.eql(u8, name, "real")) return self;
             if (std.mem.eql(u8, name, "imag")) return .{ .number = 0 };
+        }
+        if (complexProtocol(self)) |number| {
+            if (std.mem.eql(u8, name, "real")) return .{ .number = number.real };
+            if (std.mem.eql(u8, name, "imag")) return .{ .number = number.imaginary };
         }
         return switch (self) {
             .complex => |v| if (std.mem.eql(u8, name, "real")) .{ .number = v.real } else if (std.mem.eql(u8, name, "imag")) .{ .number = v.imaginary } else .undefined,
@@ -158,6 +163,24 @@ pub fn floatProtocol(value: Value) ?f64 {
     if (value == .number) return value.number;
     if (value == .object) for (value.object) |entry| {
         if (entry.typed_key == null and std.mem.eql(u8, entry.key, "__dxt_float") and entry.value == .number) return entry.value.number;
+    };
+    return null;
+}
+
+pub fn complexValue(allocator: std.mem.Allocator, number: complex_numbers.Complex) !Value {
+    if (!std.math.isNan(number.real) and !std.math.isNan(number.imaginary)) return .{ .complex = number };
+    const entries = try allocateEntries(allocator, 4);
+    entries[0] = .{ .key = "__dxt_complex", .value = .{ .complex = number } };
+    entries[1] = .{ .key = "__dxt_complex_identity", .value = .{ .string = try std.fmt.allocPrint(allocator, "{d}", .{next_float_identity.fetchAdd(1, .monotonic)}) } };
+    entries[2] = .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } };
+    entries[3] = .{ .key = "__dxt_rendered", .value = .{ .string = try complex_numbers.text(allocator, number) } };
+    return .{ .object = entries };
+}
+
+pub fn complexProtocol(value: Value) ?complex_numbers.Complex {
+    if (value == .complex) return value.complex;
+    if (value == .object) for (value.object) |entry| {
+        if (entry.typed_key == null and std.mem.eql(u8, entry.key, "__dxt_complex") and entry.value == .complex) return entry.value.complex;
     };
     return null;
 }
@@ -408,7 +431,7 @@ const Parser = struct {
         var value: Value = if (self.take("-")) blk: {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
-            if (operand == .complex) break :blk .{ .complex = .{ .real = -operand.complex.real, .imaginary = -operand.complex.imaginary } };
+            if (complexProtocol(operand)) |number| break :blk try complexValue(self.allocator, .{ .real = -number.real, .imaginary = -number.imaginary });
             if (integerText(operand)) |number| break :blk .{ .integer = try numbers.negate(self.allocator, number) };
             break :blk try floatValue(self.allocator, -(try numeric(operand)));
         } else if (self.take("+")) blk: {
@@ -416,7 +439,7 @@ const Parser = struct {
             if (!self.active) break :blk .none;
             if (operand == .boolean) break :blk try integerValue(self.allocator, @as(u8, @intFromBool(operand.boolean)));
             if (integerProtocol(operand)) |number| break :blk .{ .integer = number };
-            if (operand != .integer and floatProtocol(operand) == null and operand != .complex) return error.JinjaTypeError;
+            if (operand != .integer and floatProtocol(operand) == null and complexProtocol(operand) == null) return error.JinjaTypeError;
             break :blk operand;
         } else try self.atom();
         while (true) {
@@ -448,7 +471,10 @@ const Parser = struct {
                 if (self.take("(")) {
                     const args = try self.arguments();
                     if (self.active) value = try self.method(value, attribute, args);
-                } else if (self.active) value = try checkedAttribute(value, attribute);
+                } else if (self.active) {
+                    value = try checkedAttribute(value, attribute);
+                    if (value == .number and std.math.isNan(value.number)) value = try floatValue(self.allocator, value.number);
+                }
             } else if (with_filters and self.take("is")) {
                 const negate = self.take("not");
                 const test_name = try self.name();
@@ -606,7 +632,7 @@ const Parser = struct {
             var receiver = try host.resolve(host.context, parts.next().?, self.allocator);
             while (parts.next()) |attribute| receiver = try checkedAttribute(receiver, attribute);
         }
-        return resolved;
+        return if (resolved == .number and std.math.isNan(resolved.number)) try floatValue(self.allocator, resolved.number) else resolved;
     }
 
     fn method(self: *Parser, receiver: Value, method_name: []const u8, args: []const Argument) !Value {
@@ -689,11 +715,11 @@ fn ownedEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry)) ![
 }
 
 fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument) !?Value {
-    if (receiver.attribute("__dxt_noniterable").truthy()) return null;
-    if (receiver == .complex and std.mem.eql(u8, name_, "conjugate")) {
+    if (complexProtocol(receiver)) |number| if (std.mem.eql(u8, name_, "conjugate")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
-        return .{ .complex = .{ .real = receiver.complex.real, .imaginary = -receiver.complex.imaginary } };
-    }
+        return try complexValue(allocator, .{ .real = number.real, .imaginary = -number.imaginary });
+    };
+    if (receiver.attribute("__dxt_noniterable").truthy()) return null;
     const positional_only = if (receiver == .object) isMethod(name_, &.{ "get", "keys", "values", "items", "copy" }) else if (receiver == .list or receiver == .tuple) isMethod(name_, &.{ "copy", "count", "index" }) else if (receiver == .string) isMethod(name_, &.{ "lower", "upper", "casefold", "startswith", "endswith", "find", "rfind", "count", "index", "rindex", "strip", "lstrip", "rstrip", "join", "replace" }) else false;
     if (positional_only) for (args) |arg| if (arg.name != null) return error.InvalidJinjaArguments;
     if (receiver == .object) {
@@ -1011,13 +1037,16 @@ fn equal(a: Value, b: Value) bool {
 }
 fn equalMember(a: Value, b: Value) bool {
     if (floatProtocol(a)) |number| if (std.math.isNan(number) and mapping_keys.keyEqual(a, b)) return true;
+    if (complexProtocol(a)) |number| if ((std.math.isNan(number.real) or std.math.isNan(number.imaginary)) and mapping_keys.keyEqual(a, b)) return true;
     return equalValues(a, b);
 }
 pub fn equalValues(a: Value, b: Value) bool {
-    if (a == .complex or b == .complex) {
-        if (a == .complex and b == .complex) return a.complex.real == b.complex.real and a.complex.imaginary == b.complex.imaginary;
-        const number = if (a == .complex) a.complex else b.complex;
-        const other = if (a == .complex) b else a;
+    const complex_a = complexProtocol(a);
+    const complex_b = complexProtocol(b);
+    if (complex_a != null or complex_b != null) {
+        if (complex_a != null and complex_b != null) return complex_a.?.real == complex_b.?.real and complex_a.?.imaginary == complex_b.?.imaginary;
+        const number = complex_a orelse complex_b.?;
+        const other = if (complex_a != null) b else a;
         if (number.imaginary != 0) return false;
         return (numericOrder(std.heap.page_allocator, .{ .number = number.real }, other) catch return false) == .eq;
     }
@@ -1082,10 +1111,12 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     if (std.mem.eql(u8, op, "in")) return .{ .boolean = try contains(allocator, b, a) };
     if (std.mem.eql(u8, op, "not in")) return .{ .boolean = !(try contains(allocator, b, a)) };
     if (std.mem.eql(u8, op, "~") or (std.mem.eql(u8, op, "+") and a == .string and b == .string)) return .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ try a.text(allocator), try b.text(allocator) }) };
-    if (a == .complex or b == .complex) {
-        const x = if (a == .complex) a.complex else complex_numbers.Complex{ .real = try numeric(a), .imaginary = 0 };
-        const y = if (b == .complex) b.complex else complex_numbers.Complex{ .real = try numeric(b), .imaginary = 0 };
-        return .{ .complex = if (std.mem.eql(u8, op, "+")) complex_numbers.add(x, y) else if (std.mem.eql(u8, op, "-")) complex_numbers.subtract(x, y) else if (std.mem.eql(u8, op, "*")) complex_numbers.multiply(x, y) else if (std.mem.eql(u8, op, "/")) try complex_numbers.divide(x, y) else if (std.mem.eql(u8, op, "**")) try complex_numbers.power(x, y) else return error.JinjaTypeError };
+    const complex_a = complexProtocol(a);
+    const complex_b = complexProtocol(b);
+    if (complex_a != null or complex_b != null) {
+        const x = complex_a orelse complex_numbers.Complex{ .real = try numeric(a), .imaginary = 0 };
+        const y = complex_b orelse complex_numbers.Complex{ .real = try numeric(b), .imaginary = 0 };
+        return try complexValue(allocator, if (std.mem.eql(u8, op, "+")) complex_numbers.add(x, y) else if (std.mem.eql(u8, op, "-")) complex_numbers.subtract(x, y) else if (std.mem.eql(u8, op, "*")) complex_numbers.multiply(x, y) else if (std.mem.eql(u8, op, "/")) try complex_numbers.divide(x, y) else if (std.mem.eql(u8, op, "**")) try complex_numbers.power(x, y) else return error.JinjaTypeError);
     }
     if (std.mem.eql(u8, op, "+") and a == .list and b == .list) return .{ .list = try std.mem.concat(allocator, Value, &.{ a.list, b.list }) };
     if (std.mem.eql(u8, op, "+") and a == .tuple and b == .tuple) return .{ .tuple = try std.mem.concat(allocator, Value, &.{ a.tuple, b.tuple }) };
@@ -1123,9 +1154,9 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     const y = try numeric(b);
     if (std.mem.eql(u8, op, "**")) {
         if (x == 0 and y < 0) return error.JinjaDivisionByZero;
-        if (x < 0 and std.math.isFinite(y) and @floor(y) != y) return .{ .complex = try complex_numbers.power(.{ .real = x, .imaginary = 0 }, .{ .real = y, .imaginary = 0 }) };
+        if (x < 0 and std.math.isFinite(y) and @floor(y) != y) return try complexValue(allocator, try complex_numbers.power(.{ .real = x, .imaginary = 0 }, .{ .real = y, .imaginary = 0 }));
         const powered = std.math.pow(f64, x, y);
-        if (std.math.isNan(powered)) return error.JinjaTypeError;
+        if (std.math.isNan(powered) and std.math.isFinite(x) and std.math.isFinite(y)) return error.JinjaTypeError;
         if (std.math.isFinite(x) and std.math.isFinite(y) and !std.math.isFinite(powered)) return error.JinjaNumericOverflow;
         return try floatValue(allocator, powered);
     }
@@ -1249,7 +1280,7 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "undefined")) return value == .undefined or value == .conditional_undefined;
     if (std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "None")) return value == .none;
     if (std.mem.eql(u8, name, "string")) return value == .string;
-    if (std.mem.eql(u8, name, "number")) return integerText(value) != null or floatProtocol(value) != null or value == .complex;
+    if (std.mem.eql(u8, name, "number")) return integerText(value) != null or floatProtocol(value) != null or complexProtocol(value) != null;
     if (std.mem.eql(u8, name, "integer")) return value == .integer or integerProtocol(value) != null;
     if (std.mem.eql(u8, name, "float")) return floatProtocol(value) != null;
     if (std.mem.eql(u8, name, "boolean")) return value == .boolean;
@@ -1259,6 +1290,7 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
         if (args.len != 1) return error.InvalidJinjaArguments;
         const other = args[0].value;
         if (floatProtocol(value)) |number| if (std.math.isNan(number)) return mapping_keys.keyEqual(value, other);
+        if (complexProtocol(value)) |number| if (std.math.isNan(number.real) or std.math.isNan(number.imaginary)) return mapping_keys.keyEqual(value, other);
         if (std.meta.activeTag(value) != std.meta.activeTag(other)) return false;
         return switch (value) {
             .object => |entries| entries.ptr == other.object.ptr,
@@ -1518,7 +1550,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
             break :blk evaluate(allocator, text_value, null) catch value;
         } else value;
         if (std.mem.eql(u8, name, "as_bool") and converted != .boolean) return error.JinjaTypeError;
-        if (std.mem.eql(u8, name, "as_number") and floatProtocol(converted) == null and converted != .integer and converted != .complex) return error.JinjaTypeError;
+        if (std.mem.eql(u8, name, "as_number") and floatProtocol(converted) == null and converted != .integer and complexProtocol(converted) == null) return error.JinjaTypeError;
         return if (converted == .undefined) value else converted;
     }
     if (std.mem.eql(u8, name, "default") or std.mem.eql(u8, name, "d")) {
