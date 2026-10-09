@@ -429,7 +429,7 @@ def test_typed_metric_result_materializes_binary_decimal_uuid_and_timezone(proje
 
 
 @pytest.mark.parametrize("destination", ["duckdb", "postgres"])
-def test_process_owned_target_lock_rejects_overlap_and_recovers_after_termination(project, native_environment, destination):
+def test_process_owned_target_lock_rejects_overlap_and_recovers_after_termination(project, native_environment, destination, postgres):
     config = project[1]
     config["models"] = {"locked": {"destination": "warehouse" if destination == "duckdb" else "crm",
         "inputs": {"wait": {"connection": "crm", "query": "select 1::bigint as id from pg_sleep(10)"}},
@@ -440,6 +440,9 @@ def test_process_owned_target_lock_rejects_overlap_and_recovers_after_terminatio
     (project[0] / "dxt_connections.yml").write_text(json.dumps(config))
     args = [str(DXT), "cross-database", "run", "--project-dir", str(project[0]),
             "--profiles-dir", str(project[0]), "--allow-movement"]
+    with postgres.cursor() as cursor:
+        cursor.execute("select clock_timestamp()")
+        launched_after = cursor.fetchone()[0]
     process = subprocess.Popen(args, cwd=ROOT, env=native_environment, text=True,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
@@ -452,7 +455,7 @@ def test_process_owned_target_lock_rejects_overlap_and_recovers_after_terminatio
             for _ in range(100):
                 with monitor.cursor() as cursor:
                     cursor.execute("select pg_stat_clear_snapshot()")
-                    cursor.execute("select count(*) from pg_stat_activity where state='active' and query like 'fetch forward%__dxt_extract%'")
+                    cursor.execute("select count(*) from pg_stat_activity where state='active' and query like 'fetch forward%%__dxt_extract%%' and backend_start >= %s", [launched_after])
                     if cursor.fetchone()[0]: break
                 time.sleep(0.02)
             else: pytest.fail("First run did not reach its bounded source cursor")
@@ -468,7 +471,8 @@ def test_process_owned_target_lock_rejects_overlap_and_recovers_after_terminatio
     assert "leaked" not in result.stderr
 
 
-def test_cross_source_incremental_recomputes_dimension_and_late_fact_keys_atomically(project, native_environment, postgres):
+@pytest.mark.parametrize("cached", [False, True])
+def test_cross_source_incremental_recomputes_dimension_and_late_fact_keys_atomically(project, native_environment, postgres, cached):
     import duckdb
     config, schema = project[1], project[2]
     with postgres.cursor() as cursor:
@@ -478,6 +482,8 @@ def test_cross_source_incremental_recomputes_dimension_and_late_fact_keys_atomic
     with duckdb.connect(str(project[3])) as connection:
         connection.execute("alter table orders add column updated_at timestamp default timestamp '2024-01-10'")
         connection.execute("insert into orders values(3,100,timestamp '2024-01-01')")
+    if cached: retain(project)
+    flags = ["--allow-movement", "--allow-retention"] if cached else ["--allow-movement"]
     model = config["models"]["joined"]
     model.update(materialized="incremental", unique_key="id")
     customer = model["inputs"]["customers"]
@@ -485,7 +491,7 @@ def test_cross_source_incremental_recomputes_dimension_and_late_fact_keys_atomic
     customer["columns"] = ["id", "name", "updated_at"]
     customer["incremental"] = {"key": "id", "watermark": "updated_at"}
     model["inputs"]["orders"]["incremental"] = {"key": "customer_id", "watermark": "updated_at", "lookback_seconds": 86400}
-    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    result = invoke(project, config, native_environment, "run", *flags)
     assert result.returncode == 0, result.stderr
     assert "leaked" not in result.stderr
     assert duck_rows(project[3], "select * from marts.joined order by id") == [(1, "O'Brien", 10), (2, "second", 9), (3, "unchanged", 100)]
@@ -494,7 +500,7 @@ def test_cross_source_incremental_recomputes_dimension_and_late_fact_keys_atomic
         cursor.execute(f'update "{schema}".customers set name=\'changed\',updated_at=\'2024-01-11\' where id=1')
     with duckdb.connect(str(project[3])) as connection:
         connection.execute("insert into orders values(2,5,timestamp '2024-01-09 12:00:00')")
-    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    result = invoke(project, config, native_environment, "run", *flags)
     assert result.returncode == 0, result.stderr
     assert "leaked" not in result.stderr
     assert duck_rows(project[3], "select * from marts.joined order by id") == [(1, "changed", 10), (2, "second", 14), (3, "unchanged", 100)]
@@ -508,7 +514,7 @@ def test_cross_source_incremental_recomputes_dimension_and_late_fact_keys_atomic
     path, recovery = state(project)
     recovery["models"][0].update(status="running", source_watermarks=[], watermarks_committed=False)
     path.write_text(json.dumps(recovery))
-    result = invoke(project, config, native_environment, "recover", "--allow-movement", "--run-id", recovery["run_id"])
+    result = invoke(project, config, native_environment, "recover", *flags, "--run-id", recovery["run_id"])
     assert result.returncode == 0, result.stderr
     restored = json.loads(path.read_text())["models"][0]
     assert restored["watermarks_committed"] is True
@@ -517,20 +523,20 @@ def test_cross_source_incremental_recomputes_dimension_and_late_fact_keys_atomic
         cursor.execute(f'update "{schema}".customers set name=\'retry\',updated_at=\'2024-01-12\' where id=1')
     original = model["sql"]
     model["sql"] = f"{original} union all {original}"
-    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    result = invoke(project, config, native_environment, "run", *flags)
     assert result.returncode != 0
     assert "CrossDatabaseIncrementalUniqueKeyViolation" in result.stderr
     assert "leaked" not in result.stderr
     assert duck_rows(project[3], "select input,watermark from dxt_internal.cross_watermarks order by input") == committed
     assert duck_rows(project[3], "select name from marts.joined where id=1") == [("changed",)]
     model["sql"] = original
-    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    result = invoke(project, config, native_environment, "run", *flags)
     assert result.returncode == 0, result.stderr
     assert duck_rows(project[3], "select name from marts.joined where id=1") == [("retry",)]
-    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    result = invoke(project, config, native_environment, "run", *flags)
     assert result.returncode == 0, result.stderr
     assert len(duck_rows(project[3], "select * from marts.joined")) == 3
-    result = invoke(project, config, native_environment, "run", "--allow-movement", "--full-refresh")
+    result = invoke(project, config, native_environment, "run", *flags, "--full-refresh")
     assert result.returncode == 0, result.stderr
     assert "leaked" not in result.stderr
     assert len(duck_rows(project[3], "select * from marts.joined")) == 3
@@ -594,3 +600,185 @@ def test_incremental_missing_source_progress_is_rejected_before_database_open(pr
     assert result.returncode != 0
     assert "MissingCrossDatabaseSourceWatermark" in result.stderr
     assert not (project[0] / ".dxt").exists()
+
+
+def retain(project, mode="cached", version=None, ttl=3600):
+    profiles = json.loads((project[0] / "profiles.yml").read_text())
+    profiles["cross"]["outputs"]["cache"] = {"type": "duckdb", "path": str(project[0] / "cache.duckdb"), "schema": "dxt_stage"}
+    (project[0] / "profiles.yml").write_text(json.dumps(profiles))
+    config = project[1]
+    config["connections"]["cache"] = {"profile": "cross", "target": "cache", "role": "stage", "allowed_destinations": ["warehouse"]}
+    config["connections"]["crm"]["allowed_destinations"] = ["cache"]
+    declaration = {"mode": mode, "connection": "cache", "ttl_seconds": ttl}
+    if version is not None: declaration["version"] = version
+    config["models"]["joined"]["inputs"]["customers"]["stage"] = declaration
+    return config
+
+
+def expire_retained(project):
+    import duckdb
+    with duckdb.connect(str(project[0] / "cache.duckdb")) as connection:
+        rows = connection.execute("select key,manifest_json from dxt_stage.catalog where status='ready'").fetchall()
+        for key, text in rows:
+            manifest = json.loads(text)
+            manifest["expires_epoch"] = 0
+            connection.execute("update dxt_stage.catalog set expires_epoch=0,manifest_json=? where key=?", [json.dumps(manifest), key])
+
+
+def test_retained_cache_freshness_reuse_refresh_and_credential_free_metadata(project, native_environment, postgres):
+    config = retain(project)
+    flags = ["--allow-movement", "--allow-retention"]
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    first = state(project)[1]["models"][0]
+    assert first["rows_moved"] == 2
+    assert first["stage_artifacts"][0]["cache_hit"] is False
+    assert str(project[0]) not in json.dumps(first["stage_artifacts"])
+    with postgres.cursor() as cursor:
+        cursor.execute(f'update "{project[2]}".customers set name=\'fresh\' where id=1')
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert state(project)[1]["models"][0]["stage_artifacts"][0]["cache_hit"] is True
+    assert state(project)[1]["models"][0]["rows_moved"] == 1
+    assert duck_rows(project[3], "select name from marts.joined") == [("O'Brien",)]
+    expire_retained(project)
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert state(project)[1]["models"][0]["stage_artifacts"][0]["cache_hit"] is False
+    assert duck_rows(project[3], "select name from marts.joined") == [("fresh",)]
+
+
+def test_immutable_snapshot_version_expiry_cleanup_and_new_version(project, native_environment, postgres):
+    config = retain(project, "snapshot", "v1")
+    flags = ["--allow-movement", "--allow-retention"]
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode == 0, result.stderr
+    with postgres.cursor() as cursor:
+        cursor.execute(f'update "{project[2]}".customers set name=\'v2\' where id=1')
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode == 0, result.stderr
+    assert duck_rows(project[3], "select name from marts.joined") == [("O'Brien",)]
+    expire_retained(project)
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode != 0
+    assert "CrossDatabaseSnapshotExpiredRequireNewVersion" in result.stderr
+    assert duck_rows(project[3], "select name from marts.joined") == [("O'Brien",)]
+    result = invoke(project, config, native_environment, "cleanup")
+    assert result.returncode == 0, result.stderr
+    assert "Cleaned 1 retained stages" in result.stdout
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode != 0
+    assert "CrossDatabaseSnapshotExpiredRequireNewVersion" in result.stderr
+    config["models"]["joined"]["inputs"]["customers"]["stage"]["version"] = "v2"
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert duck_rows(project[3], "select name from marts.joined") == [("v2",)]
+
+
+def test_retained_payload_corruption_rolls_back_output_and_cleanup_allows_cache_rebuild(project, native_environment):
+    import duckdb
+    config = retain(project)
+    flags = ["--allow-movement", "--allow-retention"]
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode == 0, result.stderr
+    with duckdb.connect(str(project[0] / "cache.duckdb")) as connection:
+        manifest = json.loads(connection.execute("select manifest_json from dxt_stage.catalog").fetchone()[0])
+        connection.execute(f'update dxt_stage."{manifest["dataset"]}" set name=\'corrupt\'')
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode != 0
+    assert "CrossDatabaseStageChecksumMismatch" in result.stderr
+    assert "leaked" not in result.stderr
+    assert duck_rows(project[3], "select name from marts.joined") == [("O'Brien",)]
+    result = invoke(project, config, native_environment, "cleanup", "--older-than-seconds", "0")
+    assert result.returncode == 0, result.stderr
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode == 0, result.stderr
+    assert duck_rows(project[3], "select name from marts.joined") == [("O'Brien",)]
+
+
+def test_retention_policy_rejects_before_creating_cache(project, native_environment):
+    config = retain(project)
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode != 0
+    assert "retained stages require" in result.stderr
+    assert not (project[0] / "cache.duckdb").exists()
+
+
+def test_retained_typed_data_preserves_json_uuid_decimal_and_binary(project, native_environment):
+    config = retain(project)
+    input_config = config["models"]["joined"]["inputs"]["customers"]
+    input_config["columns"] = ["id", "amount", "enabled", "missing", "day", "payload", "uid", "document"]
+    config["models"] = {"typed": {"destination": "warehouse", "inputs": {"typed": input_config}, "sql": "select * from {{ input('typed') }}"}}
+    for _ in range(2):
+        result = invoke(project, config, native_environment, "run", "--allow-movement", "--allow-retention")
+        assert result.returncode == 0, result.stderr
+        assert "leaked" not in result.stderr
+        assert duck_rows(project[3], "select amount,hex(payload),uid::text,document::json->>'a' from marts.typed") == [
+            (Decimal("1234567890123456.7890"), "00FF275C", "12345678-1234-5678-1234-567812345678", "1")]
+
+
+def test_snapshot_same_version_rejects_changed_source_definition(project, native_environment):
+    config = retain(project, "snapshot", "fixed-v1")
+    flags = ["--allow-movement", "--allow-retention"]
+    assert invoke(project, config, native_environment, "run", *flags).returncode == 0
+    config["models"]["joined"]["inputs"]["customers"]["filter"] = "not enabled"
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode != 0
+    assert "CrossDatabaseSnapshotDefinitionChangedRequireNewVersion" in result.stderr
+    assert duck_rows(project[3], "select name from marts.joined") == [("O'Brien",)]
+
+
+def test_retained_nanosecond_timestamp_and_nul_text_are_exact(project, native_environment):
+    import duckdb
+    config = retain(project)
+    config["connections"]["source"]["allowed_destinations"] = ["cache"]
+    source_input = {"connection": "source", "relation": "main.precise", "columns": ["stamp", "txt"],
+                    "stage": {"mode": "cached", "connection": "cache", "ttl_seconds": 3600}}
+    with duckdb.connect(str(project[4])) as connection:
+        connection.execute("create table precise as select '2024-01-01 01:02:03.123456789'::timestamp_ns stamp, 'a'||chr(0)||'b' txt")
+    config["models"] = {"precise": {"destination": "warehouse", "inputs": {"precise": source_input},
+                                  "sql": "select * from {{ input('precise') }}"}}
+    for _ in range(2):
+        result = invoke(project, config, native_environment, "run", "--allow-movement", "--allow-retention")
+        assert result.returncode == 0, result.stderr
+        assert "leaked" not in result.stderr
+        assert duck_rows(project[3], "select stamp::text,txt,typeof(stamp) from marts.precise") == [
+            ("2024-01-01 01:02:03.123456789", "a\0b", "TIMESTAMP_NS")]
+
+
+def test_nanosecond_transfer_to_postgres_rejects_rounding(project, native_environment):
+    import duckdb
+    config = project[1]
+    with duckdb.connect(str(project[4])) as connection:
+        connection.execute("create table precise as select '2024-01-01 01:02:03.123456789'::timestamp_ns stamp")
+    config["models"] = {"precise": {"destination": "crm", "inputs": {"precise": {"connection": "source",
+                                  "relation": "main.precise", "columns": ["stamp"]}},
+                                  "sql": "select * from {{ input('precise') }}"}}
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode != 0
+    assert "CrossDatabaseTimestampPrecisionExceeded" in result.stderr
+    assert "leaked" not in result.stderr
+
+
+def test_cached_stage_tightened_ttl_refreshes_old_payload(project, native_environment, postgres):
+    import duckdb
+    config = retain(project)
+    flags = ["--allow-movement", "--allow-retention"]
+    assert invoke(project, config, native_environment, "run", *flags).returncode == 0
+    with postgres.cursor() as cursor:
+        cursor.execute(f'update "{project[2]}".customers set name=\'new\' where id=1')
+    with duckdb.connect(str(project[0] / "cache.duckdb")) as connection:
+        key, encoded = connection.execute("select key,manifest_json from dxt_stage.catalog").fetchone()
+        manifest = json.loads(encoded)
+        manifest["created_epoch"] -= 10
+        connection.execute("update dxt_stage.catalog set created_epoch=?,manifest_json=? where key=?",
+                           [manifest["created_epoch"], json.dumps(manifest), key])
+    config["models"]["joined"]["inputs"]["customers"]["stage"]["ttl_seconds"] = 1
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode == 0, result.stderr
+    assert duck_rows(project[3], "select name from marts.joined") == [("new",)]
+    assert state(project)[1]["models"][0]["stage_artifacts"][0]["cache_hit"] is False

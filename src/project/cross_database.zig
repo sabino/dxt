@@ -10,7 +10,7 @@ const invocation = @import("invocation.zig");
 pub const Runtime = types.Runtime;
 const Dir = std.Io.Dir;
 
-pub const Mode = enum { plan, run, recover };
+pub const Mode = enum { plan, run, recover, cleanup };
 pub const Options = struct {
     mode: Mode = .plan,
     project_dir: []const u8 = ".",
@@ -23,16 +23,18 @@ pub const Options = struct {
     allow_movement: bool = false,
     allow_sensitive: bool = false,
     allow_raw_extract: bool = false,
+    allow_retention: bool = false,
     full_refresh: bool = false,
     max_rows: ?u64 = null,
     max_bytes: ?u64 = null,
     max_memory_bytes: ?u64 = null,
     max_spill_bytes: ?u64 = null,
+    older_than_seconds: ?u64 = null,
 };
 
 pub fn printHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll(
-        \\Usage: dxt cross-database <plan|run|recover> [options]
+        \\Usage: dxt cross-database <plan|run|recover|cleanup> [options]
         \\
         \\Plan and execute declared source reductions through native DuckDB/PostgreSQL
         \\connections, with explicit movement policy and destination-local transactions.
@@ -46,12 +48,14 @@ pub fn printHelp(writer: *std.Io.Writer) !void {
         \\  --allow-movement        Authorize movement permitted by connection policy.
         \\  --allow-sensitive       Authorize sensitive movement permitted by trust policy.
         \\  --allow-raw-extract     Authorize a declared unfiltered full-table extraction.
+        \\  --allow-retention       Authorize declared cached/snapshot stage retention.
         \\  --max-rows <count>       Override the plan's movement row budget.
         \\  --max-bytes <bytes>      Override the plan's movement byte budget.
         \\  --max-memory-bytes <n>   Bound native extraction and DuckDB working memory.
         \\  --max-spill-bytes <n>    Bound DuckDB temporary storage (default: no spill).
         \\  --full-refresh           Rebuild incremental output and reset source watermarks.
         \\  --run-id <uuid>          Recover one recorded run's cleanup/commit state.
+        \\  --older-than-seconds <n> Cleanup retained stages older than n seconds.
         \\
     );
 }
@@ -63,11 +67,11 @@ pub fn parseOptions(args: []const []const u8) !Options {
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (eq(arg, "--allow-movement")) options.allow_movement = true else if (eq(arg, "--allow-sensitive")) options.allow_sensitive = true else if (eq(arg, "--allow-raw-extract")) options.allow_raw_extract = true else if (eq(arg, "--full-refresh")) options.full_refresh = true else {
+        if (eq(arg, "--allow-movement")) options.allow_movement = true else if (eq(arg, "--allow-sensitive")) options.allow_sensitive = true else if (eq(arg, "--allow-raw-extract")) options.allow_raw_extract = true else if (eq(arg, "--allow-retention")) options.allow_retention = true else if (eq(arg, "--full-refresh")) options.full_refresh = true else {
             index += 1;
             if (index >= args.len or args[index].len == 0 or std.mem.startsWith(u8, args[index], "--")) return error.MissingCrossDatabaseOptionValue;
             const value = args[index];
-            if (eq(arg, "--project-dir")) options.project_dir = value else if (eq(arg, "--config")) options.config = value else if (eq(arg, "--profiles-dir")) options.profiles_dir = value else if (eq(arg, "--select")) options.select = value else if (eq(arg, "--output")) options.output = value else if (eq(arg, "--run-id")) options.run_id = value else if (eq(arg, "--plan-hash")) options.plan_hash = value else if (eq(arg, "--max-rows")) options.max_rows = try number(value) else if (eq(arg, "--max-bytes")) options.max_bytes = try number(value) else if (eq(arg, "--max-memory-bytes")) options.max_memory_bytes = try number(value) else if (eq(arg, "--max-spill-bytes")) options.max_spill_bytes = try number(value) else return error.InvalidCrossDatabaseOption;
+            if (eq(arg, "--project-dir")) options.project_dir = value else if (eq(arg, "--config")) options.config = value else if (eq(arg, "--profiles-dir")) options.profiles_dir = value else if (eq(arg, "--select")) options.select = value else if (eq(arg, "--output")) options.output = value else if (eq(arg, "--run-id")) options.run_id = value else if (eq(arg, "--plan-hash")) options.plan_hash = value else if (eq(arg, "--max-rows")) options.max_rows = try number(value) else if (eq(arg, "--max-bytes")) options.max_bytes = try number(value) else if (eq(arg, "--max-memory-bytes")) options.max_memory_bytes = try number(value) else if (eq(arg, "--max-spill-bytes")) options.max_spill_bytes = try number(value) else if (eq(arg, "--older-than-seconds")) options.older_than_seconds = try number(value) else return error.InvalidCrossDatabaseOption;
         }
     }
     if (options.mode == .recover and options.run_id == null) return error.MissingCrossDatabaseRunId;
@@ -113,6 +117,10 @@ pub const Input = struct {
     incremental_key: ?[]const u8 = null,
     watermark: ?[]const u8 = null,
     lookback_seconds: u64 = 0,
+    stage_mode: []const u8 = "ephemeral",
+    stage_connection: ?usize = null,
+    stage_ttl_seconds: u64 = 0,
+    stage_version: ?[]const u8 = null,
     denied: ?[]const u8 = null,
 };
 pub const Model = struct {
@@ -171,6 +179,7 @@ pub fn command(runtime: Runtime, options: Options, stdout: *std.Io.Writer, stder
     }
     if (options.plan_hash) |hash| if (!eq(hash, plan.hash)) return error.CrossDatabasePlanChanged;
     if (options.mode == .recover) return @import("cross_database_run.zig").recover(runtime, rt, root, options, &plan, stdout);
+    if (options.mode == .cleanup) return @import("cross_database_cache.zig").cleanup(runtime, rt, root, options, &plan, stdout);
     for (plan.models) |model| if (model.denied) |reason| {
         try stderr.print("error: cross-database model {s} denied before source execution: {s}\n", .{ model.name, reason });
         return error.CrossDatabasePolicyDenied;
@@ -196,7 +205,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
         if (!eq(identity.adapter_type, "duckdb") and !eq(identity.adapter_type, "postgres")) return error.UnsupportedCrossDatabaseAdapter;
         if (identity.database_path != null) identity.database_path_base = profiles_dir;
         const role = try optionalFieldString(raw, "role") orelse "both";
-        if (!eq(role, "both") and !eq(role, "source") and !eq(role, "destination")) return error.InvalidCrossDatabaseConnectionRole;
+        if (!eq(role, "both") and !eq(role, "source") and !eq(role, "destination") and !eq(role, "stage")) return error.InvalidCrossDatabaseConnectionRole;
         try connections.append(runtime.allocator, .{
             .name = entry.key_ptr.*,
             .profile_name = profile_name,
@@ -221,7 +230,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
     for (connections.items) |connection| {
         try fingerprint.writer.print("\n{s}/{s}/{s}/{s}/{s}\n", .{ connection.name, connection.identity.adapter_type, connection.identity.database_path orelse "", connection.identity.database_path_base orelse "", connection.identity.connection_info orelse "" });
     }
-    try fingerprint.writer.print("\nselect={s};movement={};sensitive={};raw={};refresh={}\n", .{ options.select orelse "", options.allow_movement, options.allow_sensitive, options.allow_raw_extract, options.full_refresh });
+    try fingerprint.writer.print("\nselect={s};movement={};sensitive={};raw={};retention={};refresh={}\n", .{ options.select orelse "", options.allow_movement, options.allow_sensitive, options.allow_raw_extract, options.allow_retention, options.full_refresh });
     while (model_iterator.next()) |entry| {
         const name = entry.key_ptr.*;
         if (!identifier(name) or entry.value_ptr.* != .object) return error.InvalidCrossDatabaseModel;
@@ -231,7 +240,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
         const execution_connection = if (try optionalFieldString(raw, "execution_connection")) |name_value| try connectionIndex(connections.items, name_value) else destination;
         if (execution_connection != destination and !eq(connections.items[execution_connection].adapter_type, "duckdb")) return error.InvalidCrossDatabaseEmbeddedConnection;
         if (eq(connections.items[execution_connection].role, "source")) return error.InvalidCrossDatabaseDestination;
-        if (eq(connections.items[destination].role, "source")) return error.InvalidCrossDatabaseDestination;
+        if (eq(connections.items[destination].role, "source") or eq(connections.items[destination].role, "stage")) return error.InvalidCrossDatabaseDestination;
         const budget = try parseBudget(raw, options);
         const input_config = values.get(raw, "inputs") orelse return error.MissingCrossDatabaseInputs;
         if (input_config != .object or input_config.object.count() == 0) return error.MissingCrossDatabaseInputs;
@@ -278,6 +287,31 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
                 if (!eq(sensitivity, "public") and !eq(sensitivity, "internal") and (!options.allow_sensitive or !eq(origin.trust_domain, target.trust_domain))) input.denied = "sensitive data movement requires explicit authorization inside one trust domain";
                 if (raw_extract and !options.allow_raw_extract and !try optionalBool(policy, "allow_raw_extract", false)) input.denied = "full-table extraction requires --allow-raw-extract or policy.allow_raw_extract";
             }
+            if (values.get(input_raw, "stage")) |stage| {
+                if (stage != .object) return error.InvalidCrossDatabaseStage;
+                input.stage_mode = try optionalFieldString(stage, "mode") orelse "ephemeral";
+                if (!eq(input.stage_mode, "ephemeral") and !eq(input.stage_mode, "cached") and !eq(input.stage_mode, "snapshot")) return error.InvalidCrossDatabaseStage;
+                if (!eq(input.stage_mode, "ephemeral")) {
+                    input.denied = null;
+                    const stage_index = try connectionIndex(connections.items, try fieldString(stage, "connection"));
+                    const retained = connections.items[stage_index];
+                    if (!eq(retained.adapter_type, "duckdb") or retained.identity.database_path == null or eq(retained.identity.database_path.?, ":memory:") or eq(retained.role, "source")) return error.InvalidCrossDatabaseStageConnection;
+                    input.stage_connection = stage_index;
+                    input.stage_ttl_seconds = try optionalUnsigned(stage, "ttl_seconds") orelse if (eq(input.stage_mode, "snapshot")) 31536000 else return error.MissingCrossDatabaseStageFreshness;
+                    if (input.stage_ttl_seconds == 0 or input.stage_ttl_seconds > 3153600000) return error.InvalidCrossDatabaseStageFreshness;
+                    input.stage_version = try optionalFieldString(stage, "version");
+                    if (eq(input.stage_mode, "snapshot") and input.stage_version == null) return error.MissingCrossDatabaseSnapshotVersion;
+                    input.moved = true;
+                    const origin = connections.items[connection];
+                    const target = connections.items[execution_connection];
+                    if (!options.allow_retention and !try optionalBool(policy, "allow_retention", false)) input.denied = "retained stages require --allow-retention or policy.allow_retention";
+                    if (!options.allow_movement and !try optionalBool(policy, "allow_movement", false)) input.denied = "retained stage movement requires explicit authorization";
+                    if (origin.allowed_destinations.len != 0 and !contains(origin.allowed_destinations, retained.name)) input.denied = "retained stage is outside the source connection's allowed destinations";
+                    if (retained.allowed_destinations.len != 0 and !contains(retained.allowed_destinations, target.name)) input.denied = "execution destination is outside the retained stage's allowed destinations";
+                    if (!eq(sensitivity, "public") and !eq(sensitivity, "internal") and (!options.allow_sensitive or !eq(origin.trust_domain, retained.trust_domain) or !eq(retained.trust_domain, target.trust_domain))) input.denied = "sensitive stage retention requires explicit authorization inside one trust domain";
+                    if (raw_extract and !options.allow_raw_extract and !try optionalBool(policy, "allow_raw_extract", false)) input.denied = "full-table extraction requires explicit authorization";
+                }
+            }
             try inputs.append(runtime.allocator, input);
         }
         const sql = if (values.get(raw, "sql")) |value| try scalarString(value) else blk: {
@@ -296,15 +330,18 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
             if (model.unique_key == null) return error.MissingCrossDatabaseUniqueKey;
             for (model.inputs) |input| if (input.incremental_key == null or input.watermark == null) return error.MissingCrossDatabaseSourceWatermark;
             for (model.inputs) |input| if (input.lookback_seconds > 3153600000) return error.InvalidCrossDatabaseSourceWatermark;
+            for (model.inputs) |input| if (eq(input.stage_mode, "snapshot")) return error.CrossDatabaseFrozenSnapshotCannotAdvanceWatermarks;
         }
         var moved_count: u64 = 0;
         for (inputs.items) |input| if (input.moved) {
             moved_count += 1;
             if (input.denied != null) model.denied = input.denied;
-            if (input.estimated_rows) |rows| model.estimated_rows = std.math.add(u64, model.estimated_rows, rows) catch return error.InvalidCrossDatabaseEstimate else model.estimate_confidence = "unknown";
+            const legs: u64 = if (input.stage_connection != null) 2 else 1;
+            if (input.estimated_rows) |rows| model.estimated_rows = std.math.add(u64, model.estimated_rows, std.math.mul(u64, rows, legs) catch return error.InvalidCrossDatabaseEstimate) catch return error.InvalidCrossDatabaseEstimate else model.estimate_confidence = "unknown";
             if (input.estimated_bytes) |bytes| {
-                model.estimated_bytes = std.math.add(u64, model.estimated_bytes, bytes) catch return error.InvalidCrossDatabaseEstimate;
+                model.estimated_bytes = std.math.add(u64, model.estimated_bytes, std.math.mul(u64, bytes, legs) catch return error.InvalidCrossDatabaseEstimate) catch return error.InvalidCrossDatabaseEstimate;
                 model.estimated_cost += @as(f64, @floatFromInt(bytes)) / (1024 * 1024 * 1024) * connections.items[input.connection].egress_per_gib;
+                if (input.stage_connection) |index| model.estimated_cost += @as(f64, @floatFromInt(bytes)) / (1024 * 1024 * 1024) * connections.items[index].egress_per_gib;
             } else model.estimate_confidence = "unknown";
         };
         if (moved_count != 0) model.strategy = if (moved_count == 1) "dimension_broadcast" else "destination_staged_join";
@@ -322,7 +359,11 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
         if (eq(model.materialized, "incremental")) model.estimate_confidence = "unknown_affected_keys";
         if (model.estimated_rows > budget.max_rows) model.denied = "estimated movement exceeds the row budget";
         if (model.estimated_bytes > budget.max_bytes) model.denied = "estimated movement exceeds the byte budget";
-        if (moved_count + 2 > budget.max_objects) model.denied = "stage/output object count exceeds the object budget";
+        var retained_objects: u64 = 0;
+        for (model.inputs) |input| if (input.stage_connection != null) {
+            retained_objects += 2;
+        };
+        if (moved_count + 2 + retained_objects > budget.max_objects) model.denied = "stage/output object count exceeds the object budget";
         if (budget.max_cost) |cost| {
             if (model.estimated_cost > cost) model.denied = "estimated egress exceeds the cost budget";
         }

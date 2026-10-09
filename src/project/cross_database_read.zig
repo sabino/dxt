@@ -79,11 +79,14 @@ pub const Reader = struct {
                 const decimalWidth = connection.pool.library.?.dyn.lookup(*const fn (Handle) callconv(.c) u8, "duckdb_decimal_width") orelse return error.NativeDuckDbAbiMismatch;
                 const decimalScale = connection.pool.library.?.dyn.lookup(*const fn (Handle) callconv(.c) u8, "duckdb_decimal_scale") orelse return error.NativeDuckDbAbiMismatch;
                 const destroyType = connection.pool.library.?.dyn.lookup(*const fn (*Handle) callconv(.c) void, "duckdb_destroy_logical_type") orelse return error.NativeDuckDbAbiMismatch;
+                const getAlias = connection.pool.library.?.dyn.lookup(*const fn (Handle) callconv(.c) ?[*:0]u8, "duckdb_logical_type_get_alias") orelse return error.NativeDuckDbAbiMismatch;
                 for (self.columns, 0..) |*column, index| {
                     var logical = logicalType(prepared, index);
                     defer destroyType(&logical);
                     const id = typeId(logical);
-                    const mapped = try duckType(allocator, id, if (id == 19) decimalWidth(logical) else 0, if (id == 19) decimalScale(logical) else 0);
+                    const alias = getAlias(logical);
+                    defer if (alias) |value| connection.api.duckdb_free(value);
+                    const mapped = if (id == 17 and alias != null and std.ascii.eqlIgnoreCase(std.mem.span(alias.?), "json")) try mappedType(allocator, .text, "json") else try duckType(allocator, id, if (id == 19) decimalWidth(logical) else 0, if (id == 19) decimalScale(logical) else 0);
                     const raw_name = columnName(prepared, index) orelse return error.NativeDuckDbAbiMismatch;
                     defer connection.api.duckdb_free(raw_name);
                     column.* = .{ .name = try allocator.dupe(u8, std.mem.span(raw_name)), .kind = mapped.kind, .type_sql = mapped.sql };
@@ -138,7 +141,7 @@ pub const Reader = struct {
         errdefer output.deinit(self.allocator);
         output.columns = try self.allocator.alloc(adapter.Column, self.columns.len);
         for (output.columns) |*column| column.* = .{ .name = "", .kind = .other };
-        for (output.columns, self.columns) |*column, source| column.* = .{ .name = try self.allocator.dupe(u8, source.name), .kind = source.kind };
+        for (output.columns, self.columns) |*column, source| column.* = .{ .name = try self.allocator.dupe(u8, source.name), .kind = source.kind, .native_type = if (std.mem.eql(u8, source.type_sql, "timestamp_ns")) 22 else if (std.mem.eql(u8, source.type_sql, "time_ns")) 39 else 0 };
         output.rows = try self.allocator.alloc([]?[]const u8, rows);
         for (output.rows) |*row| row.* = &.{};
         return output;
@@ -351,8 +354,11 @@ fn duckType(allocator: std.mem.Allocator, id: c_uint, width: u8, scale: u8) !Map
         9 => decimal(allocator, 20, 0),
         16 => mappedType(allocator, .integer, "hugeint"),
         32 => mappedType(allocator, .integer, "uhugeint"),
-        10, 11 => mappedType(allocator, .floating, "double precision"),
-        12, 20, 21, 22 => mappedType(allocator, .timestamp, "timestamp"),
+        10 => mappedType(allocator, .floating, "real"),
+        11 => mappedType(allocator, .floating, "double precision"),
+        12, 20, 21 => mappedType(allocator, .timestamp, "timestamp"),
+        22 => mappedType(allocator, .timestamp, "timestamp_ns"),
+        39 => mappedType(allocator, .time, "time_ns"),
         13 => mappedType(allocator, .date, "date"),
         14 => mappedType(allocator, .time, "time"),
         17 => mappedType(allocator, .text, "text"),
@@ -368,7 +374,8 @@ fn pgType(allocator: std.mem.Allocator, id: u32, modifier: c_int) !Mapped {
     return switch (id) {
         16 => mappedType(allocator, .boolean, "boolean"),
         20, 21, 23, 26 => mappedType(allocator, .integer, "bigint"),
-        700, 701 => mappedType(allocator, .floating, "double precision"),
+        700 => mappedType(allocator, .floating, "real"),
+        701 => mappedType(allocator, .floating, "double precision"),
         1700 => if (modifier >= 4) decimal(allocator, @intCast((modifier - 4) >> 16), @intCast((modifier - 4) & 0x7ff)) else mappedType(allocator, .decimal, "numeric"),
         1082 => mappedType(allocator, .date, "date"),
         1083 => mappedType(allocator, .time, "time"),

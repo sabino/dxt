@@ -20,6 +20,8 @@ pub const Record = struct {
     affected_keys: u64 = 0,
     source_watermarks: []const @import("cross_database_incremental.zig").Watermark = &.{},
     watermarks_committed: bool = false,
+    run_id: []const u8 = "",
+    stage_artifacts: []const @import("cross_database_cache.zig").Observation = &.{},
 };
 
 pub fn execute(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan: *cross.Plan, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
@@ -28,7 +30,7 @@ pub fn execute(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan:
     const directory = try runDirectory(arena_runtime, root, run_id);
     const path = try std.fs.path.join(arena_runtime.allocator, &.{ directory, "state.json" });
     const records = try arena_runtime.allocator.alloc(Record, plan.models.len);
-    for (records, plan.models) |*record, model| record.* = .{ .model = model.name };
+    for (records, plan.models) |*record, model| record.* = .{ .model = model.name, .run_id = run_id };
     try writeState(arena_runtime, path, run_id, plan.hash, records);
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -97,7 +99,7 @@ fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, dire
         }
         record.source_watermarks = progress;
     }
-    try stageInputs(runtime, root, plan, physical, record, workspace, spill_path);
+    try stageInputs(runtime, arena_runtime.allocator, root, plan, physical, record, workspace, spill_path);
     const query = try cross.renderSql(allocator, physical, record.stages);
     defer allocator.free(query);
     const schema = try adapter.quoteIdentifier(allocator, model.schema);
@@ -192,42 +194,59 @@ fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, dire
     record.watermarks_committed = incremental != null;
 }
 
-fn stageInputs(runtime: Runtime, root: []const u8, plan: *cross.Plan, model: cross.Model, record: *Record, workspace: *adapter.Session, spill_path: []const u8) !void {
+fn stageInputs(runtime: Runtime, observation_allocator: std.mem.Allocator, root: []const u8, plan: *cross.Plan, model: cross.Model, record: *Record, workspace: *adapter.Session, spill_path: []const u8) !void {
     const allocator = runtime.allocator;
+    const cache = @import("cross_database_cache.zig");
+    var observations: std.ArrayList(cache.Observation) = .empty;
     for (model.inputs, 0..) |input, index| {
         if (!input.moved) continue;
-        var source = try open(runtime, root, plan.connections[input.connection]);
-        defer source.deinit();
-        try configure(runtime, &source, model.budget, spill_path);
-        var timer = Timer.init(runtime, &source, model.budget.max_query_seconds);
+        var retained: ?cache.Source = if (input.stage_connection != null) try cache.source(runtime, root, plan, model, input, record, spill_path) else null;
+        defer if (retained) |*value| value.deinit();
+        var original: ?adapter.Session = null;
+        defer if (original) |*value| value.deinit();
+        const source = if (retained) |*value| &value.session else blk: {
+            original = try open(runtime, root, plan.connections[input.connection]);
+            break :blk &original.?;
+        };
+        const source_connection = plan.connections[input.stage_connection orelse input.connection];
+        const source_query = if (retained) |value| value.query else input.query;
+        try configure(runtime, source, model.budget, spill_path);
+        var timer = Timer.init(runtime, source, model.budget.max_query_seconds);
         try timer.start();
         defer timer.deinit();
-        var reader = try read.Reader.open(allocator, &source, input.query, .{ .max_rows = model.budget.max_rows -| record.rows_moved, .max_bytes = model.budget.max_bytes -| record.bytes_moved, .max_memory_bytes = model.budget.max_memory_bytes }, model.budget.max_query_seconds);
+        var reader = try read.Reader.open(allocator, source, source_query, .{ .max_rows = model.budget.max_rows -| record.rows_moved, .max_bytes = model.budget.max_bytes -| record.bytes_moved, .max_memory_bytes = model.budget.max_memory_bytes }, model.budget.max_query_seconds);
         defer {
             timer.deinit();
             record.rows_moved +|= reader.guard.rows;
             record.bytes_moved +|= reader.guard.bytes;
-            record.egress_cost += @as(f64, @floatFromInt(reader.guard.bytes)) / (1024 * 1024 * 1024) * plan.connections[input.connection].egress_per_gib;
+            record.egress_cost += @as(f64, @floatFromInt(reader.guard.bytes)) / (1024 * 1024 * 1024) * source_connection.egress_per_gib;
             reader.deinit();
         }
         try createStage(allocator, workspace, record.stages[index], reader.columns);
         const decimal_shapes = try allocator.alloc(DecimalShape, reader.columns.len);
         defer allocator.free(decimal_shapes);
         @memset(decimal_shapes, .{});
+        var row_hash: cache.RowHash = .{};
         while (try reader.next()) |result| {
             var batch = result;
             defer batch.deinit(allocator);
             if (timer.expired.load(.acquire)) return error.CrossDatabaseTimeBudgetExceeded;
             if (model.budget.max_cost) |cost| {
-                const observed_cost = record.egress_cost + @as(f64, @floatFromInt(reader.guard.bytes)) / (1024 * 1024 * 1024) * plan.connections[input.connection].egress_per_gib;
+                const observed_cost = record.egress_cost + @as(f64, @floatFromInt(reader.guard.bytes)) / (1024 * 1024 * 1024) * source_connection.egress_per_gib;
                 if (observed_cost > cost) return error.CrossDatabaseCostBudgetExceeded;
             }
             if (workspace.* == .duckdb) for (reader.columns, decimal_shapes, 0..) |column, *shape, c| {
                 if (std.mem.eql(u8, column.type_sql, "numeric")) for (batch.rows) |row| if (row[c]) |text| try shape.observe(text);
             };
-            try loadBatch(allocator, workspace, record.stages[index], &batch, plan.connections[input.connection].adapter_type);
+            try row_hash.batch(allocator, &batch, source_connection.adapter_type);
+            try loadBatch(allocator, workspace, record.stages[index], &batch, source_connection.adapter_type);
         }
+        const checksum = row_hash.finish();
+        if (retained) |*value| try value.validate(reader.columns, reader.guard.rows, &checksum);
         if (workspace.* == .duckdb) try finishDecimals(allocator, workspace, record.stages[index], reader.columns, decimal_shapes);
+        const location = if (retained) |value| try std.fmt.allocPrint(observation_allocator, "{s}.dxt_stage.{s}", .{ source_connection.name, value.manifest.dataset }) else record.stages[index];
+        try observations.append(observation_allocator, try cache.observation(observation_allocator, .{ .input = input.name, .logical_id = input.logical_id, .location = location, .mode = input.stage_mode, .cache_hit = if (retained) |value| value.hit else false, .query_hash = if (retained) |value| value.manifest.query_hash else try cross.digest(observation_allocator, input.query), .rows = reader.guard.rows, .bytes = reader.guard.bytes, .checksum = &checksum, .sensitivity = input.sensitivity, .retention_until_epoch = if (retained) |value| value.manifest.expires_epoch else null, .columns = try physicalColumns(observation_allocator, workspace, reader.columns, decimal_shapes), .source_columns = reader.columns, .cleanup = if (retained != null) "retained by declared policy" else "session scoped" }));
+        record.stage_artifacts = observations.items;
     }
 }
 
@@ -249,11 +268,11 @@ pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, pla
     var workspace = try open(rt, root, plan.connections[model.execution_connection]);
     defer workspace.deinit();
     try configure(rt, &workspace, model.budget, spill);
-    var record: Record = .{ .model = model.name };
+    var record: Record = .{ .model = model.name, .run_id = &metadata.id };
     const names = try arena_runtime.allocator.alloc([]const u8, model.inputs.len);
     for (model.inputs, 0..) |input, index| names[index] = try std.fmt.allocPrint(arena_runtime.allocator, "__dxt_{s}_{s}", .{ metadata.id[0..8], input.name });
     record.stages = names;
-    try stageInputs(rt, root, plan, model, &record, &workspace, spill);
+    try stageInputs(rt, arena_runtime.allocator, root, plan, model, &record, &workspace, spill);
     const sql = try cross.renderSql(allocator, model, names);
     defer allocator.free(sql);
     var timer = Timer.init(rt, &workspace, model.budget.max_query_seconds);
@@ -268,7 +287,7 @@ pub fn queryPlan(runtime: Runtime, arena_runtime: Runtime, root: []const u8, pla
     errdefer output.deinit(allocator);
     output.columns = try allocator.alloc(adapter.Column, reader.columns.len);
     for (output.columns) |*column| column.* = .{ .name = "", .kind = .other };
-    for (output.columns, reader.columns) |*column, source| column.* = .{ .name = try allocator.dupe(u8, source.name), .kind = source.kind };
+    for (output.columns, reader.columns) |*column, source| column.* = .{ .name = try allocator.dupe(u8, source.name), .kind = source.kind, .native_type = if (std.mem.eql(u8, source.type_sql, "timestamp_ns")) 22 else if (std.mem.eql(u8, source.type_sql, "time_ns")) 39 else 0 };
     var rows: std.ArrayList([]?[]const u8) = .empty;
     errdefer {
         for (rows.items) |row| {
@@ -355,7 +374,7 @@ fn createStage(allocator: std.mem.Allocator, destination: *adapter.Session, name
     return createTypedTable(allocator, destination, quoted, columns, true);
 }
 
-fn createTypedTable(allocator: std.mem.Allocator, destination: *adapter.Session, relation: []const u8, columns: []const read.Column, temporary: bool) !void {
+pub fn createTypedTable(allocator: std.mem.Allocator, destination: *adapter.Session, relation: []const u8, columns: []const read.Column, temporary: bool) !void {
     if (columns.len == 0) return error.CrossDatabaseOutputValidationFailed;
     var sql: std.Io.Writer.Allocating = .init(allocator);
     defer sql.deinit();
@@ -364,11 +383,21 @@ fn createTypedTable(allocator: std.mem.Allocator, destination: *adapter.Session,
         if (index != 0) try sql.writer.writeByte(',');
         const identifier = try adapter.quoteIdentifier(allocator, column.name);
         defer allocator.free(identifier);
-        const type_sql = if (column.kind == .binary and destination.* == .postgres) "bytea" else if (std.mem.eql(u8, column.type_sql, "numeric") and destination.* == .duckdb) "varchar" else if ((std.mem.eql(u8, column.type_sql, "hugeint") or std.mem.eql(u8, column.type_sql, "uhugeint")) and destination.* == .postgres) "numeric(39,0)" else column.type_sql;
+        const type_sql = destinationTypeSql(destination, column);
         try sql.writer.print("{s} {s}", .{ identifier, type_sql });
     }
     try sql.writer.writeByte(')');
     try destination.execute(sql.written());
+}
+
+fn destinationTypeSql(destination: *const adapter.Session, column: read.Column) []const u8 {
+    return if (std.mem.eql(u8, column.type_sql, "timestamp_ns") and destination.* == .postgres) "timestamp" else if (std.mem.eql(u8, column.type_sql, "time_ns") and destination.* == .postgres) "time" else if (column.kind == .binary and destination.* == .postgres) "bytea" else if (std.mem.eql(u8, column.type_sql, "numeric") and destination.* == .duckdb) "varchar" else if ((std.mem.eql(u8, column.type_sql, "hugeint") or std.mem.eql(u8, column.type_sql, "uhugeint")) and destination.* == .postgres) "numeric(39,0)" else column.type_sql;
+}
+
+fn physicalColumns(allocator: std.mem.Allocator, destination: *const adapter.Session, columns: []const read.Column, shapes: []const DecimalShape) ![]read.Column {
+    const result = try allocator.dupe(read.Column, columns);
+    for (result, shapes) |*column, shape| column.type_sql = if (destination.* == .duckdb and std.mem.eql(u8, column.type_sql, "numeric")) try std.fmt.allocPrint(allocator, "decimal({d},{d})", .{ @max(1, shape.integer_digits + shape.scale), shape.scale }) else destinationTypeSql(destination, column.*);
+    return result;
 }
 
 fn loadBatch(allocator: std.mem.Allocator, destination: *adapter.Session, name: []const u8, batch: *const adapter.QueryResult, source_adapter: []const u8) !void {
@@ -377,10 +406,10 @@ fn loadBatch(allocator: std.mem.Allocator, destination: *adapter.Session, name: 
     return loadBatchSql(allocator, destination, quoted, batch, source_adapter);
 }
 
-const DecimalShape = struct {
+pub const DecimalShape = struct {
     integer_digits: usize = 0,
     scale: usize = 0,
-    fn observe(self: *DecimalShape, text: []const u8) !void {
+    pub fn observe(self: *DecimalShape, text: []const u8) !void {
         const value = if (text.len != 0 and (text[0] == '-' or text[0] == '+')) text[1..] else text;
         if (value.len == 0) return error.UnsupportedCrossDatabaseDecimal;
         const dot = std.mem.indexOfScalar(u8, value, '.') orelse value.len;
@@ -399,7 +428,7 @@ fn finishDecimals(allocator: std.mem.Allocator, destination: *adapter.Session, s
     try finishDecimalsSql(allocator, destination, relation, columns, shapes);
 }
 
-fn finishDecimalsSql(allocator: std.mem.Allocator, destination: *adapter.Session, relation: []const u8, columns: []const read.Column, shapes: []const DecimalShape) !void {
+pub fn finishDecimalsSql(allocator: std.mem.Allocator, destination: *adapter.Session, relation: []const u8, columns: []const read.Column, shapes: []const DecimalShape) !void {
     for (columns, shapes) |column, shape| {
         if (!std.mem.eql(u8, column.type_sql, "numeric")) continue;
         const name = try adapter.quoteIdentifier(allocator, column.name);
@@ -411,7 +440,7 @@ fn finishDecimalsSql(allocator: std.mem.Allocator, destination: *adapter.Session
     }
 }
 
-fn loadBatchSql(allocator: std.mem.Allocator, destination: *adapter.Session, relation: []const u8, batch: *const adapter.QueryResult, source_adapter: []const u8) !void {
+pub fn loadBatchSql(allocator: std.mem.Allocator, destination: *adapter.Session, relation: []const u8, batch: *const adapter.QueryResult, source_adapter: []const u8) !void {
     if (batch.rows.len == 0) return;
     var sql: std.Io.Writer.Allocating = .init(allocator);
     defer sql.deinit();
@@ -422,10 +451,27 @@ fn loadBatchSql(allocator: std.mem.Allocator, destination: *adapter.Session, rel
         for (row, batch.columns, 0..) |cell, column, c| {
             if (c != 0) try sql.writer.writeByte(',');
             if (cell) |text| {
+                if (destination.* == .postgres and (column.native_type == 22 or column.native_type == 39)) {
+                    if (std.mem.indexOfScalar(u8, text, '.')) |dot| {
+                        var end = dot + 1;
+                        while (end < text.len and std.ascii.isDigit(text[end])) : (end += 1) {
+                            if (end > dot + 6 and text[end] != '0') return error.CrossDatabaseTimestampPrecisionExceeded;
+                        }
+                    }
+                }
                 if (column.kind == .binary) {
                     const hex = try binaryHex(allocator, text, source_adapter);
                     defer allocator.free(hex);
                     if (destination.* == .postgres) try sql.writer.print("decode('{s}','hex')", .{hex}) else try sql.writer.print("from_hex('{s}')", .{hex});
+                } else if (std.mem.indexOfScalar(u8, text, 0) != null and destination.* == .duckdb) {
+                    const hex = try allocator.alloc(u8, text.len * 2);
+                    defer allocator.free(hex);
+                    const alphabet = "0123456789abcdef";
+                    for (text, 0..) |byte, at| {
+                        hex[at * 2] = alphabet[byte >> 4];
+                        hex[at * 2 + 1] = alphabet[byte & 15];
+                    }
+                    try sql.writer.print("decode(from_hex('{s}'))", .{hex});
                 } else {
                     const literal = try adapter.quoteLiteral(allocator, text);
                     defer allocator.free(literal);
@@ -438,7 +484,7 @@ fn loadBatchSql(allocator: std.mem.Allocator, destination: *adapter.Session, rel
     try destination.execute(sql.written());
 }
 
-fn binaryHex(allocator: std.mem.Allocator, text: []const u8, source_adapter: []const u8) ![]const u8 {
+pub fn binaryHex(allocator: std.mem.Allocator, text: []const u8, source_adapter: []const u8) ![]const u8 {
     if (std.mem.eql(u8, source_adapter, "postgres")) {
         if (!std.mem.startsWith(u8, text, "\\x") or text.len % 2 != 0) return error.UnsupportedCrossDatabaseBinary;
         for (text[2..]) |char| if (!std.ascii.isHex(char)) return error.UnsupportedCrossDatabaseBinary;
