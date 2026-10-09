@@ -56,11 +56,19 @@ pub const Options = struct {
     use_colors_file: bool = true,
     print_enabled: bool = true,
     full_refresh: bool = false,
+    empty: bool = false,
+    sample: ?[]const u8 = null,
+    sample_window: ?SampleWindow = null,
+    event_time_start: ?[]const u8 = null,
+    event_time_end: ?[]const u8 = null,
+    store_failures: bool = false,
+    seed_show: bool = false,
     docs_host: []const u8 = "127.0.0.1",
     docs_port: u16 = 8080,
     docs_open_browser: bool = false,
     docs_static: bool = false,
     docs_compile: bool = true,
+    docs_empty_catalog: bool = false,
     select: ?[]const u8 = null,
     selector: ?[]const u8 = null,
     exclude: ?[]const u8 = null,
@@ -70,6 +78,8 @@ pub const Options = struct {
     output: Output = .text,
     output_keys: ?[]const []const u8 = null,
 };
+
+pub const SampleWindow = struct { start: i96, end: i96 };
 
 pub const LogLevel = enum { debug, info, warn, @"error", none };
 
@@ -422,6 +432,8 @@ pub const ExtraCte = struct {
 };
 
 pub const Node = struct {
+    runtime_batch: ?SampleWindow = null,
+    runtime_batch_id: ?[]const u8 = null,
     default_alias: ?[]const u8 = null,
     version: std.json.Value = .null,
     latest_version: std.json.Value = .null,

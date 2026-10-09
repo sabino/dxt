@@ -3,6 +3,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const yaml = @import("yaml.zig");
+pub const input_relations = @import("input_relations.zig");
 
 pub const Prepared = struct { args: []const []const u8, options: types.Options };
 
