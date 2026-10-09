@@ -17,6 +17,9 @@ pub const Record = struct {
     stages: []const []const u8 = &.{},
     cleanup: []const u8 = "pending",
     error_name: ?[]const u8 = null,
+    affected_keys: u64 = 0,
+    source_watermarks: []const @import("cross_database_incremental.zig").Watermark = &.{},
+    watermarks_committed: bool = false,
 };
 
 pub fn execute(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan: *cross.Plan, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
@@ -79,8 +82,23 @@ fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, dire
     var transaction = true;
     defer if (transaction) destination.rollback() catch {};
     try @import("cross_database_lock.zig").acquireDatabase(allocator, &destination, model.schema, model.identifier);
-    try stageInputs(runtime, root, plan, model, record, workspace, spill_path);
-    const query = try cross.renderSql(allocator, model, record.stages);
+    var incremental: ?@import("cross_database_incremental.zig").State = null;
+    defer if (incremental) |*state| state.deinit();
+    var physical = model;
+    if (std.mem.eql(u8, model.materialized, "incremental")) {
+        incremental = try @import("cross_database_incremental.zig").State.prepare(runtime, root, plan, &destination, model, record, spill_path);
+        physical = incremental.?.model;
+        record.affected_keys = incremental.?.key_count;
+        const progress = try arena_runtime.allocator.dupe(@import("cross_database_incremental.zig").Watermark, incremental.?.watermarks);
+        for (progress) |*item| {
+            item.input = try arena_runtime.allocator.dupe(u8, item.input);
+            item.query_hash = try arena_runtime.allocator.dupe(u8, item.query_hash);
+            if (item.value) |value| item.value = try arena_runtime.allocator.dupe(u8, value);
+        }
+        record.source_watermarks = progress;
+    }
+    try stageInputs(runtime, root, plan, physical, record, workspace, spill_path);
+    const query = try cross.renderSql(allocator, physical, record.stages);
     defer allocator.free(query);
     const schema = try adapter.quoteIdentifier(allocator, model.schema);
     defer allocator.free(schema);
@@ -127,14 +145,25 @@ fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, dire
     var count = try destination.query(count_sql);
     defer count.deinit(allocator);
     record.output_rows = try std.fmt.parseUnsigned(u64, count.firstScalar() orelse return error.CrossDatabaseOutputValidationFailed, 10);
-    const drop_target = try std.fmt.allocPrint(allocator, "drop table if exists {s}", .{target});
-    defer allocator.free(drop_target);
-    try destination.execute(drop_target);
-    const target_name = try adapter.quoteIdentifier(allocator, model.identifier);
-    defer allocator.free(target_name);
-    const rename = try std.fmt.allocPrint(allocator, "alter table {s} rename to {s}", .{ temporary, target_name });
-    defer allocator.free(rename);
-    try destination.execute(rename);
+    const updated = if (incremental) |*state| try state.apply(runtime, &destination, temporary, target) else false;
+    if (!updated) {
+        const drop_target = try std.fmt.allocPrint(allocator, "drop table if exists {s}", .{target});
+        defer allocator.free(drop_target);
+        try destination.execute(drop_target);
+        const target_name = try adapter.quoteIdentifier(allocator, model.identifier);
+        defer allocator.free(target_name);
+        const rename = try std.fmt.allocPrint(allocator, "alter table {s} rename to {s}", .{ temporary, target_name });
+        defer allocator.free(rename);
+        try destination.execute(rename);
+    }
+    if (incremental) |*state| {
+        try state.commit(&destination, run_id);
+        const count_target = try std.fmt.allocPrint(allocator, "select count(*) from {s}", .{target});
+        defer allocator.free(count_target);
+        var final_count = try destination.query(count_target);
+        defer final_count.deinit(allocator);
+        record.output_rows = try std.fmt.parseUnsigned(u64, final_count.firstScalar() orelse return error.CrossDatabaseOutputValidationFailed, 10);
+    }
     // A destination-local commit marker resolves crashes between database
     // COMMIT and the filesystem run record. It contains no source payload.
     try destination.execute("create schema if not exists dxt_internal; create table if not exists dxt_internal.cross_commits (run_id text, model text, plan_hash text, output_rows bigint, primary key (run_id, model))");
@@ -160,7 +189,7 @@ fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, dire
     transaction = false;
     record.status = "success";
     record.cleanup = "complete";
-    _ = arena_runtime;
+    record.watermarks_committed = incremental != null;
 }
 
 fn stageInputs(runtime: Runtime, root: []const u8, plan: *cross.Plan, model: cross.Model, record: *Record, workspace: *adapter.Session, spill_path: []const u8) !void {
@@ -479,7 +508,18 @@ pub fn recover(runtime: Runtime, arena_runtime: Runtime, root: []const u8, optio
                 if (result.rows[0][1] == null or !std.mem.eql(u8, result.rows[0][1].?, plan.hash)) return error.CrossDatabasePlanChanged;
                 record.status = "success";
                 record.error_name = null;
+                record.watermarks_committed = std.mem.eql(u8, model.materialized, "incremental");
                 record.output_rows = try std.fmt.parseUnsigned(u64, result.rows[0][0].?, 10);
+                if (record.watermarks_committed and try destination.relationExists(runtime.allocator, "dxt_internal", "cross_watermark_history")) {
+                    const target_key = try std.fmt.allocPrint(arena_runtime.allocator, "{s}.{s}", .{ model.schema, model.identifier });
+                    const target_literal = try adapter.quoteLiteral(arena_runtime.allocator, target_key);
+                    const history_sql = try std.fmt.allocPrint(arena_runtime.allocator, "select input,query_hash,watermark from dxt_internal.cross_watermark_history where run_id={s} and model={s} order by input", .{ id_literal, target_literal });
+                    var history = try destination.query(history_sql);
+                    defer history.deinit(runtime.allocator);
+                    const watermarks = try arena_runtime.allocator.alloc(@import("cross_database_incremental.zig").Watermark, history.rows.len);
+                    for (watermarks, history.rows) |*watermark, row| watermark.* = .{ .input = try arena_runtime.allocator.dupe(u8, row[0] orelse return error.InvalidCrossDatabaseRunState), .query_hash = try arena_runtime.allocator.dupe(u8, row[1] orelse return error.InvalidCrossDatabaseRunState), .value = if (row[2]) |value| try arena_runtime.allocator.dupe(u8, value) else null };
+                    record.source_watermarks = watermarks;
+                }
             }
         }
     }

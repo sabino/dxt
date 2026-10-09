@@ -466,3 +466,131 @@ def test_process_owned_target_lock_rejects_overlap_and_recovers_after_terminatio
     result = invoke(project, config, native_environment, "run", "--allow-movement")
     assert result.returncode == 0, result.stderr
     assert "leaked" not in result.stderr
+
+
+def test_cross_source_incremental_recomputes_dimension_and_late_fact_keys_atomically(project, native_environment, postgres):
+    import duckdb
+    config, schema = project[1], project[2]
+    with postgres.cursor() as cursor:
+        cursor.execute(f'alter table "{schema}".customers add column updated_at timestamp default \'2024-01-01\'')
+        cursor.execute(f'update "{schema}".customers set updated_at=\'2024-01-10\' where id=1')
+        cursor.execute(f'insert into "{schema}".customers(id,name,updated_at) values(3,\'unchanged\',\'2024-01-01\')')
+    with duckdb.connect(str(project[3])) as connection:
+        connection.execute("alter table orders add column updated_at timestamp default timestamp '2024-01-10'")
+        connection.execute("insert into orders values(3,100,timestamp '2024-01-01')")
+    model = config["models"]["joined"]
+    model.update(materialized="incremental", unique_key="id")
+    customer = model["inputs"]["customers"]
+    customer.pop("filter")
+    customer["columns"] = ["id", "name", "updated_at"]
+    customer["incremental"] = {"key": "id", "watermark": "updated_at"}
+    model["inputs"]["orders"]["incremental"] = {"key": "customer_id", "watermark": "updated_at", "lookback_seconds": 86400}
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert duck_rows(project[3], "select * from marts.joined order by id") == [(1, "O'Brien", 10), (2, "second", 9), (3, "unchanged", 100)]
+    initial = duck_rows(project[3], "select input,watermark from dxt_internal.cross_watermarks order by input")
+    with postgres.cursor() as cursor:
+        cursor.execute(f'update "{schema}".customers set name=\'changed\',updated_at=\'2024-01-11\' where id=1')
+    with duckdb.connect(str(project[3])) as connection:
+        connection.execute("insert into orders values(2,5,timestamp '2024-01-09 12:00:00')")
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert duck_rows(project[3], "select * from marts.joined order by id") == [(1, "changed", 10), (2, "second", 14), (3, "unchanged", 100)]
+    artifact = state(project)[1]["models"][0]
+    assert artifact["affected_keys"] == 2
+    assert artifact["watermarks_committed"] is True
+    committed = duck_rows(project[3], "select input,watermark from dxt_internal.cross_watermarks order by input")
+    assert committed != initial
+    # Reconcile the commit/file crash window using the immutable per-run
+    # watermark history, even when the file never recorded source progress.
+    path, recovery = state(project)
+    recovery["models"][0].update(status="running", source_watermarks=[], watermarks_committed=False)
+    path.write_text(json.dumps(recovery))
+    result = invoke(project, config, native_environment, "recover", "--allow-movement", "--run-id", recovery["run_id"])
+    assert result.returncode == 0, result.stderr
+    restored = json.loads(path.read_text())["models"][0]
+    assert restored["watermarks_committed"] is True
+    assert len(restored["source_watermarks"]) == 2
+    with postgres.cursor() as cursor:
+        cursor.execute(f'update "{schema}".customers set name=\'retry\',updated_at=\'2024-01-12\' where id=1')
+    original = model["sql"]
+    model["sql"] = f"{original} union all {original}"
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode != 0
+    assert "CrossDatabaseIncrementalUniqueKeyViolation" in result.stderr
+    assert "leaked" not in result.stderr
+    assert duck_rows(project[3], "select input,watermark from dxt_internal.cross_watermarks order by input") == committed
+    assert duck_rows(project[3], "select name from marts.joined where id=1") == [("changed",)]
+    model["sql"] = original
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode == 0, result.stderr
+    assert duck_rows(project[3], "select name from marts.joined where id=1") == [("retry",)]
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode == 0, result.stderr
+    assert len(duck_rows(project[3], "select * from marts.joined")) == 3
+    result = invoke(project, config, native_environment, "run", "--allow-movement", "--full-refresh")
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert len(duck_rows(project[3], "select * from marts.joined")) == 3
+
+
+@pytest.mark.parametrize("strategy", ["merge", "append", "insert_overwrite"])
+def test_incremental_postgres_destination_preserves_unaffected_keys_and_retry_idempotence(project, native_environment, postgres, strategy):
+    import duckdb
+    with duckdb.connect(str(project[4])) as connection:
+        connection.execute("create table events(id bigint,amount decimal(20,4),updated_at timestamp)")
+        connection.execute("insert into events values(1,10,timestamp '2024-01-01'),(2,20,timestamp '2024-01-01')")
+    config = project[1]
+    config["models"] = {"events": {"destination": "crm", "materialized": "incremental",
+        "unique_key": "id", "incremental_strategy": strategy, "inputs": {"source": {
+            "connection": "source", "relation": "main.events", "columns": ["id", "amount", "updated_at"],
+            "incremental": {"key": "id", "watermark": "updated_at"}}}, "sql": "select id,amount from {{ input('source') }}"}}
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode == 0, result.stderr
+    with duckdb.connect(str(project[4])) as connection:
+        connection.execute("update events set amount=15,updated_at=timestamp '2024-01-02' where id=1")
+        connection.execute("insert into events values(3,30,timestamp '2024-01-02')")
+    for _ in range(2):
+        result = invoke(project, config, native_environment, "run", "--allow-movement")
+        assert result.returncode == 0, result.stderr
+        assert "leaked" not in result.stderr
+        with postgres.cursor() as cursor:
+            cursor.execute(f'select * from "{project[2]}".events order by id')
+            assert cursor.fetchall() == [(1, Decimal(10 if strategy == "append" else 15)), (2, Decimal(20)), (3, Decimal(30))]
+
+
+def test_insert_overwrite_replaces_whole_affected_partition(project, native_environment):
+    import duckdb
+    with duckdb.connect(str(project[4])) as connection:
+        connection.execute("create table events(day date,id bigint,amount decimal(20,4),updated_at timestamp)")
+        connection.execute("insert into events values(date '2024-01-01',1,10,timestamp '2024-01-10'),"
+                           "(date '2024-01-01',2,20,timestamp '2024-01-10'),(date '2024-01-02',3,30,timestamp '2024-01-01')")
+    config = project[1]
+    config["models"] = {"events": {"destination": "warehouse", "materialized": "incremental",
+        "unique_key": "day", "incremental_strategy": "insert_overwrite", "inputs": {"source": {
+            "connection": "source", "relation": "main.events", "columns": ["day", "id", "amount", "updated_at"],
+            "incremental": {"key": "day", "watermark": "updated_at"}}}, "sql": "select day,id,amount from {{ input('source') }}"}}
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode == 0, result.stderr
+    with duckdb.connect(str(project[4])) as connection:
+        connection.execute("insert into events values(date '2024-01-01',4,40,timestamp '2024-01-11')")
+    result = invoke(project, config, native_environment, "run", "--allow-movement")
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert state(project)[1]["models"][0]["affected_keys"] == 1
+    assert duck_rows(project[3], "select id,amount from marts.events order by id") == [(1, Decimal(10)), (2, Decimal(20)), (3, Decimal(30)), (4, Decimal(40))]
+    result = invoke(project, config, native_environment, "run", "--allow-movement", "--full-refresh")
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert len(duck_rows(project[3], "select * from marts.events")) == 4
+
+
+def test_incremental_missing_source_progress_is_rejected_before_database_open(project, native_environment):
+    config = project[1]
+    config["models"]["joined"].update(materialized="incremental", unique_key="id")
+    result = invoke(project, config, native_environment, "plan", "--allow-movement")
+    assert result.returncode != 0
+    assert "MissingCrossDatabaseSourceWatermark" in result.stderr
+    assert not (project[0] / ".dxt").exists()

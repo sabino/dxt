@@ -23,6 +23,7 @@ pub const Options = struct {
     allow_movement: bool = false,
     allow_sensitive: bool = false,
     allow_raw_extract: bool = false,
+    full_refresh: bool = false,
     max_rows: ?u64 = null,
     max_bytes: ?u64 = null,
     max_memory_bytes: ?u64 = null,
@@ -49,6 +50,7 @@ pub fn printHelp(writer: *std.Io.Writer) !void {
         \\  --max-bytes <bytes>      Override the plan's movement byte budget.
         \\  --max-memory-bytes <n>   Bound native extraction and DuckDB working memory.
         \\  --max-spill-bytes <n>    Bound DuckDB temporary storage (default: no spill).
+        \\  --full-refresh           Rebuild incremental output and reset source watermarks.
         \\  --run-id <uuid>          Recover one recorded run's cleanup/commit state.
         \\
     );
@@ -61,7 +63,7 @@ pub fn parseOptions(args: []const []const u8) !Options {
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (eq(arg, "--allow-movement")) options.allow_movement = true else if (eq(arg, "--allow-sensitive")) options.allow_sensitive = true else if (eq(arg, "--allow-raw-extract")) options.allow_raw_extract = true else {
+        if (eq(arg, "--allow-movement")) options.allow_movement = true else if (eq(arg, "--allow-sensitive")) options.allow_sensitive = true else if (eq(arg, "--allow-raw-extract")) options.allow_raw_extract = true else if (eq(arg, "--full-refresh")) options.full_refresh = true else {
             index += 1;
             if (index >= args.len or args[index].len == 0 or std.mem.startsWith(u8, args[index], "--")) return error.MissingCrossDatabaseOptionValue;
             const value = args[index];
@@ -108,6 +110,9 @@ pub const Input = struct {
     estimated_bytes: ?u64,
     raw_extract: bool,
     moved: bool,
+    incremental_key: ?[]const u8 = null,
+    watermark: ?[]const u8 = null,
+    lookback_seconds: u64 = 0,
     denied: ?[]const u8 = null,
 };
 pub const Model = struct {
@@ -121,6 +126,10 @@ pub const Model = struct {
     strategy: []const u8,
     execution_engine: []const u8,
     budget: Budget,
+    materialized: []const u8 = "table",
+    incremental_strategy: []const u8 = "merge",
+    unique_key: ?[]const u8 = null,
+    full_refresh: bool = false,
     estimated_rows: u64 = 0,
     estimated_bytes: u64 = 0,
     estimated_cost: f64 = 0,
@@ -212,7 +221,7 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
     for (connections.items) |connection| {
         try fingerprint.writer.print("\n{s}/{s}/{s}/{s}/{s}\n", .{ connection.name, connection.identity.adapter_type, connection.identity.database_path orelse "", connection.identity.database_path_base orelse "", connection.identity.connection_info orelse "" });
     }
-    try fingerprint.writer.print("\nselect={s};movement={};sensitive={};raw={}\n", .{ options.select orelse "", options.allow_movement, options.allow_sensitive, options.allow_raw_extract });
+    try fingerprint.writer.print("\nselect={s};movement={};sensitive={};raw={};refresh={}\n", .{ options.select orelse "", options.allow_movement, options.allow_sensitive, options.allow_raw_extract, options.full_refresh });
     while (model_iterator.next()) |entry| {
         const name = entry.key_ptr.*;
         if (!identifier(name) or entry.value_ptr.* != .object) return error.InvalidCrossDatabaseModel;
@@ -241,6 +250,8 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
             const moved = connection != execution_connection;
             const sensitivity = try optionalFieldString(input_raw, "sensitivity") orelse "public";
             const raw_extract = values.get(input_raw, "query") == null and values.get(input_raw, "columns") == null and values.get(input_raw, "projection") == null and values.get(input_raw, "filter") == null and values.get(input_raw, "group_by") == null;
+            const incremental_config = values.get(input_raw, "incremental") orelse .null;
+            if (incremental_config != .null and incremental_config != .object) return error.InvalidCrossDatabaseInput;
             var input: Input = .{
                 .name = input_name,
                 .logical_id = try optionalFieldString(input_raw, "logical_id") orelse input_name,
@@ -255,6 +266,9 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
                 .estimated_bytes = try optionalUnsigned(input_raw, "estimated_bytes"),
                 .raw_extract = raw_extract,
                 .moved = moved,
+                .incremental_key = try optionalFieldString(incremental_config, "key"),
+                .watermark = try optionalFieldString(incremental_config, "watermark"),
+                .lookback_seconds = try optionalUnsigned(incremental_config, "lookback_seconds") orelse 0,
             };
             if (moved) {
                 const origin = connections.items[connection];
@@ -272,6 +286,17 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
         };
         try fingerprint.writer.writeAll(sql);
         var model: Model = .{ .name = name, .destination = destination, .execution_connection = execution_connection, .schema = try optionalFieldString(raw, "schema") orelse connections.items[destination].identity.target_schema, .identifier = try optionalFieldString(raw, "alias") orelse name, .sql = sql, .inputs = inputs.items, .strategy = "single_engine_pushdown", .execution_engine = connections.items[execution_connection].adapter_type, .budget = budget };
+        model.materialized = try optionalFieldString(raw, "materialized") orelse "table";
+        if (!eq(model.materialized, "table") and !eq(model.materialized, "incremental")) return error.InvalidCrossDatabaseMaterialization;
+        model.incremental_strategy = try optionalFieldString(raw, "incremental_strategy") orelse "merge";
+        if (!eq(model.incremental_strategy, "merge") and !eq(model.incremental_strategy, "append") and !eq(model.incremental_strategy, "insert_overwrite")) return error.InvalidCrossDatabaseIncrementalStrategy;
+        model.unique_key = try optionalFieldString(raw, "unique_key");
+        model.full_refresh = options.full_refresh;
+        if (eq(model.materialized, "incremental")) {
+            if (model.unique_key == null) return error.MissingCrossDatabaseUniqueKey;
+            for (model.inputs) |input| if (input.incremental_key == null or input.watermark == null) return error.MissingCrossDatabaseSourceWatermark;
+            for (model.inputs) |input| if (input.lookback_seconds > 3153600000) return error.InvalidCrossDatabaseSourceWatermark;
+        }
         var moved_count: u64 = 0;
         for (inputs.items) |input| if (input.moved) {
             moved_count += 1;
@@ -294,13 +319,14 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
                 model.denied = "embedded sensitive output movement requires explicit authorization inside one trust domain";
             };
         }
+        if (eq(model.materialized, "incremental")) model.estimate_confidence = "unknown_affected_keys";
         if (model.estimated_rows > budget.max_rows) model.denied = "estimated movement exceeds the row budget";
         if (model.estimated_bytes > budget.max_bytes) model.denied = "estimated movement exceeds the byte budget";
         if (moved_count + 2 > budget.max_objects) model.denied = "stage/output object count exceeds the object budget";
         if (budget.max_cost) |cost| {
             if (model.estimated_cost > cost) model.denied = "estimated egress exceeds the cost budget";
         }
-        try std.json.Stringify.value(.{ .name = model.name, .destination = destination, .execution_connection = execution_connection, .schema = model.schema, .identifier = model.identifier, .budget = budget, .inputs = model.inputs }, .{}, &fingerprint.writer);
+        try std.json.Stringify.value(.{ .name = model.name, .destination = destination, .execution_connection = execution_connection, .schema = model.schema, .identifier = model.identifier, .budget = budget, .inputs = model.inputs, .materialized = model.materialized, .unique_key = model.unique_key, .incremental_strategy = model.incremental_strategy }, .{}, &fingerprint.writer);
         // Render now to reject missing/ambiguous logical relation references.
         _ = try renderSql(runtime.allocator, model, null);
         try models.append(runtime.allocator, model);
@@ -505,7 +531,7 @@ pub fn planJson(allocator: std.mem.Allocator, plan: Plan) ![]const u8 {
         if (i != 0) try writer.writeByte(',');
         const query_sql = try renderSql(allocator, model, null);
         defer allocator.free(query_sql);
-        try std.json.Stringify.value(.{ .name = model.name, .destination = plan.connections[model.destination].name, .execution_connection = plan.connections[model.execution_connection].name, .output = .{ .schema = model.schema, .identifier = model.identifier }, .strategy = model.strategy, .execution_engine = model.execution_engine, .output_movement = model.execution_connection != model.destination, .budget = model.budget, .estimated_rows = model.estimated_rows, .estimated_scan_bytes = @as(?u64, null), .estimated_moved_bytes = model.estimated_bytes, .estimated_load_bytes = model.estimated_bytes, .estimated_egress_cost = model.estimated_cost, .confidence = model.estimate_confidence, .permitted = model.denied == null, .denial = model.denied, .query = query_sql, .inputs = model.inputs, .rejected_strategies = [_][]const u8{"automatic external federation is unavailable; explicit native staging preserves source identity"} }, .{}, writer);
+        try std.json.Stringify.value(.{ .name = model.name, .destination = plan.connections[model.destination].name, .execution_connection = plan.connections[model.execution_connection].name, .output = .{ .schema = model.schema, .identifier = model.identifier }, .materialized = model.materialized, .unique_key = model.unique_key, .incremental_strategy = model.incremental_strategy, .full_refresh = model.full_refresh, .strategy = model.strategy, .execution_engine = model.execution_engine, .output_movement = model.execution_connection != model.destination, .budget = model.budget, .estimated_rows = model.estimated_rows, .estimated_scan_bytes = @as(?u64, null), .estimated_moved_bytes = model.estimated_bytes, .estimated_load_bytes = model.estimated_bytes, .estimated_egress_cost = model.estimated_cost, .confidence = model.estimate_confidence, .permitted = model.denied == null, .denial = model.denied, .query = query_sql, .inputs = model.inputs, .rejected_strategies = [_][]const u8{"automatic external federation is unavailable; explicit native staging preserves source identity"} }, .{}, writer);
     }
     try writer.writeAll("]}\n");
     return output.toOwnedSlice();
