@@ -1039,6 +1039,40 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
     return null;
 }
 fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []const Argument) !Value {
+    if (std.mem.eql(u8, name, "indent")) {
+        if (value != .string) return error.JinjaTypeError;
+        var bound = [_]Value{ .{ .number = 4 }, .{ .boolean = false }, .{ .boolean = false } };
+        var seen = [_]bool{false} ** 3;
+        var positional: usize = 0;
+        var has_keyword = false;
+        for (args) |arg| {
+            const index = if (arg.name) |key| blk: {
+                has_keyword = true;
+                for ([_][]const u8{ "width", "first", "blank" }, 0..) |parameter, i| if (std.mem.eql(u8, key, parameter)) break :blk i;
+                return error.InvalidJinjaArguments;
+            } else blk: {
+                if (has_keyword or positional >= bound.len) return error.InvalidJinjaArguments;
+                const i = positional;
+                positional += 1;
+                break :blk i;
+            };
+            if (seen[index]) return error.InvalidJinjaArguments;
+            seen[index] = true;
+            bound[index] = arg.value;
+        }
+        const indent = @import("indent_filter.zig");
+        const width: indent.Width = switch (bound[0]) {
+            .string => |prefix| .{ .text = prefix },
+            .boolean => |enabled| .{ .spaces = @intFromBool(enabled) },
+            .number => |number| blk: {
+                if (!std.math.isFinite(number) or @floor(number) != number) return error.JinjaTypeError;
+                if (number > 1000000) return error.JinjaIterationLimitExceeded;
+                break :blk .{ .spaces = if (number < 0) 0 else @intFromFloat(number) };
+            },
+            else => return error.JinjaTypeError,
+        };
+        return .{ .string = try indent.render(allocator, value.string, width, bound[1].truthy(), bound[2].truthy()) };
+    }
     if (std.mem.eql(u8, name, "attr")) {
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
         return value.attribute(args[0].value.string);
