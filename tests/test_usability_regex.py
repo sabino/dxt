@@ -239,10 +239,11 @@ INVALID = [
 def test_invalid_regex_matches_core_failure(tmp_path, core_runner, expression):
     root = tmp_path / "regex_invalid"
     write_project(root, expression)
-    common = ["compile", "--project-dir", str(root), "--profiles-dir", str(root), "--no-partial-parse"]
+    common = ["compile", "--project-dir", str(root), "--profiles-dir", str(root)]
     native = subprocess.run([str(DXT), *common, "--target-path", "native"], cwd=ROOT, capture_output=True, text=True)
     core = core_runner.invoke(["--quiet", *common, "--target-path", "core"])
     assert native.returncode != 0, native.stdout + native.stderr
+    assert "InvalidOption" not in native.stderr
     assert not core.success, core.result
 
 
@@ -254,8 +255,9 @@ def test_model_local_macro_replacements_fail_like_dbt_core(tmp_path, core_runner
     root = tmp_path / "regex_invalid"
     write_project(root, "0")
     (root / "models/value.sql").write_text("select '" + template + "' as rendered\n")
-    common = ["compile", "--project-dir", str(root), "--profiles-dir", str(root), "--no-partial-parse"]
+    common = ["compile", "--project-dir", str(root), "--profiles-dir", str(root)]
     native = subprocess.run([str(DXT), *common], cwd=ROOT, capture_output=True, text=True)
-    core = core_runner.invoke(["--quiet", *common])
+    core = core_runner.invoke(["--quiet", *common, "--no-partial-parse"])
     assert native.returncode != 0
+    assert "InvalidOption" not in native.stderr
     assert not core.success, core.result

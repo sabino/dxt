@@ -94,10 +94,11 @@ def test_mapping_bindings_mutations_and_relations_match_core(tmp_path, core_runn
 def test_unhashable_and_invalid_keys_match_core_failure(tmp_path, core_runner, expression):
     root = tmp_path / "mapping_invalid"
     write_project(root, expression)
-    common = ["compile", "--project-dir", str(root), "--profiles-dir", str(root), "--no-partial-parse"]
+    common = ["compile", "--project-dir", str(root), "--profiles-dir", str(root)]
     actual = subprocess.run([str(DXT), *common], capture_output=True, text=True)
-    oracle = core_runner.invoke(["--quiet", *common])
+    oracle = core_runner.invoke(["--quiet", *common, "--no-partial-parse"])
     assert actual.returncode != 0, actual.stdout + actual.stderr
+    assert "InvalidOption" not in actual.stderr
     assert not oracle.success, oracle.result
 
 
@@ -108,9 +109,9 @@ def test_native_literal_nan_avoids_core_constant_fold_codegen_defect(tmp_path, c
     (root / "models/value.sql").write_text(
         "{% set n='nan'|float %}{% set d={n:'same'} %}select '{{ d[n] }}' as rendered\n"
     )
-    common = ["compile", "--project-dir", str(root), "--profiles-dir", str(root), "--no-partial-parse"]
+    common = ["compile", "--project-dir", str(root), "--profiles-dir", str(root)]
     actual = subprocess.run([str(DXT), *common], capture_output=True, text=True)
-    oracle = core_runner.invoke(["--quiet", *common])
+    oracle = core_runner.invoke(["--quiet", *common, "--no-partial-parse"])
     assert actual.returncode == 0, actual.stderr
     assert not oracle.success
     assert "name 'nan' is not defined" in str(oracle.exception)
