@@ -6,7 +6,8 @@ const util = @import("util.zig");
 const expression = @import("expression.zig");
 
 // Source contract: dbt-core v1.10.5 parser/snapshots.py and resources/v1/snapshot.py.
-// SQL block parsing accepts literal configuration and static relation dependencies.
+// Named SQL snapshot blocks use the normal native Jinja parse context. YAML
+// relation definitions retain their separate static ref/source contract.
 pub fn parseFile(runtime: types.Runtime, project_dir: []const u8, snapshot_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *types.Graph) !void {
     const path = try fs.pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     defer runtime.allocator.free(path);
@@ -47,6 +48,20 @@ fn nextTag(sql: []const u8, start: usize) !?Tag {
     return null;
 }
 
+fn rawEnd(sql: []const u8, start: usize) !usize {
+    var cursor = start;
+    while (std.mem.indexOfPos(u8, sql, cursor, "{%")) |open| {
+        const close = std.mem.indexOfPos(u8, sql, open + 2, "%}") orelse return error.MalformedSnapshotBlock;
+        if (std.mem.eql(u8, std.mem.trim(u8, sql[open + 2 .. close], "- \t\r\n"), "endraw")) return close + 2;
+        cursor = close + 2;
+    }
+    return error.MalformedSnapshotBlock;
+}
+
+fn startsTag(contents: []const u8, keyword: []const u8) bool {
+    return std.mem.startsWith(u8, contents, keyword) and (contents.len == keyword.len or std.ascii.isWhitespace(contents[keyword.len]));
+}
+
 pub fn parseBlocks(allocator: std.mem.Allocator, sql: []const u8, snapshot_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *types.Graph) !void {
     try parseBlocksInner(allocator, sql, snapshot_root, relative_path, package_name, graph, true);
 }
@@ -55,17 +70,18 @@ fn parseBlocksInner(allocator: std.mem.Allocator, sql: []const u8, snapshot_root
     var cursor: usize = 0;
     var name: ?[]const u8 = null;
     var body_start: usize = 0;
+    var outside_control_depth: usize = 0;
     while (try nextTag(sql, cursor)) |tag| {
         cursor = tag.end;
         if (tag.kind == '#') continue;
-        if (tag.kind == '{') {
-            if (name == null) return error.UnsupportedSnapshotDefinition;
+        if (tag.kind == '{') continue;
+        if (std.mem.eql(u8, tag.contents, "raw")) {
+            cursor = try rawEnd(sql, tag.end);
             continue;
         }
-        if (std.mem.startsWith(u8, tag.contents, "snapshot") and
-            (tag.contents.len == "snapshot".len or std.ascii.isWhitespace(tag.contents["snapshot".len])))
-        {
+        if (startsTag(tag.contents, "snapshot")) {
             if (name != null) return error.MalformedSnapshotBlock;
+            if (outside_control_depth != 0) return error.UnsupportedSnapshotDefinition;
             const raw_name = std.mem.trim(u8, tag.contents["snapshot".len..], " \t\r\n");
             if (raw_name.len == 0 or !jinja.isIdentStart(raw_name[0])) return error.MalformedSnapshotBlock;
             for (raw_name[1..]) |byte| if (!jinja.isIdentChar(byte)) return error.MalformedSnapshotBlock;
@@ -93,17 +109,25 @@ fn parseBlocksInner(allocator: std.mem.Allocator, sql: []const u8, snapshot_root
                 .materialized = "snapshot",
             };
             errdefer types.deinitNode(allocator, &node);
-            if (validate) try scanBody(allocator, node.raw_code, &node);
+            if (validate) try @import("compiler.zig").scanDependencies(allocator, node.raw_code, &node, graph);
             if (validate) try validateConfig(&node);
             try graph.nodes.append(allocator, node);
             name = null;
-        } else if (name == null or validate) {
-            return error.UnsupportedSnapshotDefinition;
+        } else if (name == null) {
+            // Core only extracts snapshot blocks from this file. Its block
+            // lexer rejects definitions nested within if/for control flow.
+            if (startsTag(tag.contents, "if") or startsTag(tag.contents, "for")) outside_control_depth += 1;
+            if (std.mem.eql(u8, tag.contents, "endif") or std.mem.eql(u8, tag.contents, "endfor")) {
+                if (outside_control_depth == 0) return error.MalformedSnapshotBlock;
+                outside_control_depth -= 1;
+            }
         }
     }
-    if (name != null) return error.MalformedSnapshotBlock;
+    if (name != null or outside_control_depth != 0) return error.MalformedSnapshotBlock;
 }
 
+/// Static YAML relation expressions are deliberately parsed independently from
+/// the complete Jinja context used by legacy SQL snapshot bodies.
 pub fn scanBody(allocator: std.mem.Allocator, sql: []const u8, node: *types.Node) !void {
     var cursor: usize = 0;
     while (try nextTag(sql, cursor)) |tag| {
@@ -435,18 +459,6 @@ pub fn validateConfig(node: *const types.Node) !void {
     } else return error.UnsupportedSnapshotConfig;
 }
 
-pub fn rejectYamlDefinitions(text: []const u8) !void {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        const trimmed = util.stripYamlComment(std.mem.trim(u8, line, " \t\r"));
-        if (util.leadingSpaces(line) == 0) {
-            if (util.splitKeyValue(trimmed)) |kv| {
-                if (std.mem.eql(u8, kv.key, "snapshots") and !std.mem.eql(u8, std.mem.trim(u8, kv.value, " \t\r"), "[]")) return error.UnsupportedSnapshotYaml;
-            }
-        }
-    }
-}
-
 test "SQL snapshot blocks preserve body identity and literal configuration" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -467,7 +479,7 @@ test "SQL snapshot blocks preserve body identity and literal configuration" {
     try std.testing.expect(!graph.nodes.items[1].enabled);
 }
 
-test "snapshot parser fails closed for malformed unsupported and invalid blocks" {
+test "snapshot parser rejects malformed blocks invalid configs and nested definitions" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -477,14 +489,32 @@ test "snapshot parser fails closed for malformed unsupported and invalid blocks"
     try std.testing.expectError(error.MalformedSnapshotBlock, parseBlocks(allocator, "{% snapshot x %}{{ ref('x'}", "snapshots", "snapshots/x.sql", "demo", &graph));
     try std.testing.expectError(error.MalformedSnapshotBlock, parseBlocks(allocator, "{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
     try std.testing.expectError(error.MalformedSnapshotBlock, parseBlocks(allocator, "{% snapshot x %}{% snapshot y %}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
-    try std.testing.expectError(error.UnsupportedSnapshotDefinition, parseBlocks(allocator, "{% snapshot x %}{% if execute %}select 1{% endif %}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
+    try std.testing.expectError(error.InvalidSnapshotConfig, parseBlocks(allocator, "{% snapshot x %}{% if execute %}select 1{% endif %}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
     try std.testing.expectError(error.InvalidSnapshotConfig, parseBlocks(allocator, "{% snapshot x %}select 1{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
     try std.testing.expectError(error.InvalidSnapshotConfig, parseBlocks(allocator, "{% snapshot x %}{{ config(strategy='timestamp', unique_key='id', updated_at='ts', check_cols='all') }}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
-    try std.testing.expectError(error.UnsupportedSnapshotConfig, parseBlocks(allocator, "{% snapshot x %}{{ config(strategy=var('strategy')) }}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
-    try std.testing.expectError(error.UnsupportedSnapshotConfig, parseBlocks(allocator, "{% snapshot x %}{{ config(enabled=false, unknown='value') }}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
-    try std.testing.expectError(error.UnsupportedSnapshotConfig, parseBlocks(allocator, "{% snapshot x %}{{ config(enabled=false, enabled=true) }}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
-    try std.testing.expectError(error.UnsupportedSnapshotConfig, parseBlocks(allocator, "{% snapshot x %}{{ config(enabled=false, unique_key=['id']) }}{{ config(unique_key=var('key')) }}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
-    try std.testing.expectError(error.UnsupportedSnapshotYaml, rejectYamlDefinitions("version: 2\nsnapshots:\n  - name: history\n"));
+    try std.testing.expectError(error.InvalidSnapshotConfig, parseBlocks(allocator, "{% snapshot x %}{{ config(strategy=var('strategy')) }}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
+    try std.testing.expectError(error.InvalidJinjaArguments, parseBlocks(allocator, "{% snapshot x %}{{ config(enabled=false, enabled=true) }}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
+    try std.testing.expectError(error.UnsupportedSnapshotDefinition, parseBlocks(allocator, "{% if true %}{% snapshot x %}select 1{% endsnapshot %}{% endif %}", "snapshots", "snapshots/x.sql", "demo", &graph));
+}
+
+test "SQL snapshots use complete parse context and ignore outer expressions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    const sql = "{{ 1 }}{% set outside = 1 %}{% macro ignored() %}ignored{% endmacro %}{% snapshot dynamic %}" ++ "{% raw %}-- literal {% endsnapshot %} {{ ignored }}\n{% endraw %}" ++ "{% set strategy = var('strategy', 'check') %}" ++ "{{ config(strategy=strategy, unique_key=var('key', ['id']), check_cols='all', custom_setting='retained') }}" ++ "{% for relation_name in ['first','second'] %}select * from {{ ref(relation_name) }}{% endfor %}{% endsnapshot %}" ++ "{% snapshot disabled %}{{ config(enabled=false, unknown='value', unique_key=var('missing')) }}{% endsnapshot %}";
+    try parseBlocks(allocator, sql, "snapshots", "snapshots/dynamic.sql", "demo", &graph);
+    try std.testing.expectEqual(@as(usize, 2), graph.nodes.items.len);
+    const node = graph.nodes.items[0];
+    try std.testing.expectEqualStrings("check", node.snapshot_config.?.strategy.?);
+    try std.testing.expectEqual(@as(usize, 2), node.refs.items.len);
+    try std.testing.expectEqualStrings("first", node.refs.items[0].name);
+    try std.testing.expectEqualStrings("second", node.refs.items[1].name);
+    try std.testing.expectEqualStrings("retained", node.effective_config.object.get("custom_setting").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, node.raw_code, "literal {% endsnapshot %}") != null);
+    try std.testing.expect(!graph.nodes.items[1].enabled);
+    try std.testing.expectEqualStrings("value", graph.nodes.items[1].effective_config.object.get("unknown").?.string);
 }
 
 fn parseMetaColumns(allocator: std.mem.Allocator, value: []const u8, config: *types.SnapshotConfig) !void {

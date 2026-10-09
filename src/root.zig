@@ -579,7 +579,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.InvalidSnapshotConfig => stderr.writeAll("error: SQL snapshot requires a unique_key and a valid timestamp or check strategy configuration\n") catch {},
         error.UnsupportedProjectSnapshotConfig => stderr.writeAll("error: malformed or unsupported project snapshot configuration\n") catch {},
         error.UnsupportedSnapshotConfig => stderr.writeAll("error: malformed or unsupported snapshot configuration\n") catch {},
-        error.UnsupportedSnapshotDefinition => stderr.writeAll("error: malformed SQL snapshot definition; a named snapshot block is required\n") catch {},
+        error.UnsupportedSnapshotDefinition => stderr.writeAll("error: SQL snapshot definitions must be named top-level blocks\n") catch {},
         error.UnsupportedSnapshotYaml => stderr.writeAll("error: malformed or unsupported YAML snapshot definition or property\n") catch {},
         error.UnsupportedSnapshotAdapter => stderr.writeAll("error: snapshot execution requires a DuckDB or PostgreSQL adapter\n") catch {},
         error.UnsupportedSnapshotExecution => stderr.writeAll("error: selected snapshot cannot be executed with this adapter or configuration\n") catch {},
