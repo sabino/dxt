@@ -54,6 +54,9 @@ pub fn parseWithTarget(runtime: types.Runtime, text: []const u8, cli_vars: []con
     if (values.get(rendered, "flags")) |flags| if (values.get(flags, "validate_macro_args")) |v| {
         config.validate_macro_args = try resource.boolean(v);
     };
+    if (values.get(rendered, "flags")) |flags| if (values.get(flags, "require_batched_execution_for_custom_microbatch_strategy")) |v| {
+        config.require_batched_execution_for_custom_microbatch_strategy = try resource.boolean(v);
+    };
     if (values.get(rendered, "dispatch")) |dispatch| {
         if (dispatch != .array) return error.UnsupportedYaml;
         for (dispatch.array.items) |entry| {

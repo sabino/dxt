@@ -6,7 +6,7 @@ const Value = expression.Value;
 
 pub fn config(allocator: std.mem.Allocator, node: *const types.Node) !Value {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
-        \\{"enabled":true,"materialized":"view","alias":null,"schema":null,"database":null,"tags":[],"meta":{},"group":null,"access":"protected","contract":{"enforced":false,"alias_types":true},"pre-hook":[],"post-hook":[],"grants":{},"persist_docs":{},"quoting":{},"full_refresh":null,"unique_key":null,"incremental_strategy":null,"on_schema_change":"ignore","sql_header":null}
+        \\{"enabled":true,"materialized":"view","alias":null,"schema":null,"database":null,"tags":[],"meta":{},"group":null,"access":"protected","contract":{"enforced":false,"alias_types":true},"pre-hook":[],"post-hook":[],"grants":{},"persist_docs":{},"quoting":{},"full_refresh":null,"unique_key":null,"incremental_strategy":null,"on_schema_change":"ignore","sql_header":null,"event_time":null,"begin":null,"batch_size":null,"lookback":1,"concurrent_batches":null}
     , .{});
     // Caller is a render arena. These maps must remain alive until the frame
     // ends, including when a config object is returned from a nested macro.
@@ -17,6 +17,14 @@ pub fn config(allocator: std.mem.Allocator, node: *const types.Node) !Value {
         while (iterator.next()) |entry| try parsed.value.object.put(allocator, entry.key_ptr.*, entry.value_ptr.*);
     }
     var result = try values.toExpression(allocator, parsed.value);
+    if (result.attribute("begin") == .string) {
+        const timestamp = try @import("input_relations.zig").parseDate(result.attribute("begin").string, true);
+        const replacement = try @import("timestamp_context.zig").configuredValue(allocator, timestamp, result.attribute("begin").string);
+        for (@constCast(result.object)) |*entry| if (std.mem.eql(u8, entry.key, "begin")) {
+            entry.value = replacement;
+            break;
+        };
+    }
     if (node.runtime_batch) |batch| {
         const entries = try allocator.alloc(expression.Entry, result.object.len + 2);
         @memcpy(entries[0..result.object.len], result.object);

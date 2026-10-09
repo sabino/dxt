@@ -10,6 +10,7 @@ const project_resolve = @import("resolve.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 const config_value = @import("config_value.zig");
+const microbatch = @import("microbatch.zig");
 
 const Runtime = types.Runtime;
 const Options = types.Options;
@@ -98,6 +99,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         .project_name = config.name,
         .validate_macro_args = config.validate_macro_args,
         .require_generic_test_arguments_property = config.require_generic_test_arguments_property,
+        .require_batched_execution_for_custom_microbatch_strategy = config.require_batched_execution_for_custom_microbatch_strategy,
         .full_refresh = options.full_refresh,
     };
     errdefer graph.deinit();
@@ -251,6 +253,9 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     try rejectDuplicateUnitTests(&graph);
     try rejectDuplicateMacros(&graph);
     try callbacks.resolve_macro_dependencies(&graph);
+    for (graph.nodes.items) |*node| if (node.enabled and microbatch.enabled(node)) {
+        try microbatch.normalizeConfig(runtime.allocator, node);
+    };
     return graph;
 }
 

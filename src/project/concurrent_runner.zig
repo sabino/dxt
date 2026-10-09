@@ -281,7 +281,7 @@ fn cancelJobs(io: std.Io, jobs: []Job) void {
 }
 
 fn failed(output: results.NodeResult) bool {
-    return std.mem.eql(u8, output.status, "error") or std.mem.eql(u8, output.status, "fail");
+    return std.mem.eql(u8, output.status, "error") or std.mem.eql(u8, output.status, "fail") or std.mem.eql(u8, output.status, "partial success");
 }
 fn prerequisitesDone(jobs: []const Job, prerequisites: []const usize) bool {
     for (prerequisites) |index| if (jobs[index].state != .done) return false;
@@ -389,8 +389,16 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
     output.owns_log_output = false;
     output.log_events = &.{};
     output.owns_log_events = false;
+    output.batch_results = null;
+    output.owns_batch_results = false;
     errdefer freeResult(allocator, output);
     if (source.message) |value| output.message = try allocator.dupe(u8, value);
+    if (source.batch_results) |batches| {
+        output.batch_results = .{};
+        output.owns_batch_results = true;
+        output.batch_results.?.successful = try allocator.dupe(types.SampleWindow, batches.successful);
+        output.batch_results.?.failed = try allocator.dupe(types.SampleWindow, batches.failed);
+    }
     if (source.log_output) |value| {
         output.log_output = try allocator.dupe(u8, value);
         output.owns_log_output = true;
@@ -427,6 +435,7 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
     return output;
 }
 fn freeResult(allocator: std.mem.Allocator, output: results.NodeResult) void {
+    if (output.owns_batch_results) if (output.batch_results) |batches| batches.deinit(allocator);
     if (output.owns_compiled_ctes) {
         for (output.compiled_ctes) |cte| if (cte.sql.len != 0) allocator.free(cte.sql);
         allocator.free(output.compiled_ctes);

@@ -8,6 +8,8 @@ const docs_serve = @import("project/docs_serve.zig");
 const duckdb = @import("project/duckdb.zig");
 const incremental = @import("project/incremental.zig");
 const incremental_config = @import("project/incremental_config.zig");
+const microbatch = @import("project/microbatch.zig");
+const microbatch_run = @import("project/microbatch_run.zig");
 const project_fs = @import("project/fs.zig");
 const project_jinja = @import("project/jinja.zig");
 const project_loader = @import("project/loader.zig");
@@ -1381,13 +1383,15 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
         };
         var row = rows.items[0];
         row.node = original;
-        row.compiled_code = node.compiled_code;
-        row.owns_compiled_code = node.compiled_code != null;
+        if (row.compiled_code == null) {
+            row.compiled_code = node.compiled_code;
+            row.owns_compiled_code = node.compiled_code != null;
+        }
         row.relation_name = node.relation_name;
         row.owns_relation_name = node.relation_name != null;
         row.compile_started_at = compilation_started;
         row.compile_completed_at = compilation_completed;
-        row.compiled_ctes = node.extra_ctes.items;
+        if (!row.owns_compiled_ctes) row.compiled_ctes = node.extra_ctes.items;
         try captureResourceLogs(runtime.allocator, &row, output.written(), &log_events);
         return row;
     }
@@ -1422,6 +1426,10 @@ fn captureResourceLogs(allocator: std.mem.Allocator, row: *run_results.NodeResul
 
 fn compileConcurrentNode(runtime: Runtime, graph: *const Graph, node: *Node, db_path: []const u8) !void {
     if (std.mem.eql(u8, node.resource_type, "seed")) return;
+    if (microbatch.enabled(node)) {
+        node.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
+        return;
+    }
     if (std.mem.eql(u8, node.materialized, "incremental")) node.runtime_is_incremental = try incremental.isIncremental(runtime, db_path, graph, node);
     const compiled = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, node);
     node.compiled = true;
@@ -1701,6 +1709,11 @@ fn validateDataTestsAttachToSelectedNodes(nodes: []const DataTestRef, selected: 
 }
 
 fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, executed: *std.ArrayList(run_results.NodeResult)) !bool {
+    if (microbatch.enabled(node)) {
+        const row = try microbatch_run.execute(runtime, graph, node, db_path, null);
+        try executed.append(runtime.allocator, row);
+        return std.mem.eql(u8, row.status, "success");
+    }
     const execution = if (std.mem.eql(u8, node.resource_type, "snapshot")) snapshot_runner.execute(runtime, db_path, graph, node) else duckdb.executeModel(runtime, db_path, graph, node);
     execution catch |err| switch (err) {
         error.DuckDbExecutionFailed => {
@@ -2209,6 +2222,7 @@ fn writeRunResults(runtime: Runtime, target_dir: []const u8, results: []const ru
 
 fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.NodeResult) void {
     for (results) |result| {
+        if (result.owns_batch_results) if (result.batch_results) |batches| batches.deinit(allocator);
         if (result.owns_compiled_ctes) {
             for (result.compiled_ctes) |cte| allocator.free(cte.sql);
             allocator.free(result.compiled_ctes);

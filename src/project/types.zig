@@ -27,6 +27,7 @@ pub const Options = struct {
     skip_profile_setup: bool = false,
     execution_select: ?[]const u8 = null,
     execution_ids: ?[]const []const u8 = null,
+    microbatch_retry_results: ?std.json.Value = null,
     project_dir: []const u8 = ".",
     profiles_dir: ?[]const u8 = null,
     profile: ?[]const u8 = null,
@@ -125,6 +126,7 @@ pub const ProjectConfig = struct {
     clean_targets_set: bool = false,
     validate_macro_args: bool = false,
     require_generic_test_arguments_property: bool = false,
+    require_batched_execution_for_custom_microbatch_strategy: bool = false,
     target_path: []const u8 = "target",
     raw_project: std.json.Value = .null,
     rendered_project: std.json.Value = .null,
@@ -713,6 +715,7 @@ pub const Graph = struct {
     source_project_configs: std.ArrayList(SourceProjectConfig) = .empty,
     validate_macro_args: bool = false,
     require_generic_test_arguments_property: bool = false,
+    require_batched_execution_for_custom_microbatch_strategy: bool = false,
     deferred_relations: std.ArrayList(DeferredRelation) = .empty,
 
     pub fn unitFixtureRelation(self: *const Graph, unique_id: []const u8) ?[]const u8 {

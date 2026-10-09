@@ -6,21 +6,49 @@ const Value = expression.Value;
 const Argument = expression.Argument;
 
 pub fn value(a: std.mem.Allocator, epoch_ns: i96) !Value {
-    return datetimeValue(a, epoch_ns, false);
+    return datetimeValue(a, epoch_ns, false, 0);
 }
 
-fn datetimeValue(a: std.mem.Allocator, epoch_ns: i96, date_only: bool) !Value {
+/// Core config datetimes retain authored timezone awareness; batch datetimes
+/// themselves are always UTC. The epoch argument here represents civil fields.
+pub fn configuredValue(a: std.mem.Allocator, civil_ns: i96, original: []const u8) !Value {
+    var offset: ?i32 = null;
+    if (original.len > 19 and std.mem.endsWith(u8, original, "Z")) offset = 0 else if (original.len >= 25) {
+        const zone = original[original.len - 6 ..];
+        if ((zone[0] == '+' or zone[0] == '-') and zone[3] == ':') {
+            const hour = try std.fmt.parseInt(i32, zone[1..3], 10);
+            const minute = try std.fmt.parseInt(i32, zone[4..6], 10);
+            offset = (hour * 60 + minute) * @as(i32, if (zone[0] == '-') -1 else 1);
+        }
+    }
+    return datetimeValue(a, civil_ns, false, offset);
+}
+
+fn writeZone(w: *std.Io.Writer, offset: i32, colon: bool) !void {
+    const total = @abs(offset);
+    try w.print("{c}{d:0>2}{s}{d:0>2}", .{ @as(u8, if (offset < 0) '-' else '+'), total / 60, if (colon) ":" else "", total % 60 });
+}
+
+fn zoneName(a: std.mem.Allocator, offset: i32) ![]const u8 {
+    if (offset == 0) return "UTC";
+    var out: std.Io.Writer.Allocating = .init(a);
+    try out.writer.writeAll("UTC");
+    try writeZone(&out.writer, offset, true);
+    return out.toOwnedSlice();
+}
+
+fn datetimeValue(a: std.mem.Allocator, epoch_ns: i96, date_only: bool, utc_offset: ?i32) !Value {
     const label = try calendar.formatTimestamp(a, @intCast(@divFloor(epoch_ns, std.time.ns_per_s)));
     const micros: u64 = @intCast(@divFloor(@mod(epoch_ns, std.time.ns_per_s), std.time.ns_per_us));
-    const rendered = if (date_only) try a.dupe(u8, label[0..10]) else try isoformat(a, epoch_ns, " ", "auto");
+    const rendered = if (date_only) try a.dupe(u8, label[0..10]) else try isoformat(a, epoch_ns, " ", "auto", utc_offset);
     var entries: std.ArrayList(expression.Entry) = .empty;
     try entries.append(a, .{ .key = "__dxt_rendered", .value = .{ .string = rendered } });
     inline for (.{ .{ "year", 0, 4 }, .{ "month", 5, 7 }, .{ "day", 8, 10 }, .{ "hour", 11, 13 }, .{ "minute", 14, 16 }, .{ "second", 17, 19 } }) |field| {
         if (!date_only or field[1] < 10) try entries.append(a, .{ .key = field[0], .value = .{ .number = @floatFromInt(try std.fmt.parseInt(u64, label[field[1]..field[2]], 10)) } });
     }
-    if (!date_only) try entries.appendSlice(a, &.{ .{ .key = "microsecond", .value = .{ .number = @floatFromInt(micros) } }, .{ .key = "tzinfo", .value = .{ .string = "UTC" } } });
+    if (!date_only) try entries.appendSlice(a, &.{ .{ .key = "microsecond", .value = .{ .number = @floatFromInt(micros) } }, .{ .key = "tzinfo", .value = if (utc_offset) |offset| .{ .string = try zoneName(a, offset) } else .none } });
     for ([_][]const u8{ "strftime", "isoformat", "date", "timestamp", "weekday", "isoweekday", "replace" }) |method| {
-        try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime:{s}:{d}:{s}", .{ method, epoch_ns, if (date_only) "date" else "datetime" }) } });
+        try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime:{s}:{d}:{s}:{s}", .{ method, epoch_ns, if (date_only) "date" else "datetime", if (utc_offset) |offset| try std.fmt.allocPrint(a, "{d}", .{offset}) else "naive" }) } });
     }
     return .{ .object = try entries.toOwnedSlice(a) };
 }
@@ -48,16 +76,18 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
     const method = parts.next() orelse return error.InvalidDatetime;
     const ns = std.fmt.parseInt(i96, parts.next() orelse return error.InvalidDatetime, 10) catch return error.InvalidDatetime;
     const date_only = std.mem.eql(u8, parts.next() orelse return error.InvalidDatetime, "date");
-    if (std.mem.eql(u8, method, "strftime")) return .{ .string = try strftime(a, ns, try textArg(args, "format", 0, ""), date_only) };
+    const offset_text = parts.next() orelse "0";
+    const utc_offset: ?i32 = if (std.mem.eql(u8, offset_text, "naive")) null else std.fmt.parseInt(i32, offset_text, 10) catch return error.InvalidDatetime;
+    if (std.mem.eql(u8, method, "strftime")) return .{ .string = try strftime(a, ns, try textArg(args, "format", 0, ""), date_only, utc_offset) };
     if (std.mem.eql(u8, method, "isoformat")) {
         if (date_only) {
             const label = try calendar.formatTimestamp(a, @intCast(@divFloor(ns, std.time.ns_per_s)));
             return .{ .string = try a.dupe(u8, label[0..10]) };
         }
-        return .{ .string = try isoformat(a, ns, try textArg(args, "sep", 0, "T"), try textArg(args, "timespec", 1, "auto")) };
+        return .{ .string = try isoformat(a, ns, try textArg(args, "sep", 0, "T"), try textArg(args, "timespec", 1, "auto"), utc_offset) };
     }
-    if (std.mem.eql(u8, method, "date")) return try datetimeValue(a, @divFloor(ns, std.time.ns_per_day) * std.time.ns_per_day, true);
-    if (std.mem.eql(u8, method, "timestamp") and !date_only) return .{ .number = @as(f64, @floatFromInt(ns)) / std.time.ns_per_s };
+    if (std.mem.eql(u8, method, "date")) return try datetimeValue(a, @divFloor(ns, std.time.ns_per_day) * std.time.ns_per_day, true, null);
+    if (std.mem.eql(u8, method, "timestamp") and !date_only) return .{ .number = @as(f64, @floatFromInt(ns)) / std.time.ns_per_s - @as(f64, @floatFromInt(utc_offset orelse 0)) * 60 };
     const day = @divFloor(ns, std.time.ns_per_day);
     if (std.mem.eql(u8, method, "weekday")) return .{ .number = @floatFromInt(@mod(day + 3, 7)) };
     if (std.mem.eql(u8, method, "isoweekday")) return .{ .number = @floatFromInt(@mod(day + 3, 7) + 1) };
@@ -73,7 +103,7 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
         if (fields[6] > 999999) return error.InvalidDatetime;
         const label = try std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{ fields[0], fields[1], fields[2], fields[3], fields[4], fields[5] });
         const timestamp = @as(i96, calendar.parseTimestamp(label) catch return error.InvalidDatetime) * std.time.ns_per_s;
-        return try datetimeValue(a, timestamp + @as(i96, @intCast(fields[6])) * std.time.ns_per_us, date_only);
+        return try datetimeValue(a, timestamp + @as(i96, @intCast(fields[6])) * std.time.ns_per_us, date_only, utc_offset);
     }
     return error.JinjaTypeError;
 }
@@ -83,7 +113,7 @@ fn integer(v: Value) !u64 {
     return @intFromFloat(v.number);
 }
 
-fn isoformat(a: std.mem.Allocator, ns: i96, separator: []const u8, timespec: []const u8) ![]const u8 {
+fn isoformat(a: std.mem.Allocator, ns: i96, separator: []const u8, timespec: []const u8, utc_offset: ?i32) ![]const u8 {
     if ((std.unicode.utf8CountCodepoints(separator) catch return error.JinjaTypeError) != 1) return error.JinjaTypeError;
     const label = try calendar.formatTimestamp(a, @intCast(@divFloor(ns, std.time.ns_per_s)));
     const micros: u64 = @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_us));
@@ -93,11 +123,11 @@ fn isoformat(a: std.mem.Allocator, ns: i96, separator: []const u8, timespec: []c
     try out.writer.print("{s}{s}{s}", .{ label[0..10], separator, label[11..length] });
     if (std.mem.eql(u8, spec, "milliseconds")) try out.writer.print(".{d:0>3}", .{micros / 1000});
     if (std.mem.eql(u8, spec, "microseconds")) try out.writer.print(".{d:0>6}", .{micros});
-    try out.writer.writeAll("+00:00");
+    if (utc_offset) |offset| try writeZone(&out.writer, offset, true);
     return out.toOwnedSlice();
 }
 
-fn strftime(a: std.mem.Allocator, ns: i96, format: []const u8, date_only: bool) ![]const u8 {
+fn strftime(a: std.mem.Allocator, ns: i96, format: []const u8, date_only: bool, utc_offset: ?i32) ![]const u8 {
     const label = try calendar.formatTimestamp(a, @intCast(@divFloor(ns, std.time.ns_per_s)));
     const micros: u64 = if (date_only) 0 else @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_us));
     const days: i64 = @intCast(@divFloor(ns, std.time.ns_per_day));
@@ -128,8 +158,8 @@ fn strftime(a: std.mem.Allocator, ns: i96, format: []const u8, date_only: bool) 
             'S' => try out.writer.writeAll(if (date_only) "00" else label[17..19]),
             'f' => try out.writer.print("{d:0>6}", .{micros}),
             'p' => try out.writer.writeAll(if (date_only or hour < 12) "AM" else "PM"),
-            'z' => if (!date_only) try out.writer.writeAll("+0000"),
-            'Z' => if (!date_only) try out.writer.writeAll("UTC"),
+            'z' => if (!date_only) if (utc_offset) |offset| try writeZone(&out.writer, offset, false),
+            'Z' => if (!date_only) if (utc_offset) |offset| try out.writer.writeAll(try zoneName(a, offset)),
             'j' => try out.writer.print("{d:0>3}", .{year_day}),
             'w' => try out.writer.print("{d}", .{weekday}),
             'u' => try out.writer.print("{d}", .{@mod(weekday + 6, 7) + 1}),

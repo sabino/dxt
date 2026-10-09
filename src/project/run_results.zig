@@ -45,6 +45,18 @@ pub const NodeResult = struct {
     owns_log_output: bool = false,
     log_events: []const LogMessage = &.{},
     owns_log_events: bool = false,
+    batch_results: ?BatchResults = null,
+    owns_batch_results: bool = false,
+};
+
+pub const BatchResults = struct {
+    successful: []const types.SampleWindow = &.{},
+    failed: []const types.SampleWindow = &.{},
+
+    pub fn deinit(self: BatchResults, allocator: std.mem.Allocator) void {
+        allocator.free(self.successful);
+        allocator.free(self.failed);
+    }
 };
 
 pub const AdapterResponse = struct {
@@ -369,7 +381,35 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     } else {
         try writer.writeAll("null");
     } else try writer.writeAll("null");
+    if (result.batch_results) |batches| {
+        try writer.writeAll(", \"batch_results\": {\"successful\": ");
+        try writeBatchIntervals(writer, batches.successful);
+        try writer.writeAll(", \"failed\": ");
+        try writeBatchIntervals(writer, batches.failed);
+        try writer.writeAll("}");
+    }
     try writer.writeAll("}");
+}
+
+fn writeBatchTimestamp(writer: *Io.Writer, timestamp: i96) !void {
+    // Event-time histories may predate the Unix epoch; execution clocks do not.
+    var storage: [128]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const label = try @import("workflow_intervals.zig").formatTimestamp(fixed.allocator(), @intCast(@divFloor(timestamp, std.time.ns_per_s)));
+    try writer.print("\"{s}T{s}.{d:0>6}Z\"", .{ label[0..10], label[11..19], @as(u64, @intCast(@divFloor(@mod(timestamp, std.time.ns_per_s), std.time.ns_per_us))) });
+}
+
+fn writeBatchIntervals(writer: *Io.Writer, batches: []const types.SampleWindow) !void {
+    try writer.writeByte('[');
+    for (batches, 0..) |batch, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.writeByte('[');
+        try writeBatchTimestamp(writer, batch.start);
+        try writer.writeByte(',');
+        try writeBatchTimestamp(writer, batch.end);
+        try writer.writeByte(']');
+    }
+    try writer.writeByte(']');
 }
 
 fn resultUniqueId(result: NodeResult) []const u8 {

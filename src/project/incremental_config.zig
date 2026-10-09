@@ -77,8 +77,8 @@ pub fn validate(config: types.IncrementalConfig) !void {
 pub fn validateForAdapter(adapter_type: []const u8, config: types.IncrementalConfig) !void {
     const strategy = config.strategy orelse "default";
     if (std.mem.eql(u8, adapter_type, "postgres") and (std.mem.eql(u8, strategy, "merge") or std.mem.eql(u8, strategy, "microbatch"))) return;
-    // dbt-duckdb 1.9.6 explicitly supports these strategies, excluding MERGE.
-    if (!std.mem.eql(u8, strategy, "default") and !std.mem.eql(u8, strategy, "append") and !std.mem.eql(u8, strategy, "delete+insert")) return error.UnsupportedIncrementalStrategy;
+    // The pinned DuckDB strategies plus dxt's native microbatch extension.
+    if (!std.mem.eql(u8, strategy, "default") and !std.mem.eql(u8, strategy, "append") and !std.mem.eql(u8, strategy, "delete+insert") and !std.mem.eql(u8, strategy, "microbatch")) return error.UnsupportedIncrementalStrategy;
 }
 
 pub fn schemaPolicy(config: types.IncrementalConfig) []const u8 {

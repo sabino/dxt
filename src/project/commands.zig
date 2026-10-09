@@ -397,6 +397,17 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
         const parse_date = @import("input_relations.zig").parseDate;
         options.sample_window = .{ .start = try parse_date(start.string, true), .end = try parse_date(end.string, true) };
     };
+    var microbatch_retries: std.json.Value = .{ .object = .empty };
+    for (parsed.value.object.get("results").?.array.items) |row| {
+        if (row != .object) return error.MalformedRunResultsArtifact;
+        const batches = row.object.get("batch_results") orelse continue;
+        if (batches == .null) continue;
+        const status = row.object.get("status") orelse return error.MalformedRunResultsArtifact;
+        const id = row.object.get("unique_id") orelse return error.MalformedRunResultsArtifact;
+        if (status != .string or id != .string or batches != .object) return error.MalformedRunResultsArtifact;
+        if (isRetryableStatus(status.string)) try config_values.put(allocator, &microbatch_retries, try allocator.dupe(u8, id.string), try config_values.clone(allocator, batches));
+    }
+    if (microbatch_retries.object.count() != 0) options.microbatch_retry_results = microbatch_retries;
     if (std.mem.eql(u8, which, "generate")) inline for (.{ .{ "compile", "docs_compile" }, .{ "static", "docs_static" } }) |field| {
         if (args.get(field[0])) |value| {
             if (value != .bool) return error.MalformedRunResultsArtifact;
