@@ -3926,7 +3926,7 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
             node.properties = try @import("project/config_value.zig").clone(graph.allocator, property.properties);
         }
         if (property.config_values != .null) {
-            try @import("project/resource_config.zig").merge(graph.allocator, &node.property_config, property.config_values);
+            try @import("project/resource_config.zig").mergeAuthored(graph.allocator, &node.property_config, property.config_values);
             const raw_config = @import("project/config_value.zig").get(property.properties, "config") orelse .null;
             try @import("project/config_value.zig").overlay(graph.allocator, &node.property_raw_config, raw_config);
             for ([_][]const u8{ "meta", "docs", "tags", "group", "access", "contract" }) |key| if (@import("project/config_value.zig").get(property.properties, key)) |value| {

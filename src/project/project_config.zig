@@ -235,8 +235,8 @@ fn walkPaths(allocator: std.mem.Allocator, block: std.json.Value, raw_block: std
         if (key.len == 0) return error.InvalidProjectConfiguration;
         if (key[0] == '+' or isConfigKey(key)) {
             const config_key = resource.normalizeKey(if (key[0] == '+') key[1..] else key);
-            try resource.mergeField(allocator, &config, config_key, entry.value_ptr.*);
-            try resource.mergeField(allocator, &raw_config, config_key, values.get(raw_block, key) orelse entry.value_ptr.*);
+            try resource.mergeAuthoredField(allocator, &config, config_key, entry.value_ptr.*);
+            try resource.mergeAuthoredField(allocator, &raw_config, config_key, values.get(raw_block, key) orelse entry.value_ptr.*);
         }
     }
     if (config != .null) {

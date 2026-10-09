@@ -13,13 +13,13 @@ pub fn applyInline(allocator: std.mem.Allocator, args_text: []const u8, node: *t
         if (arg.name) |key| {
             var value = values.fromExpression(allocator, arg.value) catch return error.UnsupportedJinja;
             defer values.deinit(allocator, &value);
-            try mergeField(allocator, &config, normalizeKey(key), value);
+            try mergeFieldWithMode(allocator, &config, normalizeKey(key), value, true);
         } else {
             if (args.len != 1 or arg.value != .object) return error.UnsupportedJinja;
             for (arg.value.object) |entry| {
                 var value = values.fromExpression(allocator, entry.value) catch return error.UnsupportedJinja;
                 defer values.deinit(allocator, &value);
-                try mergeField(allocator, &config, normalizeKey(entry.key), value);
+                try mergeFieldWithMode(allocator, &config, normalizeKey(entry.key), value, true);
             }
         }
     }
@@ -27,7 +27,7 @@ pub fn applyInline(allocator: std.mem.Allocator, args_text: []const u8, node: *t
 }
 
 pub fn applyParsedInline(allocator: std.mem.Allocator, config: std.json.Value, node: *types.Node) !void {
-    try merge(allocator, &node.inline_config, config);
+    try mergeInline(allocator, &node.inline_config, config);
     try merge(allocator, &node.raw_config, config);
     try merge(allocator, &node.effective_config, config);
     try apply(allocator, node);
@@ -76,7 +76,24 @@ pub fn merge(allocator: std.mem.Allocator, target: *std.json.Value, source: std.
 }
 
 pub fn mergeField(allocator: std.mem.Allocator, target: *std.json.Value, key: []const u8, value: std.json.Value) !void {
-    if (std.mem.eql(u8, key, "tags") or std.mem.eql(u8, key, "pre-hook") or std.mem.eql(u8, key, "post-hook")) {
+    return mergeFieldWithMode(allocator, target, key, value, false);
+}
+
+pub fn mergeAuthoredField(allocator: std.mem.Allocator, target: *std.json.Value, key: []const u8, value: std.json.Value) !void {
+    return mergeFieldWithMode(allocator, target, key, value, true);
+}
+
+pub fn mergeAuthored(allocator: std.mem.Allocator, target: *std.json.Value, source: std.json.Value) !void {
+    if (source == .null) return;
+    if (source != .object) return error.InvalidConfiguration;
+    var iterator = source.object.iterator();
+    while (iterator.next()) |entry| try mergeFieldWithMode(allocator, target, normalizeKey(entry.key_ptr.*), entry.value_ptr.*, true);
+}
+
+const mergeInline = mergeAuthored;
+
+fn mergeFieldWithMode(allocator: std.mem.Allocator, target: *std.json.Value, key: []const u8, value: std.json.Value, preserve_grant_prefix: bool) !void {
+    if (std.mem.eql(u8, key, "tags") or std.mem.eql(u8, key, "pre-hook") or std.mem.eql(u8, key, "post-hook") or std.mem.eql(u8, key, "packages")) {
         var merged = std.json.Array.init(allocator);
         var result: std.json.Value = .{ .array = merged };
         defer values.deinit(allocator, &result);
@@ -84,14 +101,56 @@ pub fn mergeField(allocator: std.mem.Allocator, target: *std.json.Value, key: []
         try appendList(allocator, &merged, value, std.mem.eql(u8, key, "tags"));
         result.array = merged;
         try values.put(allocator, target, key, result);
-    } else if (std.mem.eql(u8, key, "meta") or std.mem.eql(u8, key, "grants") or std.mem.eql(u8, key, "column_types") or std.mem.eql(u8, key, "persist_docs")) {
+    } else if (std.mem.eql(u8, key, "grants")) {
+        if (value != .object) return error.InvalidConfiguration;
+        var merged: std.json.Value = .{ .object = .empty };
+        defer values.deinit(allocator, &merged);
+        if (values.get(target.*, key)) |existing| {
+            if (existing != .object) return error.InvalidConfiguration;
+            var it = existing.object.iterator();
+            while (it.next()) |entry| try putGrantList(allocator, &merged, entry.key_ptr.*, entry.value_ptr.*, false);
+        }
+        var it = value.object.iterator();
+        while (it.next()) |entry| {
+            const grant = entry.key_ptr.*;
+            const append = std.mem.startsWith(u8, grant, "+");
+            const base = std.mem.trimStart(u8, grant, "+");
+            if (preserve_grant_prefix) {
+                const prefixed = try std.fmt.allocPrint(allocator, "+{s}", .{base});
+                defer allocator.free(prefixed);
+                if (!append) {
+                    if (merged.object.fetchOrderedRemove(prefixed)) |removed| {
+                        var owned = removed.value;
+                        allocator.free(removed.key);
+                        values.deinit(allocator, &owned);
+                    }
+                    try putGrantList(allocator, &merged, base, entry.value_ptr.*, false);
+                } else if (values.get(merged, base) != null) {
+                    try putGrantList(allocator, &merged, base, entry.value_ptr.*, true);
+                } else try putGrantList(allocator, &merged, prefixed, entry.value_ptr.*, true);
+            } else try putGrantList(allocator, &merged, base, entry.value_ptr.*, append);
+        }
+        try values.put(allocator, target, key, merged);
+    } else if (std.mem.eql(u8, key, "meta") or std.mem.eql(u8, key, "column_types") or std.mem.eql(u8, key, "quoting") or std.mem.eql(u8, key, "docs") or std.mem.eql(u8, key, "contract")) {
+        if (value != .object) return error.InvalidConfiguration;
         var merged: std.json.Value = if (values.get(target.*, key)) |existing| try values.clone(allocator, existing) else .null;
         defer values.deinit(allocator, &merged);
-        if (value == .null) try values.put(allocator, target, key, value) else {
-            try values.overlay(allocator, &merged, value);
-            try values.put(allocator, target, key, merged);
-        }
+        try values.overlay(allocator, &merged, value);
+        try values.put(allocator, target, key, merged);
     } else try values.put(allocator, target, key, value);
+}
+
+fn putGrantList(allocator: std.mem.Allocator, target: *std.json.Value, key: []const u8, value: std.json.Value, append: bool) !void {
+    var list: std.json.Value = .{ .array = std.json.Array.init(allocator) };
+    defer values.deinit(allocator, &list);
+    if (append) if (values.get(target.*, key)) |previous| {
+        if (previous != .array) return error.InvalidConfiguration;
+        for (previous.array.items) |item| try list.array.append(try values.clone(allocator, item));
+    };
+    if (value == .array) {
+        for (value.array.items) |item| try list.array.append(try values.clone(allocator, item));
+    } else try list.array.append(try values.clone(allocator, value));
+    try values.put(allocator, target, key, list);
 }
 
 fn appendList(allocator: std.mem.Allocator, list: *std.json.Array, value: std.json.Value, unique: bool) !void {

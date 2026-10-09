@@ -98,7 +98,7 @@ pub fn finalize(runtime: types.Runtime, graph: *types.Graph) !void {
         if (node.snapshot_config == null) continue;
         for (graph.snapshot_properties.items) |patch| {
             if (!std.mem.eql(u8, patch.package_name, node.package_name) or !std.mem.eql(u8, patch.name, node.name)) continue;
-            try resource_config.merge(graph.allocator, &node.property_config, patch.properties.object.get("config") orelse .null);
+            try resource_config.mergeAuthored(graph.allocator, &node.property_config, patch.properties.object.get("config") orelse .null);
             inline for (.{ "tags", "docs", "meta" }) |key| {
                 if (patch.properties.object.get(key)) |value| try resource_config.mergeField(graph.allocator, &node.property_config, key, value);
             }

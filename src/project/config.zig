@@ -54,7 +54,7 @@ pub fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathCon
             if (!modelPathConfigMatches(config.path, resource_path)) continue;
             typed_path = true;
             const layer = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) &node.root_override_config else &node.project_config;
-            try @import("resource_config.zig").merge(graph.allocator, layer, config.values);
+            try @import("resource_config.zig").mergeAuthored(graph.allocator, layer, config.values);
             const raw_layer = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) &node.root_override_raw_config else &node.project_raw_config;
             try @import("resource_config.zig").merge(graph.allocator, raw_layer, if (config.raw_values != .null) config.raw_values else config.values);
         }

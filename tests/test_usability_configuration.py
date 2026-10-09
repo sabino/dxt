@@ -846,3 +846,36 @@ def test_postgres_catalog_rejects_unavailable_source_database(tmp_path, configur
     configure_adapter(pair, request, 'postgres')
     pair.write('models/sources.yml', "version: 2\nsources:\n  - name: warehouse\n    database: unavailable_database\n    schema: main\n    tables:\n      - name: missing\n")
     pair.invoke('docs generate', success=False)
+
+
+def test_core_config_overlay_dict_updates_list_append_and_grant_prefixes(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.append_project("""models:
+  configuration_fixture:
+    +grants: {select: [project_reader], insert: project_writer}
+    +docs: {show: false, node_color: '#110000'}
+    +quoting: {schema: false}
+    +contract: {enforced: false, alias_types: false}
+    +persist_docs: {relation: true, columns: true}
+    +packages: [project_dependency]
+""")
+    pair.write('models/properties.yml', """version: 2
+models:
+  - name: rendered
+    config:
+      grants: {+select: [yaml_reader], insert: yaml_writer}
+      docs: {show: true}
+      quoting: {identifier: false}
+      contract: {enforced: false}
+      persist_docs: {relation: false}
+      packages: [yaml_dependency]
+""")
+    pair.write('models/marts/rendered.sql', """{{ config(grants={'+select': ['inline_reader'], 'insert': 'inline_writer'}, docs={'node_color': '#ff0000'}, quoting={'database': false}, contract={'alias_types': true}, persist_docs={'columns': false}, packages=['inline_dependency']) }}
+{{ config(grants={'+select': ['extra_reader']}) }}
+select 1 as id
+""")
+    actual, expected = pair.invoke('compile')
+    actual_config = actual['nodes']['model.configuration_fixture.rendered']['config']
+    expected_config = expected['nodes']['model.configuration_fixture.rendered']['config']
+    for key in ['grants', 'docs', 'quoting', 'contract', 'persist_docs', 'packages']:
+        assert actual_config[key] == expected_config[key], key
