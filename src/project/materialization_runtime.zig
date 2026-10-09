@@ -15,8 +15,14 @@ pub const BodyExecutor = struct {
 };
 
 pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node) !void {
+    if (try executeReturning(runtime, db_path, graph, node)) |result| result.deinit(runtime.allocator);
+}
+
+pub fn executeReturning(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node) !?@import("materialization_result.zig").Result {
+    if (try @import("custom_materialization.zig").custom(graph, node)) |macro| return try @import("custom_materialization.zig").execute(runtime, db_path, graph, node, macro);
     var marker: u8 = 0;
-    return executeWithBody(runtime, db_path, graph, node, .{ .context = &marker, .execute = stockBody });
+    try executeWithBody(runtime, db_path, graph, node, .{ .context = &marker, .execute = stockBody });
+    return null;
 }
 
 pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node, body: BodyExecutor) !void {

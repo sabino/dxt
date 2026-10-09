@@ -225,6 +225,15 @@ pub const OperationHost = struct {
         return if (self.currentSession()) |session| session.lastError() else null;
     }
 
+    pub fn result(self: *const OperationHost, name: []const u8) ?expression.Value {
+        var index = self.stored.items.len;
+        while (index != 0) {
+            index -= 1;
+            if (std.mem.eql(u8, self.stored.items[index].name, name)) return self.stored.items[index].value;
+        }
+        return null;
+    }
+
     pub fn heldRuntime(self: *OperationHost) !Runtime {
         try self.ensureSession();
         var runtime = self.runtime;
@@ -260,6 +269,25 @@ pub const OperationHost = struct {
 
     fn call(raw: *anyopaque, name: []const u8, args: []const expression.Argument, allocator: std.mem.Allocator) anyerror!expression.Value {
         const self: *OperationHost = @ptrCast(@alignCast(raw));
+        if (std.mem.eql(u8, name, "write")) {
+            const payload = argument(args, "payload", 0) orelse return error.InvalidJinjaArguments;
+            if (args.len != 1 or payload != .string) return error.InvalidJinjaArguments;
+            const node = self.current_node orelse return error.InvalidJinjaArguments;
+            if (std.mem.eql(u8, node.resource_type, "source")) return error.InvalidJinjaArguments;
+            const a = self.values.allocator();
+            var target_path = self.graph.command_options.target_path orelse "target";
+            if (self.graph.command_options.target_path == null) for (self.graph.semantic_project_configs.items) |config| {
+                if (std.mem.eql(u8, config.package_name, self.graph.project_name)) if (config_values.get(config.rendered, "target-path")) |value| {
+                    if (value == .string) target_path = value.string;
+                };
+            };
+            const base = if (std.fs.path.isAbsolute(target_path)) target_path else try std.fs.path.join(a, &.{ self.graph.command_options.project_dir, target_path });
+            const relative = if (node.snapshot_yaml_definition) try std.fmt.allocPrint(a, "{s}/{s}.sql", .{ node.original_file_path, node.name }) else node.original_file_path;
+            const path = try std.fs.path.join(a, &.{ base, "run", node.package_name, relative });
+            if (std.fs.path.dirname(path)) |parent| try std.Io.Dir.cwd().createDirPath(self.runtime.io, parent);
+            try std.Io.Dir.cwd().writeFile(self.runtime.io, .{ .sub_path = path, .data = payload.string });
+            return .{ .string = "" };
+        }
         if (std.mem.eql(u8, name, "adapter.warn_once")) {
             const message = argument(args, "msg", 0) orelse return error.InvalidJinjaArguments;
             if (args.len != 1 or message != .string) return error.InvalidJinjaArguments;
@@ -350,6 +378,21 @@ pub const OperationHost = struct {
             try self.stored.append(self.runtime.allocator, .{ .name = try self.values.allocator().dupe(u8, key.string), .value = try @import("dbt_context.zig").cloneValue(self.values.allocator(), value) });
             return .{ .string = "" };
         }
+        if (std.mem.eql(u8, name, "store_raw_result")) {
+            const key = argument(args, "name", 0) orelse return error.InvalidJinjaArguments;
+            const message = argument(args, "message", 1) orelse expression.Value.none;
+            const code = argument(args, "code", 2) orelse expression.Value.none;
+            const count = argument(args, "rows_affected", 3) orelse expression.Value.none;
+            const table = argument(args, "agate_table", 4) orelse expression.Value.none;
+            const response: expression.Value = .{ .object = try self.values.allocator().dupe(expression.Entry, &.{
+                .{ .key = "__dxt_adapter_response", .value = .{ .boolean = true } },
+                .{ .key = "__dxt_rendered", .value = message },
+                .{ .key = "_message", .value = message },
+                .{ .key = "code", .value = code },
+                .{ .key = "rows_affected", .value = count },
+            }) };
+            return try call(self, "store_result", &.{ .{ .name = "name", .value = key }, .{ .name = "response", .value = response }, .{ .name = "agate_table", .value = table } }, allocator);
+        }
         if (std.mem.eql(u8, name, "adapter.execute")) {
             const sql = argument(args, "sql", 0) orelse return error.InvalidJinjaArguments;
             if (sql != .string) return error.InvalidJinjaArguments;
@@ -386,7 +429,7 @@ pub const OperationHost = struct {
             const value: expression.Value = .{ .object = try self.values.allocator().dupe(expression.Entry, &.{
                 .{ .key = "table", .value = if (fetch.truthy()) table else .none },
                 .{ .key = "data", .value = if (fetch.truthy() and table != .none) table.attribute("__dxt_data") else .{ .list = &.{} } },
-                .{ .key = "response", .value = .{ .object = &.{} } },
+                .{ .key = "response", .value = self.last_response },
             }) };
             try self.stored.append(self.runtime.allocator, .{ .name = try self.values.allocator().dupe(u8, key.string), .value = value });
             return .{ .string = "" };
@@ -427,7 +470,7 @@ pub const OperationHost = struct {
             code = .{ .string = try label.toOwnedSlice(allocator) };
             affected = if (has_count) try expression.integerValue(allocator, output.rows_changed) else .{ .integer = "-1" };
         }
-        self.last_response = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "__dxt_rendered", .value = .{ .string = message } }, .{ .key = "_message", .value = .{ .string = message } }, .{ .key = "code", .value = code }, .{ .key = "rows_affected", .value = affected } }) };
+        self.last_response = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "__dxt_adapter_response", .value = .{ .boolean = true } }, .{ .key = "__dxt_rendered", .value = .{ .string = message } }, .{ .key = "_message", .value = .{ .string = message } }, .{ .key = "code", .value = code }, .{ .key = "rows_affected", .value = affected } }) };
         if (std.ascii.eqlIgnoreCase(trimmed, "begin") or std.ascii.eqlIgnoreCase(trimmed, "begin transaction")) self.transaction_open = true;
         if (std.ascii.eqlIgnoreCase(trimmed, "commit") or std.ascii.eqlIgnoreCase(trimmed, "rollback")) self.transaction_open = false;
         // Native query results distinguish empty SELECTs from statements.

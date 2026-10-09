@@ -1422,11 +1422,11 @@ fn validateConcurrentResources(runtime: Runtime, graph: *const Graph, resources:
             } else if (std.mem.eql(u8, node.resource_type, "snapshot")) {
                 try snapshot_runner.validateExecution(graph, node);
             } else {
-                if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) {
+                if (!try @import("project/custom_materialization.zig").supports(graph, node)) {
                     if (std.mem.eql(u8, label, "Build")) return error.UnsupportedBuildModelMaterialization;
                     return error.UnsupportedModelMaterialization;
                 }
-                if (std.mem.eql(u8, node.materialized, "incremental")) try incremental_config.validateForAdapter(graph.adapter_type, node.incremental);
+                if (std.mem.eql(u8, node.materialized, "incremental") and try @import("project/custom_materialization.zig").custom(graph, node) == null) try incremental_config.validateForAdapter(graph.adapter_type, node.incremental);
             }
         },
         .generic => |node| try validateGenericTestExecution(node),
@@ -1699,7 +1699,7 @@ fn validateRunMaterializations(graph: *const Graph, nodes: []const *Node) !void 
     for (nodes) |node| {
         if (std.mem.eql(u8, node.language, "python")) return error.UnsupportedPythonModelExecution;
         if (std.mem.eql(u8, node.resource_type, "snapshot")) continue;
-        if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) return error.UnsupportedModelMaterialization;
+        if (!try @import("project/custom_materialization.zig").supports(graph, node)) return error.UnsupportedModelMaterialization;
     }
 }
 
@@ -1707,7 +1707,7 @@ fn validateBuildMaterializations(graph: *const Graph, nodes: []const *Node) !voi
     for (nodes) |node| {
         if (std.mem.eql(u8, node.language, "python")) return error.UnsupportedPythonModelExecution;
         if (std.mem.eql(u8, node.resource_type, "snapshot")) continue;
-        if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) return error.UnsupportedBuildModelMaterialization;
+        if (!try @import("project/custom_materialization.zig").supports(graph, node)) return error.UnsupportedBuildModelMaterialization;
     }
 }
 
@@ -1739,7 +1739,7 @@ fn validateSeedModelBuildExecution(graph: *const Graph, nodes: []const *Node) !v
             try snapshot_runner.validateExecution(graph, node);
         } else if (std.mem.eql(u8, node.resource_type, "model")) {
             if (std.mem.eql(u8, node.language, "python")) return error.UnsupportedPythonModelExecution;
-            if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) return error.UnsupportedBuildModelMaterialization;
+            if (!try @import("project/custom_materialization.zig").supports(graph, node)) return error.UnsupportedBuildModelMaterialization;
         } else {
             return error.UnsupportedBuildSelection;
         }
@@ -1837,8 +1837,8 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
         try executed.append(runtime.allocator, row);
         return std.mem.eql(u8, row.status, "success");
     }
-    const execution = @import("project/materialization_runtime.zig").execute(runtime, db_path, graph, node);
-    execution catch |err| switch (err) {
+    const execution = @import("project/materialization_runtime.zig").executeReturning(runtime, db_path, graph, node);
+    const response = execution catch |err| switch (err) {
         error.ModelContractMismatch, error.ContractColumnTypeMissing => {
             const message = if (@import("project/compile_diagnostics.zig").message(err)) |text| try runtime.allocator.dupe(u8, text) else try std.fmt.allocPrint(runtime.allocator, "Model contract failed: {s}", .{@errorName(err)});
             errdefer runtime.allocator.free(message);
@@ -1849,27 +1849,40 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
             try appendExecutionErrorResult(runtime.allocator, executed, node);
             return false;
         },
+        error.InvalidMaterializationReturn, error.MissingMaterializationMain, error.InvalidMaterializationResponse, error.UnsupportedMaterializationLanguage, error.JinjaCompilerError => {
+            try appendMaterializationErrorResult(runtime.allocator, executed, node, err);
+            return false;
+        },
         else => return err,
     };
-    try executed.append(runtime.allocator, .{ .node = node });
+    try executed.append(runtime.allocator, if (response) |result| result.row(node) else .{ .node = node });
     return true;
 }
 
 fn executeSeedAppendingResult(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node, executed: *std.ArrayList(run_results.NodeResult)) !bool {
     _ = project_dir;
-    @import("project/materialization_runtime.zig").execute(runtime, db_path, graph, node) catch |err| switch (err) {
+    const response = @import("project/materialization_runtime.zig").executeReturning(runtime, db_path, graph, node) catch |err| switch (err) {
         error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.CannotSeedView => {
             try appendExecutionErrorResult(runtime.allocator, executed, node);
             return false;
         },
+        error.InvalidMaterializationReturn, error.MissingMaterializationMain, error.InvalidMaterializationResponse, error.UnsupportedMaterializationLanguage, error.JinjaCompilerError => {
+            try appendMaterializationErrorResult(runtime.allocator, executed, node, err);
+            return false;
+        },
         else => return err,
     };
-    try executed.append(runtime.allocator, .{ .node = node });
+    try executed.append(runtime.allocator, if (response) |result| result.row(node) else .{ .node = node });
     return true;
 }
 
+fn appendMaterializationErrorResult(allocator: std.mem.Allocator, executed: *std.ArrayList(run_results.NodeResult), node: *const Node, err: anyerror) !void {
+    const message = @import("project/compile_diagnostics.zig").message(err) orelse @errorName(err);
+    try executed.append(allocator, .{ .node = node, .status = "error", .message = try allocator.dupe(u8, message) });
+}
+
 fn appendExecutionErrorResult(allocator: std.mem.Allocator, executed: *std.ArrayList(run_results.NodeResult), node: *const Node) !void {
-    const message = try allocator.dupe(u8, execution_failure_message);
+    const message = try allocator.dupe(u8, @import("project/compile_diagnostics.zig").message(error.DuckDbExecutionFailed) orelse @import("project/compile_diagnostics.zig").message(error.PostgresExecutionFailed) orelse execution_failure_message);
     errdefer allocator.free(message);
     try executed.append(allocator, .{
         .node = node,
