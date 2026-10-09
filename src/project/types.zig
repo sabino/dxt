@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const config_value = @import("config_value.zig");
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -39,6 +40,8 @@ pub const Output = enum {
 pub const VarEntry = struct {
     name: []const u8,
     value: []const u8,
+    typed_value: ?std.json.Value = null,
+    package_name: ?[]const u8 = null,
 };
 
 pub const ProjectConfig = struct {
@@ -77,6 +80,8 @@ pub const ModelPathConfig = struct {
     incremental: IncrementalConfig = .{},
     tags: std.ArrayList([]const u8) = .empty,
     docs: DocsConfig = .{},
+    resource_type: []const u8 = "model",
+    values: std.json.Value = .null,
 };
 
 pub const SourceProjectConfig = struct {
@@ -284,6 +289,8 @@ pub const ModelProperty = struct {
     enabled: ?bool = null,
     quote_columns: ?bool = null,
     seed_column_types: std.ArrayList(SeedColumnType) = .empty,
+    config_values: std.json.Value = .null,
+    properties: std.json.Value = .null,
 };
 
 pub const SeedColumnType = struct {
@@ -369,6 +376,9 @@ pub const Node = struct {
     compiled_path: ?[]const u8 = null,
     relation_name: ?[]const u8 = null,
     extra_ctes: std.ArrayList(ExtraCte) = .empty,
+    raw_config: std.json.Value = .null,
+    effective_config: std.json.Value = .null,
+    inline_config: std.json.Value = .null,
 };
 
 pub const IncrementalConfigMask = struct {
@@ -563,7 +573,7 @@ pub const Graph = struct {
         self.macro_argument_warnings.deinit(self.allocator);
         deinitDispatchConfigs(self.allocator, &self.dispatch_configs);
         self.source_project_configs.deinit(self.allocator);
-        self.vars.deinit(self.allocator);
+        deinitVars(self.allocator, &self.vars);
     }
 };
 
@@ -580,6 +590,7 @@ pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig)
     for (config.model_path_configs.items) |*path_config| {
         path_config.tags.deinit(allocator);
         path_config.incremental.deinit(allocator);
+        config_value.deinit(allocator, &path_config.values);
     }
     config.model_paths.deinit(allocator);
     config.seed_paths.deinit(allocator);
@@ -591,8 +602,13 @@ pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig)
     config.model_path_configs.deinit(allocator);
     config.source_project_configs.deinit(allocator);
     deinitDispatchConfigs(allocator, &config.dispatch_configs);
-    config.vars.deinit(allocator);
+    deinitVars(allocator, &config.vars);
     config.clean_targets.deinit(allocator);
+}
+
+pub fn deinitVars(allocator: std.mem.Allocator, vars: *std.ArrayList(VarEntry)) void {
+    for (vars.items) |*entry| if (entry.typed_value) |*value| config_value.deinit(allocator, value);
+    vars.deinit(allocator);
 }
 
 pub fn deinitDispatchConfigs(allocator: std.mem.Allocator, configs: *std.ArrayList(DispatchConfig)) void {
@@ -603,6 +619,9 @@ pub fn deinitDispatchConfigs(allocator: std.mem.Allocator, configs: *std.ArrayLi
 }
 
 pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
+    config_value.deinit(allocator, &node.raw_config);
+    config_value.deinit(allocator, &node.effective_config);
+    config_value.deinit(allocator, &node.inline_config);
     if (node.project_root) |project_root| allocator.free(project_root);
     node.tags.deinit(allocator);
     node.incremental.deinit(allocator);
@@ -693,6 +712,8 @@ fn deinitMacro(allocator: std.mem.Allocator, macro: *MacroDef) void {
 }
 
 fn deinitModelProperty(allocator: std.mem.Allocator, property: *ModelProperty) void {
+    config_value.deinit(allocator, &property.config_values);
+    config_value.deinit(allocator, &property.properties);
     property.incremental.deinit(allocator);
     property.tags.deinit(allocator);
     property.doc_blocks.deinit(allocator);

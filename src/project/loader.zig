@@ -7,6 +7,7 @@ const snapshot = @import("snapshot.zig");
 const project_resolve = @import("resolve.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
+const config_value = @import("config_value.zig");
 
 const Runtime = types.Runtime;
 const Options = types.Options;
@@ -79,7 +80,12 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     }
     try appendDispatchConfigsToGraph(runtime.allocator, &graph, config.dispatch_configs.items);
     try appendSourceProjectConfigsToGraph(runtime.allocator, &graph, config.source_project_configs.items);
-    try graph.vars.appendSlice(runtime.allocator, config.vars.items);
+    for (config.vars.items) |entry| try graph.vars.append(runtime.allocator, .{
+        .name = entry.name,
+        .value = entry.value,
+        .typed_value = if (entry.typed_value) |value| try config_value.clone(runtime.allocator, value) else null,
+        .package_name = entry.package_name,
+    });
     if (options.vars) |vars_text| {
         try parseVarsText(runtime.allocator, vars_text, &graph.vars);
     }
