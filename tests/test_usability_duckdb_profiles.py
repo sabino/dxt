@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 
 import duckdb
 import pytest
@@ -169,6 +170,25 @@ def test_native_profile_retries_real_typed_query_errors_like_core(tmp_path):
             "select currval('retry_counter') as attempts")
         successful(invoke(project, engine))
         assert query(project, "duckdb", "select * from retried") == [(2,)]
+
+
+def test_native_profile_connect_retries_a_real_writer_lock_like_core(tmp_path):
+    for project, engine in zip(projects(tmp_path), ("dxt", "dbt")):
+        profile(project, retries={"connect_attempts": 3})
+        (project / "models/observed.sql").write_text(
+            "{{ config(materialized='table') }} select * from existing")
+        connection = duckdb.connect(str(project / "warehouse.duckdb"))
+        connection.execute("create table existing as select 7 as id")
+        # A separate native process must wait until this writer releases the
+        # actual file lock. Query retries are left disabled in this profile.
+        release = threading.Timer(1.5, connection.close)
+        release.start()
+        try:
+            successful(invoke(project, engine))
+        finally:
+            release.join()
+            connection.close()
+        assert query(project, "duckdb", "select * from observed") == [(7,)]
 
 
 def test_memory_database_keeps_profile_state_when_keep_open_is_false(tmp_path):
