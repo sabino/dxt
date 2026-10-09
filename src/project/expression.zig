@@ -649,6 +649,7 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
     }
     if (receiver == .string) {
         const text_ = receiver.string;
+        if (std.mem.eql(u8, name_, "format")) return .{ .string = try @import("expression_format.zig").render(allocator, text_, args) };
         if (std.mem.eql(u8, name_, "casefold")) {
             if (args.len != 0) return error.InvalidJinjaArguments;
             return .{ .string = try unicode.convert(allocator, receiver.string, .casefold) };
