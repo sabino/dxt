@@ -36,6 +36,15 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=gnu99", "-fno-strict-aliasing", "-fwrapv", "-Wno-unused-function", "-Wno-unused-variable", b.fmt("-ffile-prefix-map={s}=.", .{b.build_root.path orelse "."}) },
     });
     mod.linkLibrary(pg_parser);
+    // Syntax only: the C Python grammar never imports or executes authored code.
+    // Zig owns dbt's static model validation, literal arguments and graph data.
+    mod.addIncludePath(b.path("vendor/tree-sitter/include"));
+    mod.addIncludePath(b.path("vendor/tree-sitter/src"));
+    mod.addIncludePath(b.path("vendor/tree-sitter-python/src"));
+    mod.addCSourceFiles(.{
+        .files = &.{ "vendor/tree-sitter/src/lib.c", "vendor/tree-sitter-python/src/parser.c", "vendor/tree-sitter-python/src/scanner.c" },
+        .flags = &.{ "-std=gnu11", b.fmt("-ffile-prefix-map={s}=.", .{b.build_root.path orelse "."}) },
+    });
 
     const exe = b.addExecutable(.{
         .name = "dxt",

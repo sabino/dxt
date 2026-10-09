@@ -10,6 +10,8 @@
         "src",
         "vendor/libyaml",
         "vendor/libpg_query",
+        "vendor/tree-sitter",
+        "vendor/tree-sitter-python",
         "vendor/dbt-docs",
         "vendor/dbt-includes",
         "vendor/unicode",
