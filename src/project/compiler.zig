@@ -3675,7 +3675,7 @@ test "compileModel skips loop-var refs and sources inside empty static loops" {
     try std.testing.expect(std.mem.indexOf(u8, compiled, "{%") == null);
 }
 
-test "compileModel rejects static for loops over unknown lists" {
+test "compileModel iterates ordinary Undefined as an empty list" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -3690,7 +3690,9 @@ test "compileModel rejects static for loops over unknown lists" {
         .raw_code = "{% for payment_method in payment_methods %}{{ payment_method }}{% endfor %}",
     });
 
-    try std.testing.expectError(error.UndefinedJinjaValue, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("", compiled);
 }
 
 test "compileModel accepts scalar set values" {
@@ -3748,7 +3750,9 @@ test "compileModel keeps static set assignments loop-local" {
         .raw_code = "{% set xs = ['a'] %}{% for x in xs %}{% set ys = ['b'] %}{% endfor %}{% for y in ys %}{{ y }}{% endfor %}",
     });
 
-    try std.testing.expectError(error.UndefinedJinjaValue, compileModel(allocator, &graph, &graph.nodes.items[0]));
+    const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
+    defer allocator.free(compiled);
+    try std.testing.expectEqualStrings("", compiled);
 }
 
 test "compileModel keeps iteration values stable when loop body shadows source list" {

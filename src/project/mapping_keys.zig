@@ -47,6 +47,7 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
         .callable,
         .undefined,
         .conditional_undefined,
+        .ordinary_undefined,
         .capture_undefined,
         => {},
         .tuple => |items| for (items) |item| try checkHashable(item, depth + 1),
@@ -234,6 +235,12 @@ test "capture Undefined dictionary keys retain Python class equality" {
     try hashable(first);
     try std.testing.expect(keyEqual(first, second));
     try std.testing.expect(!keyEqual(first, .undefined));
+    const ordinary_first = try expression.undefinedValue(allocator, "first");
+    const ordinary_second = try expression.undefinedValue(allocator, "second");
+    try hashable(ordinary_first);
+    try std.testing.expect(keyEqual(ordinary_first, ordinary_second));
+    try std.testing.expect(!keyEqual(first, ordinary_first));
+    try std.testing.expectError(error.JinjaTypeError, jsonKey(allocator, ordinary_first));
 }
 
 test "JSON keys stringify primitives and sort original numeric types exactly" {
