@@ -43,6 +43,28 @@ pub fn writeSelectedJsonWithKeys(writer: *Io.Writer, selected: []selector.Select
     try writer.writeAll("]\n");
 }
 
+/// Core's list JSON output is one object per line. Reading from the same
+/// manifest node preserves typed config/dependency fields and permits every
+/// authored top-level --output-keys field that Core exposes.
+pub fn writeSelectedJsonLines(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, selected: []selector.SelectedResource, output_keys: ?[]const []const u8) !void {
+    const rendered = try renderManifest(allocator, graph);
+    defer allocator.free(rendered);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+    const defaults = [_][]const u8{ "alias", "name", "package_name", "depends_on", "tags", "config", "resource_type", "source_name", "original_file_path", "unique_id" };
+    const keys = output_keys orelse &defaults;
+    for (selected) |item| {
+        const collection = if (std.mem.eql(u8, item.resource_type, "source")) "sources" else if (std.mem.eql(u8, item.resource_type, "exposure")) "exposures" else if (std.mem.eql(u8, item.resource_type, "metric")) "metrics" else if (std.mem.eql(u8, item.resource_type, "semantic_model")) "semantic_models" else if (std.mem.eql(u8, item.resource_type, "saved_query")) "saved_queries" else if (std.mem.eql(u8, item.resource_type, "unit_test")) "unit_tests" else "nodes";
+        const resources = parsed.value.object.get(collection) orelse return error.InvalidListResource;
+        const node = resources.object.get(item.unique_id) orelse return error.InvalidListResource;
+        var object: std.json.ObjectMap = .empty;
+        defer object.deinit(allocator);
+        for (keys) |key| if (node.object.get(key)) |value| try object.put(allocator, key, value);
+        try std.json.Stringify.value(std.json.Value{ .object = object }, .{}, writer);
+        try writer.writeByte('\n');
+    }
+}
+
 fn writeSelectedJsonObject(writer: *Io.Writer, item: selector.SelectedResource) !void {
     try writer.writeAll("{\"unique_id\":");
     try json.string(writer, item.unique_id);

@@ -22,7 +22,26 @@ pub const ExitCode = enum(u8) {
 
 pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, runtime: ?Runtime) !ExitCode {
     const rt = runtime orelse return runCommand(args, stdout, stderr, runtime);
-    var json_logs = false;
+    var arena = std.heap.ArenaAllocator.init(rt.allocator);
+    defer arena.deinit();
+    var scoped = rt;
+    scoped.allocator = arena.allocator();
+    const prepared = @import("project/cli_options.zig").prepare(scoped, args) catch |err| return commandError(err, stderr);
+    scoped.global_options = &prepared.options;
+    // Serving is long lived and must publish its listening address immediately.
+    if (prepared.args.len > 2 and equals(prepared.args[1], "docs") and equals(prepared.args[2], "serve")) return runPrepared(prepared.args, stdout, stderr, scoped);
+    var output: Io.Writer.Allocating = .init(scoped.allocator);
+    defer output.deinit();
+    var diagnostics: Io.Writer.Allocating = .init(scoped.allocator);
+    defer diagnostics.deinit();
+    const code = try runPrepared(prepared.args, &output.writer, &diagnostics.writer, scoped);
+    try @import("project/cli_logs.zig").finish(scoped, prepared.options, prepared.args, stdout, stderr, output.written(), diagnostics.written());
+    return code;
+}
+
+fn runPrepared(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, runtime: ?Runtime) !ExitCode {
+    const rt = runtime orelse return runCommand(args, stdout, stderr, runtime);
+    var json_logs = if (rt.global_options) |options| options.log_format == .json else false;
     for (args, 0..) |arg, index| if (equals(arg, "--log-format") and index + 1 < args.len) {
         json_logs = equals(args[index + 1], "json");
     };
@@ -54,7 +73,7 @@ fn emitBufferedDiagnostics(runtime: Runtime, writer: *Io.Writer, text: []const u
         try writer.writeAll("{\"data\":{\"message\":");
         try std.json.Stringify.value(line, .{}, writer);
         try writer.writeAll("},\"info\":{\"name\":\"Diagnostic\",\"level\":");
-        try std.json.Stringify.value(if (std.mem.startsWith(u8, line, "error:")) "error" else "info", .{}, writer);
+        try std.json.Stringify.value(if (std.mem.startsWith(u8, line, "error:")) "error" else if (std.mem.startsWith(u8, line, "warning:")) "warn" else "info", .{}, writer);
         try writer.writeAll(",\"thread\":\"MainThread\",\"ts\":");
         try @import("project/execution_clock.zig").writeTimestamp(writer, @import("project/execution_clock.zig").now(runtime.io));
         try writer.writeAll(",\"invocation_id\":");
@@ -64,6 +83,7 @@ fn emitBufferedDiagnostics(runtime: Runtime, writer: *Io.Writer, text: []const u
 }
 
 fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, runtime: ?Runtime) !ExitCode {
+    if (runtime) |rt| @import("project/cli_options.zig").startupWarnings(rt, stderr) catch |err| return commandError(err, stderr);
     if (args.len <= 1) {
         try printRootHelp(stdout);
         return .ok;
@@ -91,7 +111,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
                 if (equals(arg, "--environment")) workflow_options.environment = value else if (equals(arg, "--from-environment")) workflow_options.from_environment = value else if (equals(arg, "--plan")) workflow_options.plan_file = value else if (equals(arg, "--workflow-config")) workflow_options.config_file = value else if (equals(arg, "--start")) workflow_options.start = value else workflow_options.end = value;
             } else try remaining.append(rt.allocator, arg);
         }
-        const options = parseOptions(rt.allocator, remaining.items, stderr, .compile) catch |err| return commandError(err, stderr);
+        const options = parseOptions(rt.allocator, remaining.items, stderr, .compile, rt.global_options) catch |err| return commandError(err, stderr);
         project.workflow(rt, command, options, workflow_options, stdout) catch |err| return commandError(err, stderr);
         return .ok;
     }
@@ -117,7 +137,14 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             try stderr.writeAll("error: runtime I/O is required for deps\n");
             return .usage;
         };
-        const options = dependencies.parseOptions(args[2..], stderr) catch |err| return commandError(err, stderr);
+        var options = dependencies.parseOptions(args[2..], stderr) catch |err| return commandError(err, stderr);
+        if (rt.global_options) |globals| {
+            var explicit_project = false;
+            for (args[2..]) |arg| if (equals(arg, "--project-dir")) {
+                explicit_project = true;
+            };
+            if (!explicit_project) options.project_dir = globals.project_dir;
+        }
         dependencies.install(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
@@ -149,7 +176,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             return .usage;
         };
         const mode: OptionMode = if (equals(command, "debug")) .debug else if (equals(command, "init")) .init else if (equals(command, "run-operation")) .operation else if (equals(command, "retry")) .retry else .clone;
-        var options = parseOptions(rt.allocator, args[2..], stderr, mode) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, mode, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
         const invocation = commandRuntime(rt, &options);
         if (mode == .debug) {
@@ -178,7 +205,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
         if (!equals(mode, "query") and !equals(mode, "explain") and !equals(mode, "export")) return commandError(error.InvalidMetricQuery, stderr);
         const rt = runtime orelse return .usage;
         const parsed = @import("project/metric_command.zig").parse(rt.allocator, args[3..], equals(mode, "explain"), equals(mode, "export")) catch |err| return commandError(err, stderr);
-        var options = parseOptions(rt.allocator, parsed.common, stderr, .common_only) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, parsed.common, stderr, .common_only, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = "metric";
         project.metricQuery(commandRuntime(rt, &options), options, parsed.query, stdout) catch |err| return commandError(err, stderr);
         return .ok;
@@ -190,7 +217,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             return .ok;
         }
         const rt = runtime orelse return .usage;
-        var options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .build, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
         project.snapshotRun(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
@@ -205,7 +232,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             try stderr.writeAll("error: runtime I/O is required for parse\n");
             return .usage;
         };
-        var options = parseOptions(rt.allocator, args[2..], stderr, .common_and_select) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .common_and_select, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
         project.parse(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
@@ -219,7 +246,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             try stderr.writeAll("error: runtime I/O is required for compile\n");
             return .usage;
         };
-        var options = parseOptions(rt.allocator, args[2..], stderr, .compile) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .compile, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
         project.compile(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
@@ -233,7 +260,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             try stderr.writeAll("error: runtime I/O is required for ls\n");
             return .usage;
         };
-        var options = parseOptions(rt.allocator, args[2..], stderr, .list) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .list, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
         project.list(commandRuntime(rt, &options), options, stdout) catch |err| return commandError(err, stderr);
         return .ok;
@@ -247,7 +274,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             try stderr.writeAll("error: runtime I/O is required for clean\n");
             return .usage;
         };
-        var options = parseOptions(rt.allocator, args[2..], stderr, .clean) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .clean, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
         project.cleanProject(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
@@ -261,7 +288,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             try stderr.writeAll("error: runtime I/O is required for run\n");
             return .usage;
         };
-        var options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .build, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
         project.runPreflight(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
@@ -275,7 +302,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             try stderr.writeAll("error: runtime I/O is required for seed\n");
             return .usage;
         };
-        var options = parseOptions(rt.allocator, args[2..], stderr, .seed) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .seed, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
         project.seedPreflight(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
@@ -289,7 +316,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             try stderr.writeAll("error: runtime I/O is required for test\n");
             return .usage;
         };
-        var options = parseOptions(rt.allocator, args[2..], stderr, .test_command) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .test_command, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
         project.testPreflight(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
@@ -303,7 +330,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
             try stderr.writeAll("error: runtime I/O is required for build\n");
             return .usage;
         };
-        var options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
+        var options = parseOptions(rt.allocator, args[2..], stderr, .build, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
         project.buildPreflight(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
@@ -318,7 +345,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
                 try stderr.writeAll("error: runtime I/O is required for source freshness\n");
                 return .usage;
             };
-            const options = parseOptions(rt.allocator, args[3..], stderr, .source_freshness) catch |err| return commandError(err, stderr);
+            const options = parseOptions(rt.allocator, args[3..], stderr, .source_freshness, rt.global_options) catch |err| return commandError(err, stderr);
             project.sourceFreshness(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
             return .ok;
         }
@@ -335,7 +362,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
                 try stderr.writeAll("error: runtime I/O is required for docs generate\n");
                 return .usage;
             };
-            var options = parseOptions(rt.allocator, args[3..], stderr, .docs_generate) catch |err| return commandError(err, stderr);
+            var options = parseOptions(rt.allocator, args[3..], stderr, .docs_generate, rt.global_options) catch |err| return commandError(err, stderr);
             options.which = "generate";
             project.docsGenerate(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
             return .ok;
@@ -349,7 +376,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
                 try stderr.writeAll("error: runtime I/O is required for docs serve\n");
                 return .usage;
             };
-            const options = parseOptions(rt.allocator, args[3..], stderr, .docs_serve) catch |err| return commandError(err, stderr);
+            const options = parseOptions(rt.allocator, args[3..], stderr, .docs_serve, rt.global_options) catch |err| return commandError(err, stderr);
             project.docsServe(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
             return .ok;
         }
@@ -410,6 +437,10 @@ fn printExtraCommandHelp(command: []const u8, writer: *Io.Writer) !void {
 
 fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
     switch (err) {
+        error.InvalidWarnErrorOptions, error.ConflictingWarnErrorOptionKeys => {
+            stderr.print("error: invalid warn-error-options policy: {s}\n", .{@errorName(err)}) catch {};
+            return .failure;
+        },
         error.WorkflowExecutionFailure => {
             stderr.writeAll("error: native workflow execution failed; the environment was not promoted\n") catch {};
             return .failure;
@@ -604,8 +635,9 @@ fn hasHelp(args: []const []const u8) bool {
     return false;
 }
 
-fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: *Io.Writer, mode: OptionMode) !project.Options {
-    var options = project.Options{};
+fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: *Io.Writer, mode: OptionMode, inherited: ?*const project.Options) !project.Options {
+    var options = if (inherited) |value| value.* else project.Options{};
+    if (mode == .list) options.output = .selector;
     var select_values: std.ArrayList([]const u8) = .empty;
     defer select_values.deinit(allocator);
     var selector_values: std.ArrayList([]const u8) = .empty;
@@ -614,6 +646,12 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
     defer exclude_values.deinit(allocator);
     var output_key_values: std.ArrayList([]const u8) = .empty;
     defer output_key_values.deinit(allocator);
+    var resource_values: std.ArrayList([]const u8) = .empty;
+    defer resource_values.deinit(allocator);
+    var excluded_resource_values: std.ArrayList([]const u8) = .empty;
+    defer excluded_resource_values.deinit(allocator);
+    var used_models = false;
+    var used_select = false;
 
     var i: usize = 0;
     while (i < args.len) {
@@ -640,11 +678,26 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             }
             continue;
         }
-        if (isSelectorOption(arg, mode)) {
+        if (equals(arg, "--resource-type") or equals(arg, "--resource-types") or equals(arg, "--exclude-resource-type") or equals(arg, "--exclude-resource-types")) {
+            if (mode != .list) return error.UnsupportedCommandOption;
+            const excluded = std.mem.startsWith(u8, arg, "--exclude-");
             i += 1;
             var consumed = false;
             while (i < args.len and !isOptionLike(args[i])) : (i += 1) {
-                if (equals(arg, "--select")) {
+                if (!@import("project/cli_options.zig").validResourceType(args[i], excluded)) return error.UnsupportedResourceType;
+                if (excluded) try excluded_resource_values.append(allocator, args[i]) else try resource_values.append(allocator, args[i]);
+                consumed = true;
+            }
+            if (!consumed) return error.InvalidOption;
+            continue;
+        }
+        if (isSelectorOption(arg, mode)) {
+            if (equals(arg, "--models")) used_models = true;
+            if (equals(arg, "--select")) used_select = true;
+            i += 1;
+            var consumed = false;
+            while (i < args.len and !isOptionLike(args[i])) : (i += 1) {
+                if (equals(arg, "--select") or equals(arg, "--models")) {
                     try validateSelector(args[i]);
                     try select_values.append(allocator, args[i]);
                 } else if (equals(arg, "--selector")) {
@@ -734,8 +787,8 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
             continue;
         }
         if (isFlag(arg, mode)) {
-            if (equals(arg, "--fail-fast")) {
-                options.fail_fast = true;
+            if (equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast")) {
+                options.fail_fast = equals(arg, "--fail-fast");
             } else if (equals(arg, "--full-refresh")) {
                 options.full_refresh = true;
             } else if (equals(arg, "--defer") or equals(arg, "--no-defer")) {
@@ -767,6 +820,12 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8, stderr: 
     if (selector_values.items.len != 0) options.selector = try joinSelectorValues(allocator, selector_values.items);
     if (exclude_values.items.len != 0) options.exclude = try joinSelectorValues(allocator, exclude_values.items);
     if (output_key_values.items.len != 0) options.output_keys = try allocator.dupe([]const u8, output_key_values.items);
+    if (resource_values.items.len != 0) options.resource_types = try allocator.dupe([]const u8, resource_values.items);
+    if (excluded_resource_values.items.len != 0) options.exclude_resource_types = try allocator.dupe([]const u8, excluded_resource_values.items);
+    if (used_models) {
+        if (used_select or options.resource_types != null) return error.ConflictingListModels;
+        options.resource_types = try allocator.dupe([]const u8, &.{"model"});
+    }
     return options;
 }
 
@@ -814,7 +873,7 @@ fn requiresValue(arg: []const u8, mode: OptionMode) bool {
 }
 
 fn isSelectorOption(arg: []const u8, mode: OptionMode) bool {
-    return mode != .common_only and mode != .clean and mode != .docs_serve and mode != .debug and mode != .init and mode != .operation and mode != .retry and (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude"));
+    return mode != .common_only and mode != .clean and mode != .docs_serve and mode != .debug and mode != .init and mode != .operation and mode != .retry and (equals(arg, "--select") or equals(arg, "--selector") or equals(arg, "--exclude") or (mode == .list and equals(arg, "--models")));
 }
 
 fn isOptionLike(arg: []const u8) bool {
@@ -822,7 +881,7 @@ fn isOptionLike(arg: []const u8) bool {
 }
 
 fn isFlag(arg: []const u8, mode: OptionMode) bool {
-    if (equals(arg, "--fail-fast") and (mode == .build or mode == .seed or mode == .test_command or mode == .retry or mode == .compile or mode == .docs_generate)) return true;
+    if ((equals(arg, "--fail-fast") or equals(arg, "--no-fail-fast")) and (mode == .build or mode == .seed or mode == .test_command or mode == .retry or mode == .compile or mode == .docs_generate or mode == .source_freshness)) return true;
     if (mode != .common_only and mode != .clean and mode != .docs_serve and mode != .init and mode != .debug and mode != .operation and mode != .clone and mode != .retry and (equals(arg, "--defer") or equals(arg, "--no-defer") or equals(arg, "--favor-state") or equals(arg, "--no-favor-state"))) return true;
     if ((mode == .build or mode == .compile or mode == .clone) and equals(arg, "--full-refresh")) return true;
     if (mode == .init and equals(arg, "--skip-profile-setup")) return true;
@@ -1103,7 +1162,7 @@ test "test command rejects build-only full refresh flag" {
     var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stderr.deinit();
 
-    const runtime = Runtime{ .allocator = std.testing.allocator, .io = undefined };
+    const runtime = Runtime{ .allocator = std.testing.allocator, .io = std.testing.io };
     const code = try run(&.{ "dxt", "test", "--project-dir", "fixture", "--full-refresh" }, &stdout.writer, &stderr.writer, runtime);
     try std.testing.expectEqual(ExitCode.usage, code);
     try std.testing.expectEqualStrings("", stdout.written());
@@ -1289,6 +1348,7 @@ test "list command parses repeated output keys with selector lists" {
         &.{ "--select", "orders", "tag:nightly", "--output", "json", "--output-keys", "name", "resource_type", "--output-keys", "unique_id" },
         &stderr.writer,
         .list,
+        null,
     );
     defer {
         if (options.select) |value| std.testing.allocator.free(value);
@@ -1313,6 +1373,7 @@ test "list command parses repeated selector alias flags" {
         &.{ "--selector", "customer_family", "--selector", "nightly", "--select", "orders" },
         &stderr.writer,
         .list,
+        null,
     );
     defer {
         if (options.select) |value| std.testing.allocator.free(value);
@@ -1333,6 +1394,7 @@ test "docs serve parses host port and browser flags" {
         &.{ "--target-path", "target-dxt", "--host", "127.0.0.1", "--port", "8082", "--browser", "--no-browser", "--no-open" },
         &stderr.writer,
         .docs_serve,
+        null,
     );
 
     try std.testing.expectEqualStrings("target-dxt", options.target_path.?);
@@ -1346,7 +1408,7 @@ test "docs serve rejects invalid port" {
     var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stderr.deinit();
 
-    const result = parseOptions(std.testing.allocator, &.{ "--port", "0" }, &stderr.writer, .docs_serve);
+    const result = parseOptions(std.testing.allocator, &.{ "--port", "0" }, &stderr.writer, .docs_serve, null);
 
     try std.testing.expectError(error.InvalidDocsServePort, result);
 }
@@ -1355,7 +1417,7 @@ test "list command requires output keys value" {
     var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
     defer stderr.deinit();
 
-    const result = parseOptions(std.testing.allocator, &.{"--output-keys"}, &stderr.writer, .list);
+    const result = parseOptions(std.testing.allocator, &.{"--output-keys"}, &stderr.writer, .list, null);
 
     try std.testing.expectError(error.InvalidOption, result);
     try std.testing.expect(std.mem.indexOf(u8, stderr.written(), "option `--output-keys` requires a value") != null);

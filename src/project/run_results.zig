@@ -220,6 +220,20 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
     try writer.print(",\"full_refresh\":{s}", .{if (opts.full_refresh) "true" else "false"});
     try writer.print(",\"fail_fast\":{s},\"log_format\":", .{if (opts.fail_fast) "true" else "false"});
     try json.string(writer, @tagName(opts.log_format));
+    try writer.print(",\"quiet\":{s},\"write_json\":{s},\"warn_error\":{s},\"version_check\":{s}", .{ if (opts.quiet) "true" else "false", if (opts.write_json) "true" else "false", if (opts.warn_error) "true" else "false", if (opts.version_check) "true" else "false" });
+    try writer.print(",\"use_colors\":{s},\"use_colors_file\":{s},\"print\":{s}", .{ if (opts.use_colors) "true" else "false", if (opts.use_colors_file) "true" else "false", if (opts.print_enabled) "true" else "false" });
+    try writer.writeAll(",\"warn_error_options\":");
+    try writeMapping(writer, allocator, opts.warn_error_options);
+    try writer.writeAll(",\"log_level\":");
+    try json.string(writer, @tagName(opts.log_level));
+    try writer.writeAll(",\"log_level_file\":");
+    try json.string(writer, @tagName(opts.log_level_file));
+    try writer.writeAll(",\"log_format_file\":");
+    try json.string(writer, @tagName(opts.log_format_file));
+    if (opts.log_path) |path| {
+        try writer.writeAll(",\"log_path\":");
+        try json.string(writer, path);
+    }
     try writer.print(",\"defer\":{s},\"favor_state\":{s},\"indirect_selection\":", .{ if (opts.defer_enabled) "true" else "false", if (opts.favor_state) "true" else "false" });
     try json.string(writer, opts.indirect_selection);
     if (std.mem.eql(u8, opts.which, "generate")) {

@@ -12,6 +12,7 @@ pub const Runtime = struct {
     cancellation_token: ?*const std.atomic.Value(bool) = null,
     session_observer: ?SessionObserver = null,
     invocation_options: ?*const Options = null,
+    global_options: ?*const Options = null,
 };
 
 pub const SessionObserver = struct {
@@ -39,7 +40,20 @@ pub const Options = struct {
     indirect_selection: []const u8 = "eager",
     threads: ?[]const u8 = null,
     fail_fast: bool = false,
-    log_format: enum { text, json } = .text,
+    log_format: enum { text, json, debug } = .text,
+    quiet: bool = false,
+    write_json: bool = true,
+    warn_error: bool = false,
+    version_check: bool = true,
+    warn_error_options: ?[]const u8 = null,
+    log_level: LogLevel = .info,
+    log_level_file: LogLevel = .debug,
+    log_format_file: enum { text, json, debug } = .debug,
+    log_path: ?[]const u8 = null,
+    log_file_max_bytes: u64 = 10485760,
+    use_colors: bool = true,
+    use_colors_file: bool = true,
+    print_enabled: bool = true,
     full_refresh: bool = false,
     docs_host: []const u8 = "127.0.0.1",
     docs_port: u16 = 8080,
@@ -50,9 +64,13 @@ pub const Options = struct {
     selector: ?[]const u8 = null,
     exclude: ?[]const u8 = null,
     resource_type: ?[]const u8 = null,
+    resource_types: ?[]const []const u8 = null,
+    exclude_resource_types: ?[]const []const u8 = null,
     output: Output = .text,
     output_keys: ?[]const []const u8 = null,
 };
+
+pub const LogLevel = enum { debug, info, warn, @"error", none };
 
 pub const Output = enum {
     text,
@@ -624,6 +642,7 @@ pub const SemanticTimeSpine = struct {
 
 pub const Graph = struct {
     invocation: ?*const @import("invocation.zig").Metadata = null,
+    command_options: Options = .{},
     allocator: std.mem.Allocator,
     environment: ?*const std.process.Environ.Map = null,
     execution_hooks: ?@import("expression.zig").Host = null,

@@ -74,6 +74,7 @@ fn writeProjectFile(runtime: Runtime, root: []const u8, name: []const u8, conten
 }
 
 pub fn writeResults(runtime: Runtime, target_dir: []const u8, rows: []const results.NodeResult) !void {
+    if (!@import("cli_options.zig").writeJson(runtime)) return;
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     const path = try std.fs.path.join(runtime.allocator, &.{ target_dir, "run_results.json" });
     const content = try results.renderRunResultsForRuntime(runtime, rows);
@@ -363,7 +364,7 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
         if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
         options.full_refresh = value == .bool and value.bool;
     }
-    inline for (.{ .{ "defer", "defer_enabled" }, .{ "favor_state", "favor_state" }, .{ "fail_fast", "fail_fast" } }) |field| {
+    inline for (.{ .{ "defer", "defer_enabled" }, .{ "favor_state", "favor_state" }, .{ "fail_fast", "fail_fast" }, .{ "quiet", "quiet" }, .{ "write_json", "write_json" }, .{ "warn_error", "warn_error" }, .{ "version_check", "version_check" }, .{ "use_colors", "use_colors" }, .{ "use_colors_file", "use_colors_file" }, .{ "print", "print_enabled" } }) |field| {
         if (args.get(field[0])) |value| {
             if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
             @field(options, field[1]) = value == .bool and value.bool;
@@ -373,6 +374,12 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
         if (value != .string) return error.MalformedRunResultsArtifact;
         options.log_format = std.meta.stringToEnum(@TypeOf(options.log_format), value.string) orelse return error.MalformedRunResultsArtifact;
     }
+    inline for (.{ "log_level", "log_level_file", "log_format_file" }) |field| if (args.get(field)) |value| {
+        if (value != .string) return error.MalformedRunResultsArtifact;
+        @field(options, field) = std.meta.stringToEnum(@TypeOf(@field(options, field)), value.string) orelse return error.MalformedRunResultsArtifact;
+    };
+    if (args.get("warn_error_options")) |value| options.warn_error_options = try optionText(allocator, value, false);
+    if (args.get("log_path")) |value| options.log_path = try optionText(allocator, value, false);
     if (args.get("indirect_selection")) |value| {
         if (value != .string) return error.MalformedRunResultsArtifact;
         options.indirect_selection = try allocator.dupe(u8, value.string);

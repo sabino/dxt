@@ -15,10 +15,28 @@ pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *c
     const environment_profiles = if (runtime.environment) |environment| environment.get("DBT_PROFILES_DIR") else null;
     const profiles_dir = options.profiles_dir orelse environment_profiles;
     const explicit_profile_lookup = profiles_dir != null or options.profile != null or options.target != null;
+    var default_base: []const u8 = project_dir;
+    if (profiles_dir == null) {
+        if (std.Io.Dir.cwd().access(runtime.io, "profiles.yml", .{})) |_| {
+            default_base = ".";
+        } else |err| switch (err) {
+            error.FileNotFound => {
+                if (runtime.environment) |environment| if (environment.get("HOME")) |home| {
+                    const directory = try std.fs.path.join(runtime.allocator, &.{ home, ".dbt" });
+                    const candidate = try std.fs.path.join(runtime.allocator, &.{ directory, "profiles.yml" });
+                    if (std.Io.Dir.cwd().access(runtime.io, candidate, .{})) |_| default_base = directory else |failure| switch (failure) {
+                        error.FileNotFound => {},
+                        else => return failure,
+                    }
+                };
+            },
+            else => return err,
+        }
+    }
     var profiles_path = if (profiles_dir) |directory|
         try std.fs.path.join(runtime.allocator, &.{ directory, "profiles.yml" })
     else
-        try std.fs.path.join(runtime.allocator, &.{ project_dir, "profiles.yml" });
+        try std.fs.path.join(runtime.allocator, &.{ default_base, "profiles.yml" });
 
     const text = std.Io.Dir.cwd().readFileAlloc(runtime.io, profiles_path, runtime.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => {
@@ -31,7 +49,7 @@ pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *c
                 };
                 const profile_name = options.profile orelse config.profile_name orelse return error.MissingProfileName;
                 var identity = try parseAdapterIdentityTextWithEnvironment(runtime.allocator, fallback, profile_name, options.target, runtime.environment);
-                if (identity.database_path != null) identity.database_path_base = try runtime.allocator.dupe(u8, std.fs.path.dirname(profiles_path) orelse ".");
+                if (identity.database_path != null) identity.database_path_base = try std.process.currentPathAlloc(runtime.io, runtime.allocator);
                 return identity;
             };
             return null;
@@ -42,8 +60,7 @@ pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *c
     const selected_profile = options.profile orelse config.profile_name orelse return error.MissingProfileName;
     var identity = try parseAdapterIdentityTextWithEnvironment(runtime.allocator, text, selected_profile, options.target, runtime.environment);
     if (identity.database_path != null) {
-        const base = std.fs.path.dirname(profiles_path) orelse ".";
-        identity.database_path_base = try runtime.allocator.dupe(u8, base);
+        identity.database_path_base = try std.process.currentPathAlloc(runtime.io, runtime.allocator);
     }
     return identity;
 }

@@ -64,7 +64,7 @@ pub fn graphDefaultTarget(runtime: Runtime, project_dir: []const u8) ![]const u8
 pub fn loadConnectionGraph(runtime: Runtime, options: Options) !Graph {
     var config = try loadProjectConfig(runtime, options.project_dir);
     defer deinitProjectConfig(runtime.allocator, &config);
-    var graph = Graph{ .allocator = runtime.allocator, .environment = runtime.environment, .invocation = runtime.invocation, .project_name = config.name };
+    var graph = Graph{ .allocator = runtime.allocator, .environment = runtime.environment, .invocation = runtime.invocation, .command_options = options, .project_name = config.name };
     errdefer graph.deinit();
     const identity = (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) orelse return error.MissingProfileFile;
     graph.adapter_type = identity.adapter_type;
@@ -90,6 +90,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         .allocator = runtime.allocator,
         .environment = runtime.environment,
         .invocation = runtime.invocation,
+        .command_options = options,
         .project_name = config.name,
         .validate_macro_args = config.validate_macro_args,
         .require_generic_test_arguments_property = config.require_generic_test_arguments_property,

@@ -28,6 +28,7 @@ const state_artifacts = @import("project/state.zig");
 const project_defer = @import("project/defer.zig");
 const types = @import("project/types.zig");
 const workflow_engine = @import("project/workflow.zig");
+const cli_options = @import("project/cli_options.zig");
 const util = @import("project/util.zig");
 
 const execution_failure_message = "DuckDB execution failed";
@@ -71,7 +72,7 @@ pub fn runOperation(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
     defer graph.deinit();
     try resolveDependencies(&graph);
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
     const target_dir = try targetDir(runtime, options);
     _ = try writeManifest(runtime, &graph, target_dir);
     try commands.operation(runtime, options, &graph, target_dir, stdout);
@@ -82,7 +83,7 @@ pub fn clone(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
     defer graph.deinit();
     try resolveDependencies(&graph);
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
     var state = try loadSelectionState(runtime, options, selection, &graph);
@@ -204,7 +205,7 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
         var selection = try resolveSelection(runtime, options);
         defer selection.deinit(runtime.allocator);
     }
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
     const active_models = countActiveNodes(&graph);
     const active_analyses = countActiveAnalyses(&graph);
     const active_seeds = countActiveSeeds(&graph);
@@ -242,9 +243,15 @@ pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
     defer selection_state.deinit(runtime.allocator);
     const resource_type = if (options.resource_type) |value| try runtime.allocator.dupe(u8, value) else null;
-    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, resource_type, selection.select, selection.exclude, selection_state.context());
+    const candidates = try selector.selectResourcesWithContext(runtime.allocator, &graph, resource_type, selection.select, selection.exclude, selection_state.context());
+    var listed: std.ArrayList(selector.SelectedResource) = .empty;
+    defer listed.deinit(runtime.allocator);
+    for (candidates) |item| if (cli_options.resourceIncluded(options, item.resource_type)) try listed.append(runtime.allocator, item);
+    const selected = listed.items;
+    if (selected.len == 0 and try cli_options.warningIsError(runtime, "NoNodesSelected")) return error.NoNodesSelected;
+    _ = try writeManifest(runtime, &graph, try targetDir(runtime, options));
     switch (options.output) {
-        .json => try manifest.writeSelectedJsonWithKeys(stdout, selected, options.output_keys),
+        .json => try manifest.writeSelectedJsonLines(runtime.allocator, stdout, &graph, selected, options.output_keys),
         .name => {
             for (selected) |item| {
                 try stdout.print("{s}\n", .{item.search_name});
@@ -278,7 +285,7 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     defer graph.deinit();
 
     try resolveDependencies(&graph);
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
@@ -300,10 +307,7 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
         return error.ExecutionFailure;
     };
 
-    const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
-    const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
-    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
-    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
+    _ = try writeManifest(runtime, &graph, target_dir);
     try writeRunResults(runtime, target_dir, compile_rows.items);
     if (compile_result.snapshot_count != 0) {
         try stdout.print("Compiled {d} model(s), {d} snapshot(s), {d} analysis(es), and {d} test(s) into {s}\n", .{
@@ -330,7 +334,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     defer graph.deinit();
 
     try resolveDependencies(&graph);
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
@@ -352,10 +356,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
         return error.ExecutionFailure;
     } else CompileResult{ .count = 0, .saw_model = false, .compiled_base = "" };
 
-    const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
-    const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
-    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
-    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
+    _ = try writeManifestWithPolicy(runtime, &graph, target_dir, cli_options.writeJson(runtime) or options.docs_compile);
     if (options.docs_compile) try writeRunResults(runtime, target_dir, compile_rows.items);
 
     var catalog_entries: catalog.CatalogEntries = .{};
@@ -390,7 +391,7 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
     defer graph.deinit();
 
     try resolveDependencies(&graph);
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
@@ -483,7 +484,7 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
 
     const sources_path = try pathJoin(runtime.allocator, &.{ target_dir, "sources.json" });
     const sources_json = try source_freshness.renderSourcesWithInvocation(runtime.allocator, results.items, runtime.invocation);
-    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = sources_path, .data = sources_json });
+    if (cli_options.writeJson(runtime)) try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = sources_path, .data = sources_json });
     try stdout.print("Checked freshness for {d} source(s); wrote artifacts into {s}\n", .{
         results.items.len,
         util.normalizeForDisplay(manifest_path),
@@ -496,7 +497,7 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     defer graph.deinit();
 
     try resolveDependencies(&graph);
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
@@ -558,7 +559,7 @@ pub fn snapshotRun(runtime: Runtime, options: Options, stdout: *Io.Writer, stder
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
     defer graph.deinit();
     try resolveDependencies(&graph);
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph);
@@ -602,7 +603,7 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     defer graph.deinit();
 
     try resolveDependencies(&graph);
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
@@ -654,7 +655,7 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     defer graph.deinit();
 
     try resolveDependencies(&graph);
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
@@ -717,7 +718,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     defer graph.deinit();
 
     try resolveDependencies(&graph);
-    try writeWarnings(stderr, &graph);
+    try writeWarnings(runtime, stderr, &graph);
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
@@ -1919,10 +1920,15 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
         }
         return .{ .failed_tests = 1 };
     }
-    const classification = switch (test_ref) {
+    var classification = switch (test_ref) {
         .generic => |test_node| try classifyGenericTestResult(execution.failures, test_node.config),
         .singular => |test_node| try classifyGenericTestResult(execution.failures, test_node.config),
     };
+    if (std.mem.eql(u8, classification.status, "warn") and try cli_options.warningIsError(runtime, "LogTestResult")) {
+        classification.status = "fail";
+        classification.fails_command = true;
+        classification.message_kind = "fail";
+    }
     const message = if (classification.message_kind) |kind|
         try formatTestThresholdMessage(runtime.allocator, execution.failures, kind, classification.condition orelse "!= 0")
     else
@@ -2140,6 +2146,7 @@ fn appendUniqueString(allocator: std.mem.Allocator, values: *std.ArrayList([]con
 }
 
 fn writeRunResults(runtime: Runtime, target_dir: []const u8, results: []const run_results.NodeResult) !void {
+    if (!cli_options.writeJson(runtime)) return;
     const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
     const run_results_json = try run_results.renderRunResultsForRuntime(runtime, results);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
@@ -2458,7 +2465,12 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
 }
 
 fn writeManifest(runtime: Runtime, graph: *const Graph, target_dir: []const u8) ![]const u8 {
+    return writeManifestWithPolicy(runtime, graph, target_dir, cli_options.writeJson(runtime));
+}
+
+fn writeManifestWithPolicy(runtime: Runtime, graph: *const Graph, target_dir: []const u8, should_write: bool) ![]const u8 {
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
+    if (!should_write) return manifest_path;
     const manifest_json = try manifest.renderManifest(runtime.allocator, graph);
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
@@ -4328,15 +4340,18 @@ test "materializeGenericTests rejects missing package custom generic test macro"
     try std.testing.expectError(error.UnresolvedMacro, materializeGenericTests(&graph));
 }
 
-fn writeWarnings(stderr: *Io.Writer, graph: *const Graph) !void {
+fn writeWarnings(runtime: Runtime, stderr: *Io.Writer, graph: *const Graph) !void {
+    if (graph.unmatched_model_properties.items.len != 0 and try cli_options.warningIsError(runtime, "NoNodeForYamlKey")) return error.ParsingWarningAsError;
+    if (graph.unmatched_macro_properties.items.len != 0 and try cli_options.warningIsError(runtime, "MacroNotFoundForPatch")) return error.ParsingWarningAsError;
+    if (graph.macro_argument_warnings.items.len != 0 and try cli_options.warningIsError(runtime, "InvalidMacroAnnotation")) return error.ParsingWarningAsError;
     for (graph.unmatched_model_properties.items) |property| {
-        try stderr.print("warning: did not find matching {s} node for property `{s}` in {s}\n", .{ property.resource_type, property.name, util.normalizeForDisplay(property.patch_path) });
+        if (!try cli_options.warningIsSilenced(runtime, "NoNodeForYamlKey")) try stderr.print("warning: did not find matching {s} node for property `{s}` in {s}\n", .{ property.resource_type, property.name, util.normalizeForDisplay(property.patch_path) });
     }
     for (graph.unmatched_macro_properties.items) |property| {
-        try stderr.print("warning: did not find matching macro for macro property `{s}` in {s}\n", .{ property.name, util.normalizeForDisplay(property.patch_path) });
+        if (!try cli_options.warningIsSilenced(runtime, "MacroNotFoundForPatch")) try stderr.print("warning: did not find matching macro for macro property `{s}` in {s}\n", .{ property.name, util.normalizeForDisplay(property.patch_path) });
     }
     for (graph.macro_argument_warnings.items) |warning| {
-        try stderr.print("warning: {s}\n", .{warning});
+        if (!try cli_options.warningIsSilenced(runtime, "InvalidMacroAnnotation")) try stderr.print("warning: {s}\n", .{warning});
     }
 }
 
