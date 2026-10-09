@@ -127,7 +127,7 @@ fn writeAlterType(writer: *std.Io.Writer, allocator: std.mem.Allocator, target: 
     // dependent-index cleanup. Every step remains inside the model transaction.
     try writer.print("alter table {s} add column {s} {s};\nupdate {s} set {s}={s};\nalter table {s} drop column {s} cascade;\nalter table {s} rename column {s} to {s};\n", .{ target, temporary, data_type, target, temporary, quoted, target, quoted, target, temporary, quoted });
 }
-fn renderExpansionSql(allocator: std.mem.Allocator, target: []const u8, source: []const Column, existing: []const Column) ![]const u8 {
+pub fn renderExpansionSql(allocator: std.mem.Allocator, target: []const u8, source: []const Column, existing: []const Column) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     for (source) |column| if (findColumn(existing, column.column_name)) |old| {
@@ -212,7 +212,6 @@ fn renderInsertSql(allocator: std.mem.Allocator, node: *const types.Node, target
 }
 
 pub fn renderMergeSql(allocator: std.mem.Allocator, graph: *const types.Graph, node: *const types.Node, target: []const u8, stage: []const u8, dest_columns: []const Column) ![]const u8 {
-    _ = graph;
     const include = values.get(node.effective_config, "merge_update_columns") orelse .null;
     const exclude = values.get(node.effective_config, "merge_exclude_columns") orelse .null;
     const included = try columnList(include);
@@ -230,7 +229,7 @@ pub fn renderMergeSql(allocator: std.mem.Allocator, graph: *const types.Graph, n
     for (node.incremental.predicates.items) |predicate| try writer.print("({s}) and ", .{predicate});
     if (hasKey(node.incremental.unique_key)) {
         switch (node.incremental.unique_key.?) {
-            .string => |key| try writer.print("DBT_INTERNAL_SOURCE.{s}=DBT_INTERNAL_DEST.{s}", .{ key, key }),
+            .string => |key| try writer.print("DBT_INTERNAL_SOURCE.{s}{s}DBT_INTERNAL_DEST.{s}", .{ key, if (graph.enable_truthy_nulls_equals_macro) " is not distinct from " else "=", key }),
             .list => |keys| for (keys.items, 0..) |key, i| {
                 if (i != 0) try writer.writeAll(" and ");
                 try writer.print("DBT_INTERNAL_SOURCE.{s}=DBT_INTERNAL_DEST.{s}", .{ key, key });
@@ -282,9 +281,12 @@ test "PostgreSQL merge renders keys predicates and configured update columns" {
     node.incremental = .{ .unique_key = .{ .string = "id" } };
     try node.incremental.predicates.append(allocator, "DBT_INTERNAL_DEST.id>0");
     const columns = [_]Column{ .{ .column_name = "id", .data_type = "integer" }, .{ .column_name = "payload", .data_type = "text" } };
-    const graph: types.Graph = undefined;
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
     const sql = try renderMergeSql(allocator, &graph, &node, "target", "stage", &columns);
     try std.testing.expect(std.mem.indexOf(u8, sql, "(DBT_INTERNAL_DEST.id>0) and DBT_INTERNAL_SOURCE.id=DBT_INTERNAL_DEST.id") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "update set \"payload\"=DBT_INTERNAL_SOURCE.\"payload\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "values (DBT_INTERNAL_SOURCE.\"id\", DBT_INTERNAL_SOURCE.\"payload\")") != null);
+    graph.enable_truthy_nulls_equals_macro = true;
+    const truthy = try renderMergeSql(allocator, &graph, &node, "target", "stage", &columns);
+    try std.testing.expect(std.mem.indexOf(u8, truthy, "DBT_INTERNAL_SOURCE.id is not distinct from DBT_INTERNAL_DEST.id") != null);
 }

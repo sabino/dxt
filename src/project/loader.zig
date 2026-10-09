@@ -103,6 +103,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         .validate_macro_args = config.validate_macro_args,
         .require_generic_test_arguments_property = config.require_generic_test_arguments_property,
         .require_batched_execution_for_custom_microbatch_strategy = config.require_batched_execution_for_custom_microbatch_strategy,
+        .enable_truthy_nulls_equals_macro = config.enable_truthy_nulls_equals_macro,
         .full_refresh = options.full_refresh,
     };
     errdefer graph.deinit();

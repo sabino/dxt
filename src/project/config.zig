@@ -434,6 +434,8 @@ fn parseProjectFlags(text: []const u8, config: *ProjectConfig) !void {
         const kv = splitKeyValue(trimmed) orelse continue;
         if (std.mem.eql(u8, kv.key, "validate_macro_args")) {
             config.validate_macro_args = try parseStrictBool(kv.value);
+        } else if (std.mem.eql(u8, kv.key, "enable_truthy_nulls_equals_macro")) {
+            config.enable_truthy_nulls_equals_macro = try parseStrictBool(kv.value);
         }
     }
 }

@@ -127,6 +127,8 @@ def test_check_snapshot_default_clock_and_legacy_delete(tmp_path):
 
 def test_snapshot_custom_metadata_sentinel_and_composite_key(tmp_path):
     project = project_at(tmp_path / "dxt", "dbt_valid_to_current=\"timestamp '9999-12-31'\",snapshot_meta_column_names={'dbt_scd_id':'scd','dbt_updated_at':'updated','dbt_valid_from':'valid_from','dbt_valid_to':'valid_to'}")
+    config = project / "dbt_project.yml"
+    config.write_text(config.read_text() + "flags:\n  enable_truthy_nulls_equals_macro: true\n")
     path = project / "snapshots/history.sql"
     path.write_text(path.read_text().replace("unique_key='id'", "unique_key=['id','name']"))
     assert run(project).returncode == 0
@@ -482,3 +484,24 @@ def test_snapshot_root_project_configs_override_dependency_inline_configs(tmp_pa
     assert result.returncode==0,result.stderr
     node=json.loads((project/'target/manifest.json').read_text())['disabled']['snapshot.dep.dependency_history'][0]
     assert node['config']['enabled'] is False and node['schema']=='root_schema'
+
+
+@pytest.mark.parametrize('truthy_nulls', [False, True])
+def test_snapshot_composite_nullable_key_matches_pinned_core(tmp_path, truthy_nulls):
+    dbt = pinned_dbt()
+    own = project_at(tmp_path / 'dxt', '')
+    upstream = project_at(tmp_path / 'dbt', '')
+    for project in (own, upstream):
+        config = project / 'dbt_project.yml'
+        config.write_text(config.read_text() + f"flags:\n  enable_truthy_nulls_equals_macro: {str(truthy_nulls).lower()}\n")
+        path = project / 'snapshots/history.sql'
+        path.write_text(path.read_text().replace("unique_key='id'", "unique_key=['id','name']").replace('; -- supported trailing comment', ''))
+    before = snapshot(own)
+    assert before == snapshot(upstream, executable=dbt)
+    repeated = snapshot(own)
+    assert repeated == snapshot(upstream, executable=dbt)
+    assert len(repeated) == (2 if truthy_nulls else 3)
+    for project in (own, upstream): query(project, "update input set ts='2020-02-01' where id=2")
+    changed = snapshot(own)
+    assert changed == snapshot(upstream, executable=dbt)
+    assert len(changed) == (3 if truthy_nulls else 4)

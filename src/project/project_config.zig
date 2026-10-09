@@ -51,6 +51,9 @@ pub fn parseWithTarget(runtime: types.Runtime, text: []const u8, cli_vars: []con
     if (values.get(rendered, "flags")) |flags| if (values.get(flags, "require_generic_test_arguments_property")) |v| {
         config.require_generic_test_arguments_property = try resource.boolean(v);
     };
+    if (values.get(rendered, "flags")) |flags| if (values.get(flags, "enable_truthy_nulls_equals_macro")) |v| {
+        config.enable_truthy_nulls_equals_macro = try resource.boolean(v);
+    };
     if (values.get(rendered, "flags")) |flags| if (values.get(flags, "validate_macro_args")) |v| {
         config.validate_macro_args = try resource.boolean(v);
     };

@@ -134,3 +134,18 @@ def test_postgres_incremental_character_widening_precedes_schema_policy(tmp_path
     pair.run()
     pair.rows()
     assert pair.columns() == [("id", "integer"),("tenant", "integer"),("updated", "integer"),("payload", "character varying(30)")]
+
+
+@pytest.mark.parametrize("truthy_nulls", [False, True])
+@pytest.mark.parametrize("key", ["'id'", "['id','tenant']"], ids=["scalar", "composite"])
+def test_postgres_merge_nullable_key_behavior_flag_matches_core(tmp_path, postgres_server, truthy_nulls, key):
+    pair = Pair(tmp_path, postgres_server)
+    for project in pair.projects:
+        config = project / "dbt_project.yml"
+        config.write_text(config.read_text() + f"flags:\n  enable_truthy_nulls_equals_macro: {str(truthy_nulls).lower()}\n")
+    pair.write(f", incremental_strategy='merge', unique_key={key}")
+    pair.run()
+    pair.mutate("update raw_events set payload='new-null',updated=3 where id is null")
+    pair.run()
+    rows = pair.rows()
+    assert sum(row[0] is None for row in rows) == (1 if truthy_nulls and key == "'id'" else 2)

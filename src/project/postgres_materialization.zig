@@ -143,6 +143,13 @@ fn parseIndexes(allocator: std.mem.Allocator, node: *const types.Node) ![]Index 
     }
     return indexes;
 }
+
+pub fn createConfiguredIndexes(allocator: std.mem.Allocator, session: *adapter.Session, node: *const types.Node, relation: []const u8) !void {
+    const indexes = try parseIndexes(allocator, node);
+    defer allocator.free(indexes);
+    for (indexes) |index| try createIndex(allocator, session, relation, index);
+}
+
 fn createIndex(allocator: std.mem.Allocator, session: *adapter.Session, relation: []const u8, index: Index) !void {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();

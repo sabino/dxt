@@ -907,6 +907,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         for (flags.object) |entry| if (std.mem.eql(u8, entry.key, path[6..])) return entry.value;
         return .undefined;
     }
+    if (std.mem.eql(u8, path, "adapter.behavior.enable_truthy_nulls_equals_macro.no_warn")) return .{ .boolean = context.graph.enable_truthy_nulls_equals_macro };
     if (std.mem.eql(u8, path, "model") or std.mem.startsWith(u8, path, "model.")) {
         const model = try @import("context_values.zig").model(allocator, context.graph, context.node);
         return if (path.len == 5) model else @import("context_values.zig").attribute(model, path[6..]);
@@ -948,6 +949,7 @@ fn flagsValue(allocator: std.mem.Allocator, graph: *const Graph) !native_expr.Va
         try entries.append(allocator, .{ .key = name, .value = value });
     }
     for ([_]native_expr.Entry{
+        .{ .key = "ENABLE_TRUTHY_NULLS_EQUALS_MACRO", .value = .{ .boolean = graph.enable_truthy_nulls_equals_macro } },
         .{ .key = "NO_PRINT", .value = .none },
         .{ .key = "STORE_FAILURES", .value = .none },
         .{ .key = "STATIC_PARSER", .value = .{ .boolean = true } },
@@ -3675,4 +3677,17 @@ test "nested compiler frames restore the database host current resource" {
     graph.execution_hooks = .{ .context = &host_state, .resolve = TestHost.resolveValue, .call = TestHost.call, .set_node = TestHost.setNode };
     try std.testing.expectEqualStrings("parent child parent", try compileModel(allocator, &graph, &parent));
     try std.testing.expect(host_state.node == null);
+}
+
+test "compiler exposes configured nullable equality through flags and adapter behavior" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    const node = Node{ .package_name = "demo", .unique_id = "model.demo.flags", .name = "flags", .path = "flags.sql", .original_file_path = "models/flags.sql", .raw_code = "{{ flags.ENABLE_TRUTHY_NULLS_EQUALS_MACRO }}:{{ adapter.behavior.enable_truthy_nulls_equals_macro.no_warn }}" };
+    const ordinary = try compileModel(allocator, &graph, &node);
+    try std.testing.expectEqualStrings("False:False", ordinary);
+    graph.enable_truthy_nulls_equals_macro = true;
+    const truthy = try compileModel(allocator, &graph, &node);
+    try std.testing.expectEqualStrings("True:True", truthy);
 }

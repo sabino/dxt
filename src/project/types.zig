@@ -134,6 +134,7 @@ pub const ProjectConfig = struct {
     validate_macro_args: bool = false,
     require_generic_test_arguments_property: bool = false,
     require_batched_execution_for_custom_microbatch_strategy: bool = false,
+    enable_truthy_nulls_equals_macro: bool = false,
     target_path: []const u8 = "target",
     raw_project: std.json.Value = .null,
     rendered_project: std.json.Value = .null,
@@ -728,6 +729,7 @@ pub const Graph = struct {
     validate_macro_args: bool = false,
     require_generic_test_arguments_property: bool = false,
     require_batched_execution_for_custom_microbatch_strategy: bool = false,
+    enable_truthy_nulls_equals_macro: bool = false,
     deferred_relations: std.ArrayList(DeferredRelation) = .empty,
 
     pub fn unitFixtureRelation(self: *const Graph, unique_id: []const u8) ?[]const u8 {

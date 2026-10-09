@@ -1,5 +1,5 @@
-// Native DuckDB SCD2 follows dbt Core 1.10.5 global snapshot strategies/helpers
-// and dbt-duckdb 1.9.6 snapshot update/insert materialization. Each node is atomic.
+// Native DuckDB/PostgreSQL SCD2 follows dbt Core 1.10.5 global snapshot
+// strategies/helpers and the pinned adapters' update/insert materialization.
 const std = @import("std");
 const compiler = @import("compiler.zig");
 const adapter = @import("adapter.zig");
@@ -14,13 +14,23 @@ const Graph = types.Graph;
 const Node = types.Node;
 
 pub fn validateExecution(graph: *const Graph, node: *const Node) !void {
-    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedSnapshotAdapter;
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb") and !std.mem.eql(u8, graph.adapter_type, "postgres")) return error.UnsupportedSnapshotAdapter;
     if (!std.mem.eql(u8, node.resource_type, "snapshot") or node.snapshot_config == null) return error.InvalidSnapshotConfig;
     try snapshot.validateConfig(node);
 }
 
 pub fn execute(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node) !void {
+    return executeWithPolicy(runtime, db_path, graph, node, .{});
+}
+
+pub const ExecutionPolicy = @import("postgres_materialization.zig").ExecutionPolicy;
+pub fn executeWithPolicy(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
     try validateExecution(graph, node);
+    if (std.mem.eql(u8, graph.adapter_type, "postgres")) return executePostgres(runtime, graph, node, policy) catch |err| switch (err) {
+        error.PostgresExecutionFailed => error.DuckDbExecutionFailed,
+        else => err,
+    };
+    if (!policy.manage_transaction and runtime.adapter_session == null) return error.NativeAdapterSessionRequired;
     const allocator = runtime.allocator;
     const query = node.compiled_code orelse return error.InvalidSnapshotConfig;
     const relation = try compiler.relationNameForNode(allocator, graph, node);
@@ -31,10 +41,90 @@ pub fn execute(runtime: Runtime, db_path: []const u8, graph: *const Graph, node:
     defer deinitColumns(allocator, &source_columns);
     var target_columns = try targetColumns(runtime, db_path, graph, node);
     defer deinitColumns(allocator, &target_columns);
-    const sql = try renderExecutionSql(allocator, graph, node, source_columns.items, target_columns.items);
+    const sql = try renderExecutionSqlWithPolicy(allocator, graph, node, source_columns.items, target_columns.items, policy.manage_transaction, policy.manage_transaction);
     defer allocator.free(sql);
     // Source staging, schema changes, validity updates and new records share one transaction.
     try duckdb.executeSql(runtime, db_path, sql);
+}
+
+fn executePostgres(runtime: Runtime, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
+    if (!policy.manage_transaction and runtime.adapter_session == null) return error.NativeAdapterSessionRequired;
+    const allocator = runtime.allocator;
+    var owned: ?adapter.Session = null;
+    defer if (owned) |*session| session.deinit();
+    const session = runtime.adapter_session orelse blk: {
+        owned = try adapter.openSession(runtime, graph, ":memory:");
+        break :blk &owned.?;
+    };
+    if (policy.manage_transaction) try session.begin();
+    errdefer if (policy.manage_transaction) session.rollback() catch {};
+    if (compiler.relationDatabaseForNode(graph, node)) |database| {
+        var current = try session.query("select current_database()");
+        defer current.deinit(allocator);
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, database, "\""), current.firstScalar() orelse return error.InvalidAdapterIntrospection)) return error.InvalidPostgresDatabaseReference;
+    }
+    const schema = try compiler.relationSchemaForNode(allocator, graph, node);
+    defer allocator.free(schema);
+    const identifier = compiler.relationIdentifierForNode(node);
+    const kind = try session.relationTypeInDatabase(allocator, compiler.relationDatabaseForNode(graph, node), schema, identifier);
+    defer if (kind) |value| allocator.free(value);
+    if (kind) |value| if (!std.mem.eql(u8, value, "table")) return error.DuckDbExecutionFailed;
+    const header_value = @import("config_value.zig").get(node.effective_config, "sql_header") orelse .null;
+    if (header_value != .null) {
+        if (header_value != .string) return error.InvalidPostgresMaterializationConfig;
+        try session.execute(header_value.string);
+    }
+    const probe = try std.fmt.allocPrint(allocator, "create temporary view __dxt_snapshot_probe as select * from (\n{s}\n) dxt_snapshot_query", .{trimQuery(node.compiled_code orelse return error.InvalidSnapshotConfig)});
+    defer allocator.free(probe);
+    try session.execute(probe);
+    var temp_schema_result = try session.query("select nspname from pg_namespace where oid=pg_my_temp_schema()");
+    defer temp_schema_result.deinit(allocator);
+    var source_result = try session.columns(allocator, temp_schema_result.firstScalar() orelse return error.InvalidAdapterIntrospection, "__dxt_snapshot_probe");
+    defer source_result.deinit(allocator);
+    var source_columns = try columnsFromResult(allocator, source_result);
+    defer deinitColumns(allocator, &source_columns);
+    var target_result = try session.columnsInDatabase(allocator, compiler.relationDatabaseForNode(graph, node), schema, identifier);
+    defer target_result.deinit(allocator);
+    var target_columns = try columnsFromResult(allocator, target_result);
+    defer deinitColumns(allocator, &target_columns);
+    if (target_columns.items.len != 0) {
+        const incremental = @import("postgres_incremental.zig");
+        const source = try allocator.alloc(incremental.Column, source_columns.items.len);
+        defer allocator.free(source);
+        const target = try allocator.alloc(incremental.Column, target_columns.items.len);
+        defer allocator.free(target);
+        for (source_columns.items, source) |column, *out| out.* = .{ .column_name = column.name, .data_type = column.data_type };
+        for (target_columns.items, target) |column, *out| out.* = .{ .column_name = column.name, .data_type = column.data_type };
+        const relation = try compiler.relationNameForNode(allocator, graph, node);
+        defer allocator.free(relation);
+        const expansion = try incremental.renderExpansionSql(allocator, relation, source, target);
+        defer allocator.free(expansion);
+        if (expansion.len != 0) try session.execute(expansion);
+    }
+    const sql = try renderExecutionSqlWithPolicy(allocator, graph, node, source_columns.items, target_columns.items, false, false);
+    defer allocator.free(sql);
+    try session.execute(sql);
+    if (kind == null) {
+        const relation = try compiler.relationNameForNode(allocator, graph, node);
+        defer allocator.free(relation);
+        try @import("postgres_materialization.zig").createConfiguredIndexes(allocator, session, node, relation);
+    }
+    try session.execute("drop view __dxt_snapshot_probe");
+    if (policy.manage_transaction) try session.commit();
+}
+
+fn columnsFromResult(allocator: std.mem.Allocator, result: adapter.QueryResult) !Columns {
+    var columns: Columns = .empty;
+    errdefer deinitColumns(allocator, &columns);
+    for (result.rows) |row| {
+        if (row.len < 2) return error.InvalidAdapterIntrospection;
+        const name = try allocator.dupe(u8, row[0] orelse return error.InvalidAdapterIntrospection);
+        errdefer allocator.free(name);
+        const data_type = try allocator.dupe(u8, row[1] orelse return error.InvalidAdapterIntrospection);
+        errdefer allocator.free(data_type);
+        try columns.append(allocator, .{ .name = name, .data_type = data_type });
+    }
+    return columns;
 }
 
 fn queryJson(runtime: Runtime, db_path: []const u8, sql: []const u8) ![]const u8 {
@@ -132,11 +222,11 @@ fn writeKeyFields(writer: *std.Io.Writer, config: types.SnapshotConfig) !void {
     for (0..keyCount(config)) |index| try writer.print(", ({s}) as __dxt_snapshot_key_{d}", .{ keyAt(config, index), index });
 }
 
-fn writeKeyJoin(writer: *std.Io.Writer, config: types.SnapshotConfig, left: []const u8, right: []const u8) !void {
+fn writeKeyJoin(writer: *std.Io.Writer, graph: *const Graph, config: types.SnapshotConfig, left: []const u8, right: []const u8) !void {
     const is_list = config.unique_key.? == .list;
     for (0..keyCount(config)) |index| {
         if (index != 0) try writer.writeAll(" and ");
-        try writer.print("{s}.__dxt_snapshot_key_{d} {s} {s}.__dxt_snapshot_key_{d}", .{ left, index, if (is_list) "is not distinct from" else "=", right, index });
+        try writer.print("{s}.__dxt_snapshot_key_{d} {s} {s}.__dxt_snapshot_key_{d}", .{ left, index, if (is_list and graph.enable_truthy_nulls_equals_macro) "is not distinct from" else "=", right, index });
     }
 }
 
@@ -169,6 +259,10 @@ fn writeChanged(writer: *std.Io.Writer, allocator: std.mem.Allocator, config: ty
 }
 
 pub fn renderExecutionSql(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, source_columns: []const Column, target_columns: []const Column) ![]const u8 {
+    return renderExecutionSqlWithPolicy(allocator, graph, node, source_columns, target_columns, true, true);
+}
+
+pub fn renderExecutionSqlWithPolicy(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, source_columns: []const Column, target_columns: []const Column, begin_transaction: bool, commit_transaction: bool) ![]const u8 {
     const config = node.snapshot_config.?;
     const names = config.meta_columns;
     const scd_id = try compiler.quoteIdentifier(allocator, names.dbt_scd_id);
@@ -178,8 +272,8 @@ pub fn renderExecutionSql(allocator: std.mem.Allocator, graph: *const Graph, nod
     const deleted = try compiler.quoteIdentifier(allocator, names.dbt_is_deleted);
     const relation = try compiler.relationNameForNode(allocator, graph, node);
     const schema = try compiler.relationSchemaForNode(allocator, graph, node);
-    const namespace = if (compiler.relationDatabaseForNode(graph, node)) |database|
-        try std.fmt.allocPrint(allocator, "{s}.{s}", .{ try compiler.quoteIdentifier(allocator, database), try compiler.quoteIdentifier(allocator, schema) })
+    const namespace = if (!std.mem.eql(u8, graph.adapter_type, "postgres") and compiler.relationDatabaseForNode(graph, node) != null)
+        try std.fmt.allocPrint(allocator, "{s}.{s}", .{ try compiler.quoteIdentifier(allocator, compiler.relationDatabaseForNode(graph, node).?), try compiler.quoteIdentifier(allocator, schema) })
     else
         try compiler.quoteIdentifier(allocator, schema);
     const updated_at = config.updated_at orelse "current_timestamp::timestamp";
@@ -195,17 +289,21 @@ pub fn renderExecutionSql(allocator: std.mem.Allocator, graph: *const Graph, nod
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
-    try writer.writeAll("begin transaction;\ncreate temporary table __dxt_snapshot_source as select q.*");
+    if (begin_transaction) try writer.writeAll("begin transaction;\n");
+    try writer.writeAll("create temporary table __dxt_snapshot_source as select q.*");
     try writeKeyFields(writer, config);
     try writer.print(", ({s}) as __dxt_snapshot_updated_at, ", .{updated_at});
     try writeHash(writer, config, updated_at);
     try writer.print(" as __dxt_snapshot_scd_id from (\n{s}\n) q;\ncreate schema if not exists {s};\n", .{ trimQuery(node.compiled_code.?), namespace });
     if (target_columns.len == 0) {
-        try writer.print("create table {s} as select ", .{relation});
+        const unlogged = @import("config_value.zig").get(node.effective_config, "unlogged") orelse .null;
+        if (std.mem.eql(u8, graph.adapter_type, "postgres") and unlogged != .null and unlogged != .bool) return error.InvalidPostgresMaterializationConfig;
+        try writer.print("create {s}table {s} as select ", .{ if (std.mem.eql(u8, graph.adapter_type, "postgres") and unlogged == .bool and unlogged.bool) "unlogged " else "", relation });
         try writeSourceColumns(writer, allocator, source_columns, "s");
         try writer.print(", __dxt_snapshot_scd_id as {s}, __dxt_snapshot_updated_at as {s}, __dxt_snapshot_updated_at as {s}, coalesce(nullif(__dxt_snapshot_updated_at,__dxt_snapshot_updated_at), {s}) as {s}", .{ scd_id, updated, valid_from, current, valid_to });
         if (new_record) try writer.print(", 'False' as {s}", .{deleted});
-        try writer.writeAll(" from __dxt_snapshot_source s;\ncommit;\n");
+        try writer.writeAll(" from __dxt_snapshot_source s;\ndrop table __dxt_snapshot_source;\n");
+        if (commit_transaction) try writer.writeAll("commit;\n");
         return out.toOwnedSlice();
     }
     try writer.print("create temporary table __dxt_snapshot_target as select t.*", .{});
@@ -221,7 +319,7 @@ pub fn renderExecutionSql(allocator: std.mem.Allocator, graph: *const Graph, nod
     try writer.writeAll("create temporary table __dxt_snapshot_changes as select s.*, case when (");
     try writeChanged(writer, allocator, config, source_columns, target_columns, valid_from, deleted);
     try writer.print(") then t.{s} end as __dxt_snapshot_old_id from __dxt_snapshot_source s left join __dxt_snapshot_target t on ", .{scd_id});
-    try writeKeyJoin(writer, config, "t", "s");
+    try writeKeyJoin(writer, graph, config, "t", "s");
     try writer.writeAll(" where t.__dxt_snapshot_key_0 is null or (");
     try writeChanged(writer, allocator, config, source_columns, target_columns, valid_from, deleted);
     try writer.writeAll(");\n");
@@ -230,7 +328,7 @@ pub fn renderExecutionSql(allocator: std.mem.Allocator, graph: *const Graph, nod
     try writer.writeAll(");\n");
     if (!std.mem.eql(u8, hardDeletes(config), "ignore")) {
         try writer.print("create temporary table __dxt_snapshot_deletes as select t.* from __dxt_snapshot_target t left join __dxt_snapshot_source s on ", .{});
-        try writeKeyJoin(writer, config, "t", "s");
+        try writeKeyJoin(writer, graph, config, "t", "s");
         try writer.writeAll(" where s.__dxt_snapshot_key_0 is null");
         if (new_record) try writer.print(" and not (t.{s} = 'True' and t.{s} is null)", .{ deleted, valid_to });
         try writer.print(";\nupdate {s} d set {s} = current_timestamp::timestamp from __dxt_snapshot_deletes t where d.{s} = t.{s} and (d.{s} is null", .{ relation, valid_to, scd_id, scd_id, valid_to });
@@ -251,7 +349,9 @@ pub fn renderExecutionSql(allocator: std.mem.Allocator, graph: *const Graph, nod
     try writeSourceColumns(writer, allocator, source_columns, "s");
     try writer.print(", __dxt_snapshot_scd_id, __dxt_snapshot_updated_at, __dxt_snapshot_updated_at, coalesce(nullif(__dxt_snapshot_updated_at,__dxt_snapshot_updated_at), {s})", .{current});
     if (new_record) try writer.writeAll(", 'False'");
-    try writer.writeAll(" from __dxt_snapshot_changes s;\ncommit;\n");
+    try writer.writeAll(" from __dxt_snapshot_changes s;\ndrop table __dxt_snapshot_changes;\ndrop table __dxt_snapshot_target;\ndrop table __dxt_snapshot_source;\n");
+    if (!std.mem.eql(u8, hardDeletes(config), "ignore")) try writer.writeAll("drop table __dxt_snapshot_deletes;\n");
+    if (commit_transaction) try writer.writeAll("commit;\n");
     return out.toOwnedSlice();
 }
 
@@ -291,7 +391,16 @@ test "snapshot SCD staging validates metadata and retains scalar versus composit
     try keys.appendSlice(allocator, &.{ "id", "ts" });
     node.snapshot_config.?.unique_key = .{ .list = keys };
     const composite = try renderExecutionSql(allocator, &graph, &node, &source, &target);
-    try std.testing.expect(std.mem.indexOf(u8, composite, "t.__dxt_snapshot_key_1 is not distinct from s.__dxt_snapshot_key_1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, composite, "t.__dxt_snapshot_key_1 = s.__dxt_snapshot_key_1") != null);
+    graph.enable_truthy_nulls_equals_macro = true;
+    const truthy = try renderExecutionSql(allocator, &graph, &node, &source, &target);
+    try std.testing.expect(std.mem.indexOf(u8, truthy, "t.__dxt_snapshot_key_1 is not distinct from s.__dxt_snapshot_key_1") != null);
     graph.adapter_type = "postgres";
+    try validateExecution(&graph, &node);
+    const pg_sql = try renderExecutionSqlWithPolicy(allocator, &graph, &node, &source, &target, false, false);
+    try std.testing.expect(std.mem.indexOf(u8, pg_sql, "begin transaction;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pg_sql, "commit;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pg_sql, "create schema if not exists \"main\"") != null);
+    graph.adapter_type = "other";
     try std.testing.expectError(error.UnsupportedSnapshotAdapter, validateExecution(&graph, &node));
 }
