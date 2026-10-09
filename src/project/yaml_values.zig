@@ -96,6 +96,54 @@ pub fn binary(a: std.mem.Allocator, encoded: []const u8) !Value {
     return .{ .object = entries };
 }
 
+pub fn fromBytes(a: std.mem.Allocator, bytes: []const u8) !Value {
+    const encoded = try a.alloc(u8, std.base64.standard.Encoder.calcSize(bytes.len));
+    _ = std.base64.standard.Encoder.encode(encoded, bytes);
+    return binary(a, encoded);
+}
+
+pub fn fromMembers(a: std.mem.Allocator, members: []const Value) !Value {
+    const bytes = try a.alloc(u8, members.len);
+    for (members, bytes) |member, *byte| {
+        const integer = try expression.integerIndex(member);
+        if (integer < 0 or integer > 255) return error.JinjaValueError;
+        byte.* = @intCast(integer);
+    }
+    return fromBytes(a, bytes);
+}
+
+pub fn apply(a: std.mem.Allocator, op: []const u8, lhs: Value, rhs: Value) !?Value {
+    const lhs_bytes = lhs.attribute("__dxt_binary");
+    const rhs_bytes = rhs.attribute("__dxt_binary");
+    if (lhs_bytes != .string and rhs_bytes != .string) return null;
+    if (std.mem.eql(u8, op, "+")) {
+        if (lhs_bytes != .string or rhs_bytes != .string) return error.JinjaTypeError;
+        if (lhs_bytes.string.len > 10_000_000 or rhs_bytes.string.len > 10_000_000 - lhs_bytes.string.len) return error.JinjaIterationLimitExceeded;
+        return try fromBytes(a, try std.mem.concat(a, u8, &.{ lhs_bytes.string, rhs_bytes.string }));
+    }
+    if (std.mem.eql(u8, op, "*")) {
+        const bytes = if (lhs_bytes == .string) lhs_bytes.string else rhs_bytes.string;
+        const repetitions = if (lhs_bytes == .string) rhs else lhs;
+        const count: usize = @intCast(@max(0, try expression.integerIndex(repetitions)));
+        if (bytes.len == 0) return try fromBytes(a, "");
+        if (bytes.len != 0 and count > 10_000_000 / bytes.len) return error.JinjaIterationLimitExceeded;
+        const repeated = try a.alloc(u8, bytes.len * count);
+        for (0..count) |i| @memcpy(repeated[i * bytes.len ..][0..bytes.len], bytes);
+        return try fromBytes(a, repeated);
+    }
+    return null;
+}
+
+pub fn contains(container: Value, needle: Value) !bool {
+    const bytes = container.attribute("__dxt_binary");
+    if (bytes != .string) return error.JinjaTypeError;
+    const binary_needle = needle.attribute("__dxt_binary");
+    if (binary_needle == .string) return std.mem.indexOf(u8, bytes.string, binary_needle.string) != null;
+    const integer = try expression.integerIndex(needle);
+    if (integer < 0 or integer > 255) return error.JinjaValueError;
+    return std.mem.indexOfScalar(u8, bytes.string, @intCast(integer)) != null;
+}
+
 /// SafeConstructor uses Python's permissive base64 decoder: ASCII junk and
 /// nonterminal padding are ignored, while incomplete quanta raise ValueError.
 pub fn canonicalBinary(a: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -147,6 +195,20 @@ test "immutable YAML scalars preserve byte and aware datetime key identities" {
     try std.testing.expect(!keyEqual(utc, try dates.fromYaml(a, "2020-01-02")));
 }
 
+test "native bytes operators and membership retain immutable scalar values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try fromBytes(a, "Hello");
+    try std.testing.expect(try contains(bytes, .{ .integer = "101" }));
+    try std.testing.expect(try contains(bytes, try fromBytes(a, "ell")));
+    try std.testing.expectError(error.JinjaValueError, contains(bytes, .{ .integer = "256" }));
+    try std.testing.expectError(error.JinjaTypeError, contains(bytes, .{ .string = "e" }));
+    try std.testing.expectEqualStrings("Hello!", (try apply(a, "+", bytes, try fromBytes(a, "!"))).?.attribute("__dxt_binary").string);
+    try std.testing.expectEqualStrings("HelloHello", (try apply(a, "*", .{ .integer = "2" }, bytes)).?.attribute("__dxt_binary").string);
+    try std.testing.expectEqualStrings("b'He'", (try fromMembers(a, (try expression.iterableValues(a, bytes))[0..2])).attribute("__dxt_rendered").string);
+}
+
 pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Value {
     const decode_prefix = "__dxt_yaml_bytes_decode:";
     const hex_prefix = "__dxt_yaml_bytes_hex:";
@@ -156,9 +218,33 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
     const bytes = try a.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(encoded));
     try std.base64.standard.Decoder.decode(bytes, encoded);
     if (!decoding) {
-        if (args.len != 0) return error.InvalidJinjaArguments;
+        if (args.len > 2) return error.InvalidJinjaArguments;
+        var separator: ?u8 = null;
+        var group: i64 = 1;
+        var supplied: [2]bool = .{ false, false };
+        var position: usize = 0;
+        for (args) |arg| {
+            const at = if (arg.name) |key| if (std.mem.eql(u8, key, "sep")) @as(usize, 0) else if (std.mem.eql(u8, key, "bytes_per_sep")) @as(usize, 1) else return error.InvalidJinjaArguments else blk: {
+                const index = position;
+                position += 1;
+                break :blk index;
+            };
+            if (at > 1 or supplied[at]) return error.InvalidJinjaArguments;
+            supplied[at] = true;
+            if (at == 0) {
+                const text = if (arg.value == .string) arg.value.string else if (arg.value.attribute("__dxt_binary") == .string) arg.value.attribute("__dxt_binary").string else return error.JinjaTypeError;
+                if (text.len != 1 or text[0] > 127) return error.JinjaValueError;
+                separator = text[0];
+            } else {
+                group = try expression.integerIndex(arg.value);
+                if (group < std.math.minInt(i32) or group > std.math.maxInt(i32)) return error.JinjaValueError;
+            }
+        }
         var out: std.Io.Writer.Allocating = .init(a);
-        for (bytes) |byte| try out.writer.print("{x:0>2}", .{byte});
+        for (bytes, 0..) |byte, i| {
+            if (separator) |delimiter| if (i != 0 and group != 0 and (if (group > 0) (bytes.len - i) % @as(usize, @intCast(group)) == 0 else i % @as(usize, @intCast(-group)) == 0)) try out.writer.writeByte(delimiter);
+            try out.writer.print("{x:0>2}", .{byte});
+        }
         return .{ .string = try out.toOwnedSlice() };
     }
     if (args.len > 2) return error.InvalidJinjaArguments;
@@ -176,14 +262,11 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
         present[at] = true;
         if (at == 0) encoding = arg.value.string else handling = arg.value.string;
     }
-    if (!std.ascii.eqlIgnoreCase(handling, "strict")) return error.JinjaTypeError;
     if (std.ascii.eqlIgnoreCase(encoding, "utf-8") or std.ascii.eqlIgnoreCase(encoding, "utf8")) {
-        if (!std.unicode.utf8ValidateSlice(bytes)) return error.JinjaTypeError;
-        return .{ .string = bytes };
+        return .{ .string = try decodeText(a, bytes, false, handling) };
     }
     if (std.ascii.eqlIgnoreCase(encoding, "ascii")) {
-        for (bytes) |byte| if (byte > 127) return error.JinjaTypeError;
-        return .{ .string = bytes };
+        return .{ .string = try decodeText(a, bytes, true, handling) };
     }
     if (std.ascii.eqlIgnoreCase(encoding, "latin1") or std.ascii.eqlIgnoreCase(encoding, "latin-1") or std.ascii.eqlIgnoreCase(encoding, "iso-8859-1")) {
         var out: std.Io.Writer.Allocating = .init(a);
@@ -195,4 +278,36 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
         return .{ .string = try out.toOwnedSlice() };
     }
     return error.JinjaTypeError;
+}
+
+fn decodeText(a: std.mem.Allocator, bytes: []const u8, ascii: bool, handling: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(a);
+    var i: usize = 0;
+    while (i < bytes.len) {
+        if (bytes[i] < 128) {
+            try out.writer.writeByte(bytes[i]);
+            i += 1;
+            continue;
+        }
+        var consumed: usize = 1;
+        if (!ascii) {
+            const width = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 0;
+            if (width != 0) {
+                var available: usize = 1;
+                while (available < width and i + available < bytes.len and bytes[i + available] >= 0x80 and bytes[i + available] <= 0xbf) : (available += 1) {}
+                const constrained = available >= 2 and ((bytes[i] == 0xe0 and bytes[i + 1] < 0xa0) or (bytes[i] == 0xed and bytes[i + 1] >= 0xa0) or (bytes[i] == 0xf0 and bytes[i + 1] < 0x90) or (bytes[i] == 0xf4 and bytes[i + 1] >= 0x90));
+                if (available == width and !constrained and std.unicode.utf8ValidateSlice(bytes[i..][0..width])) {
+                    try out.writer.writeAll(bytes[i..][0..width]);
+                    i += width;
+                    continue;
+                }
+                if (!constrained) consumed = available;
+            }
+        }
+        if (std.mem.eql(u8, handling, "replace")) try out.writer.writeAll("\xef\xbf\xbd") else if (std.mem.eql(u8, handling, "backslashreplace")) {
+            for (bytes[i..][0..consumed]) |byte| try out.writer.print("\\x{x:0>2}", .{byte});
+        } else if (!std.mem.eql(u8, handling, "ignore")) return error.JinjaTypeError;
+        i += consumed;
+    }
+    return out.toOwnedSlice();
 }
