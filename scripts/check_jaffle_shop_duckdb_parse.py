@@ -7,8 +7,11 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,15 +109,33 @@ def load_schema_validator() -> Any:
 
 def run(args: list[str | Path], *, cwd: Path) -> subprocess.CompletedProcess[str]:
     command = [str(arg) for arg in args]
-    # The pinned public checkout declares Core >=1.11, while our compatibility
-    # oracle is Core 1.10.5. Exercise its unchanged SQL with the explicit Core
-    # version override; this gate does not certify newer Core semantics.
-    if Path(command[0]).name in {"dxt", "dbt"} and len(command) > 1:
-        command.append("--no-version-check")
-    try:
-        result = subprocess.run(command, cwd=cwd, text=True, capture_output=True)
-    except FileNotFoundError as exc:
-        raise GateError(f"command not found: {command[0]}") from exc
+    with ExitStack() as cleanup:
+        # This unchanged public revision requires Core >=1.11 and its nested
+        # test-argument default. Our pinned 1.10.5 comparison uses the explicit
+        # version override and its existing behavior flag in an external
+        # profile, identically for Core and dxt. No authored file is rewritten.
+        if "--project-dir" in command:
+            command.append("--no-version-check")
+            project = Path(command[command.index("--project-dir") + 1])
+            profile_source = project
+            if "--profiles-dir" in command:
+                profile_source = Path(command[command.index("--profiles-dir") + 1])
+            profiles_file = profile_source / "profiles.yml"
+            if profiles_file.is_file():
+                project_config = yaml.safe_load((project / "dbt_project.yml").read_text())
+                if not project_config.get("flags"):
+                    profiles = yaml.safe_load(profiles_file.read_text())
+                    profiles.setdefault("config", {})["require_generic_test_arguments_property"] = True
+                    profile_dir = Path(cleanup.enter_context(tempfile.TemporaryDirectory(prefix="dxt-jaffle-profiles-")))
+                    (profile_dir / "profiles.yml").write_text(yaml.safe_dump(profiles))
+                    if "--profiles-dir" in command:
+                        command[command.index("--profiles-dir") + 1] = str(profile_dir)
+                    else:
+                        command.extend(["--profiles-dir", str(profile_dir)])
+        try:
+            result = subprocess.run(command, cwd=cwd, text=True, capture_output=True)
+        except FileNotFoundError as exc:
+            raise GateError(f"command not found: {command[0]}") from exc
     if result.returncode != 0:
         raise GateError(
             f"command failed with exit code {result.returncode}: {display_command(command)}\n"
