@@ -7,6 +7,8 @@ from pathlib import Path
 import jsonschema
 import pytest
 
+from cli_helpers import json_lines
+
 from test_usability_commands import (core_runner, write_project, invoke_core)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -229,7 +231,7 @@ def test_core_1105_semantic_selectors(tmp_path, core_runner, selector):
     expected = sorted(json.loads(row)['unique_id'] for row in core.result)
     result = run_dxt(project, 'ls', '--select', selector, '--output', 'json', '--output-keys', 'unique_id')
     assert result.returncode == 0, result.stderr
-    actual = sorted(row['unique_id'] for row in json.loads(result.stdout))
+    actual = sorted(row['unique_id'] for row in json_lines(result.stdout))
     assert actual == expected
 
 

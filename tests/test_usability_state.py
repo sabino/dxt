@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from cli_helpers import json_lines
 from test_cli import DXT, ROOT, build_dxt, write_sources_state  # noqa: F401
 
 
@@ -12,7 +14,7 @@ def project(tmp_path: Path) -> Path:
     root = tmp_path / 'project'
     (root / 'models').mkdir(parents=True)
     (root / 'dbt_project.yml').write_text('name: usability_state\nversion: 1.0.0\nconfig-version: 2\nprofile: default\n')
-    (root / 'profiles.yml').write_text('default:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: warehouse.duckdb\n      schema: dev\n    prod:\n      type: duckdb\n      path: warehouse.duckdb\n      schema: prod\n')
+    (root / 'profiles.yml').write_text(f'default:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: {root / "warehouse.duckdb"}\n      schema: dev\n    prod:\n      type: duckdb\n      path: {root / "warehouse.duckdb"}\n      schema: prod\n')
     (root / 'models' / 'a.sql').write_text('select 1 as id\n')
     (root / 'models' / 'b.sql').write_text("select * from {{ ref('a') }}\n")
     return root
@@ -25,7 +27,7 @@ def invoke(root: Path, command: str, *args: str):
 def ids(root: Path, *args: str) -> set[str]:
     result = invoke(root, 'ls', '--output', 'json', '--indirect-selection', 'empty', *args)
     assert result.returncode == 0, result.stderr
-    return {item['unique_id'] for item in json.loads(result.stdout)}
+    return {item['unique_id'] for item in json_lines(result.stdout)}
 
 
 def core_ids(root: Path, target: Path, *args: str) -> set[str]:
@@ -37,7 +39,7 @@ def core_ids(root: Path, target: Path, *args: str) -> set[str]:
 def selected_ids(root: Path, *args: str) -> set[str]:
     result = invoke(root, 'ls', '--output', 'json', *args)
     assert result.returncode == 0, result.stderr
-    return {item['unique_id'] for item in json.loads(result.stdout)}
+    return {item['unique_id'] for item in json_lines(result.stdout)}
 
 
 def test_state_comparison_body_configuration_relation_and_membership(tmp_path):
@@ -344,7 +346,7 @@ def test_defer_core_oracle_with_real_relations(tmp_path):
     root = project(tmp_path)
     warehouse = root / 'warehouse.duckdb'
     profiles = root / 'profiles.yml'
-    profiles.write_text(profiles.read_text().replace('path: warehouse.duckdb', f'path: {warehouse}'))
+    profiles.write_text(profiles.read_text().replace(f'path: {root / "warehouse.duckdb"}', f'path: {warehouse}'))
     state = tmp_path / 'core-state'
     def core(command, target, *args):
         result = subprocess.run(['dbt', '--quiet', command, '--project-dir', str(root), '--profiles-dir', str(root), '--target-path', str(target), *map(str, args)], text=True, capture_output=True)

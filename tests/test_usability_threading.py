@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from cli_helpers import json_lines
+
 from test_usability_scheduler import chain_models, unit_project, write_project
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -216,7 +218,7 @@ def test_json_logs_preserve_list_stdout_and_failure_diagnostics(tmp_path):
                              "--output", "json", "--log-format", "json"],
                             cwd=ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert [row["unique_id"] for row in json.loads(result.stdout)] == ["model.scheduler_demo.model"]
+    assert [row["unique_id"] for row in json_lines(result.stdout)] == ["model.scheduler_demo.model"]
     assert [json.loads(line)["info"]["name"] for line in result.stderr.splitlines()] == ["CommandStart", "CommandFinished"]
     result, artifact = invoke(project, "run", "--threads", "0", "--log-format", "json")
     assert result.returncode == 2

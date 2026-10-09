@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from cli_helpers import json_lines
+
 from test_cli import ROOT, DXT, build_dxt, dbt_protobuf_json_compat
 
 
@@ -351,7 +353,7 @@ def test_model_version_selectors_match_core(tmp_path, configuration_oracle, sele
     assert reference.success, reference.exception
     assert result.returncode == 0, result.stderr
     reference_ids = sorted(json.loads(line)["unique_id"] for line in reference.result)
-    assert sorted(row["unique_id"] for row in json.loads(result.stdout)) == reference_ids == names
+    assert sorted(row["unique_id"] for row in json_lines(result.stdout)) == reference_ids == names
 
 
 def test_model_version_columns_default_inheritance_and_explicit_replacement(tmp_path, configuration_oracle):

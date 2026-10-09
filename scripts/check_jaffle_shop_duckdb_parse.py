@@ -106,6 +106,11 @@ def load_schema_validator() -> Any:
 
 def run(args: list[str | Path], *, cwd: Path) -> subprocess.CompletedProcess[str]:
     command = [str(arg) for arg in args]
+    # The pinned public checkout declares Core >=1.11, while our compatibility
+    # oracle is Core 1.10.5. Exercise its unchanged SQL with the explicit Core
+    # version override; this gate does not certify newer Core semantics.
+    if Path(command[0]).name in {"dxt", "dbt"} and len(command) > 1:
+        command.append("--no-version-check")
     try:
         result = subprocess.run(command, cwd=cwd, text=True, capture_output=True)
     except FileNotFoundError as exc:
@@ -305,19 +310,19 @@ def run_parse_gate(dxt: Path, project_dir: Path, target_dir: Path) -> Path:
 
 
 def ls_text(dxt: Path, project_dir: Path, selector: str) -> list[str]:
-    result = run([dxt, "ls", "--project-dir", project_dir, "--select", selector], cwd=ROOT)
+    result = run([dxt, "ls", "--project-dir", project_dir, "--select", selector, "--output", "text"], cwd=ROOT)
     return result.stdout.splitlines()
 
 
 def ls_json(dxt: Path, project_dir: Path, selector: str) -> list[str]:
     result = run([dxt, "ls", "--project-dir", project_dir, "--select", selector, "--output", "json"], cwd=ROOT)
-    data = json.loads(result.stdout)
+    data = [json.loads(line) for line in result.stdout.splitlines()]
     return [item["unique_id"] for item in data]
 
 
 def ls_resource_type_json(dxt: Path, project_dir: Path, resource_type: str) -> list[str]:
     result = run([dxt, "ls", "--project-dir", project_dir, "--resource-type", resource_type, "--output", "json"], cwd=ROOT)
-    data = json.loads(result.stdout)
+    data = [json.loads(line) for line in result.stdout.splitlines()]
     return [item["unique_id"] for item in data]
 
 

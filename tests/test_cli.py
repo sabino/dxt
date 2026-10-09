@@ -17,6 +17,9 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+import yaml
+
+from cli_helpers import json_lines
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,6 +123,20 @@ def copy_fixture(tmp_path: Path, name: str) -> Path:
     source = ROOT / "tests" / "fixtures" / name
     dest = tmp_path / name
     shutil.copytree(source, dest)
+    # These synthetic fixtures previously located relative DuckDB files beside
+    # their profiles. Make that location explicit; the native CLI now correctly
+    # follows Core's invocation-CWD rule, covered by dedicated CLI oracles.
+    for profile_path in dest.rglob("profiles.yml"):
+        profile_text = profile_path.read_text()
+        document = yaml.safe_load(profile_text)
+        for profile in document.values():
+            if not isinstance(profile, dict):
+                continue
+            for output in profile.get("outputs", {}).values():
+                database = output.get("path")
+                if output.get("type") == "duckdb" and database and database != ":memory:" and "{{" not in database and not Path(database).is_absolute():
+                    profile_text = profile_text.replace("path: " + database, "path: " + str(profile_path.parent / database))
+        profile_path.write_text(profile_text)
     return dest
 
 
@@ -986,7 +1003,7 @@ def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
         capture_output=True,
     )
     assert ls_result.returncode == 0, ls_result.stderr
-    assert json.loads(ls_result.stdout) == [
+    assert json_lines(ls_result.stdout) == [
         {
             "unique_id": analysis_id,
             "resource_type": "analysis",
@@ -1677,7 +1694,8 @@ def test_project_level_source_config_inherits_into_freshness_docs_and_tests(tmp_
     assert orders["identifier"] == "RawOrders"
     assert orders["loaded_at_field"] == "yaml_loaded_at"
     assert orders["loaded_at_query"] is None
-    assert orders["freshness"]["warn_after"] == {"count": 3, "period": "hour"}
+    # Core sources.py replaces project freshness when YAML supplies freshness.
+    assert orders["freshness"]["warn_after"] == {"count": None, "period": None}
     assert orders["freshness"]["error_after"] == {"count": 2, "period": "day"}
 
     docs_result = subprocess.run(
@@ -4676,7 +4694,7 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
         capture_output=True,
     )
     assert list_result.returncode == 0, list_result.stderr
-    assert json.loads(list_result.stdout) == [
+    assert json_lines(list_result.stdout) == [
         {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"}
     ]
 
@@ -4687,7 +4705,7 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
         capture_output=True,
     )
     assert generic_result.returncode == 0, generic_result.stderr
-    assert json.loads(generic_result.stdout) == []
+    assert json_lines(generic_result.stdout) == []
 
     data_result = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "test_type:data", "--output", "json"],
@@ -4696,7 +4714,7 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
         capture_output=True,
     )
     assert data_result.returncode == 0, data_result.stderr
-    assert json.loads(data_result.stdout) == [
+    assert json_lines(data_result.stdout) == [
         {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"}
     ]
 
@@ -4707,7 +4725,7 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
         capture_output=True,
     )
     assert dependency_result.returncode == 0, dependency_result.stderr
-    assert json.loads(dependency_result.stdout) == [
+    assert json_lines(dependency_result.stdout) == [
         {"unique_id": "model.singular_tests.customers", "resource_type": "model", "name": "customers"},
         {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"},
     ]
@@ -4759,7 +4777,7 @@ def test_inline_disabled_singular_sql_test_is_not_active(tmp_path: Path):
         capture_output=True,
     )
     assert list_result.returncode == 0, list_result.stderr
-    assert json.loads(list_result.stdout) == [
+    assert json_lines(list_result.stdout) == [
         {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"}
     ]
 
@@ -4861,7 +4879,7 @@ def test_parse_and_compile_apply_singular_sql_test_yaml_patches(tmp_path: Path):
         capture_output=True,
     )
     assert list_result.returncode == 0, list_result.stderr
-    assert json.loads(list_result.stdout) == [
+    assert json_lines(list_result.stdout) == [
         {"unique_id": test_id, "resource_type": "test", "name": "assert_customers"}
     ]
 
@@ -6665,7 +6683,7 @@ unit_tests:
         capture_output=True,
     )
     assert list_json.returncode == 0, list_json.stderr
-    listed = json.loads(list_json.stdout)
+    listed = json_lines(list_json.stdout)
     assert listed == [{"unique_id": unit_id, "resource_type": "unit_test", "name": "assert_order_flags"}]
 
     list_selector = subprocess.run(
@@ -7208,7 +7226,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert ls_schema_path.returncode == 0, ls_schema_path.stderr
-    assert [item["unique_id"] for item in json.loads(ls_schema_path.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_schema_path.stdout)] == [
         "model.model_properties.customers",
         *expected_tests,
     ]
@@ -7294,7 +7312,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert manifest["child_map"][column_test["unique_id"]] == []
 
     ls_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:published"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "tag:published"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7308,7 +7326,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert tag_wildcard.returncode == 0, tag_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(tag_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(tag_wildcard.stdout)] == [
         "model.model_properties.customers",
         *expected_tests,
     ]
@@ -7320,7 +7338,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert ls_tests.returncode == 0, ls_tests.stderr
-    assert json.loads(ls_tests.stdout) == [
+    assert json_lines(ls_tests.stdout) == [
         {
             "unique_id": "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
             "resource_type": "test",
@@ -7345,7 +7363,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert ls_tests_by_file.returncode == 0, ls_tests_by_file.stderr
-    assert json.loads(ls_tests_by_file.stdout) == json.loads(ls_tests.stdout)
+    assert json_lines(ls_tests_by_file.stdout) == json_lines(ls_tests.stdout)
 
     ls_resource_type_tests = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:test", "--output", "json"],
@@ -7354,7 +7372,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert ls_resource_type_tests.returncode == 0, ls_resource_type_tests.stderr
-    assert json.loads(ls_resource_type_tests.stdout) == json.loads(ls_tests.stdout)
+    assert json_lines(ls_resource_type_tests.stdout) == json_lines(ls_tests.stdout)
 
     ls_package_tests = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties,resource_type:test", "--output", "json"],
@@ -7363,7 +7381,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert ls_package_tests.returncode == 0, ls_package_tests.stderr
-    assert json.loads(ls_package_tests.stdout) == json.loads(ls_tests.stdout)
+    assert json_lines(ls_package_tests.stdout) == json_lines(ls_tests.stdout)
 
     ls_package_all = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties", "--output", "json"],
@@ -7372,7 +7390,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert ls_package_all.returncode == 0, ls_package_all.stderr
-    assert [item["unique_id"] for item in json.loads(ls_package_all.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_package_all.stdout)] == [
         "model.model_properties.customers",
         *expected_tests,
     ]
@@ -7384,7 +7402,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert ls_generic_tests.returncode == 0, ls_generic_tests.stderr
-    assert json.loads(ls_generic_tests.stdout) == json.loads(ls_tests.stdout)
+    assert json_lines(ls_generic_tests.stdout) == json_lines(ls_tests.stdout)
 
     ls_model_and_tests = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "customers test_type:generic", "--output", "json"],
@@ -7393,7 +7411,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert ls_model_and_tests.returncode == 0, ls_model_and_tests.stderr
-    assert [item["unique_id"] for item in json.loads(ls_model_and_tests.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_model_and_tests.stdout)] == [
         "model.model_properties.customers",
         "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
         "test.model_properties.unique_customers_.ccc5343706",
@@ -7407,7 +7425,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
             capture_output=True,
         )
         assert ls_indirect_tests.returncode == 0, ls_indirect_tests.stderr
-        assert [item["unique_id"] for item in json.loads(ls_indirect_tests.stdout)] == [
+        assert [item["unique_id"] for item in json_lines(ls_indirect_tests.stdout)] == [
             "model.model_properties.customers",
             "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
             "test.model_properties.unique_customers_.ccc5343706",
@@ -7420,10 +7438,10 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
         capture_output=True,
     )
     assert ls_nested_model_selector.returncode == 0, ls_nested_model_selector.stderr
-    assert json.loads(ls_nested_model_selector.stdout) == []
+    assert json_lines(ls_nested_model_selector.stdout) == []
 
     ls_singular_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "test_type:singular"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7588,7 +7606,7 @@ def test_parse_macro_artifacts_and_model_macro_dependency(tmp_path: Path):
         capture_output=True,
     )
     assert ls_default.returncode == 0, ls_default.stderr
-    assert json.loads(ls_default.stdout) == [
+    assert json_lines(ls_default.stdout) == [
         {
             "unique_id": "model.macro_artifacts.customers",
             "resource_type": "model",
@@ -7716,7 +7734,7 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
         capture_output=True,
     )
     assert ls_root_package.returncode == 0, ls_root_package.stderr
-    assert [item["unique_id"] for item in json.loads(ls_root_package.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_root_package.stdout)] == [
         "model.package_macro_namespace.customers",
         "model.package_macro_namespace.local_customers",
     ]
@@ -7728,7 +7746,7 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
         capture_output=True,
     )
     assert ls_macro_package.returncode == 0, ls_macro_package.stderr
-    assert json.loads(ls_macro_package.stdout) == []
+    assert json_lines(ls_macro_package.stdout) == []
 
     ls_unknown_package = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "package:not_a_package", "--output", "json"],
@@ -7737,7 +7755,7 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
         capture_output=True,
     )
     assert ls_unknown_package.returncode == 0, ls_unknown_package.stderr
-    assert json.loads(ls_unknown_package.stdout) == []
+    assert json_lines(ls_unknown_package.stdout) == []
 
 
 def test_parse_macro_namespace_search_order(tmp_path: Path):
@@ -8077,7 +8095,7 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
         capture_output=True,
     )
     assert ls_package.returncode == 0, ls_package.stderr
-    assert [item["unique_id"] for item in json.loads(ls_package.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_package.stdout)] == [
         package_exposure,
         package_from_source,
         package_customers,
@@ -8095,7 +8113,7 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
         capture_output=True,
     )
     assert ls_package_models.returncode == 0, ls_package_models.stderr
-    assert [item["unique_id"] for item in json.loads(ls_package_models.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_package_models.stdout)] == [
         package_from_source,
         package_customers,
         package_only_customers,
@@ -8110,7 +8128,7 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
         capture_output=True,
     )
     assert ls_root.returncode == 0, ls_root.stderr
-    assert [item["unique_id"] for item in json.loads(ls_root.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_root.stdout)] == [
         root_same_name,
         root_customers,
         root_orders,
@@ -8125,7 +8143,7 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
         capture_output=True,
     )
     assert ls_package_exclude.returncode == 0, ls_package_exclude.stderr
-    assert [item["unique_id"] for item in json.loads(ls_package_exclude.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_package_exclude.stdout)] == [
         package_exposure,
         package_from_source,
         package_customers,
@@ -8295,7 +8313,7 @@ def test_disabled_model_is_not_active_but_is_represented(tmp_path: Path):
     assert disabled_node["description"] == "Disabled model should stay out of active graph"
 
     ls_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project)],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8342,7 +8360,7 @@ def test_inline_config_enabled_false_model_is_disabled(tmp_path: Path):
     assert disabled_node["description"] == "Inline-disabled model should stay out of active graph"
 
     ls_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project)],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8485,7 +8503,7 @@ def test_parse_and_ls_resolve_vars_inside_ref_and_source(tmp_path: Path):
         capture_output=True,
     )
     assert ls_result.returncode == 0, ls_result.stderr
-    assert [item["unique_id"] for item in json.loads(ls_result.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_result.stdout)] == [
         "model.dynamic_var_ref.alt_customers",
         "model.dynamic_var_ref.orders",
     ]
@@ -8529,7 +8547,7 @@ def test_parse_and_ls_resolve_static_loop_ref_and_source_dependencies(tmp_path: 
         capture_output=True,
     )
     assert upstream_result.returncode == 0, upstream_result.stderr
-    assert [item["unique_id"] for item in json.loads(upstream_result.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(upstream_result.stdout)] == [
         "model.static_loop_deps.customers",
         "model.static_loop_deps.looped",
         "model.static_loop_deps.orders",
@@ -8544,7 +8562,7 @@ def test_parse_and_ls_resolve_static_loop_ref_and_source_dependencies(tmp_path: 
         capture_output=True,
     )
     assert source_descendant_result.returncode == 0, source_descendant_result.stderr
-    assert [item["unique_id"] for item in json.loads(source_descendant_result.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_descendant_result.stdout)] == [
         "model.static_loop_deps.looped",
         "source.static_loop_deps.raw.events",
     ]
@@ -8623,7 +8641,7 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
         capture_output=True,
     )
     assert ls_result.returncode == 0, ls_result.stderr
-    assert json.loads(ls_result.stdout) == [
+    assert json_lines(ls_result.stdout) == [
         {"unique_id": "seed.seed_ref.raw_customers", "resource_type": "seed", "name": "raw_customers"}
     ]
 
@@ -8634,7 +8652,7 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
         capture_output=True,
     )
     assert ls_file_seed.returncode == 0, ls_file_seed.stderr
-    assert json.loads(ls_file_seed.stdout) == json.loads(ls_result.stdout)
+    assert json_lines(ls_file_seed.stdout) == json_lines(ls_result.stdout)
 
 
 def test_parse_docs_blocks_and_literal_doc_descriptions(tmp_path: Path):
@@ -8745,14 +8763,14 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
         capture_output=True,
     )
     assert ls_package_all.returncode == 0, ls_package_all.stderr
-    assert [item["unique_id"] for item in json.loads(ls_package_all.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_package_all.stdout)] == [
         exposure_id,
         model_id,
         source_id,
     ]
 
     ls_default = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project)],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8771,12 +8789,12 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
         capture_output=True,
     )
     assert ls_exposure.returncode == 0, ls_exposure.stderr
-    assert json.loads(ls_exposure.stdout) == [
+    assert json_lines(ls_exposure.stdout) == [
         {"unique_id": exposure_id, "resource_type": "exposure", "name": "weekly_kpis"}
     ]
 
     ls_parents = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "+weekly_kpis"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "+weekly_kpis"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8789,7 +8807,7 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     ]
 
     ls_children = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "orders+"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "orders+"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8798,7 +8816,7 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     assert ls_children.stdout.splitlines() == [exposure_id, model_id]
 
     ls_tag = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:bi"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "tag:bi"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8807,7 +8825,7 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     assert ls_tag.stdout.splitlines() == [exposure_id]
 
     ls_tag_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:b*"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "tag:b*"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8819,7 +8837,7 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
 def test_ls_text_json_and_tag_selection(tmp_path: Path):
     project = copy_fixture(tmp_path, "inline_config")
     text_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:nightly"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "tag:nightly"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8862,7 +8880,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert json_result.returncode == 0, json_result.stderr
-    assert json.loads(json_result.stdout) == [
+    assert json_lines(json_result.stdout) == [
         {"unique_id": "model.inline_config.orders", "resource_type": "model", "name": "orders"}
     ]
 
@@ -8889,7 +8907,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert keyed_json.returncode == 0, keyed_json.stderr
-    assert json.loads(keyed_json.stdout) == [
+    assert json_lines(keyed_json.stdout) == [
         {
             "name": "orders",
             "path": "orders.sql",
@@ -8919,7 +8937,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert repeated_keyed_json.returncode == 0, repeated_keyed_json.stderr
-    assert json.loads(repeated_keyed_json.stdout) == [{"name": "orders", "unique_id": "model.inline_config.orders"}]
+    assert json_lines(repeated_keyed_json.stdout) == [{"name": "orders", "unique_id": "model.inline_config.orders"}]
 
     package_keyed_json = subprocess.run(
         [
@@ -8943,7 +8961,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert package_keyed_json.returncode == 0, package_keyed_json.stderr
-    assert json.loads(package_keyed_json.stdout) == [
+    assert json_lines(package_keyed_json.stdout) == [
         {
             "package_name": "inline_config",
             "alias": "orders",
@@ -8972,7 +8990,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert alias_keyed_json.returncode == 0, alias_keyed_json.stderr
-    assert json.loads(alias_keyed_json.stdout) == [{"name": "orders", "alias": "order_facts"}]
+    assert json_lines(alias_keyed_json.stdout) == [{"name": "orders", "alias": "order_facts"}]
 
     untagged_project = copy_fixture(tmp_path, "model_ref")
     untagged_keyed_json = subprocess.run(
@@ -8996,7 +9014,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert untagged_keyed_json.returncode == 0, untagged_keyed_json.stderr
-    assert json.loads(untagged_keyed_json.stdout) == [
+    assert json_lines(untagged_keyed_json.stdout) == [
         {"name": "stg_customers", "alias": "stg_customers", "config.materialized": "view", "config.tags": []}
     ]
 
@@ -9024,7 +9042,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert depends_keyed_json.returncode == 0, depends_keyed_json.stderr
-    assert json.loads(depends_keyed_json.stdout) == [
+    assert json_lines(depends_keyed_json.stdout) == [
         {
             "name": "customers",
             "tags": [],
@@ -9059,7 +9077,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert source_keyed_json.returncode == 0, source_keyed_json.stderr
-    assert json.loads(source_keyed_json.stdout) == [
+    assert json_lines(source_keyed_json.stdout) == [
         {"name": "customers", "source_name": "raw", "identifier": "customers"}
     ]
 
@@ -9073,7 +9091,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     assert "requires a value" in missing_output_key.stderr
 
     excluded = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "orders", "--exclude", "orders"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "orders", "--exclude", "orders"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9102,7 +9120,7 @@ def test_ls_multi_argv_and_repeated_selector_flags(tmp_path: Path):
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     expected_pair = [
         "model.selector_graph.customers",
@@ -9225,7 +9243,7 @@ def test_dbt_core_file_selector_basename_stem_and_literal_wildcard_oracle(
             capture_output=True,
         )
         assert dxt_result.returncode == 0, dxt_result.stderr
-        dxt_ids = sorted(item["unique_id"] for item in json.loads(dxt_result.stdout))
+        dxt_ids = sorted(item["unique_id"] for item in json_lines(dxt_result.stdout))
 
         dbt_result = dbtRunner().invoke(
             [
@@ -9263,7 +9281,7 @@ def test_ls_root_selectors_yml_scalar_aliases(tmp_path: Path):
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert ls_json("--selector", "customer_family") == ls_json("--select", "*customers")
     assert ls_json("--selector", "customer_and_descendants") == ls_json("--select", "customers+")
@@ -9322,7 +9340,7 @@ def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys:
         capture_output=True,
     )
     assert dxt_result.returncode == 0, dxt_result.stderr
-    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+    dxt_ids = [item["unique_id"] for item in json_lines(dxt_result.stdout)]
 
     dbt_result = dbtRunner().invoke(
         [
@@ -9380,7 +9398,7 @@ def test_ls_source_status_selects_sources_from_sources_json_state(tmp_path: Path
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert selected_ids("error") == ["source.source_freshness.raw.orders"]
     assert selected_ids("warn") == ["source.source_freshness.raw.customers"]
@@ -9423,7 +9441,7 @@ def test_source_status_selector_reports_missing_malformed_and_version_mismatch(t
     missing = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9439,7 +9457,7 @@ def test_source_status_selector_reports_missing_malformed_and_version_mismatch(t
     assert "directory containing sources.json" in missing.stderr
 
     no_state = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "source_status:warn"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "source_status:warn"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9453,7 +9471,7 @@ def test_source_status_selector_reports_missing_malformed_and_version_mismatch(t
     malformed = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9482,7 +9500,7 @@ def test_source_status_selector_reports_missing_malformed_and_version_mismatch(t
     version = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9523,7 +9541,7 @@ def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_pa
         capture_output=True,
     )
     assert tests_result.returncode == 0, tests_result.stderr
-    test_id = json.loads(tests_result.stdout)[0]["unique_id"]
+    test_id = json_lines(tests_result.stdout)[0]["unique_id"]
 
     state_dir = tmp_path / "state"
     write_run_results_state(
@@ -9555,7 +9573,7 @@ def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_pa
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert selected_ids("success") == ["model.selector_graph.stg_customers"]
     assert selected_ids("error") == ["model.selector_graph.customers", test_id]
@@ -9580,7 +9598,7 @@ def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_pa
         capture_output=True,
     )
     assert expanded.returncode == 0, expanded.stderr
-    assert [item["unique_id"] for item in json.loads(expanded.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(expanded.stdout)] == [
         "model.selector_graph.customers",
         "model.selector_graph.orders",
         test_id,
@@ -9593,7 +9611,7 @@ def test_result_selector_reports_missing_malformed_and_version_mismatch(tmp_path
     missing = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9609,7 +9627,7 @@ def test_result_selector_reports_missing_malformed_and_version_mismatch(tmp_path
     assert "directory containing run_results.json" in missing.stderr
 
     no_state = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "result:error"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "result:error"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9623,7 +9641,7 @@ def test_result_selector_reports_missing_malformed_and_version_mismatch(tmp_path
     malformed = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9652,7 +9670,7 @@ def test_result_selector_reports_missing_malformed_and_version_mismatch(tmp_path
     version = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9698,7 +9716,7 @@ def test_ls_state_new_selects_resources_from_prior_manifest_state(tmp_path: Path
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert selected_ids("state:new") == ["model.selector_graph.customers"]
     assert selected_ids("state:new+") == [
@@ -9730,7 +9748,7 @@ def test_ls_state_new_selects_resources_from_prior_manifest_state(tmp_path: Path
         capture_output=True,
     )
     assert excluded.returncode == 0, excluded.stderr
-    assert [item["unique_id"] for item in json.loads(excluded.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(excluded.stdout)] == [
         "model.selector_graph.customers"
     ]
 
@@ -9741,7 +9759,7 @@ def test_state_new_selector_reports_missing_malformed_and_version_mismatch(tmp_p
     missing = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9757,7 +9775,7 @@ def test_state_new_selector_reports_missing_malformed_and_version_mismatch(tmp_p
     assert "directory containing manifest.json" in missing.stderr
 
     no_state = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "state:new"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "state:new"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9774,7 +9792,7 @@ def test_state_new_selector_reports_missing_malformed_and_version_mismatch(tmp_p
     malformed = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9808,7 +9826,7 @@ def test_state_new_selector_reports_missing_malformed_and_version_mismatch(tmp_p
     version = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9898,7 +9916,7 @@ def test_dbt_core_result_selector_oracle(tmp_path: Path, capsys: pytest.CaptureF
         capture_output=True,
     )
     assert dxt_result.returncode == 0, dxt_result.stderr
-    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+    dxt_ids = [item["unique_id"] for item in json_lines(dxt_result.stdout)]
 
     dbt_result = dbtRunner().invoke(
         [
@@ -9999,7 +10017,7 @@ def test_dbt_core_state_new_selector_oracle(tmp_path: Path, capsys: pytest.Captu
         capture_output=True,
     )
     assert dxt_result.returncode == 0, dxt_result.stderr
-    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+    dxt_ids = [item["unique_id"] for item in json_lines(dxt_result.stdout)]
 
     dbt_result = dbtRunner().invoke(
         [
@@ -10084,7 +10102,7 @@ def test_dbt_core_source_status_fresher_and_dxt_status_extension_oracle(
         capture_output=True,
     )
     assert dxt_result.returncode == 0, dxt_result.stderr
-    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+    dxt_ids = [item["unique_id"] for item in json_lines(dxt_result.stdout)]
     assert dxt_ids == ["source.source_ref.raw.customers"]
 
     dbt_target = tmp_path / "dbt-target"
@@ -10135,7 +10153,7 @@ def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
 
     def ls_text(*args: str) -> list[str]:
         result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), *args],
+            [DXT, "ls", "--output", "text", "--project-dir", str(project), *args],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -10157,7 +10175,7 @@ def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
 
     default_project = copy_fixture(tmp_path, "single_model")
     default_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(default_project), "--select", "config.materialized:view"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(default_project), "--select", "config.materialized:view"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10224,7 +10242,7 @@ def test_project_model_path_configs_apply_below_inline_and_yaml_configs(tmp_path
 
     def ls_text(*args: str) -> list[str]:
         ls_result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), *args],
+            [DXT, "ls", "--output", "text", "--project-dir", str(project), *args],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -10276,7 +10294,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_result.returncode == 0, source_result.stderr
-    assert [item["unique_id"] for item in json.loads(source_result.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_result.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
@@ -10287,7 +10305,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_union.returncode == 0, source_union.stderr
-    assert [item["unique_id"] for item in json.loads(source_union.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_union.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
@@ -10298,7 +10316,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_wildcard.returncode == 0, source_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(source_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_wildcard.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
@@ -10309,7 +10327,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_package_wildcard.returncode == 0, source_package_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(source_package_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_package_wildcard.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
@@ -10320,7 +10338,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_name_wildcard.returncode == 0, source_name_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(source_name_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_name_wildcard.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
@@ -10331,7 +10349,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_table_without_source.returncode == 0, source_table_without_source.stderr
-    assert json.loads(source_table_without_source.stdout) == []
+    assert json_lines(source_table_without_source.stdout) == []
     for bare_source_selector in ("orders", "*orders", "source_ref.raw.*", "source.source_ref.raw.orders"):
         bare_source = subprocess.run(
             [DXT, "ls", "--project-dir", str(source_project), "--select", bare_source_selector, "--output", "json"],
@@ -10340,7 +10358,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
             capture_output=True,
         )
         assert bare_source.returncode == 0, bare_source.stderr
-        assert json.loads(bare_source.stdout) == []
+        assert json_lines(bare_source.stdout) == []
     source_path = subprocess.run(
         [DXT, "ls", "--project-dir", str(source_project), "--select", "path:models/*.yml", "--output", "json"],
         cwd=ROOT,
@@ -10348,7 +10366,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_path.returncode == 0, source_path.stderr
-    assert [item["unique_id"] for item in json.loads(source_path.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_path.stdout)] == [
         "model.source_ref.stg_customers",
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
@@ -10360,7 +10378,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_file.returncode == 0, source_file.stderr
-    assert [item["unique_id"] for item in json.loads(source_file.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_file.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
@@ -10380,7 +10398,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_package.returncode == 0, source_package.stderr
-    assert [item["unique_id"] for item in json.loads(source_package.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_package.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
@@ -10439,7 +10457,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_keyed_json.returncode == 0, source_keyed_json.stderr
-    assert json.loads(source_keyed_json.stdout) == [
+    assert json_lines(source_keyed_json.stdout) == [
         {
             "package_name": "source_ref",
             "source_name": "raw",
@@ -10457,7 +10475,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert exposure_result.returncode == 0, exposure_result.stderr
-    assert json.loads(exposure_result.stdout) == [
+    assert json_lines(exposure_result.stdout) == [
         {
             "unique_id": "exposure.exposure_artifacts.weekly_kpis",
             "resource_type": "exposure",
@@ -10471,7 +10489,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert exposure_union.returncode == 0, exposure_union.stderr
-    assert [item["unique_id"] for item in json.loads(exposure_union.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(exposure_union.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis",
         "model.exposure_artifacts.orders",
     ]
@@ -10482,7 +10500,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert exposure_wildcard.returncode == 0, exposure_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(exposure_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(exposure_wildcard.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis"
     ]
     exposure_package_wildcard = subprocess.run(
@@ -10492,7 +10510,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert exposure_package_wildcard.returncode == 0, exposure_package_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(exposure_package_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(exposure_package_wildcard.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis"
     ]
     exposure_prefixed_unique_id = subprocess.run(
@@ -10502,7 +10520,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert exposure_prefixed_unique_id.returncode == 0, exposure_prefixed_unique_id.stderr
-    assert json.loads(exposure_prefixed_unique_id.stdout) == []
+    assert json_lines(exposure_prefixed_unique_id.stdout) == []
     bare_exposure_unique_id = subprocess.run(
         [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure.exposure_artifacts.weekly_kpis", "--output", "json"],
         cwd=ROOT,
@@ -10510,7 +10528,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert bare_exposure_unique_id.returncode == 0, bare_exposure_unique_id.stderr
-    assert json.loads(bare_exposure_unique_id.stdout) == []
+    assert json_lines(bare_exposure_unique_id.stdout) == []
     exposure_path = subprocess.run(
         [DXT, "ls", "--project-dir", str(exposure_project), "--select", "path:models/*.yml", "--output", "json"],
         cwd=ROOT,
@@ -10518,7 +10536,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert exposure_path.returncode == 0, exposure_path.stderr
-    assert [item["unique_id"] for item in json.loads(exposure_path.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(exposure_path.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis",
         "source.exposure_artifacts.raw.customers",
     ]
@@ -10529,7 +10547,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert exposure_file.returncode == 0, exposure_file.stderr
-    assert [item["unique_id"] for item in json.loads(exposure_file.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(exposure_file.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis"
     ]
     exposure_selector_output = subprocess.run(
@@ -10576,7 +10594,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert exposure_keyed_json.returncode == 0, exposure_keyed_json.stderr
-    assert json.loads(exposure_keyed_json.stdout) == [
+    assert json_lines(exposure_keyed_json.stdout) == [
         {
             "original_file_path": "models/schema.yml",
             "path": "schema.yml",
@@ -10599,7 +10617,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert exposure_package.returncode == 0, exposure_package.stderr
-    assert json.loads(exposure_package.stdout) == [
+    assert json_lines(exposure_package.stdout) == [
         {
             "unique_id": "exposure.exposure_artifacts.weekly_kpis",
             "resource_type": "exposure",
@@ -10619,7 +10637,7 @@ def test_ls_graph_plus_selectors(tmp_path: Path):
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert ls_json("--select", "customers") == ["model.selector_graph.customers"]
     assert ls_json("--select", "+customers") == [
@@ -10722,7 +10740,7 @@ def test_ls_graph_plus_selectors(tmp_path: Path):
 def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     project = copy_fixture(tmp_path, "single_model")
     unsupported_type = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "function"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--resource-type", "function"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10752,7 +10770,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         "@1+customers",
     ]:
         unsupported_selector = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--select", selector],
+            [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", selector],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -10770,7 +10788,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     assert "option `--select` requires a value" in missing_selector.stderr
 
     unsupported_in_list = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "customers", "state:unsupported"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "customers", "state:unsupported"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10779,7 +10797,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     assert "selector syntax is not supported" in unsupported_in_list.stderr
 
     missing_alias = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--selector", "customer_family"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--selector", "customer_family"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10801,7 +10819,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         + "\n"
     )
     duplicated_alias = subprocess.run(
-        [DXT, "ls", "--project-dir", str(duplicated_alias_project), "--selector", "duplicate"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(duplicated_alias_project), "--selector", "duplicate"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10823,7 +10841,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         + "\n"
     )
     unsupported_yaml_alias = subprocess.run(
-        [DXT, "ls", "--project-dir", str(unsupported_yaml_alias_project), "--selector", "stateful"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(unsupported_yaml_alias_project), "--selector", "stateful"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10843,7 +10861,7 @@ def test_ls_at_selector_includes_descendant_parents(tmp_path: Path):
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert ls_json("--select", "+customers+") == [
         "model.selector_at_graph.customers",

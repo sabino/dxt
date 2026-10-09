@@ -23,7 +23,7 @@ def project(tmp_path: Path, adapter="duckdb", postgres=None):
     (root / "models").mkdir(parents=True)
     (root / "dbt_project.yml").write_text("name: workflow\nversion: '1.0'\nconfig-version: 2\nprofile: default\n")
     if adapter == "duckdb":
-        outputs = "      type: duckdb\n      path: warehouse.duckdb\n      schema: analytics\n"
+        outputs = f"      type: duckdb\n      path: {root / 'warehouse.duckdb'}\n      schema: analytics\n"
     else:
         info = postgres.get_postmaster_info()
         outputs = f"      type: postgres\n      schema: analytics\n      host: '{info.socket_dir}'\n      port: {info.port}\n      dbname: postgres\n      user: postgres\n"
@@ -325,7 +325,7 @@ def test_portable_csv_seed_types_values_and_quoting_match_pinned_core(tmp_path, 
     with (root / "dbt_project.yml").open("a") as handle:
         handle.write("seeds:\n  workflow:\n    raw:\n      +fast: false\n      +column_types: {code: 'varchar(8)'}\n")
     profile = (root / "profiles.yml").read_text()
-    (root / "profiles.yml").write_text(profile + "    core:\n      type: duckdb\n      path: warehouse.duckdb\n      schema: oracle\n")
+    (root / "profiles.yml").write_text(profile + f"    core:\n      type: duckdb\n      path: {root / 'warehouse.duckdb'}\n      schema: oracle\n")
     invoke(root, duckdb_environment, "plan")
     invoke(root, duckdb_environment, "apply")
     result = subprocess.run(["dbt", "--quiet", "seed", "--project-dir", str(root), "--profiles-dir", str(root), "--target", "core", "--target-path", str(tmp_path / "core-target")],
