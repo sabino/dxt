@@ -32,3 +32,24 @@ def test_core_configured_test_limit_is_not_added_to_compiled_macro_body(
             assert 'limit' not in node['compiled_code'].lower()
     for path in pair.projects:
         contracts.assert_artifact(path / 'target/manifest.json')
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_core_authored_generic_model_argument_preserves_relation_attributes(
+    tmp_path, configuration_oracle, request, adapter,
+):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, adapter)
+    pair.write('models/marts/value.sql', '{{ config(materialized="table") }}select 1 as id')
+    pair.write('macros/identity.sql', "{% test relation_identity(model) %}select '{{ model.identifier }}' as identifier, '{{ model.schema }}' as schema_name from {{ model.render() }} where false{% endtest %}")
+    pair.write('models/schema.yml', "version: 2\nmodels:\n  - name: value\n    data_tests: [relation_identity]\nsources:\n  - name: raw\n    schema: landing\n    tables:\n      - name: events\n        identifier: source_events\n        data_tests: [relation_identity]\n")
+    actual, expected = pair.invoke('compile')
+    tests = {uid: node for uid, node in expected['nodes'].items() if node['resource_type'] == 'test'}
+    assert len(tests) == 2
+    for uid, node in tests.items():
+        assert actual['nodes'][uid]['compiled_code'] == node['compiled_code'], uid
+        assert actual['nodes'][uid]['depends_on'] == node['depends_on'], uid
+        identifier = 'source_events' if node['attached_node'] is None else 'value'
+        assert f"select '{identifier}' as identifier" in node['compiled_code']
+    for path in pair.projects:
+        contracts.assert_artifact(path / 'target/manifest.json')

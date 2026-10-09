@@ -838,8 +838,6 @@ fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, t
     const macro = findCustomGenericTestMacro(graph, test_node) orelse return error.UnsupportedTestExecution;
     const relation_name = try genericTestRelationName(allocator, graph, test_node);
     defer allocator.free(relation_name);
-    const model_sql = try genericTestModelSqlForNode(allocator, graph, test_node, relation_name);
-    defer allocator.free(model_sql);
 
     var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, test_node.enabled, &.{}, test_node.config_values);
     defer @import("config_value.zig").deinit(allocator, &canonical_config);
@@ -847,6 +845,7 @@ fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, t
     var context = CompileContext.init(allocator, graph, &node);
     defer context.deinit();
     const arena = context.value_arena.allocator();
+    const model_value = try genericTestModelValueForNode(arena, graph, test_node, relation_name);
     var args: std.ArrayList(native_expr.Argument) = .empty;
     if (test_node.arguments == .object) {
         var iterator = test_node.arguments.object.iterator();
@@ -856,7 +855,7 @@ fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, t
             try args.append(arena, .{ .name = entry.key_ptr.*, .value = value });
         }
     }
-    try args.append(arena, .{ .name = "model", .value = .{ .string = model_sql } });
+    try args.append(arena, .{ .name = "model", .value = model_value });
     if (column_name) |column| try args.append(arena, .{ .name = "column_name", .value = .{ .string = column } });
     const result = try renderMacroValue(&context, macro, args.items);
     // Core keeps the macro body unchanged in compiled_code. Its test
@@ -872,14 +871,21 @@ fn genericTestModelSql(allocator: std.mem.Allocator, relation_name: []const u8, 
 }
 
 fn genericTestModelSqlForNode(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode, relation_name: []const u8) ![]const u8 {
-    if (resolve.findMacroIdForUnqualifiedNamespaceCall(graph, test_node.package_name, "get_where_subquery") == null) return genericTestModelSql(allocator, relation_name, test_node.config.where);
-    const node = Node{ .resolved_identity = test_node.resolved_identity, .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = test_node.config_values, .test_config = test_node.config, .enabled = test_node.enabled };
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const relation = if (test_node.attached_node) |id| try relationValueForInputNode(a, graph, &node, findNodeByUniqueId(graph, id) orelse return error.UnresolvedRef) else if (test_node.attached_source_unique_id) |id| try relationValueForSource(a, graph, &node, findSourceByUniqueId(graph, id) orelse return error.UnresolvedSource) else native_expr.Value{ .string = relation_name };
-    const generated = try renderMacroForNode(a, graph, &node, "get_where_subquery", &.{.{ .value = relation }});
+    const generated = try genericTestModelValueForNode(a, graph, test_node, relation_name);
     return try allocator.dupe(u8, try generated.text(a));
+}
+
+fn genericTestModelValueForNode(a: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode, relation_name: []const u8) !native_expr.Value {
+    if (resolve.findMacroIdForUnqualifiedNamespaceCall(graph, test_node.package_name, "get_where_subquery") == null) return .{ .string = try genericTestModelSql(a, relation_name, test_node.config.where) };
+    const node = Node{ .resolved_identity = test_node.resolved_identity, .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = test_node.config_values, .test_config = test_node.config, .enabled = test_node.enabled };
+    const relation = if (test_node.attached_node) |id| try relationValueForInputNode(a, graph, &node, findNodeByUniqueId(graph, id) orelse return error.UnresolvedRef) else if (test_node.attached_source_unique_id) |id| try relationValueForSource(a, graph, &node, findSourceByUniqueId(graph, id) orelse return error.UnresolvedSource) else native_expr.Value{ .string = relation_name };
+    // The normal helper returns a Relation without a where clause and a string
+    // for a filtered subquery. Preserve whichever value the resolved macro
+    // returns so authored tests can call Relation methods and read attributes.
+    return try renderMacroForNode(a, graph, &node, "get_where_subquery", &.{.{ .value = relation }});
 }
 
 fn applyGenericTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?i64) ![]const u8 {
@@ -3058,12 +3064,13 @@ test "compileGenericTest renders root project custom generic test body" {
         .original_file_path = "macros/custom_tests.sql",
         .macro_sql =
         \\{% test positive_amount(model, column_name) %}
-        \\select {{ column_name }}
+        \\select {{ column_name }} /* {{ model.identifier }} */
         \\from {{ model }}
         \\where {{ column_name }} < 0
         \\{% endtest %}
         ,
     });
+    try graph.macros.append(allocator, .{ .package_name = "demo", .unique_id = "macro.demo.get_where_subquery", .name = "get_where_subquery", .path = "where.sql", .original_file_path = "macros/where.sql", .macro_sql = "{% macro get_where_subquery(relation) %}{{ return(relation) }}{% endmacro %}" });
     try graph.tests.append(allocator, .{
         .package_name = "demo",
         .unique_id = "test.demo.positive_amount_orders_amount.abc",
@@ -3085,6 +3092,7 @@ test "compileGenericTest renders root project custom generic test body" {
     try std.testing.expect(std.mem.indexOf(u8, compiled, "select amount") != null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"main\".\"orders\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "where amount < 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled, "/* orders */") != null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "limit") == null);
 }
 
