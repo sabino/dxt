@@ -595,7 +595,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.MissingDeferState => stderr.writeAll("error: --defer requires --state or --defer-state containing manifest.json\n") catch {},
         error.MalformedDeferRelation => stderr.writeAll("error: deferral manifest resource requires schema and alias relation fields\n") catch {},
         error.DeferRelationLookupFailed => stderr.writeAll("error: could not inspect the current target relation for deferral\n") catch {},
-        error.UnsupportedDeferAdapter => stderr.writeAll("error: deferral relation lookup requires the DuckDB adapter\n") catch {},
+        error.UnsupportedDeferAdapter => stderr.writeAll("error: deferral relation lookup is unavailable for the selected adapter\n") catch {},
         error.UnsupportedIndirectSelection => stderr.writeAll("error: --indirect-selection must be eager, cautious, buildable, or empty\n") catch {},
         error.MissingStateManifestState => stderr.writeAll("error: state selectors require --state pointing to a directory containing manifest.json\n") catch {},
         error.MissingStateManifestArtifact => stderr.writeAll("error: --state must point to a directory containing manifest.json for state selectors\n") catch {},
@@ -608,14 +608,14 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedTestSelection => stderr.writeAll("error: test currently supports only supported DuckDB test resources\n") catch {},
         error.UnsupportedBuildSelection => stderr.writeAll("error: build currently supports only selected model, seed, source, test, and supported unit test resources\n") catch {},
         error.UnsupportedMixedBuildExecution => stderr.writeAll("error: build currently executes only seed-only, model-only, seed+model, seed+model+supported-test, model+supported-test, source+supported-test, or supported-test-only selections\n") catch {},
-        error.UnsupportedAdapterExecution => stderr.writeAll("error: run currently executes only DuckDB SQL models\n") catch {},
-        error.UnsupportedBuildAdapterExecution => stderr.writeAll("error: build currently executes only DuckDB models, seeds, and supported tests\n") catch {},
-        error.UnsupportedSeedAdapterExecution => stderr.writeAll("error: seed/build currently executes only DuckDB seeds\n") catch {},
-        error.UnsupportedSourceFreshnessAdapter => stderr.writeAll("error: source freshness currently supports only DuckDB sources\n") catch {},
+        error.UnsupportedAdapterExecution => stderr.writeAll("error: run requires a supported native execution adapter (duckdb or postgres)\n") catch {},
+        error.UnsupportedBuildAdapterExecution => stderr.writeAll("error: build requires a supported native execution adapter (duckdb or postgres)\n") catch {},
+        error.UnsupportedSeedAdapterExecution => stderr.writeAll("error: seed/build requires a supported seed adapter (duckdb or postgres)\n") catch {},
+        error.UnsupportedSourceFreshnessAdapter => stderr.writeAll("error: source freshness requires a supported freshness adapter (duckdb or postgres)\n") catch {},
         error.UnsupportedSourceFreshnessSelection => stderr.writeAll("error: source freshness currently supports only selected source resources\n") catch {},
         error.UnsupportedSourceFreshness => stderr.writeAll("error: source freshness currently requires loaded_at_field or loaded_at_query and complete freshness thresholds\n") catch {},
         error.UnsupportedModelMaterialization => stderr.writeAll("error: unsupported model materialization for the selected adapter\n") catch {},
-        error.UnsupportedIncrementalStrategy => stderr.writeAll("error: dbt-duckdb incremental strategies supported: append, delete+insert, default\n") catch {},
+        error.UnsupportedIncrementalStrategy => stderr.writeAll("error: incremental strategy is unavailable for the selected adapter\n") catch {},
         error.UnsupportedBuildModelMaterialization => stderr.writeAll("error: unsupported build model materialization for the selected adapter\n") catch {},
         error.UnsupportedDuckDbPath => stderr.writeAll("error: this DuckDB execution slice supports only local DuckDB database file paths\n") catch {},
         error.CyclicModelDependency => stderr.writeAll("error: selected model graph contains a cycle\n") catch {},
@@ -625,7 +625,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.NativeDuckDbConnectionFailed => stderr.writeAll("error: native DuckDB connection failed\n") catch {},
         error.NativeDuckDbReadOnlyConnection => stderr.writeAll("error: DuckDB connection permits read-only queries\n") catch {},
         error.InvalidThreadCount => stderr.writeAll("error: --threads must be an integer between 1 and 256\n") catch {},
-        error.InvalidLogFormat => stderr.writeAll("error: --log-format must be text or json\n") catch {},
+        error.InvalidLogFormat => stderr.writeAll("error: --log-format must be text, debug or json\n") catch {},
         error.InvalidDuckDbBackend => stderr.writeAll("error: DXT_DUCKDB_BACKEND must be auto, native, or cli\n") catch {},
         error.NativePostgresLibraryNotFound => stderr.writeAll("error: native PostgreSQL library unavailable; install libpq or set DXT_POSTGRES_LIBRARY\n") catch {},
         error.NativePostgresAbiMismatch => stderr.writeAll("error: native PostgreSQL library does not provide the required libpq API\n") catch {},
@@ -665,7 +665,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
             return .failure;
         },
         error.UnsupportedModelExecution => stderr.writeAll("error: model execution is unavailable for the selected adapter\n") catch {},
-        error.UnsupportedSeedExecution => stderr.writeAll("error: seed/build currently executes only DuckDB CSV seeds with supported quote_columns and column_types settings\n") catch {},
+        error.UnsupportedSeedExecution => stderr.writeAll("error: seed/build requires valid CSV seed configuration\n") catch {},
         error.UnsupportedTestExecution => stderr.writeAll("error: test/build currently executes only selected DuckDB singular SQL tests, supported custom generic column tests, and model/seed/source not_null/unique/accepted_values/relationships column tests\n") catch {},
         error.UnsupportedUnitTestExecution => stderr.writeAll("error: unit test execution currently supports only dict row fixtures for literal ref/source inputs and expected rows\n") catch {},
         error.InvalidDocsServePort => stderr.writeAll("error: --port must be an integer between 1 and 65535\n") catch {},
@@ -983,21 +983,23 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  retry            Retry failed and skipped resources from prior results.
         \\  clone            Create views over prior state relations.
         \\  version          Print the dxt version.
-        \\  parse            Parse a supported dbt project subset and emit manifest artifacts.
-        \\  ls               List resources from the supported parser graph.
+        \\  parse            Parse a dbt project and emit manifest artifacts.
+        \\  ls               List selected project resources.
         \\  clean            Delete configured generated project artifacts.
         \\  deps             Resolve and install local, Git, and Hub package dependencies.
-        \\  compile          Compile supported dbt SQL/Jinja without executing.
-        \\  run              Execute supported selected DuckDB SQL models.
+        \\  compile          Compile SQL and macros with the selected adapter context.
+        \\  run              Execute selected DuckDB or PostgreSQL models.
         \\  analyze          Parse SQL, bind types and resolve column lineage.
         \\  explain          Write native plans and typed logical SQL analysis.
         \\  snapshot         Maintain selected DuckDB timestamp and check snapshots.
-        \\  seed             Load supported selected DuckDB CSV seeds.
-        \\  test             Execute supported selected DuckDB tests.
-        \\  build            Execute supported selected DuckDB seeds, models, and tests.
-        \\  source freshness Check freshness for supported DuckDB sources.
+        \\  seed             Load selected CSV seeds into DuckDB or PostgreSQL.
+        \\  test             Execute data and unit tests on DuckDB or PostgreSQL.
+        \\  build            Build seeds, models, snapshots, unit tests and data tests.
+        \\  source freshness Check selected DuckDB or PostgreSQL source freshness.
         \\  docs generate    Generate supported docs artifacts.
         \\  docs serve       Serve generated docs artifacts from the target directory.
+        \\  metric           Query, explain and export semantic metrics and saved queries.
+        \\  cross-database   Plan and execute governed transformations across connections.
         \\  plan             Explain native model-version changes and missing intervals.
         \\  apply            Execute a native plan and audit before switching environment views.
         \\  environment      Inspect persisted native environment versions.
@@ -1019,7 +1021,7 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
         } else if (equals(command, "clean")) {
             try writer.writeAll("`dxt clean` removes configured generated project artifact directories.\n\n");
         } else {
-            try writer.print("`dxt {s}` supports the M1 parser subset documented in PLAN.md.\n\n", .{command});
+            try writer.print("`dxt {s}` uses the project and adapter contract documented in docs/COMPATIBILITY.md.\n\n", .{command});
         }
         try writer.writeAll("Options:\n");
         try writer.writeAll(
