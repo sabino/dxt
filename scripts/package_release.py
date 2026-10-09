@@ -19,6 +19,11 @@ NOTICES = {
     'dbt-includes-provenance.json': 'vendor/dbt-includes/provenance.json',
     'unicode-LICENSE': 'vendor/unicode/LICENSE',
     'unicode-UPSTREAM': 'vendor/unicode/README.md',
+    'tree-sitter-LICENSE': 'vendor/tree-sitter/LICENSE',
+    'tree-sitter-provenance.json': 'vendor/tree-sitter/provenance.json',
+    'tree-sitter-unicode-LICENSE': 'vendor/tree-sitter/src/unicode/LICENSE',
+    'tree-sitter-python-LICENSE': 'vendor/tree-sitter-python/LICENSE',
+    'tree-sitter-python-provenance.json': 'vendor/tree-sitter-python/provenance.json',
     **{f'{package}-LICENSE': f'vendor/dbt-includes/{package}/LICENSE'
        for package in ['dbt', 'dbt_duckdb', 'dbt_postgres']},
 }

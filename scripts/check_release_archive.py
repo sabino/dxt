@@ -33,6 +33,11 @@ REQUIRED_MEMBERS = {
     "docs/licenses/dbt_postgres-LICENSE",
     "docs/licenses/unicode-LICENSE",
     "docs/licenses/unicode-UPSTREAM",
+    "docs/licenses/tree-sitter-LICENSE",
+    "docs/licenses/tree-sitter-provenance.json",
+    "docs/licenses/tree-sitter-unicode-LICENSE",
+    "docs/licenses/tree-sitter-python-LICENSE",
+    "docs/licenses/tree-sitter-python-provenance.json",
 }
 
 ALLOWED_TOP_LEVEL_FILES = {

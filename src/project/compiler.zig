@@ -872,7 +872,14 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
     if (std.mem.startsWith(u8, span, "adapter.dispatch")) return try renderAdapterDispatchExpression(context, span);
     const value = try context.evaluate(span);
     if (context.returned != null) return try context.allocator.dupe(u8, "");
-    return try context.allocator.dupe(u8, try value.text(context.value_arena.allocator()));
+    const rendered = value.text(context.value_arena.allocator()) catch |err| {
+        if (@import("compile_diagnostics.zig").message(err) == null) {
+            const detail = try std.fmt.allocPrint(context.value_arena.allocator(), "{s} rendering expression: {s}", .{ @errorName(err), span });
+            @import("compile_diagnostics.zig").captureError(context.node.original_file_path, context.node.name, detail, err);
+        }
+        return err;
+    };
+    return try context.allocator.dupe(u8, rendered);
 }
 
 fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: std.mem.Allocator) anyerror!native_expr.Value {

@@ -129,6 +129,9 @@ with PATH empty and no Python/CLI product fallback. Both gates, the native test
 suite, mandatory Core/public project suite and safety scans must run again on the
 final integrated tree before publishing the PR and marking milestones complete.
 
+The user confirmed SQL model execution only for the initial release. Native
+Python syntax discovery and parse/compile artifacts remain visible; selecting
+Python models for execution must fail before warehouse mutations.
 The initial adapter certification scope is DuckDB and PostgreSQL, as confirmed
 by the user. Remaining dbt adapters are a subsequent certification scope, with
 their own drivers and live warehouse targets; they must not be advertised as

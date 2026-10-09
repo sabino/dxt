@@ -970,7 +970,7 @@ def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
     assert analysis["path"] == "analysis/customer_report.sql"
     assert analysis["original_file_path"] == "analyses/customer_report.sql"
     assert analysis["description"] == "Customer report analysis"
-    assert analysis["config"]["materialized"] == "analysis"
+    assert analysis["config"]["materialized"] == "view"
     assert analysis["config"]["tags"] == ["reporting"]
     assert analysis["columns"]["customer_id"]["description"] == "Customer identifier"
     assert analysis["refs"] == [{"name": "customers", "package": None, "version": None}]

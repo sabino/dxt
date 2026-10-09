@@ -49,9 +49,9 @@ pub fn load(runtime: types.Runtime, graph: *types.Graph) !void {
 }
 
 fn less(graph: *const types.Graph, left: *types.Node, right: *types.Node) bool {
-    const left_root = std.mem.eql(u8, left.package_name, graph.project_name);
-    const right_root = std.mem.eql(u8, right.package_name, graph.project_name);
-    if (left_root != right_root) return !left_root;
+    const root_package_lhs = std.mem.eql(u8, left.package_name, graph.project_name);
+    const root_package_rhs = std.mem.eql(u8, right.package_name, graph.project_name);
+    if (root_package_lhs != root_package_rhs) return !root_package_lhs;
     const package_order = std.mem.order(u8, left.package_name, right.package_name);
     if (package_order != .eq) return package_order == .lt;
     return left.hook_index.? < right.hook_index.?;
