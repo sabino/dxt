@@ -9,6 +9,7 @@ const GenericTestNode = types.GenericTestNode;
 const SingularTestNode = types.SingularTestNode;
 const UnitTestDef = types.UnitTestDef;
 const Runtime = types.Runtime;
+const clock = @import("execution_clock.zig");
 
 pub const NodeResult = struct {
     node: ?*const Node = null,
@@ -22,6 +23,19 @@ pub const NodeResult = struct {
     owns_compiled_code: bool = false,
     relation_name: ?[]const u8 = null,
     owns_relation_name: bool = false,
+    thread_number: u16 = 1,
+    execution_started_at: ?i96 = null,
+    execution_completed_at: ?i96 = null,
+    execution_time: f64 = 0,
+    compile_started_at: ?i96 = null,
+    compile_completed_at: ?i96 = null,
+    adapter_response: ?AdapterResponse = null,
+};
+
+pub const AdapterResponse = struct {
+    message: ?[]const u8 = null,
+    code: ?[]const u8 = null,
+    rows_affected: ?i64 = null,
 };
 
 pub const ResultStatusRow = struct {
@@ -126,13 +140,49 @@ pub fn renderRunResultsWithInvocation(allocator: std.mem.Allocator, results: []c
     return try out.toOwnedSlice();
 }
 
+fn writeTiming(writer: *Io.Writer, name: []const u8, start: ?i96, finish: ?i96) !void {
+    try writer.writeAll("{\"name\": ");
+    try json.string(writer, name);
+    try writer.writeAll(", \"started_at\": ");
+    try clock.writeTimestamp(writer, start);
+    try writer.writeAll(", \"completed_at\": ");
+    try clock.writeTimestamp(writer, finish);
+    try writer.writeByte('}');
+}
+
 fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     try writer.writeAll("\n    {\"status\": ");
     try json.string(writer, result.status);
     try writer.writeAll(", \"timing\": [");
-    try writer.writeAll("{\"name\": \"compile\", \"started_at\": null, \"completed_at\": null}, ");
-    try writer.writeAll("{\"name\": \"execute\", \"started_at\": null, \"completed_at\": null}");
-    try writer.writeAll("], \"thread_id\": \"Thread-1\", \"execution_time\": 0.0, \"adapter_response\": {}, \"message\": ");
+    var has_timing = false;
+    if (result.compile_started_at != null and result.compile_completed_at != null) {
+        try writeTiming(writer, "compile", result.compile_started_at, result.compile_completed_at);
+        has_timing = true;
+    }
+    if (result.execution_started_at != null and result.execution_completed_at != null) {
+        if (has_timing) try writer.writeAll(", ");
+        try writeTiming(writer, "execute", result.execution_started_at, result.execution_completed_at);
+    }
+    try writer.print("], \"thread_id\": \"Thread-{d}\", \"execution_time\": {d}, \"adapter_response\": {{", .{ result.thread_number, result.execution_time });
+    if (result.adapter_response) |response| {
+        var fields: usize = 0;
+        if (response.message) |message| {
+            try writer.writeAll("\"_message\": ");
+            try json.string(writer, message);
+            fields += 1;
+        }
+        if (response.code) |code| {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.writeAll("\"code\": ");
+            try json.string(writer, code);
+            fields += 1;
+        }
+        if (response.rows_affected) |count| {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.print("\"rows_affected\": {d}", .{count});
+        }
+    }
+    try writer.writeAll("}, \"message\": ");
     if (result.message) |message| {
         try json.string(writer, message);
     } else {
