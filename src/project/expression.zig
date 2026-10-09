@@ -11,6 +11,7 @@ const sets = @import("set_context.zig");
 pub const Value = union(enum) {
     undefined,
     conditional_undefined,
+    ordinary_undefined: *CaptureUndefined,
     capture_undefined: *CaptureUndefined,
     none,
     boolean: bool,
@@ -30,7 +31,7 @@ pub const Value = union(enum) {
         if (sequences.truthy(self)) |result| return result;
         if (self == .object) if (sequence(self)) |items| return items.len != 0;
         return switch (self) {
-            .undefined, .conditional_undefined, .capture_undefined, .none => false,
+            .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined, .none => false,
             .boolean => |v| v,
             .number => |v| v != 0,
             .complex => |v| v.real != 0 or v.imaginary != 0,
@@ -44,7 +45,7 @@ pub const Value = union(enum) {
 
     pub fn text(self: Value, allocator: std.mem.Allocator) anyerror![]const u8 {
         return switch (self) {
-            .undefined, .conditional_undefined, .capture_undefined => "",
+            .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined => "",
             .callable => error.JinjaTypeError,
             .none => "None",
             .boolean => |v| if (v) "True" else "False",
@@ -128,8 +129,12 @@ pub fn captureUndefined(allocator: std.mem.Allocator, name: ?[]const u8) !Value 
     };
     return .{ .capture_undefined = captured };
 }
+pub fn undefinedValue(allocator: std.mem.Allocator, name: ?[]const u8) !Value {
+    const captured = try captureUndefined(allocator, name);
+    return .{ .ordinary_undefined = captured.capture_undefined };
+}
 pub fn isUndefined(value: Value) bool {
-    return value == .undefined or value == .conditional_undefined or value == .capture_undefined;
+    return value == .undefined or value == .conditional_undefined or value == .ordinary_undefined or value == .capture_undefined;
 }
 
 /// Probe the iterable protocol without consuming one-shot iterators.
@@ -251,15 +256,31 @@ test "NaN scalar equality and container identity follow separate Python rules" {
 pub fn checkedAttribute(value: Value, name: []const u8) !Value {
     if (value == .capture_undefined) {
         if (std.mem.eql(u8, name, "name") or std.mem.eql(u8, name, "hint") or std.mem.eql(u8, name, "unsafe_callable") or std.mem.eql(u8, name, "alters_data")) return value.attribute(name);
-        if (std.mem.startsWith(u8, name, "__") and std.mem.endsWith(u8, name, "__")) return error.UndefinedJinjaValue;
         const captured = value.capture_undefined;
+        if (undefinedUnsafeAttribute(name, true)) {
+            const result = try captureUndefined(captured.allocator, name);
+            result.capture_undefined.hint = try std.fmt.allocPrint(captured.allocator, "access to attribute '{s}' of 'Undefined' object is unsafe.", .{name});
+            return result;
+        }
+        // Jinja falls back to subscription after __getattr__ rejects an
+        // unknown dunder. CaptureUndefined subscription preserves the cell.
+        if (std.mem.startsWith(u8, name, "__") and std.mem.endsWith(u8, name, "__")) return value;
         captured.name = try captured.allocator.dupe(u8, name);
         const result = try captureUndefined(captured.allocator, name);
         result.capture_undefined.hint = captured.hint;
         return result;
     }
-    if (value == .undefined or value == .conditional_undefined) return error.UndefinedJinjaValue;
+    if (isUndefined(value)) {
+        if (undefinedUnsafeAttribute(name, false)) return if (value == .ordinary_undefined) try undefinedValue(value.ordinary_undefined.allocator, name) else .undefined;
+        return error.UndefinedJinjaValue;
+    }
     return value.attribute(name);
+}
+
+fn undefinedUnsafeAttribute(name: []const u8, capture: bool) bool {
+    if (std.mem.eql(u8, name, "__dict__")) return capture;
+    inline for (.{ "__class__", "__dict__", "__slots__", "__repr__", "__str__", "__bool__", "__len__", "__iter__", "__aiter__", "__call__", "__getitem__", "__getattr__", "__getattribute__", "__setattr__", "__delattr__", "__dir__", "__eq__", "__ne__", "__hash__", "__reduce__", "__reduce_ex__", "__init__", "__init_subclass__", "__new__", "__subclasshook__", "__doc__", "__module__", "__add__", "__radd__", "__sub__", "__rsub__", "__mul__", "__rmul__", "__div__", "__rdiv__", "__truediv__", "__rtruediv__", "__floordiv__", "__rfloordiv__", "__mod__", "__rmod__", "__pos__", "__neg__", "__lt__", "__le__", "__gt__", "__ge__", "__int__", "__float__", "__complex__", "__pow__", "__rpow__" }) |attribute| if (std.mem.eql(u8, name, attribute)) return true;
+    return false;
 }
 
 pub fn integerIndex(value: Value) !i64 {
@@ -312,7 +333,7 @@ pub fn evaluate(allocator: std.mem.Allocator, input: []const u8, host: ?Host) !V
         const else_at = topLevelKeyword(remainder, "else");
         const condition = try evaluate(allocator, remainder[0 .. else_at orelse remainder.len], host);
         if (condition.truthy()) return try evaluate(allocator, input[0..condition_at], host);
-        return if (else_at) |position| try evaluate(allocator, remainder[position + 4 ..], host) else .conditional_undefined;
+        return if (else_at) |position| try evaluate(allocator, remainder[position + 4 ..], host) else try undefinedValue(allocator, null);
     }
     var parser = Parser{ .allocator = allocator, .input = input, .host = host };
     const value = try parser.binary(0);
@@ -520,7 +541,7 @@ const Parser = struct {
                     try self.expect("]");
                     if (self.active) {
                         value = try indexValue(self.allocator, value, start.?);
-                        if (value == .undefined and self.capturing()) value = try captureUndefined(self.allocator, if (start.? == .string) start.?.string else null);
+                        if (value == .undefined) value = try self.missing(if (start.? == .string) start.?.string else null);
                     }
                 }
             } else if (self.take(".")) {
@@ -530,7 +551,7 @@ const Parser = struct {
                     if (self.active) value = try self.method(value, attribute, args);
                 } else if (self.active) {
                     value = try checkedAttribute(value, attribute);
-                    if (value == .undefined and self.capturing()) value = try captureUndefined(self.allocator, attribute);
+                    if (value == .undefined) value = try self.missing(attribute);
                     if (value == .number and std.math.isNan(value.number)) value = try floatValue(self.allocator, value.number);
                 }
             } else if (with_filters and self.take("is")) {
@@ -546,7 +567,7 @@ const Parser = struct {
                 const args = if (self.take("(")) try self.arguments() else &.{};
                 if (self.active) {
                     value = try filter(self.allocator, filter_name, value, args);
-                    if (value == .undefined and self.capturing()) value = try captureUndefined(self.allocator, null);
+                    if (value == .undefined) value = try self.missing(null);
                 }
             } else break;
         }
@@ -693,14 +714,14 @@ const Parser = struct {
             var parts = std.mem.splitScalar(u8, path, '.');
             const root_name = parts.next().?;
             var receiver: Value = if (self.host) |host| try host.resolve(host.context, root_name, self.allocator) else .undefined;
-            if (receiver == .undefined and self.capturing()) receiver = try captureUndefined(self.allocator, root_name);
+            if (receiver == .undefined) receiver = try self.missing(root_name);
             while (parts.next()) |attribute| {
                 receiver = try checkedAttribute(receiver, attribute);
-                if (receiver == .undefined and self.capturing()) receiver = try captureUndefined(self.allocator, attribute);
+                if (receiver == .undefined) receiver = try self.missing(attribute);
             }
             return receiver;
         }
-        if (resolved == .undefined and self.capturing()) return try captureUndefined(self.allocator, path);
+        if (resolved == .undefined) return try self.missing(path);
         return if (resolved == .number and std.math.isNan(resolved.number)) try floatValue(self.allocator, resolved.number) else resolved;
     }
 
@@ -726,6 +747,10 @@ const Parser = struct {
 
     fn capturing(self: *const Parser) bool {
         return if (self.host) |host| host.capture_undefined else false;
+    }
+
+    fn missing(self: *const Parser, name_: ?[]const u8) !Value {
+        return if (self.capturing()) try captureUndefined(self.allocator, name_) else try undefinedValue(self.allocator, name_);
     }
 
     fn arguments(self: *Parser) anyerror![]const Argument {
@@ -1148,7 +1173,7 @@ pub fn equalValues(a: Value, b: Value) bool {
     if ((integerText(a) != null or floatProtocol(a) != null) and (integerText(b) != null or floatProtocol(b) != null)) return (numericOrder(std.heap.page_allocator, a, b) catch return false) == .eq;
     if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
     return switch (a) {
-        .undefined, .conditional_undefined, .capture_undefined => unreachable,
+        .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined => unreachable,
         .none => true,
         .string => |s| std.mem.eql(u8, s, b.string),
         .number => |n| n == b.number,
@@ -1390,6 +1415,7 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
         if (args.len != 1) return error.InvalidJinjaArguments;
         const other = args[0].value;
         if (value == .capture_undefined and other == .capture_undefined) return value.capture_undefined.identity == other.capture_undefined.identity;
+        if (value == .ordinary_undefined and other == .ordinary_undefined) return value.ordinary_undefined.identity == other.ordinary_undefined.identity;
         if (isUndefined(value) or isUndefined(other)) return false;
         if (floatProtocol(value)) |number| if (std.math.isNan(number)) return mapping_keys.keyEqual(value, other);
         if (complexProtocol(value)) |number| if (std.math.isNan(number.real) or std.math.isNan(number.imaginary)) return mapping_keys.keyEqual(value, other);
@@ -1666,7 +1692,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
     }
     if (std.mem.eql(u8, name, "length") or std.mem.eql(u8, name, "count")) return try integerValue(allocator, switch (value) {
         .string => |v| try unicode.count(v),
-        .undefined, .conditional_undefined, .capture_undefined => 0,
+        .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined => 0,
         .list, .tuple => |v| v.len,
         .object => |v| if (value.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError else if (try sequences.length(value)) |length| length else if (sequence(value)) |items| items.len else v.len,
         else => return error.JinjaTypeError,
@@ -1837,7 +1863,7 @@ test "omitted conditional alternatives preserve Jinja plain Undefined" {
     defer arena.deinit();
     const a = arena.allocator();
     const missing = try evaluate(a, "'x' if false", null);
-    try std.testing.expect(missing == .conditional_undefined);
+    try std.testing.expect(missing == .ordinary_undefined);
     try std.testing.expectEqualStrings("", try missing.text(a));
     try std.testing.expect((try evaluate(a, "('x' if false) is undefined", null)).boolean);
     try std.testing.expectEqualStrings("fallback", try (try evaluate(a, "('x' if false)|default('fallback')", null)).text(a));
@@ -1855,6 +1881,10 @@ test "ordinary undefined renders and iterates but rejects attribute arithmetic a
     try std.testing.expectEqualStrings("Undefined", try repr(.undefined, a));
     try std.testing.expect((try evaluate(a, "missing is callable and missing is iterable and missing is sequence", null)).boolean);
     try std.testing.expect(equalValues(.undefined, .conditional_undefined));
+    const bound = try evaluate(a, "missing", null);
+    try std.testing.expect(try testValue("sameas", bound, &.{.{ .value = bound }}));
+    try std.testing.expect(!try testValue("sameas", bound, &.{.{ .value = try evaluate(a, "missing", null) }}));
+    try std.testing.expectEqualStrings("", try (try evaluate(a, "missing.__class__", null)).text(a));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "missing.field", null));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "missing + 1", null));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "+missing", null));
@@ -1890,7 +1920,9 @@ test "parse undefined captures mutable alias names and stable subscript call ide
     try std.testing.expectEqualStrings("missing", (try evaluate(a, "(missing)().name", host)).string);
     try std.testing.expectEqualStrings("", try (try evaluate(a, "missing.field.call()", host)).text(a));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "missing + 1", host));
-    try std.testing.expectError(error.UndefinedJinjaValue, checkedAttribute(original, "__reduce__"));
+    try std.testing.expect(isUndefined(try checkedAttribute(original, "__reduce__")));
+    try std.testing.expectEqualStrings("missing", (try evaluate(a, "missing.__unknown__.name", host)).string);
+    try std.testing.expectEqualStrings("__class__", (try evaluate(a, "missing.__class__.name", host)).string);
 }
 
 test "set expressions preserve aliases comparisons iteration and typed map conversion" {
