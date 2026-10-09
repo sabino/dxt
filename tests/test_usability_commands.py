@@ -94,6 +94,9 @@ def test_init_scaffolds_a_buildable_duckdb_project(tmp_path):
     assert build.returncode == 0, build.stderr
     data = artifact(project)
     assert data['args']['which'] == 'build'
+    assert data['metadata']['invocation_id'] is not None
+    assert data['metadata']['invocation_started_at'][:4] != '1970'
+    assert data['elapsed_time'] > 0
     assert len(data['results']) == 4
     assert all(row['status'] in {'success', 'pass'} for row in data['results'])
     assert query(project / 'starter.duckdb', 'select * from main.customers order by id') == [{'id': 1, 'name': 'Ada'}, {'id': 2, 'name': 'Grace'}]
@@ -365,7 +368,7 @@ def test_core_1105_clone_view_copy_existing_relation_and_full_refresh(tmp_path, 
         assert (clone.returncode == 0) if engine == 'dxt' else clone.success
         query(database, 'insert into prod.customers values (8)')
         observed[engine] = {
-            'results': {key: {field: row[field] for field in ('status', 'compiled', 'compiled_code', 'message', 'failures', 'relation_name')} for key, row in rows(project).items()},
+            'results': {key: {field: row[field] for field in ('status', 'compiled', 'compiled_code', 'message', 'failures', 'relation_name', 'adapter_response')} for key, row in rows(project).items()},
             'data': query(database, 'select * from dev.customers order by id'),
             'type': query(database, "select table_type from information_schema.tables where table_schema='dev' and table_name='customers'"),
         }

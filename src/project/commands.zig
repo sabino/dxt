@@ -410,7 +410,7 @@ pub fn cloneRelations(runtime: Runtime, options: Options, graph: *types.Graph, s
             try rows.append(runtime.allocator, .{ .node = node, .status = "error", .message = "DuckDB execution failed" });
             continue;
         };
-        try rows.append(runtime.allocator, .{ .node = node, .message = "OK" });
+        try rows.append(runtime.allocator, .{ .node = node, .message = "OK", .adapter_response = .{ .message = "OK" } });
     }
     try writeResults(runtime, target_dir, rows.items);
     try stdout.print("Cloned {d} relation(s)\n", .{rows.items.len});
