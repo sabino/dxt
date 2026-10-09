@@ -129,6 +129,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         try parseVarsText(runtime.allocator, vars_text, &graph.vars);
     }
 
+    try @import("bundled_macros.zig").load(runtime.allocator, &graph);
     try loadProjectMacros(runtime, options.project_dir, config.name, config.macro_paths.items, true, callbacks, &graph);
     try loadInstalledPackageMacros(runtime, options.project_dir, callbacks, &graph);
     try loadInstalledPackageResources(runtime, options.project_dir, callbacks, &graph);

@@ -573,13 +573,23 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
     while (index < end_index) {
         if (context.returned != null) return;
         if (index + 1 >= end_index or sql[index] != '{') {
+            // Jinja whitespace control consumes only adjacent source text.
+            // It must not trim a preceding expression's returned whitespace
+            // or reach across an intervening comment/control tag.
+            if (std.ascii.isWhitespace(sql[index])) {
+                var next = index;
+                while (next < end_index and std.ascii.isWhitespace(sql[next])) next += 1;
+                if (next + 2 < sql.len and sql[next] == '{' and sql[next + 2] == '-' and (sql[next + 1] == '%' or sql[next + 1] == '{' or sql[next + 1] == '#')) {
+                    index = next;
+                    continue;
+                }
+            }
             try out.append(context.allocator, sql[index]);
             index += 1;
             continue;
         }
 
         const tag_kind = sql[index + 1];
-        if (index + 2 < end_index and sql[index + 2] == '-') trimOutput(context.allocator, out);
         if (tag_kind == '#') {
             const close = std.mem.indexOfPos(u8, sql, index + 2, "#}") orelse return error.UnsupportedJinja;
             if (close + 2 > end_index) return error.UnsupportedJinja;
@@ -698,7 +708,6 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
         }
         index = afterTag(sql, close + 2, end_index);
     }
-    if (end_index + 2 < sql.len and sql[end_index] == '{' and sql[end_index + 2] == '-') trimOutput(context.allocator, out);
 }
 
 const CaptureBlock = struct { start: usize, close: usize };
@@ -893,6 +902,7 @@ fn upsertConfigArgument(allocator: std.mem.Allocator, values: *std.ArrayList(nat
 
 fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
+    if (try @import("bundled_macros.zig").callColumn(allocator, name, args)) |value| return value;
     if (std.mem.eql(u8, name, "__dxt_caller") or std.mem.eql(u8, name, "caller")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         return try resolveExpressionValue(context, "__dxt_caller_sql", allocator);

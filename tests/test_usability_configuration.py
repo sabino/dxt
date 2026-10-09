@@ -440,3 +440,41 @@ def test_jinja_flags_and_core_version_use_effective_command_options(tmp_path, co
     actual, expected = [m["nodes"]["model.configuration_fixture.rendered"] for m in manifests]
     assert actual["compiled_code"] == expected["compiled_code"]
     assert actual["config"]["meta"] == expected["config"]["meta"]
+
+
+@pytest.mark.parametrize('adapter_type', ['duckdb', 'postgres'])
+def test_bundled_core_and_adapter_definitions_match_pinned_manifest(tmp_path, configuration_oracle, adapter_type):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/bundled.sql', 'select 1 as id\n')
+    if adapter_type == 'postgres':
+        pair.write('profiles.yml', 'configuration_fixture:\n  target: dev\n  outputs:\n    dev: {type: postgres, host: localhost, port: 1, dbname: configuration_fixture, schema: main, user: fixture, password: fixture, threads: 1}\n')
+    actual, expected = pair.invoke('parse')
+    internal = lambda manifest: {key: value for key, value in manifest['macros'].items() if value['package_name'] in {'dbt', 'dbt_' + adapter_type}}
+    actual_macros, expected_macros = internal(actual), internal(expected)
+    assert actual_macros.keys() == expected_macros.keys()
+    for key in expected_macros:
+        for field in ['name', 'package_name', 'path', 'original_file_path', 'macro_sql']:
+            assert actual_macros[key][field] == expected_macros[key][field], (key, field)
+    assert actual['docs']['doc.dbt.__overview__'] == expected['docs']['doc.dbt.__overview__']
+
+
+@pytest.mark.parametrize('sql', [
+    "select cast(1 as {{ dbt.type_int() }}) as id, cast('hello' as {{ dbt.type_string() }}) as label",
+    "select cast(1 as {{ dbt.type_numeric() }}) as amount, cast(1 as {{ dbt.type_float() }}) as value, cast(true as {{ dbt.type_boolean() }}) as enabled",
+    "select {{ dbt.string_literal('hello') }} as label, {{ dbt.hash(\"'hello'\") }} as digest",
+    "select {{ dbt.dateadd('day', 2, \"date '2024-01-01'\") }} as added, {{ dbt.datediff(\"date '2024-01-01'\", \"date '2024-01-03'\", 'day') }} as delta",
+    "{{ '\\n\\n' }}{%- set ignored = 1 %}select 1 as id",
+    "\n\n{# comment preserves preceding literal whitespace #}{%- set ignored = 1 -%}select 1 as id",
+    "select {{ dbt.concat([\"'a'\", \"'b'\"]) }} as joined, {{ dbt.split_part(\"'a,b'\", \"','\", 2) }} as part",
+])
+def test_upstream_sql_macros_compile_and_execute_unchanged(tmp_path, configuration_oracle, sql):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/bundled.sql', '{{ config(materialized="table") }}\n' + sql + '\n')
+    actual, expected = pair.invoke('run')
+    assert actual['nodes']['model.configuration_fixture.bundled']['compiled_code'] == expected['nodes']['model.configuration_fixture.bundled']['compiled_code']
+    import duckdb
+    rows = []
+    for project in pair.projects:
+        with duckdb.connect(str(project / 'warehouse.duckdb'), read_only=True) as connection:
+            rows.append(connection.execute('select * from main.bundled').fetchall())
+    assert rows[0] == rows[1]

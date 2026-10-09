@@ -195,7 +195,8 @@ pub fn parseMacros(runtime: types.Runtime, project_dir: []const u8, relative_pat
     try parseMacrosFromText(runtime.allocator, text, relative_path, package_name, graph);
 }
 
-pub fn parseMacrosFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+pub fn parseMacrosFromText(allocator: std.mem.Allocator, raw_text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    const text = std.mem.trim(u8, raw_text, " \t\r\n");
     var index: usize = 0;
     var control_depth: usize = 0;
     while (try nextJinjaBlockOutsideIgnoredSpans(text, &index)) |open| {
@@ -228,7 +229,17 @@ pub fn parseMacrosFromText(allocator: std.mem.Allocator, text: []const u8, relat
 
         const end = try findEndMacroTag(text, close + 2, macro_tag.end_tag);
 
-        const macro_sql = std.mem.trim(u8, text[open .. end.close + 2], " \t\r\n");
+        // Core's block extractor includes whitespace consumed by '-' on the
+        // opening/closing tags in the original macro_sql artifact.
+        var block_start = open;
+        if (text[open + 2] == '-') {
+            while (block_start > index and std.ascii.isWhitespace(text[block_start - 1])) block_start -= 1;
+        }
+        var block_end = end.close + 2;
+        if (end.close > 0 and text[end.close - 1] == '-') {
+            while (block_end < text.len and std.ascii.isWhitespace(text[block_end])) block_end += 1;
+        }
+        const macro_sql = text[block_start..block_end];
         var macro = try macroDefFromParts(allocator, package_name, macro_tag.name, relative_path, macro_sql);
         macro.signature_arguments = macro_tag.arguments;
         macro_tag.arguments = .empty;
@@ -239,7 +250,7 @@ pub fn parseMacrosFromText(allocator: std.mem.Allocator, text: []const u8, relat
         macro_tag.supported_languages = .empty;
         macro.has_supported_languages = macro_tag.has_supported_languages;
         try graph.macros.append(allocator, macro);
-        index = end.close + 2;
+        index = block_end;
     }
     if (control_depth != 0) return error.MalformedMacroBlock;
 }

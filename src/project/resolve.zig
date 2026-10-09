@@ -93,6 +93,7 @@ pub fn findMacroIdForUnqualifiedNamespaceCall(graph: *const Graph, package_name:
     if (!std.mem.eql(u8, package_name, graph.project_name)) {
         if (findProjectMacroIdByName(graph, name)) |macro_id| return macro_id;
     }
+    if (findMacroIdByPackageAndName(graph, adapterPackage(graph), name)) |macro_id| return macro_id;
     if (findMacroIdByPackageAndName(graph, "dbt", name)) |macro_id| return macro_id;
     return null;
 }
@@ -103,6 +104,7 @@ pub fn findMacroIdForUnqualifiedMacroDependency(graph: *const Graph, package_nam
         if (findProjectMacroIdByName(graph, name)) |macro_id| return macro_id;
     }
     if (findNonInternalPackageMacroIdByName(graph, package_name, name)) |macro_id| return macro_id;
+    if (findMacroIdByPackageAndName(graph, adapterPackage(graph), name)) |macro_id| return macro_id;
     if (findMacroIdByPackageAndName(graph, "dbt", name)) |macro_id| return macro_id;
     return null;
 }
@@ -506,7 +508,7 @@ fn findNonInternalPackageMacroIdByName(graph: *const Graph, current_package: []c
         if (!std.mem.eql(u8, macro.name, name)) continue;
         if (std.mem.eql(u8, macro.package_name, current_package)) continue;
         if (std.mem.eql(u8, macro.package_name, graph.project_name)) continue;
-        if (std.mem.eql(u8, macro.package_name, "dbt")) continue;
+        if (std.mem.eql(u8, macro.package_name, "dbt") or std.mem.eql(u8, macro.package_name, "dbt_duckdb") or std.mem.eql(u8, macro.package_name, "dbt_postgres")) continue;
         return macro.unique_id;
     }
     return null;
@@ -522,6 +524,9 @@ fn findDispatchConfig(graph: *const Graph, macro_namespace: []const u8) ?*const 
 fn findDispatchMacroIdInConfiguredOrder(graph: *const Graph, search_order: []const []const u8, adapter_prefixes: []const []const u8, macro_name: []const u8) ?[]const u8 {
     for (search_order) |package_name| {
         for (adapter_prefixes) |prefix| {
+            if (std.mem.eql(u8, package_name, "dbt")) {
+                if (findDispatchMacroIdByPackageAndName(graph, adapterPackage(graph), prefix, macro_name)) |macro_id| return macro_id;
+            }
             if (findDispatchMacroIdByPackageAndName(graph, package_name, prefix, macro_name)) |macro_id| return macro_id;
         }
     }
@@ -533,8 +538,13 @@ fn findDispatchMacroIdInNamespace(graph: *const Graph, package_name: []const u8,
     if (!std.mem.eql(u8, package_name, graph.project_name)) {
         if (findDispatchMacroIdByPackageAndName(graph, graph.project_name, prefix, macro_name)) |macro_id| return macro_id;
     }
+    if (findDispatchMacroIdByPackageAndName(graph, adapterPackage(graph), prefix, macro_name)) |macro_id| return macro_id;
     if (findDispatchMacroIdByPackageAndName(graph, "dbt", prefix, macro_name)) |macro_id| return macro_id;
     return null;
+}
+
+fn adapterPackage(graph: *const Graph) []const u8 {
+    return if (std.mem.eql(u8, graph.adapter_type, "postgres")) "dbt_postgres" else "dbt_duckdb";
 }
 
 fn findDispatchMacroIdByPackageAndName(graph: *const Graph, package_name: []const u8, prefix: []const u8, macro_name: []const u8) ?[]const u8 {
