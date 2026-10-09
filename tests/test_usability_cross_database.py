@@ -1203,3 +1203,58 @@ def test_explicit_raw_query_authorization_and_scalar_projection_are_native(proje
         result = invoke(project, config, native_environment, "run", "--allow-movement")
         assert result.returncode == 0, result.stderr
         assert duck_rows(project[3], "select amount from marts.raw") == expected
+
+
+def test_simultaneous_query_catalog_writers_preserve_runs_without_blocking_sources(project, native_environment, query_driver):
+    fcntl = pytest.importorskip("fcntl")
+    config = project[1]
+    config["connections"]["crm_reader"] = {"profile": "cross", "target": "crm"}
+    (project[0] / "dxt_connections.yml").write_text(json.dumps(config))
+    directory = project[0] / ".dxt"
+    directory.mkdir()
+    lock = (directory / "cross-catalog.lock").open("a+")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    processes = []
+    try:
+        for value in (1, 2):
+            request = {"options": {"connection": "crm", "policy": {
+                "profiles_dir": str(project[0]), "allow_movement": True}},
+                "sql": 'select value from "logical"."input"',
+                "bindings": [{"logical_id": "semantic.simultaneous", "relation_name": '"logical"."input"',
+                              "source_relation": f"{project[2]}.customers", "connection": "crm_reader",
+                              "source_query": f"select {value}::bigint as value from pg_sleep(0.2)"}]}
+            request_path = project[0] / f"query_request_{value}.json"
+            request_path.write_text(json.dumps(request))
+            processes.append(subprocess.Popen([str(query_driver), "query", str(project[0]), str(request_path)],
+                                              cwd=ROOT, env=native_environment, text=True,
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        for _ in range(400):
+            tasks = list((directory / "cross-runs").glob("*/tasks/metric_query.json"))
+            if len(tasks) == 2 and all(json.loads(path.read_text())["status"] == "success" for path in tasks): break
+            for process in processes:
+                if process.poll() is not None: pytest.fail(process.communicate()[1] or "Query bypassed the held catalog writer lock")
+            time.sleep(0.01)
+        else: pytest.fail("Independent source/final queries did not complete while catalog metadata was locked")
+        # The metadata lease must not cover source opens, source reads or final SQL.
+        assert all(process.poll() is None for process in processes)
+        assert not (directory / "cross-catalog.json").exists()
+        run_ids = {path.parent.parent.name for path in tasks}
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        outcomes = []
+        for process in processes:
+            output, errors = process.communicate(timeout=15)
+            assert process.returncode == 0, errors
+            assert "leaked" not in errors
+            outcomes.append(json.loads(output))
+        assert [outcome["result"] for outcome in outcomes] == [[{"value": 1}], [{"value": 2}]]
+        catalog = json.loads((directory / "cross-catalog.json").read_text())
+        assert catalog["generation"] == 2
+        assert {run["run_id"] for run in catalog["runs"]} == run_ids
+        assert len(catalog["relation_stats"]) == 2
+        assert all(run["tasks"][0]["status"] == "success" for run in catalog["runs"])
+        assert str(project[0]) not in json.dumps(catalog)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+        for process in processes:
+            if process.poll() is None: process.terminate(); process.communicate(timeout=5)
