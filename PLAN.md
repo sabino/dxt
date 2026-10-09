@@ -115,6 +115,13 @@ manifest and macro context. Model, seed, snapshot and test defaults, typed extra
 fields and normalized hooks are compared in full against pinned Core; shared
 configuration merge/execution changes remain with the configuration worker.
 
+The supervisor owns project hook operation discovery, compile artifacts and the
+on-run-start/on-run-end lifecycle in a focused native module. Narrow Node index,
+loader, compiler, OperationHost context and run-results hooks integrate after the
+typed expression/compiler helpers. The configuration worker owns resource hooks
+and their held-session body wrapper; these are separate execution lifecycles.
+Actual Core failure, ordering, context and transaction behavior is the oracle.
+
 The developer performance harness compares complete artifacts and every compiled
 model before enforcing cold/warm budgets. Its first 250-model, three-repetition
 ReleaseSafe measurement passed both budgets. Clean-install checks also passed

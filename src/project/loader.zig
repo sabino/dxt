@@ -255,6 +255,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     try callbacks.materialize_generic_tests(&graph);
     try @import("unit_metadata.zig").checksums(&graph);
     try @import("unit_versions.zig").assign(&graph);
+    try @import("hook_operations.zig").load(runtime, &graph);
     sortGraphResources(&graph);
     try rejectDuplicateAnalyses(&graph);
     try rejectDuplicateModels(&graph);

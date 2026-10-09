@@ -28,7 +28,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
     defer resources.deinit(runtime.allocator);
     for (graph.nodes.items) |*node| {
         if (!node.enabled or !contains(selected, node.unique_id)) continue;
-        if (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "snapshot") or std.mem.eql(u8, node.resource_type, "analysis") or std.mem.eql(u8, node.resource_type, "seed")) try resources.append(runtime.allocator, .{ .node = node });
+        if (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "snapshot") or std.mem.eql(u8, node.resource_type, "analysis") or std.mem.eql(u8, node.resource_type, "operation") or std.mem.eql(u8, node.resource_type, "seed")) try resources.append(runtime.allocator, .{ .node = node });
     }
     for (graph.tests.items) |*node| if (contains(selected, node.unique_id)) {
         try resources.append(runtime.allocator, .{ .generic = node });
@@ -50,7 +50,8 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
     for (summary.rows, 0..) |row, index| {
         if (row.compiled_code) |sql| {
             const package, const path = if (row.node) |node| .{ node.package_name, if (std.mem.eql(u8, node.resource_type, "analysis")) node.path else node.original_file_path } else if (row.test_node) |node| .{ node.package_name, node.path } else if (row.singular_test_node) |node| .{ node.package_name, node.original_file_path } else unreachable;
-            const artifact = if (row.node != null and row.node.?.snapshot_yaml_definition) try std.fmt.allocPrint(runtime.allocator, "{s}/{s}.sql", .{ path, row.node.?.name }) else path;
+            const artifact = if (row.node != null and row.node.?.hook_index != null) try std.fs.path.join(runtime.allocator, &.{ path, row.node.?.path }) else if (row.node != null and row.node.?.snapshot_yaml_definition) try std.fmt.allocPrint(runtime.allocator, "{s}/{s}.sql", .{ path, row.node.?.name }) else path;
+            defer if (row.node != null and (row.node.?.hook_index != null or row.node.?.snapshot_yaml_definition)) runtime.allocator.free(artifact);
             const compiled_path = try std.fs.path.join(runtime.allocator, &.{ counts.compiled_base, package, artifact });
             if (std.fs.path.dirname(compiled_path)) |parent| try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
             try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = sql });
@@ -61,7 +62,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 node.compiled_path = compiled_path;
                 if (row.relation_name) |relation| node.relation_name = try runtime.allocator.dupe(u8, relation);
                 for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
-                if (std.mem.eql(u8, node.resource_type, "analysis")) counts.analyses += 1 else if (std.mem.eql(u8, node.resource_type, "snapshot")) counts.snapshots += 1 else if (!std.mem.eql(u8, node.materialized, "ephemeral")) counts.models += 1;
+                if (std.mem.eql(u8, node.resource_type, "analysis")) counts.analyses += 1 else if (std.mem.eql(u8, node.resource_type, "snapshot")) counts.snapshots += 1 else if (node.hook_index == null and !std.mem.eql(u8, node.materialized, "ephemeral")) counts.models += 1;
             } else if (row.test_node) |original| {
                 const node = @constCast(original);
                 node.compiled = true;
@@ -136,7 +137,7 @@ fn render(runtime: types.Runtime, graph: *const types.Graph, resource: runner.Re
             row.compiled_code = compiled.compiled_code;
             row.owns_compiled_code = true;
             row.compiled_ctes = compiled.extra_ctes.items;
-            if (!std.mem.eql(u8, node.materialized, "ephemeral") and !std.mem.eql(u8, node.resource_type, "analysis")) {
+            if (node.hook_index == null and !std.mem.eql(u8, node.materialized, "ephemeral") and !std.mem.eql(u8, node.resource_type, "analysis")) {
                 row.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, &node);
                 row.owns_relation_name = true;
             }

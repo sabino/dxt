@@ -111,6 +111,7 @@ pub const VarEntry = struct {
 };
 
 pub const ProjectConfig = struct {
+    file_checksum: [32]u8 = .{0} ** 32,
     name: []const u8,
     profile_name: ?[]const u8 = null,
     model_paths: std.ArrayList([]const u8) = .empty,
@@ -458,6 +459,8 @@ pub const ExtraCte = struct {
 };
 
 pub const Node = struct {
+    hook_index: ?usize = null,
+    hook_checksum: ?[32]u8 = null,
     runtime_batch: ?SampleWindow = null,
     runtime_batch_id: ?[]const u8 = null,
     default_alias: ?[]const u8 = null,
@@ -670,6 +673,7 @@ pub const SemanticResource = struct {
 };
 
 pub const SemanticProjectConfig = struct {
+    file_checksum: [32]u8 = .{0} ** 32,
     package_name: []const u8,
     raw: std.json.Value,
     rendered: std.json.Value,
@@ -681,6 +685,7 @@ pub const SemanticTimeSpine = struct {
 };
 
 pub const Graph = struct {
+    skip_nodes_if_on_run_start_fails: bool = false,
     parser_cache_hit: bool = false,
     parser_cache_reason: []const u8 = "disabled",
     parser_cache_changes: usize = 0,

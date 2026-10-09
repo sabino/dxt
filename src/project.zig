@@ -1273,9 +1273,24 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
         }
     }
     try @import("project/relation_cache.zig").warmSession(&preparation, true);
-    const summary = try concurrent_runner.run(runtime, graph, options, resources.items, db_path, executeConcurrentResource, stderr);
-    defer runtime.allocator.free(summary.rows);
-    defer deinitRunResults(runtime.allocator, summary.rows);
+    var task_rows: std.ArrayList(run_results.NodeResult) = .empty;
+    defer task_rows.deinit(runtime.allocator);
+    defer deinitRunResults(runtime.allocator, task_rows.items);
+    const start_failed = try @import("project/hook_operations.zig").run(runtime, graph, &preparation, db_path, target_dir, "on-run-start", &task_rows, stderr, null);
+    var summary = if (start_failed and graph.skip_nodes_if_on_run_start_fails) blk: {
+        const rows = try runtime.allocator.alloc(run_results.NodeResult, resources.items.len);
+        for (resources.items, rows) |resource, *row| {
+            row.* = resource.result("skipped");
+            row.thread_name = "MainThread";
+        }
+        break :blk concurrent_runner.Summary{ .rows = rows, .had_execution_error = true };
+    } else try concurrent_runner.run(runtime, graph, options, resources.items, db_path, executeConcurrentResource, stderr);
+    const job_rows = summary.rows;
+    defer runtime.allocator.free(job_rows);
+    var transferred = false;
+    defer if (!transferred) deinitRunResults(runtime.allocator, job_rows);
+    try task_rows.appendSlice(runtime.allocator, summary.rows);
+    transferred = true;
     // Publish each job's final compilation only after its arena has transferred
     // ownership. Skipped nodes keep their parsed relation identity.
     for (summary.rows) |row| {
@@ -1298,6 +1313,9 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
             for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
         }
     }
+    const end_failed = try @import("project/hook_operations.zig").run(runtime, graph, &preparation, db_path, target_dir, "on-run-end", &task_rows, stderr, if (start_failed and graph.skip_nodes_if_on_run_start_fails) &.{} else null);
+    summary.had_execution_error = summary.had_execution_error or start_failed or end_failed;
+    summary.rows = task_rows.items;
     _ = try writeManifest(runtime, graph, target_dir);
     try @import("project/seed_preview.zig").write(runtime, graph, options, summary.rows, stdout);
     try writeRunResults(runtime, target_dir, summary.rows);
@@ -1342,6 +1360,7 @@ fn printConcurrentSummary(stdout: *Io.Writer, rows: []const run_results.NodeResu
     for (rows) |row| {
         if (std.mem.eql(u8, row.status, "skipped")) continue;
         if (row.node) |node| {
+            if (node.hook_index != null) continue;
             if (std.mem.eql(u8, node.resource_type, "seed")) seeds += 1 else models += 1;
         } else if (row.test_node) |node| {
             tests += 1;
@@ -2253,7 +2272,7 @@ fn commandSelection(allocator: std.mem.Allocator, candidates: []const selector.S
     for (candidates) |item| {
         const kind = item.resource_type;
         if (std.mem.eql(u8, kind, "model") or std.mem.eql(u8, kind, "seed") or std.mem.eql(u8, kind, "snapshot") or std.mem.eql(u8, kind, "test") or
-            (command == .compile and std.mem.eql(u8, kind, "analysis")) or
+            (command == .compile and (std.mem.eql(u8, kind, "analysis") or std.mem.eql(u8, kind, "operation"))) or
             (command == .build and (std.mem.eql(u8, kind, "unit_test") or std.mem.eql(u8, kind, "exposure") or std.mem.eql(u8, kind, "saved_query")))) try selected.append(allocator, item);
     }
     return selected.toOwnedSlice(allocator);
@@ -2272,13 +2291,16 @@ fn executeEphemeralSelection(runtime: Runtime, options: Options, graph: *Graph, 
         deinitRunResults(runtime.allocator, rows.items);
         rows.deinit(runtime.allocator);
     }
-    _ = compileWithHost(runtime, options, graph, selected, target_dir, &rows, stderr) catch |err| {
+    const start_failed = try @import("project/hook_operations.zig").run(runtime, graph, &session, db_path, target_dir, "on-run-start", &rows, stderr, null);
+    if (!start_failed or !graph.skip_nodes_if_on_run_start_fails) _ = compileWithHost(runtime, options, graph, selected, target_dir, &rows, stderr) catch |err| {
         _ = try writeManifest(runtime, graph, target_dir);
         try writeRunResults(runtime, target_dir, rows.items);
         return err;
     };
+    const end_failed = try @import("project/hook_operations.zig").run(runtime, graph, &session, db_path, target_dir, "on-run-end", &rows, stderr, if (start_failed and graph.skip_nodes_if_on_run_start_fails) &.{} else null);
     _ = try writeManifest(runtime, graph, target_dir);
-    try writeRunResults(runtime, target_dir, &.{});
+    try writeRunResults(runtime, target_dir, rows.items);
+    if (start_failed or end_failed) return error.ExecutionFailure;
     try stdout.writeAll("Completed selected ephemeral model compilation\n");
 }
 

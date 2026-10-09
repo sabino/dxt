@@ -19,6 +19,7 @@ pub const LogMessage = struct {
 };
 
 pub const NodeResult = struct {
+    thread_name: ?[]const u8 = null,
     operation_id: ?[]const u8 = null,
     node: ?*const Node = null,
     test_node: ?*const GenericTestNode = null,
@@ -323,7 +324,7 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
         try writeTiming(writer, "execute", result.execution_started_at, result.execution_completed_at);
     }
     try writer.writeAll("], \"thread_id\": ");
-    if (result.thread_number == 0) try writer.writeAll("\"MainThread\"") else try writer.print("\"Thread-{d}\"", .{result.thread_number});
+    if (result.thread_name) |name| try json.string(writer, name) else if (result.thread_number == 0) try writer.writeAll("\"MainThread\"") else try writer.print("\"Thread-{d}\"", .{result.thread_number});
     try writer.print(", \"execution_time\": {d}, \"adapter_response\": {{", .{result.execution_time});
     if (result.adapter_response) |response| {
         var fields: usize = 0;
@@ -439,7 +440,7 @@ fn resultUniqueId(result: NodeResult) []const u8 {
 }
 
 fn isCompiledResultNode(node: *const Node) bool {
-    return std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "snapshot");
+    return std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "snapshot") or std.mem.eql(u8, node.resource_type, "operation");
 }
 
 test "run-results writer emits dbt v6 success shape" {

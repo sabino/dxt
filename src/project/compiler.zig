@@ -909,6 +909,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         return if (path.len == 6) config else @import("context_values.zig").attribute(config, path[7..]);
     }
     if (std.mem.eql(u8, path, "this") or std.mem.startsWith(u8, path, "this.")) {
+        if (context.node.hook_index != null) return .none;
         var value = try relationValueForNode(allocator, context.graph, context.node, false);
         if (path.len == 4) return value;
         var attributes = std.mem.splitScalar(u8, path[5..], '.');
@@ -920,7 +921,14 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         if (@import("config_value.zig").get(context.graph.target_context, path[7..])) |value| return try valueFromJson(allocator, value);
         return .{ .string = try renderTargetAttribute(allocator, context.graph, path[7..]) };
     }
-    if (context.graph.execution_hooks) |hooks| return try hooks.resolve(hooks.context, path, allocator);
+    if (context.graph.execution_hooks) |hooks| {
+        const value = try hooks.resolve(hooks.context, path, allocator);
+        if (value != .undefined) return value;
+    }
+    if (context.node.hook_index != null) {
+        if (std.mem.eql(u8, path, "results") or std.mem.eql(u8, path, "schemas") or std.mem.eql(u8, path, "database_schemas")) return .conditional_undefined;
+        if (std.mem.eql(u8, path, "index")) return .conditional_undefined;
+    }
     return .undefined;
 }
 
@@ -941,6 +949,7 @@ fn flagsValue(allocator: std.mem.Allocator, graph: *const Graph) !native_expr.Va
         try entries.append(allocator, .{ .key = name, .value = value });
     }
     for ([_]native_expr.Entry{
+        .{ .key = "SKIP_NODES_IF_ON_RUN_START_FAILS", .value = .{ .boolean = graph.skip_nodes_if_on_run_start_fails } },
         .{ .key = "ENABLE_TRUTHY_NULLS_EQUALS_MACRO", .value = .{ .boolean = graph.enable_truthy_nulls_equals_macro } },
         .{ .key = "NO_PRINT", .value = .none },
         .{ .key = "STORE_FAILURES", .value = .none },

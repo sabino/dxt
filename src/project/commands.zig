@@ -112,6 +112,7 @@ const StoredValue = struct { name: []const u8, value: expression.Value, loaded: 
 /// A native SQL host for operation macros and executable compiler contexts.
 /// Results live for the host lifetime, including values retained by load_result.
 pub const OperationHost = struct {
+    context_values: std.json.Value = .null,
     runtime: Runtime,
     graph: *const types.Graph,
     db_path: []const u8,
@@ -209,8 +210,9 @@ pub const OperationHost = struct {
         self.values.deinit();
     }
 
-    fn resolveValue(_: *anyopaque, _: []const u8, _: std.mem.Allocator) anyerror!expression.Value {
-        return .undefined;
+    fn resolveValue(raw: *anyopaque, path: []const u8, allocator: std.mem.Allocator) anyerror!expression.Value {
+        const self: *OperationHost = @ptrCast(@alignCast(raw));
+        return try @import("hook_operations.zig").resolve(allocator, self.context_values, path);
     }
 
     fn call(raw: *anyopaque, name: []const u8, args: []const expression.Argument, allocator: std.mem.Allocator) anyerror!expression.Value {

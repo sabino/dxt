@@ -89,7 +89,7 @@ pub fn node(allocator: std.mem.Allocator, resource: *const types.Node) !Json {
     errdefer values.deinit(allocator, &result);
     try values.put(allocator, &result, "enabled", .{ .bool = resource.enabled });
     try values.put(allocator, &result, "materialized", .{ .string = resource.materialized });
-    const tags = try strings(allocator, resource.tags.items);
+    const tags = try strings(allocator, if (resource.hook_index != null) &.{} else resource.tags.items);
     defer {
         var owned = tags;
         values.deinit(allocator, &owned);

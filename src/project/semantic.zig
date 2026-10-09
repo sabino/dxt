@@ -763,7 +763,7 @@ pub fn captureProject(graph: *Graph, config: *const types.ProjectConfig) !void {
     errdefer values.deinit(a, &rendered);
     const package = try a.dupe(u8, config.name);
     errdefer a.free(package);
-    try graph.semantic_project_configs.append(a, .{ .package_name = package, .raw = raw, .rendered = rendered });
+    try graph.semantic_project_configs.append(a, .{ .package_name = package, .raw = raw, .rendered = rendered, .file_checksum = config.file_checksum });
 }
 fn mergeConfig(a: std.mem.Allocator, target: *Value, source: Value) !void {
     if (source == .null) return;

@@ -492,7 +492,13 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
         try writeFqnFromPath(writer, node.package_name, logical_path, node.name, version_part);
     } else try writeFqnFromPath(writer, node.package_name, node.snapshot_fqn_path orelse node.path, node.name, if (snapshot_config != null and !node.snapshot_yaml_definition) node.name else null);
     try writer.writeAll(",\"checksum\":");
-    try writeSha256Checksum(writer, if (node.snapshot_file_code) |file_code| std.mem.trim(u8, file_code, " \t\r\n\x0b\x0c") else node.raw_code);
+    if (node.hook_checksum) |digest| {
+        var hex: [64]u8 = undefined;
+        _ = try std.fmt.bufPrint(&hex, "{x}", .{&digest});
+        try writer.writeAll("{\"name\":\"sha256\",\"checksum\":");
+        try json.string(writer, &hex);
+        try writer.writeAll("}");
+    } else try writeSha256Checksum(writer, if (node.snapshot_file_code) |file_code| std.mem.trim(u8, file_code, " \t\r\n\x0b\x0c") else node.raw_code);
     try writer.writeAll(",\"tags\":");
     try json.stringArray(writer, node.tags.items);
 }
@@ -908,6 +914,10 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
+    if (node.hook_index) |index| {
+        try writer.print(",\"index\":{d},\"contract\":{{\"enforced\":false,\"alias_types\":true,\"checksum\":null}}", .{index});
+        if (!node.compiled) try writer.writeAll(",\"relation_name\":null");
+    }
     if (std.mem.eql(u8, node.resource_type, "model")) {
         try writer.writeAll(",\"access\":");
         try json.string(writer, @import("group_access.zig").access(&node));
@@ -966,7 +976,7 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
         try writer.writeAll(",\"extra_ctes\":");
         try writeExtraCtes(writer, node.extra_ctes.items);
         try writer.writeAll(",\"extra_ctes_injected\":");
-        try writer.writeAll(if (node.extra_ctes.items.len != 0) "true" else "false");
+        try writer.writeAll(if (node.extra_ctes.items.len != 0 or node.hook_index != null) "true" else "false");
     }
     try writer.writeAll(",\"meta\":");
     if (@import("config_value.zig").get(node.effective_config, "meta")) |meta| try std.json.Stringify.value(meta, .{}, writer) else if (node.snapshot_meta_json) |meta| try writeJsonValue(writer, meta) else try writeMetaObject(writer, node.meta.items);
