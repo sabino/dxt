@@ -21,6 +21,8 @@ pub const Record = struct {
     source_watermarks: []const @import("cross_database_incremental.zig").Watermark = &.{},
     watermarks_committed: bool = false,
     run_id: []const u8 = "",
+    destination_version: ?[]const u8 = null,
+    destination_capabilities: ?adapter.Capabilities = null,
     stage_artifacts: []const @import("cross_database_cache.zig").Observation = &.{},
 };
 
@@ -31,7 +33,7 @@ pub fn execute(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan:
     const path = try std.fs.path.join(arena_runtime.allocator, &.{ directory, "state.json" });
     const records = try arena_runtime.allocator.alloc(Record, plan.models.len);
     for (records, plan.models) |*record, model| record.* = .{ .model = model.name, .run_id = run_id };
-    try writeState(arena_runtime, path, run_id, plan.hash, records);
+    try writeState(arena_runtime, path, run_id, plan.hash, plan.definition_hash, records);
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -43,7 +45,7 @@ pub fn execute(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan:
         const names = try arena_runtime.allocator.alloc([]const u8, model.inputs.len);
         for (model.inputs, 0..) |input, index| names[index] = try std.fmt.allocPrint(arena_runtime.allocator, "__dxt_{s}_{s}", .{ run_id[0..8], input.name });
         record.stages = names;
-        try writeState(arena_runtime, path, run_id, plan.hash, records);
+        try writeState(arena_runtime, path, run_id, plan.hash, plan.definition_hash, records);
         executeModel(.{ .allocator = allocator, .io = runtime.io, .environment = runtime.environment, .duckdb_pool = &pool }, arena_runtime, root, directory, run_id, plan, model, record) catch |err| {
             record.status = "error";
             record.error_name = @errorName(err);
@@ -51,15 +53,16 @@ pub fn execute(runtime: Runtime, arena_runtime: Runtime, root: []const u8, plan:
             failed = true;
             try stderr.print("error: cross-database model {s}: {s}; destination rolled back and temporary stages disconnected\n", .{ model.name, @errorName(err) });
         };
-        try writeState(arena_runtime, path, run_id, plan.hash, records);
+        try writeState(arena_runtime, path, run_id, plan.hash, plan.definition_hash, records);
         try stdout.print("{s}: {s}; moved {d} rows / {d} bytes; run {s}\n", .{ model.name, record.status, record.rows_moved, record.bytes_moved, run_id });
     }
     const spill = try std.fs.path.join(arena_runtime.allocator, &.{ directory, "spill" });
     Dir.cwd().deleteTree(runtime.io, spill) catch |err| {
         for (records) |*record| record.cleanup = "incomplete";
-        try writeState(arena_runtime, path, run_id, plan.hash, records);
+        try writeState(arena_runtime, path, run_id, plan.hash, plan.definition_hash, records);
         return err;
     };
+    try @import("cross_database_catalog.zig").record(runtime, root, plan, run_id, records);
     if (failed) return error.CrossDatabaseExecutionFailed;
 }
 
@@ -69,6 +72,8 @@ fn executeModel(runtime: Runtime, arena_runtime: Runtime, root: []const u8, dire
     defer target_lock.deinit();
     var destination = try open(runtime, root, plan.connections[model.destination]);
     defer destination.deinit();
+    record.destination_version = try @import("cross_database_catalog.zig").version(arena_runtime.allocator, &destination);
+    record.destination_capabilities = destination.capabilities();
     var embedded: ?adapter.Session = null;
     defer if (embedded) |*session| session.deinit();
     var workspace = &destination;
@@ -245,7 +250,7 @@ fn stageInputs(runtime: Runtime, observation_allocator: std.mem.Allocator, root:
         if (retained) |*value| try value.validate(reader.columns, reader.guard.rows, &checksum);
         if (workspace.* == .duckdb) try finishDecimals(allocator, workspace, record.stages[index], reader.columns, decimal_shapes);
         const location = if (retained) |value| try std.fmt.allocPrint(observation_allocator, "{s}.dxt_stage.{s}", .{ source_connection.name, value.manifest.dataset }) else record.stages[index];
-        try observations.append(observation_allocator, try cache.observation(observation_allocator, .{ .input = input.name, .logical_id = input.logical_id, .location = location, .mode = input.stage_mode, .cache_hit = if (retained) |value| value.hit else false, .query_hash = if (retained) |value| value.manifest.query_hash else try cross.digest(observation_allocator, input.query), .rows = reader.guard.rows, .bytes = reader.guard.bytes, .checksum = &checksum, .sensitivity = input.sensitivity, .retention_until_epoch = if (retained) |value| value.manifest.expires_epoch else null, .columns = try physicalColumns(observation_allocator, workspace, reader.columns, decimal_shapes), .source_columns = reader.columns, .cleanup = if (retained != null) "retained by declared policy" else "session scoped" }));
+        try observations.append(observation_allocator, try cache.observation(observation_allocator, .{ .input = input.name, .logical_id = input.logical_id, .location = location, .mode = input.stage_mode, .cache_hit = if (retained) |value| value.hit else false, .query_hash = if (retained) |value| value.manifest.query_hash else try cross.digest(observation_allocator, input.query), .rows = reader.guard.rows, .bytes = reader.guard.bytes, .checksum = &checksum, .sensitivity = input.sensitivity, .retention_until_epoch = if (retained) |value| value.manifest.expires_epoch else null, .columns = try physicalColumns(observation_allocator, workspace, reader.columns, decimal_shapes), .source_columns = reader.columns, .source_adapter = plan.connections[input.connection].adapter_type, .source_version = if (retained) |value| value.manifest.source_version else try @import("cross_database_catalog.zig").version(observation_allocator, source), .source_capabilities = if (retained) |value| value.manifest.source_capabilities else source.capabilities(), .data_as_of_epoch = if (retained) |value| value.manifest.created_epoch else @import("cross_database_catalog.zig").epoch(runtime.io), .cleanup = if (retained != null) "retained by declared policy" else "session scoped" }));
         record.stage_artifacts = observations.items;
     }
 }
@@ -520,7 +525,8 @@ pub fn recover(runtime: Runtime, arena_runtime: Runtime, root: []const u8, optio
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidCrossDatabaseRunState;
     const old_hash = parsed.value.object.get("plan_hash") orelse return error.InvalidCrossDatabaseRunState;
-    if (old_hash != .string or !std.mem.eql(u8, old_hash.string, plan.hash)) return error.CrossDatabasePlanChanged;
+    const old_definition = parsed.value.object.get("definition_hash") orelse old_hash;
+    if (old_hash != .string or old_definition != .string or !std.mem.eql(u8, old_definition.string, plan.definition_hash)) return error.CrossDatabasePlanChanged;
     const recorded_id = parsed.value.object.get("run_id") orelse return error.InvalidCrossDatabaseRunState;
     if (recorded_id != .string or !std.mem.eql(u8, recorded_id.string, id)) return error.InvalidCrossDatabaseRunState;
     const previous = try std.json.parseFromValue([]Record, arena_runtime.allocator, parsed.value.object.get("models") orelse return error.InvalidCrossDatabaseRunState, .{});
@@ -551,7 +557,7 @@ pub fn recover(runtime: Runtime, arena_runtime: Runtime, root: []const u8, optio
             var result = try destination.query(query);
             defer result.deinit(runtime.allocator);
             if (result.rows.len != 0) {
-                if (result.rows[0][1] == null or !std.mem.eql(u8, result.rows[0][1].?, plan.hash)) return error.CrossDatabasePlanChanged;
+                if (result.rows[0][1] == null or !std.mem.eql(u8, result.rows[0][1].?, old_hash.string)) return error.CrossDatabasePlanChanged;
                 record.status = "success";
                 record.error_name = null;
                 record.watermarks_committed = std.mem.eql(u8, model.materialized, "incremental");
@@ -571,7 +577,7 @@ pub fn recover(runtime: Runtime, arena_runtime: Runtime, root: []const u8, optio
     }
     const spill = try std.fs.path.join(arena_runtime.allocator, &.{ directory, "spill" });
     try Dir.cwd().deleteTree(runtime.io, spill);
-    try writeState(arena_runtime, path, id, plan.hash, records);
+    try writeState(arena_runtime, path, id, old_hash.string, plan.definition_hash, records);
     try stdout.print("Recovered run {s}; temporary sessions were disconnected, destination commit markers verified, local stages cleaned\n", .{id});
 }
 
@@ -586,9 +592,9 @@ fn qualified(allocator: std.mem.Allocator, schema: []const u8, name: []const u8)
     defer allocator.free(b);
     return std.fmt.allocPrint(allocator, "{s}.{s}", .{ a, b });
 }
-fn writeState(runtime: Runtime, path: []const u8, id: []const u8, hash: []const u8, records: []const Record) !void {
+fn writeState(runtime: Runtime, path: []const u8, id: []const u8, hash: []const u8, definition_hash: []const u8, records: []const Record) !void {
     var out: std.Io.Writer.Allocating = .init(runtime.allocator);
-    try std.json.Stringify.value(.{ .schema_version = 1, .run_id = id, .plan_hash = hash, .models = records }, .{}, &out.writer);
+    try std.json.Stringify.value(.{ .schema_version = 1, .run_id = id, .plan_hash = hash, .definition_hash = definition_hash, .models = records }, .{}, &out.writer);
     try cross.writeAtomic(runtime, path, out.written());
 }
 

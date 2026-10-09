@@ -121,6 +121,8 @@ pub const Input = struct {
     stage_connection: ?usize = null,
     stage_ttl_seconds: u64 = 0,
     stage_version: ?[]const u8 = null,
+    estimate_confidence: []const u8 = "unknown",
+    estimate_observed_epoch: ?u64 = null,
     denied: ?[]const u8 = null,
 };
 pub const Model = struct {
@@ -144,7 +146,7 @@ pub const Model = struct {
     estimate_confidence: []const u8 = "declared",
     denied: ?[]const u8 = null,
 };
-pub const Plan = struct { hash: []const u8, connections: []Connection, models: []Model };
+pub const Plan = struct { hash: []const u8, definition_hash: []const u8 = "", catalog_generation: u64 = 0, connections: []Connection, models: []Model };
 pub const RelationBinding = @import("cross_database_query.zig").RelationBinding;
 pub const QueryOptions = @import("cross_database_query.zig").QueryOptions;
 pub const QueryOutcome = @import("cross_database_query.zig").QueryOutcome;
@@ -220,6 +222,9 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
     }
     const model_config = values.get(config, "models") orelse return error.MissingCrossDatabaseModels;
     if (model_config != .object or model_config.object.count() == 0) return error.MissingCrossDatabaseModels;
+    var catalog = try @import("cross_database_catalog.zig").load(runtime, root);
+    defer catalog.deinit();
+    const catalog_age = try optionalUnsigned(values.get(config, "catalog") orelse .null, "max_age_seconds") orelse 86400;
     var models: std.ArrayList(Model) = .empty;
     var model_iterator = model_config.object.iterator();
     const policy = values.get(config, "policy") orelse .null;
@@ -373,7 +378,46 @@ pub fn buildPlan(runtime: Runtime, options: Options, root: []const u8, source: [
         try models.append(runtime.allocator, model);
     }
     if (models.items.len == 0) return error.MissingCrossDatabaseModels;
-    return .{ .hash = try digest(runtime.allocator, fingerprint.written()), .connections = connections.items, .models = models.items };
+    const definition_hash = try digest(runtime.allocator, fingerprint.written());
+    // Evidence changes the reviewed plan, while recovery remains bound to the
+    // unchanged project and physical profiles plus the recorded commit hash.
+    for (models.items) |*model| {
+        model.estimated_rows = 0;
+        model.estimated_bytes = 0;
+        model.estimated_cost = 0;
+        model.estimate_confidence = "declared";
+        for (model.inputs) |*input| {
+            input.estimate_confidence = if (input.estimated_rows != null and input.estimated_bytes != null) "declared" else "unknown";
+            const connection = connections.items[input.connection];
+            const binding_hash = try @import("cross_database_catalog.zig").bindingHash(runtime.allocator, connection);
+            if (if (catalog_age == 0) null else @import("cross_database_catalog.zig").match(&catalog, connection.name, input.logical_id, binding_hash, input.query_hash, @import("cross_database_catalog.zig").epoch(runtime.io), catalog_age)) |observed| {
+                if (input.estimated_rows == null) input.estimated_rows = observed.rows;
+                if (input.estimated_bytes == null) input.estimated_bytes = observed.bytes;
+                if (eq(input.estimate_confidence, "unknown")) {
+                    input.estimate_confidence = "observed_previous_run";
+                    input.estimate_observed_epoch = observed.observed_epoch;
+                }
+            }
+            if (!input.moved) continue;
+            const legs: u64 = if (input.stage_connection != null) 2 else 1;
+            if (input.estimated_rows) |rows| model.estimated_rows +|= rows *| legs;
+            if (input.estimated_bytes) |bytes| {
+                model.estimated_bytes +|= bytes *| legs;
+                model.estimated_cost += @as(f64, @floatFromInt(bytes)) / (1024 * 1024 * 1024) * connection.egress_per_gib;
+                if (input.stage_connection) |index| model.estimated_cost += @as(f64, @floatFromInt(bytes)) / (1024 * 1024 * 1024) * connections.items[index].egress_per_gib;
+            }
+            if (eq(input.estimate_confidence, "unknown")) model.estimate_confidence = "unknown" else if (eq(input.estimate_confidence, "observed_previous_run") and !eq(model.estimate_confidence, "unknown")) model.estimate_confidence = "observed_previous_run";
+        }
+        if (model.execution_connection != model.destination) model.estimate_confidence = "unknown_output";
+        if (eq(model.materialized, "incremental")) model.estimate_confidence = "unknown_affected_keys";
+        if (model.estimated_rows > model.budget.max_rows) model.denied = "estimated movement exceeds the row budget";
+        if (model.estimated_bytes > model.budget.max_bytes) model.denied = "estimated movement exceeds the byte budget";
+        if (model.budget.max_cost) |cost| if (model.estimated_cost > cost) {
+            model.denied = "estimated egress exceeds the cost budget";
+        };
+        try std.json.Stringify.value(.{ .name = model.name, .inputs = model.inputs, .confidence = model.estimate_confidence }, .{}, &fingerprint.writer);
+    }
+    return .{ .hash = try digest(runtime.allocator, fingerprint.written()), .definition_hash = definition_hash, .catalog_generation = catalog.value.generation, .connections = connections.items, .models = models.items };
 }
 
 pub fn renderSql(allocator: std.mem.Allocator, model: Model, stage_names: ?[]const []const u8) ![]const u8 {
@@ -562,7 +606,9 @@ pub fn planJson(allocator: std.mem.Allocator, plan: Plan) ![]const u8 {
     const writer = &output.writer;
     try writer.writeAll("{\"schema_version\":1,\"plan_hash\":");
     try std.json.Stringify.value(plan.hash, .{}, writer);
-    try writer.writeAll(",\"connections\":[");
+    try writer.writeAll(",\"definition_hash\":");
+    try std.json.Stringify.value(plan.definition_hash, .{}, writer);
+    try writer.print(",\"catalog_generation\":{d},\"connections\":[", .{plan.catalog_generation});
     for (plan.connections, 0..) |connection, i| {
         if (i != 0) try writer.writeByte(',');
         try std.json.Stringify.value(.{ .name = connection.name, .profile = connection.profile_name, .target = connection.target, .adapter = connection.adapter_type, .role = connection.role, .trust_domain = connection.trust_domain, .allowed_destinations = connection.allowed_destinations, .capabilities = .{ .transactions = true, .transactional_ddl = true, .native_reads = true, .temporary_stages = true } }, .{}, writer);
@@ -581,6 +627,7 @@ pub fn planJson(allocator: std.mem.Allocator, plan: Plan) ![]const u8 {
 pub fn writeAtomic(runtime: Runtime, path: []const u8, text: []const u8) !void {
     if (std.fs.path.dirname(path)) |directory| try Dir.cwd().createDirPath(runtime.io, directory);
     const temporary = try std.fmt.allocPrint(runtime.allocator, "{s}.tmp", .{path});
+    defer runtime.allocator.free(temporary);
     defer Dir.cwd().deleteFile(runtime.io, temporary) catch {};
     try Dir.cwd().writeFile(runtime.io, .{ .sub_path = temporary, .data = text });
     try Dir.rename(Dir.cwd(), temporary, Dir.cwd(), path, runtime.io);

@@ -241,6 +241,7 @@ def test_observed_budget_rolls_back_existing_output_and_cleans_stages(project, n
     for field in ("estimated_rows", "estimated_bytes"):
         model["inputs"]["customers"].pop(field)
     model["budget"] = {budget: 0}
+    config["catalog"] = {"max_age_seconds": 0}
     if budget == "max_cost": config["connections"]["crm"]["egress_per_gib"] = 1
     result = invoke(project, config, native_environment, "run", "--allow-movement")
     assert result.returncode != 0, result.stdout
@@ -782,3 +783,75 @@ def test_cached_stage_tightened_ttl_refreshes_old_payload(project, native_enviro
     assert result.returncode == 0, result.stderr
     assert duck_rows(project[3], "select name from marts.joined") == [("new",)]
     assert state(project)[1]["models"][0]["stage_artifacts"][0]["cache_hit"] is False
+
+
+def test_catalog_observations_feed_fresh_costs_and_preserve_recovery_identity(project, native_environment):
+    config = project[1]
+    source = config["models"]["joined"]["inputs"]["customers"]
+    source.pop("estimated_rows")
+    source.pop("estimated_bytes")
+    flags = ["--allow-movement"]
+    assert invoke(project, config, native_environment, "plan", *flags).returncode == 0
+    first_plan = json.loads((project[0] / "target" / "dxt_plan.json").read_text())
+    assert first_plan["models"][0]["confidence"] == "unknown"
+    result = invoke(project, config, native_environment, "run", *flags)
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    path, recorded = state(project)
+    catalog_text = (project[0] / ".dxt" / "cross-catalog.json").read_text()
+    catalog = json.loads(catalog_text)
+    assert str(project[0]) not in catalog_text
+    assert len(catalog["relation_stats"]) == 1
+    stat = catalog["relation_stats"][0]
+    assert stat["rows"] == 1 and stat["bytes"] == 8
+    assert stat["source_adapter"] == "postgres" and stat["source_version"]
+    assert [column["name"] for column in stat["columns"]] == ["id", "name"]
+    assert catalog["runs"][0]["tasks"][0]["rows_moved"] == 1
+    assert catalog["runs"][0]["tasks"][0]["estimated_rows"] == 0
+    assert catalog["lineage_edges"][0]["logical_id"] == "source.cross.crm.customers"
+    assert invoke(project, config, native_environment, "plan", *flags).returncode == 0
+    observed_plan = json.loads((project[0] / "target" / "dxt_plan.json").read_text())
+    assert observed_plan["definition_hash"] == first_plan["definition_hash"]
+    assert observed_plan["plan_hash"] != first_plan["plan_hash"]
+    assert observed_plan["models"][0]["confidence"] == "observed_previous_run"
+    assert observed_plan["models"][0]["estimated_moved_bytes"] == 8
+    result = invoke(project, config, native_environment, "run", *flags, "--max-bytes", "7")
+    assert result.returncode != 0
+    assert "estimated movement exceeds the byte budget" in result.stderr
+    assert duck_rows(project[3], "select quantity from marts.joined") == [(10,)]
+    recorded["models"][0]["status"] = "running"
+    path.write_text(json.dumps(recorded))
+    result = invoke(project, config, native_environment, "recover", *flags, "--run-id", recorded["run_id"])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(path.read_text())["models"][0]["status"] == "success"
+    source["filter"] = "not enabled"
+    assert invoke(project, config, native_environment, "plan", *flags).returncode == 0
+    changed = json.loads((project[0] / "target" / "dxt_plan.json").read_text())
+    assert changed["models"][0]["confidence"] == "unknown"
+
+
+def test_catalog_stale_or_changed_credentials_do_not_authorize_estimates(project, native_environment):
+    config = project[1]
+    source = config["models"]["joined"]["inputs"]["customers"]
+    source.pop("estimated_rows")
+    source.pop("estimated_bytes")
+    flags = ["--allow-movement"]
+    assert invoke(project, config, native_environment, "run", *flags).returncode == 0
+    catalog_path = project[0] / ".dxt" / "cross-catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["relation_stats"][0]["observed_epoch"] -= 100
+    catalog_path.write_text(json.dumps(catalog))
+    config["catalog"] = {"max_age_seconds": 1}
+    assert invoke(project, config, native_environment, "plan", *flags).returncode == 0
+    assert json.loads((project[0] / "target" / "dxt_plan.json").read_text())["models"][0]["confidence"] == "unknown"
+    config.pop("catalog")
+    profiles_path = project[0] / "profiles.yml"
+    profiles = json.loads(profiles_path.read_text())
+    profiles["cross"]["outputs"]["crm"]["password"] = "private-credential-fixture"
+    profiles_path.write_text(json.dumps(profiles))
+    result = invoke(project, config, native_environment, "plan", *flags)
+    assert result.returncode == 0, result.stderr
+    rendered = (project[0] / "target" / "dxt_plan.json").read_text()
+    assert "private-credential-fixture" not in rendered
+    assert "private-credential-fixture" not in result.stderr
+    assert json.loads(rendered)["models"][0]["confidence"] == "unknown"

@@ -26,6 +26,8 @@ pub const Manifest = struct {
     schema_hash: []const u8,
     columns: []read.Column,
     created_by_run: []const u8 = "",
+    source_version: []const u8 = "",
+    source_capabilities: ?adapter.Capabilities = null,
 };
 
 pub const Observation = struct {
@@ -42,6 +44,10 @@ pub const Observation = struct {
     retention_until_epoch: ?u64,
     columns: []read.Column,
     source_columns: []read.Column,
+    source_adapter: []const u8 = "",
+    source_version: []const u8 = "",
+    source_capabilities: ?adapter.Capabilities = null,
+    data_as_of_epoch: u64 = 0,
     readiness: []const u8 = "ready",
     cleanup: []const u8 = "session scoped",
 };
@@ -176,7 +182,7 @@ pub fn source(runtime: cross.Runtime, root: []const u8, plan: *cross.Plan, model
         column.type_sql = if (std.mem.eql(u8, column.type_sql, "numeric")) try std.fmt.allocPrint(allocator, "decimal({d},{d})", .{ @max(1, shape.integer_digits + shape.scale), shape.scale }) else try allocator.dupe(u8, column.type_sql);
     }
     const schema = try std.json.Stringify.valueAlloc(allocator, columns, .{});
-    const manifest: Manifest = .{ .key = key, .dataset = dataset, .logical_id = input.logical_id, .source_connection = origin.name, .stage_connection = retained.name, .source_binding_hash = binding_hash, .query_hash = query_hash, .mode = input.stage_mode, .version = input.stage_version, .sensitivity = input.sensitivity, .created_epoch = now, .expires_epoch = std.math.add(u64, now, input.stage_ttl_seconds) catch return error.InvalidCrossDatabaseStageFreshness, .rows = reader.guard.rows, .bytes = reader.guard.bytes, .checksum = try allocator.dupe(u8, &hash.finish()), .schema_hash = try cross.digest(allocator, schema), .columns = columns, .created_by_run = record.run_id };
+    const manifest: Manifest = .{ .key = key, .dataset = dataset, .logical_id = input.logical_id, .source_connection = origin.name, .stage_connection = retained.name, .source_binding_hash = binding_hash, .query_hash = query_hash, .mode = input.stage_mode, .version = input.stage_version, .sensitivity = input.sensitivity, .created_epoch = now, .expires_epoch = std.math.add(u64, now, input.stage_ttl_seconds) catch return error.InvalidCrossDatabaseStageFreshness, .rows = reader.guard.rows, .bytes = reader.guard.bytes, .checksum = try allocator.dupe(u8, &hash.finish()), .schema_hash = try cross.digest(allocator, schema), .columns = columns, .created_by_run = record.run_id, .source_version = try @import("cross_database_catalog.zig").version(allocator, &origin_session), .source_capabilities = origin_session.capabilities() };
     const json = try std.json.Stringify.valueAlloc(allocator, manifest, .{});
     const clear = try std.fmt.allocPrint(allocator, "delete from dxt_stage.catalog where key={s}", .{key_literal});
     try cache.execute(clear);
