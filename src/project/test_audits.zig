@@ -43,6 +43,19 @@ pub fn relationName(allocator: std.mem.Allocator, graph: *const types.Graph, con
 
 pub fn execute(runtime: types.Runtime, graph: *const types.Graph, db_path: []const u8, config: types.GenericTestConfig, alias: []const u8, package: []const u8, compiled_sql: []const u8) !Result {
     const a = runtime.allocator;
+    var scoped_runtime = runtime;
+    var owned_session: ?adapter.Session = null;
+    defer if (owned_session) |*session| session.deinit();
+    // The default PostgreSQL test materialization uses statement auto_begin
+    // and commits its audit CREATE. DuckDB drops prior relations with
+    // auto_begin=False, so a failed CREATE retains that drop's effects.
+    const postgres = std.mem.eql(u8, graph.adapter_type, "postgres");
+    if (postgres and scoped_runtime.adapter_session == null) {
+        owned_session = try adapter.openSession(runtime, graph, db_path);
+        scoped_runtime.adapter_session = &owned_session.?;
+    }
+    if (postgres) try scoped_runtime.adapter_session.?.begin();
+    errdefer if (postgres) scoped_runtime.adapter_session.?.rollback() catch {};
     const options = runtime.invocation_options orelse runtime.global_options orelse &graph.command_options;
     const store = shouldStore(config, options.*);
     var relation: ?[]const u8 = null;
@@ -61,30 +74,38 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, db_path: []con
         defer a.free(identifier_lit);
         const lookup = try std.fmt.allocPrint(a, "select table_type from information_schema.tables where table_schema={s} and table_name={s}", .{ schema_lit, identifier_lit });
         defer a.free(lookup);
-        var existing = try adapter.queryForGraph(runtime, graph, db_path, lookup);
+        var existing = try adapter.queryForGraph(scoped_runtime, graph, db_path, lookup);
         defer existing.deinit(a);
         const schema_sql = try adapter.quoteIdentifier(a, schema);
         defer a.free(schema_sql);
         const create_schema = try std.fmt.allocPrint(a, "create schema if not exists {s}", .{schema_sql});
         defer a.free(create_schema);
-        try adapter.executeForGraph(runtime, graph, db_path, create_schema);
+        try adapter.executeForGraph(scoped_runtime, graph, db_path, create_schema);
         if (existing.firstScalar()) |old_kind| {
             const drop = try std.fmt.allocPrint(a, "drop {s} {s}", .{ if (std.mem.eql(u8, old_kind, "VIEW")) "view" else "table", relation.? });
             defer a.free(drop);
-            try adapter.executeForGraph(runtime, graph, db_path, drop);
+            try adapter.executeForGraph(scoped_runtime, graph, db_path, drop);
         }
         const create = try std.fmt.allocPrint(a, "create {s} {s} as ({s})", .{ kind, relation.?, trimTerminator(compiled_sql) });
         defer a.free(create);
-        try adapter.executeForGraph(runtime, graph, db_path, create);
+        try adapter.executeForGraph(scoped_runtime, graph, db_path, create);
+        if (postgres) {
+            // Core publishes stored failures before evaluating fail_calc and
+            // thresholds. An aggregate error must retain the new audit table.
+            try scoped_runtime.adapter_session.?.commit();
+            try scoped_runtime.adapter_session.?.begin();
+        }
     }
     const query = if (relation) |name| try std.fmt.allocPrint(a, "select * from {s}", .{name}) else try a.dupe(u8, compiled_sql);
     defer a.free(query);
     const sql = try renderExecutionSql(a, query, config);
     defer a.free(sql);
-    var result = try adapter.queryForGraph(runtime, graph, db_path, sql);
+    var result = try adapter.queryForGraph(scoped_runtime, graph, db_path, sql);
     defer result.deinit(a);
     if (result.columns.len != 3 or result.rows.len != 1 or result.rows[0].len != 3) return error.InvalidTestResult;
-    return .{ .failures = try parseFailures(result.rows[0][0]), .should_warn = try parseBoolean(result.rows[0][1]), .should_error = try parseBoolean(result.rows[0][2]), .relation_name = relation };
+    const output = Result{ .failures = try parseFailures(result.rows[0][0]), .should_warn = try parseBoolean(result.rows[0][1]), .should_error = try parseBoolean(result.rows[0][2]), .relation_name = relation };
+    if (postgres) try scoped_runtime.adapter_session.?.commit();
+    return output;
 }
 
 pub fn renderExecutionSql(a: std.mem.Allocator, query: []const u8, config: types.GenericTestConfig) ![]const u8 {

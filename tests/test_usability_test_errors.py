@@ -208,19 +208,19 @@ def test_audit_relation_sql_errors_are_durable(tmp_path: Path, kind: str):
             "        data_tests:\n          - not_null:\n              config:\n                store_failures: true\n"
         )
     else:
-        files["tests/m_broken.sql"] = "{{ config(store_failures=true) }}select id from {{ ref('orders') }} where id is null\n"
+        files["tests/m_broken.sql"] = "{{ config(store_failures=true) }}select missing_column from {{ ref('orders') }}\n"
     project, target = tmp_path / "project", tmp_path / "target"
     write_project(project, files)
     target.mkdir()
     database = target / "dxt.duckdb"
-    query(database, f"create table orders as select null::integer as id; create schema dbt_test__audit; create view dbt_test__audit.{alias} as select 99 as id;")
+    query(database, f"create table orders as select null::integer as missing_id; create schema main_dbt_test__audit; create view main_dbt_test__audit.{alias} as select 99 as id;")
     outcome = run_dxt(project, target, "test")
     assert outcome.returncode == 1, outcome.stdout + outcome.stderr
     rows = results(target)
     assert len(rows) == 2
     assert_error(next(row for row in rows.values() if row["status"] == "error"))
     assert rows["test.error_outcomes.zz_independent"]["status"] == "pass"
-    assert query(database, f"select id from dbt_test__audit.{alias}") == "99"
+    assert query(database, f"select count(*) from information_schema.tables where table_schema='main_dbt_test__audit' and table_name='{alias}'") == "0"
 
 
 def unit_error_files() -> dict[str, str]:
