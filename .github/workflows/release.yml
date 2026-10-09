@@ -161,7 +161,7 @@ jobs:
           cp vendor/dbt-docs/UPSTREAM "dist/${name}/docs/licenses/dbt-docs-UPSTREAM"
           cp vendor/libpg_query/LICENSE "dist/${name}/docs/licenses/libpg_query-LICENSE"
           cp vendor/libpg_query/THIRD_PARTY_LICENSES.txt "dist/${name}/docs/licenses/libpg_query-THIRD_PARTY_LICENSES.txt"
-          cp vendor/libpg_query/UPSTREAM "dist/${name}/docs/licenses/libpg_query-UPSTREAM"
+          cp vendor/libpg_query/provenance.json "dist/${name}/docs/licenses/libpg_query-provenance.json"
           test ! -f LICENSE || cp LICENSE "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           tar -tzf "dist/${name}.tar.gz"
