@@ -42,6 +42,7 @@ pub const Options = struct {
     fail_fast: bool = false,
     log_format: enum { text, json, debug } = .text,
     quiet: bool = false,
+    debug: bool = false,
     write_json: bool = true,
     warn_error: bool = false,
     version_check: bool = true,

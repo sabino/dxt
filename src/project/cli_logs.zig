@@ -32,7 +32,8 @@ pub fn finish(runtime: types.Runtime, options: types.Options, args: []const []co
 }
 
 fn console(runtime: types.Runtime, options: types.Options, writer: *std.Io.Writer, text: []const u8) !void {
-    const minimum: types.LogLevel = if (options.quiet) .@"error" else options.log_level;
+    if (options.log_level == .none) return;
+    const minimum: types.LogLevel = if (options.quiet) .@"error" else if (options.debug) .debug else options.log_level;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
@@ -55,11 +56,13 @@ fn console(runtime: types.Runtime, options: types.Options, writer: *std.Io.Write
 }
 
 fn fileEvents(runtime: types.Runtime, options: types.Options, writer: *std.Io.Writer, text: []const u8) !void {
+    if (options.log_level_file == .none) return;
+    const minimum: types.LogLevel = if (options.debug) .debug else options.log_level_file;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         const severity = level(runtime.allocator, line);
-        if (@intFromEnum(severity) < @intFromEnum(options.log_level_file)) continue;
+        if (@intFromEnum(severity) < @intFromEnum(minimum)) continue;
         const event = try displayedEvent(runtime.allocator, line);
         defer if (event) |value| runtime.allocator.free(value.message);
         const display = if (options.log_format_file != .json and event != null) event.?.message else line;

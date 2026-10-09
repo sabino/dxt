@@ -222,6 +222,7 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
     try writer.print(",\"fail_fast\":{s},\"log_format\":", .{if (opts.fail_fast) "true" else "false"});
     try json.string(writer, @tagName(opts.log_format));
     try writer.print(",\"quiet\":{s},\"write_json\":{s},\"warn_error\":{s},\"version_check\":{s}", .{ if (opts.quiet) "true" else "false", if (opts.write_json) "true" else "false", if (opts.warn_error) "true" else "false", if (opts.version_check) "true" else "false" });
+    try writer.print(",\"debug\":{s}", .{if (opts.debug) "true" else "false"});
     try writer.print(",\"use_colors\":{s},\"use_colors_file\":{s},\"print\":{s}", .{ if (opts.use_colors) "true" else "false", if (opts.use_colors_file) "true" else "false", if (opts.print_enabled) "true" else "false" });
     try writer.writeAll(",\"warn_error_options\":");
     try writeMapping(writer, allocator, opts.warn_error_options);

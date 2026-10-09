@@ -104,6 +104,7 @@ fn defaults(runtime: types.Runtime) !types.Options {
     options.fail_fast = try environmentBool(runtime, "DBT_FAIL_FAST", false);
     options.full_refresh = try environmentBool(runtime, "DBT_FULL_REFRESH", false);
     options.quiet = try environmentBool(runtime, "DBT_QUIET", false);
+    options.debug = try environmentBool(runtime, "DBT_DEBUG", false);
     options.write_json = try environmentBool(runtime, "DBT_WRITE_JSON", true);
     options.warn_error = try environmentBool(runtime, "DBT_WARN_ERROR", false);
     options.version_check = try environmentBool(runtime, "DBT_VERSION_CHECK", true);
@@ -122,7 +123,7 @@ fn defaults(runtime: types.Runtime) !types.Options {
 
 fn universal(options: *types.Options, args: []const []const u8, index: *usize) !bool {
     const arg = args[index.*];
-    if (eq(arg, "--quiet") or eq(arg, "--no-quiet")) options.quiet = eq(arg, "--quiet") else if (eq(arg, "--use-colors") or eq(arg, "--no-use-colors")) options.use_colors = eq(arg, "--use-colors") else if (eq(arg, "--use-colors-file") or eq(arg, "--no-use-colors-file")) options.use_colors_file = eq(arg, "--use-colors-file") else if (eq(arg, "--print") or eq(arg, "--no-print")) options.print_enabled = eq(arg, "--print") else if (eq(arg, "--write-json") or eq(arg, "--no-write-json")) options.write_json = eq(arg, "--write-json") else if (eq(arg, "--version-check") or eq(arg, "--no-version-check")) options.version_check = eq(arg, "--version-check") else if (eq(arg, "--warn-error") or eq(arg, "--no-warn-error")) options.warn_error = eq(arg, "--warn-error") else if (eq(arg, "--debug") or eq(arg, "--no-debug")) options.log_level = if (eq(arg, "--debug")) .debug else .info else if (eq(arg, "--log-format") or eq(arg, "--log-format-file") or eq(arg, "--log-level") or eq(arg, "--log-level-file") or eq(arg, "--log-path") or eq(arg, "--log-file-max-bytes") or eq(arg, "--warn-error-options")) {
+    if (eq(arg, "--quiet") or eq(arg, "--no-quiet")) options.quiet = eq(arg, "--quiet") else if (eq(arg, "--use-colors") or eq(arg, "--no-use-colors")) options.use_colors = eq(arg, "--use-colors") else if (eq(arg, "--use-colors-file") or eq(arg, "--no-use-colors-file")) options.use_colors_file = eq(arg, "--use-colors-file") else if (eq(arg, "--print") or eq(arg, "--no-print")) options.print_enabled = eq(arg, "--print") else if (eq(arg, "--write-json") or eq(arg, "--no-write-json")) options.write_json = eq(arg, "--write-json") else if (eq(arg, "--version-check") or eq(arg, "--no-version-check")) options.version_check = eq(arg, "--version-check") else if (eq(arg, "--warn-error") or eq(arg, "--no-warn-error")) options.warn_error = eq(arg, "--warn-error") else if (eq(arg, "--debug") or eq(arg, "--no-debug")) options.debug = eq(arg, "--debug") else if (eq(arg, "--log-format") or eq(arg, "--log-format-file") or eq(arg, "--log-level") or eq(arg, "--log-level-file") or eq(arg, "--log-path") or eq(arg, "--log-file-max-bytes") or eq(arg, "--warn-error-options")) {
         index.* += 1;
         if (index.* >= args.len) return error.InvalidOption;
         const value = args[index.*];
@@ -317,4 +318,6 @@ test "Core spelling preserves global precedence and nested commands" {
     try std.testing.expectError(error.DuplicateGlobalOption, prepare(runtime, &.{ "dxt", "--target", "first", "parse", "--target", "last" }));
     const aliases = try prepare(runtime, &.{ "dxt", "list", "-smain", "-tprod", "--project-dir=fixture" });
     try std.testing.expectEqualDeep(&[_][]const u8{ "dxt", "ls", "--select", "main", "--target", "prod", "--project-dir", "fixture" }, aliases.args);
+    const debugging = try prepare(runtime, &.{ "dxt", "--debug", "parse", "--log-level", "info" });
+    try std.testing.expect(debugging.options.debug and debugging.options.log_level == .info);
 }
