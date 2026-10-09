@@ -276,3 +276,16 @@ models:
     assert actual['nodes']['model.configuration_fixture.value']['alias'] == 'configuration_fixture_marts_value_model'
     test = next(node for node in actual['nodes'].values() if node['resource_type'] == 'test' and node['name'].startswith('not_null'))
     assert test['alias'] == 'configuration_fixture_marts_not_null_value_id_audit'
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_core_generic_model_argument_retains_empty_input_relation_policy(tmp_path, configuration_oracle, request, adapter):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, adapter)
+    pair.write('models/marts/value.sql', '{{ config(materialized="table") }}select cast(null as integer) as id')
+    pair.write('models/schema.yml', "version: 2\nmodels:\n  - name: value\n    columns:\n      - name: id\n        data_tests: [not_null]\n")
+    pair.invoke('build', flags=['--empty'])
+    rows = [json.loads((path / 'target/run_results.json').read_text())['results'] for path in pair.projects]
+    assert [row['status'] for row in rows[0]] == [row['status'] for row in rows[1]] == ['success', 'pass']
+    assert rows[0][1]['failures'] == rows[1][1]['failures'] == 0
+    assert rows[0][1]['compiled_code'] == rows[1][1]['compiled_code']

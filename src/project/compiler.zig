@@ -709,7 +709,7 @@ fn genericTestModelSqlForNode(allocator: std.mem.Allocator, graph: *const Graph,
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const relation = if (test_node.attached_node) |id| try relationValueForNode(a, graph, findNodeByUniqueId(graph, id) orelse return error.UnresolvedRef, false) else if (test_node.attached_source_unique_id) |id| try relationValueForSource(a, graph, &node, findSourceByUniqueId(graph, id) orelse return error.UnresolvedSource) else native_expr.Value{ .string = relation_name };
+    const relation = if (test_node.attached_node) |id| try relationValueForInputNode(a, graph, &node, findNodeByUniqueId(graph, id) orelse return error.UnresolvedRef) else if (test_node.attached_source_unique_id) |id| try relationValueForSource(a, graph, &node, findSourceByUniqueId(graph, id) orelse return error.UnresolvedSource) else native_expr.Value{ .string = relation_name };
     const generated = try renderMacroForNode(a, graph, &node, "get_where_subquery", &.{.{ .value = relation }});
     return try allocator.dupe(u8, try generated.text(a));
 }
