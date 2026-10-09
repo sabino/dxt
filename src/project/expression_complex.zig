@@ -1,6 +1,17 @@
 //! Native Python complex arithmetic for Jinja exponentiation results.
 const std = @import("std");
 const numbers = @import("expression_number.zig");
+// CPython's complex power uses the platform C math functions. Using the same
+// native implementation preserves the last bits of displayed scalar results.
+const libm = struct {
+    extern fn hypot(f64, f64) f64;
+    extern fn pow(f64, f64) f64;
+    extern fn atan2(f64, f64) f64;
+    extern fn exp(f64) f64;
+    extern fn log(f64) f64;
+    extern fn cos(f64) f64;
+    extern fn sin(f64) f64;
+};
 pub const Complex = struct { real: f64, imaginary: f64 };
 
 pub fn add(x: Complex, y: Complex) Complex {
@@ -41,16 +52,16 @@ pub fn power(x: Complex, y: Complex) !Complex {
         }
         return if (y.real < 0) try divide(.{ .real = 1, .imaginary = 0 }, result) else result;
     }
-    const magnitude = std.math.hypot(x.real, x.imaginary);
-    var length = std.math.pow(f64, magnitude, y.real);
-    const angle = std.math.atan2(x.imaginary, x.real);
+    const magnitude = libm.hypot(x.real, x.imaginary);
+    var length = libm.pow(magnitude, y.real);
+    const angle = libm.atan2(x.imaginary, x.real);
     var phase = angle * y.real;
     if (y.imaginary != 0) {
-        length /= @exp(angle * y.imaginary);
-        phase += y.imaginary * @log(magnitude);
+        length /= libm.exp(angle * y.imaginary);
+        phase += y.imaginary * libm.log(magnitude);
     }
     if (std.math.isFinite(magnitude) and std.math.isFinite(y.real) and std.math.isFinite(y.imaginary) and !std.math.isFinite(length)) return error.JinjaNumericOverflow;
-    return .{ .real = length * @cos(phase), .imaginary = length * @sin(phase) };
+    return .{ .real = length * libm.cos(phase), .imaginary = length * libm.sin(phase) };
 }
 
 fn component(a: std.mem.Allocator, value: f64) ![]const u8 {
