@@ -101,7 +101,13 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, options: types
             const kind = sem.string(sem.field(config, "export_as")) orelse return error.InvalidMetricQuery;
             const qs = try adapter.quoteIdentifier(runtime.allocator, schema);
             const qi = try adapter.quoteIdentifier(runtime.allocator, alias);
-            const sql = try std.fmt.allocPrint(runtime.allocator, "BEGIN; CREATE SCHEMA IF NOT EXISTS {s}; CREATE OR REPLACE {s} {s}.{s} AS {s}; COMMIT;", .{ qs, kind, qs, qi, plan.sql });
+            const schema_literal = try adapter.quoteLiteral(runtime.allocator, schema);
+            const alias_literal = try adapter.quoteLiteral(runtime.allocator, alias);
+            const lookup = try std.fmt.allocPrint(runtime.allocator, "select table_type from information_schema.tables where table_schema={s} and table_name={s}", .{ schema_literal, alias_literal });
+            var existing = adapter.queryForGraph(runtime, graph, database, lookup) catch return error.MetricExecutionFailure;
+            defer existing.deinit(runtime.allocator);
+            const drop = if (existing.firstScalar()) |table_type| try std.fmt.allocPrint(runtime.allocator, "DROP {s} {s}.{s};", .{ if (std.mem.eql(u8, table_type, "VIEW")) "VIEW" else "TABLE", qs, qi }) else "";
+            const sql = try std.fmt.allocPrint(runtime.allocator, "BEGIN; CREATE SCHEMA IF NOT EXISTS {s}; {s} CREATE {s} {s}.{s} AS {s}; COMMIT;", .{ qs, drop, kind, qs, qi, plan.sql });
             adapter.executeForGraph(runtime, graph, database, sql) catch return error.MetricExecutionFailure;
         }
         try stdout.print("Exported {d} saved query relation(s)\n", .{exports.len});

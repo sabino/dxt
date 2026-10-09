@@ -299,7 +299,7 @@ saved-queries:
 
 def metricflow_sql(project: Path, metrics: list[str], groups: list[str], where: list[str] | None = None,
                    order_by: list[str] | None = None, limit: int | None = None,
-                   start_time: str | None = None, end_time: str | None = None):
+                   start_time: str | None = None, end_time: str | None = None, postgres: bool = False):
     from importlib.metadata import version
     from datetime import datetime
     from metricflow_semantics.model.dbt_manifest_parser import parse_manifest_from_dbt_generated_manifest
@@ -307,10 +307,11 @@ def metricflow_sql(project: Path, metrics: list[str], groups: list[str], where: 
     from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest
     from metricflow.protocols.sql_client import SqlEngine
     from metricflow.sql.render.duckdb_renderer import DuckDbSqlPlanRenderer
+    from metricflow.sql.render.postgres import PostgresSQLSqlPlanRenderer
     assert version('metricflow') == '0.208.1'
     class SqlClient:
-        sql_engine_type = SqlEngine.DUCKDB
-        sql_plan_renderer = DuckDbSqlPlanRenderer()
+        sql_engine_type = SqlEngine.POSTGRES if postgres else SqlEngine.DUCKDB
+        sql_plan_renderer = PostgresSQLSqlPlanRenderer() if postgres else DuckDbSqlPlanRenderer()
         def render_bind_parameter_key(self, key):
             return '?'
     manifest = parse_manifest_from_dbt_generated_manifest((project / 'target/semantic_manifest.json').read_text())
@@ -448,3 +449,58 @@ def test_metric_invalid_dimension_and_grain_fail_before_warehouse(tmp_path):
         result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue', '--group-by', group)
         assert result.returncode == 2, result.stderr
         assert not (project / 'warehouse.duckdb').exists()
+
+
+def test_postgres_native_metric_execution_and_atomic_saved_export(tmp_path, core_runner):
+    import pgserver
+    import psycopg2
+    with pgserver.get_server(tmp_path / 'postgres-data') as server:
+        project = semantic_project(tmp_path / 'metric')
+        info = server.get_postmaster_info()
+        (project / 'profiles.yml').write_text(f"""commands:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: '{info.socket_dir}'
+      port: {info.port}
+      dbname: postgres
+      user: postgres
+      password: ''
+      schema: dev
+      threads: 1
+""")
+        with psycopg2.connect(server.get_uri()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("create schema dev; create table dev.orders(id integer,customer_id integer,amount integer,ordered_at date,status text)")
+                cursor.execute("insert into dev.orders values (1,1,10,'2024-01-01','paid'),(2,1,20,'2024-01-03','paid')")
+                cursor.execute("create table dev.customers(id integer,country text); insert into dev.customers values (1,'US')")
+                cursor.execute("create table dev.metricflow_time_spine(date_day date); insert into dev.metricflow_time_spine select generate_series(date '2024-01-01',date '2024-01-05',interval '1 day')")
+        core = invoke_core(core_runner, project, 'parse')
+        assert core.success, core.exception
+        result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue,average_order', '--group-by', 'customer__country')
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == [{'customer__country': 'US', 'revenue': 30, 'average_order': 15}]
+        for attempt in range(2):
+            result = run_dxt(project, 'metric', 'export', '--saved-query', 'daily_revenue')
+            assert result.returncode == 0, result.stderr
+        with psycopg2.connect(server.get_uri()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(metricflow_sql(project, ['revenue'], ['metric_time__day'], order_by=['metric_time__day'], postgres=True))
+                expected = cursor.fetchall()
+                cursor.execute('select * from reporting.daily_revenue_export order by metric_time__day')
+                assert cursor.fetchall() == expected
+        semantic_yaml = project / 'models/semantic.yml'
+        original = semantic_yaml.read_text()
+        semantic_yaml.write_text(original.replace('export_as: table', 'export_as: view'))
+        result = run_dxt(project, 'metric', 'export', '--saved-query', 'daily_revenue')
+        assert result.returncode == 0, result.stderr
+        semantic_yaml.write_text(original.replace('expr: amount', 'expr: absent_column'))
+        result = run_dxt(project, 'metric', 'export', '--saved-query', 'daily_revenue')
+        assert result.returncode == 1, result.stderr
+        with psycopg2.connect(server.get_uri()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute('select * from reporting.daily_revenue_export order by metric_time__day')
+                assert cursor.fetchall() == expected
+                cursor.execute("select table_type from information_schema.tables where table_schema='reporting' and table_name='daily_revenue_export'")
+                assert cursor.fetchone() == ('VIEW',)

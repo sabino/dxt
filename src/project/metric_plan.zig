@@ -242,40 +242,42 @@ const Context = struct {
     }
     fn combineOutputs(self: *Context, outputs: []const Output, metric_name: ?[]const u8, expr: ?[]const u8) ![]const u8 {
         const a = self.allocator;
+        // A union of group keys preserves null groups and supports PostgreSQL,
+        // which cannot hash/merge a FULL JOIN with IS NOT DISTINCT FROM.
+        var keys: ?[]const u8 = null;
+        if (self.query.group_by.len != 0) {
+            var axis: std.Io.Writer.Allocating = .init(a);
+            for (outputs, 0..) |output, i| {
+                if (i != 0) try axis.writer.writeAll(" UNION ");
+                try axis.writer.writeAll("SELECT ");
+                for (self.query.group_by, 0..) |group, g| {
+                    if (g != 0) try axis.writer.writeByte(',');
+                    try axis.writer.writeAll(try ident(a, group));
+                }
+                try axis.writer.print(" FROM {s}", .{output.cte});
+            }
+            keys = try self.add(try axis.toOwnedSlice());
+        }
         var out: std.Io.Writer.Allocating = .init(a);
         const w = &out.writer;
         try w.writeAll("SELECT ");
-        for (self.query.group_by) |group| {
-            try w.writeAll("COALESCE(");
-            for (outputs, 0..) |output, i| {
-                _ = output;
-                if (i != 0) try w.writeByte(',');
-                try w.print("i{d}.{s}", .{ i, try ident(a, group) });
-            }
-            if (outputs.len == 1) try w.writeAll(",NULL");
-            try w.print(") AS {s},", .{try ident(a, group)});
-        }
+        for (self.query.group_by) |group| try w.print("k.{s} AS {s},", .{ try ident(a, group), try ident(a, group) });
         if (metric_name) |name| try w.print("({s}) AS {s}", .{ expr.?, try ident(a, name) }) else for (outputs, 0..) |output, i| {
             if (i != 0) try w.writeByte(',');
             try w.print("i{d}.{s} AS {s}", .{ i, try ident(a, output.name), try ident(a, output.name) });
         }
-        try w.print(" FROM {s} i0", .{outputs[0].cte});
-        for (outputs[1..], 1..) |output, i| {
-            if (self.query.group_by.len == 0) {
-                try w.print(" CROSS JOIN {s} i{d}", .{ output.cte, i });
-                continue;
-            }
-            try w.print(" FULL OUTER JOIN {s} i{d} ON ", .{ output.cte, i });
-            for (self.query.group_by, 0..) |group, g| {
-                if (g != 0) try w.writeAll(" AND ");
-                try w.writeAll("COALESCE(");
-                for (0..i) |j| {
-                    if (j != 0) try w.writeByte(',');
-                    try w.print("i{d}.{s}", .{ j, try ident(a, group) });
+        if (keys) |axis| {
+            try w.print(" FROM {s} k", .{axis});
+            for (outputs, 0..) |output, i| {
+                try w.print(" LEFT JOIN {s} i{d} ON ", .{ output.cte, i });
+                for (self.query.group_by, 0..) |group, g| {
+                    if (g != 0) try w.writeAll(" AND ");
+                    try w.print("k.{s} IS NOT DISTINCT FROM i{d}.{s}", .{ try ident(a, group), i, try ident(a, group) });
                 }
-                if (i == 1) try w.writeAll(",NULL");
-                try w.print(") IS NOT DISTINCT FROM i{d}.{s}", .{ i, try ident(a, group) });
             }
+        } else {
+            try w.print(" FROM {s} i0", .{outputs[0].cte});
+            for (outputs[1..], 1..) |output, i| try w.print(" CROSS JOIN {s} i{d}", .{ output.cte, i });
         }
         return self.add(try out.toOwnedSlice());
     }
