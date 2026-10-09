@@ -708,7 +708,7 @@ pub fn renderSingularTestSql(allocator: std.mem.Allocator, graph: *const Graph, 
     return try applySingularTestConfig(allocator, compiled_sql, test_node.config.where, test_node.config.limit);
 }
 
-fn applySingularTestConfig(allocator: std.mem.Allocator, compiled_sql: []const u8, where_sql: ?[]const u8, limit: ?u64) ![]const u8 {
+fn applySingularTestConfig(allocator: std.mem.Allocator, compiled_sql: []const u8, where_sql: ?[]const u8, limit: ?i64) ![]const u8 {
     if (where_sql) |filter| {
         defer allocator.free(compiled_sql);
         const query_sql = trimTrailingSqlTerminator(compiled_sql);
@@ -718,7 +718,7 @@ fn applySingularTestConfig(allocator: std.mem.Allocator, compiled_sql: []const u
     return try applyTestLimit(allocator, compiled_sql, limit);
 }
 
-fn applyTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?u64) ![]const u8 {
+fn applyTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?i64) ![]const u8 {
     if (limit) |row_limit| {
         defer allocator.free(sql);
         const query_sql = trimTrailingSqlTerminator(sql);

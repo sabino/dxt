@@ -548,6 +548,9 @@ pub fn compileSingularTest(allocator: std.mem.Allocator, graph: *const Graph, te
         .original_file_path = test_node.original_file_path,
         .raw_code = test_node.raw_code,
         .materialized = "test",
+        .test_config = test_node.config,
+        .effective_config = test_node.config_values,
+        .enabled = test_node.enabled,
     };
     var context = CompileContext.init(allocator, graph, &node);
     defer context.deinit();
@@ -624,7 +627,9 @@ fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, t
     const model_sql = try genericTestModelSql(allocator, relation_name, test_node.config.where);
     defer allocator.free(model_sql);
 
-    const node = Node{ .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test" };
+    var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, test_node.enabled, &.{}, test_node.config_values);
+    defer @import("config_value.zig").deinit(allocator, &canonical_config);
+    const node = Node{ .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = canonical_config, .test_config = test_node.config, .enabled = test_node.enabled };
     var context = CompileContext.init(allocator, graph, &node);
     defer context.deinit();
     const arena = context.value_arena.allocator();
@@ -651,7 +656,7 @@ fn genericTestModelSql(allocator: std.mem.Allocator, relation_name: []const u8, 
     return try allocator.dupe(u8, relation_name);
 }
 
-fn applyGenericTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?u64) ![]const u8 {
+fn applyGenericTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?i64) ![]const u8 {
     if (limit) |row_limit| {
         defer allocator.free(sql);
         return try std.fmt.allocPrint(allocator, "{s}\nlimit {d}", .{ sql, row_limit });

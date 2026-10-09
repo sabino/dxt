@@ -271,6 +271,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     try snapshot_yaml.finalize(runtime, &graph);
     try snapshot_yaml.rejectRelationCollisions(&graph);
     try callbacks.materialize_generic_tests(&graph);
+    try @import("generic_test_config.zig").finalize(runtime, &graph);
     try @import("unit_metadata.zig").checksums(&graph);
     try @import("unit_versions.zig").assign(&graph);
     try @import("hook_operations.zig").load(runtime, &graph);

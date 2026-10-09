@@ -207,6 +207,11 @@ fn selectorTermValueForValidation(raw_term: []const u8) ![]const u8 {
 }
 
 fn validateSelectorMethod(part: []const u8) !void {
+    if (std.mem.startsWith(u8, part, "config.")) {
+        const colon = std.mem.indexOfScalar(u8, part, ':') orelse return error.UnsupportedSelector;
+        if (colon == "config.".len or colon + 1 == part.len) return error.UnsupportedSelector;
+        return;
+    }
     const prefixes = [_][]const u8{
         "tag:",
         "path:",
@@ -214,6 +219,7 @@ fn validateSelectorMethod(part: []const u8) !void {
         "package:",
         "resource_type:",
         "test_type:",
+        "test_name:",
         "source:",
         "exposure:",
         "unit_test:",
@@ -260,7 +266,7 @@ fn isSupportedResourceType(value: []const u8) bool {
 }
 
 fn isSupportedTestType(value: []const u8) bool {
-    return std.mem.eql(u8, value, "generic") or std.mem.eql(u8, value, "singular") or std.mem.eql(u8, value, "data") or std.mem.eql(u8, value, "unit");
+    return std.mem.eql(u8, value, "generic") or std.mem.eql(u8, value, "schema") or std.mem.eql(u8, value, "singular") or std.mem.eql(u8, value, "data") or std.mem.eql(u8, value, "unit");
 }
 
 fn isSupportedSourceStatusSelector(value: []const u8) bool {
@@ -356,6 +362,7 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
         }
     }
     for (graph.tests.items) |*test_node| {
+        if (!test_node.enabled) continue;
         if (matchesResourceType(resource_type, "test") and evaluateExpression(graph, test_node.unique_id, expression, context).direct) {
             try selected.append(allocator, .{
                 .unique_id = test_node.unique_id,
@@ -367,9 +374,10 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
                 .original_file_path = test_node.original_file_path,
                 .selector = try pathBackedOutputSelector(allocator, test_node.package_name, test_node.path),
                 .alias = test_node.alias,
+                .config_tags = @import("generic_test_config.zig").configTags(test_node),
                 .config_materialized = "test",
                 .has_config_tags = true,
-                .config_enabled = true,
+                .config_enabled = test_node.enabled,
                 .has_config_enabled = true,
                 .depends_on_nodes = test_node.depends_on.items,
                 .depends_on_macros = test_node.macro_depends_on.items,
@@ -636,9 +644,16 @@ fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const Generi
 }
 
 fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8, context: SelectionContext) bool {
-    if (std.mem.startsWith(u8, value, "group:")) {
-        for (graph.nodes.items) |node| if (std.mem.eql(u8, node.unique_id, test_node.attached_node orelse "")) return if (@import("group_access.zig").group(node.effective_config)) |name| matchesSelectorPattern(value[6..], name) else false;
+    if (!test_node.enabled) return false;
+    if (std.mem.startsWith(u8, value, "fqn:")) return matchesGenericTestFqnPattern(value[4..], test_node);
+    if (std.mem.startsWith(u8, value, "test_name:")) return matchesSelectorPattern(value[10..], test_node.test_name);
+    if (std.mem.startsWith(u8, value, "tag:")) {
+        for (test_node.tags.items) |tag| if (matchesSelectorPattern(value[4..], tag)) return true;
         return false;
+    }
+    if (std.mem.startsWith(u8, value, "config.")) return @import("generic_test_config.zig").matchesConfig(test_node, value[7..]);
+    if (std.mem.startsWith(u8, value, "group:")) {
+        return if (@import("group_access.zig").group(test_node.config_values)) |name| matchesSelectorPattern(value[6..], name) else false;
     }
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(test_node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(test_node.unique_id, value, context);
@@ -650,7 +665,7 @@ fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNod
     }
     if (std.mem.startsWith(u8, value, "test_type:")) {
         const test_type = value["test_type:".len..];
-        return std.mem.eql(u8, test_type, "generic") or std.mem.eql(u8, test_type, "data");
+        return std.mem.eql(u8, test_type, "generic") or std.mem.eql(u8, test_type, "schema") or std.mem.eql(u8, test_type, "data");
     }
     if (std.mem.startsWith(u8, value, "package:")) {
         return matchesUniqueIdPackage(graph, test_node.unique_id, value["package:".len..]);
@@ -744,7 +759,7 @@ fn resourceDirectlyMatches(graph: *const Graph, unique_id: []const u8, value: []
     const spec = parseSelectorSpec(value);
     for (graph.nodes.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesSelector(graph, node, spec, context);
     for (graph.sources.items) |*source| if (std.mem.eql(u8, source.unique_id, unique_id)) return matchesSourceSelector(graph, source, spec, context);
-    for (graph.tests.items) |*node| if (std.mem.eql(u8, node.unique_id, unique_id)) return matchesTestSelector(graph, node, spec, context);
+    for (graph.tests.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesTestSelector(graph, node, spec, context);
     for (graph.singular_tests.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesSingularTestSelector(graph, node, spec, context);
     for (graph.unit_tests.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesUnitTestSelector(graph, node, spec, context);
     for (graph.exposures.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesExposureSelector(graph, node, spec, context);
@@ -755,7 +770,7 @@ fn resourceDirectlyMatches(graph: *const Graph, unique_id: []const u8, value: []
 }
 
 fn indirectDependencies(graph: *const Graph, id: []const u8) ?[]const []const u8 {
-    for (graph.tests.items) |node| if (std.mem.eql(u8, node.unique_id, id)) return node.depends_on.items;
+    for (graph.tests.items) |node| if (node.enabled and std.mem.eql(u8, node.unique_id, id)) return node.depends_on.items;
     for (graph.singular_tests.items) |node| if (node.enabled and std.mem.eql(u8, node.unique_id, id)) return node.depends_on.items;
     for (graph.unit_tests.items) |node| if (node.enabled and std.mem.eql(u8, node.unique_id, id)) return node.depends_on.items;
     return null;
@@ -1157,7 +1172,16 @@ fn matchesNodeFqnPattern(pattern: []const u8, node: *const Node) bool {
 }
 
 fn matchesGenericTestFqnPattern(pattern: []const u8, test_node: *const GenericTestNode) bool {
-    return matchesPathBackedFqnPattern(pattern, test_node.package_name, test_node.path);
+    if (test_node.fqn.items.len == 0) return matchesPathBackedFqnPattern(pattern, test_node.package_name, test_node.path);
+    var buffer: [4096]u8 = undefined;
+    var len: usize = 0;
+    var unscoped_start: usize = 0;
+    for (test_node.fqn.items, 0..) |part, index| {
+        if (index != 0 and !appendFqnByte(&buffer, &len, '.')) return false;
+        if (index == 1) unscoped_start = len;
+        if (!appendFqnSlice(&buffer, &len, part)) return false;
+    }
+    return matchesFqnCandidate(pattern, buffer[0..len]) or matchesFqnCandidate(pattern, buffer[unscoped_start..len]);
 }
 
 fn matchesSingularTestFqnPattern(pattern: []const u8, test_node: *const SingularTestNode) bool {
@@ -1420,6 +1444,7 @@ fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, s
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     for (graph.tests.items) |*target| {
+        if (!target.enabled) continue;
         if (!matchesTestSelectorTerm(graph, target, spec.value, context)) continue;
         if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
@@ -1470,6 +1495,7 @@ fn resourceInChildrensParentsSelection(graph: *const Graph, selected_unique_id: 
         if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
     }
     for (graph.tests.items) |*resource| {
+        if (!resource.enabled) continue;
         if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
     }
     for (graph.singular_tests.items) |*resource| {
@@ -1508,6 +1534,7 @@ fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, 
         return dependencyListContainsTransitive(graph, node.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
     for (graph.tests.items) |test_node| {
+        if (!test_node.enabled) continue;
         if (!std.mem.eql(u8, test_node.unique_id, resource_unique_id)) continue;
         return dependencyListContainsTransitive(graph, test_node.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }

@@ -4553,7 +4553,7 @@ def test_generic_test_configs_drive_test_and_build_statuses(tmp_path: Path):
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for generic test store_failures coverage")
-def test_generic_test_store_failures_materializes_and_drops_audit_relation(tmp_path: Path):
+def test_generic_test_store_failures_materializes_and_keeps_empty_audit_relation(tmp_path: Path):
     project = tmp_path / "generic_test_store_failures"
     write_generic_test_config_project(project, severity="error", error_if="> 0", store_failures=True)
     target = tmp_path / "store-target"
@@ -4580,12 +4580,12 @@ def test_generic_test_store_failures_materializes_and_drops_audit_relation(tmp_p
     run_results = json.loads((target / "run_results.json").read_text())
     result = run_results["results"][0]
     assert result["status"] == "fail"
-    assert result["relation_name"] == '"dbt_test__audit"."not_null_customers_customer_id"'
+    assert result["relation_name"] == '"main_dbt_test__audit"."not_null_customers_customer_id"'
     assert result["compiled_code"].endswith("limit 1")
     manifest = json.loads((target / "manifest.json").read_text())
     test_node = manifest["nodes"][result["unique_id"]]
     assert test_node["config"]["store_failures"] is True
-    assert duckdb_scalar(db_path, 'select count(*) from "dbt_test__audit"."not_null_customers_customer_id"') == "1"
+    assert duckdb_scalar(db_path, 'select count(*) from "main_dbt_test__audit"."not_null_customers_customer_id"') == "1"
 
     write_generic_test_config_project(
         project,
@@ -4603,14 +4603,15 @@ def test_generic_test_store_failures_materializes_and_drops_audit_relation(tmp_p
     assert pass_result.returncode == 0, pass_result.stderr
     pass_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in pass_results["results"]] == ["success", "pass"]
-    assert pass_results["results"][1]["relation_name"] is None
+    assert pass_results["results"][1]["relation_name"] == '"main_dbt_test__audit"."not_null_customers_customer_id"'
     assert (
         duckdb_scalar(
             db_path,
-            "select count(*) from information_schema.tables where table_schema = 'dbt_test__audit' and table_name = 'not_null_customers_customer_id'",
+            "select count(*) from information_schema.tables where table_schema = 'main_dbt_test__audit' and table_name = 'not_null_customers_customer_id'",
         )
-        == "0"
+        == "1"
     )
+    assert duckdb_scalar(db_path, 'select count(*) from "main_dbt_test__audit"."not_null_customers_customer_id"') == "0"
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")

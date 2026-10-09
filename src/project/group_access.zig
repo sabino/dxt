@@ -122,7 +122,8 @@ pub fn validate(graph: *const types.Graph) !void {
     for (graph.singular_tests.items) |test_node| if (test_node.enabled) try validateRefs(graph, test_node.package_name, test_node.config_values, test_node.depends_on.items);
     // Core generic tests inherit the attached model's group.
     for (graph.tests.items) |test_node| {
-        var config: Value = .null;
+        if (!test_node.enabled) continue;
+        var config: Value = test_node.config_values;
         for (graph.nodes.items) |node| if (std.mem.eql(u8, node.unique_id, test_node.attached_node orelse "")) {
             config = node.effective_config;
         };
@@ -157,7 +158,7 @@ pub fn writeManifest(writer: *std.Io.Writer, graph: *const types.Graph) !void {
             member_first = false;
             try std.json.Stringify.value(node.unique_id, .{}, writer);
         };
-        for (graph.tests.items) |test_node| for (graph.nodes.items) |node| if (std.mem.eql(u8, test_node.attached_node orelse "", node.unique_id)) if (group(node.effective_config)) |assigned| if (std.mem.eql(u8, name, assigned)) {
+        for (graph.tests.items) |test_node| if (!test_node.disabled) if (genericGroup(graph, &test_node)) |assigned| if (std.mem.eql(u8, name, assigned)) {
             if (!member_first) try writer.writeByte(',');
             member_first = false;
             try std.json.Stringify.value(test_node.unique_id, .{}, writer);
@@ -170,6 +171,13 @@ pub fn writeManifest(writer: *std.Io.Writer, graph: *const types.Graph) !void {
         try writer.writeByte(']');
     }
     try writer.writeAll("},\n");
+}
+
+pub fn genericGroup(graph: *const types.Graph, test_node: *const types.GenericTestNode) ?[]const u8 {
+    if (test_node.attached_node) |attached| {
+        for (graph.nodes.items) |node| if (std.mem.eql(u8, attached, node.unique_id)) return group(node.effective_config);
+    }
+    return group(test_node.config_values);
 }
 
 test "private access requires a shared group and respects package restrictions" {

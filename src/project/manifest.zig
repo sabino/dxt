@@ -162,6 +162,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeNode(allocator, writer, graph, node);
     }
     for (graph.tests.items) |test_node| {
+        if (test_node.disabled) continue;
         if (node_index != 0) try writer.writeAll(",");
         node_index += 1;
         try writer.writeAll("\n    ");
@@ -265,6 +266,25 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeNode(allocator, writer, graph, node);
         try writer.writeAll("]");
     }
+    for (graph.tests.items, 0..) |test_node, index| {
+        if (!test_node.disabled) continue;
+        var prior = false;
+        for (graph.tests.items[0..index]) |other| if (other.disabled and std.mem.eql(u8, other.unique_id, test_node.unique_id)) {
+            prior = true;
+        };
+        if (prior) continue;
+        if (disabled_index != 0) try writer.writeByte(',');
+        disabled_index += 1;
+        try json.string(writer, test_node.unique_id);
+        try writer.writeAll(":[");
+        var wrote = false;
+        for (graph.tests.items) |other| if (other.disabled and std.mem.eql(u8, other.unique_id, test_node.unique_id)) {
+            if (wrote) try writer.writeByte(',');
+            wrote = true;
+            try writeGenericTestNode(allocator, writer, graph, other);
+        };
+        try writer.writeByte(']');
+    }
     for (graph.unit_tests.items) |unit| {
         if (unit.enabled) continue;
         if (disabled_index != 0) try writer.writeByte(',');
@@ -304,6 +324,13 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
     }
     try writer.writeAll("\n  },\n  \"parent_map\": {");
     var parent_index: usize = 0;
+    for (graph.sources.items) |source| {
+        if (!source.enabled) continue;
+        if (parent_index != 0) try writer.writeByte(',');
+        parent_index += 1;
+        try json.string(writer, source.unique_id);
+        try writer.writeAll(":[]");
+    }
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
         if (parent_index != 0) try writer.writeAll(",");
@@ -311,15 +338,16 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, node.unique_id);
         try writer.writeAll(": ");
-        try json.stringArray(writer, node.depends_on.items);
+        try writeSortedDependencies(allocator, writer, node.depends_on.items);
     }
     for (graph.tests.items) |test_node| {
+        if (test_node.disabled) continue;
         if (parent_index != 0) try writer.writeAll(",");
         parent_index += 1;
         try writer.writeAll("\n    ");
         try json.string(writer, test_node.unique_id);
         try writer.writeAll(": ");
-        try json.stringArray(writer, test_node.depends_on.items);
+        try writeSortedDependencies(allocator, writer, test_node.depends_on.items);
     }
     for (graph.singular_tests.items) |test_node| {
         if (!test_node.enabled) continue;
@@ -328,7 +356,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, test_node.unique_id);
         try writer.writeAll(": ");
-        try json.stringArray(writer, test_node.depends_on.items);
+        try writeSortedDependencies(allocator, writer, test_node.depends_on.items);
     }
     for (graph.exposures.items) |exposure| {
         if (!exposure.enabled) continue;
@@ -337,7 +365,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, exposure.unique_id);
         try writer.writeAll(": ");
-        try json.stringArray(writer, exposure.depends_on.items);
+        try writeSortedDependencies(allocator, writer, exposure.depends_on.items);
     }
     for (graph.unit_tests.items) |unit_test| {
         if (!unit_test.enabled) continue;
@@ -346,7 +374,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, unit_test.unique_id);
         try writer.writeAll(": ");
-        try json.stringArray(writer, unit_test.depends_on.items);
+        try writeSortedDependencies(allocator, writer, unit_test.depends_on.items);
     }
     for (graph.semantic_resources.items) |resource| {
         if (!resource.enabled) continue;
@@ -360,9 +388,16 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try json.stringArray(writer, dependencies);
     }
     try writer.writeAll("\n  },\n  \"child_map\": {");
-    try writeChildMap(writer, graph);
+    try writeChildMap(allocator, writer, graph);
     try writer.writeAll("\n  }\n}\n");
     return try out.toOwnedSlice();
+}
+
+fn writeSortedDependencies(allocator: std.mem.Allocator, writer: *Io.Writer, dependencies: []const []const u8) !void {
+    const sorted = try allocator.dupe([]const u8, dependencies);
+    defer allocator.free(sorted);
+    util.sortStrings(sorted);
+    try json.stringArray(writer, sorted);
 }
 
 fn writeManifestMetadata(writer: *Io.Writer, graph: *const Graph) !void {
@@ -375,90 +410,82 @@ fn writeManifestMetadata(writer: *Io.Writer, graph: *const Graph) !void {
     try writer.writeAll("}");
 }
 
-fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
+fn writeChildMap(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph) !void {
     var first = true;
     for (graph.nodes.items) |candidate| {
         if (!candidate.enabled) continue;
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.tests.items) |candidate| {
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        if (candidate.disabled) continue;
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.singular_tests.items) |candidate| {
         if (!candidate.enabled) continue;
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.sources.items) |candidate| {
         if (!candidate.enabled) continue;
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.exposures.items) |candidate| {
         if (!candidate.enabled) continue;
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.unit_tests.items) |candidate| {
         if (!candidate.enabled) continue;
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.semantic_resources.items) |resource| {
         if (!resource.enabled) continue;
-        try writeChildMapEntry(writer, graph, resource.unique_id, &first);
+        try writeChildMapEntry(allocator, writer, graph, resource.unique_id, &first);
     }
 }
 
-fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []const u8, first: *bool) !void {
+fn writeChildMapEntry(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, unique_id: []const u8, first: *bool) !void {
     if (!first.*) try writer.writeAll(",");
     first.* = false;
     try writer.writeAll("\n    ");
     try json.string(writer, unique_id);
-    try writer.writeAll(": [");
-    var child_first = true;
+    try writer.writeAll(": ");
+    var children: std.ArrayList([]const u8) = .empty;
+    defer children.deinit(allocator);
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
         if (util.containsString(node.depends_on.items, unique_id)) {
-            if (!child_first) try writer.writeAll(",");
-            child_first = false;
-            try json.string(writer, node.unique_id);
+            try children.append(allocator, node.unique_id);
         }
     }
     for (graph.tests.items) |test_node| {
+        if (test_node.disabled) continue;
         if (util.containsString(test_node.depends_on.items, unique_id)) {
-            if (!child_first) try writer.writeAll(",");
-            child_first = false;
-            try json.string(writer, test_node.unique_id);
+            try children.append(allocator, test_node.unique_id);
         }
     }
     for (graph.singular_tests.items) |test_node| {
         if (!test_node.enabled) continue;
         if (util.containsString(test_node.depends_on.items, unique_id)) {
-            if (!child_first) try writer.writeAll(",");
-            child_first = false;
-            try json.string(writer, test_node.unique_id);
+            try children.append(allocator, test_node.unique_id);
         }
     }
     for (graph.exposures.items) |exposure| {
         if (!exposure.enabled) continue;
         if (util.containsString(exposure.depends_on.items, unique_id)) {
-            if (!child_first) try writer.writeAll(",");
-            child_first = false;
-            try json.string(writer, exposure.unique_id);
+            try children.append(allocator, exposure.unique_id);
         }
     }
     for (graph.unit_tests.items) |unit_test| {
         if (!unit_test.enabled) continue;
         if (util.containsString(unit_test.depends_on.items, unique_id)) {
-            if (!child_first) try writer.writeAll(",");
-            child_first = false;
-            try json.string(writer, unit_test.unique_id);
+            try children.append(allocator, unit_test.unique_id);
         }
     }
     for (graph.semantic_resources.items) |resource| {
         if (!resource.enabled or !util.containsString(resource.depends_on.items, unique_id)) continue;
-        if (!child_first) try writer.writeByte(',');
-        child_first = false;
-        try json.string(writer, resource.unique_id);
+        try children.append(allocator, resource.unique_id);
     }
-    try writer.writeAll("]");
+    util.sortStrings(children.items);
+    try json.stringArray(writer, children.items);
 }
 
 fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, node: Node) !void {
@@ -521,17 +548,18 @@ fn writeTestNodeIdentityFields(
     name: []const u8,
     raw_code: ?[]const u8,
     config: types.GenericTestConfig,
+    fqn: ?[]const []const u8,
 ) !void {
     const audit_node = audits.auditNode(config, name, package_name);
     const schema_name = try compiler.relationSchemaForNode(allocator, graph, &audit_node);
     defer allocator.free(schema_name);
 
     try writer.writeAll(",\"database\":");
-    try writeNullableString(writer, config.database orelse compiler.relationDatabaseForNode(graph, &audit_node));
+    try writeNullableString(writer, config.database orelse compiler.relationDatabaseForNode(graph, &audit_node) orelse databaseNameForGraph(graph));
     try writer.writeAll(",\"schema\":");
     try json.string(writer, schema_name);
     try writer.writeAll(",\"fqn\":");
-    try writeFqnFromPath(writer, package_name, path, name, null);
+    if (fqn) |parts| try json.stringArray(writer, parts) else try writeFqnFromPath(writer, package_name, path, name, null);
     try writer.writeAll(",\"checksum\":");
     if (raw_code) |code| {
         try writeSha256Checksum(writer, code);
@@ -1218,10 +1246,13 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try json.string(writer, test_node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, test_node.name);
-    try writeUnrenderedTestConfig(writer, test_node.config);
+    if (test_node.unrendered_config == .object) {
+        try writer.writeAll(",\"unrendered_config\":");
+        try std.json.Stringify.value(test_node.unrendered_config, .{}, writer);
+    } else try writeUnrenderedTestConfig(writer, test_node.config);
     try writer.writeAll(",\"alias\":");
     try json.string(writer, test_node.config.alias orelse test_node.alias);
-    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, null, test_node.config);
+    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, null, test_node.config, if (test_node.fqn.items.len != 0) test_node.fqn.items else null);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -1230,6 +1261,14 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     const raw_code = try genericTestRawCode(allocator, test_node);
     defer allocator.free(raw_code);
     try json.string(writer, raw_code);
+    try writer.writeAll(",\"description\":");
+    try json.string(writer, test_node.description);
+    try writer.writeAll(",\"tags\":");
+    try json.stringArray(writer, test_node.tags.items);
+    try writer.writeAll(",\"meta\":");
+    try std.json.Stringify.value(@import("config_value.zig").get(test_node.config_values, "meta") orelse @as(std.json.Value, .{ .object = .empty }), .{}, writer);
+    try writer.writeAll(",\"group\":");
+    try writeNullableString(writer, @import("group_access.zig").genericGroup(graph, &test_node));
     try writer.writeAll(",\"attached_node\":");
     if (test_node.attached_node) |attached_node| {
         try json.string(writer, attached_node);
@@ -1292,7 +1331,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
         try writer.writeAll("null");
     }
     try writer.writeAll("},\"config\":");
-    var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, true, &.{}, .null);
+    var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, test_node.enabled, &.{}, test_node.config_values);
     defer @import("config_value.zig").deinit(allocator, &canonical_config);
     try std.json.Stringify.value(canonical_config, .{}, writer);
     try writer.writeAll(",\"depends_on\":{\"macros\":");
@@ -1323,7 +1362,7 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     try writeUnrenderedTestConfig(writer, test_node.config);
     try writer.writeAll(",\"alias\":");
     try json.string(writer, test_node.config.alias orelse test_node.alias);
-    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, test_node.raw_code, test_node.config);
+    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, test_node.raw_code, test_node.config, null);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -1367,7 +1406,7 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
 }
 
 fn genericTestRawCode(allocator: std.mem.Allocator, node: GenericTestNode) ![]const u8 {
-    if (node.config.configured_order_len == 0) return try allocator.dupe(u8, node.raw_code);
+    if (node.builder_config == .object or node.config.configured_order_len == 0) return try allocator.dupe(u8, node.raw_code);
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
@@ -2444,8 +2483,8 @@ test "manifest writer filters disabled resources and writes graph maps" {
     const child_map = root.get("child_map").?.object;
     const source_children = child_map.get("source.demo.raw.customers").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), source_children.len);
-    try std.testing.expectEqualStrings("model.demo.customers", source_children[0].string);
-    try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", source_children[1].string);
+    try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", source_children[0].string);
+    try std.testing.expectEqualStrings("model.demo.customers", source_children[1].string);
     const model_children = child_map.get("model.demo.customers").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), model_children.len);
     try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", model_children[0].string);

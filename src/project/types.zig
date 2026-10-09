@@ -324,6 +324,9 @@ pub const ColumnDef = struct {
 pub const GenericTestDef = struct {
     name: []const u8,
     arguments: std.json.Value = .null,
+    config_values: std.json.Value = .null,
+    custom_name: ?[]const u8 = null,
+    description: []const u8 = "",
     namespace: ?[]const u8 = null,
     column_name: ?[]const u8 = null,
     accepted_values: std.ArrayList([]const u8) = .empty,
@@ -338,7 +341,7 @@ pub const GenericTestConfig = struct {
     configured_order: [std.meta.fields(GenericTestConfigField).len]GenericTestConfigField = undefined,
     configured_order_len: usize = 0,
     where: ?[]const u8 = null,
-    limit: ?u64 = null,
+    limit: ?i64 = null,
     severity: []const u8 = "ERROR",
     warn_if: []const u8 = "!= 0",
     error_if: []const u8 = "!= 0",
@@ -594,6 +597,16 @@ pub const SnapshotConfig = struct {
 };
 
 pub const GenericTestNode = struct {
+    config_values: std.json.Value = .null,
+    builder_config: std.json.Value = .null,
+    unrendered_config: std.json.Value = .null,
+    enabled: bool = true,
+    disabled: bool = false,
+    reference_warnings: std.ArrayList([]const u8) = .empty,
+    tags: std.ArrayList([]const u8) = .empty,
+    config_tags: std.ArrayList([]const u8) = .empty,
+    fqn: std.ArrayList([]const u8) = .empty,
+    description: []const u8 = "",
     package_name: []const u8,
     unique_id: []const u8,
     name: []const u8,
@@ -935,6 +948,13 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
 
 pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
     config_value.deinit(allocator, &test_node.arguments);
+    config_value.deinit(allocator, &test_node.config_values);
+    config_value.deinit(allocator, &test_node.builder_config);
+    config_value.deinit(allocator, &test_node.unrendered_config);
+    test_node.tags.deinit(allocator);
+    test_node.config_tags.deinit(allocator);
+    test_node.reference_warnings.deinit(allocator);
+    test_node.fqn.deinit(allocator);
     test_node.accepted_values.deinit(allocator);
     test_node.refs.deinit(allocator);
     test_node.source_refs.deinit(allocator);
@@ -1037,6 +1057,7 @@ fn deinitMacroProperty(allocator: std.mem.Allocator, property: *MacroProperty) v
 fn deinitGenericTestDefs(allocator: std.mem.Allocator, tests: *std.ArrayList(GenericTestDef)) void {
     for (tests.items) |*test_def| {
         config_value.deinit(allocator, &test_def.arguments);
+        config_value.deinit(allocator, &test_def.config_values);
         test_def.accepted_values.deinit(allocator);
     }
     tests.deinit(allocator);

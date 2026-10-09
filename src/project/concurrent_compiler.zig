@@ -30,7 +30,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
         if (!node.enabled or !contains(selected, node.unique_id)) continue;
         if (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "snapshot") or std.mem.eql(u8, node.resource_type, "analysis") or std.mem.eql(u8, node.resource_type, "operation") or std.mem.eql(u8, node.resource_type, "seed")) try resources.append(runtime.allocator, .{ .node = node });
     }
-    for (graph.tests.items) |*node| if (contains(selected, node.unique_id)) {
+    for (graph.tests.items) |*node| if (node.enabled and contains(selected, node.unique_id)) {
         try resources.append(runtime.allocator, .{ .generic = node });
     };
     for (graph.singular_tests.items) |*node| if (node.enabled and contains(selected, node.unique_id)) {

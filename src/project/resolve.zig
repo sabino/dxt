@@ -230,6 +230,41 @@ pub fn resolveDependencies(graph: *Graph) !void {
             try appendUnique(graph.allocator, &node.depends_on, try resolveRefDependency(graph, node.package_name, ref_dep));
         }
     }
+    for (graph.tests.items) |*test_node| {
+        if (test_node.disabled) continue;
+        test_node.depends_on.clearRetainingCapacity();
+        for (test_node.source_refs.items) |source_dep| {
+            const target = resolveSourceDependency(graph, test_node.package_name, source_dep) catch |err| switch (err) {
+                error.UnresolvedSource => {
+                    test_node.enabled = false;
+                    try @import("config_value.zig").put(graph.allocator, &test_node.config_values, "enabled", .{ .bool = false });
+                    var disabled = false;
+                    for (graph.sources.items) |source| if (!source.enabled and std.mem.eql(u8, source.source_name, source_dep.source_name) and std.mem.eql(u8, source.table_name, source_dep.table_name)) {
+                        disabled = true;
+                    };
+                    if (!disabled) try test_node.reference_warnings.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "Test '{s}' ({s}) depends on a source named '{s}.{s}' which was not found", .{ test_node.unique_id, test_node.original_file_path, source_dep.source_name, source_dep.table_name }));
+                    continue;
+                },
+                else => return err,
+            };
+            if (test_node.relationship_source_to) |relationship| if (std.mem.eql(u8, relationship.source_name, source_dep.source_name) and std.mem.eql(u8, relationship.table_name, source_dep.table_name)) {
+                test_node.relationship_source_to_unique_id = target;
+            };
+            try appendUnique(graph.allocator, &test_node.depends_on, target);
+        }
+        for (test_node.refs.items) |ref_dep| {
+            const target = resolveRefDependency(graph, test_node.package_name, ref_dep) catch |err| switch (err) {
+                error.DisabledRef, error.UnresolvedRef => {
+                    test_node.enabled = false;
+                    try @import("config_value.zig").put(graph.allocator, &test_node.config_values, "enabled", .{ .bool = false });
+                    if (err == error.UnresolvedRef) try test_node.reference_warnings.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "Test '{s}' ({s}) depends on a node named '{s}' which was not found", .{ test_node.unique_id, test_node.original_file_path, ref_dep.name }));
+                    continue;
+                },
+                else => return err,
+            };
+            try appendUnique(graph.allocator, &test_node.depends_on, target);
+        }
+    }
     for (graph.exposures.items) |*exposure| {
         if (!exposure.enabled) continue;
         for (exposure.refs.items) |ref_dep| {

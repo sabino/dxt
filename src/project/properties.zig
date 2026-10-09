@@ -73,6 +73,10 @@ pub fn parseColumnsWithArgumentsProperty(allocator: std.mem.Allocator, input: st
         if (values.get(item, "description")) |description| column.description = try ownedString(allocator, description);
         if (values.get(column.properties, "data_type")) |dtype| column.data_type = if (dtype == .null) null else try resource.string(dtype);
         if (values.get(item, "quote")) |quote| column.quote = if (quote == .null) null else try resource.boolean(quote);
+        const tags = values.get(values.get(item, "config") orelse .null, "tags") orelse values.get(item, "tags") orelse .null;
+        if (tags == .string) try column.tags.append(allocator, try allocator.dupe(u8, tags.string)) else if (tags == .array) {
+            for (tags.array.items) |tag| try column.tags.append(allocator, try ownedString(allocator, tag));
+        } else if (tags != .null) return error.InvalidResourceProperties;
         try parseTestsWithArgumentsProperty(allocator, values.get(item, "data_tests") orelse values.get(item, "tests") orelse .null, &column.tests, nested_arguments);
         try columns.append(allocator, column);
     }
@@ -96,7 +100,12 @@ pub fn parseTestsWithArgumentsProperty(allocator: std.mem.Allocator, input: std.
         var test_def = types.GenericTestDef{ .name = try allocator.dupe(u8, name) };
         if (if (nested_arguments) values.get(definition, "arguments") else null) |args| {
             if (args != .object) return error.InvalidGenericTestConfiguration;
-            test_def.arguments = try values.clone(allocator, args);
+            var it = definition.object.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "arguments") or std.mem.eql(u8, entry.key_ptr.*, "config") or std.mem.eql(u8, entry.key_ptr.*, "name") or std.mem.eql(u8, entry.key_ptr.*, "description")) continue;
+                try values.put(allocator, &test_def.arguments, entry.key_ptr.*, entry.value_ptr.*);
+            }
+            try values.overlay(allocator, &test_def.arguments, args);
         } else if (definition == .object) {
             var it = definition.object.iterator();
             while (it.next()) |entry| {
@@ -104,6 +113,7 @@ pub fn parseTestsWithArgumentsProperty(allocator: std.mem.Allocator, input: std.
                 try values.put(allocator, &test_def.arguments, entry.key_ptr.*, entry.value_ptr.*);
             }
         }
+        try @import("generic_test_config.zig").extract(allocator, definition, &test_def);
         if (values.get(test_def.arguments, "column_name")) |v| test_def.column_name = try resource.string(v);
         if (values.get(test_def.arguments, "quote")) |v| test_def.accepted_values_quote = try resource.boolean(v);
         if (values.get(test_def.arguments, "field")) |v| test_def.relationship_field = try resource.string(v);
@@ -112,7 +122,7 @@ pub fn parseTestsWithArgumentsProperty(allocator: std.mem.Allocator, input: std.
             if (items != .array) return error.InvalidGenericTestConfiguration;
             for (items.array.items) |value| try test_def.accepted_values.append(allocator, try values.scalarText(allocator, value));
         }
-        if (values.get(definition, "config")) |config| try parseTestConfig(allocator, config, &test_def.config);
+        if (!@import("generic_test_config.zig").containsJinja(test_def.config_values)) try parseTestConfig(allocator, test_def.config_values, &test_def.config);
         try tests.append(allocator, test_def);
     }
 }
@@ -122,8 +132,8 @@ pub fn parseTestConfig(allocator: std.mem.Allocator, config: std.json.Value, tar
     if (config != .object) return error.InvalidGenericTestConfiguration;
     if (values.get(config, "where")) |value| target.where = if (value == .null) null else try ownedString(allocator, value);
     if (values.get(config, "limit")) |value| {
-        if (value != .integer or value.integer < 0) return error.InvalidGenericTestConfiguration;
-        target.limit = @intCast(value.integer);
+        if (value != .null and value != .integer) return error.InvalidGenericTestConfiguration;
+        target.limit = if (value == .null) null else value.integer;
     }
     if (values.get(config, "severity")) |value| target.severity = try ownedString(allocator, value);
     if (values.get(config, "warn_if")) |value| target.warn_if = try ownedString(allocator, value);

@@ -85,6 +85,7 @@ fn normalizeHooks(allocator: std.mem.Allocator, source: Json) !Json {
 }
 
 pub fn node(allocator: std.mem.Allocator, resource: *const types.Node) !Json {
+    if (std.mem.eql(u8, resource.resource_type, "test")) return try testConfig(allocator, resource.test_config, resource.enabled, &.{}, resource.effective_config);
     var result = try defaults(allocator, resource.resource_type);
     errdefer values.deinit(allocator, &result);
     try values.put(allocator, &result, "enabled", .{ .bool = resource.enabled });

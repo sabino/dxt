@@ -136,6 +136,9 @@ pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTes
     var cloned = GenericTestDef{
         .name = source.name,
         .arguments = try @import("config_value.zig").clone(graph.allocator, source.arguments),
+        .config_values = try @import("config_value.zig").clone(graph.allocator, source.config_values),
+        .custom_name = source.custom_name,
+        .description = source.description,
         .namespace = source.namespace,
         .column_name = source.column_name,
         .accepted_values_quote = source.accepted_values_quote,
@@ -146,6 +149,7 @@ pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTes
     errdefer {
         cloned.accepted_values.deinit(graph.allocator);
         @import("config_value.zig").deinit(graph.allocator, &cloned.arguments);
+        @import("config_value.zig").deinit(graph.allocator, &cloned.config_values);
     }
     for (source.accepted_values.items) |value| {
         try cloned.accepted_values.append(graph.allocator, value);
@@ -163,7 +167,7 @@ pub fn applyGenericTestConfigValue(allocator: std.mem.Allocator, test_def: *Gene
         const limit_text = try dupTrimmedScalar(allocator, value);
         defer allocator.free(limit_text);
         test_def.config.markConfigured(.limit);
-        test_def.config.limit = std.fmt.parseUnsigned(u64, limit_text, 10) catch return error.UnsupportedYaml;
+        test_def.config.limit = std.fmt.parseInt(i64, limit_text, 10) catch return error.UnsupportedYaml;
         return true;
     }
     if (std.mem.eql(u8, key, "severity")) {
@@ -1795,6 +1799,7 @@ pub const GenericTestNames = struct {
 };
 
 pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: GenericTestDef, model_name: []const u8, column_name: ?[]const u8) !GenericTestNames {
+    if (test_def.custom_name) |name| return .{ .full = try allocator.dupe(u8, name), .compiled = try allocator.dupe(u8, name) };
     var clean_args: std.ArrayList([]const u8) = .empty;
     defer {
         for (clean_args.items) |arg| allocator.free(arg);
@@ -2109,7 +2114,7 @@ test "applyGenericTestConfigValue parses supported generic test config scalars" 
     try std.testing.expect(!try applyGenericTestConfigValue(allocator, &test_def, "store_failures_as", "table"));
 
     try std.testing.expectEqualStrings("customer_id > 0", test_def.config.where.?);
-    try std.testing.expectEqual(@as(u64, 2), test_def.config.limit.?);
+    try std.testing.expectEqual(@as(i64, 2), test_def.config.limit.?);
     try std.testing.expectEqualStrings("warn", test_def.config.severity);
     try std.testing.expectEqualStrings("> 0", test_def.config.warn_if);
     try std.testing.expectEqualStrings("> 10", test_def.config.error_if);

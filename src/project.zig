@@ -1234,7 +1234,7 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
         if (!std.mem.eql(u8, node.resource_type, "seed") and node.relation_name == null) node.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
         try resources.append(runtime.allocator, .{ .node = node });
     }
-    for (graph.tests.items) |*node| if (selectionContains(selected, node.unique_id)) {
+    for (graph.tests.items) |*node| if (node.enabled and selectionContains(selected, node.unique_id)) {
         try resources.append(runtime.allocator, .{ .generic = node });
     };
     for (graph.singular_tests.items) |*node| if (node.enabled and selectionContains(selected, node.unique_id)) {
@@ -1676,6 +1676,7 @@ fn selectedDataTestExecutionOrder(runtime: Runtime, graph: *Graph, selected: []c
     var ordered = try runtime.allocator.alloc(DataTestRef, selected_count);
     var index: usize = 0;
     for (graph.tests.items) |*test_node| {
+        if (!test_node.enabled) continue;
         if (!selectionContains(selected, test_node.unique_id)) continue;
         ordered[index] = .{ .generic = test_node };
         index += 1;
@@ -2354,6 +2355,7 @@ fn countSelectedGraphSeeds(graph: *const Graph, selected: []const selector.Selec
 fn countSelectedDataTests(graph: *const Graph, selected: []const selector.SelectedResource) usize {
     var count: usize = 0;
     for (graph.tests.items) |test_node| {
+        if (!test_node.enabled) continue;
         if (selectionContains(selected, test_node.unique_id)) count += 1;
     }
     for (graph.singular_tests.items) |test_node| {
@@ -2580,6 +2582,7 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
 
     if (include_singular_tests) {
         for (graph.tests.items) |*test_node| {
+            if (!test_node.enabled) continue;
             if (!selectionContains(selected, test_node.unique_id)) continue;
             saw_selected_generic_test = true;
             if (isBuiltInGenericTestNode(test_node)) {
@@ -3239,7 +3242,7 @@ test "parseSingularTestPropertiesFromText records top-level patches and ignores 
     try std.testing.expectEqualStrings("patched singular test", property.description);
     try std.testing.expectEqual(false, property.enabled.?);
     try std.testing.expectEqualStrings("status = 'checked'", property.config.where.?);
-    try std.testing.expectEqual(@as(u64, 2), property.config.limit.?);
+    try std.testing.expectEqual(@as(i64, 2), property.config.limit.?);
     try std.testing.expectEqualStrings("Warn", property.config.severity);
     try std.testing.expectEqualStrings("> 0", property.config.warn_if);
     try std.testing.expectEqualStrings("> 10", property.config.error_if);
@@ -3303,7 +3306,7 @@ test "applySingularTestProperties applies config and preserves inline enabled pr
     try std.testing.expectEqualStrings("tests/schema.yml", patched.patch_path.?);
     try std.testing.expectEqualStrings("patched singular test", patched.description);
     try std.testing.expectEqualStrings("status = 'checked'", patched.config.where.?);
-    try std.testing.expectEqual(@as(u64, 1), patched.config.limit.?);
+    try std.testing.expectEqual(@as(i64, 1), patched.config.limit.?);
     try std.testing.expectEqualStrings("Warn", patched.config.severity);
     try std.testing.expectEqualStrings("> 0", patched.config.warn_if);
     try std.testing.expectEqualStrings("> 10", patched.config.error_if);
@@ -3753,7 +3756,7 @@ fn applySingularTestConfigValue(allocator: std.mem.Allocator, property: *types.S
         const limit_text = try dupTrimmedScalar(allocator, value);
         defer allocator.free(limit_text);
         property.config.markConfigured(.limit);
-        property.config.limit = std.fmt.parseUnsigned(u64, limit_text, 10) catch return error.UnsupportedYaml;
+        property.config.limit = std.fmt.parseInt(i64, limit_text, 10) catch return error.UnsupportedYaml;
         return true;
     }
     if (std.mem.eql(u8, key, "severity")) {
@@ -4023,7 +4026,7 @@ fn findSingularTestIndexByPackageAndName(graph: *const Graph, package_name: []co
 
 fn materializeGenericTests(graph: *Graph) !void {
     for (graph.nodes.items) |*node| {
-        if (!node.enabled or (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot"))) continue;
+        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot")) continue;
         for (node.tests.items) |test_def| {
             if (isSupportedGenericTest(test_def, null)) {
                 try appendGenericTestNode(graph, node, test_def, null);
@@ -4042,7 +4045,6 @@ fn materializeGenericTests(graph: *Graph) !void {
         }
     }
     for (graph.sources.items) |*source| {
-        if (!source.enabled) continue;
         for (source.tests.items) |test_def| {
             if (isSupportedSourceGenericTest(test_def, null)) {
                 try appendSourceGenericTestNode(graph, source, test_def, null);
@@ -4068,10 +4070,6 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
     const model_kwarg = try @import("project/model_versions.zig").modelKwarg(graph.allocator, node);
     defer graph.allocator.free(model_kwarg);
     const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, node.package_name, names.full, test_def, model_kwarg, effective_column_name);
-    for (graph.tests.items) |existing| {
-        if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
-    }
-
     const macro_call = if (test_def.namespace) |namespace|
         try std.fmt.allocPrint(graph.allocator, "{s}.test_{s}", .{ namespace, test_def.name })
     else
@@ -4091,6 +4089,8 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
         .raw_code = raw_code,
         .test_name = test_def.name,
         .arguments = try @import("project/config_value.zig").clone(graph.allocator, test_def.arguments),
+        .builder_config = try @import("project/config_value.zig").clone(graph.allocator, test_def.config_values),
+        .description = test_def.description,
         .test_namespace = test_def.namespace,
         .column_name = column_name,
         .argument_column_name = effective_column_name,
@@ -4111,14 +4111,9 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
             const target_source = try sourceDepFromValue(graph.allocator, test_def.relationship_to);
             test_node.relationship_source_to = target_source;
             try appendSourceDepUnique(graph.allocator, &test_node.source_refs, target_source);
-            const target_unique_id = try resolveSourceDependency(graph, node.package_name, target_source);
-            test_node.relationship_source_to_unique_id = target_unique_id;
-            try appendUnique(graph.allocator, &test_node.depends_on, target_unique_id);
         } else {
             const target_ref = try refDepFromValue(graph.allocator, test_def.relationship_to);
             try test_node.refs.append(graph.allocator, target_ref);
-            const target_unique_id = try resolveRefDependency(graph, node.package_name, target_ref);
-            try appendUnique(graph.allocator, &test_node.depends_on, target_unique_id);
         }
     }
     try test_node.refs.append(graph.allocator, .{ .package = null, .name = node.name, .version = try @import("project/config_value.zig").clone(graph.allocator, node.version) });
@@ -4126,6 +4121,9 @@ fn appendGenericTestNode(graph: *Graph, node: *const Node, test_def: GenericTest
     if (isBuiltInGenericTestNode(&test_node) and (node.version != .null or (!std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")))) {
         try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
     }
+    if (column_name) |name| for (node.columns.items) |column| if (std.mem.eql(u8, column.name, name)) {
+        try test_node.tags.appendSlice(graph.allocator, column.tags.items);
+    };
     try graph.tests.append(graph.allocator, test_node);
 }
 
@@ -4140,6 +4138,9 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
     const source_test_def = GenericTestDef{
         .name = source_test_name,
         .arguments = test_def.arguments,
+        .config_values = test_def.config_values,
+        .custom_name = test_def.custom_name,
+        .description = test_def.description,
         .namespace = test_def.namespace,
         .column_name = test_def.column_name,
         .accepted_values = test_def.accepted_values,
@@ -4151,10 +4152,6 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
     const names = try synthesizeGenericTestNames(graph.allocator, source_test_def, source_target_name, effective_column_name);
     // Source prefixes belong to node names; dbt hashes the original test metadata.
     const unique_id = try genericTestUniqueIdForModelKwarg(graph.allocator, source.package_name, names.full, test_def, source_model_kwarg, effective_column_name);
-    for (graph.tests.items) |existing| {
-        if (std.mem.eql(u8, existing.unique_id, unique_id)) return;
-    }
-
     const macro_call = if (test_def.namespace) |namespace|
         try std.fmt.allocPrint(graph.allocator, "{s}.test_{s}", .{ namespace, test_def.name })
     else
@@ -4174,6 +4171,8 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
         .raw_code = raw_code,
         .test_name = test_def.name,
         .arguments = try @import("project/config_value.zig").clone(graph.allocator, test_def.arguments),
+        .builder_config = try @import("project/config_value.zig").clone(graph.allocator, test_def.config_values),
+        .description = test_def.description,
         .test_namespace = test_def.namespace,
         .column_name = column_name,
         .argument_column_name = effective_column_name,
@@ -4197,9 +4196,6 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
             const target_source = try sourceDepFromValue(graph.allocator, test_def.relationship_to);
             test_node.relationship_source_to = target_source;
             try appendSourceDepUnique(graph.allocator, &test_node.source_refs, target_source);
-            const target_unique_id = try resolveSourceDependency(graph, source.package_name, target_source);
-            test_node.relationship_source_to_unique_id = target_unique_id;
-            try appendUnique(graph.allocator, &test_node.depends_on, target_unique_id);
             try appendSourceDepUnique(graph.allocator, &test_node.source_refs, attached_source_dep);
             try appendUnique(graph.allocator, &test_node.depends_on, source.unique_id);
         } else {
@@ -4207,8 +4203,6 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
             try appendUnique(graph.allocator, &test_node.depends_on, source.unique_id);
             const target_ref = try refDepFromValue(graph.allocator, test_def.relationship_to);
             try test_node.refs.append(graph.allocator, target_ref);
-            const target_unique_id = try resolveRefDependency(graph, source.package_name, target_ref);
-            try appendUnique(graph.allocator, &test_node.depends_on, target_unique_id);
         }
     } else {
         try appendSourceDepUnique(graph.allocator, &test_node.source_refs, attached_source_dep);
@@ -4217,6 +4211,9 @@ fn appendSourceGenericTestNode(graph: *Graph, source: *const SourceDef, test_def
     if (isBuiltInGenericTestNode(&test_node) and !std.mem.eql(u8, test_def.name, "not_null") and !std.mem.eql(u8, test_def.name, "unique")) {
         try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
     }
+    if (column_name) |name| for (source.columns.items) |column| if (std.mem.eql(u8, column.name, name)) {
+        try test_node.tags.appendSlice(graph.allocator, column.tags.items);
+    };
     try graph.tests.append(graph.allocator, test_node);
 }
 
@@ -4311,6 +4308,9 @@ fn columnCustomGenericTestDef(graph: *const Graph, package_name: []const u8, tes
     return GenericTestDef{
         .name = macro_test_name,
         .arguments = test_def.arguments,
+        .config_values = test_def.config_values,
+        .custom_name = test_def.custom_name,
+        .description = test_def.description,
         .accepted_values = test_def.accepted_values,
         .namespace = if (namespace_parts) |parts| parts.namespace else null,
         .column_name = test_def.column_name,
@@ -4538,6 +4538,7 @@ test "materializeGenericTests rejects missing package custom generic test macro"
 }
 
 fn writeWarnings(runtime: Runtime, stderr: *Io.Writer, graph: *const Graph) !void {
+    for (graph.tests.items) |test_node| for (test_node.reference_warnings.items) |warning| try @import("project/selection_warnings.zig").warning(runtime, stderr, "NodeNotFoundOrDisabled", "I060", warning, null);
     if (graph.command_options.debug or graph.command_options.log_level == .debug) {
         try stderr.writeAll("{\"data\":{\"hit\":");
         try std.json.Stringify.value(graph.parser_cache_hit, .{}, stderr);
@@ -4585,6 +4586,8 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
                 existing.quote = source.quote;
                 existing.description = "";
                 existing.doc_blocks.clearRetainingCapacity();
+                existing.tags.clearRetainingCapacity();
+                try existing.tags.appendSlice(graph.allocator, source.tags.items);
             }
             if (source.description.len != 0) existing.description = try resolveDocDescription(graph, package_name, source.description, &existing.doc_blocks);
             for (source.tests.items) |test_def| {
@@ -4596,6 +4599,7 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
     }
 
     var column = ColumnDef{ .name = source.name, .data_type = source.data_type, .quote = source.quote, .properties = try @import("project/config_value.zig").clone(graph.allocator, source.properties) };
+    try column.tags.appendSlice(graph.allocator, source.tags.items);
     errdefer {
         column.doc_blocks.deinit(graph.allocator);
         column.tests.deinit(graph.allocator);

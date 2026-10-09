@@ -46,7 +46,7 @@ pub const Audit = struct {
     severity: []const u8 = "ERROR",
     error_if: []const u8 = "!= 0",
     warn_if: []const u8 = "!= 0",
-    limit: ?u64 = null,
+    limit: ?i64 = null,
 };
 
 pub const Change = struct {
@@ -654,6 +654,7 @@ fn compileAudits(context: *Context) ![]const Audit {
     const a = context.runtime.allocator;
     var audits: std.ArrayList(Audit) = .empty;
     for (context.graph.tests.items) |*test_node| {
+        if (!test_node.enabled) continue;
         if (test_node.attached_node) |id| {
             if (findNode(context.graph, id)) |node| if (!node.enabled) continue;
         }

@@ -236,7 +236,7 @@ pub fn apply(allocator: std.mem.Allocator, node: *types.Node) !void {
     }
     if (values.get(config, "where")) |v| node.test_config.where = try nullableString(v);
     if (values.get(config, "limit")) |v| {
-        if (v == .null) node.test_config.limit = null else if (v == .integer and v.integer >= 0) node.test_config.limit = @intCast(v.integer) else return error.InvalidConfiguration;
+        if (v == .null) node.test_config.limit = null else if (v == .integer) node.test_config.limit = v.integer else return error.InvalidConfiguration;
     }
     if (values.get(config, "severity")) |v| {
         const severity = try string(v);
@@ -306,6 +306,6 @@ test "inline singular test config projects severity and failure conditions" {
     try std.testing.expectEqualStrings("> 2", node.test_config.warn_if);
     try std.testing.expectEqualStrings("> 5", node.test_config.error_if);
     try std.testing.expectEqualStrings("id is not null", node.test_config.where.?);
-    try std.testing.expectEqual(@as(u64, 7), node.test_config.limit.?);
+    try std.testing.expectEqual(@as(i64, 7), node.test_config.limit.?);
     try std.testing.expect(node.test_config.configured.contains(.severity));
 }

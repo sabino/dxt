@@ -232,6 +232,7 @@ fn addTestNodes(graph: *types.Graph, selected_ids: []const []const u8) !void {
         try graph.nodes.append(allocator, .{ .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .depends_on = try duplicateList(allocator, test_node.depends_on.items), .macro_depends_on = try duplicateList(allocator, test_node.macro_depends_on.items), .effective_config = try testConfigValue(allocator, test_node.config) });
     }
     for (graph.tests.items) |test_node| {
+        if (!test_node.enabled) continue;
         if (!contains(selected_ids, test_node.unique_id)) continue;
         try graph.nodes.append(allocator, .{ .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .depends_on = try duplicateList(allocator, test_node.depends_on.items), .macro_depends_on = try duplicateList(allocator, test_node.macro_depends_on.items), .effective_config = try testConfigValue(allocator, test_node.config) });
     }
@@ -246,7 +247,7 @@ fn duplicateList(allocator: std.mem.Allocator, input: []const []const u8) !std.A
 }
 fn compileTest(allocator: std.mem.Allocator, graph: *const types.Graph, id: []const u8) ![]const u8 {
     for (graph.singular_tests.items) |*test_node| if (eq(test_node.unique_id, id)) return try compiler.compileSingularTest(allocator, graph, test_node);
-    for (graph.tests.items) |*test_node| if (eq(test_node.unique_id, id)) return try compiler.compileGenericTest(allocator, graph, test_node);
+    for (graph.tests.items) |*test_node| if (test_node.enabled and eq(test_node.unique_id, id)) return try compiler.compileGenericTest(allocator, graph, test_node);
     return error.UnresolvedTestNode;
 }
 
