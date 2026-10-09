@@ -55,6 +55,7 @@ pub const Context = struct {
 
     fn resolve(raw: *anyopaque, path: []const u8, allocator: std.mem.Allocator) anyerror!expression.Value {
         const self: *Context = @ptrCast(@alignCast(raw));
+        if (@import("base_context.zig").callable(path)) return .{ .callable = path };
         if (std.mem.eql(u8, path, "target")) return try values.toExpression(allocator, self.target);
         if (std.mem.startsWith(u8, path, "target.")) return try values.toExpression(allocator, values.get(self.target, path[7..]) orelse return .undefined);
         return .undefined;
@@ -62,6 +63,7 @@ pub const Context = struct {
 
     fn call(raw: *anyopaque, name: []const u8, args: []const expression.Argument, allocator: std.mem.Allocator) anyerror!expression.Value {
         const self: *Context = @ptrCast(@alignCast(raw));
+        if (try @import("base_context.zig").call(allocator, name, args)) |result| return result;
         if (!std.mem.eql(u8, name, "env_var") and !std.mem.eql(u8, name, "var")) return error.UnresolvedMacro;
         if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
         const key = args[0].value.string;

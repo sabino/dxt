@@ -64,13 +64,10 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
     }
     if (std.mem.eql(u8, name, "fromjson")) {
         const bound = try bind(&.{ "string", "default" }, args, 1);
-        if (bound[0] != .string) return error.JinjaTypeError;
-        const parsed = std.json.parseFromSlice(std.json.Value, a, bound[0].string, .{ .allocate = .alloc_always, .parse_numbers = false, .duplicate_field_behavior = .use_last }) catch |err| switch (err) {
-            error.OutOfMemory => return err,
+        return @import("json_context_load.zig").load(a, bound[0]) catch |err| switch (err) {
+            error.OutOfMemory, error.JinjaTypeError, error.JinjaExpressionDepthExceeded, error.JinjaIterationLimitExceeded => return err,
             else => return bound[1],
         };
-        defer parsed.deinit();
-        return try @import("dbt_context.zig").cloneValue(a, try @import("config_value.zig").toExpression(a, parsed.value));
     }
     if (std.mem.eql(u8, name, "set") or std.mem.eql(u8, name, "set_strict")) {
         const strict = std.mem.eql(u8, name, "set_strict");
