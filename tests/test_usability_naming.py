@@ -289,3 +289,28 @@ def test_core_generic_model_argument_retains_empty_input_relation_policy(tmp_pat
     assert [row['status'] for row in rows[0]] == [row['status'] for row in rows[1]] == ['success', 'pass']
     assert rows[0][1]['failures'] == rows[1][1]['failures'] == 0
     assert rows[0][1]['compiled_code'] == rows[1][1]['compiled_code']
+
+
+@pytest.mark.parametrize('database', [None, 'configured'])
+@pytest.mark.parametrize('dispatch_override', [False, True])
+def test_native_profileless_parse_retains_optional_catalog_and_custom_naming(tmp_path, configuration_oracle, database, dispatch_override):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/value.sql', ("{{ config(database='configured') }}" if database else '') + 'select 1 as id')
+    pair.write('macros/names.sql', "{% macro generate_alias_name(custom_alias_name, node) %}{{ return(node.name ~ '_named') }}{% endmacro %}" + ("{% macro duckdb__generate_database_name(custom_database_name, node) %}{{ return('override_catalog') }}{% endmacro %}" if dispatch_override else ''))
+    for path in pair.projects:
+        (path / 'profiles.yml').unlink()
+    actual, expected = pair.projects
+    # Profileless inspection is a native extension; Core requires a profile.
+    reference = configuration_oracle.invoke(['parse', '--project-dir', str(expected), '--profiles-dir', str(expected), '--quiet'])
+    assert reference.success is False
+    assert 'profile' in str(reference.exception).lower()
+    for _ in range(2):
+        result = subprocess.run([DXT, 'parse', '--project-dir', str(actual)], cwd=actual, text=True, capture_output=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        node = json.loads((actual / 'target/manifest.json').read_text())['nodes']['model.configuration_fixture.value']
+        expected_database = 'override_catalog' if dispatch_override else database
+        assert node['database'] == expected_database
+        assert node['schema'] == 'main'
+        assert node['alias'] == 'value_named'
+        assert node['relation_name'] == (f'"{expected_database}".' if expected_database else '') + '"main"."value_named"'
+        contracts.assert_artifact(actual / 'target/manifest.json')

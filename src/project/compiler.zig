@@ -1227,6 +1227,9 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     if (std.mem.eql(u8, path, "target") and context.graph.target_context != .null) return try valueFromJson(allocator, context.graph.target_context);
     if (std.mem.startsWith(u8, path, "target.")) {
         if (@import("config_value.zig").get(context.graph.target_context, path[7..])) |value| return try valueFromJson(allocator, value);
+        // Native parse can inspect a project without a profile. Preserve its
+        // absent catalog as None when stock naming macros read target.database.
+        if (std.mem.eql(u8, path, "target.database") and context.graph.target_context == .null) return .none;
         return .{ .string = renderTargetAttribute(allocator, context.graph, path[7..]) catch |err| switch (err) {
             error.UnsupportedJinja => return .undefined,
             else => return err,
@@ -2215,6 +2218,18 @@ fn renderTargetAttribute(allocator: std.mem.Allocator, graph: *const Graph, attr
     if (std.mem.eql(u8, attribute, "type")) return try allocator.dupe(u8, graph.adapter_type);
     if (std.mem.eql(u8, attribute, "profile_name")) return try allocator.dupe(u8, graph.profile_name orelse graph.project_name);
     return error.UnsupportedJinja;
+}
+
+test "profileless target database remains None for native naming context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "demo" };
+    defer graph.deinit();
+    const node = Node{ .package_name = "demo", .unique_id = "model.demo.value", .name = "value", .path = "value.sql", .original_file_path = "models/value.sql", .raw_code = "select '{{ target.database is none }}' as no_catalog" };
+    const compiled = try compileModel(a, &graph, &node);
+    defer a.free(compiled);
+    try std.testing.expectEqualStrings("select 'True' as no_catalog", compiled);
 }
 
 fn renderStatement(context: *CompileContext, span: []const u8) !void {

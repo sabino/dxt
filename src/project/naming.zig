@@ -6,6 +6,7 @@ const types = @import("types.zig");
 const compiler = @import("compiler.zig");
 const values = @import("config_value.zig");
 const context = @import("context_values.zig");
+const Value = @import("expression.zig").Value;
 
 pub fn finalize(runtime: types.Runtime, graph: *types.Graph) !void {
     for (graph.nodes.items) |*node| try nodeIdentity(runtime.allocator, graph, node);
@@ -65,7 +66,7 @@ fn savedQueryExports(a: std.mem.Allocator, graph: *const types.Graph, data: *std
                 .{ .value = try values.toExpression(temporary, override) },
                 .{ .value = try values.toExpression(temporary, argument) },
             };
-            const generated = try compiler.renderNamingMacro(temporary, graph, macro, &arguments);
+            const generated: Value = if (equal(component, "database") and profilelessStockDatabase(graph, macro, override)) .none else try compiler.renderNamingMacro(temporary, graph, macro, &arguments);
             if (generated != .string and generated != .none) return error.JinjaCompilerError;
             try values.put(temporary, &argument, component, if (generated == .string) .{ .string = try @import("expression_unicode.zig").strip(generated.string, null, true, true) } else .null);
         }
@@ -136,7 +137,7 @@ fn nodeIdentityWithFqn(a: std.mem.Allocator, graph: *const types.Graph, node: *t
             .{ .value = try values.toExpression(temporary, override) },
             .{ .value = model },
         };
-        const generated = try compiler.renderNamingMacro(temporary, graph, macro, &arguments);
+        const generated: Value = if (equal(component, "database") and profilelessStockDatabase(graph, macro, override)) if (node.resolved_identity.?.database) |catalog| .{ .string = catalog } else .none else try compiler.renderNamingMacro(temporary, graph, macro, &arguments);
         if (generated != .string and !(equal(component, "database") and generated == .none)) {
             @import("compile_diagnostics.zig").capture(node.original_file_path, node.name, "naming macro returned an unsupported relation component type");
             return error.JinjaCompilerError;
@@ -167,6 +168,15 @@ fn nodeIdentityWithFqn(a: std.mem.Allocator, graph: *const types.Graph, node: *t
 
 fn equal(left: []const u8, right: []const u8) bool {
     return std.mem.eql(u8, left, right);
+}
+
+fn profilelessStockDatabase(graph: *const types.Graph, macro: *const types.MacroDef, override: std.json.Value) bool {
+    if (graph.target_context != .null or override != .null or !equal(macro.package_name, "dbt")) return false;
+    const dispatched = @import("resolve.zig").findMacroIdForAdapterDispatch(graph, "dbt", "generate_database_name", "dbt", &.{ graph.adapter_type, "default" }) orelse return false;
+    // Core requires a profile. Native profileless inspection preserves its
+    // optional catalog rather than converting target.database=None to "None"
+    // through the stock macro's text output. Authored generators still run.
+    return equal(dispatched, "macro.dbt.default__generate_database_name");
 }
 
 test "naming generator ignores unrelated packages and honors resource package overrides" {
