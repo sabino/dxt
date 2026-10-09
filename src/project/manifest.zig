@@ -481,6 +481,15 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
     try json.string(writer, if (snapshot_config) |config| config.target_schema orelse schema_name else schema_name);
     try writer.writeAll(",\"alias\":");
     try json.string(writer, alias);
+    try writer.writeAll(",\"relation_name\":");
+    const relational = std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "seed") or std.mem.eql(u8, node.resource_type, "snapshot");
+    if (relational and !std.mem.eql(u8, node.materialized, "ephemeral")) {
+        if (node.relation_name) |relation| try json.string(writer, relation) else {
+            const relation = try compiler.relationNameForNode(allocator, graph, node);
+            defer allocator.free(relation);
+            try json.string(writer, relation);
+        }
+    } else try writer.writeAll("null");
     try writer.writeAll(",\"fqn\":");
     if (node.version != .null) {
         const version = try @import("config_value.zig").scalarText(allocator, node.version);
@@ -932,7 +941,9 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     } else {
         try writer.writeAll("null");
     }
-    try writer.writeAll(",\"language\":\"sql\",\"raw_code\":");
+    try writer.writeAll(",\"language\":");
+    try json.string(writer, node.language);
+    try writer.writeAll(",\"raw_code\":");
     try json.string(writer, node.raw_code);
     try writer.writeAll(",\"description\":");
     try json.string(writer, node.description);
@@ -959,16 +970,10 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
         try json.string(writer, node.compiled_code orelse "");
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(node.compiled_path orelse ""));
-        try writer.writeAll(",\"relation_name\":");
-        if (node.relation_name) |relation_name| {
-            try json.string(writer, relation_name);
-        } else {
-            try writer.writeAll("null");
-        }
         try writer.writeAll(",\"extra_ctes\":");
         try writeExtraCtes(writer, node.extra_ctes.items);
         try writer.writeAll(",\"extra_ctes_injected\":");
-        try writer.writeAll(if (node.extra_ctes.items.len != 0 or node.hook_index != null) "true" else "false");
+        try writer.writeAll("true");
     }
     try writer.writeAll(",\"meta\":");
     if (@import("config_value.zig").get(node.effective_config, "meta")) |meta| try std.json.Stringify.value(meta, .{}, writer) else if (node.snapshot_meta_json) |meta| try writeJsonValue(writer, meta) else try writeMetaObject(writer, node.meta.items);
@@ -1304,7 +1309,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
         try json.string(writer, test_node.compiled_code orelse "");
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(test_node.compiled_path orelse ""));
-        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":false");
+        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":true");
     }
     try writer.writeAll("}");
 }
@@ -1357,7 +1362,7 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
         try json.string(writer, test_node.compiled_code orelse "");
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(test_node.compiled_path orelse ""));
-        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":false");
+        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":true");
     }
     try writer.writeAll("}");
 }
@@ -1952,7 +1957,7 @@ test "manifest writer emits source generic tests with null attached node" {
         test_node.get("compiled_path").?.string,
     );
     try std.testing.expectEqual(@as(usize, 0), test_node.get("extra_ctes").?.array.items.len);
-    try std.testing.expect(!test_node.get("extra_ctes_injected").?.bool);
+    try std.testing.expect(test_node.get("extra_ctes_injected").?.bool);
     const sources = test_node.get("sources").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), sources.len);
     try std.testing.expectEqualStrings("raw", sources[0].array.items[0].string);
@@ -2228,7 +2233,7 @@ test "manifest writer emits singular tests without generic-only fields" {
         test_node.get("compiled_path").?.string,
     );
     try std.testing.expectEqual(@as(usize, 0), test_node.get("extra_ctes").?.array.items.len);
-    try std.testing.expect(!test_node.get("extra_ctes_injected").?.bool);
+    try std.testing.expect(test_node.get("extra_ctes_injected").?.bool);
     try std.testing.expectEqualStrings("customers", test_node.get("refs").?.array.items[0].object.get("name").?.string);
     try std.testing.expectEqualStrings(
         "model.demo.customers",

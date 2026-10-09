@@ -167,6 +167,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
             error.FileNotFound => continue,
             else => return err,
         };
+        try project_fs.discoverPythonFiles(runtime, root, model_path, &sql_files);
         sortStrings(sql_files.items);
         sortStrings(yaml_files.items);
         sortStrings(md_files.items);
@@ -178,7 +179,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
             try callbacks.parse_yaml_properties(runtime, options.project_dir, model_path, yaml_path, config.name, &graph);
         }
         for (sql_files.items) |sql_path| {
-            try @import("parse_cache.zig").model(runtime, options.project_dir, model_path, sql_path, config.name, &graph, callbacks.parse_model);
+            if (std.mem.endsWith(u8, sql_path, ".py")) try callbacks.parse_model(runtime, options.project_dir, model_path, sql_path, config.name, &graph) else try @import("parse_cache.zig").model(runtime, options.project_dir, model_path, sql_path, config.name, &graph, callbacks.parse_model);
         }
     }
 
@@ -250,6 +251,16 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     try applyMacroProperties(&graph);
     try callbacks.apply_singular_test_properties(&graph, config.name);
     try callbacks.apply_model_properties(&graph, config.name);
+    for (graph.nodes.items) |*node| {
+        if (!std.mem.eql(u8, node.language, "python")) continue;
+        // Core's Python model patch supplies table when properties omit a
+        // materialization. Inline config still has its usual higher priority.
+        if (config_value.get(node.property_config, "materialized") == null) {
+            try config_value.put(runtime.allocator, &node.property_config, "materialized", .{ .string = "table" });
+            try config_value.put(runtime.allocator, &node.property_raw_config, "materialized", .{ .string = "table" });
+            try @import("resource_config.zig").rebuild(runtime.allocator, node);
+        }
+    }
     try project_resolve.rejectDuplicateSnapshots(&graph);
     for (graph.nodes.items) |*node| {
         if (node.snapshot_config == null) continue;
@@ -399,6 +410,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
                 error.FileNotFound => continue,
                 else => return err,
             };
+            try project_fs.discoverPythonFiles(runtime, root, model_path, &sql_files);
             sortStrings(sql_files.items);
             sortStrings(yaml_files.items);
             sortStrings(md_files.items);
@@ -411,7 +423,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
             }
 
             for (sql_files.items) |sql_path| {
-                try @import("parse_cache.zig").model(runtime, package_dir, model_path, sql_path, package_config.name, graph, callbacks.parse_model);
+                if (std.mem.endsWith(u8, sql_path, ".py")) try callbacks.parse_model(runtime, package_dir, model_path, sql_path, package_config.name, graph) else try @import("parse_cache.zig").model(runtime, package_dir, model_path, sql_path, package_config.name, graph, callbacks.parse_model);
             }
         }
 

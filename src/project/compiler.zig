@@ -227,6 +227,12 @@ pub fn compileModel(allocator: std.mem.Allocator, graph: *const Graph, node: *co
     return try compileModelBody(allocator, graph, node);
 }
 
+pub fn recordPythonScaffoldDependency(allocator: std.mem.Allocator, graph: *const Graph, node: *Node) !void {
+    if (!std.mem.eql(u8, node.language, "python")) return;
+    const id = resolve.findMacroIdForUnqualifiedNamespaceCall(graph, node.package_name, "py_script_postfix") orelse return error.UnresolvedMacro;
+    try util.appendUnique(allocator, &node.macro_depends_on, id);
+}
+
 /// Render a runtime hook in the resource's own typed compilation context.
 pub fn renderTextForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, text: []const u8) ![]const u8 {
     var context = CompileContext.init(allocator, graph, node);
@@ -332,6 +338,13 @@ fn valueFromJson(allocator: std.mem.Allocator, value: std.json.Value) anyerror!n
 }
 
 pub fn compileModelWithInjectedCtes(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) !CompiledModel {
+    if (std.mem.eql(u8, node.language, "python")) {
+        for (node.depends_on.items) |id| {
+            const parent = findNodeByUniqueId(graph, id) orelse continue;
+            if (std.mem.eql(u8, parent.materialized, "ephemeral")) return error.PythonModelEphemeralDependency;
+        }
+        return .{ .compiled_code = try compileModelBody(allocator, graph, node) };
+    }
     var state = EphemeralCompileState.init(allocator, graph);
     errdefer state.deinit();
 
@@ -359,6 +372,15 @@ fn compileModelBody(allocator: std.mem.Allocator, graph: *const Graph, node: *co
     defer timing.finish();
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
+
+    if (std.mem.eql(u8, node.language, "python")) {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try out.appendSlice(allocator, node.raw_code);
+        try out.appendSlice(allocator, "\n\n");
+        try renderRange(&context, "{{ py_script_postfix(model) }}", 0, "{{ py_script_postfix(model) }}".len, &out);
+        return try out.toOwnedSlice(allocator);
+    }
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);

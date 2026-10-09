@@ -475,6 +475,7 @@ pub const Node = struct {
     original_file_path: []const u8,
     patch_path: ?[]const u8 = null,
     raw_code: []const u8,
+    language: []const u8 = "sql",
     // SQL snapshot blocks retain the source file for dbt's file-level checksum.
     snapshot_file_code: ?[]const u8 = null,
     snapshot_fqn_path: ?[]const u8 = null,

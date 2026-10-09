@@ -222,11 +222,12 @@ pub fn resolveDependencies(graph: *Graph) !void {
             if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
         }
         sortStrings(node.macro_depends_on.items);
-        for (node.refs.items) |ref_dep| {
-            try appendUnique(graph.allocator, &node.depends_on, try resolveRefDependency(graph, node.package_name, ref_dep));
-        }
+        // Core resolves source edges before ref edges for parsed nodes.
         for (node.source_refs.items) |source_dep| {
             try appendUnique(graph.allocator, &node.depends_on, try resolveSourceDependency(graph, node.package_name, source_dep));
+        }
+        for (node.refs.items) |ref_dep| {
+            try appendUnique(graph.allocator, &node.depends_on, try resolveRefDependency(graph, node.package_name, ref_dep));
         }
     }
     for (graph.exposures.items) |*exposure| {
@@ -879,8 +880,8 @@ test "dependency resolution populates sorted unique node exposure and unit test 
     try resolveDependencies(&graph);
 
     try std.testing.expectEqual(@as(usize, 2), graph.nodes.items[1].depends_on.items.len);
-    try std.testing.expectEqualStrings("model.demo.customers", graph.nodes.items[1].depends_on.items[0]);
-    try std.testing.expectEqualStrings("source.demo.raw.customers", graph.nodes.items[1].depends_on.items[1]);
+    try std.testing.expectEqualStrings("source.demo.raw.customers", graph.nodes.items[1].depends_on.items[0]);
+    try std.testing.expectEqualStrings("model.demo.customers", graph.nodes.items[1].depends_on.items[1]);
     try std.testing.expectEqual(@as(usize, 1), graph.nodes.items[1].macro_depends_on.items.len);
     try std.testing.expectEqualStrings("macro.demo.format_id", graph.nodes.items[1].macro_depends_on.items[0]);
     try std.testing.expectEqual(@as(usize, 2), graph.exposures.items[0].depends_on.items.len);

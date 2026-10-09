@@ -6,7 +6,13 @@ const Value = expression.Value;
 
 pub fn config(allocator: std.mem.Allocator, node: *const types.Node) !Value {
     // The render arena retains the config until the macro frame completes.
-    const canonical = try @import("canonical_manifest_config.zig").node(allocator, node);
+    var canonical = try @import("canonical_manifest_config.zig").node(allocator, node);
+    // Core's ModelConfig exposes empty parser metadata to the scaffold macros,
+    // even when no config.get call added these extra fields to the artifact.
+    if (std.mem.eql(u8, node.language, "python")) {
+        if (!canonical.object.contains("config_keys_used")) try canonical.object.put(allocator, "config_keys_used", .{ .array = std.json.Array.init(allocator) });
+        if (!canonical.object.contains("config_keys_defaults")) try canonical.object.put(allocator, "config_keys_defaults", .{ .array = std.json.Array.init(allocator) });
+    }
     var result = try values.toExpression(allocator, canonical);
     if (result.attribute("begin") == .string) {
         const timestamp = try @import("input_relations.zig").parseDate(result.attribute("begin").string, true);
@@ -48,6 +54,16 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
     const tags = try expression.allocateValues(allocator, node.tags.items.len);
     for (node.tags.items, tags) |tag, *value| value.* = .{ .string = tag };
     var batch_value: Value = .none;
+    const refs = try expression.allocateValues(allocator, node.refs.items.len);
+    for (node.refs.items, refs) |ref, *value| {
+        var entries: std.ArrayList(expression.Entry) = .empty;
+        try entries.append(allocator, .{ .key = "name", .value = .{ .string = ref.name } });
+        if (ref.package) |package| try entries.append(allocator, .{ .key = "package", .value = .{ .string = package } });
+        if (ref.version != .null) try entries.append(allocator, .{ .key = "version", .value = try values.toExpression(allocator, ref.version) });
+        value.* = .{ .object = try entries.toOwnedSlice(allocator) };
+    }
+    const sources = try expression.allocateValues(allocator, node.source_refs.items.len);
+    for (node.source_refs.items, sources) |source, *value| value.* = .{ .list = try allocator.dupe(Value, &.{ .{ .string = source.source_name }, .{ .string = source.table_name } }) };
     if (node.runtime_batch) |batch| batch_value = .{ .object = try allocator.dupe(expression.Entry, &.{
         .{ .key = "id", .value = if (node.runtime_batch_id) |id| .{ .string = id } else .none },
         .{ .key = "event_time_start", .value = try @import("timestamp_context.zig").value(allocator, batch.start) },
@@ -57,9 +73,14 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         .{ .key = "name", .value = .{ .string = node.name } },
         .{ .key = "unique_id", .value = .{ .string = node.unique_id } },
         .{ .key = "resource_type", .value = .{ .string = node.resource_type } },
+        .{ .key = "language", .value = .{ .string = node.language } },
+        .{ .key = "refs", .value = .{ .list = refs } },
+        .{ .key = "sources", .value = .{ .list = sources } },
         .{ .key = "package_name", .value = .{ .string = node.package_name } },
         .{ .key = "path", .value = .{ .string = node.path } },
         .{ .key = "original_file_path", .value = .{ .string = node.original_file_path } },
+        .{ .key = "raw_code", .value = .{ .string = node.raw_code } },
+        .{ .key = "fqn", .value = try fqn(allocator, node) },
         .{ .key = "description", .value = .{ .string = node.description } },
         .{ .key = "database", .value = if (compiler.relationDatabaseForNode(graph, node)) |database| .{ .string = database } else .none },
         .{ .key = "schema", .value = .{ .string = try compiler.relationSchemaForNode(allocator, graph, node) } },
@@ -71,6 +92,22 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         .{ .key = "latest_version", .value = try values.toExpression(allocator, node.latest_version) },
         .{ .key = "batch", .value = batch_value },
     }) };
+}
+
+fn fqn(allocator: std.mem.Allocator, node: *const types.Node) !Value {
+    var parts: std.ArrayList(Value) = .empty;
+    try parts.append(allocator, .{ .string = node.package_name });
+    const path = @import("util.zig").normalizeForDisplay(node.path);
+    var segments = std.mem.splitScalar(u8, path, '/');
+    while (segments.next()) |segment| {
+        if (segment.len == 0) continue;
+        const last = segments.peek() == null;
+        const stem = if (last) if (std.mem.lastIndexOfScalar(u8, segment, '.')) |dot| segment[0..dot] else segment else segment;
+        try parts.append(allocator, .{ .string = if (last and node.version != .null) node.name else stem });
+    }
+    if (parts.items.len == 1) try parts.append(allocator, .{ .string = node.name });
+    if (node.version != .null) try parts.append(allocator, .{ .string = try std.fmt.allocPrint(allocator, "v{s}", .{try values.scalarText(allocator, node.version)}) });
+    return .{ .list = try parts.toOwnedSlice(allocator) };
 }
 
 pub fn attribute(value: Value, path: []const u8) Value {

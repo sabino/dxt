@@ -770,6 +770,10 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     const selected = try commandSelection(runtime.allocator, candidates, .build);
     if (selected.len == 0) return finishEmptySelection(runtime, target_dir, stderr);
 
+    for (graph.nodes.items) |node| {
+        if (node.enabled and std.mem.eql(u8, node.language, "python") and selectionContains(selected, node.unique_id)) return error.UnsupportedPythonModelExecution;
+    }
+
     try project_defer.apply(runtime, &graph, options, selected, target_dir);
     if (try concurrent_runner.requested(runtime, options, &graph)) {
         const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
@@ -1614,6 +1618,7 @@ fn selectedSeedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []
 
 fn validateRunMaterializations(graph: *const Graph, nodes: []const *Node) !void {
     for (nodes) |node| {
+        if (std.mem.eql(u8, node.language, "python")) return error.UnsupportedPythonModelExecution;
         if (std.mem.eql(u8, node.resource_type, "snapshot")) continue;
         if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) return error.UnsupportedModelMaterialization;
     }
@@ -1621,6 +1626,7 @@ fn validateRunMaterializations(graph: *const Graph, nodes: []const *Node) !void 
 
 fn validateBuildMaterializations(graph: *const Graph, nodes: []const *Node) !void {
     for (nodes) |node| {
+        if (std.mem.eql(u8, node.language, "python")) return error.UnsupportedPythonModelExecution;
         if (std.mem.eql(u8, node.resource_type, "snapshot")) continue;
         if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) return error.UnsupportedBuildModelMaterialization;
     }
@@ -1653,6 +1659,7 @@ fn validateSeedModelBuildExecution(graph: *const Graph, nodes: []const *Node) !v
         } else if (std.mem.eql(u8, node.resource_type, "snapshot")) {
             try snapshot_runner.validateExecution(graph, node);
         } else if (std.mem.eql(u8, node.resource_type, "model")) {
+            if (std.mem.eql(u8, node.language, "python")) return error.UnsupportedPythonModelExecution;
             if (!duckdb.isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized)) return error.UnsupportedBuildModelMaterialization;
         } else {
             return error.UnsupportedBuildSelection;
@@ -2533,6 +2540,7 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
         compiled_model.compiled_code = "";
         compiled_model.extra_ctes = .empty;
         node.compiled_path = util.normalizeForDisplay(compiled_path);
+        try compiler.recordPythonScaffoldDependency(runtime.allocator, graph, node);
         node.relation_name = relation_name;
         if (!std.mem.eql(u8, node.materialized, "ephemeral")) try recordCompilation(runtime, compile_rows, started, .{ .node = node });
         if (std.mem.eql(u8, node.resource_type, "snapshot")) compiled_snapshot_count += 1 else compiled_count += 1;
@@ -3807,11 +3815,15 @@ fn parseModel(runtime: Runtime, project_dir: []const u8, model_root: []const u8,
         .path = model_path,
         .original_file_path = relative_path,
         .raw_code = sql,
+        .language = if (std.mem.endsWith(u8, relative_path, ".py")) "python" else "sql",
     };
     errdefer {
         deinitNode(runtime.allocator, &node);
     }
-    try compiler.scanDependencies(runtime.allocator, sql, &node, graph);
+    if (std.mem.eql(u8, node.language, "python")) {
+        node.raw_code = std.mem.trim(u8, sql, " \t\r\n");
+        try @import("project/python_model.zig").scan(runtime.allocator, node.raw_code, &node);
+    } else try compiler.scanDependencies(runtime.allocator, sql, &node, graph);
     try graph.nodes.append(runtime.allocator, node);
 }
 

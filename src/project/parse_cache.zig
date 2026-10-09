@@ -49,7 +49,7 @@ pub fn prepare(runtime: types.Runtime, options: types.Options, graph: *const typ
     @import("util.zig").sortStrings(files.items);
     var digest: std.crypto.hash.sha2.Sha256 = .init(.{});
     // Compiler/schema changes invalidate development caches as well as releases.
-    inline for (.{ schema, @embedFile("types.zig"), @embedFile("loader.zig"), @embedFile("compiler.zig"), @embedFile("expression.zig"), @embedFile("parse.zig"), @embedFile("jinja.zig"), @embedFile("config.zig"), @embedFile("properties.zig"), @embedFile("resource_config.zig"), @embedFile("group_access.zig"), @embedFile("snapshot_yaml.zig"), @embedFile("model_versions.zig"), @embedFile("unit_yaml.zig"), @embedFile("unit_metadata.zig"), @embedFile("semantic.zig"), @embedFile("bundled_macros.zig"), @embedFile("../project.zig"), @embedFile("parse_cache.zig"), @embedFile("parse_cache_codec.zig"), @embedFile("yaml.zig"), @embedFile("profile.zig"), @embedFile("config_render.zig"), @embedFile("config_value.zig"), @embedFile("project_config.zig"), @embedFile("source_properties.zig"), @embedFile("snapshot.zig"), @embedFile("unit_config.zig"), @embedFile("unit_versions.zig") }) |source| hashPart(&digest, source);
+    inline for (.{ schema, @embedFile("types.zig"), @embedFile("loader.zig"), @embedFile("compiler.zig"), @embedFile("expression.zig"), @embedFile("parse.zig"), @embedFile("jinja.zig"), @embedFile("config.zig"), @embedFile("properties.zig"), @embedFile("resource_config.zig"), @embedFile("group_access.zig"), @embedFile("snapshot_yaml.zig"), @embedFile("model_versions.zig"), @embedFile("unit_yaml.zig"), @embedFile("unit_metadata.zig"), @embedFile("semantic.zig"), @embedFile("bundled_macros.zig"), @embedFile("../project.zig"), @embedFile("parse_cache.zig"), @embedFile("python_model.zig"), @embedFile("parse_cache_codec.zig"), @embedFile("yaml.zig"), @embedFile("profile.zig"), @embedFile("config_render.zig"), @embedFile("config_value.zig"), @embedFile("project_config.zig"), @embedFile("source_properties.zig"), @embedFile("snapshot.zig"), @embedFile("unit_config.zig"), @embedFile("unit_versions.zig") }) |source| hashPart(&digest, source);
     for (@import("dbt_includes").files) |file| {
         hashPart(&digest, file.path);
         hashPart(&digest, file.text);
@@ -133,6 +133,16 @@ fn projectFiles(runtime: types.Runtime, root: []const u8, project: *const types.
         try fs.discoverSeedFiles(runtime, directory, path, &csv);
         for ([_][]const []const u8{ sql.items, yaml.items, markdown.items, csv.items }) |items| for (items) |item| try files.append(a, try fs.pathJoin(a, &.{ root, item }));
     };
+    for (project.model_paths.items) |path| {
+        const directory = try fs.pathJoin(a, &.{ root, path });
+        var python: std.ArrayList([]const u8) = .empty;
+        defer python.deinit(a);
+        fs.discoverPythonFiles(runtime, directory, path, &python) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        for (python.items) |item| try files.append(a, try fs.pathJoin(a, &.{ root, item }));
+    }
 }
 
 pub fn restore(runtime: types.Runtime, state: State, graph: *types.Graph) bool {
