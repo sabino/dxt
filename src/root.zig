@@ -32,7 +32,14 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
     }
 
     if (equals(command, "snapshot")) {
-        return commandError(error.UnsupportedSnapshotExecution, stderr);
+        if (hasHelp(args[2..])) {
+            try printCommandHelp(command, stdout, .build);
+            return .ok;
+        }
+        const rt = runtime orelse return .usage;
+        const options = parseOptions(rt.allocator, args[2..], stderr, .build) catch |err| return commandError(err, stderr);
+        project.snapshotRun(rt, options, stdout, stderr) catch |err| return commandError(err, stderr);
+        return .ok;
     }
 
     if (equals(command, "parse")) {
@@ -232,6 +239,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedSnapshotConfig => stderr.writeAll("error: unsupported SQL snapshot config; only the documented literal config subset is supported\n") catch {},
         error.UnsupportedSnapshotDefinition => stderr.writeAll("error: SQL snapshots support only named blocks with literal config, ref, and source calls\n") catch {},
         error.UnsupportedSnapshotYaml => stderr.writeAll("error: YAML snapshot definitions and properties are not supported; use literal SQL snapshot blocks\n") catch {},
+        error.UnsupportedSnapshotAdapter => stderr.writeAll("error: snapshot execution requires a DuckDB adapter\n") catch {},
         error.UnsupportedSnapshotExecution => stderr.writeAll("error: snapshot resources currently support parse and ls only; snapshot compilation and execution are not supported\n") catch {},
         error.DuplicateSeedName => stderr.writeAll("error: duplicate seed name in supported M1 parser subset\n") catch {},
         error.DuplicateDocName => stderr.writeAll("error: duplicate docs block name in supported M1 parser subset\n") catch {},
@@ -534,6 +542,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
         \\  clean            Delete configured generated project artifacts.
         \\  compile          Compile supported dbt SQL/Jinja without executing.
         \\  run              Execute supported selected DuckDB SQL models.
+        \\  snapshot         Maintain selected DuckDB timestamp and check snapshots.
         \\  seed             Load supported selected DuckDB CSV seeds.
         \\  test             Execute supported selected DuckDB tests.
         \\  build            Execute supported selected DuckDB seeds, models, and tests.
@@ -546,7 +555,7 @@ pub fn printRootHelp(writer: *Io.Writer) !void {
 
 fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !void {
     try writer.print("Usage: dxt {s} [options]\n\n", .{command});
-    if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "seed") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
+    if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "seed") or equals(command, "snapshot") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
         if (equals(command, "docs serve")) {
             try writer.writeAll("`dxt docs serve` serves generated docs artifacts from the target directory.\n\n");
         } else if (equals(command, "clean")) {
@@ -560,13 +569,13 @@ fn printCommandHelp(command: []const u8, writer: *Io.Writer, mode: HelpMode) !vo
             \\  --vars <yaml-or-json>
             \\
         );
-        if (equals(command, "parse") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "seed") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
+        if (equals(command, "parse") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "seed") or equals(command, "snapshot") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
             try writer.writeAll(
                 \\  --target-path <path>
                 \\
             );
         }
-        if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "seed") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
+        if (equals(command, "parse") or equals(command, "ls") or equals(command, "clean") or equals(command, "compile") or equals(command, "run") or equals(command, "seed") or equals(command, "snapshot") or equals(command, "test") or equals(command, "build") or equals(command, "docs generate") or equals(command, "docs serve") or equals(command, "source freshness")) {
             try writer.writeAll(
                 \\  --profiles-dir <path>
                 \\

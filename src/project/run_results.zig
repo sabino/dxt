@@ -195,7 +195,7 @@ fn resultUniqueId(result: NodeResult) []const u8 {
 }
 
 fn isCompiledResultNode(node: *const Node) bool {
-    return std.mem.eql(u8, node.resource_type, "model");
+    return std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "snapshot");
 }
 
 test "run-results writer emits dbt v6 success shape" {

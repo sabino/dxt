@@ -57,7 +57,7 @@ pub fn dependenciesCompleted(allocator: std.mem.Allocator, graph: *const Graph, 
     const physical = try physicalDependencies(allocator, graph, dependencies);
     defer allocator.free(physical);
     for (physical) |dependency| {
-        if (!std.mem.startsWith(u8, dependency, "model.") and !std.mem.startsWith(u8, dependency, "seed.")) continue;
+        if (!std.mem.startsWith(u8, dependency, "model.") and !std.mem.startsWith(u8, dependency, "seed.") and !std.mem.startsWith(u8, dependency, "snapshot.")) continue;
         if (selected) |resources| {
             if (!selectedContains(resources, dependency)) continue;
         }
@@ -89,6 +89,7 @@ pub fn orderNodes(allocator: std.mem.Allocator, graph: *Graph, selected: []const
     for (graph.nodes.items, 0..) |*node, index| {
         remaining[index] = node.enabled and selectedContains(selected, node.unique_id) and
             ((std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.materialized, "ephemeral")) or
+                std.mem.eql(u8, node.resource_type, "snapshot") or
                 (include_seeds and std.mem.eql(u8, node.resource_type, "seed")));
         if (remaining[index]) count += 1;
     }

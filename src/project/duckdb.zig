@@ -247,7 +247,7 @@ pub fn collectCatalogEntries(runtime: Runtime, db_path: []const u8, graph: *cons
 
     for (graph.nodes.items) |*node| {
         if (!selectionContains(selected, node.unique_id)) continue;
-        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed")) continue;
+        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot")) continue;
         const entry = try catalogEntryForNode(runtime.allocator, graph, node, rows) orelse continue;
         try entries.nodes.append(runtime.allocator, entry);
     }
@@ -306,7 +306,7 @@ fn catalogEntryForNode(allocator: std.mem.Allocator, graph: *const Graph, node: 
     defer allocator.free(schema_name);
     const identifier = compiler.relationIdentifierForNode(node);
 
-    return try catalogEntryForRelation(allocator, node.unique_id, null, schema_name, identifier, rows);
+    return try catalogEntryForRelation(allocator, node.unique_id, compiler.relationDatabaseForNode(graph, node), schema_name, identifier, rows);
 }
 
 fn catalogEntryForSource(allocator: std.mem.Allocator, source: *const SourceDef, rows: []const std.json.Value) !?catalog.CatalogEntry {
@@ -413,7 +413,7 @@ fn selectionContains(selected: []const selector.SelectedResource, unique_id: []c
     return false;
 }
 
-fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
+pub fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
@@ -693,7 +693,7 @@ fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     return try out.toOwnedSlice(allocator);
 }
 
-fn trimTrailingSqlTerminator(sql: []const u8) []const u8 {
+pub fn trimTrailingSqlTerminator(sql: []const u8) []const u8 {
     const trimmed_end = trimSqlRightEnd(sql, sql.len);
     var end = trimmed_end;
     while (stripOneTrailingSqlComment(sql[0..end])) |comment_start| {

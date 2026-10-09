@@ -5,7 +5,7 @@ const types = @import("types.zig");
 const util = @import("util.zig");
 
 // Source contract: dbt-core v1.10.5 parser/snapshots.py and resources/v1/snapshot.py.
-// This read-only slice deliberately accepts literal SQL blocks, not general Jinja.
+// SQL block parsing accepts literal configuration and static relation dependencies.
 pub fn parseFile(runtime: types.Runtime, project_dir: []const u8, snapshot_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *types.Graph) !void {
     const path = try fs.pathJoin(runtime.allocator, &.{ project_dir, relative_path });
     defer runtime.allocator.free(path);
@@ -205,9 +205,9 @@ fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *types.Node
         while (index < args.len) : (index += 1) {
             if (args[index] == '\'' or args[index] == '"') {
                 index = (jinja.skipQuotedSpan(args, index) orelse return error.UnsupportedSnapshotConfig) - 1;
-            } else if (args[index] == '[') {
+            } else if (args[index] == '[' or args[index] == '{') {
                 list_depth += 1;
-            } else if (args[index] == ']') {
+            } else if (args[index] == ']' or args[index] == '}') {
                 if (list_depth == 0) return error.UnsupportedSnapshotConfig;
                 list_depth -= 1;
             } else if (args[index] == ',' and list_depth == 0) break;
@@ -233,6 +233,13 @@ fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *types.Node
             config.check_cols = replacement;
         } else if (std.mem.eql(u8, key, "invalidate_hard_deletes")) {
             config.invalidate_hard_deletes = try parseBool(value);
+        } else if (std.mem.eql(u8, key, "hard_deletes")) {
+            config.hard_deletes = try parseString(allocator, value);
+        } else if (std.mem.eql(u8, key, "dbt_valid_to_current")) {
+            config.dbt_valid_to_current = try parseString(allocator, value);
+        } else if (std.mem.eql(u8, key, "snapshot_meta_column_names")) {
+            try parseMetaColumns(allocator, value, config);
+            config.meta_columns_configured = true;
         } else if (std.mem.eql(u8, key, "enabled")) {
             node.enabled = try parseBool(value);
             node.inline_enabled = true;
@@ -263,9 +270,13 @@ fn hasColumns(columns: types.SnapshotColumns) bool {
     };
 }
 
-fn validateConfig(node: *const types.Node) !void {
+pub fn validateConfig(node: *const types.Node) !void {
     if (!node.enabled) return;
     const config = node.snapshot_config.?;
+    if (config.hard_deletes != null and config.invalidate_hard_deletes != null) return error.InvalidSnapshotConfig;
+    if (config.hard_deletes) |mode| {
+        if (!std.mem.eql(u8, mode, "ignore") and !std.mem.eql(u8, mode, "invalidate") and !std.mem.eql(u8, mode, "new_record")) return error.InvalidSnapshotConfig;
+    }
     const strategy = config.strategy orelse return error.InvalidSnapshotConfig;
     if (!hasColumns(config.unique_key orelse return error.InvalidSnapshotConfig)) return error.InvalidSnapshotConfig;
     if (std.mem.eql(u8, strategy, "timestamp")) {
@@ -291,38 +302,6 @@ pub fn rejectYamlDefinitions(text: []const u8) !void {
             }
         }
     }
-}
-
-pub fn rejectSelectedResources(graph: *const types.Graph, selected: anytype) !void {
-    var visited = std.StringHashMap(void).init(graph.allocator);
-    defer visited.deinit();
-    for (selected) |item| {
-        visited.clearRetainingCapacity();
-        if (std.mem.eql(u8, item.resource_type, "snapshot") or try hasSnapshotDependency(graph, item.unique_id, &visited)) return error.UnsupportedSnapshotExecution;
-    }
-}
-
-fn hasSnapshotDependency(graph: *const types.Graph, unique_id: []const u8, visited: *std.StringHashMap(void)) !bool {
-    if (std.mem.startsWith(u8, unique_id, "snapshot.")) return true;
-    if (visited.contains(unique_id)) return false;
-    try visited.put(unique_id, {});
-    for (graph.nodes.items) |node| {
-        if (!node.enabled or !std.mem.eql(u8, node.unique_id, unique_id)) continue;
-        for (node.depends_on.items) |dependency| if (try hasSnapshotDependency(graph, dependency, visited)) return true;
-    }
-    for (graph.singular_tests.items) |node| {
-        if (!node.enabled or !std.mem.eql(u8, node.unique_id, unique_id)) continue;
-        for (node.depends_on.items) |dependency| if (try hasSnapshotDependency(graph, dependency, visited)) return true;
-    }
-    for (graph.tests.items) |node| {
-        if (!std.mem.eql(u8, node.unique_id, unique_id)) continue;
-        for (node.depends_on.items) |dependency| if (try hasSnapshotDependency(graph, dependency, visited)) return true;
-    }
-    for (graph.unit_tests.items) |node| {
-        if (!node.enabled or !std.mem.eql(u8, node.unique_id, unique_id)) continue;
-        for (node.depends_on.items) |dependency| if (try hasSnapshotDependency(graph, dependency, visited)) return true;
-    }
-    return false;
 }
 
 test "SQL snapshot blocks preserve body identity and literal configuration" {
@@ -363,4 +342,34 @@ test "snapshot parser fails closed for malformed unsupported and invalid blocks"
     try std.testing.expectError(error.UnsupportedSnapshotConfig, parseBlocks(allocator, "{% snapshot x %}{{ config(enabled=false, enabled=true) }}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
     try std.testing.expectError(error.UnsupportedSnapshotConfig, parseBlocks(allocator, "{% snapshot x %}{{ config(enabled=false, unique_key=['id']) }}{{ config(unique_key=var('key')) }}{% endsnapshot %}", "snapshots", "snapshots/x.sql", "demo", &graph));
     try std.testing.expectError(error.UnsupportedSnapshotYaml, rejectYamlDefinitions("version: 2\nsnapshots:\n  - name: history\n"));
+}
+
+fn parseMetaColumns(allocator: std.mem.Allocator, value: []const u8, config: *types.SnapshotConfig) !void {
+    if (value.len < 2 or value[0] != '{' or value[value.len - 1] != '}') return error.UnsupportedSnapshotConfig;
+    var index: usize = 1;
+    while (true) {
+        index = jinja.skipWs(value, index);
+        if (index == value.len - 1) break;
+        if (index >= value.len - 1 or (value[index] != '\'' and value[index] != '"')) return error.UnsupportedSnapshotConfig;
+        const key = try jinja.parseQuoted(allocator, value, index);
+        index = jinja.skipWs(value, key.next);
+        if (index >= value.len - 1 or value[index] != ':') return error.UnsupportedSnapshotConfig;
+        index = jinja.skipWs(value, index + 1);
+        if (index >= value.len - 1) return error.UnsupportedSnapshotConfig;
+        const name = jinja.parseQuoted(allocator, value, index) catch return error.UnsupportedSnapshotConfig;
+        if (name.value.len == 0) return error.InvalidSnapshotConfig;
+        var matched = false;
+        inline for (.{ "dbt_scd_id", "dbt_updated_at", "dbt_valid_from", "dbt_valid_to", "dbt_is_deleted" }, 0..) |field, field_index| {
+            if (std.mem.eql(u8, key.value, field)) {
+                @field(config.meta_columns, field) = name.value;
+                config.meta_columns_fields |= @as(u5, 1) << field_index;
+                matched = true;
+            }
+        }
+        if (!matched) return error.UnsupportedSnapshotConfig;
+        index = jinja.skipWs(value, name.next);
+        if (index == value.len - 1) break;
+        if (index >= value.len - 1 or value[index] != ',') return error.UnsupportedSnapshotConfig;
+        index += 1;
+    }
 }

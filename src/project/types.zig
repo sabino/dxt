@@ -406,6 +406,14 @@ pub const SnapshotColumns = union(enum) {
     }
 };
 
+pub const SnapshotMetaColumns = struct {
+    dbt_scd_id: []const u8 = "dbt_scd_id",
+    dbt_updated_at: []const u8 = "dbt_updated_at",
+    dbt_valid_from: []const u8 = "dbt_valid_from",
+    dbt_valid_to: []const u8 = "dbt_valid_to",
+    dbt_is_deleted: []const u8 = "dbt_is_deleted",
+};
+
 pub const SnapshotConfig = struct {
     strategy: ?[]const u8 = null,
     unique_key: ?SnapshotColumns = null,
@@ -414,6 +422,11 @@ pub const SnapshotConfig = struct {
     updated_at: ?[]const u8 = null,
     check_cols: ?SnapshotColumns = null,
     invalidate_hard_deletes: ?bool = null,
+    hard_deletes: ?[]const u8 = null,
+    dbt_valid_to_current: ?[]const u8 = null,
+    meta_columns: SnapshotMetaColumns = .{},
+    meta_columns_configured: bool = false,
+    meta_columns_fields: u5 = 0,
 };
 
 pub const GenericTestNode = struct {

@@ -2114,6 +2114,20 @@ fn writeSnapshotConfig(writer: *Io.Writer, node: *const Node, config: types.Snap
         try writer.writeAll(",\"invalidate_hard_deletes\":");
         try writer.writeAll(if (value) "true" else "false");
     }
+    if (config.hard_deletes) |value| {
+        try writer.writeAll(",\"hard_deletes\":");
+        try json.string(writer, value);
+    }
+    try writer.writeAll(",\"dbt_valid_to_current\":");
+    try writeNullableString(writer, config.dbt_valid_to_current);
+    try writer.writeAll(",\"snapshot_meta_column_names\":{");
+    inline for (.{ "dbt_scd_id", "dbt_updated_at", "dbt_valid_from", "dbt_valid_to", "dbt_is_deleted" }, 0..) |key, index| {
+        if (index != 0) try writer.writeAll(",");
+        try json.string(writer, key);
+        try writer.writeAll(":");
+        if (config.meta_columns_fields & (@as(u5, 1) << index) != 0) try json.string(writer, @field(config.meta_columns, key)) else try writer.writeAll("null");
+    }
+    try writer.writeAll("}");
     if (node.config_schema) |value| {
         try writer.writeAll(",\"schema\":");
         try json.string(writer, value);

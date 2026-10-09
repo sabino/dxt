@@ -657,7 +657,7 @@ pub fn relationNameForNode(allocator: std.mem.Allocator, graph: *const Graph, no
     const schema = try relationSchemaForNode(allocator, graph, node);
     defer allocator.free(schema);
     const identifier = relationIdentifierForNode(node);
-    return renderRelation(allocator, .{ .schema = schema, .identifier = identifier });
+    return renderRelation(allocator, .{ .database = relationDatabaseForNode(graph, node), .schema = schema, .identifier = identifier });
 }
 
 fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
@@ -1782,11 +1782,29 @@ fn findMacroByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Macro
 }
 
 pub fn relationSchemaForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
+    if (node.snapshot_config) |config| {
+        if (config.target_schema) |schema| return try allocator.dupe(u8, schema);
+    }
     if (node.config_schema) |custom_schema| {
         const trimmed = std.mem.trim(u8, custom_schema, " \t\r\n");
         return try std.fmt.allocPrint(allocator, "{s}_{s}", .{ graph.target_schema, trimmed });
     }
     return try allocator.dupe(u8, graph.target_schema);
+}
+
+pub fn relationDatabaseForNode(graph: *const Graph, node: *const Node) ?[]const u8 {
+    if (node.snapshot_config) |config| {
+        if (config.target_database) |database| return database;
+        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return null;
+        const path = graph.database_path orelse return "memory";
+        if (std.mem.eql(u8, path, ":memory:")) return "memory";
+        const basename = std.fs.path.basename(path);
+        if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot| {
+            if (dot != 0) return basename[0..dot];
+        }
+        return basename;
+    }
+    return null;
 }
 
 pub fn relationIdentifierForNode(node: *const Node) []const u8 {

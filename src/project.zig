@@ -11,6 +11,7 @@ const project_fs = @import("project/fs.zig");
 const project_jinja = @import("project/jinja.zig");
 const project_loader = @import("project/loader.zig");
 const project_snapshot = @import("project/snapshot.zig");
+const snapshot_runner = @import("project/snapshot_runner.zig");
 const project_parse = @import("project/parse.zig");
 const project_resolve = @import("project/resolve.zig");
 const selector_config = @import("project/selector_config.zig");
@@ -191,17 +192,20 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
-    try project_snapshot.rejectSelectedResources(&graph, selected);
 
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, true, true);
-    if (selected.len != 0 and !compile_result.saw_model and !compile_result.saw_analysis and !compile_result.saw_generic_test and !compile_result.saw_singular_test) return error.UnsupportedCompileSelection;
+    if (selected.len != 0 and !compile_result.saw_model and !compile_result.saw_snapshot and !compile_result.saw_analysis and !compile_result.saw_generic_test and !compile_result.saw_singular_test) return error.UnsupportedCompileSelection;
 
     const manifest_path = try pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
     const manifest_json = try manifest.renderManifest(runtime.allocator, &graph);
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = manifest_path, .data = manifest_json });
-    if (compile_result.analysis_count == 0) {
+    if (compile_result.snapshot_count != 0) {
+        try stdout.print("Compiled {d} model(s), {d} snapshot(s), {d} analysis(es), and {d} test(s) into {s}\n", .{
+            compile_result.count, compile_result.snapshot_count, compile_result.analysis_count, compile_result.test_count, util.normalizeForDisplay(compile_result.compiled_base),
+        });
+    } else if (compile_result.analysis_count == 0) {
         try stdout.print("Compiled {d} model(s) and {d} test(s) into {s}\n", .{
             compile_result.count,
             compile_result.test_count,
@@ -229,7 +233,6 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
-    try project_snapshot.rejectSelectedResources(&graph, selected);
 
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
@@ -277,10 +280,6 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
-    if (selection.select != null) {
-        const requested = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
-        try project_snapshot.rejectSelectedResources(&graph, requested);
-    }
     const selected_sources = try selector.selectResourcesWithContext(runtime.allocator, &graph, "source", selection.select, selection.exclude, selection_context);
     if (selected_sources.len == 0 and selection.select != null) {
         const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
@@ -373,10 +372,6 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
-    if (selection.select != null) {
-        const requested = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
-        try project_snapshot.rejectSelectedResources(&graph, requested);
-    }
     const selected_models = try selector.selectResourcesWithContext(runtime.allocator, &graph, "model", selection.select, selection.exclude, selection_context);
     if (selected_models.len == 0 and selection.select != null) {
         const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
@@ -421,6 +416,43 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     });
 }
 
+pub fn snapshotRun(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
+    var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
+    defer graph.deinit();
+    try resolveDependencies(&graph);
+    try writeWarnings(stderr, &graph);
+    var selection = try resolveSelection(runtime, options);
+    defer selection.deinit(runtime.allocator);
+    var selection_state = try loadSelectionState(runtime, options, selection);
+    defer selection_state.deinit(runtime.allocator);
+    const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, "snapshot", selection.select, selection.exclude, selection_state.context());
+    const ordered = try selectedModelExecutionOrder(runtime, &graph, selected);
+    defer runtime.allocator.free(ordered);
+    for (ordered) |node| try snapshot_runner.validateExecution(&graph, node);
+    const target_dir = try targetDir(runtime, options);
+    _ = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
+    const manifest_path = try writeManifest(runtime, &graph, target_dir);
+    const db_path = try duckdb.databasePath(runtime.allocator, target_dir, &graph);
+    var results: std.ArrayList(run_results.NodeResult) = .empty;
+    defer {
+        deinitRunResults(runtime.allocator, results.items);
+        results.deinit(runtime.allocator);
+    }
+    var blocked: std.ArrayList([]const u8) = .empty;
+    defer blocked.deinit(runtime.allocator);
+    var had_failure = false;
+    for (ordered) |node| {
+        if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &results)) continue;
+        if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &results)) {
+            try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
+            had_failure = true;
+        }
+    }
+    if (had_failure) return failExecution(runtime, target_dir, manifest_path, db_path, results.items, stdout, "Snapshot");
+    try writeRunResults(runtime, target_dir, results.items);
+    try stdout.print("Snapshotted {d} snapshot(s) into {s}; wrote artifacts into {s}\n", .{ results.items.len, util.normalizeForDisplay(db_path), util.normalizeForDisplay(manifest_path) });
+}
+
 pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
     defer graph.deinit();
@@ -433,10 +465,6 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
-    if (selection.select != null) {
-        const requested = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
-        try project_snapshot.rejectSelectedResources(&graph, requested);
-    }
     const selected_seeds = try selector.selectResourcesWithContext(runtime.allocator, &graph, "seed", selection.select, selection.exclude, selection_context);
     if (selected_seeds.len == 0) {
         if (selection.select != null) {
@@ -486,14 +514,8 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
-    if (selection.select != null) {
-        const requested = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
-        try project_snapshot.rejectSelectedResources(&graph, requested);
-    }
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, "test", selection.select, selection.exclude, selection_context);
     const selected_unit_tests = try selector.selectResourcesWithContext(runtime.allocator, &graph, "unit_test", selection.select, selection.exclude, selection_context);
-    try project_snapshot.rejectSelectedResources(&graph, selected);
-    try project_snapshot.rejectSelectedResources(&graph, selected_unit_tests);
     if (selected.len == 0 and selected_unit_tests.len == 0) {
         if (selection.select != null) {
             const selected_any = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_context);
@@ -547,7 +569,6 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
     var selection_state = try loadSelectionState(runtime, options, selection);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
-    try project_snapshot.rejectSelectedResources(&graph, selected);
 
     const target_dir = try targetDir(runtime, options);
     const compile_result = try compileSelectedModels(runtime, &graph, selected, target_dir, false, false);
@@ -1043,6 +1064,8 @@ const CompileResult = struct {
     test_count: usize = 0,
     saw_model: bool,
     saw_analysis: bool = false,
+    saw_snapshot: bool = false,
+    snapshot_count: usize = 0,
     saw_generic_test: bool = false,
     saw_singular_test: bool = false,
     compiled_base: []const u8,
@@ -1081,7 +1104,7 @@ fn classifyBuildSelection(selected: []const selector.SelectedResource) BuildSele
     for (selected) |item| {
         if (std.mem.eql(u8, item.resource_type, "seed")) {
             kinds.seed += 1;
-        } else if (std.mem.eql(u8, item.resource_type, "model")) {
+        } else if (std.mem.eql(u8, item.resource_type, "model") or std.mem.eql(u8, item.resource_type, "snapshot")) {
             kinds.model += 1;
         } else if (std.mem.eql(u8, item.resource_type, "source")) {
             kinds.source += 1;
@@ -1104,12 +1127,14 @@ fn selectedSeedModelExecutionOrder(runtime: Runtime, graph: *Graph, selected: []
 
 fn validateRunMaterializations(nodes: []const *Node) !void {
     for (nodes) |node| {
+        if (std.mem.eql(u8, node.resource_type, "snapshot")) continue;
         if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedModelMaterialization;
     }
 }
 
 fn validateBuildMaterializations(nodes: []const *Node) !void {
     for (nodes) |node| {
+        if (std.mem.eql(u8, node.resource_type, "snapshot")) continue;
         if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedBuildModelMaterialization;
     }
 }
@@ -1135,10 +1160,11 @@ fn validateSeedExecution(graph: *const Graph, nodes: []const *Node) !void {
 }
 
 fn validateSeedModelBuildExecution(graph: *const Graph, nodes: []const *Node) !void {
-    _ = graph;
     for (nodes) |node| {
         if (std.mem.eql(u8, node.resource_type, "seed")) {
             if (!std.mem.eql(u8, node.materialized, "seed")) return error.UnsupportedSeedExecution;
+        } else if (std.mem.eql(u8, node.resource_type, "snapshot")) {
+            try snapshot_runner.validateExecution(graph, node);
         } else if (std.mem.eql(u8, node.resource_type, "model")) {
             if (!duckdb.isSupportedMaterialization(node.materialized)) return error.UnsupportedBuildModelMaterialization;
         } else {
@@ -1222,7 +1248,7 @@ fn validateDataTestsAttachToSelectedNodes(nodes: []const DataTestRef, selected: 
         },
         .singular => |test_node| {
             for (test_node.depends_on.items) |dependency| {
-                if ((std.mem.startsWith(u8, dependency, "model.") or std.mem.startsWith(u8, dependency, "seed.")) and !selectionContains(selected, dependency)) {
+                if ((std.mem.startsWith(u8, dependency, "model.") or std.mem.startsWith(u8, dependency, "seed.") or std.mem.startsWith(u8, dependency, "snapshot.")) and !selectionContains(selected, dependency)) {
                     return error.UnsupportedTestExecution;
                 }
             }
@@ -1231,7 +1257,8 @@ fn validateDataTestsAttachToSelectedNodes(nodes: []const DataTestRef, selected: 
 }
 
 fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, executed: *std.ArrayList(run_results.NodeResult)) !bool {
-    duckdb.executeModel(runtime, db_path, graph, node) catch |err| switch (err) {
+    const execution = if (std.mem.eql(u8, node.resource_type, "snapshot")) snapshot_runner.execute(runtime, db_path, graph, node) else duckdb.executeModel(runtime, db_path, graph, node);
+    execution catch |err| switch (err) {
         error.DuckDbExecutionFailed => {
             try appendExecutionErrorResult(runtime.allocator, executed, node);
             return false;
@@ -1666,7 +1693,7 @@ fn appendDataTestBlockedRoots(allocator: std.mem.Allocator, blocked_roots: *std.
         .singular => {},
     }
     for (test_ref.dependsOn()) |dependency| {
-        if (std.mem.startsWith(u8, dependency, "model.") or std.mem.startsWith(u8, dependency, "seed.")) {
+        if (std.mem.startsWith(u8, dependency, "model.") or std.mem.startsWith(u8, dependency, "seed.") or std.mem.startsWith(u8, dependency, "snapshot.")) {
             try appendUniqueString(allocator, blocked_roots, dependency);
         }
     }
@@ -1840,21 +1867,30 @@ fn targetDir(runtime: Runtime, options: Options) ![]const u8 {
 }
 
 fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, include_singular_tests: bool, include_analyses: bool) !CompileResult {
-    try project_snapshot.rejectSelectedResources(graph, selected);
+    if (graph.database_path == null and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
+        for (graph.nodes.items) |node| {
+            if (node.enabled and std.mem.eql(u8, node.resource_type, "snapshot")) {
+                graph.database_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
+                break;
+            }
+        }
+    }
     const compiled_base = try pathJoin(runtime.allocator, &.{ target_dir, "compiled" });
     try std.Io.Dir.cwd().createDirPath(runtime.io, compiled_base);
 
     var compiled_count: usize = 0;
+    var compiled_snapshot_count: usize = 0;
     var compiled_analysis_count: usize = 0;
     var compiled_test_count: usize = 0;
     var saw_selected_model = false;
+    var saw_selected_snapshot = false;
     var saw_selected_analysis = false;
     var saw_selected_generic_test = false;
     var saw_selected_singular_test = false;
     for (graph.nodes.items) |*node| {
-        if (!node.enabled or !std.mem.eql(u8, node.resource_type, "model")) continue;
+        if (!node.enabled or (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "snapshot"))) continue;
         if (!selectionContains(selected, node.unique_id)) continue;
-        saw_selected_model = true;
+        if (std.mem.eql(u8, node.resource_type, "snapshot")) saw_selected_snapshot = true else saw_selected_model = true;
         if (std.mem.eql(u8, node.materialized, "ephemeral")) continue;
 
         if (std.mem.eql(u8, node.materialized, "incremental")) {
@@ -1879,7 +1915,7 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         compiled_model.extra_ctes = .empty;
         node.compiled_path = util.normalizeForDisplay(compiled_path);
         node.relation_name = relation_name;
-        compiled_count += 1;
+        if (std.mem.eql(u8, node.resource_type, "snapshot")) compiled_snapshot_count += 1 else compiled_count += 1;
     }
 
     if (include_analyses) {
@@ -1945,6 +1981,8 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         .analysis_count = compiled_analysis_count,
         .test_count = compiled_test_count,
         .saw_model = saw_selected_model,
+        .saw_snapshot = saw_selected_snapshot,
+        .snapshot_count = compiled_snapshot_count,
         .saw_analysis = saw_selected_analysis,
         .saw_generic_test = saw_selected_generic_test,
         .saw_singular_test = saw_selected_singular_test,
