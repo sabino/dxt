@@ -36,6 +36,7 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
     if (expression.integerProtocol(candidate) != null) return;
     if (expression.floatProtocol(candidate) != null) return;
+    if (expression.complexProtocol(candidate) != null) return;
     switch (candidate) {
         .none,
         .boolean,
@@ -59,6 +60,18 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
 }
 
 pub fn keyEqual(left: Value, right: Value) bool {
+    if (expression.complexProtocol(left)) |a| {
+        if (expression.complexProtocol(right)) |b| {
+            const a_nan = std.math.isNan(a.real) or std.math.isNan(a.imaginary);
+            const b_nan = std.math.isNan(b.real) or std.math.isNan(b.imaginary);
+            if (a_nan or b_nan) {
+                if (!a_nan or !b_nan) return false;
+                const id_a = left.attribute("__dxt_complex_identity");
+                const id_b = right.attribute("__dxt_complex_identity");
+                return id_a == .string and id_b == .string and std.mem.eql(u8, id_a.string, id_b.string);
+            }
+        }
+    }
     if (expression.floatProtocol(left)) |a| {
         if (expression.floatProtocol(right)) |b| {
             if (std.math.isNan(a) or std.math.isNan(b)) {
@@ -70,6 +83,8 @@ pub fn keyEqual(left: Value, right: Value) bool {
         }
     }
     if (left == .object or right == .object) {
+        if (expression.complexProtocol(left) != null or expression.complexProtocol(right) != null)
+            return expression.equalValues(left, right);
         if (expression.integerProtocol(left) != null or expression.integerProtocol(right) != null)
             return expression.equalValues(left, right);
         const relation_left = left.attribute("__dxt_relation");
@@ -193,6 +208,20 @@ test "NaN mapping keys preserve object identity independently of numeric equalit
     try std.testing.expect(keyEqual(first, copy));
     try std.testing.expect(!keyEqual(first, second));
     try std.testing.expect(!expression.equalValues(first, first));
+}
+
+test "complex NaN keys preserve identity and remain invalid JSON keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const first = try expression.complexValue(allocator, .{ .real = std.math.nan(f64), .imaginary = 0 });
+    const second = try expression.complexValue(allocator, .{ .real = std.math.nan(f64), .imaginary = 0 });
+    const copy = try @import("dbt_context.zig").cloneValue(allocator, first);
+    try hashable(first);
+    try std.testing.expect(keyEqual(first, copy));
+    try std.testing.expect(!keyEqual(first, second));
+    try std.testing.expect(!expression.equalValues(first, first));
+    try std.testing.expectError(error.JinjaTypeError, jsonKey(allocator, first));
 }
 
 test "JSON keys stringify primitives and sort original numeric types exactly" {

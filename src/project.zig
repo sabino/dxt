@@ -1345,7 +1345,7 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
     const start_failed = try @import("project/hook_operations.zig").run(runtime, graph, &preparation, db_path, target_dir, "on-run-start", &task_rows, stderr, null);
     // A file-backed keep_open=false profile closes its final connection between
     // preparation, model jobs and end hooks, resetting connection-local state.
-    const reset_preparation = graph.adapter_kind == .duckdb and
+    const reset_preparation = std.mem.eql(u8, graph.adapter_type, "duckdb") and
         !std.mem.eql(u8, db_path, ":memory:") and
         !@import("project/duckdb_profile.zig").keepOpen(graph.duckdb_credentials);
     if (reset_preparation) {

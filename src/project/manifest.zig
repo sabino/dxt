@@ -1384,8 +1384,9 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(test_node.compiled_path orelse ""));
         try writer.writeAll(",\"extra_ctes\":");
-        try writeExtraCtes(writer, test_node.extra_ctes.items);
-        try writer.writeAll(",\"extra_ctes_injected\":true");
+        try writeExtraCtes(writer, test_node.extra_ctes.items, graph.command_options.inject_ephemeral_ctes);
+        try writer.writeAll(",\"extra_ctes_injected\":");
+        try writer.writeAll(if (graph.command_options.inject_ephemeral_ctes) "true" else "false");
     }
     try writer.writeAll("}");
 }
@@ -1439,8 +1440,9 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(test_node.compiled_path orelse ""));
         try writer.writeAll(",\"extra_ctes\":");
-        try writeExtraCtes(writer, test_node.extra_ctes.items);
-        try writer.writeAll(",\"extra_ctes_injected\":true");
+        try writeExtraCtes(writer, test_node.extra_ctes.items, graph.command_options.inject_ephemeral_ctes);
+        try writer.writeAll(",\"extra_ctes_injected\":");
+        try writer.writeAll(if (graph.command_options.inject_ephemeral_ctes) "true" else "false");
     }
     try writer.writeAll("}");
 }

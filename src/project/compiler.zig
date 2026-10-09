@@ -667,16 +667,15 @@ fn injectTestDependencies(allocator: std.mem.Allocator, graph: *const Graph, dep
     defer state.deinit();
     const node = Node{ .depends_on = dependencies, .resource_type = "test", .package_name = "", .unique_id = "", .name = "", .path = "", .original_file_path = "", .raw_code = "" };
     try collectEphemeralDependencies(&state, &node);
-    if (state.extra_ctes.items.len == 0) return .{ .compiled_code = body };
-    // Core preserves a leading space in each InjectedCTE's metadata and joins
-    // definitions with comma-space while retaining the test's SQL trivia.
-    for (state.extra_ctes.items) |*cte| {
-        const sql = try std.fmt.allocPrint(allocator, " {s}", .{cte.sql});
-        allocator.free(cte.sql);
-        cte.sql = sql;
-    }
-    const injected = try injectTestCtes(allocator, body, state.extra_ctes.items);
-    allocator.free(body);
+    // The shared collector retains Core's leading space and respects the
+    // no-injection flag, including empty SQL in dependency metadata.
+    const injected = if (state.extra_ctes.items.len == 0 or !graph.command_options.inject_ephemeral_ctes)
+        body
+    else blk: {
+        const sql = try injectTestCtes(allocator, body, state.extra_ctes.items);
+        allocator.free(body);
+        break :blk sql;
+    };
     const ctes = state.extra_ctes;
     state.extra_ctes = .empty;
     return .{ .compiled_code = injected, .extra_ctes = ctes };
