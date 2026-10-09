@@ -36,7 +36,7 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
         const bound = try bind(&.{ "value", "default" }, args, 1);
         const input = if (bound[0] == .string) bound[0].string else if (bound[0].attribute("__dxt_binary") == .string) bound[0].attribute("__dxt_binary").string else return error.JinjaTypeError;
         return @import("yaml_context.zig").load(a, input) catch |err| switch (err) {
-            error.OutOfMemory, error.JinjaIterationLimitExceeded, error.JinjaExpressionDepthExceeded => return err,
+            error.OutOfMemory, error.JinjaIterationLimitExceeded, error.JinjaExpressionDepthExceeded, error.JinjaKeyError => return err,
             else => return bound[1],
         };
     }

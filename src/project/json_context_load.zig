@@ -50,6 +50,10 @@ fn convert(a: std.mem.Allocator, input: std.json.Value, marker: []const u8) anye
             else => error.InvalidJson,
         };
     }
+    if (input == .number_string and std.mem.indexOfAny(u8, input.number_string, ".eE") == null) {
+        const digits = input.number_string.len - @as(usize, @intFromBool(input.number_string[0] == '-'));
+        if (digits > 4300) return error.InvalidJson;
+    }
     if (input == .array) {
         const members = try expression.allocateValues(a, input.array.items.len);
         for (input.array.items, members) |item, *member| member.* = try convert(a, item, marker);

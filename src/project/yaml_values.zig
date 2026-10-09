@@ -96,6 +96,41 @@ pub fn binary(a: std.mem.Allocator, encoded: []const u8) !Value {
     return .{ .object = entries };
 }
 
+/// SafeConstructor uses Python's permissive base64 decoder: ASCII junk and
+/// nonterminal padding are ignored, while incomplete quanta raise ValueError.
+pub fn canonicalBinary(a: std.mem.Allocator, text: []const u8) ![]const u8 {
+    for (text) |byte| if (byte > 127) return error.InvalidYamlScalar;
+    var bytes: std.Io.Writer.Allocating = .init(a);
+    var position: u3 = 0;
+    var padding: u3 = 0;
+    var bits: u32 = 0;
+    var ended = false;
+    for (text) |byte| {
+        if (byte == '=') {
+            if (position >= 2) {
+                padding += 1;
+                if (@as(u4, position) + padding >= 4) {
+                    ended = true;
+                    break;
+                }
+            }
+            continue;
+        }
+        const digit: u32 = if (byte >= 'A' and byte <= 'Z') byte - 'A' else if (byte >= 'a' and byte <= 'z') byte - 'a' + 26 else if (byte >= '0' and byte <= '9') byte - '0' + 52 else if (byte == '+') 62 else if (byte == '/') 63 else continue;
+        padding = 0;
+        bits = (bits << 6) | digit;
+        position += 1;
+        if (position >= 2) try bytes.writer.writeByte(@truncate(bits >> @as(u5, @intCast((4 - @as(u4, position)) * 2))));
+        if (position == 4) {
+            position = 0;
+            bits = 0;
+        }
+    }
+    if (!ended and position != 0) return error.InvalidYamlScalar;
+    const encoded = try a.alloc(u8, std.base64.standard.Encoder.calcSize(bytes.written().len));
+    return std.base64.standard.Encoder.encode(encoded, bytes.written());
+}
+
 test "immutable YAML scalars preserve byte and aware datetime key identities" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

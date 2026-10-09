@@ -74,8 +74,12 @@ const Parser = struct {
         switch (self.event.type) {
             c.YAML_SCALAR_EVENT => {
                 try self.anchor(self.event.data.scalar.anchor, result);
-                const text = self.event.data.scalar.value[0..self.event.data.scalar.length];
+                var text: []const u8 = self.event.data.scalar.value[0..self.event.data.scalar.length];
                 const tag = if (self.event.data.scalar.tag != null) try self.a.dupe(u8, std.mem.span(self.event.data.scalar.tag)) else null;
+                if (tag) |explicit| {
+                    if (isTag(explicit, "binary")) text = try @import("yaml_values.zig").canonicalBinary(self.a, text);
+                    if (isTag(explicit, "bool") and !validBoolean(text)) return error.JinjaKeyError;
+                }
                 const scalar = try yaml.resolveScalar(self.a, text, tag, self.event.data.scalar.style == c.YAML_PLAIN_SCALAR_STYLE, key);
                 result.tag = scalar.tag;
                 result.merge = scalar.merge;
@@ -115,6 +119,11 @@ const Parser = struct {
 
 fn isTag(tag: []const u8, short: []const u8) bool {
     return std.mem.eql(u8, tag, short) or (std.mem.startsWith(u8, tag, "tag:yaml.org,2002:") and std.mem.eql(u8, tag[18..], short));
+}
+
+fn validBoolean(text: []const u8) bool {
+    inline for (.{ "yes", "no", "true", "false", "on", "off" }) |accepted| if (std.ascii.eqlIgnoreCase(text, accepted)) return true;
+    return false;
 }
 
 fn flatten(a: std.mem.Allocator, node: *Node, output: *std.ArrayList(Pair), depth: usize) !void {
