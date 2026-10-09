@@ -293,3 +293,18 @@ def test_core_print_quiet_and_no_print_preserve_debug_file_messages(tmp_path, du
         assert "VISIBLE_PRINT" in restored.stdout + restored.stderr
         debugging = invoke(engine, ["--debug", "--log-level", "info", *args], root, environment(duckdb_environment))
         assert "DEBUG_MARKER" in debugging.stdout + debugging.stderr
+
+
+def test_core_list_keeps_empty_top_level_tags_and_ignores_dotted_or_synthetic_keys(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    env = environment(duckdb_environment)
+    observed = {}
+    for engine in ["dxt", "core"]:
+        result = invoke(engine, ["--quiet", "ls", "--project-dir", root, "--profiles-dir", root,
+                                "--select", "b", "--output", "json", "--output-keys", "name", "tags",
+                                "depends_on", "config.materialized", "selector"], root, env)
+        observed[engine] = json.loads(result.stdout)
+        assert observed[engine]["tags"] == []
+        assert "config.materialized" not in observed[engine]
+        assert "selector" not in observed[engine]
+    assert observed["dxt"] == observed["core"]

@@ -482,6 +482,8 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
     } else try writeFqnFromPath(writer, node.package_name, node.snapshot_fqn_path orelse node.path, node.name, if (snapshot_config != null and !node.snapshot_yaml_definition) node.name else null);
     try writer.writeAll(",\"checksum\":");
     try writeSha256Checksum(writer, if (node.snapshot_file_code) |file_code| std.mem.trim(u8, file_code, " \t\r\n\x0b\x0c") else node.raw_code);
+    try writer.writeAll(",\"tags\":");
+    try json.stringArray(writer, node.tags.items);
 }
 
 fn writeTestNodeIdentityFields(

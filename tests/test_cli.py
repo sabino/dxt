@@ -995,8 +995,7 @@ def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
             "resource_type",
             "name",
             "path",
-            "config.materialized",
-            "config.tags",
+            "config",
         ],
         cwd=ROOT,
         text=True,
@@ -1009,8 +1008,7 @@ def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
             "resource_type": "analysis",
             "name": "customer_report",
             "path": "analysis/customer_report.sql",
-            "config.materialized": "analysis",
-            "config.tags": ["reporting"],
+            "config": analysis["config"],
         }
     ]
 
@@ -1891,7 +1889,11 @@ def test_compile_docs_run_and_build_render_profile_target_and_this_context(tmp_p
             capture_output=True,
         )
         assert result.returncode == expected_returncode, result.stderr
-        assert_profile_target_context_outputs(target, command_name)
+        if expected_returncode == 0:
+            assert_profile_target_context_outputs(target, command_name)
+        else:
+            assert not (target / "compiled").exists()
+            assert "PostgreSQL connection failed" in result.stderr
 
 
 def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
@@ -2523,7 +2525,7 @@ target-path: target
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
-def test_run_resolves_duckdb_profile_path_relative_to_profiles_dir(tmp_path: Path):
+def test_run_resolves_duckdb_profile_path_relative_to_invocation_cwd(tmp_path: Path):
     project = tmp_path / "profile_path_project"
     profiles_dir = tmp_path / "profiles"
     (project / "models").mkdir(parents=True)
@@ -2547,6 +2549,8 @@ target-path: target
 """
     )
     (project / "models" / "customers.sql").write_text("select 11 as customer_id\n")
+    invocation_dir = tmp_path / "invocation"
+    invocation_dir.mkdir()
     target = tmp_path / "run-target"
     result = subprocess.run(
         [
@@ -2561,16 +2565,17 @@ target-path: target
             "--select",
             "customers",
         ],
-        cwd=ROOT,
+        cwd=invocation_dir,
         text=True,
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert (profiles_dir / "profile-relative.duckdb").exists()
+    assert (invocation_dir / "profile-relative.duckdb").exists()
     assert not (project / "profile-relative.duckdb").exists()
+    assert not (profiles_dir / "profile-relative.duckdb").exists()
     query = subprocess.run(
-        [DUCKDB, str(profiles_dir / "profile-relative.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "analytics"."customers"'],
-        cwd=ROOT,
+        [DUCKDB, str(invocation_dir / "profile-relative.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "analytics"."customers"'],
+        cwd=invocation_dir,
         text=True,
         capture_output=True,
     )
@@ -4688,7 +4693,7 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
     assert all("ignored" not in unique_id for unique_id in manifest["nodes"])
 
     list_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -4699,7 +4704,7 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
     ]
 
     generic_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -4708,7 +4713,7 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
     assert json_lines(generic_result.stdout) == []
 
     data_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:data", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:data", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -4719,7 +4724,7 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
     ]
 
     dependency_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "customers", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "customers", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -4771,7 +4776,7 @@ def test_inline_disabled_singular_sql_test_is_not_active(tmp_path: Path):
     assert disabled_test["depends_on"]["nodes"] == []
 
     list_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -4873,7 +4878,7 @@ def test_parse_and_compile_apply_singular_sql_test_yaml_patches(tmp_path: Path):
     assert disabled_test["depends_on"]["nodes"] == []
 
     list_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:singular_yaml", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:singular_yaml", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -6677,7 +6682,7 @@ unit_tests:
     assert unit_id in manifest["child_map"]["model.unit_test_project.orders"]
 
     list_json = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "unit_test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "unit_test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7220,7 +7225,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert node["columns"]["customer_name"]["description"] == "Display name"
 
     ls_schema_path = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "path:models/*.yml", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "path:models/*.yml", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7320,7 +7325,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert ls_result.returncode == 0, ls_result.stderr
     assert ls_result.stdout.splitlines() == ["model.model_properties.customers", *expected_tests]
     tag_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:pub*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:pub*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7332,7 +7337,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     ]
 
     ls_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7357,7 +7362,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     ]
 
     ls_tests_by_file = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "file:schema.yml", "--resource-type", "test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "file:schema.yml", "--resource-type", "test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7366,7 +7371,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert json_lines(ls_tests_by_file.stdout) == json_lines(ls_tests.stdout)
 
     ls_resource_type_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7375,7 +7380,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert json_lines(ls_resource_type_tests.stdout) == json_lines(ls_tests.stdout)
 
     ls_package_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties,resource_type:test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties,resource_type:test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7384,7 +7389,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert json_lines(ls_package_tests.stdout) == json_lines(ls_tests.stdout)
 
     ls_package_all = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7396,7 +7401,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     ]
 
     ls_generic_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7405,7 +7410,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert json_lines(ls_generic_tests.stdout) == json_lines(ls_tests.stdout)
 
     ls_model_and_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "customers test_type:generic", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "customers test_type:generic", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7419,7 +7424,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     ]
     for model_selector in ("customers", "customers*", "model_properties.customers", "model_properties.customers*"):
         ls_indirect_tests = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--select", model_selector, "--output", "json"],
+            [DXT, "ls", "--project-dir", str(project), "--select", model_selector, "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -7432,7 +7437,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
             "test.model_properties.unique_customers_customer_id.c5af1ff4b1",
         ]
     ls_nested_model_selector = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "model_properties.customers.*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "model_properties.customers.*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7566,7 +7571,7 @@ def test_parse_macro_artifacts_and_model_macro_dependency(tmp_path: Path):
     macro_id = "macro.macro_artifacts.format_id"
     dependent_macro_id = "macro.macro_artifacts.outer_id"
     nested_macro_id = "macro.macro_artifacts.wrap_optional"
-    assert sorted(manifest["macros"]) == [macro_id, dependent_macro_id, nested_macro_id]
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [macro_id, dependent_macro_id, nested_macro_id]
     assert manifest["macros"][macro_id] == {
         "unique_id": macro_id,
         "resource_type": "macro",
@@ -7600,7 +7605,7 @@ def test_parse_macro_artifacts_and_model_macro_dependency(tmp_path: Path):
     assert macro_id not in manifest["child_map"]
 
     ls_default = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7627,7 +7632,7 @@ def test_parse_macro_block_variants(tmp_path: Path):
 
     manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
     assert_manifest_schema_slice(project / "target-dxt" / "manifest.json")
-    assert sorted(manifest["macros"]) == [
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [
         "macro.macro_block_variants.format_id",
         "macro.macro_block_variants.materialization_empty_langs_default",
         "macro.macro_block_variants.materialization_incremental_default",
@@ -7704,7 +7709,7 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
     root_external_macro_id = "macro.package_macro_namespace.wrap_external_id"
     package_macro_id = "macro.util_pkg.format_id"
     package_outer_macro_id = "macro.util_pkg.outer_id"
-    assert sorted(manifest["macros"]) == [
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [
         root_macro_id,
         root_external_macro_id,
         package_macro_id,
@@ -7728,7 +7733,7 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
     assert str(project) not in manifest_path.read_text()
 
     ls_root_package = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:package_macro_namespace", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:package_macro_namespace", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7740,7 +7745,7 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
     ]
 
     ls_macro_package = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7749,7 +7754,7 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
     assert json_lines(ls_macro_package.stdout) == []
 
     ls_unknown_package = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:not_a_package", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:not_a_package", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7777,7 +7782,7 @@ def test_parse_macro_namespace_search_order(tmp_path: Path):
     other_shared = "macro.other_pkg.shared"
     package_same = "macro.util_pkg.same_name"
     package_wrap = "macro.util_pkg.pkg_wrap"
-    assert sorted(manifest["macros"]) == [
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [
         root_only,
         root_same,
         other_shared,
@@ -7820,7 +7825,7 @@ def test_parse_static_adapter_dispatch_dependencies(tmp_path: Path):
     package_value = "macro.util_pkg.duckdb__package_value"
     package_wrap = "macro.util_pkg.wrap_dispatch"
 
-    assert sorted(manifest["macros"]) == [
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [
         root_package_value,
         root_render,
         package_value,
@@ -7857,7 +7862,7 @@ def test_parse_static_adapter_dispatch_uses_project_dispatch_config(tmp_path: Pa
     manifest = json.loads(manifest_path.read_text())
     assert_manifest_schema_slice(manifest_path)
 
-    assert sorted(manifest["macros"]) == [
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [
         "macro.adapter_dispatch_project_config.default__render_value",
         "macro.override_pkg.duckdb__render_value",
         "macro.util_pkg.duckdb__render_value",
@@ -7968,7 +7973,7 @@ def test_macro_paths_replace_default_macro_directory(tmp_path: Path):
     assert result.returncode == 0, result.stderr
 
     manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
-    assert sorted(manifest["macros"]) == ["macro.macro_paths_custom.kept_macro"]
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == ["macro.macro_paths_custom.kept_macro"]
     macro = manifest["macros"]["macro.macro_paths_custom.kept_macro"]
     assert macro["path"] == "custom_macros/kept.sql"
     assert macro["original_file_path"] == "custom_macros/kept.sql"
@@ -8018,7 +8023,7 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
         package_seed,
     ]
     assert sorted(manifest["sources"]) == [package_source]
-    assert sorted(manifest["docs"]) == [package_doc]
+    assert sorted(identifier for identifier, doc in manifest["docs"].items() if doc["package_name"] != "dbt") == [package_doc]
     assert sorted(manifest["exposures"]) == [package_exposure]
     assert manifest["sources"][package_source]["package_name"] == "util_pkg"
     assert manifest["docs"][package_doc]["package_name"] == "util_pkg"
@@ -8089,7 +8094,7 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
     assert str(project) not in manifest_path.read_text()
 
     ls_package = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8107,7 +8112,7 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
     ]
 
     ls_package_models = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg,resource_type:model", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg,resource_type:model", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8122,7 +8127,7 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
     ]
 
     ls_root = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:this", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:this", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8137,7 +8142,7 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
     ]
 
     ls_package_exclude = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--exclude", "pkg_seeded_customers", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--exclude", "pkg_seeded_customers", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8497,7 +8502,7 @@ def test_parse_and_ls_resolve_vars_inside_ref_and_source(tmp_path: Path):
             "{customer_model: alt_customers}",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8541,7 +8546,7 @@ def test_parse_and_ls_resolve_static_loop_ref_and_source_dependencies(tmp_path: 
     assert "model.static_loop_deps.looped" in manifest["child_map"]["source.static_loop_deps.raw.events"]
 
     upstream_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "+looped", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "+looped", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8556,7 +8561,7 @@ def test_parse_and_ls_resolve_static_loop_ref_and_source_dependencies(tmp_path: 
     ]
 
     source_descendant_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "source:raw.events+", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "source:raw.events+", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8635,7 +8640,7 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     assert manifest["child_map"]["seed.seed_ref.raw_customers"] == ["model.seed_ref.stg_customers"]
 
     ls_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "seed", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "seed", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8646,7 +8651,7 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     ]
 
     ls_file_seed = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "file:raw_customers.csv", "--resource-type", "seed", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "file:raw_customers.csv", "--resource-type", "seed", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8677,7 +8682,7 @@ def test_parse_docs_blocks_and_literal_doc_descriptions(tmp_path: Path):
     manifest = json.loads(first_manifest)
     assert_partial_manifest_schema(manifest)
     assert_manifest_schema_slice(manifest_path)
-    assert sorted(manifest["docs"]) == [
+    assert sorted(identifier for identifier, doc in manifest["docs"].items() if doc["package_name"] != "dbt") == [
         "doc.docs_blocks.customer_id",
         "doc.docs_blocks.customer_model",
     ]
@@ -8757,7 +8762,7 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     assert str(project) not in (project / "target-dxt" / "manifest.json").read_text()
 
     ls_package_all = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:exposure_artifacts", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:exposure_artifacts", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8783,7 +8788,7 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     ]
 
     ls_exposure = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "exposure", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "exposure", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8844,7 +8849,8 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     )
     assert text_result.returncode == 0, text_result.stderr
     assert text_result.stdout.splitlines() == ["model.inline_config.orders"]
-    assert not (project / "target").exists()
+    assert_manifest_schema_slice(project / "target" / "manifest.json")
+    assert not (project / "target" / "run_results.json").exists()
 
     name_result = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "tag:nightly", "--output", "name"],
@@ -8874,7 +8880,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     assert selector_result.stdout.splitlines() == ["inline_config.orders"]
 
     json_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--output", "json", "--resource-type", "model"],
+        [DXT, "ls", "--project-dir", str(project), "--output", "json", "--resource-type", "model", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8912,7 +8918,6 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
             "name": "orders",
             "path": "orders.sql",
             "original_file_path": "models/orders.sql",
-            "selector": "inline_config.orders",
             "unique_id": "model.inline_config.orders",
         }
     ]
@@ -8952,8 +8957,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
             "--output-keys",
             "package_name",
             "alias",
-            "config.materialized",
-            "config.tags",
+            "config",
             "non_existent_key",
         ],
         cwd=ROOT,
@@ -8965,8 +8969,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         {
             "package_name": "inline_config",
             "alias": "orders",
-            "config.materialized": "table",
-            "config.tags": ["finance", "nightly"],
+            "config": json.loads((project / "target" / "manifest.json").read_text())["nodes"]["model.inline_config.orders"]["config"],
         }
     ]
 
@@ -9006,8 +9009,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
             "--output-keys",
             "name",
             "alias",
-            "config.materialized",
-            "config.tags",
+            "config",
         ],
         cwd=ROOT,
         text=True,
@@ -9015,7 +9017,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     )
     assert untagged_keyed_json.returncode == 0, untagged_keyed_json.stderr
     assert json_lines(untagged_keyed_json.stdout) == [
-        {"name": "stg_customers", "alias": "stg_customers", "config.materialized": "view", "config.tags": []}
+        {"name": "stg_customers", "alias": "stg_customers", "config": json.loads((untagged_project / "target" / "manifest.json").read_text())["nodes"]["model.model_ref.stg_customers"]["config"]}
     ]
 
     depends_keyed_json = subprocess.run(
@@ -9046,10 +9048,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         {
             "name": "customers",
             "tags": [],
-            "depends_on.nodes": ["model.model_ref.stg_customers"],
-            "depends_on.macros": [],
-            "config.enabled": True,
-            "config.docs.show": True,
+            "depends_on": {"nodes": ["model.model_ref.stg_customers"], "macros": []},
         }
     ]
 
@@ -9114,7 +9113,7 @@ def test_ls_multi_argv_and_repeated_selector_flags(tmp_path: Path):
 
     def ls_json(*args: str) -> list[str]:
         result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args, "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -9237,7 +9236,7 @@ def test_dbt_core_file_selector_basename_stem_and_literal_wildcard_oracle(
 
     for selector in selectors:
         dxt_result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--select", selector, "--output", "json"],
+            [DXT, "ls", "--project-dir", str(project), "--select", selector, "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -9256,7 +9255,7 @@ def test_dbt_core_file_selector_basename_stem_and_literal_wildcard_oracle(
                 selector,
                 "--output",
                 "json",
-            ]
+             "--output-keys", "unique_id", "resource_type", "name"]
         )
         dbt_stdout = capsys.readouterr().out
         dbt_ids = sorted(
@@ -9275,7 +9274,7 @@ def test_ls_root_selectors_yml_scalar_aliases(tmp_path: Path):
 
     def ls_json(*args: str) -> list[str]:
         result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args, "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -9334,7 +9333,7 @@ def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys:
     )
 
     dxt_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--selector", "customer_without_staging", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--selector", "customer_without_staging", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9353,7 +9352,7 @@ def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys:
             "customer_without_staging",
             "--output",
             "json",
-        ]
+         "--output-keys", "unique_id", "resource_type", "name"]
     )
     dbt_stdout = capsys.readouterr().out
     dbt_ids = sorted(
@@ -9392,7 +9391,7 @@ def test_ls_source_status_selects_sources_from_sources_json_state(tmp_path: Path
                 f"source_status:{status}",
                 "--output",
                 "json",
-            ],
+             "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -9535,7 +9534,7 @@ def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_pa
     )
 
     tests_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9567,7 +9566,7 @@ def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_pa
                 f"result:{status}",
                 "--output",
                 "json",
-            ],
+             "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -9592,7 +9591,7 @@ def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_pa
             "result:error+",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9710,7 +9709,7 @@ def test_ls_state_new_selects_resources_from_prior_manifest_state(tmp_path: Path
                 selector,
                 "--output",
                 "json",
-            ],
+             "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -9742,7 +9741,7 @@ def test_ls_state_new_selects_resources_from_prior_manifest_state(tmp_path: Path
             "stg_customers",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9910,7 +9909,7 @@ def test_dbt_core_result_selector_oracle(tmp_path: Path, capsys: pytest.CaptureF
             "result:error+",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9933,7 +9932,7 @@ def test_dbt_core_result_selector_oracle(tmp_path: Path, capsys: pytest.CaptureF
             "result:error+",
             "--output",
             "json",
-        ]
+         "--output-keys", "unique_id", "resource_type", "name"]
     )
     dbt_stdout = capsys.readouterr().out
     dbt_ids = sorted(
@@ -10011,7 +10010,7 @@ def test_dbt_core_state_new_selector_oracle(tmp_path: Path, capsys: pytest.Captu
             "state:new",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10034,7 +10033,7 @@ def test_dbt_core_state_new_selector_oracle(tmp_path: Path, capsys: pytest.Captu
             "state:new",
             "--output",
             "json",
-        ]
+         "--output-keys", "unique_id", "resource_type", "name"]
     )
     dbt_stdout = capsys.readouterr().out
     dbt_ids = sorted(
@@ -10096,7 +10095,7 @@ def test_dbt_core_source_status_fresher_and_dxt_status_extension_oracle(
             "source_status:warn",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10126,7 +10125,7 @@ def test_dbt_core_source_status_fresher_and_dxt_status_extension_oracle(
                 selector,
                 "--output",
                 "json",
-            ]
+             "--output-keys", "unique_id", "resource_type", "name"]
         )
         dbt_stdout = capsys.readouterr().out
         assert dbt_result.success, dbt_result.exception
@@ -10288,7 +10287,7 @@ def test_project_model_path_configs_apply_below_inline_and_yaml_configs(tmp_path
 def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     source_project = copy_fixture(tmp_path, "source_ref")
     source_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "resource_type:source", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "resource_type:source", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10299,7 +10298,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.source_ref.raw.orders",
     ]
     source_union = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw.customers source:raw.orders", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw.customers source:raw.orders", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10310,7 +10309,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.source_ref.raw.orders",
     ]
     source_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw.*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw.*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10321,7 +10320,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.source_ref.raw.orders",
     ]
     source_package_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:source_ref.raw.*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:source_ref.raw.*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10332,7 +10331,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.source_ref.raw.orders",
     ]
     source_name_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10343,7 +10342,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.source_ref.raw.orders",
     ]
     source_table_without_source = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:*orders", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:*orders", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10352,7 +10351,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     assert json_lines(source_table_without_source.stdout) == []
     for bare_source_selector in ("orders", "*orders", "source_ref.raw.*", "source.source_ref.raw.orders"):
         bare_source = subprocess.run(
-            [DXT, "ls", "--project-dir", str(source_project), "--select", bare_source_selector, "--output", "json"],
+            [DXT, "ls", "--project-dir", str(source_project), "--select", bare_source_selector, "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -10360,7 +10359,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         assert bare_source.returncode == 0, bare_source.stderr
         assert json_lines(bare_source.stdout) == []
     source_path = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "path:models/*.yml", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "path:models/*.yml", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10372,7 +10371,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.source_ref.raw.orders",
     ]
     source_file = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "file:schema.yml", "--resource-type", "source", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "file:schema.yml", "--resource-type", "source", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10392,7 +10391,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
             "package:source_ref,resource_type:source",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10463,13 +10462,12 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
             "source_name": "raw",
             "original_file_path": "models/schema.yml",
             "path": "models/schema.yml",
-            "selector": "source:source_ref.raw.customers",
         }
     ]
 
     exposure_project = copy_fixture(tmp_path, "exposure_artifacts")
     exposure_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "resource_type:exposure", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "resource_type:exposure", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10483,7 +10481,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         }
     ]
     exposure_union = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "orders weekly_kpis", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "orders weekly_kpis", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10494,7 +10492,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "model.exposure_artifacts.orders",
     ]
     exposure_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:weekly_*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:weekly_*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10504,7 +10502,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "exposure.exposure_artifacts.weekly_kpis"
     ]
     exposure_package_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:exposure_artifacts.weekly_*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:exposure_artifacts.weekly_*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10514,7 +10512,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "exposure.exposure_artifacts.weekly_kpis"
     ]
     exposure_prefixed_unique_id = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:exposure.exposure_artifacts.weekly_kpis", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:exposure.exposure_artifacts.weekly_kpis", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10522,7 +10520,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     assert exposure_prefixed_unique_id.returncode == 0, exposure_prefixed_unique_id.stderr
     assert json_lines(exposure_prefixed_unique_id.stdout) == []
     bare_exposure_unique_id = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure.exposure_artifacts.weekly_kpis", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure.exposure_artifacts.weekly_kpis", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10530,7 +10528,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     assert bare_exposure_unique_id.returncode == 0, bare_exposure_unique_id.stderr
     assert json_lines(bare_exposure_unique_id.stdout) == []
     exposure_path = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "path:models/*.yml", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "path:models/*.yml", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10541,7 +10539,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         "source.exposure_artifacts.raw.customers",
     ]
     exposure_file = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "file:schema.yml", "--resource-type", "exposure", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "file:schema.yml", "--resource-type", "exposure", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10598,7 +10596,6 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         {
             "original_file_path": "models/schema.yml",
             "path": "schema.yml",
-            "selector": "exposure:exposure_artifacts.weekly_kpis",
         }
     ]
     exposure_package = subprocess.run(
@@ -10611,7 +10608,7 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
             "package:exposure_artifacts,resource_type:exposure",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10631,7 +10628,7 @@ def test_ls_graph_plus_selectors(tmp_path: Path):
 
     def ls_json(*args: str) -> list[str]:
         result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args, "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -10779,7 +10776,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         assert "selector syntax is not supported" in unsupported_selector.stderr
 
     missing_selector = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10855,7 +10852,7 @@ def test_ls_at_selector_includes_descendant_parents(tmp_path: Path):
 
     def ls_json(*args: str) -> list[str]:
         result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args, "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -11321,7 +11318,7 @@ def test_docs_generate_writes_manifest_catalog_and_compiled_sql(tmp_path: Path):
     assert manifest["nodes"]["model.docs_blocks.customers"]["compiled_path"].endswith(
         "/compiled/docs_blocks/models/customers.sql"
     )
-    assert sorted(manifest["docs"]) == [
+    assert sorted(identifier for identifier, doc in manifest["docs"].items() if doc["package_name"] != "dbt") == [
         "doc.docs_blocks.customer_id",
         "doc.docs_blocks.customer_model",
     ]
