@@ -104,6 +104,37 @@ fn inSet(code: u21, set: []const u8) !bool {
     return false;
 }
 
+pub fn splitWhitespace(a: std.mem.Allocator, text: []const u8, maximum: i64, backwards: bool) ![]const []const u8 {
+    var spans: std.ArrayList([2]usize) = .empty;
+    defer spans.deinit(a);
+    var index: usize = 0;
+    var start: ?usize = null;
+    while (index < text.len) {
+        const size = try std.unicode.utf8ByteSequenceLength(text[index]);
+        const code = try std.unicode.utf8Decode(text[index .. index + size]);
+        if (whitespace(code)) {
+            if (start) |first| try spans.append(a, .{ first, index });
+            start = null;
+        } else if (start == null) start = index;
+        index += size;
+    }
+    if (start) |first| try spans.append(a, .{ first, text.len });
+    if (spans.items.len == 0) return &.{};
+    const split_count = if (maximum < 0) spans.items.len - 1 else @min(@as(usize, @intCast(maximum)), spans.items.len - 1);
+    const values = try a.alloc([]const u8, split_count + 1);
+    if (!backwards) {
+        for (values[0..split_count], spans.items[0..split_count]) |*result, span| result.* = text[span[0]..span[1]];
+        const final = spans.items[split_count];
+        values[split_count] = text[final[0]..if (maximum >= 0 and split_count == maximum) text.len else final[1]];
+    } else {
+        const remaining = spans.items.len - split_count - 1;
+        const final = spans.items[remaining];
+        values[0] = text[if (maximum >= 0 and split_count == maximum) 0 else final[0]..final[1]];
+        for (values[1..], spans.items[remaining + 1 ..]) |*result, span| result.* = text[span[0]..span[1]];
+    }
+    return values;
+}
+
 test "Unicode expansion, contextual sigma, codepoint length and whitespace" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

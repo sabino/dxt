@@ -383,12 +383,40 @@ const Parser = struct {
                     if (self.index >= self.input.len) return error.InvalidJinjaExpression;
                     const escaped = self.input[self.index];
                     self.index += 1;
-                    try out.append(self.allocator, switch (escaped) {
+                    if (escaped == 'x' or escaped == 'u' or escaped == 'U') {
+                        const digits: usize = if (escaped == 'x') 2 else if (escaped == 'u') 4 else 8;
+                        if (self.index + digits > self.input.len) return error.InvalidJinjaExpression;
+                        const code = std.fmt.parseInt(u21, self.input[self.index .. self.index + digits], 16) catch return error.InvalidJinjaExpression;
+                        self.index += digits;
+                        var buffer: [4]u8 = undefined;
+                        const size = std.unicode.utf8Encode(code, &buffer) catch return error.InvalidJinjaExpression;
+                        try out.appendSlice(self.allocator, buffer[0..size]);
+                        continue;
+                    }
+                    if (escaped >= '0' and escaped <= '7') {
+                        const start = self.index - 1;
+                        while (self.index - start < 3 and self.index < self.input.len and self.input[self.index] >= '0' and self.input[self.index] <= '7') self.index += 1;
+                        const code = try std.fmt.parseInt(u21, self.input[start..self.index], 8);
+                        var buffer: [4]u8 = undefined;
+                        const size = try std.unicode.utf8Encode(code, &buffer);
+                        try out.appendSlice(self.allocator, buffer[0..size]);
+                        continue;
+                    }
+                    const decoded: ?u8 = switch (escaped) {
+                        'a' => 7,
+                        'b' => 8,
+                        'f' => 12,
                         'n' => '\n',
                         'r' => '\r',
                         't' => '\t',
-                        else => escaped,
-                    });
+                        'v' => 11,
+                        '\\', '\'', '"' => escaped,
+                        else => null,
+                    };
+                    if (decoded) |byte| try out.append(self.allocator, byte) else {
+                        try out.append(self.allocator, '\\');
+                        try out.append(self.allocator, escaped);
+                    }
                 } else try out.append(self.allocator, ch);
             }
             return error.InvalidJinjaExpression;
@@ -555,7 +583,7 @@ fn ownedEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry)) ![
 }
 
 fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument) !?Value {
-    const positional_only = if (receiver == .object) isMethod(name_, &.{ "get", "keys", "values", "items", "copy" }) else if (receiver == .list) isMethod(name_, &.{ "copy", "count", "index" }) else if (receiver == .string) isMethod(name_, &.{ "lower", "upper", "startswith", "endswith", "find", "rfind", "count", "index", "rindex", "strip", "lstrip", "rstrip", "join", "replace" }) else false;
+    const positional_only = if (receiver == .object) isMethod(name_, &.{ "get", "keys", "values", "items", "copy" }) else if (receiver == .list or receiver == .tuple) isMethod(name_, &.{ "copy", "count", "index" }) else if (receiver == .string) isMethod(name_, &.{ "lower", "upper", "casefold", "startswith", "endswith", "find", "rfind", "count", "index", "rindex", "strip", "lstrip", "rstrip", "join", "replace" }) else false;
     if (positional_only) for (args) |arg| if (arg.name != null) return error.InvalidJinjaArguments;
     if (receiver == .object) {
         if (std.mem.eql(u8, name_, "get")) {
@@ -606,6 +634,10 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
     }
     if (receiver == .string) {
         const text_ = receiver.string;
+        if (std.mem.eql(u8, name_, "casefold")) {
+            if (args.len != 0) return error.InvalidJinjaArguments;
+            return .{ .string = try unicode.convert(allocator, receiver.string, .casefold) };
+        }
         if (std.mem.eql(u8, name_, "lower") or std.mem.eql(u8, name_, "upper")) {
             if (args.len != 0) return error.InvalidJinjaArguments;
             return try filter(allocator, name_, receiver, &.{});
@@ -703,30 +735,9 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
             var count: i64 = 0;
             var position: usize = if (backwards) text_.len else 0;
             if (separator == .none) {
-                while (true) {
-                    if (backwards) {
-                        while (position > 0 and std.ascii.isWhitespace(text_[position - 1])) position -= 1;
-                        if (position == 0) break;
-                        if (maximum >= 0 and count >= maximum) {
-                            try values.append(allocator, .{ .string = text_[0..position] });
-                            break;
-                        }
-                        const finish = position;
-                        while (position > 0 and !std.ascii.isWhitespace(text_[position - 1])) position -= 1;
-                        try values.append(allocator, .{ .string = text_[position..finish] });
-                    } else {
-                        while (position < text_.len and std.ascii.isWhitespace(text_[position])) position += 1;
-                        if (position == text_.len) break;
-                        if (maximum >= 0 and count >= maximum) {
-                            try values.append(allocator, .{ .string = text_[position..] });
-                            break;
-                        }
-                        const start = position;
-                        while (position < text_.len and !std.ascii.isWhitespace(text_[position])) position += 1;
-                        try values.append(allocator, .{ .string = text_[start..position] });
-                    }
-                    count += 1;
-                }
+                const fields = try unicode.splitWhitespace(allocator, text_, maximum, backwards);
+                for (fields) |field| try values.append(allocator, .{ .string = field });
+                return .{ .list = try ownedValues(allocator, &values) };
             } else {
                 while (maximum < 0 or count < maximum) {
                     if (backwards) {
@@ -922,6 +933,23 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     if (std.mem.eql(u8, op, "~") or (std.mem.eql(u8, op, "+") and a == .string and b == .string)) return .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ try a.text(allocator), try b.text(allocator) }) };
     if (std.mem.eql(u8, op, "+") and a == .list and b == .list) return .{ .list = try std.mem.concat(allocator, Value, &.{ a.list, b.list }) };
     if (std.mem.eql(u8, op, "+") and a == .tuple and b == .tuple) return .{ .tuple = try std.mem.concat(allocator, Value, &.{ a.tuple, b.tuple }) };
+    if (std.mem.eql(u8, op, "*")) {
+        const container: Value = if (a == .string or a == .list or a == .tuple) a else b;
+        const repetitions = if (a == .string or a == .list or a == .tuple) b else a;
+        if (container == .string or container == .list or container == .tuple) {
+            const count: usize = @intCast(@max(0, try integerIndex(repetitions)));
+            const size = if (container == .string) container.string.len else sequence(container).?.len;
+            if (size != 0 and count > 10000000 / size) return error.JinjaIterationLimitExceeded;
+            if (container == .string) {
+                const result = try allocator.alloc(u8, count * size);
+                for (0..count) |i| @memcpy(result[i * size ..][0..size], container.string);
+                return .{ .string = result };
+            }
+            const result = try allocateValues(allocator, count * size);
+            for (0..count) |i| @memcpy(result[i * size ..][0..size], sequence(container).?);
+            return if (container == .tuple) .{ .tuple = result } else .{ .list = result };
+        }
+    }
     if (std.mem.indexOfScalar(u8, "<>", op[0]) != null) {
         const order: std.math.Order = if (a == .string and b == .string) std.mem.order(u8, a.string, b.string) else numericOrder(allocator, a, b) catch |err| {
             if (err == error.UnorderedJinjaNumber) return .{ .boolean = false };
@@ -929,21 +957,27 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
         };
         return .{ .boolean = if (std.mem.eql(u8, op, "<")) order == .lt else if (std.mem.eql(u8, op, ">")) order == .gt else if (std.mem.eql(u8, op, "<=")) order != .gt else order != .lt };
     }
-    if (!std.mem.eql(u8, op, "/")) if (integerText(a)) |x| {
+    if (integerText(a)) |x| {
         if (integerText(b)) |y| {
+            if (std.mem.eql(u8, op, "/")) return .{ .number = try numbers.divide(allocator, x, y) };
             if (!std.mem.eql(u8, op, "**") or y[0] != '-') return .{ .integer = try numbers.apply(allocator, op, x, y) };
         }
-    };
+    }
     const x = try numeric(a);
     const y = try numeric(b);
     if (std.mem.eql(u8, op, "**")) {
         if (x == 0 and y < 0) return error.JinjaDivisionByZero;
         const powered = std.math.pow(f64, x, y);
         if (std.math.isNan(powered)) return error.JinjaTypeError;
+        if (std.math.isFinite(x) and std.math.isFinite(y) and !std.math.isFinite(powered)) return error.JinjaNumericOverflow;
         return .{ .number = powered };
     }
     if ((std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "//") or std.mem.eql(u8, op, "%")) and y == 0) return error.JinjaDivisionByZero;
-    return .{ .number = if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else if (std.mem.eql(u8, op, "//")) @floor(x / y) else if (std.mem.eql(u8, op, "%")) x - @floor(x / y) * y else return error.InvalidJinjaExpression };
+    if (std.mem.eql(u8, op, "//") or std.mem.eql(u8, op, "%")) {
+        const result = try numbers.floatDivMod(x, y);
+        return .{ .number = if (std.mem.eql(u8, op, "//")) result.quotient else result.remainder };
+    }
+    return .{ .number = if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else return error.InvalidJinjaExpression };
 }
 fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
     if (value == .object and key == .string) return value.attribute(key.string);
@@ -1070,11 +1104,16 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
         return try contains(args[0].value, value);
     }
     if (std.mem.eql(u8, name, "odd") or std.mem.eql(u8, name, "even")) {
-        const odd = @mod(try numeric(value), 2) != 0;
+        const odd = if (integerText(value)) |number| (number[number.len - 1] - '0') % 2 != 0 else @mod(try numeric(value), 2) != 0;
         return if (std.mem.eql(u8, name, "odd")) odd else !odd;
     }
     if (std.mem.eql(u8, name, "divisibleby")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
+        if (integerText(value)) |number| if (integerText(args[0].value)) |divisor| {
+            const remainder = try numbers.apply(std.heap.page_allocator, "%", number, divisor);
+            defer std.heap.page_allocator.free(remainder);
+            return std.mem.eql(u8, remainder, "0");
+        };
         const divisor = try numeric(args[0].value);
         if (divisor == 0) return error.JinjaDivisionByZero;
         return @mod(try numeric(value), divisor) == 0;
@@ -1309,7 +1348,10 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
         }
         const fallback = argument(args, "default", 0, .{ .number = 0.0 });
         if (value == .string) return .{ .number = std.fmt.parseFloat(f64, try unicode.strip(value.string, null, true, true)) catch return fallback };
-        return .{ .number = numeric(value) catch return fallback };
+        return .{ .number = numeric(value) catch |err| {
+            if (err == error.JinjaNumericOverflow) return err;
+            return fallback;
+        } };
     }
     if (std.mem.eql(u8, name, "upper") or std.mem.eql(u8, name, "lower")) return .{ .string = try unicode.convert(allocator, try value.text(allocator), if (std.mem.eql(u8, name, "upper")) .upper else .lower) };
     if (std.mem.eql(u8, name, "trim")) return .{ .string = try unicode.strip(try value.text(allocator), if (args.len > 0) try args[0].value.text(allocator) else null, true, true) };

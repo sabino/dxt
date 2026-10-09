@@ -105,6 +105,62 @@ pub fn floatText(a: std.mem.Allocator, number: f64) ![]const u8 {
     return out.toOwnedSlice();
 }
 
+pub fn divide(a: std.mem.Allocator, left: []const u8, right: []const u8) !f64 {
+    if (std.mem.eql(u8, right, "0")) return error.JinjaDivisionByZero;
+    var x = try parse(a, left);
+    defer x.deinit();
+    var y = try parse(a, right);
+    defer y.deinit();
+    const negative = x.isPositive() != y.isPositive();
+    x.abs();
+    y.abs();
+    if (x.bitCountAbs() == 0) return if (negative) -0.0 else 0.0;
+    var exponent: i64 = @as(i64, @intCast(x.bitCountAbs())) - @as(i64, @intCast(y.bitCountAbs()));
+    var normalized = try Big.init(a);
+    defer normalized.deinit();
+    if (exponent >= 0) {
+        try normalized.shiftLeft(&y, @intCast(exponent));
+        if (Big.order(x, normalized) == .lt) exponent -= 1;
+    } else {
+        try normalized.shiftLeft(&x, @intCast(-exponent));
+        if (Big.order(normalized, y) == .lt) exponent -= 1;
+    }
+    if (exponent > 1023) return error.JinjaNumericOverflow;
+    if (exponent < -1075) return if (negative) -0.0 else 0.0;
+    const unit: i32 = @intCast(@max(exponent - 52, -1074));
+    if (unit < 0) try x.shiftLeft(&x, @intCast(-unit)) else try y.shiftLeft(&y, @intCast(unit));
+    var q = try Big.init(a);
+    defer q.deinit();
+    var remainder = try Big.init(a);
+    defer remainder.deinit();
+    try q.divTrunc(&remainder, &x, &y);
+    try remainder.shiftLeft(&remainder, 1);
+    const round = Big.order(remainder, y);
+    if (round == .gt or (round == .eq and q.isOdd())) try q.addScalar(&q, @as(u8, 1));
+    const result = std.math.ldexp(q.toFloat(f64, .nearest_even)[0], unit);
+    if (!std.math.isFinite(result)) return error.JinjaNumericOverflow;
+    return if (negative) -result else result;
+}
+
+/// Python derives float floor division from fmod rather than flooring x/y;
+/// for example 1.0 // 0.1 is 9.0 due to the representable divisor.
+pub fn floatDivMod(x: f64, y: f64) !struct { quotient: f64, remainder: f64 } {
+    if (y == 0) return error.JinjaDivisionByZero;
+    var remainder = @rem(x, y);
+    var quotient = (x - remainder) / y;
+    if (remainder != 0) {
+        if ((y < 0) != (remainder < 0)) {
+            remainder += y;
+            quotient -= 1;
+        }
+    } else remainder = std.math.copysign(@as(f64, 0), y);
+    if (quotient != 0) {
+        const floor = @floor(quotient);
+        quotient = if (quotient - floor > 0.5) floor + 1 else floor;
+    } else quotient = std.math.copysign(@as(f64, 0), x / y);
+    return .{ .quotient = quotient, .remainder = remainder };
+}
+
 test "integers retain precision, floor signs and exact mixed comparison" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -118,4 +174,6 @@ test "integers retain precision, floor signs and exact mixed comparison" {
     try std.testing.expectEqual(std.math.Order.lt, try orderFloat(a, "0", std.math.floatMin(f64)));
     try std.testing.expectEqualStrings("-1", try floatToInteger(a, -1.9));
     try std.testing.expectEqualStrings("100000000000000000000", try floatToInteger(a, 1e20));
+    try std.testing.expectEqual(@as(f64, 1), try divide(a, "1267650600228229401496703205376", "1267650600228229401496703205376"));
+    try std.testing.expectEqual(@as(f64, 9), (try floatDivMod(1.0, 0.1)).quotient);
 }
