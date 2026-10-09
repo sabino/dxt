@@ -367,6 +367,28 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
     const which = try allocator.dupe(u8, which_value.string);
     var options = current;
     options.which = which;
+    if (args.get("empty")) |value| {
+        if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
+        options.empty = value == .bool and value.bool;
+    }
+    inline for (.{ "sample", "event_time_start", "event_time_end" }) |key| if (args.get(key)) |value| {
+        @field(options, key) = try optionText(allocator, value, false);
+        if (!std.mem.eql(u8, key, "sample")) if (@field(options, key)) |raw| {
+            const timestamp = try @import("input_relations.zig").parseDate(raw, true);
+            const normalized = try @import("input_relations.zig").formatSampleTimestamp(allocator, timestamp);
+            allocator.free(raw);
+            @field(options, key) = normalized;
+        };
+    };
+    // SAMPLE in Core artifacts is a converted start/end mapping. Retrying a
+    // relative window uses the artifact's concrete window rather than now.
+    if (args.get("sample")) |value| if (value == .object) {
+        const start = value.object.get("start") orelse return error.MalformedRunResultsArtifact;
+        const end = value.object.get("end") orelse return error.MalformedRunResultsArtifact;
+        if (start != .string or end != .string) return error.MalformedRunResultsArtifact;
+        const parse_date = @import("input_relations.zig").parseDate;
+        options.sample_window = .{ .start = try parse_date(start.string, true), .end = try parse_date(end.string, true) };
+    };
     if (std.mem.eql(u8, which, "generate")) inline for (.{ .{ "compile", "docs_compile" }, .{ "static", "docs_static" } }) |field| {
         if (args.get(field[0])) |value| {
             if (value != .bool) return error.MalformedRunResultsArtifact;

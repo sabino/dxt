@@ -389,13 +389,13 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     var catalog_entries: catalog.CatalogEntries = .{};
     defer catalog.deinitCatalogEntries(runtime.allocator, &catalog_entries);
-    if (duckdb.databasePath(runtime.allocator, target_dir, &graph)) |db_path| {
+    if (!options.docs_empty_catalog) if (duckdb.databasePath(runtime.allocator, target_dir, &graph)) |db_path| {
         defer runtime.allocator.free(db_path);
         catalog_entries = try duckdb.collectCatalogEntries(runtime, db_path, &graph, selected);
     } else |err| switch (err) {
         error.UnsupportedDuckDbPath => {},
         else => return err,
-    }
+    };
 
     const catalog_path = try pathJoin(runtime.allocator, &.{ target_dir, "catalog.json" });
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);

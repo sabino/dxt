@@ -308,3 +308,44 @@ def test_core_list_keeps_empty_top_level_tags_and_ignores_dotted_or_synthetic_ke
         assert "config.materialized" not in observed[engine]
         assert "selector" not in observed[engine]
     assert observed["dxt"] == observed["core"]
+
+
+def test_core_empty_catalog_skips_warehouse_discovery(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    for engine in ['dxt', 'core']:
+        target = tmp_path / f'{engine}-target'
+        args = ['-q', 'docs', 'generate', '--no-compile', '--empty-catalog', '--project-dir', root, '--target-path', target]
+        invoke(engine, args, root, environment(duckdb_environment))
+        catalog = json.loads((target / 'catalog.json').read_text())
+        assert catalog['nodes'] == catalog['sources'] == {}
+        assert not (target / 'run_results.json').exists()
+
+
+def test_core_event_time_pair_validation_and_command_placement(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    for engine in ['dxt', 'core']:
+        for command, flags in [
+            ('run', ['--event-time-start', '2024-01-01']),
+            ('run', ['--event-time-end', '2024-01-02']),
+            ('run', ['--event-time-start', '2024-01-02', '--event-time-end', '2024-01-01']),
+            ('run', ['--event-time-start', '2024-01-01Z', '--event-time-end', '2024-01-02']),
+            ('compile', ['--sample', '1 day']),
+            ('parse', ['--empty']),
+            ('seed', ['--empty']),
+            ('snapshot', ['--sample', '1 day']),
+        ]:
+            result = invoke(engine, ['-q', command, '--project-dir', root, *flags], root, environment(duckdb_environment), ok=False)
+            assert result.returncode == 2, (engine, command, flags, result.stdout, result.stderr)
+        # An unrelated command never parses command-specific environment flags.
+        invoke(engine, ['-q', 'parse', '--project-dir', root], root,
+               environment(duckdb_environment, DBT_EMPTY='invalid', DBT_SAMPLE='invalid', DBT_EVENT_TIME_END='invalid'))
+
+
+def test_core_sample_validation_and_explicit_override_of_environment(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    for engine in ['dxt', 'core']:
+        for value in ['bad', '1 minute', '{start: 2024-01-01}', '{start: bad, end: 2024-01-02}']:
+            result = invoke(engine, ['-q', 'run', '--project-dir', root, '--sample', value], root, environment(duckdb_environment), ok=False)
+            assert result.returncode == 2, (engine, value, result.stdout, result.stderr)
+        invoke(engine, ['-q', 'run', '--project-dir', root, '-s', 'a', '--sample', '''{start: '2024-01-01', end: '2024-01-02'}'''], root,
+               environment(duckdb_environment, DBT_SAMPLE='invalid'))

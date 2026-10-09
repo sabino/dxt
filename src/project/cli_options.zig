@@ -9,9 +9,8 @@ pub const Prepared = struct { args: []const []const u8, options: types.Options }
 
 pub fn prepare(runtime: types.Runtime, args: []const []const u8) !Prepared {
     const a = runtime.allocator;
-    var options = try defaults(runtime);
     var expanded: std.ArrayList([]const u8) = .empty;
-    if (args.len == 0) return .{ .args = args, .options = options };
+    if (args.len == 0) return .{ .args = args, .options = try defaults(runtime, null) };
     try expanded.append(a, args[0]);
     for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--")) {
@@ -26,6 +25,7 @@ pub fn prepare(runtime: types.Runtime, args: []const []const u8) !Prepared {
             try expanded.append(a, arg[2..]);
         } else try expanded.append(a, alias(arg));
     }
+    var options = try defaults(runtime, commandHint(expanded.items));
     var before: std.ArrayList([]const u8) = .empty;
     var body: std.ArrayList([]const u8) = .empty;
     var command: ?[]const u8 = null;
@@ -87,15 +87,18 @@ pub fn prepare(runtime: types.Runtime, args: []const []const u8) !Prepared {
     return .{ .args = try normalized.toOwnedSlice(a), .options = options };
 }
 
-fn defaults(runtime: types.Runtime) !types.Options {
+fn defaults(runtime: types.Runtime, command: ?[]const u8) !types.Options {
     var options: types.Options = .{};
+    options.which = command orelse "";
     options.project_dir = environment(runtime, "DBT_PROJECT_DIR") orelse try defaultProjectDir(runtime);
     options.profiles_dir = environment(runtime, "DBT_PROFILES_DIR");
     options.profile = environment(runtime, "DBT_PROFILE");
     options.target = environment(runtime, "DBT_TARGET");
     options.target_path = environment(runtime, "DBT_TARGET_PATH");
-    if (environment(runtime, "DBT_RESOURCE_TYPES")) |value| options.resource_types = try splitTypes(runtime.allocator, value);
-    if (environment(runtime, "DBT_EXCLUDE_RESOURCE_TYPES")) |value| options.exclude_resource_types = try splitTypes(runtime.allocator, value);
+    if (eq(options.which, "ls")) {
+        if (environment(runtime, "DBT_RESOURCE_TYPES")) |value| options.resource_types = try splitTypes(runtime.allocator, value);
+        if (environment(runtime, "DBT_EXCLUDE_RESOURCE_TYPES")) |value| options.exclude_resource_types = try splitTypes(runtime.allocator, value);
+    }
     options.state = environment(runtime, "DBT_STATE") orelse environment(runtime, "DBT_ARTIFACT_STATE_PATH");
     options.defer_state = environment(runtime, "DBT_DEFER_STATE");
     options.indirect_selection = environment(runtime, "DBT_INDIRECT_SELECTION") orelse "eager";
@@ -103,7 +106,13 @@ fn defaults(runtime: types.Runtime) !types.Options {
     options.defer_enabled = try environmentBool(runtime, "DBT_DEFER", false);
     options.favor_state = try environmentBool(runtime, "DBT_FAVOR_STATE", false);
     options.fail_fast = try environmentBool(runtime, "DBT_FAIL_FAST", false);
-    options.full_refresh = try environmentBool(runtime, "DBT_FULL_REFRESH", false);
+    if (eq(options.which, "run") or eq(options.which, "build") or eq(options.which, "seed") or eq(options.which, "compile")) options.full_refresh = try environmentBool(runtime, "DBT_FULL_REFRESH", false);
+    if (eq(options.which, "run") or eq(options.which, "build") or eq(options.which, "snapshot") or eq(options.which, "compile")) options.empty = try environmentBool(runtime, "DBT_EMPTY", false);
+    if (eq(options.which, "run") or eq(options.which, "build")) {
+        options.sample = environment(runtime, "DBT_SAMPLE");
+        options.event_time_start = environment(runtime, "DBT_EVENT_TIME_START");
+        options.event_time_end = environment(runtime, "DBT_EVENT_TIME_END");
+    }
     options.quiet = try environmentBool(runtime, "DBT_QUIET", false);
     options.debug = try environmentBool(runtime, "DBT_DEBUG", false);
     options.write_json = try environmentBool(runtime, "DBT_WRITE_JSON", true);
@@ -281,6 +290,20 @@ fn alias(value: []const u8) []const u8 {
 fn globalValue(arg: []const u8) bool {
     return eq(arg, "--profile") or eq(arg, "--target") or eq(arg, "--state") or eq(arg, "--defer-state") or eq(arg, "--indirect-selection");
 }
+fn commandHint(args: []const []const u8) ?[]const u8 {
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (eq(arg, "--version")) return "version";
+        if (!std.mem.startsWith(u8, arg, "-")) return if (eq(arg, "list")) "ls" else arg;
+        if (globalValue(arg) or universalValue(arg) or valueOption(arg)) index += 1;
+    }
+    return null;
+}
+fn universalValue(arg: []const u8) bool {
+    for ([_][]const u8{ "--log-format", "--log-format-file", "--log-level", "--log-level-file", "--log-path", "--log-file-max-bytes", "--warn-error-options" }) |name| if (eq(arg, name)) return true;
+    return false;
+}
 fn splitTypes(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
     var types_list: std.ArrayList([]const u8) = .empty;
     var iterator = std.mem.tokenizeAny(u8, value, " ,\t");
@@ -302,7 +325,7 @@ fn globalKey(arg: []const u8) ?[]const u8 {
 fn valueOption(arg: []const u8) bool {
     // Value options consume their next token, even when it resembles a global
     // flag. This preserves YAML/JSON macro arguments and quoted scalar vars.
-    for ([_][]const u8{ "--project-dir", "--profiles-dir", "--profile", "--target", "--target-path", "--vars", "--state", "--defer-state", "--indirect-selection", "--threads", "--args", "--selector", "--host", "--port", "--output", "--resource-type", "--environment", "--from-environment", "--plan", "--workflow-config", "--start", "--end" }) |name| if (eq(arg, name)) return true;
+    for ([_][]const u8{ "--project-dir", "--profiles-dir", "--profile", "--target", "--target-path", "--vars", "--state", "--defer-state", "--indirect-selection", "--threads", "--args", "--selector", "--host", "--port", "--output", "--resource-type", "--environment", "--from-environment", "--plan", "--workflow-config", "--start", "--end", "--sample", "--event-time-start", "--event-time-end" }) |name| if (eq(arg, name)) return true;
     return false;
 }
 fn eq(lhs: []const u8, rhs: []const u8) bool {

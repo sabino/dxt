@@ -14,7 +14,9 @@ pub fn render(allocator: std.mem.Allocator, graph: *const types.Graph, current: 
     // Core unit fixture resolvers deliberately ignore input limits/sampling.
     if (graph.unit_fixture_relations) return result;
     if (graph.command_options.empty) {
-        const replacement = try std.fmt.allocPrint(allocator, "(select * from {s} where false limit 0) _dbt_limit_subq_{s}", .{ result, target_name });
+        const alias = try subqueryAlias(allocator, graph, "limit", target_name);
+        defer allocator.free(alias);
+        const replacement = try std.fmt.allocPrint(allocator, "(select * from {s} where false limit 0){s}", .{ result, alias });
         allocator.free(result);
         result = replacement;
     }
@@ -31,9 +33,18 @@ pub fn render(allocator: std.mem.Allocator, graph: *const types.Graph, current: 
     defer allocator.free(start);
     const end = try formatSampleTimestamp(allocator, window.end);
     defer allocator.free(end);
-    const replacement = try std.fmt.allocPrint(allocator, "(select * from {s} where {s} >= '{s}+00:00' and {s} < '{s}+00:00') _dbt_et_filter_subq_{s}", .{ result, field.string, start, field.string, end, target_name });
+    const alias = try subqueryAlias(allocator, graph, "et_filter", target_name);
+    defer allocator.free(alias);
+    const replacement = try std.fmt.allocPrint(allocator, "(select * from {s} where {s} >= '{s}+00:00' and {s} < '{s}+00:00'){s}", .{ result, field.string, start, field.string, end, alias });
     allocator.free(result);
     return replacement;
+}
+
+fn subqueryAlias(allocator: std.mem.Allocator, graph: *const types.Graph, namespace: []const u8, target_name: []const u8) ![]const u8 {
+    // dbt-duckdb 1.9.6 DuckDBRelation.require_alias=false; PostgreSQL inherits
+    // BaseRelation.require_alias=true and its deterministic namespace alias.
+    if (std.mem.eql(u8, graph.adapter_type, "duckdb")) return allocator.dupe(u8, "");
+    return std.fmt.allocPrint(allocator, " _dbt_{s}_subq_{s}", .{ namespace, target_name });
 }
 
 /// Click's SAMPLE type accepts a YAML object or N hour/day/month/year(s).
@@ -124,7 +135,7 @@ pub fn formatSampleTimestamp(allocator: std.mem.Allocator, value: i96) ![]const 
 
 test "Core input limits wrap sampling outside the empty relation and ignore unit fixtures" {
     const allocator = std.testing.allocator;
-    var graph = types.Graph{ .allocator = allocator, .project_name = "example", .command_options = .{ .empty = true, .sample_window = .{ .start = try parseDate("2024-01-01", false), .end = try parseDate("2024-01-02", false) } } };
+    var graph = types.Graph{ .allocator = allocator, .project_name = "example", .adapter_type = "postgres", .command_options = .{ .empty = true, .sample_window = .{ .start = try parseDate("2024-01-01", false), .end = try parseDate("2024-01-02", false) } } };
     var node = types.Node{ .package_name = "example", .unique_id = "model.example.b", .name = "b", .path = "b.sql", .original_file_path = "models/b.sql", .raw_code = "" };
     var config = try std.json.parseFromSlice(std.json.Value, allocator, "{\"event_time\":\"occurred_at\"}", .{});
     defer config.deinit();

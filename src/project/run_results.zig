@@ -219,6 +219,26 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
         try writer.print("{d}", .{threads});
     }
     try writer.print(",\"full_refresh\":{s}", .{if (opts.full_refresh) "true" else "false"});
+    if (std.mem.eql(u8, opts.which, "run") or std.mem.eql(u8, opts.which, "build") or std.mem.eql(u8, opts.which, "compile") or std.mem.eql(u8, opts.which, "snapshot")) try writer.print(",\"empty\":{s}", .{if (opts.empty) "true" else "false"});
+    if (opts.sample_window) |window| {
+        try writer.writeAll(",\"sample\":{\"start\":");
+        inline for (.{ "start", "end" }) |key| {
+            if (std.mem.eql(u8, key, "end")) try writer.writeAll(",\"end\":");
+            const timestamp = try @import("input_relations.zig").formatSampleTimestamp(allocator, @field(window, key));
+            defer allocator.free(timestamp);
+            const zoned = try std.fmt.allocPrint(allocator, "{s}T{s}+00:00", .{ timestamp[0..10], timestamp[11..] });
+            defer allocator.free(zoned);
+            try json.string(writer, zoned);
+        }
+        try writer.writeByte('}');
+    } else if (opts.sample) |value| {
+        try writer.writeAll(",\"sample\":");
+        try json.string(writer, value);
+    }
+    inline for (.{ "event_time_start", "event_time_end" }) |key| if (@field(opts, key)) |value| {
+        try writer.print(",\"{s}\":", .{key});
+        try json.string(writer, value);
+    };
     try writer.print(",\"fail_fast\":{s},\"log_format\":", .{if (opts.fail_fast) "true" else "false"});
     try json.string(writer, @tagName(opts.log_format));
     try writer.print(",\"quiet\":{s},\"write_json\":{s},\"warn_error\":{s},\"version_check\":{s}", .{ if (opts.quiet) "true" else "false", if (opts.write_json) "true" else "false", if (opts.warn_error) "true" else "false", if (opts.version_check) "true" else "false" });
@@ -240,6 +260,7 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
     try json.string(writer, opts.indirect_selection);
     if (std.mem.eql(u8, opts.which, "generate")) {
         try writer.print(",\"static\":{s},\"compile\":{s}", .{ if (opts.docs_static) "true" else "false", if (opts.docs_compile) "true" else "false" });
+        try writer.print(",\"empty_catalog\":{s}", .{if (opts.docs_empty_catalog) "true" else "false"});
     }
     if (std.mem.eql(u8, opts.which, "run-operation")) {
         try writer.writeAll(",\"macro\":");
