@@ -86,7 +86,8 @@ pub fn columnValue(allocator: std.mem.Allocator, definition: ColumnDef) !Value {
         .{ .key = "numeric_precision", .value = try @import("config_value.zig").toExpression(allocator, definition.numeric_precision) },
         .{ .key = "numeric_scale", .value = try @import("config_value.zig").toExpression(allocator, definition.numeric_scale) },
     });
-    for ([_][]const u8{ "is_string", "is_numeric", "is_integer", "is_float", "string_size", "can_expand_to", "literal" }) |method| try entries.append(allocator, .{
+    try entries.append(allocator, .{ .key = "fields", .value = .{ .list = try structFields(allocator, definition) } });
+    for ([_][]const u8{ "is_string", "is_numeric", "is_integer", "is_float", "is_number", "is_struct", "flatten", "string_size", "can_expand_to", "literal" }) |method| try entries.append(allocator, .{
         .key = method,
         .value = .{ .callable = try std.fmt.allocPrint(allocator, "__dxt_column:{s}:{s}", .{ method, serialized }) },
     });
@@ -118,6 +119,23 @@ fn callColumn(allocator: std.mem.Allocator, adapter_type: []const u8, name: []co
     const boundary = std.mem.indexOfScalarPos(u8, name, prefix.len, ':') orelse return error.InvalidColumn;
     const method = name[prefix.len..boundary];
     const definition = (try std.json.parseFromSlice(ColumnDef, allocator, name[boundary + 1 ..], .{})).value;
+    if (std.mem.eql(u8, method, "is_struct")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        return .{ .boolean = isStruct(definition) };
+    }
+    if (std.mem.eql(u8, method, "flatten")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        return try flattenColumn(allocator, definition);
+    }
+    if (std.mem.eql(u8, method, "is_number")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        const number_methods = [_][]const u8{ "is_integer", "is_numeric", "is_float" };
+        for (number_methods) |numeric| {
+            const callable = try std.fmt.allocPrint(allocator, "__dxt_column:{s}:{s}", .{ numeric, name[boundary + 1 ..] });
+            if ((try callColumn(allocator, adapter_type, callable, &.{})).?.truthy()) return .{ .boolean = true };
+        }
+        return .{ .boolean = false };
+    }
     if (std.mem.eql(u8, method, "literal")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
         return .{ .string = try std.fmt.allocPrint(allocator, "{s}::{s}", .{ try args[0].value.text(allocator), try columnDataType(allocator, definition) }) };
@@ -146,6 +164,55 @@ fn callColumn(allocator: std.mem.Allocator, adapter_type: []const u8, name: []co
         return .{ .boolean = false };
     }
     return error.UnsupportedColumnMethod;
+}
+
+fn isStruct(definition: ColumnDef) bool {
+    return std.mem.eql(u8, definition.adapter_type, "duckdb") and definition.dtype.len >= 6 and std.ascii.eqlIgnoreCase(definition.dtype[0..6], "struct");
+}
+
+fn structFields(allocator: std.mem.Allocator, definition: ColumnDef) anyerror![]Value {
+    if (!isStruct(definition) or definition.dtype.len < 8 or definition.dtype[6] != '(' or !std.mem.endsWith(u8, definition.dtype, ")")) return try expression.allocateValues(allocator, 0);
+    const text = definition.dtype[7 .. definition.dtype.len - 1];
+    var fields: std.ArrayList(Value) = .empty;
+    var depth: usize = 0;
+    var start: usize = 0;
+    for (text, 0..) |byte, index| {
+        if (byte == '(') depth += 1;
+        if (byte == ')') {
+            if (depth == 0) return error.InvalidColumn;
+            depth -= 1;
+        }
+        if (byte == ',' and depth == 0) {
+            try fields.append(allocator, try structField(allocator, text[start..index]));
+            start = index + 1;
+        }
+    }
+    if (depth != 0) return error.InvalidColumn;
+    if (text.len != 0) try fields.append(allocator, try structField(allocator, text[start..]));
+    return if (fields.items.len == 0) try expression.allocateValues(allocator, 0) else try fields.toOwnedSlice(allocator);
+}
+
+fn structField(allocator: std.mem.Allocator, raw: []const u8) !Value {
+    const text = std.mem.trim(u8, raw, " \t\r\n");
+    const boundary = std.mem.indexOfScalar(u8, text, ' ') orelse return error.InvalidColumn;
+    return try columnValue(allocator, .{ .column = text[0..boundary], .dtype = text[boundary + 1 ..] });
+}
+
+pub fn flattenColumn(allocator: std.mem.Allocator, definition: ColumnDef) anyerror!Value {
+    if (!isStruct(definition)) return .{ .list = try allocator.dupe(Value, &.{try columnValue(allocator, definition)}) };
+    var columns: std.ArrayList(Value) = .empty;
+    for (try structFields(allocator, definition)) |field| {
+        const serialized = field.attribute("__dxt_column");
+        const child = (try std.json.parseFromSlice(ColumnDef, allocator, serialized.string, .{})).value;
+        const flattened = try flattenColumn(allocator, child);
+        for (flattened.list) |column| {
+            const payload = column.attribute("__dxt_column");
+            var leaf = (try std.json.parseFromSlice(ColumnDef, allocator, payload.string, .{})).value;
+            leaf.column = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ definition.column, leaf.column });
+            try columns.append(allocator, try columnValue(allocator, leaf));
+        }
+    }
+    return .{ .list = if (columns.items.len == 0) try expression.allocateValues(allocator, 0) else try columns.toOwnedSlice(allocator) };
 }
 
 fn optional(value: ?[]const u8) Value {

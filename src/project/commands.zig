@@ -216,6 +216,14 @@ pub const OperationHost = struct {
     fn call(raw: *anyopaque, name: []const u8, args: []const expression.Argument, allocator: std.mem.Allocator) anyerror!expression.Value {
         const self: *OperationHost = @ptrCast(@alignCast(raw));
         if (try @import("adapter_context.zig").call(self.values.allocator(), self.graph, &self.adapter_state, .{ .context = self, .render = renderAdapterMacro }, name, args)) |value| return value;
+        if (std.mem.eql(u8, name, "adapter.get_column_schema_from_query")) {
+            const sql = argument(args, "sql", 0) orelse return error.InvalidJinjaArguments;
+            if (sql != .string) return error.InvalidJinjaArguments;
+            try self.ensureSession();
+            var runtime = self.runtime;
+            runtime.adapter_session = self.currentSession();
+            return try @import("query_schema.zig").columns(self.values.allocator(), runtime, self.graph, self.db_path, sql.string);
+        }
         if (std.mem.eql(u8, name, "log") or std.mem.eql(u8, name, "print")) {
             const message = argument(args, "msg", 0) orelse return error.InvalidJinjaArguments;
             const is_print = std.mem.eql(u8, name, "print");

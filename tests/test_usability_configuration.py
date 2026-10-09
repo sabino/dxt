@@ -734,6 +734,66 @@ def test_postgres_docs_catalog_rejects_other_database(tmp_path, configuration_or
     pair.invoke('docs generate', success=False)
 
 
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_native_query_schema_columns_match_core_adapter_types(tmp_path, configuration_oracle, request, adapter):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, adapter)
+    pair.write('models/marts/query.sql', """{% if execute %}
+{% set columns = adapter.get_column_schema_from_query("select 1::smallint as small_number, 1::bigint as big_number, 1::decimal(10,2) as amount, 1::real as approximate, 'hello'::varchar(24) as label, true as enabled, '2024-01-02'::date as day, '2024-01-02 12:30:00'::timestamp as moment") %}
+select '{{ columns | map(attribute='name') | join(',') }}' as names,
+       '{{ columns | map(attribute='dtype') | join(',') }}' as dtypes,
+       '{{ columns | map(attribute='data_type') | join(',') }}' as data_types
+{% else %}select 0{% endif %}
+""")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.query']['compiled_code'] == expected['nodes']['model.configuration_fixture.query']['compiled_code']
+
+
+def test_native_duckdb_query_schema_flattens_struct_columns_like_core(tmp_path, configuration_oracle):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/query.sql', """{% if execute %}
+{% set columns = adapter.get_column_schema_from_query("select {'name': 'one', 'nested': {'number': 2::integer, 'amount': 2::decimal(10,2)}} as payload") %}
+select '{{ columns | map(attribute='name') | join(',') }}' as names,
+       '{{ columns | map(attribute='dtype') | join(',') }}' as types
+{% else %}select 0{% endif %}
+""")
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.query']['compiled_code'] == expected['nodes']['model.configuration_fixture.query']['compiled_code']
+
+
+def test_native_postgres_expand_target_columns_executes_and_preserves_rows(tmp_path, configuration_oracle, request):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, 'postgres')
+    import psycopg2
+    from psycopg2 import sql
+    server = request.getfixturevalue('configuration_postgres')
+    schemas = ['expand_native', 'expand_core']
+    for project, schema in zip(pair.projects, schemas):
+        profile = project / 'profiles.yml'
+        profile.write_text(profile.read_text().replace('schema: main', 'schema: ' + schema))
+        with psycopg2.connect(server.get_uri()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql.SQL('create schema {}').format(sql.Identifier(schema)))
+                cursor.execute(sql.SQL('create table {}.expand_from (label varchar(20)); create table {}.expand_to (label varchar(5)); insert into {}.expand_to values (%s)').format(sql.Identifier(schema), sql.Identifier(schema), sql.Identifier(schema)), ('short',))
+    pair.write('macros/expand.sql', """{% macro expand_columns() %}
+{% set from_relation = api.Relation.create(database=target.database, schema=target.schema, identifier='expand_from') %}
+{% set to_relation = api.Relation.create(database=target.database, schema=target.schema, identifier='expand_to') %}
+{% do adapter.expand_target_column_types(from_relation, to_relation) %}
+{% do adapter.commit() %}
+{% endmacro %}
+""")
+    pair.invoke('run-operation expand_columns')
+    observations = []
+    with psycopg2.connect(server.get_uri()) as connection:
+        with connection.cursor() as cursor:
+            for schema in schemas:
+                cursor.execute('select character_maximum_length from information_schema.columns where table_schema=%s and table_name=%s and column_name=%s', (schema, 'expand_to', 'label'))
+                length = cursor.fetchone()[0]
+                cursor.execute(sql.SQL('select label from {}.expand_to').format(sql.Identifier(schema)))
+                observations.append((length, cursor.fetchall()))
+    assert observations[0] == observations[1] == (20, [('short',)])
+
+
 def test_postgres_catalog_respects_authored_dispatch(tmp_path, configuration_oracle, request):
     pair = ConfigurationPair(tmp_path, configuration_oracle)
     configure_adapter(pair, request, 'postgres')

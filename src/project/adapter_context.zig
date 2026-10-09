@@ -27,7 +27,7 @@ fn is(name: []const u8, method: []const u8) bool {
 }
 
 pub fn parseReplacement(allocator: std.mem.Allocator, name: []const u8) !?Value {
-    for ([_][]const u8{ "get_columns_in_relation", "get_missing_columns" }) |method| if (is(name, method)) return .{ .list = try expression.allocateValues(allocator, 0) };
+    for ([_][]const u8{ "get_columns_in_relation", "get_missing_columns", "get_column_schema_from_query" }) |method| if (is(name, method)) return .{ .list = try expression.allocateValues(allocator, 0) };
     for ([_][]const u8{ "get_relation", "drop_relation", "truncate_relation", "rename_relation", "create_schema", "drop_schema", "expand_target_column_types" }) |method| if (is(name, method)) return .none;
     if (is(name, "check_schema_exists")) return .{ .boolean = false };
     return null;
@@ -45,6 +45,30 @@ pub fn call(allocator: std.mem.Allocator, graph: *const types.Graph, state: *Sta
     if (is(name, "get_columns_in_relation")) {
         const relation = try relationArg(args, "relation", 0);
         return try executor.render(executor.context, allocator, "get_columns_in_relation", &.{.{ .name = "relation", .value = relation }});
+    }
+    if (is(name, "expand_target_column_types")) {
+        const from = try relationArg(args, "from_relation", 0);
+        const to = try relationArg(args, "to_relation", 1);
+        const source = try executor.render(executor.context, allocator, "get_columns_in_relation", &.{.{ .name = "relation", .value = from }});
+        const target = try executor.render(executor.context, allocator, "get_columns_in_relation", &.{.{ .name = "relation", .value = to }});
+        if (source != .list or target != .list) return error.InvalidAdapterIntrospection;
+        for (source.list) |reference| {
+            const column_name = reference.attribute("name");
+            if (column_name != .string) return error.InvalidAdapterIntrospection;
+            for (target.list) |column| {
+                const target_name = column.attribute("name");
+                if (target_name != .string or !std.mem.eql(u8, column_name.string, target_name.string)) continue;
+                const method = column.attribute("can_expand_to");
+                if (method != .callable) return error.InvalidAdapterIntrospection;
+                const expand = (try contexts.call(allocator, graph.adapter_type, method.callable, &.{.{ .value = reference }})) orelse return error.InvalidAdapterIntrospection;
+                if (!expand.truthy()) continue;
+                const size_method = reference.attribute("string_size");
+                const size = (try contexts.call(allocator, graph.adapter_type, size_method.callable, &.{})).?;
+                const new_type = try std.fmt.allocPrint(allocator, "character varying({s})", .{try size.text(allocator)});
+                _ = try executor.render(executor.context, allocator, "alter_column_type", &.{ .{ .name = "relation", .value = to }, .{ .name = "column_name", .value = column_name }, .{ .name = "new_column_type", .value = .{ .string = new_type } } });
+            }
+        }
+        return .none;
     }
     if (is(name, "get_missing_columns")) {
         const from = try relationArg(args, "from_relation", 0);
