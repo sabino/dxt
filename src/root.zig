@@ -3,6 +3,11 @@ pub const DuckDBPool = @import("project/native_duckdb.zig").Pool;
 const Io = std.Io;
 const project = @import("project.zig");
 const dependencies = @import("project/dependencies.zig");
+pub const yaml = @import("project/yaml.zig");
+
+test "shared native YAML reader is available" {
+    _ = yaml;
+}
 
 pub const version = "0.0.0";
 pub const Runtime = project.Runtime;

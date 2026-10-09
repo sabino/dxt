@@ -9,6 +9,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
     });
+    // libyaml handles YAML token syntax. The native Zig yaml module owns the
+    // document model, tag resolution, aliases/merges, diagnostics and lifetimes.
+    mod.addIncludePath(b.path("vendor/libyaml/include"));
+    mod.addCSourceFiles(.{
+        .files = &.{ "vendor/libyaml/src/api.c", "vendor/libyaml/src/reader.c", "vendor/libyaml/src/scanner.c", "vendor/libyaml/src/parser.c" },
+        .flags = &.{ "-std=gnu99", "-DYAML_VERSION_STRING=\"0.2.5\"", "-DYAML_VERSION_MAJOR=0", "-DYAML_VERSION_MINOR=2", "-DYAML_VERSION_PATCH=5", b.fmt("-ffile-prefix-map={s}=.", .{b.build_root.path orelse "."}) },
+    });
 
     const exe = b.addExecutable(.{
         .name = "dxt",

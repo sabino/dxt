@@ -1,0 +1,6 @@
+https://github.com/yaml/libyaml
+Version: 0.2.5
+Commit: 2c891fc7a770e8ba2fec34fc6b545c672beb37e6
+Tag object: 65d19898a301b817261003b00d1dcef00895a7b4
+Only the event scanner/parser API and its headers are compiled.
+Document composition and scalar/tag construction are implemented in Zig.
