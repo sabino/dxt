@@ -227,6 +227,16 @@ pub fn compileModel(allocator: std.mem.Allocator, graph: *const Graph, node: *co
     return try compileModelBody(allocator, graph, node);
 }
 
+/// Render a runtime hook in the resource's own typed compilation context.
+pub fn renderTextForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, text: []const u8) ![]const u8 {
+    var context = CompileContext.init(allocator, graph, node);
+    defer context.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try renderRange(&context, text, 0, text.len, &out);
+    return try out.toOwnedSlice(allocator);
+}
+
 /// Source freshness SQL is rendered at execution, when `this` is the source
 /// relation and variables/macros have their normal package scope.
 pub fn renderSourceExpression(allocator: std.mem.Allocator, graph: *const Graph, source: *const SourceDef, text: []const u8) ![]const u8 {
@@ -683,7 +693,7 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                 const values = try iterationValues(context.value_arena.allocator(), iterable);
                 for (values, 0..) |value, loop_index| {
                     context.pushScope();
-                    try context.setValue(block.variable_name, value);
+                    try assignValue(context, block.variable_name, value);
                     const entries = try context.value_arena.allocator().alloc(native_expr.Entry, 6);
                     entries[0] = .{ .key = "index", .value = try native_expr.integerValue(context.value_arena.allocator(), loop_index + 1) };
                     entries[1] = .{ .key = "index0", .value = try native_expr.integerValue(context.value_arena.allocator(), loop_index) };
@@ -877,6 +887,11 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         return .{ .list = values };
     }
     if (std.mem.eql(u8, path, "execute")) return .{ .boolean = context.parse_node == null };
+    if (std.mem.eql(u8, path, "sql") or std.mem.eql(u8, path, "compiled_code")) return if (context.node.compiled_code) |sql| .{ .string = sql } else .undefined;
+    if (std.mem.eql(u8, path, "pre_hooks") or std.mem.eql(u8, path, "post_hooks")) {
+        const config = try @import("canonical_manifest_config.zig").node(allocator, context.node);
+        return try valueFromJson(allocator, @import("config_value.zig").get(config, if (std.mem.eql(u8, path, "pre_hooks")) "pre-hook" else "post-hook").?);
+    }
     if (std.mem.eql(u8, path, "dbt_version")) return .{ .string = @import("invocation.zig").compatible_core };
     if (std.mem.eql(u8, path, "flags") or std.mem.startsWith(u8, path, "flags.")) {
         const flags = try flagsValue(allocator, context.graph);
@@ -1070,6 +1085,22 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         @import("compile_diagnostics.zig").capture(context.node.original_file_path, context.node.name, try args[0].value.text(allocator));
         return error.JinjaCompilerError;
     }
+    if (std.mem.eql(u8, name, "render")) {
+        if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
+        var rendered: std.ArrayList(u8) = .empty;
+        defer rendered.deinit(context.allocator);
+        try renderRange(context, args[0].value.string, 0, args[0].value.string.len, &rendered);
+        return .{ .string = try allocator.dupe(u8, rendered.items) };
+    }
+    if (std.mem.eql(u8, name, "tojson")) {
+        if (args.len < 1 or args.len > 2) return error.InvalidJinjaArguments;
+        return .{ .string = @import("context_json.zig").stringify(allocator, args[0].value) catch return if (args.len == 2) args[1].value else .none };
+    }
+    if (std.mem.eql(u8, name, "fromjson")) {
+        if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, args[0].value.string, .{}) catch return if (args.len == 2) args[1].value else .none;
+        return try valueFromJson(allocator, parsed.value);
+    }
     if (context.parse_node != null) {
         if (try @import("adapter_context.zig").parseReplacement(allocator, name)) |value| return value;
         if (std.mem.eql(u8, name, "run_query") or std.mem.eql(u8, name, "load_result")) return .none;
@@ -1176,8 +1207,9 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     const open_start = std.mem.indexOf(u8, macro.macro_sql, "{%") orelse return error.UnsupportedJinja;
     const open_end = std.mem.indexOfPos(u8, macro.macro_sql, open_start + 2, "%}") orelse return error.UnsupportedJinja;
     const declaration = std.mem.trim(u8, macro.macro_sql[open_start + 2 .. open_end], " \t\r\n-");
-    const paren = std.mem.indexOfScalar(u8, declaration, '(') orelse return error.UnsupportedJinja;
-    const close = findMatchingParen(declaration, paren) orelse return error.UnsupportedJinja;
+    const materialization = std.mem.startsWith(u8, declaration, "materialization ");
+    const paren = if (materialization) declaration.len else std.mem.indexOfScalar(u8, declaration, '(') orelse return error.UnsupportedJinja;
+    const close = if (materialization) declaration.len else findMatchingParen(declaration, paren) orelse return error.UnsupportedJinja;
     var parameters: std.ArrayList(MacroParameter) = .empty;
     var offset = paren + 1;
     while (offset < close) {
@@ -1226,7 +1258,9 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     }
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(context.allocator);
-    const body_end = if (std.mem.startsWith(u8, declaration, "data_test "))
+    const body_end = if (materialization)
+        findEndGenericTestTag(macro.macro_sql, open_end + 2, "endmaterialization") orelse return error.UnsupportedJinja
+    else if (std.mem.startsWith(u8, declaration, "data_test "))
         findEndGenericTestTag(macro.macro_sql, open_end + 2, "enddata_test") orelse return error.UnsupportedJinja
     else if (std.mem.startsWith(u8, declaration, "test "))
         findEndGenericTestTag(macro.macro_sql, open_end + 2, "endtest") orelse return error.UnsupportedJinja
@@ -1795,15 +1829,19 @@ fn renderStatement(context: *CompileContext, span: []const u8) !void {
 }
 
 fn assignValue(context: *CompileContext, target: []const u8, value: native_expr.Value) anyerror!void {
-    if (std.mem.indexOfScalar(u8, target, ',')) |_| {
-        if (value != .list) return error.JinjaTypeError;
-        var names = std.mem.splitScalar(u8, target, ',');
+    const trimmed = std.mem.trim(u8, target, " \t\r\n");
+    if (trimmed.len >= 2 and trimmed[0] == '(' and findMatchingParen(trimmed, 0) == trimmed.len - 1) return try assignValue(context, trimmed[1 .. trimmed.len - 1], value);
+    if (expressionBoundary(trimmed, 0, trimmed.len) < trimmed.len) {
+        const items = try native_expr.iterableValues(context.value_arena.allocator(), value);
         var i: usize = 0;
-        while (names.next()) |name| : (i += 1) {
-            if (i >= value.list.len) return error.InvalidJinjaArguments;
-            try assignValue(context, std.mem.trim(u8, name, " \t"), value.list[i]);
+        var start: usize = 0;
+        while (start < trimmed.len) : (i += 1) {
+            const finish = expressionBoundary(trimmed, start, trimmed.len);
+            if (i >= items.len) return error.InvalidJinjaArguments;
+            try assignValue(context, std.mem.trim(u8, trimmed[start..finish], " \t\r\n"), items[i]);
+            start = finish + 1;
         }
-        if (i != value.list.len) return error.InvalidJinjaArguments;
+        if (i != items.len) return error.InvalidJinjaArguments;
         return;
     }
     if (std.mem.lastIndexOfScalar(u8, target, '.')) |dot| {
@@ -2054,10 +2092,18 @@ fn parseForBlock(sql: []const u8, body_start: usize, span: []const u8) !ForBlock
     var index: usize = "for".len;
     index = jinja.skipWs(span, index);
     const variable_start = index;
-    if (index >= span.len or !jinja.isIdentStart(span[index])) return error.UnsupportedJinja;
-    index += 1;
-    while (index < span.len and jinja.isIdentChar(span[index])) index += 1;
-    const variable_name = span[variable_start..index];
+    var depth: usize = 0;
+    while (index < span.len) : (index += 1) {
+        if (depth == 0 and index > variable_start and std.ascii.isWhitespace(span[index - 1]) and std.mem.startsWith(u8, span[index..], "in") and (index + 2 == span.len or !jinja.isIdentChar(span[index + 2]))) break;
+        const byte = span[index];
+        if (byte == '(') depth += 1 else if (byte == ')') {
+            if (depth == 0) return error.UnsupportedJinja;
+            depth -= 1;
+        } else if (!jinja.isIdentChar(byte) and byte != ',' and !std.ascii.isWhitespace(byte)) return error.UnsupportedJinja;
+    }
+    if (depth != 0) return error.UnsupportedJinja;
+    const variable_name = std.mem.trim(u8, span[variable_start..index], " \t\r\n");
+    if (variable_name.len == 0) return error.UnsupportedJinja;
     index = jinja.skipWs(span, index);
     if (index + "in".len > span.len or !std.mem.eql(u8, span[index .. index + "in".len], "in")) return error.UnsupportedJinja;
     const before_ok = index == 0 or !jinja.isIdentChar(span[index - 1]);

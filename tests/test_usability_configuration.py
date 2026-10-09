@@ -810,6 +810,19 @@ select '{{ relation.get('metadata').get('type') }}' as kind,
     assert actual['nodes']['model.configuration_fixture.relation_metadata']['compiled_code'] == expected['nodes']['model.configuration_fixture.relation_metadata']['compiled_code']
 
 
+@pytest.mark.parametrize('template', [
+    "select '{{ tojson({'integer': 9007199254740993, 'float': 1.0, 'label': 'café🙂', 'array': (True, None)}) }}' as value",
+    "select '{{ fromjson('{\"values\": [1, 2]}')['values'] | join(',') }}' as value",
+    "{% set x,y = (1,2) %}select '{{ x+y }}{% for a,b in zip((1,2),(3,4)) %}{{ a+b }}{% endfor %}' as value",
+    "select '{{ render(\"{{ model.name }}:{{ config.get('materialized') }}\") }}' as value",
+])
+def test_native_hook_context_rendering_and_tuple_binding_match_core(tmp_path, configuration_oracle, template):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/rendered.sql', template)
+    actual, expected = pair.invoke('compile')
+    assert actual['nodes']['model.configuration_fixture.rendered']['compiled_code'] == expected['nodes']['model.configuration_fixture.rendered']['compiled_code']
+
+
 def test_postgres_catalog_respects_authored_dispatch(tmp_path, configuration_oracle, request):
     pair = ConfigurationPair(tmp_path, configuration_oracle)
     configure_adapter(pair, request, 'postgres')
