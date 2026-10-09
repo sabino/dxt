@@ -61,7 +61,10 @@ pub fn graphDefaultTarget(runtime: Runtime, project_dir: []const u8) ![]const u8
 }
 
 pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Graph {
-    var config = try loadProjectConfig(runtime, options.project_dir);
+    var cli_vars: std.ArrayList(types.VarEntry) = .empty;
+    defer types.deinitVars(runtime.allocator, &cli_vars);
+    if (options.vars) |text| try parseVarsText(runtime.allocator, text, &cli_vars);
+    var config = try project_config.loadProjectConfigWithContext(runtime, options.project_dir, cli_vars.items, .null);
     defer deinitProjectConfig(runtime.allocator, &config);
 
     var graph = Graph{
@@ -79,8 +82,13 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         graph.database_path = identity.database_path;
         graph.database_path_base = identity.database_path_base;
         graph.connection_info = identity.connection_info;
+        graph.target_context = identity.target_context;
+        graph.target_threads = identity.threads;
         graph.profile_name = identity.profile_name;
         graph.target_name = identity.target_name;
+        const rendered_config = try project_config.loadProjectConfigWithContext(runtime, options.project_dir, cli_vars.items, graph.target_context);
+        deinitProjectConfig(runtime.allocator, &config);
+        config = rendered_config;
     }
     try appendDispatchConfigsToGraph(runtime.allocator, &graph, config.dispatch_configs.items);
     try appendSourceProjectConfigsToGraph(runtime.allocator, &graph, config.source_project_configs.items);
@@ -89,6 +97,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         .value = entry.value,
         .typed_value = if (entry.typed_value) |value| try config_value.clone(runtime.allocator, value) else null,
         .package_name = entry.package_name,
+        .priority = entry.priority,
     });
     if (options.vars) |vars_text| {
         try parseVarsText(runtime.allocator, vars_text, &graph.vars);
@@ -154,8 +163,6 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         }
     }
 
-    try applyProjectModelPathConfigs(&graph, config.model_path_configs.items, true, null);
-
     for (config.seed_paths.items) |seed_path| {
         var seed_files: std.ArrayList([]const u8) = .empty;
         defer seed_files.deinit(runtime.allocator);
@@ -189,6 +196,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     try loadSingularTests(runtime, options.project_dir, config.name, config.test_paths.items, callbacks, &graph);
     try loadSnapshots(runtime, options.project_dir, config.name, config.snapshot_paths.items, callbacks, &graph);
     if (config.snapshot_config_text) |text| try graph.snapshot_project_configs.append(runtime.allocator, .{ .package_name = config.name, .text = text });
+    try applyProjectModelPathConfigs(&graph, config.model_path_configs.items, true, null);
 
     try rejectDuplicateMacroProperties(&graph);
     try applyMacroProperties(&graph);
@@ -271,11 +279,16 @@ fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, callbac
     sortStrings(package_dirs.items);
 
     for (package_dirs.items) |package_dir| {
-        var package_config = loadProjectConfig(runtime, package_dir) catch |err| switch (err) {
+        var package_config = project_config.loadProjectConfigWithContext(runtime, package_dir, graph.vars.items, graph.target_context) catch |err| switch (err) {
             error.MissingProjectFile => continue,
             else => return err,
         };
         defer deinitProjectConfig(runtime.allocator, &package_config);
+
+        for (package_config.vars.items) |entry| {
+            const scope = entry.package_name orelse package_config.name;
+            try graph.vars.append(runtime.allocator, .{ .name = entry.name, .value = entry.value, .typed_value = if (entry.typed_value) |v| try config_value.clone(runtime.allocator, v) else null, .package_name = scope, .priority = if (entry.package_name == null) 10 else 20 });
+        }
 
         try loadProjectMacros(runtime, package_dir, package_config.name, package_config.macro_paths.items, true, callbacks, graph);
     }
@@ -293,7 +306,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
     sortStrings(package_dirs.items);
 
     for (package_dirs.items) |package_dir| {
-        var package_config = loadProjectConfig(runtime, package_dir) catch |err| switch (err) {
+        var package_config = project_config.loadProjectConfigWithContext(runtime, package_dir, graph.vars.items, graph.target_context) catch |err| switch (err) {
             error.MissingProjectFile => continue,
             else => return err,
         };

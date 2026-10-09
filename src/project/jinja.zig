@@ -304,6 +304,36 @@ pub fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph
     try scanRange(allocator, sql, 0, sql.len, node, graph, &context);
 }
 
+/// Literal braces and delimiter-like strings inside expressions belong to the
+/// expression lexer. Only a delimiter outside strings and containers ends it.
+pub fn findExpressionClose(text: []const u8, start: usize) ?usize {
+    var index = start;
+    var quote: ?u8 = null;
+    var depth: usize = 0;
+    while (index < text.len) : (index += 1) {
+        const byte = text[index];
+        if (quote) |q| {
+            if (byte == '\\') {
+                index += 1;
+                continue;
+            }
+            if (byte == q) quote = null;
+            continue;
+        }
+        if (byte == '\'' or byte == '"') {
+            quote = byte;
+            continue;
+        }
+        if (byte == '}' and depth == 0 and index + 1 < text.len and text[index + 1] == '}') return index;
+        if (byte == '(' or byte == '[' or byte == '{') depth += 1;
+        if (byte == ')' or byte == ']' or byte == '}') {
+            if (depth == 0) return null;
+            depth -= 1;
+        }
+    }
+    return null;
+}
+
 pub fn renderParseExpression(allocator: std.mem.Allocator, span: []const u8, node: *Node, graph: ?*const Graph) ![]const u8 {
     var scan_context = ScanContext{ .allocator = allocator };
     defer scan_context.deinit();
@@ -330,7 +360,7 @@ fn scanRange(allocator: std.mem.Allocator, sql: []const u8, start: usize, range_
         }
         const tag_kind = sql[index + 1];
         const close = if (tag_kind == '{')
-            std.mem.indexOfPos(u8, sql, index + 2, "}}")
+            findExpressionClose(sql, index + 2)
         else if (tag_kind == '%')
             std.mem.indexOfPos(u8, sql, index + 2, "%}")
         else
@@ -856,7 +886,7 @@ pub fn scanMacroSqlForKnownMacroCalls(allocator: std.mem.Allocator, sql: []const
             continue;
         }
         const close = if (sql[index + 1] == '{')
-            std.mem.indexOfPos(u8, sql, index + 2, "}}")
+            findExpressionClose(sql, index + 2)
         else if (sql[index + 1] == '%')
             std.mem.indexOfPos(u8, sql, index + 2, "%}")
         else

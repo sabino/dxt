@@ -43,6 +43,25 @@ pub fn normalizeKey(key: []const u8) []const u8 {
     return key;
 }
 
+pub fn rebuild(allocator: std.mem.Allocator, node: *types.Node) !void {
+    var effective: std.json.Value = .null;
+    errdefer values.deinit(allocator, &effective);
+    try merge(allocator, &effective, node.project_config);
+    try merge(allocator, &effective, node.property_config);
+    try merge(allocator, &effective, node.inline_config);
+    try merge(allocator, &effective, node.root_override_config);
+    values.deinit(allocator, &node.effective_config);
+    node.effective_config = effective;
+    var raw: std.json.Value = .null;
+    try values.overlay(allocator, &raw, node.project_raw_config);
+    try values.overlay(allocator, &raw, node.property_raw_config);
+    try values.overlay(allocator, &raw, node.inline_config);
+    try values.overlay(allocator, &raw, node.root_override_raw_config);
+    values.deinit(allocator, &node.raw_config);
+    node.raw_config = raw;
+    try apply(allocator, node);
+}
+
 /// dbt appends hooks and tags while dict configs merge their keys. Remaining
 /// fields use the nearest resource configuration, including explicit nulls.
 pub fn merge(allocator: std.mem.Allocator, target: *std.json.Value, source: std.json.Value) !void {

@@ -579,7 +579,7 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
             index += 1;
             continue;
         };
-        const close = std.mem.indexOfPos(u8, sql, index + 2, close_marker) orelse return error.UnsupportedJinja;
+        const close = (if (tag_kind == '{') jinja.findExpressionClose(sql, index + 2) else std.mem.indexOfPos(u8, sql, index + 2, close_marker)) orelse return error.UnsupportedJinja;
         if (close + 2 > end_index) return error.UnsupportedJinja;
         const span = tagContent(sql, index, close);
         if (tag_kind == '{') {
@@ -808,7 +808,11 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     if (std.mem.eql(u8, path, "model.config.materialized")) return .{ .string = context.node.materialized };
     if (std.mem.eql(u8, path, "this")) return .{ .string = try relationNameForNode(allocator, context.graph, context.node) };
     if (std.mem.startsWith(u8, path, "this.")) return .{ .string = try renderThisAttribute(allocator, context.graph, context.node, path[5..]) };
-    if (std.mem.startsWith(u8, path, "target.")) return .{ .string = try renderTargetAttribute(allocator, context.graph, path[7..]) };
+    if (std.mem.eql(u8, path, "target") and context.graph.target_context != .null) return try valueFromJson(allocator, context.graph.target_context);
+    if (std.mem.startsWith(u8, path, "target.")) {
+        if (@import("config_value.zig").get(context.graph.target_context, path[7..])) |value| return try valueFromJson(allocator, value);
+        return .{ .string = try renderTargetAttribute(allocator, context.graph, path[7..]) };
+    }
     if (context.graph.execution_hooks) |hooks| return try hooks.resolve(hooks.context, path, allocator);
     return .undefined;
 }
@@ -865,7 +869,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
             if (context.graph.environment) |environment| {
                 if (environment.get(key)) |value| return .{ .string = value };
             }
-        } else if (findScopedGraphVar(context.graph, context.current_macro_package orelse context.node.package_name, key)) |entry| {
+        } else if (findScopedGraphVar(context.graph, context.node.package_name, key)) |entry| {
             const value = if (entry.typed_value) |typed| try valueFromJson(allocator, typed) else native_expr.Value{ .string = entry.value };
             if (value != .string or (std.mem.indexOf(u8, value.string, "{{") == null and std.mem.indexOf(u8, value.string, "{%") == null)) return value;
             if (context.var_render_depth >= max_macro_render_depth) return error.JinjaExpressionDepthExceeded;
@@ -1212,14 +1216,13 @@ fn findGraphVarValue(graph: *const Graph, name: []const u8) ?[]const u8 {
 }
 
 fn findScopedGraphVar(graph: *const Graph, package: []const u8, name: []const u8) ?*const types.VarEntry {
-    var global: ?*const types.VarEntry = null;
+    var found: ?*const types.VarEntry = null;
     for (graph.vars.items) |*entry| {
         if (!std.mem.eql(u8, entry.name, name)) continue;
-        if (entry.package_name) |scope| {
-            if (std.mem.eql(u8, scope, package)) return entry;
-        } else global = entry;
+        if (entry.package_name) |scope| if (!std.mem.eql(u8, scope, package)) continue;
+        if (found == null or entry.priority >= found.?.priority) found = entry;
     }
-    return global;
+    return found;
 }
 
 fn renderAdapterDispatchExpression(context: *CompileContext, span: []const u8) ![]const u8 {
@@ -1492,7 +1495,7 @@ fn renderCustomGenericTestBody(allocator: std.mem.Allocator, sql: []const u8, st
             continue;
         }
 
-        const close = std.mem.indexOfPos(u8, sql, index + 2, "}}") orelse return error.UnsupportedCustomGenericTest;
+        const close = jinja.findExpressionClose(sql, index + 2) orelse return error.UnsupportedCustomGenericTest;
         if (close + 2 > end_index) return error.UnsupportedCustomGenericTest;
         const span = std.mem.trim(u8, sql[index + 2 .. close], " \t\r\n-");
         if (std.mem.eql(u8, span, "model")) {

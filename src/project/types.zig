@@ -49,6 +49,7 @@ pub const VarEntry = struct {
     value: []const u8,
     typed_value: ?std.json.Value = null,
     package_name: ?[]const u8 = null,
+    priority: u8 = 0,
 };
 
 pub const ProjectConfig = struct {
@@ -74,6 +75,8 @@ pub const ProjectConfig = struct {
     clean_targets_set: bool = false,
     validate_macro_args: bool = false,
     target_path: []const u8 = "target",
+    raw_project: std.json.Value = .null,
+    rendered_project: std.json.Value = .null,
 };
 
 pub const DispatchConfig = struct {
@@ -90,6 +93,7 @@ pub const ModelPathConfig = struct {
     docs: DocsConfig = .{},
     resource_type: []const u8 = "model",
     values: std.json.Value = .null,
+    raw_values: std.json.Value = .null,
 };
 
 pub const SourceProjectConfig = struct {
@@ -417,6 +421,12 @@ pub const Node = struct {
     raw_config: std.json.Value = .null,
     effective_config: std.json.Value = .null,
     inline_config: std.json.Value = .null,
+    project_config: std.json.Value = .null,
+    property_config: std.json.Value = .null,
+    root_override_config: std.json.Value = .null,
+    project_raw_config: std.json.Value = .null,
+    property_raw_config: std.json.Value = .null,
+    root_override_raw_config: std.json.Value = .null,
 };
 
 pub const IncrementalConfigMask = struct {
@@ -561,6 +571,8 @@ pub const Graph = struct {
     database_path: ?[]const u8 = null,
     database_path_base: ?[]const u8 = null,
     connection_info: ?[]const u8 = null,
+    target_context: std.json.Value = .null,
+    target_threads: u16 = 1,
     profile_name: ?[]const u8 = null,
     target_name: ?[]const u8 = null,
     vars: std.ArrayList(VarEntry) = .empty,
@@ -593,6 +605,7 @@ pub const Graph = struct {
     }
 
     pub fn deinit(self: *Graph) void {
+        config_value.deinit(self.allocator, &self.target_context);
         for (self.nodes.items) |*node| {
             deinitNode(self.allocator, node);
         }
@@ -663,13 +676,18 @@ pub const AdapterIdentity = struct {
     database_path: ?[]const u8 = null,
     database_path_base: ?[]const u8 = null,
     connection_info: ?[]const u8 = null,
+    target_context: std.json.Value = .null,
+    threads: u16 = 1,
 };
 
 pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig) void {
+    config_value.deinit(allocator, &config.raw_project);
+    config_value.deinit(allocator, &config.rendered_project);
     for (config.model_path_configs.items) |*path_config| {
         path_config.tags.deinit(allocator);
         path_config.incremental.deinit(allocator);
         config_value.deinit(allocator, &path_config.values);
+        config_value.deinit(allocator, &path_config.raw_values);
     }
     config.model_paths.deinit(allocator);
     config.seed_paths.deinit(allocator);
@@ -701,6 +719,12 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
     config_value.deinit(allocator, &node.raw_config);
     config_value.deinit(allocator, &node.effective_config);
     config_value.deinit(allocator, &node.inline_config);
+    config_value.deinit(allocator, &node.project_config);
+    config_value.deinit(allocator, &node.property_config);
+    config_value.deinit(allocator, &node.root_override_config);
+    config_value.deinit(allocator, &node.project_raw_config);
+    config_value.deinit(allocator, &node.property_raw_config);
+    config_value.deinit(allocator, &node.root_override_raw_config);
     if (node.project_root) |project_root| allocator.free(project_root);
     node.tags.deinit(allocator);
     node.incremental.deinit(allocator);

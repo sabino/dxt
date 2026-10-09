@@ -25,16 +25,37 @@ const dupTrimmedScalar = util.dupTrimmedScalar;
 const sortStrings = util.sortStrings;
 
 pub fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
+    return try loadProjectConfigWithContext(runtime, project_dir, &.{}, .null);
+}
+
+pub fn loadProjectConfigWithContext(runtime: Runtime, project_dir: []const u8, cli_vars: []const VarEntry, target: std.json.Value) !ProjectConfig {
     const path = try std.fs.path.join(runtime.allocator, &.{ project_dir, "dbt_project.yml" });
     const text = std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return error.MissingProjectFile,
         else => return err,
     };
-    return try parseProjectConfigText(runtime.allocator, text);
+    return try @import("project_config.zig").parseWithTarget(runtime, text, cli_vars, target);
 }
 
 pub fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig, override_dependency_inline: bool, restrict_package_name: ?[]const u8) !void {
     for (graph.nodes.items) |*node| {
+        var typed_path = false;
+        for (configs) |config| {
+            if (config.values == .null) continue;
+            if (restrict_package_name) |package| if (!std.mem.eql(u8, package, node.package_name)) continue;
+            if (!std.mem.eql(u8, config.resource_type, node.resource_type)) continue;
+            if (config.package_name.len != 0 and !std.mem.eql(u8, node.package_name, config.package_name)) continue;
+            if (!modelPathConfigMatches(config.path, node.path)) continue;
+            typed_path = true;
+            const layer = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) &node.root_override_config else &node.project_config;
+            try @import("resource_config.zig").merge(graph.allocator, layer, config.values);
+            const raw_layer = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) &node.root_override_raw_config else &node.project_raw_config;
+            try @import("resource_config.zig").merge(graph.allocator, raw_layer, if (config.raw_values != .null) config.raw_values else config.values);
+        }
+        if (typed_path) {
+            try @import("resource_config.zig").rebuild(graph.allocator, node);
+            continue;
+        }
         if (!std.mem.eql(u8, node.resource_type, "model")) continue;
 
         var materialized_config: ?*const ModelPathConfig = null;
@@ -107,6 +128,13 @@ pub fn appendOrReplaceVar(allocator: std.mem.Allocator, vars: *std.ArrayList(Var
 }
 
 pub fn parseVarsText(allocator: std.mem.Allocator, text: []const u8, vars: *std.ArrayList(VarEntry)) !void {
+    var document = try @import("yaml.zig").parse(allocator, text);
+    defer document.deinit();
+    try @import("project_config.zig").appendVars(allocator, vars, document.value, false);
+    sortVars(vars.items);
+}
+
+fn parseVarsTextLegacy(allocator: std.mem.Allocator, text: []const u8, vars: *std.ArrayList(VarEntry)) !void {
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "{}")) return;
     if (trimmed[0] == '[') return error.UnsupportedYaml;
@@ -1340,7 +1368,7 @@ test "vars parser accepts strict JSON object scalars" {
     try std.testing.expectEqualStrings("transactions", vars.items[5].value);
 }
 
-test "vars parser rejects nested CLI values" {
+test "vars parser preserves nested CLI values and string scalar types" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1348,11 +1376,14 @@ test "vars parser rejects nested CLI values" {
     var vars: std.ArrayList(VarEntry) = .empty;
     defer vars.deinit(allocator);
 
-    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "{orders_model: [customers]}", &vars));
-    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "{\"orders_model\": [\"customers\"]}", &vars));
+    try parseVarsText(allocator, "{orders_model: [customers], options: {enabled: true, label: 'false'}}", &vars);
+    try std.testing.expectEqualStrings("options", vars.items[0].name);
+    try std.testing.expect(vars.items[0].typed_value.?.object.get("enabled").?.bool);
+    try std.testing.expectEqualStrings("false", vars.items[0].typed_value.?.object.get("label").?.string);
+    try std.testing.expectEqualStrings("customers", vars.items[1].typed_value.?.array.items[0].string);
 }
 
-test "vars parser leaves existing vars unchanged when strict JSON contains nested values" {
+test "vars parser leaves existing vars unchanged for invalid top-level sequences" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1361,7 +1392,7 @@ test "vars parser leaves existing vars unchanged when strict JSON contains neste
     defer vars.deinit(allocator);
 
     try parseVarsText(allocator, "{\"orders_model\": \"customers\"}", &vars);
-    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "{\"raw_table\": \"transactions\", \"bad\": [\"nested\"]}", &vars));
+    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "[{raw_table: transactions}]", &vars));
 
     try std.testing.expectEqual(@as(usize, 1), vars.items.len);
     try std.testing.expectEqualStrings("orders_model", vars.items[0].name);

@@ -1925,9 +1925,8 @@ fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const sele
         if (std.mem.eql(u8, node.resource_type, "snapshot")) saw_selected_snapshot = true else saw_selected_model = true;
         if (std.mem.eql(u8, node.materialized, "ephemeral")) continue;
 
-        if (std.mem.eql(u8, node.materialized, "incremental")) {
+        if (std.mem.eql(u8, node.materialized, "incremental") and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
             try incremental_config.validate(node.incremental);
-            if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
             const incremental_db_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
             defer runtime.allocator.free(incremental_db_path);
             node.runtime_is_incremental = try incremental.isIncremental(runtime, incremental_db_path, graph, node);

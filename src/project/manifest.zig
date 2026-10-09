@@ -808,6 +808,7 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
         try writer.writeAll(",\"meta\":");
         if (node.snapshot_meta_json) |value| try writeJsonValue(writer, value) else try writeMetaObject(writer, node.meta.items);
     }
+    try writeAdditionalConfig(writer, &node);
     try writer.writeAll("},\"depends_on\":{\"macros\":");
     try json.stringArray(writer, node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
@@ -832,6 +833,12 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
         try writer.writeAll(",\"extra_ctes_injected\":");
         try writer.writeAll(if (node.extra_ctes.items.len != 0) "true" else "false");
     }
+    try writer.writeAll(",\"unrendered_config\":");
+    try std.json.Stringify.value(if (node.raw_config == .null) @as(std.json.Value, .{ .object = .empty }) else node.raw_config, .{}, writer);
+    try writer.writeAll(",\"meta\":");
+    if (@import("config_value.zig").get(node.effective_config, "meta")) |meta| try std.json.Stringify.value(meta, .{}, writer)
+    else if (node.snapshot_meta_json) |meta| try writeJsonValue(writer, meta)
+    else try writeMetaObject(writer, node.meta.items);
     try writer.writeAll("}");
 }
 
@@ -922,6 +929,29 @@ fn writeUnrenderedNodeConfig(writer: *Io.Writer, graph: *const Graph, node: *con
         try writeSeedColumnTypes(writer, node.seed_column_types.items);
     }
     try writer.writeAll("}");
+}
+
+fn writeAdditionalConfig(writer: *Io.Writer, node: *const Node) !void {
+    if (node.effective_config != .object) return;
+    var it = node.effective_config.object.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        var emitted = false;
+        for ([_][]const u8{ "enabled", "materialized", "tags", "docs", "persist_docs" }) |known| if (std.mem.eql(u8, key, known)) {
+            emitted = true;
+        };
+        if (std.mem.eql(u8, node.materialized, "incremental")) for ([_][]const u8{ "unique_key", "incremental_strategy", "on_schema_change", "full_refresh", "incremental_predicates" }) |known| {
+            if (std.mem.eql(u8, key, known)) emitted = true;
+        };
+        if (node.snapshot_config != null) for ([_][]const u8{ "meta", "strategy", "unique_key", "target_schema", "target_database", "updated_at", "check_cols", "invalidate_hard_deletes", "hard_deletes", "dbt_valid_to_current", "snapshot_meta_column_names" }) |known| {
+            if (std.mem.eql(u8, key, known)) emitted = true;
+        };
+        if (emitted) continue;
+        try writer.writeAll(",");
+        try json.string(writer, key);
+        try writer.writeAll(":");
+        try std.json.Stringify.value(entry.value_ptr.*, .{}, writer);
+    }
 }
 
 fn writeExtraCtes(writer: *Io.Writer, extra_ctes: []const types.ExtraCte) !void {
