@@ -50,9 +50,9 @@ fn viewItems(a: std.mem.Allocator, value: Value, name: []const u8) ![]const Valu
     if (source != .object) return error.JinjaTypeError;
     const values = try expression.allocateValues(a, source.object.len);
     for (source.object, values) |entry, *result| {
-        if (std.mem.eql(u8, name, "keys")) result.* = .{ .string = entry.key } else if (std.mem.eql(u8, name, "values")) result.* = entry.value else {
+        if (std.mem.eql(u8, name, "keys")) result.* = expression.entryKey(entry) else if (std.mem.eql(u8, name, "values")) result.* = entry.value else {
             const pair = try expression.allocateValues(a, 2);
-            pair[0] = .{ .string = entry.key };
+            pair[0] = expression.entryKey(entry);
             pair[1] = entry.value;
             result.* = .{ .tuple = pair };
         }

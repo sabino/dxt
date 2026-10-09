@@ -3,6 +3,7 @@ const numbers = @import("expression_number.zig");
 const sequences = @import("expression_sequence.zig");
 const unicode = @import("expression_unicode.zig");
 const complex_numbers = @import("expression_complex.zig");
+const mapping_keys = @import("mapping_keys.zig");
 
 /// Native Jinja expression values. Allocations belong to the caller's render
 /// arena; values can cross macro returns without borrowing a temporary frame.
@@ -21,6 +22,7 @@ pub const Value = union(enum) {
     callable: []const u8,
 
     pub fn truthy(self: Value) bool {
+        if (floatProtocol(self)) |number| return number != 0;
         if (integerProtocol(self)) |number| return !std.mem.eql(u8, number, "0");
         if (sequences.truthy(self)) |result| return result;
         if (self == .object) if (sequence(self)) |items| return items.len != 0;
@@ -68,7 +70,7 @@ pub const Value = union(enum) {
                 try out.append(allocator, '{');
                 for (entries, 0..) |entry, i| {
                     if (i != 0) try out.appendSlice(allocator, ", ");
-                    try out.appendSlice(allocator, try repr(.{ .string = entry.key }, allocator));
+                    try out.appendSlice(allocator, try repr(entry.typed_key orelse .{ .string = entry.key }, allocator));
                     try out.appendSlice(allocator, ": ");
                     try out.appendSlice(allocator, try repr(entry.value, allocator));
                 }
@@ -82,7 +84,7 @@ pub const Value = union(enum) {
         return switch (self) {
             .complex => |v| if (std.mem.eql(u8, name, "real")) .{ .number = v.real } else if (std.mem.eql(u8, name, "imag")) .{ .number = v.imaginary } else .undefined,
             .object => |entries| blk: {
-                for (entries) |entry| if (std.mem.eql(u8, name, entry.key)) break :blk entry.value;
+                for (entries) |entry| if ((entry.typed_key == null or entry.typed_key.? == .string) and std.mem.eql(u8, name, entry.key)) break :blk entry.value;
                 break :blk .undefined;
             },
             else => .undefined,
@@ -90,7 +92,27 @@ pub const Value = union(enum) {
     }
 };
 
-pub const Entry = struct { key: []const u8, value: Value };
+pub const Entry = struct { key: []const u8, value: Value, typed_key: ?Value = null };
+pub fn entryKey(entry: Entry) Value {
+    return mapping_keys.key(entry);
+}
+pub fn hashableKey(key: Value) !void {
+    try mapping_keys.hashable(key);
+}
+pub fn mappingEntry(container: Value, key: Value) !?Entry {
+    return try mapping_keys.entry(container, key);
+}
+pub fn mappingGet(container: Value, key: Value) !Value {
+    return if (try mappingEntry(container, key)) |entry| entry.value else .undefined;
+}
+pub fn mappingPut(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry), key: Value, value: Value) !void {
+    try hashableKey(key);
+    for (entries.items) |*entry| if (mapping_keys.matches(entry.*, key)) {
+        entry.value = value;
+        return;
+    };
+    try entries.append(allocator, try mapping_keys.create(key, value));
+}
 pub const Argument = struct { name: ?[]const u8 = null, value: Value };
 pub const Host = struct {
     context: *anyopaque,
@@ -115,6 +137,27 @@ pub fn integerValue(allocator: std.mem.Allocator, number: anytype) !Value {
     return .{ .integer = try std.fmt.allocPrint(allocator, "{d}", .{number}) };
 }
 
+// Python dictionary lookup preserves a NaN object's identity even though NaN
+// compares unequal to itself. Retain that identity across arena-owned clones.
+var next_float_identity: std.atomic.Value(u64) = .init(0);
+pub fn floatValue(allocator: std.mem.Allocator, number: f64) !Value {
+    if (!std.math.isNan(number)) return .{ .number = number };
+    const entries = try allocateEntries(allocator, 4);
+    entries[0] = .{ .key = "__dxt_float", .value = .{ .number = number } };
+    entries[1] = .{ .key = "__dxt_float_identity", .value = .{ .string = try std.fmt.allocPrint(allocator, "{d}", .{next_float_identity.fetchAdd(1, .monotonic)}) } };
+    entries[2] = .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } };
+    entries[3] = .{ .key = "__dxt_rendered", .value = .{ .string = "nan" } };
+    return .{ .object = entries };
+}
+
+pub fn floatProtocol(value: Value) ?f64 {
+    if (value == .number) return value.number;
+    if (value == .object) for (value.object) |entry| {
+        if (entry.typed_key == null and std.mem.eql(u8, entry.key, "__dxt_float") and entry.value == .number) return entry.value.number;
+    };
+    return null;
+}
+
 pub fn checkedAttribute(value: Value, name: []const u8) !Value {
     if (value == .undefined or value == .conditional_undefined) return error.UndefinedJinjaValue;
     return value.attribute(name);
@@ -130,6 +173,7 @@ pub fn integerIndex(value: Value) !i64 {
 }
 
 pub fn numericFloat(value: Value) !f64 {
+    if (floatProtocol(value)) |number| return number;
     if (integerProtocol(value)) |number| return numericFloat(.{ .integer = number });
     return switch (value) {
         .integer => |number| blk: {
@@ -338,13 +382,13 @@ const Parser = struct {
             if (!self.active) break :blk .none;
             if (operand == .complex) break :blk .{ .complex = .{ .real = -operand.complex.real, .imaginary = -operand.complex.imaginary } };
             if (integerText(operand)) |number| break :blk .{ .integer = try numbers.negate(self.allocator, number) };
-            break :blk .{ .number = -(try numeric(operand)) };
+            break :blk try floatValue(self.allocator, -(try numeric(operand)));
         } else if (self.take("+")) blk: {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
             if (operand == .boolean) break :blk try integerValue(self.allocator, @as(u8, @intFromBool(operand.boolean)));
             if (integerProtocol(operand)) |number| break :blk .{ .integer = number };
-            if (operand != .integer and operand != .number and operand != .complex) return error.JinjaTypeError;
+            if (operand != .integer and floatProtocol(operand) == null and operand != .complex) return error.JinjaTypeError;
             break :blk operand;
         } else try self.atom();
         while (true) {
@@ -461,7 +505,7 @@ const Parser = struct {
             }
             const literal = self.input[start..self.index];
             if (std.mem.indexOfAny(u8, literal, ".eE") == null) return .{ .integer = numbers.canonical(self.allocator, literal, 10) catch return error.InvalidJinjaExpression };
-            return .{ .number = std.fmt.parseFloat(f64, literal) catch return error.InvalidJinjaExpression };
+            return try floatValue(self.allocator, std.fmt.parseFloat(f64, literal) catch return error.InvalidJinjaExpression);
         }
         if (self.take("(")) {
             if (self.take(")")) return .{ .tuple = &.{} };
@@ -493,9 +537,9 @@ const Parser = struct {
             var entries: std.ArrayList(Entry) = .empty;
             if (!self.take("}")) while (true) {
                 const key = try self.binary(0);
-                if (key != .string) return error.InvalidJinjaExpression;
                 try self.expect(":");
-                try entries.append(self.allocator, .{ .key = key.string, .value = try self.binary(0) });
+                const value = try self.binary(0);
+                if (self.active) try mappingPut(self.allocator, &entries, key, value);
                 if (self.take("}")) break;
                 try self.expect(",");
                 if (self.take("}")) break;
@@ -560,10 +604,12 @@ const Parser = struct {
                 if (self.active) {
                     if (expanded != .object) return error.InvalidJinjaArguments;
                     for (expanded.object) |entry| {
+                        const key = entryKey(entry);
+                        if (key != .string) return error.InvalidJinjaArguments;
                         for (args.items) |arg| if (arg.name) |argument_name| {
-                            if (std.mem.eql(u8, argument_name, entry.key)) return error.InvalidJinjaArguments;
+                            if (std.mem.eql(u8, argument_name, key.string)) return error.InvalidJinjaArguments;
                         };
-                        try args.append(self.allocator, .{ .name = entry.key, .value = entry.value });
+                        try args.append(self.allocator, .{ .name = key.string, .value = entry.value });
                     }
                 }
                 saw_keyword = true;
@@ -624,9 +670,8 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
     if (positional_only) for (args) |arg| if (arg.name != null) return error.InvalidJinjaArguments;
     if (receiver == .object) {
         if (std.mem.eql(u8, name_, "get")) {
-            if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
-            const value = receiver.attribute(args[0].value.string);
-            return if (value != .undefined) value else if (args.len == 2) args[1].value else .none;
+            if (args.len < 1 or args.len > 2) return error.InvalidJinjaArguments;
+            return if (try mappingEntry(receiver, args[0].value)) |entry| entry.value else if (args.len == 2) args[1].value else .none;
         }
         if (std.mem.eql(u8, name_, "keys") or std.mem.eql(u8, name_, "values") or std.mem.eql(u8, name_, "items")) {
             if (args.len != 0) return error.InvalidJinjaArguments;
@@ -921,6 +966,8 @@ fn integerFromString(a: std.mem.Allocator, text: []const u8, base_arg: u8) ![]co
     return if (negative) try numbers.negate(a, number) else number;
 }
 fn numericOrder(a: std.mem.Allocator, left: Value, right: Value) !std.math.Order {
+    if (floatProtocol(left)) |number| if (std.math.isNan(number)) return error.UnorderedJinjaNumber;
+    if (floatProtocol(right)) |number| if (std.math.isNan(number)) return error.UnorderedJinjaNumber;
     if (integerText(left)) |x| {
         if (integerText(right)) |y| return numbers.order(x, y);
         return try numbers.orderFloat(a, x, try numeric(right));
@@ -950,13 +997,12 @@ pub fn equalValues(a: Value, b: Value) bool {
         const source_b = b.attribute("__dxt_sequence_source");
         if (source_a != .object or source_b != .object or source_a.object.len != source_b.object.len) return false;
         for (source_a.object) |entry| {
-            const value = source_b.attribute(entry.key);
-            if (value == .undefined) return false;
-            if (std.mem.eql(u8, kind_a, "items") and !equal(entry.value, value)) return false;
+            const item = (mappingEntry(source_b, entryKey(entry)) catch return false) orelse return false;
+            if (std.mem.eql(u8, kind_a, "items") and !equal(entry.value, item.value)) return false;
         }
         return true;
     }
-    if ((integerText(a) != null or a == .number) and (integerText(b) != null or b == .number)) return (numericOrder(std.heap.page_allocator, a, b) catch return false) == .eq;
+    if ((integerText(a) != null or floatProtocol(a) != null) and (integerText(b) != null or floatProtocol(b) != null)) return (numericOrder(std.heap.page_allocator, a, b) catch return false) == .eq;
     if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
     return switch (a) {
         .undefined, .conditional_undefined, .none => true,
@@ -974,7 +1020,10 @@ pub fn equalValues(a: Value, b: Value) bool {
         },
         .object => |entries| blk: {
             if (entries.len != b.object.len) break :blk false;
-            for (entries) |entry| if (!equal(entry.value, b.attribute(entry.key))) break :blk false;
+            for (entries) |entry| {
+                const other = (mappingEntry(b, entryKey(entry)) catch break :blk false) orelse break :blk false;
+                if (!equal(entry.value, other.value)) break :blk false;
+            }
             break :blk true;
         },
     };
@@ -990,7 +1039,7 @@ fn contains(allocator: std.mem.Allocator, container: Value, item: Value) !bool {
             for (values) |v| if (equal(v, item)) break :blk true;
             break :blk false;
         },
-        .object => if (item == .string) container.attribute(item.string) != .undefined else error.JinjaTypeError,
+        .object => (try mappingEntry(container, item)) != null,
         else => error.JinjaTypeError,
     };
 }
@@ -1045,14 +1094,14 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
         const powered = std.math.pow(f64, x, y);
         if (std.math.isNan(powered)) return error.JinjaTypeError;
         if (std.math.isFinite(x) and std.math.isFinite(y) and !std.math.isFinite(powered)) return error.JinjaNumericOverflow;
-        return .{ .number = powered };
+        return try floatValue(allocator, powered);
     }
     if ((std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "//") or std.mem.eql(u8, op, "%")) and y == 0) return error.JinjaDivisionByZero;
     if (std.mem.eql(u8, op, "//") or std.mem.eql(u8, op, "%")) {
         const result = try numbers.floatDivMod(x, y);
-        return .{ .number = if (std.mem.eql(u8, op, "//")) result.quotient else result.remainder };
+        return try floatValue(allocator, if (std.mem.eql(u8, op, "//")) result.quotient else result.remainder);
     }
-    return .{ .number = if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else return error.InvalidJinjaExpression };
+    return try floatValue(allocator, if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else return error.InvalidJinjaExpression);
 }
 fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
     if (value == .object) {
@@ -1065,8 +1114,8 @@ fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
             return indexed.list[@intCast(i)];
         }
     }
-    if (value == .object and key == .string) return value.attribute(key.string);
     if (value == .object) if (sequence(value)) |items| return try indexValue(allocator, .{ .list = items }, key);
+    if (value == .object) return try mappingGet(value, key);
     var i = integerIndex(key) catch return .undefined;
     const characters = if (value == .string) try iterableValues(allocator, value) else null;
     const len: usize = switch (value) {
@@ -1117,7 +1166,7 @@ pub fn iterableValues(allocator: std.mem.Allocator, value: Value) anyerror![]con
     if (value == .undefined or value == .conditional_undefined or value == .none) return &.{};
     if (value == .object) {
         const result = try allocateValues(allocator, value.object.len);
-        for (value.object, result) |entry, *v| v.* = .{ .string = entry.key };
+        for (value.object, result) |entry, *v| v.* = entryKey(entry);
         return result;
     }
     if (value == .string) {
@@ -1167,9 +1216,9 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "undefined")) return value == .undefined or value == .conditional_undefined;
     if (std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "None")) return value == .none;
     if (std.mem.eql(u8, name, "string")) return value == .string;
-    if (std.mem.eql(u8, name, "number")) return integerText(value) != null or value == .number or value == .complex;
+    if (std.mem.eql(u8, name, "number")) return integerText(value) != null or floatProtocol(value) != null or value == .complex;
     if (std.mem.eql(u8, name, "integer")) return value == .integer or integerProtocol(value) != null;
-    if (std.mem.eql(u8, name, "float")) return value == .number;
+    if (std.mem.eql(u8, name, "float")) return floatProtocol(value) != null;
     if (std.mem.eql(u8, name, "boolean")) return value == .boolean;
     if (std.mem.eql(u8, name, "true")) return value == .boolean and value.boolean;
     if (std.mem.eql(u8, name, "false")) return value == .boolean and !value.boolean;
@@ -1256,20 +1305,23 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
     }
     if (std.mem.eql(u8, name, "dict") or std.mem.eql(u8, name, "namespace")) {
         var entries: std.ArrayList(Entry) = .empty;
+        var positional: usize = 0;
         for (args) |arg| {
             const key = arg.name orelse {
-                if (arg.value != .object) return error.InvalidJinjaArguments;
-                try entries.appendSlice(allocator, arg.value.object);
+                positional += 1;
+                if (positional > 1) return error.InvalidJinjaArguments;
+                if (arg.value == .object and !arg.value.attribute("__dxt_noniterable").truthy() and sequences.kind(arg.value) == null) {
+                    for (arg.value.object) |entry| try mappingPut(allocator, &entries, entryKey(entry), entry.value);
+                } else {
+                    for (try iterableValues(allocator, arg.value)) |item| {
+                        const pair = try iterableValues(allocator, item);
+                        if (pair.len != 2) return error.InvalidJinjaArguments;
+                        try mappingPut(allocator, &entries, pair[0], pair[1]);
+                    }
+                }
                 continue;
             };
-            var updated = false;
-            for (entries.items) |*entry| if (std.mem.eql(u8, entry.key, key)) {
-                entry.value = arg.value;
-                updated = true;
-                break;
-            };
-            if (updated) continue;
-            try entries.append(allocator, .{ .key = key, .value = arg.value });
+            try mappingPut(allocator, &entries, .{ .string = key }, arg.value);
         }
         return .{ .object = try ownedEntries(allocator, &entries) };
     }
@@ -1432,7 +1484,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
             break :blk evaluate(allocator, text_value, null) catch value;
         } else value;
         if (std.mem.eql(u8, name, "as_bool") and converted != .boolean) return error.JinjaTypeError;
-        if (std.mem.eql(u8, name, "as_number") and converted != .number and converted != .integer and converted != .complex) return error.JinjaTypeError;
+        if (std.mem.eql(u8, name, "as_number") and floatProtocol(converted) == null and converted != .integer and converted != .complex) return error.JinjaTypeError;
         return if (converted == .undefined) value else converted;
     }
     if (std.mem.eql(u8, name, "default") or std.mem.eql(u8, name, "d")) {
@@ -1463,15 +1515,16 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
                 const floating = std.fmt.parseFloat(f64, text) catch return fallback;
                 return .{ .integer = numbers.floatToInteger(allocator, floating) catch return fallback };
             }
-            if (value == .number) return .{ .integer = try numbers.floatToInteger(allocator, value.number) };
+            if (floatProtocol(value)) |number| return .{ .integer = try numbers.floatToInteger(allocator, number) };
             return fallback;
         }
         const fallback = argument(args, "default", 0, .{ .number = 0.0 });
-        if (value == .string) return .{ .number = std.fmt.parseFloat(f64, try unicode.strip(value.string, null, true, true)) catch return fallback };
-        return .{ .number = numeric(value) catch |err| {
+        if (value == .string) return try floatValue(allocator, std.fmt.parseFloat(f64, try unicode.strip(value.string, null, true, true)) catch return fallback);
+        if (floatProtocol(value) != null) return value;
+        return try floatValue(allocator, numeric(value) catch |err| {
             if (err == error.JinjaNumericOverflow) return err;
             return fallback;
-        } };
+        });
     }
     if (std.mem.eql(u8, name, "upper") or std.mem.eql(u8, name, "lower")) return .{ .string = try unicode.convert(allocator, try value.text(allocator), if (std.mem.eql(u8, name, "upper")) .upper else .lower) };
     if (std.mem.eql(u8, name, "trim")) return .{ .string = try unicode.strip(try value.text(allocator), if (args.len > 0) try args[0].value.text(allocator) else null, true, true) };

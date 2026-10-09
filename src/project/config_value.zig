@@ -6,8 +6,8 @@ pub fn toExpression(allocator: std.mem.Allocator, value: std.json.Value) anyerro
         .null => .none,
         .bool => |v| .{ .boolean = v },
         .integer => |v| try expression.integerValue(allocator, v),
-        .float => |v| .{ .number = v },
-        .number_string => |v| if (std.mem.indexOfAny(u8, v, ".eE") != null) .{ .number = try std.fmt.parseFloat(f64, v) } else .{ .integer = try @import("expression_number.zig").canonical(allocator, v, 10) },
+        .float => |v| try expression.floatValue(allocator, v),
+        .number_string => |v| if (std.mem.indexOfAny(u8, v, ".eE") != null) try expression.floatValue(allocator, try std.fmt.parseFloat(f64, v)) else .{ .integer = try @import("expression_number.zig").canonical(allocator, v, 10) },
         .string => |v| .{ .string = v },
         .array => |items| blk: {
             const values = try expression.allocateValues(allocator, items.items.len);
@@ -26,6 +26,7 @@ pub fn toExpression(allocator: std.mem.Allocator, value: std.json.Value) anyerro
 
 pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) anyerror!std.json.Value {
     if (expression.integerProtocol(value)) |number| return fromExpression(allocator, .{ .integer = number });
+    if (expression.floatProtocol(value)) |number| return .{ .float = number };
     if (value.attribute("__dxt_noniterable").truthy()) return error.InvalidConfiguration;
     return switch (value) {
         .none => .null,
