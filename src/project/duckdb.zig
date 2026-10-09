@@ -26,6 +26,7 @@ pub const GenericTestExecutionResult = struct {
 pub const UnitTestExecutionResult = struct {
     compiled_code: []const u8,
     failures: u64,
+    execution_error: bool = false,
 };
 
 pub const FreshnessQueryResult = struct {
@@ -83,15 +84,13 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
     const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
     defer runtime.allocator.free(execution_sql);
     const failures = queryGenericTestFailures(runtime, db_path, execution_sql) catch |err| switch (err) {
-        error.DuckDbExecutionFailed => {
-            if (!isBuiltInGenericTestName(test_node.test_name)) {
-                return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true };
-            }
-            return err;
-        },
+        error.DuckDbExecutionFailed => return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
         else => return err,
     };
-    const relation_name = try syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures);
+    const relation_name = syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures) catch |err| switch (err) {
+        error.DuckDbExecutionFailed => return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+        else => return err,
+    };
     return .{ .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
 }
 
@@ -100,8 +99,14 @@ pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const 
     errdefer runtime.allocator.free(compiled_sql);
     const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
     defer runtime.allocator.free(execution_sql);
-    const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
-    const relation_name = try syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures);
+    const failures = queryGenericTestFailures(runtime, db_path, execution_sql) catch |err| switch (err) {
+        error.DuckDbExecutionFailed => return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+        else => return err,
+    };
+    const relation_name = syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures) catch |err| switch (err) {
+        error.DuckDbExecutionFailed => return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
+        else => return err,
+    };
     return .{ .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
 }
 
@@ -110,10 +115,16 @@ pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Gra
 }
 
 pub fn executeUnitTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, unit_test: *const UnitTestDef) !UnitTestExecutionResult {
+    // Supported dict fixtures construct every relation in an isolated connection.
+    // Failed SQL must never replace or alter relations in the target database.
+    _ = db_path;
     const planned = try unit_test_plan.renderUnitTestSql(runtime.allocator, graph, unit_test);
     defer runtime.allocator.free(planned.execution_sql);
     errdefer runtime.allocator.free(planned.compiled_code);
-    const failures = try queryUnitTestFailures(runtime, db_path, planned.execution_sql);
+    const failures = queryUnitTestFailures(runtime, ":memory:", planned.execution_sql) catch |err| switch (err) {
+        error.DuckDbExecutionFailed => return .{ .compiled_code = planned.compiled_code, .failures = 0, .execution_error = true },
+        else => return err,
+    };
     return .{ .compiled_code = planned.compiled_code, .failures = failures };
 }
 
@@ -405,10 +416,7 @@ fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
         .argv = &.{ "duckdb", db_path, "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
+    }) catch |err| return normalizeExecutionProcessError(err);
     defer runtime.allocator.free(result.stdout);
     defer runtime.allocator.free(result.stderr);
 
@@ -424,17 +432,13 @@ fn queryGenericTestFailures(runtime: Runtime, db_path: []const u8, sql: []const 
         .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
+    }) catch |err| return normalizeExecutionProcessError(err);
     defer runtime.allocator.free(result.stdout);
     defer runtime.allocator.free(result.stderr);
 
     switch (result.term) {
         .exited => |code| if (code == 0) {
-            const field = firstCsvField(result.stdout) orelse return error.DuckDbExecutionFailed;
-            return std.fmt.parseUnsigned(u64, field, 10) catch error.DuckDbExecutionFailed;
+            return parseTestFailureCount(result.stdout);
         },
         else => {},
     }
@@ -446,21 +450,30 @@ fn queryUnitTestFailures(runtime: Runtime, db_path: []const u8, sql: []const u8)
         .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
+    }) catch |err| return normalizeExecutionProcessError(err);
     defer runtime.allocator.free(result.stdout);
     defer runtime.allocator.free(result.stderr);
 
     switch (result.term) {
         .exited => |code| if (code == 0) {
-            const field = firstCsvField(result.stdout) orelse return error.DuckDbExecutionFailed;
-            return std.fmt.parseUnsigned(u64, field, 10) catch error.DuckDbExecutionFailed;
+            return parseTestFailureCount(result.stdout);
         },
         else => {},
     }
     return error.DuckDbExecutionFailed;
+}
+
+fn normalizeExecutionProcessError(err: anyerror) anyerror {
+    return switch (err) {
+        error.FileNotFound => error.DuckDbCliNotFound,
+        error.StreamTooLong => error.DuckDbExecutionFailed,
+        else => err,
+    };
+}
+
+fn parseTestFailureCount(stdout: []const u8) !u64 {
+    const field = firstCsvField(stdout) orelse return error.DuckDbExecutionFailed;
+    return std.fmt.parseUnsigned(u64, field, 10) catch error.DuckDbExecutionFailed;
 }
 
 fn firstCsvField(stdout: []const u8) ?[]const u8 {
@@ -664,13 +677,6 @@ pub fn renderGenericTestExecutionSql(allocator: std.mem.Allocator, compiled_sql:
         "select\n  count(*) as failures,\n  count(*) != 0 as should_warn,\n  count(*) != 0 as should_error\nfrom (\n{s}\n) dbt_internal_test;\n",
         .{query_sql},
     );
-}
-
-fn isBuiltInGenericTestName(test_name: []const u8) bool {
-    return std.mem.eql(u8, test_name, "not_null") or
-        std.mem.eql(u8, test_name, "unique") or
-        std.mem.eql(u8, test_name, "accepted_values") or
-        std.mem.eql(u8, test_name, "relationships");
 }
 
 fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
@@ -1425,6 +1431,16 @@ test "renderGenericTestSql rejects unsupported accepted_values shapes" {
     graph.tests.items[0].column_name = null;
     try graph.tests.items[0].accepted_values.append(allocator, "new");
     try std.testing.expectError(error.UnsupportedTestExecution, renderGenericTestSql(allocator, &graph, &graph.tests.items[0]));
+}
+
+test "test execution distinguishes SQL output errors from setup failures" {
+    try std.testing.expectEqual(error.DuckDbExecutionFailed, normalizeExecutionProcessError(error.StreamTooLong));
+    try std.testing.expectEqual(error.DuckDbCliNotFound, normalizeExecutionProcessError(error.FileNotFound));
+    try std.testing.expectEqual(error.OutOfMemory, normalizeExecutionProcessError(error.OutOfMemory));
+    try std.testing.expectEqual(@as(u64, 2), try parseTestFailureCount("2,true,true\n"));
+    for ([_][]const u8{ "", "not a count", "-1", "18446744073709551616" }) |output| {
+        try std.testing.expectError(error.DuckDbExecutionFailed, parseTestFailureCount(output));
+    }
 }
 
 test "firstCsvField reads the leading failures value" {

@@ -1450,13 +1450,29 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
 
 fn appendOneUnitTestResult(runtime: Runtime, db_path: []const u8, graph: *const Graph, unit_test: *const UnitTestDef, executed: *std.ArrayList(run_results.NodeResult)) !GenericTestExecutionSummary {
     const execution = try duckdb.executeUnitTest(runtime, db_path, graph, unit_test);
-    errdefer runtime.allocator.free(execution.compiled_code);
+    return appendUnitTestExecutionResult(runtime.allocator, unit_test, execution, executed);
+}
+
+fn appendUnitTestExecutionResult(allocator: std.mem.Allocator, unit_test: *const UnitTestDef, execution: duckdb.UnitTestExecutionResult, executed: *std.ArrayList(run_results.NodeResult)) !GenericTestExecutionSummary {
+    errdefer allocator.free(execution.compiled_code);
+    if (execution.execution_error) {
+        const message = try allocator.dupe(u8, execution_failure_message);
+        errdefer allocator.free(message);
+        try executed.append(allocator, .{
+            .unit_test_node = unit_test,
+            .status = "error",
+            .message = message,
+        });
+        allocator.free(execution.compiled_code);
+        return .{ .failed_tests = 1 };
+    }
     const classification = classifyDefaultTestResult(execution.failures);
     const message = if (classification.message_kind) |kind|
-        try formatTestThresholdMessage(runtime.allocator, execution.failures, kind, classification.condition orelse "!= 0")
+        try formatTestThresholdMessage(allocator, execution.failures, kind, classification.condition orelse "!= 0")
     else
         null;
-    try executed.append(runtime.allocator, .{
+    errdefer if (message) |owned_message| allocator.free(owned_message);
+    try executed.append(allocator, .{
         .unit_test_node = unit_test,
         .status = classification.status,
         .message = message,
@@ -1468,6 +1484,42 @@ fn appendOneUnitTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
         .failed_tests = if (classification.fails_command) 1 else 0,
         .total_failures = if (classification.fails_command) execution.failures else 0,
     };
+}
+
+test "unit execution errors retain prior rows and contain only sanitized metadata" {
+    const allocator = std.testing.allocator;
+    const unit_test = UnitTestDef{
+        .package_name = "demo",
+        .unique_id = "unit_test.demo.orders.invalid_cast",
+        .name = "invalid_cast",
+        .model = "orders",
+        .path = "schema.yml",
+        .original_file_path = "models/schema.yml",
+    };
+    var executed: std.ArrayList(run_results.NodeResult) = .empty;
+    defer {
+        deinitRunResults(allocator, executed.items);
+        executed.deinit(allocator);
+    }
+    try executed.append(allocator, .{ .unit_test_node = &unit_test, .status = "pass", .failures = 0 });
+    const summary = try appendUnitTestExecutionResult(allocator, &unit_test, .{
+        .compiled_code = try allocator.dupe(u8, "select cast('private input' as integer)"),
+        .failures = 0,
+        .execution_error = true,
+    }, &executed);
+    try std.testing.expectEqual(@as(usize, 1), summary.failed_tests);
+    try std.testing.expectEqual(@as(u64, 0), summary.total_failures);
+    try std.testing.expectEqual(@as(usize, 2), executed.items.len);
+    try std.testing.expectEqualStrings("pass", executed.items[0].status);
+    const error_row = executed.items[1];
+    try std.testing.expectEqualStrings("error", error_row.status);
+    try std.testing.expectEqualStrings(execution_failure_message, error_row.message.?);
+    try std.testing.expect(error_row.failures == null);
+    try std.testing.expect(error_row.compiled_code == null);
+    const rendered = try run_results.renderRunResults(allocator, executed.items);
+    defer allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "private input") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"compiled\": null") != null);
 }
 
 const TestResultClassification = struct {

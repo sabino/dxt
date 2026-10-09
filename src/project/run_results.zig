@@ -147,7 +147,9 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     try writer.writeAll(", \"unique_id\": ");
     try json.string(writer, resultUniqueId(result));
     try writer.writeAll(", \"compiled\": ");
-    if (result.test_node != null or result.singular_test_node != null or result.unit_test_node != null or result.compiled_code != null) {
+    if (result.unit_test_node != null and std.mem.eql(u8, result.status, "error")) {
+        try writer.writeAll("null");
+    } else if (result.test_node != null or result.singular_test_node != null or result.unit_test_node != null or result.compiled_code != null) {
         try writer.writeAll("true");
     } else if (result.node) |node| if (isCompiledResultNode(node)) {
         try writer.writeAll(if (node.compiled) "true" else "false");
