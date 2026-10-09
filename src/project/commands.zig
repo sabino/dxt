@@ -10,6 +10,7 @@ const results = @import("run_results.zig");
 const compiler = @import("compiler.zig");
 const resolve = @import("resolve.zig");
 const selector = @import("selector.zig");
+const clone_materialization = @import("clone_materialization.zig");
 const Runtime = types.Runtime;
 const Options = types.Options;
 
@@ -648,10 +649,15 @@ pub fn cloneRelations(runtime: Runtime, options: Options, graph: *types.Graph, s
     if (!std.mem.eql(u8, version.string, "https://schemas.getdbt.com/dbt/manifest/v12.json")) return error.UnsupportedStateManifestSchemaVersion;
     const nodes = parsed.value.object.get("nodes") orelse return error.MalformedStateManifestArtifact;
     if (nodes != .object) return error.MalformedStateManifestArtifact;
-    if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb") and !std.mem.eql(u8, graph.adapter_type, "postgres")) return error.UnsupportedAdapterExecution;
     const db_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
     var rows: std.ArrayList(results.NodeResult) = .empty;
     defer rows.deinit(runtime.allocator);
+    var outcomes: std.ArrayList(clone_materialization.Outcome) = .empty;
+    defer {
+        for (outcomes.items) |outcome| outcome.deinit(runtime.allocator);
+        outcomes.deinit(runtime.allocator);
+    }
     var failed = false;
     for (graph.nodes.items) |*node| {
         if (!node.enabled or std.mem.eql(u8, node.materialized, "ephemeral")) continue;
@@ -662,67 +668,21 @@ pub fn cloneRelations(runtime: Runtime, options: Options, graph: *types.Graph, s
             break;
         };
         if (!chosen) continue;
-        cloneOne(runtime, options, graph, node, nodes.object.get(node.unique_id), db_path) catch |err| {
+        const outcome = clone_materialization.execute(runtime, options, graph, node, nodes.object.get(node.unique_id), db_path) catch |err| {
             if (err == error.OutOfMemory) return err;
             failed = true;
-            try rows.append(runtime.allocator, .{ .node = node, .status = "error", .message = "DuckDB execution failed" });
+            try rows.append(runtime.allocator, .{ .node = node, .status = "error", .message = if (std.mem.eql(u8, graph.adapter_type, "postgres")) "PostgreSQL execution failed" else "DuckDB execution failed" });
             continue;
         };
-        try rows.append(runtime.allocator, .{ .node = node, .message = "OK", .adapter_response = .{ .message = "OK" } });
+        outcomes.append(runtime.allocator, outcome) catch |err| {
+            outcome.deinit(runtime.allocator);
+            return err;
+        };
+        try rows.append(runtime.allocator, .{ .node = node, .message = outcome.message, .adapter_response = outcome.response });
     }
     try writeResults(runtime, target_dir, rows.items);
     try stdout.print("Cloned {d} relation(s)\n", .{rows.items.len});
     if (failed) return error.ExecutionFailure;
-}
-
-fn cloneOne(runtime: Runtime, options: Options, graph: *const types.Graph, node: *types.Node, prior_value: ?std.json.Value, db_path: []const u8) !void {
-    const allocator = runtime.allocator;
-    const schema = try compiler.relationSchemaForNode(allocator, graph, node);
-    const target = try compiler.relationNameForNode(allocator, graph, node);
-    const database = std.fs.path.stem(std.fs.path.basename(db_path));
-    if (std.mem.eql(u8, node.resource_type, "model")) {
-        node.compiled = false;
-        node.compiled_code = null;
-        node.relation_name = if (compiler.relationDatabaseForNode(graph, node) != null)
-            try allocator.dupe(u8, target)
-        else
-            try std.fmt.allocPrint(allocator, "{s}.{s}", .{ try compiler.quoteIdentifier(allocator, database), target });
-    }
-    const prior = prior_value orelse return;
-    if (prior != .object) return error.MalformedStateManifestArtifact;
-    if (prior.object.get("relation_name")) |relation_value| {
-        if (relation_value == .null) return;
-    }
-    const schema_value = prior.object.get("schema") orelse return error.MalformedStateManifestArtifact;
-    const alias_value = prior.object.get("alias") orelse return error.MalformedStateManifestArtifact;
-    if (schema_value != .string or alias_value != .string) return error.MalformedStateManifestArtifact;
-    const quoted_schema = try compiler.quoteIdentifier(allocator, schema);
-    const prior_schema = try compiler.quoteIdentifier(allocator, schema_value.string);
-    const prior_alias = try compiler.quoteIdentifier(allocator, alias_value.string);
-    const database_value = prior.object.get("database") orelse .null;
-    const source = if (database_value == .string)
-        try std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{ try compiler.quoteIdentifier(allocator, database_value.string), prior_schema, prior_alias })
-    else
-        try std.fmt.allocPrint(allocator, "{s}.{s}", .{ prior_schema, prior_alias });
-    const sql = try std.fmt.allocPrint(allocator, "select * from {s}", .{source});
-    // Avoid a self-referential replacement when source and destination coincide.
-    if (std.mem.eql(u8, schema, schema_value.string) and std.mem.eql(u8, compiler.relationIdentifierForNode(node), alias_value.string)) return;
-    const lookup = try std.fmt.allocPrint(allocator, "select table_type from information_schema.tables where table_schema = {s} and table_name = {s}", .{ try sqlLiteral(allocator, schema), try sqlLiteral(allocator, compiler.relationIdentifierForNode(node)) });
-    var existing_result = try adapter.queryForGraph(runtime, graph, db_path, lookup);
-    defer existing_result.deinit(allocator);
-    const existing_json = try existing_result.json(allocator);
-    defer allocator.free(existing_json);
-    var existing = std.json.parseFromSlice(std.json.Value, allocator, if (std.mem.trim(u8, existing_json, " \t\r\n").len == 0) "[]" else existing_json, .{}) catch return error.DuckDbExecutionFailed;
-    defer existing.deinit();
-    if (existing.value != .array) return error.DuckDbExecutionFailed;
-    const exists = existing.value.array.items.len != 0;
-    if (exists and !options.full_refresh) return;
-    const drop = if (exists) blk: {
-        const kind = existing.value.array.items[0].object.get("table_type") orelse return error.DuckDbExecutionFailed;
-        break :blk try std.fmt.allocPrint(allocator, "drop {s} {s};\n", .{ if (kind == .string and std.mem.eql(u8, kind.string, "VIEW")) "view" else "table", target });
-    } else "";
-    const create = try std.fmt.allocPrint(allocator, "begin;\ncreate schema if not exists {s};\n{s}create view {s} as {s};\ncommit;", .{ quoted_schema, drop, target, sql });
-    try adapter.executeForGraph(runtime, graph, db_path, create);
 }
 
 fn sqlLiteral(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
