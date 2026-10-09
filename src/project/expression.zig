@@ -1580,6 +1580,8 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
     }
     if (std.mem.eql(u8, name, "attr")) {
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
+        if (value == .capture_undefined and std.mem.startsWith(u8, args[0].value.string, "__") and std.mem.endsWith(u8, args[0].value.string, "__") and !undefinedUnsafeAttribute(args[0].value.string, true)) return try captureUndefined(allocator, args[0].value.string);
+        if (isUndefined(value)) return try checkedAttribute(value, args[0].value.string);
         return value.attribute(args[0].value.string);
     }
     if (std.mem.eql(u8, name, "map")) {
@@ -1886,6 +1888,7 @@ test "ordinary undefined renders and iterates but rejects attribute arithmetic a
     try std.testing.expect(!try testValue("sameas", bound, &.{.{ .value = try evaluate(a, "missing", null) }}));
     try std.testing.expectEqualStrings("", try (try evaluate(a, "missing.__class__", null)).text(a));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "missing.field", null));
+    try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "missing|attr('field')", null));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "missing + 1", null));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "+missing", null));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "missing[:2]", null));
@@ -1923,6 +1926,8 @@ test "parse undefined captures mutable alias names and stable subscript call ide
     try std.testing.expect(isUndefined(try checkedAttribute(original, "__reduce__")));
     try std.testing.expectEqualStrings("missing", (try evaluate(a, "missing.__unknown__.name", host)).string);
     try std.testing.expectEqualStrings("__class__", (try evaluate(a, "missing.__class__.name", host)).string);
+    try std.testing.expectEqualStrings("field", (try evaluate(a, "(missing|attr('field')).name", host)).string);
+    try std.testing.expectEqualStrings("__unknown__", (try evaluate(a, "(missing|attr('__unknown__')).name", host)).string);
 }
 
 test "set expressions preserve aliases comparisons iteration and typed map conversion" {
