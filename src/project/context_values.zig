@@ -34,6 +34,7 @@ pub fn config(allocator: std.mem.Allocator, node: *const types.Node) !Value {
 
 pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *const types.Node) !Value {
     const compiler = @import("compiler.zig");
+    const effective_config = try config(allocator, node);
     var columns: std.ArrayList(expression.Entry) = .empty;
     var authored_columns = node.columns.items;
     if (authored_columns.len == 0) for (graph.model_properties.items) |property| {
@@ -85,7 +86,10 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         .{ .key = "database", .value = if (compiler.relationDatabaseForNode(graph, node)) |database| .{ .string = database } else .none },
         .{ .key = "schema", .value = .{ .string = try compiler.relationSchemaForNode(allocator, graph, node) } },
         .{ .key = "alias", .value = .{ .string = compiler.relationIdentifierForNode(node) } },
-        .{ .key = "config", .value = try config(allocator, node) },
+        .{ .key = "config", .value = effective_config },
+        .{ .key = "meta", .value = effective_config.attribute("meta") },
+        .{ .key = "group", .value = effective_config.attribute("group") },
+        .{ .key = "access", .value = effective_config.attribute("access") },
         .{ .key = "columns", .value = .{ .object = if (columns.items.len == 0) try expression.allocateEntries(allocator, 0) else try columns.toOwnedSlice(allocator) } },
         .{ .key = "tags", .value = .{ .list = tags } },
         .{ .key = "version", .value = try values.toExpression(allocator, node.version) },

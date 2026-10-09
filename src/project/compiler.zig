@@ -89,6 +89,7 @@ const CompileContext = struct {
     bindings: std.ArrayList(ValueBinding) = .empty,
     returned: ?native_expr.Value = null,
     parse_node: ?*Node = null,
+    execute_override: ?bool = null,
     var_render_depth: usize = 0,
     loop_depth: usize = 0,
     loop_break: bool = false,
@@ -239,6 +240,15 @@ pub fn recordPythonScaffoldDependency(allocator: std.mem.Allocator, graph: *cons
     try util.appendUnique(allocator, &node.macro_depends_on, id);
 }
 
+/// The parser shortcuts not_null/unique configuration. Rendering their model
+/// argument during compilation calls the normally resolved where helper.
+/// Publish its dependency after worker results have returned to the collector.
+pub fn recordGenericCompilationDependency(allocator: std.mem.Allocator, graph: *const Graph, node: *GenericTestNode) !void {
+    if (findCustomGenericTestMacro(graph, node) == null) return;
+    const id = resolve.findMacroIdForUnqualifiedNamespaceCall(graph, node.package_name, "get_where_subquery") orelse return;
+    try util.appendUnique(allocator, &node.macro_depends_on, id);
+}
+
 /// Render a runtime hook in the resource's own typed compilation context.
 pub fn renderTextForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, text: []const u8) ![]const u8 {
     var context = CompileContext.init(allocator, graph, node);
@@ -347,6 +357,20 @@ pub fn renderMacroForNode(allocator: std.mem.Allocator, graph: *const Graph, nod
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
     return try dbt_context.cloneValue(allocator, try callExpressionValue(&context, macro_name, args, context.value_arena.allocator()));
+}
+
+/// Name generation uses Core's execute=false macro context, with variables
+/// scoped to the chosen macro package and no warehouse execution host.
+pub fn renderNamingMacro(allocator: std.mem.Allocator, graph: *const Graph, macro: *const MacroDef, args: []const native_expr.Argument) !native_expr.Value {
+    var naming_graph = graph.*;
+    naming_graph.execution_hooks = null;
+    const node = Node{ .resource_type = "macro", .package_name = macro.package_name, .unique_id = macro.unique_id, .name = macro.name, .path = macro.path, .original_file_path = macro.original_file_path, .raw_code = macro.macro_sql };
+    var context = CompileContext.init(allocator, &naming_graph, &node);
+    defer context.deinit();
+    context.execute_override = false;
+    const name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ macro.package_name, macro.name });
+    defer allocator.free(name);
+    return try dbt_context.cloneValue(allocator, try callExpressionValue(&context, name, args, context.value_arena.allocator()));
 }
 
 pub fn renderGenericArgumentValue(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, argument: std.json.Value) !native_expr.Value {
@@ -562,6 +586,7 @@ fn trimSqlRight(sql: []const u8) []const u8 {
 
 pub fn compileSingularTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode) ![]const u8 {
     const node = Node{
+        .resolved_identity = test_node.resolved_identity,
         .resource_type = "test",
         .package_name = test_node.package_name,
         .unique_id = test_node.unique_id,
@@ -599,7 +624,7 @@ pub fn compileGenericTest(allocator: std.mem.Allocator, graph: *const Graph, tes
 
     const relation_name = try genericTestRelationName(allocator, graph, test_node);
     defer allocator.free(relation_name);
-    const model_sql = try genericTestModelSql(allocator, relation_name, test_node.config.where);
+    const model_sql = try genericTestModelSqlForNode(allocator, graph, test_node, relation_name);
     defer allocator.free(model_sql);
     const quoted_column = try quoteIdentifier(allocator, column_name);
     defer allocator.free(quoted_column);
@@ -646,12 +671,12 @@ fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, t
     const macro = findCustomGenericTestMacro(graph, test_node) orelse return error.UnsupportedTestExecution;
     const relation_name = try genericTestRelationName(allocator, graph, test_node);
     defer allocator.free(relation_name);
-    const model_sql = try genericTestModelSql(allocator, relation_name, test_node.config.where);
+    const model_sql = try genericTestModelSqlForNode(allocator, graph, test_node, relation_name);
     defer allocator.free(model_sql);
 
     var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, test_node.enabled, &.{}, test_node.config_values);
     defer @import("config_value.zig").deinit(allocator, &canonical_config);
-    const node = Node{ .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = canonical_config, .test_config = test_node.config, .enabled = test_node.enabled };
+    const node = Node{ .resolved_identity = test_node.resolved_identity, .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = canonical_config, .test_config = test_node.config, .enabled = test_node.enabled };
     var context = CompileContext.init(allocator, graph, &node);
     defer context.deinit();
     const arena = context.value_arena.allocator();
@@ -676,6 +701,17 @@ fn genericTestModelSql(allocator: std.mem.Allocator, relation_name: []const u8, 
         return try std.fmt.allocPrint(allocator, "(select * from {s} where {s}) dbt_subquery", .{ relation_name, filter });
     }
     return try allocator.dupe(u8, relation_name);
+}
+
+fn genericTestModelSqlForNode(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode, relation_name: []const u8) ![]const u8 {
+    if (resolve.findMacroIdForUnqualifiedNamespaceCall(graph, test_node.package_name, "get_where_subquery") == null) return genericTestModelSql(allocator, relation_name, test_node.config.where);
+    const node = Node{ .resolved_identity = test_node.resolved_identity, .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = test_node.config_values, .test_config = test_node.config, .enabled = test_node.enabled };
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const relation = if (test_node.attached_node) |id| try relationValueForNode(a, graph, findNodeByUniqueId(graph, id) orelse return error.UnresolvedRef, false) else if (test_node.attached_source_unique_id) |id| try relationValueForSource(a, graph, &node, findSourceByUniqueId(graph, id) orelse return error.UnresolvedSource) else native_expr.Value{ .string = relation_name };
+    const generated = try renderMacroForNode(a, graph, &node, "get_where_subquery", &.{.{ .value = relation }});
+    return try allocator.dupe(u8, try generated.text(a));
 }
 
 fn applyGenericTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?i64) ![]const u8 {
@@ -1012,7 +1048,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         for (strings, values) |s, *v| v.* = .{ .string = s };
         return .{ .list = values };
     }
-    if (std.mem.eql(u8, path, "execute")) return .{ .boolean = context.parse_node == null };
+    if (std.mem.eql(u8, path, "execute")) return .{ .boolean = context.execute_override orelse (context.parse_node == null) };
     if (std.mem.eql(u8, path, "sql") or std.mem.eql(u8, path, "compiled_code")) return if (context.node.compiled_code) |sql| .{ .string = sql } else .undefined;
     if (std.mem.eql(u8, path, "pre_hooks") or std.mem.eql(u8, path, "post_hooks")) {
         const config = try @import("canonical_manifest_config.zig").node(allocator, context.node);
@@ -1223,7 +1259,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     if (std.mem.eql(u8, name, "is_incremental")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
-        return .{ .boolean = context.parse_node == null and context.node.runtime_is_incremental };
+        return .{ .boolean = (context.execute_override orelse (context.parse_node == null)) and context.node.runtime_is_incremental };
     }
     if (std.mem.eql(u8, name, "var") or std.mem.eql(u8, name, "env_var")) {
         if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
@@ -1284,7 +1320,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return try valueFromJson(allocator, parsed.value);
     }
     if (try @import("adapter_context.zig").credentialValue(allocator, context.graph, name, args)) |value| return value;
-    if (context.parse_node != null) {
+    if (context.parse_node != null or context.execute_override == false) {
         if (try @import("adapter_context.zig").parseReplacement(allocator, name)) |value| return value;
         if (std.mem.eql(u8, name, "run_query") or std.mem.eql(u8, name, "load_result")) return .none;
         if (std.mem.eql(u8, name, "statement") or std.mem.eql(u8, name, "store_result") or std.mem.eql(u8, name, "log") or std.mem.eql(u8, name, "print")) return .{ .string = "" };
@@ -1827,9 +1863,8 @@ fn findEndMacroTag(sql: []const u8, start: usize) ?usize {
 
 fn findCustomGenericTestMacro(graph: *const Graph, test_node: *const GenericTestNode) ?*const MacroDef {
     for (test_node.macro_depends_on.items) |macro_id| {
-        if (!std.mem.startsWith(u8, macro_id, "macro.dbt.")) {
-            return findMacroByUniqueId(graph, macro_id);
-        }
+        const macro = findMacroByUniqueId(graph, macro_id) orelse continue;
+        if (std.mem.startsWith(u8, macro.name, "test_") and macro.macro_sql.len != 0) return macro;
     }
     return null;
 }
@@ -2475,6 +2510,7 @@ fn findMacroByUniqueId(graph: *const Graph, unique_id: []const u8) ?*const Macro
 }
 
 pub fn relationSchemaForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
+    if (node.resolved_identity) |identity| return try allocator.dupe(u8, identity.schema);
     if (node.snapshot_config) |config| {
         if (config.target_schema) |schema| return try allocator.dupe(u8, schema);
     }
@@ -2486,6 +2522,7 @@ pub fn relationSchemaForNode(allocator: std.mem.Allocator, graph: *const Graph, 
 }
 
 pub fn relationDatabaseForNode(graph: *const Graph, node: *const Node) ?[]const u8 {
+    if (node.resolved_identity) |identity| return identity.database;
     const values = @import("config_value.zig");
     if (node.snapshot_config) |config| if (config.target_database) |database| return database;
     if (values.get(node.effective_config, "database")) |database| if (database == .string) return database.string;
@@ -2501,6 +2538,7 @@ pub fn relationDatabaseForNode(graph: *const Graph, node: *const Node) ?[]const 
 }
 
 pub fn relationIdentifierForNode(node: *const Node) []const u8 {
+    if (node.resolved_identity) |identity| return identity.identifier;
     if (node.config_alias) |custom_alias| {
         const trimmed = std.mem.trim(u8, custom_alias, " \t\r\n");
         if (trimmed.len != 0) return trimmed;

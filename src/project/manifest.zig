@@ -503,9 +503,9 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
 
     try writer.writeAll(",\"database\":");
     const snapshot_config = node.snapshot_config;
-    try writeNullableString(writer, compiler.relationDatabaseForNode(graph, node) orelse databaseNameForGraph(graph));
+    try writeNullableString(writer, if (node.resolved_identity) |identity| identity.database else compiler.relationDatabaseForNode(graph, node) orelse databaseNameForGraph(graph));
     try writer.writeAll(",\"schema\":");
-    try json.string(writer, if (snapshot_config) |config| config.target_schema orelse schema_name else schema_name);
+    try json.string(writer, if (node.resolved_identity != null) schema_name else if (snapshot_config) |config| config.target_schema orelse schema_name else schema_name);
     try writer.writeAll(",\"alias\":");
     try json.string(writer, alias);
     try writer.writeAll(",\"relation_name\":");
@@ -549,15 +549,24 @@ fn writeTestNodeIdentityFields(
     raw_code: ?[]const u8,
     config: types.GenericTestConfig,
     fqn: ?[]const []const u8,
+    identity: ?types.ResolvedIdentity,
+    alias: []const u8,
 ) !void {
-    const audit_node = audits.auditNode(config, name, package_name);
+    var audit_node = audits.auditNode(config, alias, package_name);
+    audit_node.resolved_identity = identity;
     const schema_name = try compiler.relationSchemaForNode(allocator, graph, &audit_node);
     defer allocator.free(schema_name);
 
     try writer.writeAll(",\"database\":");
-    try writeNullableString(writer, config.database orelse compiler.relationDatabaseForNode(graph, &audit_node) orelse databaseNameForGraph(graph));
+    try writeNullableString(writer, if (identity) |resolved| resolved.database else config.database orelse compiler.relationDatabaseForNode(graph, &audit_node) orelse databaseNameForGraph(graph));
     try writer.writeAll(",\"schema\":");
     try json.string(writer, schema_name);
+    try writer.writeAll(",\"relation_name\":");
+    if (audits.shouldStore(config, graph.command_options)) {
+        const relation = try audits.relationNameWithIdentity(allocator, graph, config, alias, package_name, identity);
+        defer allocator.free(relation);
+        try json.string(writer, relation);
+    } else try writer.writeAll("null");
     try writer.writeAll(",\"fqn\":");
     if (fqn) |parts| try json.stringArray(writer, parts) else try writeFqnFromPath(writer, package_name, path, name, null);
     try writer.writeAll(",\"checksum\":");
@@ -1251,8 +1260,8 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
         try std.json.Stringify.value(test_node.unrendered_config, .{}, writer);
     } else try writeUnrenderedTestConfig(writer, test_node.config);
     try writer.writeAll(",\"alias\":");
-    try json.string(writer, test_node.config.alias orelse test_node.alias);
-    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, null, test_node.config, if (test_node.fqn.items.len != 0) test_node.fqn.items else null);
+    try json.string(writer, if (test_node.resolved_identity) |identity| identity.identifier else test_node.config.alias orelse test_node.alias);
+    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, null, test_node.config, if (test_node.fqn.items.len != 0) test_node.fqn.items else null, test_node.resolved_identity, test_node.alias);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -1359,10 +1368,10 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     try json.string(writer, test_node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, test_node.name);
-    try writeUnrenderedTestConfig(writer, test_node.config);
+    try writeUnrenderedTestConfigWithValues(writer, test_node.config, test_node.config_values);
     try writer.writeAll(",\"alias\":");
-    try json.string(writer, test_node.config.alias orelse test_node.alias);
-    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, test_node.raw_code, test_node.config, null);
+    try json.string(writer, if (test_node.resolved_identity) |identity| identity.identifier else test_node.config.alias orelse test_node.alias);
+    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, test_node.raw_code, test_node.config, null, test_node.resolved_identity, test_node.alias);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -1453,6 +1462,10 @@ fn writeGenericConfigString(writer: *Io.Writer, value: []const u8) !void {
 }
 
 fn writeUnrenderedTestConfig(writer: *Io.Writer, config: types.GenericTestConfig) !void {
+    return writeUnrenderedTestConfigWithValues(writer, config, .null);
+}
+
+fn writeUnrenderedTestConfigWithValues(writer: *Io.Writer, config: types.GenericTestConfig, extra: std.json.Value) !void {
     try writer.writeAll(",\"unrendered_config\":{");
     var wrote = false;
     inline for (std.meta.fields(types.GenericTestConfigField)) |field| {
@@ -1490,6 +1503,14 @@ fn writeUnrenderedTestConfig(writer: *Io.Writer, config: types.GenericTestConfig
             }
         }
     }
+    if (extra == .object) for (extra.object.keys(), extra.object.values()) |key, value| {
+        if (std.meta.stringToEnum(types.GenericTestConfigField, key) != null) continue;
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try json.string(writer, key);
+        try writer.writeAll(":");
+        try std.json.Stringify.value(value, .{}, writer);
+    };
     try writer.writeAll("}");
 }
 

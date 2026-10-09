@@ -466,7 +466,22 @@ pub const ExtraCte = struct {
     sql: []const u8,
 };
 
+/// Owned parse-time results of Core's generate_*_name policies. Configuration
+/// remains authored separately; relation consumers use this stable identity.
+pub const ResolvedIdentity = struct {
+    database: ?[]const u8 = null,
+    schema: []const u8,
+    identifier: []const u8,
+
+    pub fn deinit(self: *ResolvedIdentity, allocator: std.mem.Allocator) void {
+        if (self.database) |database| allocator.free(database);
+        allocator.free(self.schema);
+        allocator.free(self.identifier);
+    }
+};
+
 pub const Node = struct {
+    resolved_identity: ?ResolvedIdentity = null,
     hook_index: ?usize = null,
     hook_checksum: ?[32]u8 = null,
     runtime_batch: ?SampleWindow = null,
@@ -602,6 +617,7 @@ pub const SnapshotConfig = struct {
 };
 
 pub const GenericTestNode = struct {
+    resolved_identity: ?ResolvedIdentity = null,
     config_values: std.json.Value = .null,
     builder_config: std.json.Value = .null,
     unrendered_config: std.json.Value = .null,
@@ -644,6 +660,7 @@ pub const GenericTestNode = struct {
 };
 
 pub const SingularTestNode = struct {
+    resolved_identity: ?ResolvedIdentity = null,
     config_values: std.json.Value = .null,
     package_name: []const u8,
     unique_id: []const u8,
@@ -911,6 +928,7 @@ pub fn deinitDispatchConfigs(allocator: std.mem.Allocator, configs: *std.ArrayLi
 }
 
 pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
+    if (node.resolved_identity) |*identity| identity.deinit(allocator);
     config_value.deinit(allocator, &node.version);
     config_value.deinit(allocator, &node.latest_version);
     config_value.deinit(allocator, &node.properties);
@@ -952,6 +970,7 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
 }
 
 pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
+    if (test_node.resolved_identity) |*identity| identity.deinit(allocator);
     config_value.deinit(allocator, &test_node.arguments);
     config_value.deinit(allocator, &test_node.config_values);
     config_value.deinit(allocator, &test_node.builder_config);
@@ -968,6 +987,7 @@ pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTe
 }
 
 pub fn deinitSingularTestNode(allocator: std.mem.Allocator, test_node: *SingularTestNode) void {
+    if (test_node.resolved_identity) |*identity| identity.deinit(allocator);
     config_value.deinit(allocator, &test_node.config_values);
     test_node.doc_blocks.deinit(allocator);
     test_node.tags.deinit(allocator);

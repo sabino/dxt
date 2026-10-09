@@ -1324,8 +1324,8 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
         };
         const node: ?Node = switch (resource) {
             .node => |value| value.*,
-            .generic => |value| if (@import("project/test_audits.zig").shouldStore(config.?, options)) @import("project/test_audits.zig").auditNode(config.?, value.alias, value.package_name) else null,
-            .singular => |value| if (@import("project/test_audits.zig").shouldStore(config.?, options)) @import("project/test_audits.zig").auditNode(config.?, value.alias, value.package_name) else null,
+            .generic => |value| if (@import("project/test_audits.zig").shouldStore(config.?, options)) @import("project/test_audits.zig").auditNodeWithIdentity(config.?, value.alias, value.package_name, value.resolved_identity) else null,
+            .singular => |value| if (@import("project/test_audits.zig").shouldStore(config.?, options)) @import("project/test_audits.zig").auditNodeWithIdentity(config.?, value.alias, value.package_name, value.resolved_identity) else null,
             else => null,
         };
         if (node) |value| {
@@ -2670,6 +2670,7 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
             test_node.compiled = true;
             test_node.compiled_code = compiled_code;
             test_node.compiled_path = util.normalizeForDisplay(compiled_path);
+            try compiler.recordGenericCompilationDependency(runtime.allocator, graph, test_node);
             try recordCompilation(runtime, compile_rows, started, .{ .test_node = test_node, .compiled_code = compiled_code });
             compiled_test_count += 1;
         }

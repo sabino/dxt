@@ -32,8 +32,19 @@ pub fn auditNode(config: types.GenericTestConfig, alias: []const u8, package: []
     return .{ .resource_type = "test", .package_name = package, .unique_id = "", .name = alias, .path = "", .original_file_path = "", .raw_code = "", .config_schema = config.schema orelse "dbt_test__audit", .config_alias = config.alias orelse alias };
 }
 
-pub fn relationName(allocator: std.mem.Allocator, graph: *const types.Graph, config: types.GenericTestConfig, alias: []const u8, package: []const u8) ![]const u8 {
+pub fn auditNodeWithIdentity(config: types.GenericTestConfig, alias: []const u8, package: []const u8, identity: ?types.ResolvedIdentity) types.Node {
     var node = auditNode(config, alias, package);
+    node.resolved_identity = identity;
+    return node;
+}
+
+pub fn relationName(allocator: std.mem.Allocator, graph: *const types.Graph, config: types.GenericTestConfig, alias: []const u8, package: []const u8) ![]const u8 {
+    return relationNameWithIdentity(allocator, graph, config, alias, package, null);
+}
+
+pub fn relationNameWithIdentity(allocator: std.mem.Allocator, graph: *const types.Graph, config: types.GenericTestConfig, alias: []const u8, package: []const u8, identity: ?types.ResolvedIdentity) ![]const u8 {
+    var node = auditNode(config, alias, package);
+    node.resolved_identity = identity;
     var object: std.json.ObjectMap = .empty;
     defer object.deinit(allocator);
     if (config.database) |database| try object.put(allocator, "database", .{ .string = database });
@@ -42,6 +53,10 @@ pub fn relationName(allocator: std.mem.Allocator, graph: *const types.Graph, con
 }
 
 pub fn execute(runtime: types.Runtime, graph: *const types.Graph, db_path: []const u8, config: types.GenericTestConfig, alias: []const u8, package: []const u8, compiled_sql: []const u8) !Result {
+    return executeWithIdentity(runtime, graph, db_path, config, alias, package, compiled_sql, null);
+}
+
+pub fn executeWithIdentity(runtime: types.Runtime, graph: *const types.Graph, db_path: []const u8, config: types.GenericTestConfig, alias: []const u8, package: []const u8, compiled_sql: []const u8, identity: ?types.ResolvedIdentity) !Result {
     const a = runtime.allocator;
     var scoped_runtime = runtime;
     var owned_session: ?adapter.Session = null;
@@ -63,8 +78,9 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, db_path: []con
     if (store) {
         const kind = configuredKind(config) orelse "table";
         if (!std.mem.eql(u8, kind, "table") and !std.mem.eql(u8, kind, "view")) return error.InvalidTestFailureMaterialization;
-        relation = try relationName(a, graph, config, alias, package);
-        const node = auditNode(config, alias, package);
+        relation = try relationNameWithIdentity(a, graph, config, alias, package, identity);
+        var node = auditNode(config, alias, package);
+        node.resolved_identity = identity;
         const schema = try compiler.relationSchemaForNode(a, graph, &node);
         defer a.free(schema);
         const identifier = compiler.relationIdentifierForNode(&node);

@@ -138,7 +138,7 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
     const compiled_sql = try renderGenericTestSql(runtime.allocator, graph, test_node);
     errdefer runtime.allocator.free(compiled_sql);
     const compilation_completed = clock.now(runtime.io);
-    const result = test_audits.execute(runtime, graph, db_path, test_node.config, test_node.alias, test_node.package_name, compiled_sql) catch |err| switch (err) {
+    const result = test_audits.executeWithIdentity(runtime, graph, db_path, test_node.config, test_node.alias, test_node.package_name, compiled_sql, test_node.resolved_identity) catch |err| switch (err) {
         error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.AdapterQueryCancelled, error.InvalidTestFailureMaterialization, error.InvalidTestResult => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
         else => return err,
     };
@@ -150,7 +150,7 @@ pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const 
     const compiled_sql = try renderSingularTestSql(runtime.allocator, graph, test_node);
     errdefer runtime.allocator.free(compiled_sql);
     const compilation_completed = clock.now(runtime.io);
-    const result = test_audits.execute(runtime, graph, db_path, test_node.config, test_node.alias, test_node.package_name, compiled_sql) catch |err| switch (err) {
+    const result = test_audits.executeWithIdentity(runtime, graph, db_path, test_node.config, test_node.alias, test_node.package_name, compiled_sql, test_node.resolved_identity) catch |err| switch (err) {
         error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.AdapterQueryCancelled, error.InvalidTestFailureMaterialization, error.InvalidTestResult => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .failures = 0, .execution_error = true },
         else => return err,
     };

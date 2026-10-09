@@ -76,6 +76,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 node.compiled = true;
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
                 node.compiled_path = compiled_path;
+                try compiler.recordGenericCompilationDependency(runtime.allocator, graph, node);
                 counts.tests += 1;
             } else if (row.singular_test_node) |original| {
                 const node = @constCast(original);

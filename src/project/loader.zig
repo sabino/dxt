@@ -269,12 +269,13 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         try compiler.scanDependencies(runtime.allocator, node.raw_code, node, &graph);
     }
     try snapshot_yaml.finalize(runtime, &graph);
-    try snapshot_yaml.rejectRelationCollisions(&graph);
     try callbacks.materialize_generic_tests(&graph);
     try @import("generic_test_config.zig").finalize(runtime, &graph);
     try @import("unit_metadata.zig").checksums(&graph);
     try @import("unit_versions.zig").assign(&graph);
     try @import("hook_operations.zig").load(runtime, &graph);
+    try @import("naming.zig").finalize(runtime, &graph);
+    try snapshot_yaml.rejectRelationCollisions(&graph);
     sortGraphResources(&graph);
     try rejectDuplicateAnalyses(&graph);
     try rejectDuplicateModels(&graph);

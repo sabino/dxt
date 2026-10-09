@@ -55,6 +55,8 @@ pub fn prepare(runtime: types.Runtime, options: types.Options, graph: *const typ
         hashPart(&digest, file.text);
     }
     hashPart(&digest, options.project_dir);
+    hashPart(&digest, @embedFile("naming.zig"));
+    hashPart(&digest, @embedFile("context_values.zig"));
     hashPart(&digest, try std.Io.Dir.cwd().realPathFileAlloc(runtime.io, options.project_dir, a));
     hashPart(&digest, try std.json.Stringify.valueAlloc(a, project.rendered_project, .{}));
     hashPart(&digest, try std.json.Stringify.valueAlloc(a, graph.target_context, .{}));
