@@ -554,7 +554,7 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
         if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
         options.full_refresh = value == .bool and value.bool;
     }
-    inline for (.{ .{ "defer", "defer_enabled" }, .{ "favor_state", "favor_state" }, .{ "fail_fast", "fail_fast" }, .{ "quiet", "quiet" }, .{ "debug", "debug" }, .{ "write_json", "write_json" }, .{ "warn_error", "warn_error" }, .{ "version_check", "version_check" }, .{ "use_colors", "use_colors" }, .{ "use_colors_file", "use_colors_file" }, .{ "print", "print_enabled" } }) |field| {
+    inline for (.{ .{ "defer", "defer_enabled" }, .{ "favor_state", "favor_state" }, .{ "fail_fast", "fail_fast" }, .{ "quiet", "quiet" }, .{ "debug", "debug" }, .{ "write_json", "write_json" }, .{ "warn_error", "warn_error" }, .{ "version_check", "version_check" }, .{ "use_colors", "use_colors" }, .{ "use_colors_file", "use_colors_file" }, .{ "print", "print_enabled" }, .{ "populate_cache", "populate_cache" }, .{ "cache_selected_only", "cache_selected_only" }, .{ "log_cache_events", "log_cache_events" } }) |field| {
         if (args.get(field[0])) |value| {
             if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
             @field(options, field[1]) = value == .bool and value.bool;

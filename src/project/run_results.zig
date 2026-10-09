@@ -265,6 +265,8 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
     try json.string(writer, @tagName(opts.log_format));
     try writer.print(",\"quiet\":{s},\"write_json\":{s},\"warn_error\":{s},\"version_check\":{s}", .{ if (opts.quiet) "true" else "false", if (opts.write_json) "true" else "false", if (opts.warn_error) "true" else "false", if (opts.version_check) "true" else "false" });
     try writer.print(",\"debug\":{s}", .{if (opts.debug) "true" else "false"});
+    try writer.print(",\"populate_cache\":{s},\"cache_selected_only\":{s}", .{ if (opts.populate_cache) "true" else "false", if (opts.cache_selected_only) "true" else "false" });
+    if (opts.log_cache_events) try writer.writeAll(",\"log_cache_events\":true");
     if (opts.single_threaded) try writer.writeAll(",\"single_threaded\":true");
     if (opts.record_timing_info) |path| {
         try writer.writeAll(",\"record_timing_info\":");
