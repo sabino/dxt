@@ -113,3 +113,38 @@ def test_package_restrict_access_matches_core(tmp_path, core_runner, visibility,
     actual, oracle = parse_pair(project, core_runner)
     assert (actual.returncode == 0) == allowed, actual.stderr
     assert oracle.success == allowed, oracle.exception
+
+
+@pytest.mark.parametrize('description', ["{{ var('missing') }}", "{{ doc('missing') }}"])
+def test_group_description_is_preserved_at_schema_parse_like_core(tmp_path, core_runner, description):
+    project = tmp_path / 'project'
+    project_at(project, "version: 2\ngroups:\n  - name: finance\n    owner: {name: Finance}\n    description: \"" + description + "\"\n", {'base': 'select 1 as id'})
+    actual, oracle = parse_pair(project, core_runner)
+    assert actual.returncode == 0, actual.stderr
+    assert oracle.success, oracle.exception
+    native = json.loads((project / 'native/manifest.json').read_text())
+    core = json.loads((project / 'core/manifest.json').read_text())
+    assert native['groups'] == core['groups']
+
+
+@pytest.mark.parametrize('key', ['group', 'access'])
+def test_duplicate_top_level_and_config_ownership_is_rejected_like_core(tmp_path, core_runner, key):
+    project = tmp_path / 'project'
+    value = 'finance' if key == 'group' else 'public'
+    project_at(project, json.dumps({'version': 2, 'groups': [{'name': 'finance', 'owner': {'name': 'Finance'}}], 'models': [{'name': 'base', key: value, 'config': {key: value}}]}))
+    actual, oracle = parse_pair(project, core_runner)
+    assert actual.returncode != 0 and 'DuplicateResourceConfiguration' in actual.stderr
+    assert not oracle.success
+
+
+def test_top_level_ownership_values_render_with_merged_variables(tmp_path, core_runner):
+    project = tmp_path / 'project'
+    properties = "version: 2\ngroups: [{name: finance, owner: {name: Finance}, config: {meta: {team: \"{{ var('team') }}\"}}}]\nmodels:\n  - name: base\n    group: \"{{ var('team') }}\"\n    access: public\n"
+    project_at(project, properties, {'base': 'select 1 as id'})
+    actual, oracle = parse_pair(project, core_runner)
+    assert actual.returncode == 0, actual.stderr
+    assert oracle.success, oracle.exception
+    native = json.loads((project / 'native/manifest.json').read_text())
+    core = json.loads((project / 'core/manifest.json').read_text())
+    assert native['groups'] == core['groups']
+    assert native['nodes']['model.ownership.base']['config']['group'] == core['nodes']['model.ownership.base']['config']['group']

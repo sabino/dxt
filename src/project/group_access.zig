@@ -24,7 +24,13 @@ pub fn parse(runtime: types.Runtime, document: Value, root: []const u8, path: []
     var context = @import("config_render.zig").Context{ .runtime = runtime, .vars = graph.vars.items, .target = graph.target_context, .package_name = package };
     for (definitions.array.items) |definition| {
         if (definition != .object) return error.InvalidGroupDefinition;
-        var rendered = try context.render(definition);
+        var rendered: Value = .{ .object = .empty };
+        var fields = definition.object.iterator();
+        while (fields.next()) |entry| {
+            var value = if (std.mem.eql(u8, entry.key_ptr.*, "description")) try values.clone(runtime.allocator, entry.value_ptr.*) else try context.render(entry.value_ptr.*);
+            defer values.deinit(runtime.allocator, &value);
+            try values.put(runtime.allocator, &rendered, entry.key_ptr.*, value);
+        }
         defer values.deinit(runtime.allocator, &rendered);
         const name = text(field(rendered, "name")) orelse return error.InvalidGroupDefinition;
         const owner = field(rendered, "owner");
