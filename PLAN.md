@@ -64,6 +64,17 @@ macro invocation with the supervisor and live connection checks with the
 adapter worker; command commits integrate after state/defer and dependencies.
 Parallel pytest runs use separate ignored basetemp directories to prevent
 pytest's shared temporary-retention cleanup from removing active fixtures.
+After dependency installation, that worker owns a general native YAML reader
+and completes remaining dependency syntax/transports using it. The reader
+returns std.json.Value with source diagnostics and supports block/flow maps and
+sequences, multiline scalars, anchors/aliases/merge, tags and quoted escapes.
+Configuration/profile and semantic workers will consume this shared reader
+after its commit, preserving scope and configuration precedence during migration.
+The completed incremental worker next owns full project/profile/resource
+configuration, model versions/groups/access and contract/hook/grant execution.
+It stacks on its incremental slice and consumes the shared YAML reader when
+ready; narrow compiler/test-macro interfaces coordinate with the supervisor.
+Configuration commits follow the YAML/dependency and snapshot parser commits.
 
 Validation uses the current pinned Core/adapter contract, repeated-run and
 failure fixtures, full applicable schemas, public projects, native tests,

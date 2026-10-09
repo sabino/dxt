@@ -216,6 +216,20 @@ pub fn compileModel(allocator: std.mem.Allocator, graph: *const Graph, node: *co
 /// Render with execute=false to discover dependencies through real expression,
 /// scope and macro semantics, including macros returning a list of ref names.
 pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
+    // Core's static extraction sees literal refs in both execute branches.
+    // General macro/expression templates fall back to execute=false rendering.
+    const refs_start = node.refs.items.len;
+    const sources_start = node.source_refs.items.len;
+    const macros_start = node.macro_depends_on.items.len;
+    var static_success = true;
+    jinja.scanSql(allocator, sql, node, graph) catch |err| switch (err) {
+        error.UnsupportedJinja, error.UnsupportedDynamicRef, error.UnsupportedDynamicSource, error.UnresolvedVar, error.UnresolvedMacro => static_success = false,
+        else => return err,
+    };
+    if (static_success and node.macro_depends_on.items.len == macros_start) return;
+    node.refs.shrinkRetainingCapacity(refs_start);
+    node.source_refs.shrinkRetainingCapacity(sources_start);
+    node.macro_depends_on.shrinkRetainingCapacity(macros_start);
     const fallback = Graph{ .allocator = allocator, .project_name = node.package_name };
     var context = CompileContext.init(allocator, graph orelse &fallback, node);
     defer context.deinit();
@@ -768,7 +782,9 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return error.UnresolvedMacro;
     }
     const macro = findMacroByUniqueId(context.graph, macro_id.?) orelse return error.UnresolvedMacro;
-    if (context.parse_node) |node| try util.appendUnique(context.allocator, &node.macro_depends_on, macro.unique_id);
+    if (context.parse_node) |node| {
+        if (context.macro_render_depth == 0) try util.appendUnique(context.allocator, &node.macro_depends_on, macro.unique_id);
+    }
     return try renderMacroValue(context, macro, args);
 }
 
@@ -1066,6 +1082,9 @@ fn renderAdapterDispatchExpression(context: *CompileContext, span: []const u8) !
         dispatch_prefixes.slice(),
     ) orelse return error.UnresolvedMacro;
     const macro = findMacroByUniqueId(context.graph, macro_id) orelse return error.UnresolvedMacro;
+    if (context.parse_node) |node| {
+        if (context.macro_render_depth == 0) try util.appendUnique(context.allocator, &node.macro_depends_on, macro.unique_id);
+    }
     return try renderMacroCall(context, macro, span[arg_open + 1 .. arg_close]);
 }
 

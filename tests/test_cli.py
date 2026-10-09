@@ -10834,7 +10834,7 @@ def test_malformed_docs_block_fails_loudly(tmp_path: Path):
     assert "malformed docs block" in result.stderr
 
 
-def test_unsupported_macro_call_fails_loudly(tmp_path: Path):
+def test_missing_expression_var_fails_loudly(tmp_path: Path):
     project = copy_fixture(tmp_path, "unsupported_macro_call")
     result = subprocess.run(
         [DXT, "parse", "--project-dir", str(project)],
@@ -10843,7 +10843,7 @@ def test_unsupported_macro_call_fails_loudly(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "unsupported or malformed Jinja" in result.stderr
+    assert "unresolved var" in result.stderr
 
 
 def test_missing_package_macro_fails_loudly(tmp_path: Path):
@@ -12009,7 +12009,7 @@ def test_docs_generate_reuses_file_selectors(tmp_path: Path):
     assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
 
 
-def test_docs_generate_fails_loudly_on_unsupported_compile_jinja(tmp_path: Path):
+def test_docs_generate_fails_loudly_on_missing_expression_var(tmp_path: Path):
     project = copy_fixture(tmp_path, "unsupported_macro_call")
     result = subprocess.run(
         [DXT, "docs", "generate", "--project-dir", str(project)],
@@ -12018,7 +12018,7 @@ def test_docs_generate_fails_loudly_on_unsupported_compile_jinja(tmp_path: Path)
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "unsupported or malformed Jinja" in result.stderr
+    assert "unresolved var" in result.stderr
 
 
 def test_unknown_option_is_rejected():
