@@ -349,6 +349,7 @@ pub fn analyze(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
             break;
         };
     }
+    for (selected) |item| if (std.mem.startsWith(u8, item.unique_id, "test.")) try ids.append(runtime.allocator, item.unique_id);
     try @import("project/sql_analysis.zig").run(runtime, &graph, ids.items, target_dir, stdout, stderr, options.output == .json or std.mem.eql(u8, options.which, "explain"));
 }
 

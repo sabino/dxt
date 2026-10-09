@@ -16,12 +16,14 @@ pub const Operator = struct { kind: []const u8, offset: usize = 0 };
 pub const Ir = struct { columns: []const Column, inputs: []const Input, operators: []const Operator, predicate_origins: []const Origin };
 const Binding = struct { alias: []const u8, columns: []const Column };
 const Scope = struct { bindings: std.ArrayList(Binding) = .empty, ctes: std.ArrayList(Binding) = .empty, outer: ?*const Scope = null, projected: []const Column = &.{}, join_keys: std.StringHashMapUnmanaged(Column) = .empty };
-pub const FunctionBinding = struct { offset: usize, columns: []const Column };
+pub const FunctionBinding = struct { offset: usize, columns: []const Column, input: ?Input = null };
 
 pub const Builder = struct {
     allocator: std.mem.Allocator,
     dialect: Dialect,
     catalog: []const Relation,
+    default_catalog: []const u8 = "",
+    search_path: []const []const u8 = &.{},
     functions: []const FunctionBinding = &.{},
     inputs: std.ArrayList(Input) = .empty,
     operators: std.ArrayList(Operator) = .empty,
@@ -217,7 +219,8 @@ pub const Builder = struct {
                 var name = alias;
                 if (name.len == 0) name = if (self.dialect == .duckdb) text(field(function, "function_name")) else try self.stringName(items(field(function, "funcname"))[0]);
                 const argument_origins = try self.expression(function, scope);
-                for (columns) |*column| column.origins = argument_origins;
+                for (columns) |*column| column.origins = try self.joinOrigins(column.origins, argument_origins);
+                if (binding.input) |input| try self.inputs.append(self.allocator, input);
                 try scope.bindings.append(self.allocator, .{ .alias = name, .columns = columns });
                 try self.op("TableFunction", offset);
                 return;
@@ -233,11 +236,24 @@ pub const Builder = struct {
             return;
         };
         var matched: ?Relation = null;
+        var matched_rank: usize = 0;
+        var ambiguous = false;
         for (self.catalog) |relation| {
             if (!self.equal(identifier, relation.identifier) or (schema.len != 0 and !self.equal(schema, relation.schema)) or (catalog.len != 0 and !self.equal(catalog, relation.catalog))) continue;
-            if (matched != null) return error.SqlLineageAmbiguousRelation;
-            matched = relation;
+            var rank: usize = 0;
+            if (catalog.len == 0 and self.equal(self.default_catalog, relation.catalog)) rank += self.search_path.len + 1;
+            if (schema.len == 0) for (self.search_path, 0..) |candidate, index| if (self.equal(candidate, relation.schema)) {
+                rank += self.search_path.len - index;
+                break;
+            };
+            if (matched != null and rank == matched_rank) ambiguous = true;
+            if (matched == null or rank > matched_rank) {
+                matched = relation;
+                matched_rank = rank;
+                ambiguous = false;
+            }
         }
+        if (ambiguous) return error.SqlLineageAmbiguousRelation;
         const relation = matched orelse return error.SqlLineageUnresolvedRelation;
         try scope.bindings.append(self.allocator, .{ .alias = if (alias.len == 0) identifier else alias, .columns = relation.columns });
         var found = false;
@@ -429,4 +445,20 @@ test "logical IR resolves PostgreSQL CTE joins and expressions to typed base col
     try std.testing.expectEqualStrings("INTEGER", ir.columns[0].data_type);
     try std.testing.expectEqual(@as(usize, 1), ir.inputs.len);
     try std.testing.expect(ir.predicate_origins.len != 0);
+}
+
+test "logical relation resolution follows native schema search path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var pg = try parser.Postgres.open(.{ .allocator = allocator, .io = std.testing.io });
+    const parsed = try pg.parse(allocator, "select id from orders");
+    const columns = [_]Column{.{ .name = "id", .data_type = "integer" }};
+    var builder = Builder{ .allocator = allocator, .dialect = .postgres, .default_catalog = "warehouse", .search_path = &.{"public"}, .catalog = &.{
+        .{ .resource_id = "relation.a.orders", .catalog = "warehouse", .schema = "a", .identifier = "orders", .columns = &columns },
+        .{ .resource_id = "relation.b.orders", .catalog = "warehouse", .schema = "b", .identifier = "orders", .columns = &columns },
+        .{ .resource_id = "source.demo.orders", .catalog = "warehouse", .schema = "public", .identifier = "orders", .columns = &columns },
+    } };
+    const result = try builder.build(parsed.tree, &columns);
+    try std.testing.expectEqualStrings("source.demo.orders", result.inputs[0].resource_id);
 }

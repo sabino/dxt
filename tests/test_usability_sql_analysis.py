@@ -177,6 +177,7 @@ def test_analysis_macros_cannot_escape_readonly_transaction_or_publish_secrets(t
     assert result.returncode == 1
     assert "synthetic_secret" not in result.stderr
     assert "synthetic_secret" not in (project / "target/dxt_sql_analysis.json").read_text()
+    assert "synthetic_secret" not in (project / "target/.dxt_sql_analysis_cache.json").read_text()
 
 def test_postgres_native_grammar_binding_lineage_errors_and_readonly_recovery(tmp_path):
     if importlib.util.find_spec("pgserver") is None:
@@ -242,6 +243,7 @@ def test_file_schema_cache_invalidation_and_failed_dependency_propagation(tmp_pa
     (project / "models/final.sql").write_text("select amount from {{ ref('base') }}")
     cold = report(project, native_environment)
     assert cold["nodes"]["model.analysis_contract.final"]["columns"][0]["data_type"] == "BIGINT"
+    assert cold["nodes"]["model.analysis_contract.final"]["columns"][0]["origins"][0]["resource_id"].startswith("external.duckdb.read_csv.")
     assert report(project, native_environment)["stats"]["cache_hits"] == 2
     input_file.write_text("id,amount\n1,hello\n")
     changed = report(project, native_environment)
@@ -281,3 +283,34 @@ def test_pinned_core_compiled_sql_and_executed_results_match_analysis(tmp_path, 
     core_rows = duck_query(project, 'select * from "final" order by id')
     assert invoke(project, native_environment, "run", "--select", "base", "final").returncode == 0
     assert duck_query(project, 'select * from "final" order by id') == core_rows
+
+
+def test_tests_and_snapshot_metadata_share_native_analysis_dag(tmp_path, native_environment):
+    project = project_at(tmp_path)
+    (project / "snapshots").mkdir()
+    (project / "tests").mkdir()
+    duck_query(project, "alter table orders add column ts timestamp; update orders set ts='2024-01-01'")
+    (project / "snapshots/history.sql").write_text("{% snapshot history %}{{ config(strategy='timestamp',unique_key='id',updated_at='ts',target_schema='archive',hard_deletes='new_record',snapshot_meta_column_names={'dbt_valid_to':'closed_at'}) }}select * from {{ source('raw','orders') }}{% endsnapshot %}")
+    (project / "models/base.sql").write_text("select id,amount from {{ source('raw','orders') }}")
+    (project / "models/final.sql").write_text("select id,dbt_scd_id,dbt_updated_at,closed_at,dbt_is_deleted from {{ ref('history') }}")
+    schema = project / "models/schema.yml"
+    schema.write_text(schema.read_text()+"models:\n  - name: base\n    columns:\n      - name: id\n        data_tests: [not_null]\n")
+    (project / "tests/positive_amount.sql").write_text("select id from {{ ref('base') }} where amount<0")
+    analyzed = report(project, native_environment)
+    final = analyzed["nodes"]["model.analysis_contract.final"]
+    assert [column["data_type"] for column in final["columns"]] == ["INTEGER","VARCHAR","TIMESTAMP","TIMESTAMP","VARCHAR"]
+    assert final["columns"][1]["origins"] == [{"resource_id":"snapshot.analysis_contract.history","column":"dbt_scd_id"}]
+    tests = [node for node in analyzed["nodes"].values() if node["resource_type"] == "test"]
+    assert len(tests) == 2 and all(node["status"] == "success" for node in tests)
+    assert all(node["columns"][0]["origins"][0]["resource_id"] == "source.analysis_contract.raw.orders" for node in tests)
+    selected = report(project, native_environment, "--resource-type", "test")
+    assert len(selected["nodes"]) == 2 and all(node["resource_type"] == "test" for node in selected["nodes"].values())
+    assert duck_query(project, "select count(*) n from information_schema.tables where table_schema='archive'") == [{"n":0}]
+
+
+def test_native_search_path_wins_over_duplicate_relation_names(tmp_path, native_environment):
+    project = project_at(tmp_path)
+    duck_query(project, "create schema a; create schema b; create table a.orders(other varchar); create table b.orders(other varchar)")
+    (project / "models/output.sql").write_text("select id from orders")
+    node = report(project, native_environment)["nodes"]["model.analysis_contract.output"]
+    assert node["inputs"][0]["resource_id"] == "source.analysis_contract.raw.orders"

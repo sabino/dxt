@@ -53,7 +53,19 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
     const start = std.Io.Clock.awake.now(runtime.io).nanoseconds;
     const cache_path = try std.fs.path.join(allocator, &.{ target_dir, ".dxt_sql_analysis_cache.json" });
     const previous = try readCache(local_runtime, cache_path);
+    var version_result = try session.query("select version()");
+    defer version_result.deinit(allocator);
+    const parser_signature = try hash(allocator, try std.fmt.allocPrint(allocator, "{s}:pg-17.7:{s}", .{ graph.adapter_type, version_result.firstScalar() orelse "" }));
     var catalog = try loadCatalog(local_runtime, graph, &session);
+    var schemas_result = try session.query("select current_database(),unnest(current_schemas(true)) as search_schema");
+    defer schemas_result.deinit(allocator);
+    var search_path: std.ArrayList([]const u8) = .empty;
+    for (schemas_result.rows) |row| {
+        const candidate = row[1] orelse continue;
+        if (!contains(search_path.items, candidate)) try search_path.append(allocator, try allocator.dupe(u8, candidate));
+    }
+    const default_catalog = if (schemas_result.rows.len != 0) try allocator.dupe(u8, schemas_result.rows[0][0] orelse "") else "";
+    try addTestNodes(graph, selected_ids);
     const order = try requiredOrder(allocator, graph, selected_ids);
     var virtual: std.ArrayList(Virtual) = .empty;
     var nodes: std.json.ObjectMap = .empty;
@@ -80,6 +92,11 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
             failed = true;
             try recover(&session, dialect);
             continue;
+        } else if (eq(node.resource_type, "test")) compileTest(allocator, graph, node.unique_id) catch |err| {
+            try appendFailure(allocator, &nodes, &visible, selected_ids, node, .{ .code = "JINJA_COMPILATION", .message = @errorName(err) }, "", runtime, graph, db_path, stderr);
+            failed = true;
+            try recover(&session, dialect);
+            continue;
         } else blk: {
             const result = compiler.compileModelWithInjectedCtes(allocator, graph, node) catch |err| {
                 try appendFailure(allocator, &nodes, &visible, selected_ids, node, .{ .code = "JINJA_COMPILATION", .message = @errorName(err) }, "", runtime, graph, db_path, stderr);
@@ -92,7 +109,7 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
         const compiled_hash = try hash(allocator, compiled);
         const cached_ast = field(field(previous, "asts"), node.unique_id);
         var parsed: parser.Parsed = .{};
-        if (eq(text(field(cached_ast, "compiled_hash")), compiled_hash)) parsed.tree = try values.clone(allocator, field(cached_ast, "tree"));
+        if (eq(text(field(cached_ast, "compiled_hash")), compiled_hash) and eq(text(field(cached_ast, "parser_signature")), parser_signature)) parsed.tree = try values.clone(allocator, field(cached_ast, "tree"));
         if (parsed.tree == .null) {
             parsed = if (dialect == .duckdb) try parser.parseDuckDb(allocator, &session, compiled) else try pg.parse(allocator, compiled);
             stats.parsed_nodes += 1;
@@ -109,7 +126,7 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
             try recover(&session, dialect);
             continue;
         };
-        const fingerprint = try nodeFingerprint(local_runtime, graph, node, compiled, parsed.tree, catalog.items, nodes);
+        const fingerprint = try nodeFingerprint(local_runtime, graph, node, compiled, parser_signature, parsed.tree, catalog.items, nodes);
         const cached = field(field(previous, "nodes"), node.unique_id);
         var analysis: Value = .null;
         if (eq(text(field(cached, "fingerprint")), fingerprint) and eq(text(field(cached, "status")), "success")) {
@@ -118,7 +135,7 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
         } else if (cached != .null) stats.invalidated_nodes += 1;
         // Persist the native AST independently from typed analysis. Schema and
         // config changes reuse syntax while rebinding the changed node.
-        try asts.put(allocator, node.unique_id, try toValue(allocator, .{ .fingerprint = fingerprint, .compiled_hash = compiled_hash, .tree = parsed.tree }));
+        try asts.put(allocator, node.unique_id, try toValue(allocator, .{ .fingerprint = fingerprint, .compiled_hash = compiled_hash, .parser_signature = parser_signature, .tree = parsed.tree }));
         const rewritten = try rewriteRelations(allocator, compiled, parsed.tree, dialect, graph, virtual.items);
         const bind_query = if (dialect == .postgres) try withVirtualQueries(allocator, rewritten, virtual.items) else rewritten;
         if (analysis == .null) {
@@ -137,7 +154,7 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
                 try recover(&session, dialect);
                 continue;
             };
-            var builder = ir.Builder{ .allocator = allocator, .dialect = dialect, .catalog = catalog.items, .functions = functions.items };
+            var builder = ir.Builder{ .allocator = allocator, .dialect = dialect, .catalog = catalog.items, .default_catalog = default_catalog, .search_path = search_path.items, .functions = functions.items };
             const logical = builder.build(parsed.tree, bound) catch |err| {
                 try appendFailure(allocator, &nodes, &visible, selected_ids, node, .{ .code = "COLUMN_LINEAGE", .message = @errorName(err) }, compiled, runtime, graph, db_path, stderr);
                 failed = true;
@@ -154,14 +171,25 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
         }
         try nodes.put(allocator, node.unique_id, analysis);
         if (contains(selected_ids, node.unique_id)) try visible.put(allocator, node.unique_id, analysis);
-        const columns = try columnsFromValue(allocator, field(analysis, "columns"));
+        if (eq(node.resource_type, "test")) {
+            if (dialect == .postgres) try session.execute("release savepoint dxt_analysis_node");
+            continue;
+        }
+        const source_columns = try columnsFromValue(allocator, field(analysis, "columns"));
+        const relation_query = if (eq(node.resource_type, "snapshot")) try snapshotBindingQuery(allocator, node, rewritten) else rewritten;
+        const columns = if (eq(node.resource_type, "snapshot")) snapshotRelationColumns(allocator, &session, dialect, node, relation_query, source_columns) catch |err| {
+            try appendFailure(allocator, &nodes, &visible, selected_ids, node, try bindingDiagnostic(allocator, &session, compiled, err), compiled, runtime, graph, db_path, stderr);
+            failed = true;
+            try recover(&session, dialect);
+            continue;
+        } else source_columns;
         for (columns) |*column| if (column.origins.len == 0) {
             column.origins = try allocator.dupe(ir.Origin, &.{.{ .resource_id = node.unique_id, .column = column.name }});
         };
         try replaceCatalogNode(allocator, graph, &catalog, node, columns);
         const name = try std.fmt.allocPrint(allocator, "__dxt_bind_{s}", .{(try hash(allocator, node.unique_id))[0..16]});
         if (dialect == .duckdb) {
-            const view = try std.fmt.allocPrint(allocator, "create or replace temporary view {s} as {s}", .{ try adapter.quoteIdentifier(allocator, name), rewritten });
+            const view = try std.fmt.allocPrint(allocator, "create or replace temporary view {s} as {s}", .{ try adapter.quoteIdentifier(allocator, name), relation_query });
             session.execute(view) catch |err| {
                 // An error here is a failed binder relation, not a successful
                 // analysis cache entry for downstream consumers.
@@ -170,7 +198,7 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
                 continue;
             };
         }
-        try virtual.append(allocator, .{ .node = node, .name = name, .query = rewritten });
+        try virtual.append(allocator, .{ .node = node, .name = name, .query = relation_query });
         if (dialect == .postgres) try session.execute("release savepoint dxt_analysis_node");
     }
     stats.elapsed_ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(runtime.io).nanoseconds - start)) / 1_000_000;
@@ -179,10 +207,47 @@ pub fn run(runtime: types.Runtime, graph: *types.Graph, selected_ids: []const []
     const report_json = try stringify(allocator, report);
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = try std.fs.path.join(allocator, &.{ target_dir, "dxt_sql_analysis.json" }), .data = report_json });
-    const cache = try toValue(allocator, .{ .schema_version = "dxt-sql-analysis-v1", .adapter_type = graph.adapter_type, .nodes = @as(Value, .{ .object = nodes }), .asts = @as(Value, .{ .object = asts }) });
+    var safe_asts: std.json.ObjectMap = .empty;
+    var ast_iterator = asts.iterator();
+    while (ast_iterator.next()) |entry| {
+        const before = try stringify(allocator, entry.value_ptr.*);
+        var safe = try values.clone(allocator, entry.value_ptr.*);
+        try sanitizeTreeMode(allocator, &safe, runtime, graph, db_path, true);
+        if (eq(before, try stringify(allocator, safe))) try safe_asts.put(allocator, entry.key_ptr.*, safe);
+    }
+    var safe_nodes = try values.clone(allocator, .{ .object = nodes });
+    try sanitizeTree(allocator, &safe_nodes, runtime, graph, db_path);
+    const cache = try toValue(allocator, .{ .schema_version = "dxt-sql-analysis-v1", .adapter_type = graph.adapter_type, .nodes = safe_nodes, .asts = @as(Value, .{ .object = safe_asts }) });
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = cache_path, .data = try stringify(allocator, cache) });
     if (json_output) try stdout.print("{s}\n", .{report_json}) else try stdout.print("Analyzed {d} SQL resource(s): {d} parsed, {d} bound, {d} cached, {d} invalidated ({d:.2} ms)\n", .{ visible.count(), stats.parsed_nodes, stats.bound_nodes, stats.cache_hits, stats.invalidated_nodes, stats.elapsed_ms });
     if (failed) return error.SqlAnalysisFailure;
+}
+
+// Tests use the same DAG and read-only binder as model SQL, while their
+// compiler keeps dbt's generic/singular contexts and arguments intact.
+fn addTestNodes(graph: *types.Graph, selected_ids: []const []const u8) !void {
+    const allocator = graph.allocator;
+    for (graph.singular_tests.items) |test_node| {
+        if (!test_node.enabled or !contains(selected_ids, test_node.unique_id)) continue;
+        try graph.nodes.append(allocator, .{ .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .depends_on = try duplicateList(allocator, test_node.depends_on.items), .macro_depends_on = try duplicateList(allocator, test_node.macro_depends_on.items), .effective_config = try testConfigValue(allocator, test_node.config) });
+    }
+    for (graph.tests.items) |test_node| {
+        if (!contains(selected_ids, test_node.unique_id)) continue;
+        try graph.nodes.append(allocator, .{ .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .depends_on = try duplicateList(allocator, test_node.depends_on.items), .macro_depends_on = try duplicateList(allocator, test_node.macro_depends_on.items), .effective_config = try testConfigValue(allocator, test_node.config) });
+    }
+}
+fn testConfigValue(allocator: std.mem.Allocator, config: types.GenericTestConfig) !Value {
+    return try toValue(allocator, .{ .where = config.where, .limit = config.limit, .severity = config.severity, .warn_if = config.warn_if, .error_if = config.error_if, .store_failures = config.store_failures });
+}
+fn duplicateList(allocator: std.mem.Allocator, input: []const []const u8) !std.ArrayList([]const u8) {
+    var result: std.ArrayList([]const u8) = .empty;
+    try result.appendSlice(allocator, input);
+    return result;
+}
+fn compileTest(allocator: std.mem.Allocator, graph: *const types.Graph, id: []const u8) ![]const u8 {
+    for (graph.singular_tests.items) |*test_node| if (eq(test_node.unique_id, id)) return try compiler.compileSingularTest(allocator, graph, test_node);
+    for (graph.tests.items) |*test_node| if (eq(test_node.unique_id, id)) return try compiler.compileGenericTest(allocator, graph, test_node);
+    return error.UnresolvedTestNode;
 }
 
 fn loadCatalog(runtime: types.Runtime, graph: *const types.Graph, session: *adapter.Session) !std.ArrayList(ir.Relation) {
@@ -249,7 +314,15 @@ fn collectFunctions(allocator: std.mem.Allocator, session: *adapter.Session, dia
         const end = try functionEnd(original, offset);
         const ordinality = if (dialect == .duckdb) eq(text(field(ast, "with_ordinality")), "WITH_ORDINALITY") else field(field(ast, "RangeFunction"), "ordinality") == .bool and field(field(ast, "RangeFunction"), "ordinality").bool;
         const query = try std.fmt.allocPrint(allocator, "select * from {s}{s}", .{ original[offset..end], if (ordinality) " with ordinality" else "" });
-        try result.append(allocator, .{ .offset = offset, .columns = try bind(allocator, session, dialect, query) });
+        const columns = try bind(allocator, session, dialect, query);
+        const name = if (dialect == .duckdb) text(field(function, "function_name")) else if (items(field(function, "funcname")).len != 0) text(field(field(items(field(function, "funcname"))[0], "String"), "sval")) else "";
+        var input: ?ir.Input = null;
+        if (std.mem.startsWith(u8, name, "read_") or eq(name, "postgres_scan") or eq(name, "sqlite_scan")) {
+            const id = try std.fmt.allocPrint(allocator, "external.{s}.{s}.{s}", .{ @tagName(dialect), name, (try hash(allocator, original[offset..end]))[0..16] });
+            for (columns) |*column| column.origins = try allocator.dupe(ir.Origin, &.{.{ .resource_id = id, .column = column.name }});
+            input = .{ .resource_id = id, .catalog = "", .schema = "", .identifier = name, .offset = offset };
+        }
+        try result.append(allocator, .{ .offset = offset, .columns = columns, .input = input });
     }
     switch (ast) {
         .object => |object| {
@@ -306,6 +379,34 @@ fn functionEnd(query: []const u8, start: usize) !usize {
         }
     }
     return error.InvalidSqlAstLocation;
+}
+
+fn snapshotBindingQuery(allocator: std.mem.Allocator, node: *const types.Node, query: []const u8) ![]const u8 {
+    const config = node.snapshot_config orelse return error.InvalidSnapshotConfig;
+    const names = config.meta_columns;
+    const updated = config.updated_at orelse "current_timestamp::timestamp";
+    return try std.fmt.allocPrint(allocator, "select s.*,cast(null as varchar) as {s},({s}) as {s},({s}) as {s},nullif(({s}),({s})) as {s}{s} from ({s}) s", .{
+        try adapter.quoteIdentifier(allocator, names.dbt_scd_id),                                                                                                                                                   updated, try adapter.quoteIdentifier(allocator, names.dbt_updated_at), updated, try adapter.quoteIdentifier(allocator, names.dbt_valid_from), updated, updated, try adapter.quoteIdentifier(allocator, names.dbt_valid_to),
+        if (config.hard_deletes != null and eq(config.hard_deletes.?, "new_record")) try std.fmt.allocPrint(allocator, ",'False' as {s}", .{try adapter.quoteIdentifier(allocator, names.dbt_is_deleted)}) else "", query,
+    });
+}
+fn snapshotRelationColumns(allocator: std.mem.Allocator, session: *adapter.Session, dialect: parser.Dialect, node: *const types.Node, query: []const u8, source: []const ir.Column) ![]ir.Column {
+    const typed = try bind(allocator, session, dialect, query);
+    if (typed.len < source.len) return error.SqlLineageOutputMismatch;
+    for (typed[0..source.len], source) |*column, original| column.origins = original.origins;
+    const config = node.snapshot_config.?;
+    for (typed[source.len..]) |*column| {
+        // SCD identity and validity are produced by snapshot materialization;
+        // preserve that producer identity rather than invent a source field.
+        column.origins = try allocator.dupe(ir.Origin, &.{.{ .resource_id = node.unique_id, .column = column.name }});
+        if (config.updated_at) |updated| if (eq(column.name, config.meta_columns.dbt_updated_at) or eq(column.name, config.meta_columns.dbt_valid_from)) {
+            for (source) |original| if (eq(original.name, updated)) {
+                column.origins = original.origins;
+                break;
+            };
+        };
+    }
+    return typed;
 }
 
 fn replaceCatalogNode(allocator: std.mem.Allocator, graph: *const types.Graph, catalog: *std.ArrayList(ir.Relation), node: *const types.Node, columns: []const ir.Column) !void {
@@ -427,11 +528,14 @@ fn visit(graph: *const types.Graph, allocator: std.mem.Allocator, index: usize, 
     colors[index] = 2;
     try order.append(allocator, index);
 }
-fn nodeFingerprint(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, compiled: []const u8, ast: Value, catalog: []const ir.Relation, completed: std.json.ObjectMap) ![]const u8 {
+fn nodeFingerprint(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, compiled: []const u8, parser_signature: []const u8, ast: Value, catalog: []const ir.Relation, completed: std.json.ObjectMap) ![]const u8 {
     const allocator = runtime.allocator;
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
-    digest.update("dxt-sql-analysis-v1-ir-2-pg-17.7-duckdb-1.4");
+    digest.update("dxt-sql-analysis-v1-ir-3");
+    digest.update(parser_signature);
     digest.update(graph.adapter_type);
+    if (graph.connection_info) |connection| digest.update(connection);
+    if (graph.target_context != .null) digest.update(try stringify(allocator, graph.target_context));
     digest.update(node.unique_id);
     digest.update(node.raw_code);
     digest.update(compiled);
@@ -552,12 +656,18 @@ fn recover(session: *adapter.Session, dialect: parser.Dialect) !void {
     if (dialect == .postgres) try session.execute("rollback to savepoint dxt_analysis_node; release savepoint dxt_analysis_node");
 }
 fn sanitizeTree(allocator: std.mem.Allocator, value: *Value, runtime: types.Runtime, graph: *const types.Graph, db_path: []const u8) anyerror!void {
+    return try sanitizeTreeMode(allocator, value, runtime, graph, db_path, false);
+}
+// Private native ASTs retain authored file names for replay. Connection strings
+// and secret values are never persisted; public diagnostics also redact paths.
+fn sanitizeTreeMode(allocator: std.mem.Allocator, value: *Value, runtime: types.Runtime, graph: *const types.Graph, db_path: []const u8, authored_paths: bool) anyerror!void {
     switch (value.*) {
         .string => |original| {
             var rendered = original;
-            for ([_][]const u8{ graph.connection_info orelse "", db_path, if (runtime.invocation_options) |options| options.project_dir else "" }, 0..) |sensitive, index| if (sensitive.len > 1 and (index == 0 or std.fs.path.isAbsolute(sensitive))) {
+            for ([_][]const u8{ graph.connection_info orelse "", db_path, if (runtime.invocation_options) |options| options.project_dir else "" }, 0..) |sensitive, index| if (sensitive.len > 1 and (index == 0 or (!authored_paths and std.fs.path.isAbsolute(sensitive)))) {
                 rendered = try replace(allocator, rendered, sensitive, "[redacted]");
             };
+            rendered = try redactCredentials(allocator, rendered, graph.connection_info orelse "");
             if (runtime.environment) |environment| {
                 var it = environment.iterator();
                 while (it.next()) |entry| if (std.mem.startsWith(u8, entry.key_ptr.*, "DBT_ENV_SECRET_") and entry.value_ptr.len != 0) {
@@ -568,12 +678,46 @@ fn sanitizeTree(allocator: std.mem.Allocator, value: *Value, runtime: types.Runt
         },
         .object => |*object| {
             var it = object.iterator();
-            while (it.next()) |entry| try sanitizeTree(allocator, entry.value_ptr, runtime, graph, db_path);
+            while (it.next()) |entry| try sanitizeTreeMode(allocator, entry.value_ptr, runtime, graph, db_path, authored_paths);
         },
-        .array => |*array| for (array.items) |*entry| try sanitizeTree(allocator, entry, runtime, graph, db_path),
+        .array => |*array| for (array.items) |*entry| try sanitizeTreeMode(allocator, entry, runtime, graph, db_path, authored_paths),
         else => {},
     }
 }
+// libpq connection values use single quotes and backslash escaping. Redact
+// individual credential values even when a diagnostic prints only the value.
+fn redactCredentials(allocator: std.mem.Allocator, original: []const u8, connection: []const u8) ![]const u8 {
+    var rendered = original;
+    var index: usize = 0;
+    while (index < connection.len) {
+        while (index < connection.len and std.ascii.isWhitespace(connection[index])) index += 1;
+        const begin = index;
+        while (index < connection.len and connection[index] != '=' and !std.ascii.isWhitespace(connection[index])) index += 1;
+        const key = connection[begin..index];
+        while (index < connection.len and std.ascii.isWhitespace(connection[index])) index += 1;
+        if (index == connection.len or connection[index] != '=') break;
+        index += 1;
+        while (index < connection.len and std.ascii.isWhitespace(connection[index])) index += 1;
+        const quoted = index < connection.len and connection[index] == '\'';
+        if (quoted) index += 1;
+        var decoded: std.Io.Writer.Allocating = .init(allocator);
+        defer decoded.deinit();
+        while (index < connection.len) {
+            const byte = connection[index];
+            index += 1;
+            if ((quoted and byte == '\'') or (!quoted and std.ascii.isWhitespace(byte))) break;
+            if (byte == '\\' and index < connection.len) {
+                try decoded.writer.writeByte(connection[index]);
+                index += 1;
+            } else try decoded.writer.writeByte(byte);
+        }
+        if (eq(key, "password") or eq(key, "sslpassword") or eq(key, "sslkey") or eq(key, "passfile")) {
+            if (decoded.written().len != 0) rendered = try replace(allocator, rendered, decoded.written(), "[redacted]");
+        }
+    }
+    return rendered;
+}
+
 fn replace(allocator: std.mem.Allocator, original: []const u8, needle: []const u8, replacement: []const u8) ![]const u8 {
     return try std.mem.replaceOwned(u8, allocator, original, needle, replacement);
 }
@@ -654,4 +798,11 @@ test "AST relation rewriting respects quoted identifiers and qualification bound
     try std.testing.expectEqual(@as(usize, 20), identifierEnd("\"db\".\"s\".\"a\"\"quoted\" as a", 0));
     try std.testing.expectEqual(@as(usize, 5), identifierEnd("tbl.x where x=1", 0));
     try std.testing.expectEqual(@as(usize, 3), identifierEnd("tbl where x=1", 0));
+}
+
+test "native diagnostic projection redacts escaped connection credentials" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try redactCredentials(arena.allocator(), "failed: synthetic ' quote\\ key", "host='fixture' password='synthetic \\' quote\\\\ key'");
+    try std.testing.expectEqualStrings("failed: [redacted]", result);
 }

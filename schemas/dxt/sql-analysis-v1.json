@@ -222,7 +222,8 @@
             "model",
             "analysis",
             "snapshot",
-            "seed"
+            "seed",
+            "test"
           ]
         },
         "path": {
