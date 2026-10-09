@@ -7,7 +7,7 @@ const Value = std.json.Value;
 
 pub fn liveField(comptime name: []const u8) bool {
     @setEvalBranchQuota(100000);
-    for (.{ "allocator", "environment", "invocation", "command_options", "timing_profile", "relation_cache", "execution_hooks", "log_collector", "unit_fixture_relations", "unit_overrides", "unit_fixture_aliases", "connection_info", "target_context", "duckdb_credentials", "target_threads", "adapter_type", "target_schema", "database_path", "database_path_base", "profile_name", "target_name", "full_refresh", "parser_cache_hit", "parser_cache_reason", "parser_cache_changes", "parser_cache_reused_files" }) |key| if (std.mem.eql(u8, name, key)) return true;
+    for (.{ "allocator", "environment", "invocation", "command_options", "timing_profile", "relation_cache", "warning_registry", "execution_hooks", "log_collector", "unit_fixture_relations", "unit_overrides", "unit_fixture_aliases", "connection_info", "target_context", "duckdb_credentials", "target_threads", "adapter_type", "target_schema", "database_path", "database_path_base", "profile_name", "target_name", "full_refresh", "parser_cache_hit", "parser_cache_reason", "parser_cache_changes", "parser_cache_reused_files" }) |key| if (std.mem.eql(u8, name, key)) return true;
     return false;
 }
 

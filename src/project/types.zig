@@ -734,6 +734,7 @@ pub const Graph = struct {
     parser_cache_reused_files: usize = 0,
     parser_file_cache: std.json.Value = .null,
     relation_cache: ?*@import("relation_cache.zig").Cache = null,
+    warning_registry: ?*@import("warning_registry.zig").Registry = null,
     unit_fixture_relations: bool = false,
     unit_overrides: std.json.Value = .null,
     unit_fixture_aliases: []const DeferredRelation = &.{},
@@ -808,6 +809,10 @@ pub const Graph = struct {
         if (self.relation_cache) |cache| {
             cache.deinit();
             self.allocator.destroy(cache);
+        }
+        if (self.warning_registry) |registry| {
+            registry.deinit();
+            self.allocator.destroy(registry);
         }
         for (self.groups.items) |*definition| config_value.deinit(self.allocator, definition);
         self.groups.deinit(self.allocator);

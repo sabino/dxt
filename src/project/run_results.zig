@@ -16,6 +16,7 @@ pub const LogMessage = struct {
     message: []const u8,
     level: []const u8,
     is_print: bool = false,
+    is_adapter_warning: bool = false,
 };
 
 pub const NodeResult = struct {

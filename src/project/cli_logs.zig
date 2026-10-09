@@ -7,7 +7,13 @@ const clock = @import("execution_clock.zig");
 pub fn finish(runtime: types.Runtime, options: types.Options, args: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer, output: []const u8, diagnostics: []const u8) !void {
     const data = primaryOutput(args);
     if (data) try stdout.writeAll(output) else try console(runtime, options, stdout, output);
-    try console(runtime, options, stderr, diagnostics);
+    // Adapter logger events use Core's console stream even when the native
+    // execution callback also carries diagnostics on its stderr buffer.
+    var diagnostic_lines = std.mem.splitScalar(u8, diagnostics, '\n');
+    while (diagnostic_lines.next()) |line| {
+        if (line.len == 0) continue;
+        try console(runtime, options, if (adapterWarning(runtime.allocator, line)) stdout else stderr, line);
+    }
     if (args.len < 2 or help(args) or std.mem.eql(u8, args[1], "version") or std.mem.eql(u8, args[1], "--version")) return;
     const path = options.log_path orelse try std.fs.path.join(runtime.allocator, &.{ options.project_dir, "logs" });
     try std.Io.Dir.cwd().createDirPath(runtime.io, path);
@@ -103,6 +109,17 @@ fn fileEvents(runtime: types.Runtime, options: types.Options, writer: *std.Io.Wr
     }
 }
 
+fn adapterWarning(allocator: std.mem.Allocator, line: []const u8) bool {
+    if (line.len == 0 or line[0] != '{') return false;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const info = parsed.value.object.get("info") orelse return false;
+    if (info != .object) return false;
+    const name = info.object.get("name") orelse return false;
+    return name == .string and std.mem.eql(u8, name.string, "AdapterEventWarning");
+}
+
 const DisplayedEvent = struct { message: []const u8, printed: bool, primary: bool = false };
 fn displayedEvent(allocator: std.mem.Allocator, line: []const u8) !?DisplayedEvent {
     if (line[0] != '{') return null;
@@ -115,7 +132,7 @@ fn displayedEvent(allocator: std.mem.Allocator, line: []const u8) !?DisplayedEve
     if (name != .string) return null;
     const printed = std.mem.eql(u8, name.string, "PrintEvent") or std.mem.eql(u8, name.string, "ShowNode") or std.mem.eql(u8, name.string, "CompiledNode");
     const primary = std.mem.eql(u8, name.string, "SeedSampleTable");
-    if (!primary and !printed and !std.mem.startsWith(u8, name.string, "JinjaLog") and !std.mem.eql(u8, name.string, "NothingToDo") and !std.mem.eql(u8, name.string, "NoNodesForSelectionCriteria") and !std.mem.eql(u8, name.string, "MainEncounteredError")) return null;
+    if (!primary and !printed and !std.mem.startsWith(u8, name.string, "JinjaLog") and !std.mem.eql(u8, name.string, "AdapterEventWarning") and !std.mem.eql(u8, name.string, "NothingToDo") and !std.mem.eql(u8, name.string, "NoNodesForSelectionCriteria") and !std.mem.eql(u8, name.string, "MainEncounteredError")) return null;
     const data = parsed.value.object.get("data") orelse return null;
     if (data != .object) return null;
     const message = info.object.get("msg") orelse data.object.get("msg") orelse data.object.get("message") orelse return null;

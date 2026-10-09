@@ -443,6 +443,7 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
         for (source.log_events, entries) |original, *entry| {
             entry.level = original.level;
             entry.is_print = original.is_print;
+            entry.is_adapter_warning = original.is_adapter_warning;
             entry.message = try allocator.dupe(u8, original.message);
         }
     }
@@ -490,12 +491,22 @@ fn freeResult(allocator: std.mem.Allocator, output: results.NodeResult) void {
 
 pub fn emitLogMessages(runtime: types.Runtime, writer: *std.Io.Writer, id: []const u8, worker: u16, messages: []const results.LogMessage) !void {
     for (messages) |entry| {
+        const displayed = if (entry.is_adapter_warning) try std.fmt.allocPrint(runtime.allocator, "DuckDB adapter: {s}", .{entry.message}) else entry.message;
+        defer if (entry.is_adapter_warning) runtime.allocator.free(displayed);
         try writer.writeAll("{\"data\":{\"unique_id\":");
         try std.json.Stringify.value(id, .{}, writer);
         try writer.writeAll(",\"msg\":");
-        try std.json.Stringify.value(entry.message, .{}, writer);
+        try std.json.Stringify.value(displayed, .{}, writer);
+        if (entry.is_adapter_warning) {
+            try writer.writeAll(",\"name\":\"DuckDB\",\"args\":[],\"base_msg\":");
+            try std.json.Stringify.value(entry.message, .{}, writer);
+        }
         try writer.writeAll("},\"info\":{\"name\":");
-        try std.json.Stringify.value(if (entry.is_print) "PrintEvent" else if (std.mem.eql(u8, entry.level, "debug")) "JinjaLogDebug" else "JinjaLogInfo", .{}, writer);
+        try std.json.Stringify.value(if (entry.is_adapter_warning) "AdapterEventWarning" else if (entry.is_print) "PrintEvent" else if (std.mem.eql(u8, entry.level, "debug")) "JinjaLogDebug" else "JinjaLogInfo", .{}, writer);
+        if (entry.is_adapter_warning) {
+            try writer.writeAll(",\"msg\":");
+            try std.json.Stringify.value(displayed, .{}, writer);
+        }
         try writer.writeAll(",\"level\":");
         try std.json.Stringify.value(entry.level, .{}, writer);
         try writer.writeAll(",\"thread\":");

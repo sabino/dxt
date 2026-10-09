@@ -289,15 +289,20 @@ pub const OperationHost = struct {
             return .{ .string = "" };
         }
         if (std.mem.eql(u8, name, "adapter.warn_once")) {
+            if (!std.mem.eql(u8, self.graph.adapter_type, "duckdb")) return error.UnresolvedMacro;
             const message = argument(args, "msg", 0) orelse return error.InvalidJinjaArguments;
             if (args.len != 1 or message != .string) return error.InvalidJinjaArguments;
-            for (self.warned.items) |text| if (std.mem.eql(u8, text, message.string)) return .{ .string = "" };
-            try self.warned.append(self.runtime.allocator, try self.values.allocator().dupe(u8, message.string));
+            if (self.graph.warning_registry) |registry| {
+                if (!try registry.first(message.string)) return .{ .string = "" };
+            } else {
+                for (self.warned.items) |text| if (std.mem.eql(u8, text, message.string)) return .{ .string = "" };
+                try self.warned.append(self.runtime.allocator, try self.values.allocator().dupe(u8, message.string));
+            }
             if (self.log_events) |events| {
                 const text = try self.runtime.allocator.dupe(u8, message.string);
                 errdefer self.runtime.allocator.free(text);
-                try events.append(self.runtime.allocator, .{ .message = text, .level = "warn" });
-            } else try self.stdout.print("warning: {s}\n", .{message.string});
+                try events.append(self.runtime.allocator, .{ .message = text, .level = "warn", .is_adapter_warning = true });
+            } else try @import("concurrent_runner.zig").emitLogMessages(self.runtime, self.stdout, if (self.current_node) |node| node.unique_id else "operation", 0, &.{.{ .message = message.string, .level = "warn", .is_adapter_warning = true }});
             return .{ .string = "" };
         }
         if (try @import("adapter_context.zig").call(self.values.allocator(), self.graph, &self.adapter_state, .{ .context = self, .render = renderAdapterMacro }, name, args)) |value| return value;
