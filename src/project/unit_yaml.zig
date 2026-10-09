@@ -7,6 +7,14 @@ const yaml = @import("yaml.zig");
 const csv = @import("seed_csv.zig");
 
 pub fn parse(allocator: std.mem.Allocator, text: []const u8, root: []const u8, path: []const u8, package: []const u8, graph: *types.Graph) !void {
+    return parseDocument(allocator, null, text, root, path, package, graph);
+}
+
+pub fn parseWithRuntime(runtime: types.Runtime, text: []const u8, root: []const u8, path: []const u8, package: []const u8, graph: *types.Graph) !void {
+    return parseDocument(runtime.allocator, runtime, text, root, path, package, graph);
+}
+
+fn parseDocument(allocator: std.mem.Allocator, runtime: ?types.Runtime, text: []const u8, root: []const u8, path: []const u8, package: []const u8, graph: *types.Graph) !void {
     var document = try yaml.parse(allocator, text);
     defer document.deinit();
     const definitions = values.get(document.value, "unit_tests") orelse return;
@@ -46,25 +54,7 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, root: []const u8, p
                 if (values.get(unit.versions, category) == null) try values.put(allocator, &unit.versions, category, .null);
             };
         }
-        if (values.get(item, "config")) |config| {
-            if (config != .object) return error.InvalidUnitTestDefinition;
-            unit.config_values = try values.clone(allocator, config);
-            if (values.get(config, "enabled")) |enabled| {
-                if (enabled != .bool) return error.InvalidUnitTestDefinition;
-                unit.enabled = enabled.bool;
-            }
-            if (values.get(config, "tags")) |tags| {
-                if (tags == .string) try unit.tags.append(allocator, try string(allocator, tags)) else if (tags == .array) {
-                    for (tags.array.items) |tag| try unit.tags.append(allocator, try string(allocator, tag));
-                } else return error.InvalidUnitTestDefinition;
-            }
-            if (values.get(config, "meta")) |meta| {
-                if (meta != .object) return error.InvalidUnitTestDefinition;
-                var it = meta.object.iterator();
-                while (it.next()) |entry| if (entry.value_ptr.* != .array and entry.value_ptr.* != .object) try unit.meta.append(allocator, .{ .key = try allocator.dupe(u8, entry.key_ptr.*), .value = try scalar(allocator, entry.value_ptr.*) });
-            }
-        }
-        @import("util.zig").sortStrings(unit.tags.items);
+        try @import("unit_config.zig").apply(allocator, runtime, graph, &unit, values.get(item, "config") orelse .null);
         const given = values.get(item, "given") orelse return error.InvalidUnitTestDefinition;
         if (given != .array) return error.InvalidUnitTestDefinition;
         for (given.array.items) |input| {
@@ -82,7 +72,7 @@ fn string(allocator: std.mem.Allocator, value: std.json.Value) ![]const u8 {
     return try allocator.dupe(u8, value.string);
 }
 fn scalar(allocator: std.mem.Allocator, value: std.json.Value) !types.JsonScalar {
-    return .{ .text = if (value == .array or value == .object) try std.json.Stringify.valueAlloc(allocator, value, .{}) else try values.scalarText(allocator, value), .kind = switch (value) {
+    return .{ .text = if (value == .array or value == .object or value == .float) try @import("native_repr.zig").jsonAlloc(allocator, value) else try values.scalarText(allocator, value), .kind = switch (value) {
         .string => .string,
         .bool => .bool,
         .null => .null,

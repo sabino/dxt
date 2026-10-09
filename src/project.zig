@@ -3254,7 +3254,7 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
     try @import("project/semantic.zig").parseProperties(runtime, text, resource_root, relative_path, package_name, graph);
     try snapshot_yaml.parseProperties(runtime, text, resource_root, relative_path, package_name, graph);
     try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
-    try parseUnitTestsFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
+    try @import("project/unit_yaml.zig").parseWithRuntime(runtime, text, resource_root, relative_path, package_name, graph);
     var properties_document = try @import("project/yaml.zig").parse(runtime.allocator, text);
     defer properties_document.deinit();
     try @import("project/group_access.zig").parse(runtime, properties_document.value, resource_root, relative_path, package_name, graph);

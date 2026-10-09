@@ -198,7 +198,7 @@ test "structured project parser preserves anchors paths and typed package variab
 }
 
 fn isResourceBlock(key: []const u8) bool {
-    for ([_][]const u8{ "models", "seeds", "snapshots", "tests", "data_tests", "analyses", "sources" }) |candidate| if (std.mem.eql(u8, key, candidate)) return true;
+    for ([_][]const u8{ "models", "seeds", "snapshots", "tests", "data_tests", "analyses", "sources", "unit_tests" }) |candidate| if (std.mem.eql(u8, key, candidate)) return true;
     return false;
 }
 

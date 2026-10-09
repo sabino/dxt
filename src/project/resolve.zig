@@ -259,6 +259,10 @@ pub fn resolveDependencies(graph: *Graph) !void {
             error.UnresolvedRef => return error.UnresolvedUnitTestModel,
             else => return err,
         };
+        for (graph.nodes.items) |*node| if (std.mem.eql(u8, node.unique_id, model_unique_id)) {
+            unit_test.schema = try @import("compiler.zig").relationSchemaForNode(graph.allocator, graph, node);
+            break;
+        };
         try appendUnique(graph.allocator, &unit_test.depends_on, model_unique_id);
         sortStrings(unit_test.depends_on.items);
     }

@@ -265,6 +265,15 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeNode(allocator, writer, graph, node);
         try writer.writeAll("]");
     }
+    for (graph.unit_tests.items) |unit| {
+        if (unit.enabled) continue;
+        if (disabled_index != 0) try writer.writeByte(',');
+        disabled_index += 1;
+        try json.string(writer, unit.unique_id);
+        try writer.writeAll(":[");
+        try writeUnitTestNode(writer, unit);
+        try writer.writeByte(']');
+    }
     for (graph.singular_tests.items) |test_node| {
         if (test_node.enabled) continue;
         if (disabled_index != 0) try writer.writeAll(",");
@@ -810,25 +819,29 @@ fn writeUnitTestNode(writer: *Io.Writer, unit_test: UnitTestDef) !void {
     try json.string(writer, util.normalizeForDisplay(unit_test.original_file_path));
     try writer.writeAll(",\"unique_id\":");
     try json.string(writer, unit_test.unique_id);
-    try writer.writeAll(",\"fqn\":[");
-    try json.string(writer, unit_test.package_name);
-    try writer.writeAll(",");
-    try json.string(writer, unit_test.model);
-    try writer.writeAll(",");
-    try json.string(writer, unit_test.name);
-    try writer.writeAll("],\"description\":");
+    try writer.writeAll(",\"fqn\":");
+    try json.stringArray(writer, if (unit_test.fqn.items.len != 0) unit_test.fqn.items else &.{ unit_test.package_name, unit_test.model, unit_test.name });
+    try writer.writeAll(",\"description\":");
     try json.string(writer, unit_test.description);
     try writer.writeAll(",\"overrides\":");
     try std.json.Stringify.value(unit_test.overrides, .{}, writer);
     try writer.writeAll(",\"depends_on\":{\"macros\":[],\"nodes\":");
     try json.stringArray(writer, unit_test.depends_on.items);
-    try writer.writeAll("},\"config\":{\"tags\":");
-    try json.stringArray(writer, unit_test.tags.items);
-    try writer.writeAll(",\"meta\":");
-    if (@import("config_value.zig").get(unit_test.config_values, "meta")) |meta| try std.json.Stringify.value(meta, .{}, writer) else try writeMetaObject(writer, unit_test.meta.items);
-    try writer.writeAll(",\"enabled\":");
-    try writer.writeAll(if (unit_test.enabled) "true" else "false");
-    try writer.writeAll(",\"static_analysis\":null},\"checksum\":null,\"schema\":null,\"created_at\":0.0,\"versions\":");
+    try writer.writeAll("},\"config\":");
+    if (unit_test.config_values == .object) try std.json.Stringify.value(unit_test.config_values, .{}, writer) else {
+        try writer.writeAll("{\"tags\":");
+        try json.stringArray(writer, unit_test.tags.items);
+        try writer.writeAll(",\"meta\":");
+        try writeMetaObject(writer, unit_test.meta.items);
+        try writer.writeAll(",\"enabled\":");
+        try writer.writeAll(if (unit_test.enabled) "true" else "false");
+        try writer.writeAll(",\"static_analysis\":null}");
+    }
+    try writer.writeAll(",\"checksum\":");
+    if (unit_test.checksum) |checksum| try json.string(writer, checksum) else try writer.writeAll("null");
+    try writer.writeAll(",\"schema\":");
+    if (unit_test.schema) |schema| try json.string(writer, schema) else try writer.writeAll("null");
+    try writer.writeAll(",\"created_at\":0.0,\"versions\":");
     try std.json.Stringify.value(unit_test.versions, .{}, writer);
     try writer.writeAll(",\"version\":");
     try std.json.Stringify.value(unit_test.version, .{}, writer);

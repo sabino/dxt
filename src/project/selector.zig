@@ -1011,6 +1011,7 @@ fn matchesUnitTestSelectorIntersection(graph: *const Graph, unit_test: *const Un
 }
 
 fn matchesUnitTestSelectorTerm(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8, context: SelectionContext) bool {
+    if (std.mem.startsWith(u8, value, "fqn:")) return matchesUnitTestFqnPattern(value[4..], unit_test);
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(unit_test.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(unit_test.unique_id, value, context);
     if (matchesSelectorPattern(value, unit_test.name) or
@@ -1149,6 +1150,15 @@ fn matchesSingularTestFqnPattern(pattern: []const u8, test_node: *const Singular
 fn matchesUnitTestFqnPattern(pattern: []const u8, unit_test: *const UnitTestDef) bool {
     var buffer: [4096]u8 = undefined;
     var len: usize = 0;
+    if (unit_test.fqn.items.len != 0) {
+        var unscoped_start: usize = 0;
+        for (unit_test.fqn.items, 0..) |part, index| {
+            if (index != 0 and !appendFqnByte(&buffer, &len, '.')) return false;
+            if (index == 1) unscoped_start = len;
+            if (!appendFqnSlice(&buffer, &len, part)) return false;
+        }
+        return matchesFqnCandidate(pattern, buffer[0..len]) or matchesFqnCandidate(pattern, buffer[unscoped_start..len]);
+    }
     if (!appendFqnSlice(&buffer, &len, unit_test.package_name)) return false;
     if (!appendFqnByte(&buffer, &len, '.')) return false;
     const model_start = len;

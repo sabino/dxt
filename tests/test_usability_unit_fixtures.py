@@ -248,7 +248,7 @@ def test_pinned_core_fixture_and_override_contract(tmp_path,request):
     actual_defs=json.loads((project/'target'/'manifest.json').read_text())['unit_tests']
     expected_defs=json.loads((project/'core-target'/'manifest.json').read_text())['unit_tests']
     for identifier,definition in actual_defs.items():
-        for field in ['given','expect','overrides','versions','version','depends_on']:
+        for field in ['given','expect','overrides','versions','version','depends_on','checksum','fqn','config','schema']:
             assert definition[field]==expected_defs[identifier][field],(identifier,field)
 
 

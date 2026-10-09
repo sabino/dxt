@@ -250,6 +250,9 @@ pub const UnitTestFixture = struct {
 };
 
 pub const UnitTestDef = struct {
+    fqn: std.ArrayList([]const u8) = .empty,
+    checksum: ?[]const u8 = null,
+    schema: ?[]const u8 = null,
     overrides: std.json.Value = .null,
     versions: std.json.Value = .null,
     version: std.json.Value = .null,
@@ -950,6 +953,7 @@ fn deinitExposureDef(allocator: std.mem.Allocator, exposure: *ExposureDef) void 
 }
 
 pub fn deinitUnitTestDef(allocator: std.mem.Allocator, unit_test: *UnitTestDef) void {
+    unit_test.fqn.deinit(allocator);
     config_value.deinit(allocator, &unit_test.overrides);
     config_value.deinit(allocator, &unit_test.versions);
     config_value.deinit(allocator, &unit_test.version);

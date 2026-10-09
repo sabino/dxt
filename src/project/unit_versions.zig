@@ -10,6 +10,13 @@ pub fn assign(graph: *types.Graph) !void {
         expanded.deinit(graph.allocator);
     }
     for (graph.unit_tests.items) |*unit| {
+        if (!unit.enabled) {
+            var copy = try clone(graph.allocator, unit);
+            errdefer types.deinitUnitTestDef(graph.allocator, &copy);
+            try initialModelMetadata(graph, &copy);
+            try expanded.append(graph.allocator, copy);
+            continue;
+        }
         var has_versions = false;
         const first_expanded = expanded.items.len;
         for (graph.nodes.items) |node| {
@@ -19,6 +26,7 @@ pub fn assign(graph: *types.Graph) !void {
             var copy = try clone(graph.allocator, unit);
             errdefer types.deinitUnitTestDef(graph.allocator, &copy);
             copy.version = try values.clone(graph.allocator, node.version);
+            copy.schema = try @import("compiler.zig").relationSchemaForNode(graph.allocator, graph, &node);
             const v = try values.scalarText(graph.allocator, node.version);
             defer graph.allocator.free(v);
             copy.unique_id = try std.fmt.allocPrint(graph.allocator, "unit_test.{s}.{s}.{s}_v{s}", .{ unit.package_name, unit.model, unit.name, v });
@@ -27,12 +35,23 @@ pub fn assign(graph: *types.Graph) !void {
         if (!has_versions) {
             if (values.get(unit.versions, "include")) |include| if (include != .null and (include != .array or include.array.items.len != 0)) return error.InvalidUnitTestVersions;
             if (values.get(unit.versions, "exclude")) |exclude| if (exclude != .null and (exclude != .array or exclude.array.items.len != 0)) return error.InvalidUnitTestVersions;
-            try expanded.append(graph.allocator, try clone(graph.allocator, unit));
+            var copy = try clone(graph.allocator, unit);
+            errdefer types.deinitUnitTestDef(graph.allocator, &copy);
+            try initialModelMetadata(graph, &copy);
+            try expanded.append(graph.allocator, copy);
         } else if (expanded.items.len == first_expanded) return error.UnitTestVersionNotFound;
     }
     for (graph.unit_tests.items) |*unit| types.deinitUnitTestDef(graph.allocator, unit);
     graph.unit_tests.deinit(graph.allocator);
     graph.unit_tests = expanded;
+}
+fn initialModelMetadata(graph: *const types.Graph, unit: *types.UnitTestDef) !void {
+    for (graph.nodes.items) |*node| {
+        if (!std.mem.eql(u8, node.resource_type, "model") or !std.mem.eql(u8, node.package_name, unit.package_name) or !std.mem.eql(u8, node.name, unit.model) or node.version != .null) continue;
+        unit.schema = try @import("compiler.zig").relationSchemaForNode(graph.allocator, graph, node);
+        if (!unit.enabled) try unit.depends_on.append(graph.allocator, node.unique_id);
+        return;
+    }
 }
 fn included(_: std.mem.Allocator, rule: std.json.Value, version: std.json.Value) !bool {
     if (rule == .null) return true;
@@ -71,6 +90,7 @@ fn clone(a: std.mem.Allocator, unit: *const types.UnitTestDef) !types.UnitTestDe
     result.given = .empty;
     result.expect = .{};
     result.tags = .empty;
+    result.fqn = .empty;
     result.meta = .empty;
     result.depends_on = .empty;
     result.overrides = .null;
@@ -83,7 +103,12 @@ fn clone(a: std.mem.Allocator, unit: *const types.UnitTestDef) !types.UnitTestDe
     result.config_values = try values.clone(a, unit.config_values);
     for (unit.given.items) |fixture| try result.given.append(a, try cloneFixture(a, fixture));
     result.expect = try cloneFixture(a, unit.expect);
-    try result.tags.appendSlice(a, unit.tags.items);
+    if (values.get(result.config_values, "tags")) |tags| {
+        if (tags == .array) for (tags.array.items) |tag| {
+            if (tag == .string) try result.tags.append(a, tag.string);
+        };
+    } else try result.tags.appendSlice(a, unit.tags.items);
+    try result.fqn.appendSlice(a, unit.fqn.items);
     try result.meta.appendSlice(a, unit.meta.items);
     return result;
 }

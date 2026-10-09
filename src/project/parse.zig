@@ -3322,8 +3322,8 @@ test "parseUnitTestsFromText records dict fixtures and config" {
     try std.testing.expectEqualStrings("schema.yml", unit_test.path);
     try std.testing.expectEqualStrings("verifies item flags", unit_test.description);
     try std.testing.expectEqual(@as(usize, 2), unit_test.tags.items.len);
-    try std.testing.expectEqualStrings("marts", unit_test.tags.items[0]);
-    try std.testing.expectEqualStrings("unit", unit_test.tags.items[1]);
+    try std.testing.expectEqualStrings("unit", unit_test.tags.items[0]);
+    try std.testing.expectEqualStrings("marts", unit_test.tags.items[1]);
     try std.testing.expectEqual(@as(usize, 1), unit_test.given.items.len);
     try std.testing.expectEqualStrings("ref('order_items')", unit_test.given.items[0].input.?);
     try std.testing.expectEqual(@as(usize, 2), unit_test.given.items[0].rows.items.len);
