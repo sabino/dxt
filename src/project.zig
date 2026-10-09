@@ -442,7 +442,7 @@ pub fn snapshotRun(runtime: Runtime, options: Options, stdout: *Io.Writer, stder
     defer blocked.deinit(runtime.allocator);
     var had_failure = false;
     for (ordered) |node| {
-        if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &blocked, node, &results)) continue;
+        if (try appendSkippedIfNodeDependsOnBlocked(runtime.allocator, &graph, &blocked, node, &results)) continue;
         if (!try executeModelAppendingResult(runtime, db_path, &graph, node, &results)) {
             try appendUniqueString(runtime.allocator, &blocked, node.unique_id);
             had_failure = true;

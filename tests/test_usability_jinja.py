@@ -35,6 +35,11 @@ def compile_dxt(path):
 
 
 @pytest.mark.parametrize("sql", [
+    "{% set x | upper %}hello{% endset %}select '{{ x }}' as marker",
+    "{% set x = 1 %}{% with x=2, y='inner' %}select {{ x }} as n, '{{ y }}' as y{% endwith %} union all select {{ x }}, 'outer'",
+    "{% set a,b = [2,3] %}select {{ a+b }} as n",
+    "{% set ns = namespace(total=0) %}{% for i in range(4) %}{% set ns.total = ns.total+i %}{% endfor %}select {{ ns.total }} as n",
+    "{% raw %}select '{{ unreplaced }}' as marker{% endraw %}",
     "{% set x = 'credit_card' %}select '{{ x|upper }}' as payment",
     "{% set xs = [missing] %}select 1 as marker",
     "{% set xs = ['a\\n'] %}select '{{ xs[0]|replace('\\n','!') }}' as marker",
@@ -79,3 +84,23 @@ select {{ nested(value, multiplier=3) }} as n, '{{ env_var('DXT_JINJA_MARKER') }
     result = subprocess.run(["duckdb", ":memory:", "-json", "-batch", "-bail", "-c", compiled], text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == [{"n": 6, "marker": "confirmed"}, {"n": 9, "marker": "confirmed"}, {"n": 12, "marker": "confirmed"}]
+
+
+def test_macro_call_capture_matches_jinja(tmp_path):
+    macros = "{% macro wrap() %}[{{ caller() }}]{% endmacro %}"
+    sql = "{% call wrap() %}{{ 2+3 }}{% endcall %}"
+    project = tmp_path / "caller"
+    project_at(project, sql, macros)
+    compiled = compile_dxt(project)
+    reference = Environment(undefined=StrictUndefined).from_string(macros+sql).render()
+    assert compiled == reference == "[5]"
+
+
+def test_model_secret_environment_variable_is_rejected(tmp_path, monkeypatch):
+    marker = "private-credential-marker"
+    monkeypatch.setenv("DBT_ENV_SECRET_PASSWORD", marker)
+    project = tmp_path / "secret"
+    project_at(project, "select '{{ env_var('DBT_ENV_SECRET_PASSWORD') }}' as marker")
+    result = subprocess.run([str(DXT), "compile", "--project-dir", str(project), "--profiles-dir", str(project)], text=True, capture_output=True)
+    assert result.returncode != 0
+    assert marker not in result.stdout+result.stderr

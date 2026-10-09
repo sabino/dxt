@@ -84,6 +84,7 @@ const CompileContext = struct {
     bindings: std.ArrayList(ValueBinding) = .empty,
     returned: ?native_expr.Value = null,
     parse_node: ?*Node = null,
+    var_render_depth: usize = 0,
 
     const ValueBinding = struct {
         name: []const u8,
@@ -226,7 +227,15 @@ pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *No
         error.UnsupportedJinja, error.UnsupportedDynamicRef, error.UnsupportedDynamicSource, error.UnresolvedVar, error.UnresolvedMacro => static_success = false,
         else => return err,
     };
-    if (static_success and node.macro_depends_on.items.len == macros_start) return;
+    if (static_success and node.macro_depends_on.items.len == macros_start and !requiresNativeRendering(sql)) return;
+    for (node.refs.items[refs_start..]) |ref| {
+        if (ref.package) |package| allocator.free(package);
+        allocator.free(ref.name);
+    }
+    for (node.source_refs.items[sources_start..]) |source| {
+        allocator.free(source.source_name);
+        allocator.free(source.table_name);
+    }
     node.refs.shrinkRetainingCapacity(refs_start);
     node.source_refs.shrinkRetainingCapacity(sources_start);
     node.macro_depends_on.shrinkRetainingCapacity(macros_start);
@@ -237,6 +246,12 @@ pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *No
     var rendered: std.ArrayList(u8) = .empty;
     defer rendered.deinit(allocator);
     try renderRange(&context, sql, 0, sql.len, &rendered);
+}
+
+fn requiresNativeRendering(sql: []const u8) bool {
+    for ([_][]const u8{ "var(", "var (", "env_var(", "env_var (", "{% set", "{%- set", "{% call", "{%- call", "{% for", "{%- for", "run_query(", "statement(", "log(", "print(" }) |needle|
+        if (std.mem.indexOf(u8, sql, needle) != null) return true;
+    return false;
 }
 
 pub fn renderOperation(runtime: types.Runtime, graph: *const Graph, macro_name: []const u8, kwargs: std.json.Value) ![]const u8 {
@@ -558,6 +573,61 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
             defer context.allocator.free(rendered);
             try out.appendSlice(context.allocator, rendered);
         } else {
+            if (std.mem.eql(u8, span, "raw")) {
+                const block = try findCaptureBlock(sql, close + 2, end_index, "raw", "endraw");
+                try out.appendSlice(context.allocator, sql[close + 2 .. block.start]);
+                index = afterTag(sql, block.close, end_index);
+                continue;
+            }
+            if (std.mem.startsWith(u8, span, "set ") and std.mem.indexOfScalar(u8, span, '=') == null) {
+                const block = try findCaptureBlock(sql, close + 2, end_index, "set", "endset");
+                var captured: std.ArrayList(u8) = .empty;
+                defer captured.deinit(context.allocator);
+                try renderRange(context, sql, afterTag(sql, close + 2, end_index), block.start, &captured);
+                const pipe = std.mem.indexOfScalar(u8, span, '|');
+                const target = std.mem.trim(u8, span[4 .. pipe orelse span.len], " \t\r\n");
+                const value = native_expr.Value{ .string = try context.value_arena.allocator().dupe(u8, captured.items) };
+                if (pipe) |filter_start| {
+                    try context.setValue("__dxt_capture", value);
+                    const expression = try std.fmt.allocPrint(context.value_arena.allocator(), "__dxt_capture{s}", .{span[filter_start..]});
+                    try assignValue(context, target, try context.evaluate(expression));
+                } else try assignValue(context, target, value);
+                index = afterTag(sql, block.close, end_index);
+                continue;
+            }
+            if (std.mem.startsWith(u8, span, "call ")) {
+                const block = try findCaptureBlock(sql, close + 2, end_index, "call", "endcall");
+                var captured: std.ArrayList(u8) = .empty;
+                defer captured.deinit(context.allocator);
+                try renderRange(context, sql, afterTag(sql, close + 2, end_index), block.start, &captured);
+                const expression = std.mem.trim(u8, span[5..], " \t\r\n");
+                const call = try parseSingleCall(expression);
+                const arena = context.value_arena.allocator();
+                const args = try native_expr.evaluateArguments(arena, expression[call.open + 1 .. call.close], context.host());
+                var arguments: std.ArrayList(native_expr.Argument) = .empty;
+                try arguments.appendSlice(arena, args);
+                context.pushScope();
+                defer context.popScope();
+                try context.setValue("__dxt_caller_sql", .{ .string = try arena.dupe(u8, captured.items) });
+                try context.setValue("caller", .{ .callable = "__dxt_caller" });
+                if (std.mem.eql(u8, expression[0..call.open], "statement"))
+                    try arguments.append(arena, .{ .name = "caller_sql", .value = .{ .string = captured.items } });
+                const value = try callExpressionValue(context, std.mem.trim(u8, expression[0..call.open], " \t"), arguments.items, arena);
+                if (value != .none) try out.appendSlice(context.allocator, try value.text(arena));
+                index = afterTag(sql, block.close, end_index);
+                continue;
+            }
+            if (std.mem.eql(u8, span, "with") or std.mem.startsWith(u8, span, "with ")) {
+                const block = try findCaptureBlock(sql, close + 2, end_index, "with", "endwith");
+                context.pushScope();
+                defer context.popScope();
+                const arena = context.value_arena.allocator();
+                const args = try native_expr.evaluateArguments(arena, std.mem.trim(u8, span[4..], " \t"), context.host());
+                for (args) |arg| try assignValue(context, arg.name orelse return error.InvalidJinjaArguments, arg.value);
+                try renderRange(context, sql, afterTag(sql, close + 2, end_index), block.start, out);
+                index = afterTag(sql, block.close, end_index);
+                continue;
+            }
             if (isEndForStatement(span)) return error.UnsupportedJinja;
             if (isEndIfStatement(span) or isElseStatement(span) or isElifStatement(span)) return error.UnsupportedJinja;
             if (isForStatement(span)) {
@@ -598,6 +668,27 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
         index = afterTag(sql, close + 2, end_index);
     }
     if (end_index + 2 < sql.len and sql[end_index] == '{' and sql[end_index + 2] == '-') trimOutput(context.allocator, out);
+}
+
+const CaptureBlock = struct { start: usize, close: usize };
+
+fn findCaptureBlock(sql: []const u8, start: usize, limit: usize, opening: []const u8, ending: []const u8) !CaptureBlock {
+    var index = start;
+    var depth: usize = 1;
+    while (index < limit) {
+        const tag = std.mem.indexOfPos(u8, sql, index, "{%") orelse return error.UnsupportedJinja;
+        const close = std.mem.indexOfPos(u8, sql, tag + 2, "%}") orelse return error.UnsupportedJinja;
+        if (close + 2 > limit) return error.UnsupportedJinja;
+        const span = tagContent(sql, tag, close);
+        if (std.mem.eql(u8, span, ending)) {
+            depth -= 1;
+            if (depth == 0) return .{ .start = tag, .close = close + 2 };
+        } else if (std.mem.startsWith(u8, span, opening) and (span.len == opening.len or std.ascii.isWhitespace(span[opening.len]))) {
+            if (!std.mem.eql(u8, opening, "set") or std.mem.indexOfScalar(u8, span, '=') == null) depth += 1;
+        }
+        index = close + 2;
+    }
+    return error.UnsupportedJinja;
 }
 
 fn tagContent(sql: []const u8, start: usize, close: usize) []const u8 {
@@ -703,6 +794,10 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
 
 fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
+    if (std.mem.eql(u8, name, "__dxt_caller") or std.mem.eql(u8, name, "caller")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        return try resolveExpressionValue(context, "__dxt_caller_sql", allocator);
+    }
     if (std.mem.eql(u8, name, "config")) {
         if (context.parse_node) |node| {
             var raw: std.ArrayList(u8) = .empty;
@@ -724,11 +819,21 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     if (std.mem.eql(u8, name, "var") or std.mem.eql(u8, name, "env_var")) {
         if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
         const key = args[0].value.string;
-        const text: ?[]const u8 = if (std.mem.eql(u8, name, "var")) findGraphVarValue(context.graph, key) else if (context.graph.environment) |environment| environment.get(key) else null;
-        if (text) |value| {
-            if (std.mem.eql(u8, name, "env_var")) return .{ .string = value };
-            const parsed = native_expr.evaluate(allocator, value, null) catch return .{ .string = value };
-            return if (parsed == .undefined) .{ .string = value } else parsed;
+        if (std.mem.eql(u8, name, "env_var")) {
+            if (std.mem.startsWith(u8, key, "DBT_ENV_SECRET_")) return error.SecretEnvironmentVariableForbidden;
+            if (context.graph.environment) |environment| {
+                if (environment.get(key)) |value| return .{ .string = value };
+            }
+        } else if (findScopedGraphVar(context.graph, context.current_macro_package orelse context.node.package_name, key)) |entry| {
+            const value = if (entry.typed_value) |typed| try valueFromJson(allocator, typed) else native_expr.Value{ .string = entry.value };
+            if (value != .string or (std.mem.indexOf(u8, value.string, "{{") == null and std.mem.indexOf(u8, value.string, "{%") == null)) return value;
+            if (context.var_render_depth >= max_macro_render_depth) return error.JinjaExpressionDepthExceeded;
+            context.var_render_depth += 1;
+            defer context.var_render_depth -= 1;
+            var rendered: std.ArrayList(u8) = .empty;
+            defer rendered.deinit(context.allocator);
+            try renderRange(context, value.string, 0, value.string.len, &rendered);
+            return .{ .string = try allocator.dupe(u8, rendered.items) };
         }
         if (args.len == 2) return args[1].value;
         return if (std.mem.eql(u8, name, "var")) error.UnresolvedVar else error.EnvironmentVariableMissing;
@@ -739,6 +844,10 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return .{ .string = "" };
     }
     if (std.mem.eql(u8, name, "exceptions.raise_compiler_error")) return error.JinjaCompilerError;
+    if (context.parse_node != null) {
+        if (std.mem.eql(u8, name, "run_query") or std.mem.eql(u8, name, "load_result")) return .none;
+        if (std.mem.eql(u8, name, "statement") or std.mem.eql(u8, name, "store_result") or std.mem.eql(u8, name, "log") or std.mem.eql(u8, name, "print")) return .{ .string = "" };
+    }
     if (std.mem.eql(u8, name, "adapter.quote")) {
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
         return .{ .string = try quoteIdentifier(allocator, args[0].value.string) };
@@ -1054,6 +1163,17 @@ fn findGraphVarValue(graph: *const Graph, name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, entry.name, name)) return entry.value;
     }
     return null;
+}
+
+fn findScopedGraphVar(graph: *const Graph, package: []const u8, name: []const u8) ?*const types.VarEntry {
+    var global: ?*const types.VarEntry = null;
+    for (graph.vars.items) |*entry| {
+        if (!std.mem.eql(u8, entry.name, name)) continue;
+        if (entry.package_name) |scope| {
+            if (std.mem.eql(u8, scope, package)) return entry;
+        } else global = entry;
+    }
+    return global;
 }
 
 fn renderAdapterDispatchExpression(context: *CompileContext, span: []const u8) ![]const u8 {
@@ -1386,13 +1506,37 @@ fn renderStatement(context: *CompileContext, span: []const u8) !void {
         const assignment = std.mem.trim(u8, span[4..], " \t\r\n");
         const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return error.UnsupportedJinja;
         const name = std.mem.trim(u8, assignment[0..equals], " \t\r\n");
-        if (name.len == 0 or !jinja.isIdentStart(name[0])) return error.UnsupportedJinja;
-        for (name) |c| if (!jinja.isIdentChar(c)) return error.UnsupportedJinja;
-        try context.setValue(name, try context.evaluate(assignment[equals + 1 ..]));
+        try assignValue(context, name, try context.evaluate(assignment[equals + 1 ..]));
         return;
     }
     const call = if (std.mem.startsWith(u8, span, "do ")) span[3..] else span;
     _ = try context.evaluate(call);
+}
+
+fn assignValue(context: *CompileContext, target: []const u8, value: native_expr.Value) anyerror!void {
+    if (std.mem.indexOfScalar(u8, target, ',')) |_| {
+        if (value != .list) return error.JinjaTypeError;
+        var names = std.mem.splitScalar(u8, target, ',');
+        var i: usize = 0;
+        while (names.next()) |name| : (i += 1) {
+            if (i >= value.list.len) return error.InvalidJinjaArguments;
+            try assignValue(context, std.mem.trim(u8, name, " \t"), value.list[i]);
+        }
+        if (i != value.list.len) return error.InvalidJinjaArguments;
+        return;
+    }
+    if (std.mem.lastIndexOfScalar(u8, target, '.')) |dot| {
+        const object = try context.evaluate(target[0..dot]);
+        if (object != .object) return error.JinjaTypeError;
+        for (@constCast(object.object)) |*entry| if (std.mem.eql(u8, entry.key, target[dot + 1 ..])) {
+            entry.value = value;
+            return;
+        };
+        return error.UndefinedJinjaValue;
+    }
+    if (target.len == 0 or !jinja.isIdentStart(target[0])) return error.UnsupportedJinja;
+    for (target) |c| if (!jinja.isIdentChar(c)) return error.UnsupportedJinja;
+    try context.setValue(target, value);
 }
 
 const SetListAssignment = struct {
