@@ -78,7 +78,7 @@ fn executeInTransaction(allocator: std.mem.Allocator, session: *adapter.Session,
     defer allocator.free(backup);
     try dropIfExists(allocator, session, schema, intermediate_id, intermediate);
     try dropIfExists(allocator, session, schema, backup_id, backup);
-    const creation = try renderCreate(allocator, node, intermediate, sql);
+    const creation = if (@import("contracts.zig").enforced(node)) try @import("contracts.zig").renderCreation(allocator, graph, node, intermediate, sql, node.materialized) else try renderCreate(allocator, node, intermediate, sql);
     defer allocator.free(creation);
     var result = try session.query(creation);
     errdefer result.deinit(allocator);

@@ -1826,6 +1826,12 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
     }
     const execution = @import("project/materialization_runtime.zig").execute(runtime, db_path, graph, node);
     execution catch |err| switch (err) {
+        error.ModelContractMismatch, error.ContractColumnTypeMissing => {
+            const message = if (@import("project/compile_diagnostics.zig").message(err)) |text| try runtime.allocator.dupe(u8, text) else try std.fmt.allocPrint(runtime.allocator, "Model contract failed: {s}", .{@errorName(err)});
+            errdefer runtime.allocator.free(message);
+            try executed.append(runtime.allocator, .{ .node = node, .status = "error", .message = message });
+            return false;
+        },
         error.DuckDbExecutionFailed, error.PostgresExecutionFailed => {
             try appendExecutionErrorResult(runtime.allocator, executed, node);
             return false;
@@ -4072,7 +4078,10 @@ fn applyModelProperties(graph: *Graph, package_name: []const u8) !void {
         for (property.columns.items) |column| {
             try appendColumnClone(graph, property.package_name, &node.columns, column);
         }
-        sortColumns(node.columns.items);
+        // Core preserves YAML column order for model contracts and the
+        // generated INSERT projection. Legacy line-reader fixtures retain
+        // their previous deterministic sorting.
+        if (property.properties == .null) sortColumns(node.columns.items);
     }
 }
 
@@ -4634,6 +4643,7 @@ fn writeWarnings(runtime: Runtime, stderr: *Io.Writer, graph: *const Graph) !voi
     if (graph.unmatched_model_properties.items.len != 0 and try cli_options.warningIsError(runtime, "NoNodeForYamlKey")) return error.ParsingWarningAsError;
     if (graph.unmatched_macro_properties.items.len != 0 and try cli_options.warningIsError(runtime, "MacroNotFoundForPatch")) return error.ParsingWarningAsError;
     if (graph.macro_argument_warnings.items.len != 0 and try cli_options.warningIsError(runtime, "InvalidMacroAnnotation")) return error.ParsingWarningAsError;
+    if (graph.constraint_warnings.items.len != 0 and try cli_options.warningIsError(runtime, "UnsupportedConstraintMaterialization")) return error.ParsingWarningAsError;
     for (graph.unmatched_model_properties.items) |property| {
         if (!try cli_options.warningIsSilenced(runtime, "NoNodeForYamlKey")) try stderr.print("warning: did not find matching {s} node for property `{s}` in {s}\n", .{ property.resource_type, property.name, util.normalizeForDisplay(property.patch_path) });
     }
@@ -4642,6 +4652,9 @@ fn writeWarnings(runtime: Runtime, stderr: *Io.Writer, graph: *const Graph) !voi
     }
     for (graph.macro_argument_warnings.items) |warning| {
         if (!try cli_options.warningIsSilenced(runtime, "InvalidMacroAnnotation")) try stderr.print("warning: {s}\n", .{warning});
+    }
+    for (graph.constraint_warnings.items) |warning| {
+        if (!try cli_options.warningIsSilenced(runtime, "UnsupportedConstraintMaterialization")) try stderr.print("warning: {s}\n", .{warning});
     }
 }
 

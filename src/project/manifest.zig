@@ -956,6 +956,14 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
         try writer.print(",\"index\":{d},\"contract\":{{\"enforced\":false,\"alias_types\":true,\"checksum\":null}}", .{index});
     }
     if (std.mem.eql(u8, node.resource_type, "model")) {
+        try writer.writeAll(",\"contract\":");
+        var contract = try @import("contracts.zig").metadata(allocator, &node);
+        defer @import("config_value.zig").deinit(allocator, &contract);
+        try std.json.Stringify.value(contract, .{}, writer);
+        try writer.writeAll(",\"constraints\":");
+        var constraints = try @import("contracts.zig").artifactConstraints(allocator, graph, &node, @import("config_value.zig").get(node.properties, "constraints") orelse .null, true);
+        defer @import("config_value.zig").deinit(allocator, &constraints);
+        try std.json.Stringify.value(constraints, .{}, writer);
         try writer.writeAll(",\"access\":");
         try json.string(writer, @import("group_access.zig").access(&node));
         try writer.writeAll(",\"version\":");
@@ -988,7 +996,7 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
     try writer.writeAll(",\"columns\":");
-    try writeColumns(writer, node.columns.items);
+    if (std.mem.eql(u8, node.resource_type, "model")) try writeModelColumns(allocator, writer, graph, &node) else try writeColumns(writer, node.columns.items);
     try writer.writeAll(",\"config\":");
     var canonical_config = try @import("canonical_manifest_config.zig").node(allocator, &node);
     defer @import("config_value.zig").deinit(allocator, &canonical_config);
@@ -1165,6 +1173,21 @@ fn writeSeedColumnTypes(writer: *Io.Writer, column_types: []const types.SeedColu
         try json.string(writer, column_type.data_type);
     }
     try writer.writeAll("}");
+}
+
+fn writeModelColumns(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, node: *const Node) !void {
+    if (!node.compiled) return writeColumns(writer, node.columns.items);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const columns = try scratch.dupe(types.ColumnDef, node.columns.items);
+    for (columns) |*column| {
+        if (column.properties != .object) continue;
+        column.properties = try @import("config_value.zig").clone(scratch, column.properties);
+        const constraints = try @import("contracts.zig").artifactConstraints(scratch, graph, node, @import("config_value.zig").get(column.properties, "constraints") orelse .null, false);
+        try @import("config_value.zig").put(scratch, &column.properties, "constraints", constraints);
+    }
+    return writeColumns(writer, columns);
 }
 
 fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {

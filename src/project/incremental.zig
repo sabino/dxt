@@ -173,6 +173,14 @@ pub fn executeWithPolicy(runtime: types.Runtime, db_path: []const u8, graph: *co
     defer runtime.allocator.free(target);
     const compiled = std.mem.trimEnd(u8, node.compiled_code orelse return error.UnsupportedModelExecution, " \t\r\n;");
     if (existing == .missing or existing == .view or config.fullRefresh(graph, node)) {
+        if (@import("contracts.zig").enforced(node)) {
+            const creation = try @import("contracts.zig").renderCreation(runtime.allocator, graph, node, target, compiled, "table");
+            defer runtime.allocator.free(creation);
+            const drop_kind = if (existing == .view) "view" else "table";
+            const sql = try std.fmt.allocPrint(runtime.allocator, "{s}create schema if not exists {s};\ndrop {s} if exists {s};\n{s}\n{s}", .{ if (policy.manage_transaction) "begin transaction;\n" else "", schema_quoted, drop_kind, target, creation, if (policy.manage_transaction) "commit;\n" else "" });
+            defer runtime.allocator.free(sql);
+            return try executeSql(runtime, db_path, sql);
+        }
         // CTAS and replacement share one transaction, including view-to-table changes.
         const sql = try std.fmt.allocPrint(runtime.allocator, "{s}create schema if not exists {s};\n{s}{s}{s}create or replace table {s} as (\n{s}\n);\n{s}", .{ if (policy.manage_transaction) "begin transaction;\n" else "", schema_quoted, if (existing == .view) "drop view " else "", if (existing == .view) target else "", if (existing == .view) ";\n" else "", target, compiled, if (policy.manage_transaction) "commit;\n" else "" });
         defer runtime.allocator.free(sql);

@@ -47,8 +47,14 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         var fields = if (column.properties == .object) try values.clone(allocator, column.properties) else std.json.Value{ .object = .empty };
         try fields.object.put(allocator, "name", .{ .string = column.name });
         try fields.object.put(allocator, "description", .{ .string = column.description });
-        try fields.object.put(allocator, "data_type", if (column.data_type) |dtype| .{ .string = dtype } else .null);
-        try fields.object.put(allocator, "quote", if (column.quote) |quote| .{ .bool = quote } else .null);
+        if (column.data_type) |dtype| try fields.object.put(allocator, "data_type", .{ .string = dtype }) else _ = fields.object.swapRemove("data_type");
+        const contract = values.get(node.effective_config, "contract") orelse .null;
+        const aliases = values.get(contract, "alias_types") orelse std.json.Value{ .bool = true };
+        if (aliases == .bool and aliases.bool) if (column.data_type) |dtype| {
+            const translated = (try @import("bundled_macros.zig").callColumn(allocator, "api.Column.translate_type", &.{.{ .value = .{ .string = dtype } }})).?;
+            try fields.object.put(allocator, "data_type", .{ .string = translated.string });
+        };
+        if (column.quote) |quote| try fields.object.put(allocator, "quote", .{ .bool = quote }) else _ = fields.object.swapRemove("quote");
         if (!fields.object.contains("constraints")) try fields.object.put(allocator, "constraints", .{ .array = std.json.Array.init(allocator) });
         try columns.append(allocator, .{ .key = column.name, .value = try values.toExpression(allocator, fields) });
     }
@@ -90,6 +96,8 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         .{ .key = "meta", .value = effective_config.attribute("meta") },
         .{ .key = "group", .value = effective_config.attribute("group") },
         .{ .key = "access", .value = effective_config.attribute("access") },
+        .{ .key = "contract", .value = try values.toExpression(allocator, try @import("contracts.zig").metadata(allocator, node)) },
+        .{ .key = "constraints", .value = try values.toExpression(allocator, try @import("contracts.zig").modelConstraints(allocator, node)) },
         .{ .key = "columns", .value = .{ .object = if (columns.items.len == 0) try expression.allocateEntries(allocator, 0) else try columns.toOwnedSlice(allocator) } },
         .{ .key = "tags", .value = .{ .list = tags } },
         .{ .key = "version", .value = try values.toExpression(allocator, node.version) },

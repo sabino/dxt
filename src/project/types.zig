@@ -772,6 +772,7 @@ pub const Graph = struct {
     unmatched_model_properties: std.ArrayList(UnmatchedModelProperty) = .empty,
     unmatched_macro_properties: std.ArrayList(UnmatchedMacroProperty) = .empty,
     macro_argument_warnings: std.ArrayList([]const u8) = .empty,
+    constraint_warnings: std.ArrayList([]const u8) = .empty,
     dispatch_configs: std.ArrayList(DispatchConfig) = .empty,
     source_project_configs: std.ArrayList(SourceProjectConfig) = .empty,
     validate_macro_args: bool = false,
@@ -864,6 +865,8 @@ pub const Graph = struct {
         self.unmatched_model_properties.deinit(self.allocator);
         self.unmatched_macro_properties.deinit(self.allocator);
         self.macro_argument_warnings.deinit(self.allocator);
+        for (self.constraint_warnings.items) |message| self.allocator.free(message);
+        self.constraint_warnings.deinit(self.allocator);
         deinitDispatchConfigs(self.allocator, &self.dispatch_configs);
         for (self.source_project_configs.items) |*source_config| config_value.deinit(self.allocator, &source_config.values);
         self.source_project_configs.deinit(self.allocator);

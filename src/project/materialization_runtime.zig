@@ -54,6 +54,7 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
     try host.begin();
     errdefer host.rollback() catch {};
     try runHooks(allocator, &runtime_graph, node, config, "pre-hook", true);
+    if (@import("contracts.zig").enforced(node)) _ = try compiler.renderMacroForNode(allocator, &runtime_graph, node, "get_assert_columns_equivalent", &.{.{ .name = "sql", .value = .{ .string = duckdb.trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution) } }});
     try body.execute(body.context, held_runtime, &runtime_graph, node, db_path, .{ .manage_transaction = false, .file_effects = &journal });
     const post_hooks_first = std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, materialized, "table");
     if (post_hooks_first) try runHooks(allocator, &runtime_graph, node, config, "post-hook", true);

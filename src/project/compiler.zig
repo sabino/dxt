@@ -1296,6 +1296,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     if (try @import("regex_context.zig").call(allocator, name, args, context.host())) |value| return value;
     if (try @import("grants_context.zig").call(allocator, name, args)) |value| return value;
+    if (try @import("constraint_context.zig").call(allocator, context.graph.adapter_type, name, args, context.host())) |value| return value;
     if (try dbt_context.call(allocator, context.graph.adapter_type, name, args)) |value| return value;
     if (std.mem.eql(u8, name, "adapter.type")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
@@ -1416,6 +1417,10 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         @import("compile_diagnostics.zig").capture(context.node.original_file_path, context.node.name, try args[0].value.text(allocator));
         return error.JinjaCompilerError;
     }
+    if (std.mem.eql(u8, name, "exceptions.raise_contract_error") or std.mem.eql(u8, name, "exceptions.column_type_missing")) {
+        @import("compile_diagnostics.zig").captureError(context.node.original_file_path, context.node.name, "Model contract does not match the SQL result columns.", error.ModelContractMismatch);
+        return error.ModelContractMismatch;
+    }
     if (std.mem.eql(u8, name, "render")) {
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
         var rendered: std.ArrayList(u8) = .empty;
@@ -1493,6 +1498,13 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     const macro = findMacroByUniqueId(context.graph, macro_id.?) orelse return error.UnresolvedMacro;
     if (context.parse_node) |node| {
         if (context.macro_render_depth == 0) try util.appendUnique(context.allocator, &node.macro_depends_on, macro.unique_id);
+    }
+    // The pinned DuckDB helper leaves explicitly quoted column names unquoted
+    // in the INSERT projection. Honor the authored quoting policy while
+    // preserving project overrides and the bundled dependency identity.
+    if (std.mem.eql(u8, macro.package_name, "dbt_duckdb") and std.mem.eql(u8, macro.name, "get_column_names") and @import("contracts.zig").enforced(context.node)) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        return @import("constraint_context.zig").columnNames(allocator, (try @import("context_values.zig").model(allocator, context.graph, context.node)).attribute("columns"));
     }
     return try renderMacroValue(context, macro, args);
 }

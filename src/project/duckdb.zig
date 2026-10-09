@@ -104,6 +104,11 @@ pub fn executeModelWithPolicy(runtime: Runtime, db_path: []const u8, graph: *con
         var held_runtime = runtime;
         held_runtime.adapter_session = session;
         try dropConflictingMaterialization(held_runtime, db_path, graph, node);
+        if (@import("contracts.zig").enforced(node)) {
+            const drop_sql = try renderDropSql(runtime.allocator, graph, node, if (std.mem.eql(u8, node.materialized, "table")) .table else .view);
+            defer runtime.allocator.free(drop_sql);
+            try session.execute(drop_sql);
+        }
         try session.execute(sql);
         if (policy.manage_transaction) try session.commit();
         return;
@@ -627,6 +632,12 @@ pub fn renderModelSql(allocator: std.mem.Allocator, graph: *const Graph, node: *
     defer if (should_free_relation) allocator.free(relation_name);
 
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) return postgres_materialization.renderCreate(allocator, node, relation_name, compiled_code);
+
+    if (@import("contracts.zig").enforced(node)) {
+        const creation = try @import("contracts.zig").renderCreation(allocator, graph, node, relation_name, compiled_code, node.materialized);
+        defer allocator.free(creation);
+        return std.fmt.allocPrint(allocator, "create schema if not exists {s};\n{s}", .{ quoted_schema, creation });
+    }
 
     const materialization_keyword: []const u8 = if (std.mem.eql(u8, node.materialized, "table")) "table" else "view";
     return try std.fmt.allocPrint(

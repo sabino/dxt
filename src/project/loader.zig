@@ -269,6 +269,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         try compiler.scanDependencies(runtime.allocator, node.raw_code, node, &graph);
     }
     try snapshot_yaml.finalize(runtime, &graph);
+    try @import("contracts.zig").finalize(runtime, &graph);
     try callbacks.materialize_generic_tests(&graph);
     try @import("generic_test_config.zig").finalize(runtime, &graph);
     try @import("unit_metadata.zig").checksums(&graph);
