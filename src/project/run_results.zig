@@ -209,6 +209,8 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
         try writer.print("{d}", .{threads});
     }
     try writer.print(",\"full_refresh\":{s}", .{if (opts.full_refresh) "true" else "false"});
+    try writer.print(",\"fail_fast\":{s},\"log_format\":", .{if (opts.fail_fast) "true" else "false"});
+    try json.string(writer, @tagName(opts.log_format));
     try writer.print(",\"defer\":{s},\"favor_state\":{s},\"indirect_selection\":", .{ if (opts.defer_enabled) "true" else "false", if (opts.favor_state) "true" else "false" });
     try json.string(writer, opts.indirect_selection);
     if (std.mem.eql(u8, opts.which, "generate")) {

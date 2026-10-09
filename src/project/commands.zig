@@ -358,11 +358,15 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
         if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
         options.full_refresh = value == .bool and value.bool;
     }
-    inline for (.{ .{ "defer", "defer_enabled" }, .{ "favor_state", "favor_state" } }) |field| {
+    inline for (.{ .{ "defer", "defer_enabled" }, .{ "favor_state", "favor_state" }, .{ "fail_fast", "fail_fast" } }) |field| {
         if (args.get(field[0])) |value| {
             if (value != .bool and value != .null) return error.MalformedRunResultsArtifact;
             @field(options, field[1]) = value == .bool and value.bool;
         }
+    }
+    if (args.get("log_format")) |value| {
+        if (value != .string) return error.MalformedRunResultsArtifact;
+        options.log_format = std.meta.stringToEnum(@TypeOf(options.log_format), value.string) orelse return error.MalformedRunResultsArtifact;
     }
     if (args.get("indirect_selection")) |value| {
         if (value != .string) return error.MalformedRunResultsArtifact;
