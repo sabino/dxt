@@ -237,6 +237,7 @@ pub fn collectCatalogEntries(runtime: Runtime, db_path: []const u8, graph: *cons
         try entries.nodes.append(runtime.allocator, entry);
     }
     for (graph.sources.items) |*source| {
+        if (!source.enabled) continue;
         if (!selectionContains(selected, source.unique_id)) continue;
         const entry = try catalogEntryForSource(runtime.allocator, source, rows) orelse continue;
         try entries.sources.append(runtime.allocator, entry);

@@ -79,6 +79,10 @@ fn sourcePaths(allocator: std.mem.Allocator, block: std.json.Value, package: []c
     while (it.next()) |entry| {
         const key = std.mem.trimStart(u8, entry.key_ptr.*, "+ ");
         const value = entry.value_ptr.*;
+        if (isSourceConfig(key)) {
+            try values.put(allocator, &config.values, key, value);
+            configured = true;
+        }
         if (std.mem.eql(u8, key, "database")) {
             config.database = try ownedOptionalString(allocator, value);
             configured = true;
@@ -134,7 +138,7 @@ pub fn quoting(value: std.json.Value) !types.SourceQuoting {
     if (value == .null) return .{};
     if (value != .object) return error.InvalidSourceConfiguration;
     var result = types.SourceQuoting{};
-    inline for (.{ "database", "schema", "identifier" }) |key| if (values.get(value, key)) |item| {
+    inline for (.{ "database", "schema", "identifier", "column" }) |key| if (values.get(value, key)) |item| {
         @field(result, key) = if (item == .null) null else try resource.boolean(item);
     };
     return result;

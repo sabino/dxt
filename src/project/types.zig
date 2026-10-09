@@ -107,6 +107,7 @@ pub const ModelPathConfig = struct {
 };
 
 pub const SourceProjectConfig = struct {
+    values: std.json.Value = .null,
     package_name: []const u8,
     source_name: ?[]const u8 = null,
     table_name: ?[]const u8 = null,
@@ -129,6 +130,14 @@ pub const DocsConfig = struct {
 };
 
 pub const SourceDef = struct {
+    enabled: bool = true,
+    description: []const u8 = "",
+    source_description: []const u8 = "",
+    loader: []const u8 = "",
+    properties: std.json.Value = .null,
+    source_properties: std.json.Value = .null,
+    raw_config: std.json.Value = .null,
+    effective_config: std.json.Value = .null,
     package_name: []const u8,
     unique_id: []const u8,
     source_name: []const u8,
@@ -147,6 +156,7 @@ pub const SourceDef = struct {
 };
 
 pub const SourceQuoting = struct {
+    column: ?bool = null,
     database: ?bool = null,
     schema: ?bool = null,
     identifier: ?bool = null,
@@ -710,6 +720,7 @@ pub const Graph = struct {
         self.unmatched_macro_properties.deinit(self.allocator);
         self.macro_argument_warnings.deinit(self.allocator);
         deinitDispatchConfigs(self.allocator, &self.dispatch_configs);
+        for (self.source_project_configs.items) |*source_config| config_value.deinit(self.allocator, &source_config.values);
         self.source_project_configs.deinit(self.allocator);
         deinitVars(self.allocator, &self.vars);
         for (self.deferred_relations.items) |relation| {
@@ -754,6 +765,7 @@ pub fn deinitProjectConfig(allocator: std.mem.Allocator, config: *ProjectConfig)
     config.snapshot_paths.deinit(allocator);
     config.function_paths.deinit(allocator);
     config.model_path_configs.deinit(allocator);
+    for (config.source_project_configs.items) |*source_config| config_value.deinit(allocator, &source_config.values);
     config.source_project_configs.deinit(allocator);
     deinitDispatchConfigs(allocator, &config.dispatch_configs);
     deinitVars(allocator, &config.vars);
@@ -834,6 +846,10 @@ fn deinitSingularTestProperty(allocator: std.mem.Allocator, property: *SingularT
 }
 
 pub fn deinitSourceDef(allocator: std.mem.Allocator, source: *SourceDef) void {
+    config_value.deinit(allocator, &source.properties);
+    config_value.deinit(allocator, &source.source_properties);
+    config_value.deinit(allocator, &source.raw_config);
+    config_value.deinit(allocator, &source.effective_config);
     deinitGenericTestDefs(allocator, &source.tests);
     for (source.columns.items) |*column| {
         config_value.deinit(allocator, &column.properties);

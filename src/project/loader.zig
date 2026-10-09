@@ -259,7 +259,11 @@ fn appendDispatchConfigsToGraph(allocator: std.mem.Allocator, graph: *Graph, con
 }
 
 fn appendSourceProjectConfigsToGraph(allocator: std.mem.Allocator, graph: *Graph, configs: []const SourceProjectConfig) !void {
-    try graph.source_project_configs.appendSlice(allocator, configs);
+    for (configs) |config| {
+        var copied = config;
+        copied.values = try config_value.clone(allocator, config.values);
+        try graph.source_project_configs.append(allocator, copied);
+    }
 }
 
 fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []const u8, macro_paths: []const []const u8, parse_properties: bool, callbacks: Callbacks, graph: *Graph) !void {

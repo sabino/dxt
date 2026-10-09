@@ -194,3 +194,36 @@ def test_cli_vars_resolve_custom_package_install_path(tmp_path, configuration_or
     actual, expected = [m["nodes"]["model.configuration_fixture.rendered"] for m in manifests]
     assert actual["compiled_code"] == expected["compiled_code"]
     assert actual["depends_on"]["nodes"] == expected["depends_on"]["nodes"]
+
+
+def test_source_yaml_anchors_typed_inheritance_and_disabled_resources(tmp_path, configuration_oracle, monkeypatch):
+    monkeypatch.setenv("DXT_SOURCE_SCHEMA", "landing")
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.append_project("sources: {configuration_fixture: {raw: {+meta: {project: true}, +tags: [project]}}}\n")
+    pair.write("models/properties.yml", """version: 2
+source_defaults: &defaults
+  schema: "{{ env_var('DXT_SOURCE_SCHEMA') }}"
+  description: Upstream event data
+  loaded_at_field: loaded_at
+  freshness: {warn_after: {count: 4, period: hour}}
+  meta: {owner: source, nested: [1, true, null]}
+  tags: [source]
+sources:
+  - <<: *defaults
+    name: raw
+    tables:
+      - name: events
+        description: Event records
+        meta: {team: events}
+        tags: [events]
+        freshness: {error_after: {count: 8, period: hour}}
+        columns:
+          - {name: id, data_type: integer, meta: {nested: {enabled: true}}, tags: [key]}
+      - {name: hidden, config: {enabled: false}}
+""")
+    manifests = pair.invoke("parse")
+    actual, expected = [m["sources"]["source.configuration_fixture.raw.events"] for m in manifests]
+    for key in ["schema", "database", "identifier", "relation_name", "description", "source_description", "freshness", "loaded_at_field", "meta", "tags", "columns", "config"]:
+        assert actual[key] == expected[key], key
+    assert "source.configuration_fixture.raw.hidden" not in manifests[0]["sources"]
+    assert manifests[0]["disabled"]["source.configuration_fixture.raw.hidden"][0]["config"]["enabled"] is False

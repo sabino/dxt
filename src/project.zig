@@ -2882,11 +2882,11 @@ fn parseYamlProperties(runtime: Runtime, project_dir: []const u8, resource_root:
 
     try @import("project/semantic.zig").parseProperties(runtime, text, resource_root, relative_path, package_name, graph);
     try snapshot_yaml.parseProperties(runtime.allocator, text, resource_root, relative_path, package_name, graph);
-    try parseSourcesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseExposuresFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     try parseUnitTestsFromText(runtime.allocator, text, resource_root, relative_path, package_name, graph);
     var properties_document = try @import("project/yaml.zig").parse(runtime.allocator, text);
     defer properties_document.deinit();
+    try @import("project/source_properties.zig").parse(runtime, properties_document.value, relative_path, package_name, graph);
     try @import("project/properties.zig").parseModels(runtime, properties_document.value, relative_path, package_name, graph);
     try parseSingularTestPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
     try parseMacroPropertiesFromText(runtime.allocator, text, relative_path, package_name, graph);
@@ -3540,6 +3540,7 @@ fn materializeGenericTests(graph: *Graph) !void {
         }
     }
     for (graph.sources.items) |*source| {
+        if (!source.enabled) continue;
         for (source.tests.items) |test_def| {
             if (isSupportedSourceGenericTest(test_def, null) and genericTestColumnName(test_def, null) != null) {
                 try appendSourceGenericTestNode(graph, source, test_def, null);

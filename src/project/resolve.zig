@@ -174,10 +174,14 @@ pub fn resolveRefDependency(graph: *const Graph, current_package: []const u8, re
 
 pub fn resolveSourceDependency(graph: *const Graph, current_package: []const u8, source_dep: SourceDep) ![]const u8 {
     const unique_id = try std.fmt.allocPrint(graph.allocator, "source.{s}.{s}.{s}", .{ current_package, source_dep.source_name, source_dep.table_name });
-    if (hasSource(graph, unique_id)) return unique_id;
+    for (graph.sources.items) |source| if (std.mem.eql(u8, source.unique_id, unique_id)) {
+        if (!source.enabled) return error.UnresolvedSource;
+        return unique_id;
+    };
 
     var found: ?[]const u8 = null;
     for (graph.sources.items) |source| {
+        if (!source.enabled) continue;
         if (!std.mem.eql(u8, source.source_name, source_dep.source_name)) continue;
         if (!std.mem.eql(u8, source.table_name, source_dep.table_name)) continue;
         if (found != null) return error.UnresolvedSource;

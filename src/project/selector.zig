@@ -380,6 +380,7 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
         }
     }
     for (graph.sources.items) |*source| {
+        if (!source.enabled) continue;
         if (matchesResourceType(resource_type, "source") and evaluateExpression(graph, source.unique_id, expression, context).direct) {
             try selected.append(allocator, .{
                 .unique_id = source.unique_id,
@@ -691,6 +692,7 @@ fn primaryResourceMatches(graph: *const Graph, unique_id: []const u8, spec: Sele
         if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesSelector(graph, node, spec, context);
     }
     for (graph.sources.items) |*source| {
+        if (!source.enabled) continue;
         if (std.mem.eql(u8, source.unique_id, unique_id)) return matchesSourceSelector(graph, source, spec, context);
     }
     return false;
@@ -819,6 +821,7 @@ fn matchesSingularDependencyNameOrFqnSelector(graph: *const Graph, test_node: *c
 }
 
 fn matchesSourceSelector(graph: *const Graph, source: *const SourceDef, spec: SelectorSpec, context: SelectionContext) bool {
+    if (!source.enabled) return false;
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
     return matchesSourceSelectorExpression(graph, source, spec.value, context);

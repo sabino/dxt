@@ -156,8 +156,11 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeSingularTestNode(allocator, writer, graph, test_node);
     }
     try writer.writeAll("\n  },\n  \"sources\": {");
-    for (graph.sources.items, 0..) |source, index| {
-        if (index != 0) try writer.writeAll(",");
+    var source_index: usize = 0;
+    for (graph.sources.items) |source| {
+        if (!source.enabled) continue;
+        if (source_index != 0) try writer.writeAll(",");
+        source_index += 1;
         try writer.writeAll("\n    ");
         try json.string(writer, source.unique_id);
         try writer.writeAll(": ");
@@ -257,6 +260,15 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try std.json.Stringify.value(resource.data, .{}, writer);
         try writer.writeByte(']');
     }
+    for (graph.sources.items) |source| {
+        if (source.enabled) continue;
+        if (disabled_index != 0) try writer.writeAll(",");
+        disabled_index += 1;
+        try json.string(writer, source.unique_id);
+        try writer.writeAll(":[");
+        try writeSourceNode(allocator, writer, graph, source);
+        try writer.writeAll("]");
+    }
     try writer.writeAll("\n  },\n  \"parent_map\": {");
     var parent_index: usize = 0;
     for (graph.nodes.items) |node| {
@@ -344,6 +356,7 @@ fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
     for (graph.sources.items) |candidate| {
+        if (!candidate.enabled) continue;
         try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
     }
     for (graph.exposures.items) |candidate| {
@@ -611,7 +624,13 @@ fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *con
     try json.string(writer, source.source_name);
     try writer.writeAll(",");
     try json.string(writer, source.table_name);
-    try writer.writeAll("],\"source_description\":\"\",\"loader\":\"\",\"loaded_at_field\":");
+    try writer.writeAll("],\"description\":");
+    try json.string(writer, source.description);
+    try writer.writeAll(",\"source_description\":");
+    try json.string(writer, source.source_description);
+    try writer.writeAll(",\"loader\":");
+    try json.string(writer, source.loader);
+    try writer.writeAll(",\"loaded_at_field\":");
     try writeNullableString(writer, source.loaded_at_field);
     try writer.writeAll(",\"loaded_at_query\":");
     try writeNullableString(writer, source.loaded_at_query);
@@ -619,22 +638,60 @@ fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *con
     if (source.freshness == null and source.freshness_set) try writer.writeAll("null") else try writeSourceFreshnessThreshold(writer, source.freshness orelse .{});
     try writer.writeAll(",\"columns\":");
     try writeColumns(writer, source.columns.items);
-    try writer.writeAll(",\"config\":{\"enabled\":true,\"freshness\":");
-    if (source.freshness == null and source.freshness_set) try writer.writeAll("null") else try writeSourceFreshnessThreshold(writer, source.freshness orelse .{});
-    try writer.writeAll(",\"loaded_at_field\":");
-    try writeNullableString(writer, source.loaded_at_field);
-    try writer.writeAll(",\"loaded_at_query\":");
-    try writeNullableString(writer, source.loaded_at_query);
-    try writer.writeAll(",\"meta\":{},\"tags\":[]},\"unrendered_config\":{\"loaded_at_field\":");
-    try writeNullableString(writer, source.loaded_at_field);
-    try writer.writeAll(",\"loaded_at_query\":");
-    try writeNullableString(writer, source.loaded_at_query);
-    try writer.writeAll(",\"meta\":{},\"tags\":[]");
-    if (source.freshness != null or source.freshness_set) {
-        try writer.writeAll(",\"freshness\":");
-        if (source.freshness) |freshness| try writeSourceFreshnessThreshold(writer, freshness) else try writer.writeAll("null");
+    const fields = @import("config_value.zig");
+    try writer.writeAll(",\"meta\":");
+    try std.json.Stringify.value(fields.get(source.effective_config, "meta") orelse @as(std.json.Value, .{ .object = .empty }), .{}, writer);
+    try writer.writeAll(",\"tags\":");
+    try std.json.Stringify.value(fields.get(source.effective_config, "tags") orelse @as(std.json.Value, .{ .array = std.json.Array.init(std.heap.page_allocator) }), .{}, writer);
+    try writer.writeAll(",\"config\":");
+    try writeSourceConfig(writer, source, false);
+    try writer.writeAll(",\"unrendered_config\":");
+    try writeSourceConfig(writer, source, true);
+    try writer.writeAll("}");
+}
+
+fn writeSourceConfig(writer: *Io.Writer, source: SourceDef, raw: bool) !void {
+    const fields = @import("config_value.zig");
+    const config = if (raw) source.raw_config else source.effective_config;
+    try writer.writeAll("{");
+    var wrote = false;
+    if (!raw) {
+        try writer.writeAll("\"enabled\":");
+        try writer.writeAll(if (source.enabled) "true" else "false");
+        try writer.writeAll(",\"event_time\":");
+        try std.json.Stringify.value(fields.get(config, "event_time") orelse .null, .{}, writer);
+        wrote = true;
     }
-    try writer.writeAll("}}");
+    inline for (.{ "loaded_at_field", "loaded_at_query", "meta", "tags" }) |key| {
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try json.string(writer, key);
+        try writer.writeAll(":");
+        const fallback: std.json.Value = if (std.mem.eql(u8, key, "meta")) .{ .object = .empty } else if (std.mem.eql(u8, key, "tags")) .{ .array = std.json.Array.init(std.heap.page_allocator) } else if (std.mem.eql(u8, key, "loaded_at_field") and source.loaded_at_field != null) .{ .string = source.loaded_at_field.? } else if (std.mem.eql(u8, key, "loaded_at_query") and source.loaded_at_query != null) .{ .string = source.loaded_at_query.? } else .null;
+        const value = fields.get(config, key) orelse fallback;
+        try std.json.Stringify.value(value, .{}, writer);
+    }
+    if (!raw or fields.get(config, "freshness") != null or (source.freshness != null and source.properties == .null)) {
+        if (wrote) try writer.writeAll(",");
+        try writer.writeAll("\"freshness\":");
+        if (source.freshness == null and source.freshness_set) try writer.writeAll("null") else try writeSourceFreshnessThreshold(writer, source.freshness orelse .{});
+    }
+    if (config == .object) {
+        var it = config.object.iterator();
+        while (it.next()) |entry| {
+            var known = false;
+            for ([_][]const u8{ "loaded_at_field", "loaded_at_query", "meta", "tags", "freshness" }) |key| if (std.mem.eql(u8, key, entry.key_ptr.*)) {
+                known = true;
+            };
+            if (!raw and (std.mem.eql(u8, entry.key_ptr.*, "enabled") or std.mem.eql(u8, entry.key_ptr.*, "event_time"))) known = true;
+            if (known) continue;
+            try writer.writeAll(",");
+            try json.string(writer, entry.key_ptr.*);
+            try writer.writeAll(":");
+            try std.json.Stringify.value(entry.value_ptr.*, .{}, writer);
+        }
+    }
+    try writer.writeAll("}");
 }
 
 fn writeSourceQuoting(writer: *Io.Writer, quoting: types.SourceQuoting) !void {
@@ -644,7 +701,9 @@ fn writeSourceQuoting(writer: *Io.Writer, quoting: types.SourceQuoting) !void {
     try writeNullableBool(writer, quoting.schema);
     try writer.writeAll(",\"identifier\":");
     try writeNullableBool(writer, quoting.identifier);
-    try writer.writeAll(",\"column\":null}");
+    try writer.writeAll(",\"column\":");
+    try writeNullableBool(writer, quoting.column);
+    try writer.writeAll("}");
 }
 
 fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {
@@ -1082,8 +1141,8 @@ fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
         } else {
             const fields = @import("config_value.zig");
             const config = fields.get(column.properties, "config") orelse @as(std.json.Value, .{ .object = .empty });
-            const meta = fields.get(config, "meta") orelse fields.get(column.properties, "meta") orelse @as(std.json.Value, .{ .object = .empty });
-            const tags = fields.get(config, "tags") orelse fields.get(column.properties, "tags") orelse @as(std.json.Value, .{ .array = std.json.Array.init(std.heap.page_allocator) });
+            const meta = fields.get(column.properties, "meta") orelse @as(std.json.Value, .{ .object = .empty });
+            const tags = fields.get(column.properties, "tags") orelse @as(std.json.Value, .{ .array = std.json.Array.init(std.heap.page_allocator) });
             try writer.writeAll(",\"meta\":");
             try std.json.Stringify.value(meta, .{}, writer);
             try writer.writeAll(",\"data_type\":");
