@@ -4490,6 +4490,15 @@ test "materializeGenericTests rejects missing package custom generic test macro"
 }
 
 fn writeWarnings(runtime: Runtime, stderr: *Io.Writer, graph: *const Graph) !void {
+    if (graph.command_options.debug or graph.command_options.log_level == .debug) {
+        try stderr.writeAll("{\"data\":{\"hit\":");
+        try std.json.Stringify.value(graph.parser_cache_hit, .{}, stderr);
+        try stderr.writeAll(",\"reason\":");
+        try std.json.Stringify.value(graph.parser_cache_reason, .{}, stderr);
+        try stderr.print(",\"changed_files\":{d},\"reused_files\":{d}}},\"info\":{{\"name\":\"NativeParseCache\",\"level\":\"debug\",\"thread\":\"MainThread\",\"ts\":", .{ graph.parser_cache_changes, graph.parser_cache_reused_files });
+        try execution_clock.writeTimestamp(stderr, execution_clock.now(runtime.io));
+        try stderr.writeAll("}}\n");
+    }
     if (graph.unmatched_model_properties.items.len != 0 and try cli_options.warningIsError(runtime, "NoNodeForYamlKey")) return error.ParsingWarningAsError;
     if (graph.unmatched_macro_properties.items.len != 0 and try cli_options.warningIsError(runtime, "MacroNotFoundForPatch")) return error.ParsingWarningAsError;
     if (graph.macro_argument_warnings.items.len != 0 and try cli_options.warningIsError(runtime, "InvalidMacroAnnotation")) return error.ParsingWarningAsError;

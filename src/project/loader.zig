@@ -139,6 +139,9 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
         try parseVarsText(runtime.allocator, vars_text, &graph.vars);
     }
 
+    const parse_state = try @import("parse_cache.zig").prepare(runtime, options, &graph, &config);
+    if (@import("parse_cache.zig").restore(runtime, parse_state, &graph)) return graph;
+
     try @import("bundled_macros.zig").load(runtime.allocator, &graph);
     try loadProjectMacros(runtime, options.project_dir, config.name, config.macro_paths.items, true, callbacks, &graph);
     try loadInstalledPackageMacros(runtime, options.project_dir, callbacks, &graph);
@@ -168,7 +171,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
             try callbacks.parse_yaml_properties(runtime, options.project_dir, model_path, yaml_path, config.name, &graph);
         }
         for (sql_files.items) |sql_path| {
-            try callbacks.parse_model(runtime, options.project_dir, model_path, sql_path, config.name, &graph);
+            try @import("parse_cache.zig").model(runtime, options.project_dir, model_path, sql_path, config.name, &graph, callbacks.parse_model);
         }
     }
 
@@ -265,6 +268,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     for (graph.nodes.items) |*node| if (node.enabled and microbatch.enabled(node)) {
         try microbatch.normalizeConfig(runtime.allocator, node);
     };
+    try @import("parse_cache.zig").save(runtime, parse_state, &graph);
     return graph;
 }
 
@@ -399,7 +403,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
             }
 
             for (sql_files.items) |sql_path| {
-                try callbacks.parse_model(runtime, package_dir, model_path, sql_path, package_config.name, graph);
+                try @import("parse_cache.zig").model(runtime, package_dir, model_path, sql_path, package_config.name, graph, callbacks.parse_model);
             }
         }
 

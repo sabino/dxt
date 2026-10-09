@@ -681,6 +681,11 @@ pub const SemanticTimeSpine = struct {
 };
 
 pub const Graph = struct {
+    parser_cache_hit: bool = false,
+    parser_cache_reason: []const u8 = "disabled",
+    parser_cache_changes: usize = 0,
+    parser_cache_reused_files: usize = 0,
+    parser_file_cache: std.json.Value = .null,
     relation_cache: ?*@import("relation_cache.zig").Cache = null,
     unit_fixture_relations: bool = false,
     unit_overrides: std.json.Value = .null,
@@ -745,6 +750,7 @@ pub const Graph = struct {
     }
 
     pub fn deinit(self: *Graph) void {
+        config_value.deinit(self.allocator, &self.parser_file_cache);
         if (self.relation_cache) |cache| {
             cache.deinit();
             self.allocator.destroy(cache);

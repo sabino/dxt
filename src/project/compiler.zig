@@ -257,11 +257,15 @@ pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *No
         .resource_type = node.resource_type,
     };
     defer types.deinitNode(allocator, &probe);
-    var static_success = true;
-    jinja.scanSql(allocator, sql, &probe, graph) catch |err| switch (err) {
-        error.UnsupportedJinja, error.UnsupportedDynamicRef, error.UnsupportedDynamicSource, error.UnresolvedVar, error.UnresolvedMacro => static_success = false,
-        else => return err,
-    };
+    var static_success = graph == null or graph.?.command_options.static_parser;
+    if (static_success) {
+        const timing = try @import("timing_profile.zig").start(if (graph) |present| present.timing_profile else null, .{ .filename = @src().file, .line = @src().line, .function = "scanSqlStatic" });
+        defer timing.finish();
+        jinja.scanSql(allocator, sql, &probe, graph) catch |err| switch (err) {
+            error.UnsupportedJinja, error.UnsupportedDynamicRef, error.UnsupportedDynamicSource, error.UnresolvedVar, error.UnresolvedMacro => static_success = false,
+            else => return err,
+        };
+    }
     if (static_success and probe.macro_depends_on.items.len == 0 and !requiresNativeRendering(sql)) {
         try node.refs.appendSlice(allocator, probe.refs.items);
         try node.source_refs.appendSlice(allocator, probe.source_refs.items);
@@ -3631,6 +3635,31 @@ test "static extraction fallback applies literal and macro hooks once" {
     try std.testing.expectEqual(@as(usize, 1), values.get(node.inline_config, "pre-hook").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 1), values.get(node.inline_config, "post-hook").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 1), node.tags.items.len);
+}
+
+test "disabled static parser renders the same literal configs without scanner calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var profile = @import("timing_profile.zig").Registry.init(a, std.testing.io);
+    defer profile.deinit();
+    var graph: Graph = .{ .allocator = a, .project_name = "demo", .timing_profile = &profile };
+    defer graph.deinit();
+    var first: Node = .{ .package_name = "demo", .unique_id = "model.demo.first", .name = "first", .path = "first.sql", .original_file_path = "models/first.sql", .raw_code = "" };
+    defer types.deinitNode(a, &first);
+    const sql = "{{ config(tags=['daily'], materialized='table') }}select * from {{ ref('upstream') }}";
+    try scanDependencies(a, sql, &first, &graph);
+    try std.testing.expectEqual(@as(usize, 1), profile.entries.items.len);
+    try std.testing.expectEqualStrings("scanSqlStatic", profile.entries.items[0].key.function);
+    try std.testing.expectEqual(@as(u32, 1), profile.entries.items[0].counts.total);
+    graph.command_options.static_parser = false;
+    var second: Node = .{ .package_name = "demo", .unique_id = "model.demo.second", .name = "second", .path = "second.sql", .original_file_path = "models/second.sql", .raw_code = "" };
+    defer types.deinitNode(a, &second);
+    try scanDependencies(a, sql, &second, &graph);
+    try std.testing.expectEqual(@as(u32, 1), profile.entries.items[0].counts.total);
+    try std.testing.expectEqualStrings(first.materialized, second.materialized);
+    try std.testing.expectEqualStrings(first.tags.items[0], second.tags.items[0]);
+    try std.testing.expectEqualStrings(first.refs.items[0].name, second.refs.items[0].name);
 }
 
 test "source expressions render source this identity and package variables" {
