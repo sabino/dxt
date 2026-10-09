@@ -1337,6 +1337,9 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
     defer output.deinit();
     var host = try commands.OperationHost.init(runtime, &graph, db_path, &output.writer);
     defer host.deinit();
+    var log_events: std.ArrayList(run_results.LogMessage) = .empty;
+    defer log_events.deinit(runtime.allocator);
+    host.log_events = &log_events;
     graph.execution_hooks = host.host();
     var rows: std.ArrayList(run_results.NodeResult) = .empty;
     defer rows.deinit(runtime.allocator);
@@ -1349,7 +1352,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
             row.message = try runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource compilation failed");
             row.compile_started_at = compilation_started;
             row.compile_completed_at = execution_clock.now(runtime.io);
-            try captureResourceLogs(runtime.allocator, &row, output.written());
+            try captureResourceLogs(runtime.allocator, &row, output.written(), &log_events);
             return row;
         };
         const compilation_completed = execution_clock.now(runtime.io);
@@ -1370,30 +1373,36 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
         row.compile_started_at = compilation_started;
         row.compile_completed_at = compilation_completed;
         row.compiled_ctes = node.extra_ctes.items;
-        try captureResourceLogs(runtime.allocator, &row, output.written());
+        try captureResourceLogs(runtime.allocator, &row, output.written(), &log_events);
         return row;
     }
-    switch (resource) {
-        .generic => |node| {
-            _ = try appendOneDataTestResult(runtime, db_path, &graph, .{ .generic = @constCast(node) }, &rows);
-        },
-        .singular => |node| {
-            _ = try appendOneDataTestResult(runtime, db_path, &graph, .{ .singular = @constCast(node) }, &rows);
-        },
-        .unit => |node| {
-            _ = try appendOneUnitTestResult(runtime, db_path, &graph, node, &rows);
-        },
+    const compilation_started = execution_clock.now(runtime.io);
+    _ = (switch (resource) {
+        .generic => |node| appendOneDataTestResult(runtime, db_path, &graph, .{ .generic = @constCast(node) }, &rows),
+        .singular => |node| appendOneDataTestResult(runtime, db_path, &graph, .{ .singular = @constCast(node) }, &rows),
+        .unit => |node| appendOneUnitTestResult(runtime, db_path, &graph, node, &rows),
         .node => unreachable,
-    }
+    }) catch |err| blk: {
+        var failure = resource.result("error");
+        failure.message = try std.fmt.allocPrint(runtime.allocator, "Test compilation failed: {s}", .{@errorName(err)});
+        failure.compile_started_at = compilation_started;
+        failure.compile_completed_at = execution_clock.now(runtime.io);
+        if (resource != .unit) failure.compiled_override = false;
+        try rows.append(runtime.allocator, failure);
+        break :blk GenericTestExecutionSummary{ .failed_tests = 1 };
+    };
     var row = rows.items[0];
-    try captureResourceLogs(runtime.allocator, &row, output.written());
+    try captureResourceLogs(runtime.allocator, &row, output.written(), &log_events);
     return row;
 }
 
-fn captureResourceLogs(allocator: std.mem.Allocator, row: *run_results.NodeResult, messages: []const u8) !void {
-    if (messages.len == 0) return;
-    row.log_output = try allocator.dupe(u8, messages);
-    row.owns_log_output = true;
+fn captureResourceLogs(allocator: std.mem.Allocator, row: *run_results.NodeResult, messages: []const u8, events: *std.ArrayList(run_results.LogMessage)) !void {
+    if (messages.len != 0) {
+        row.log_output = try allocator.dupe(u8, messages);
+        row.owns_log_output = true;
+    }
+    row.log_events = try events.toOwnedSlice(allocator);
+    row.owns_log_events = true;
 }
 
 fn compileConcurrentNode(runtime: Runtime, graph: *const Graph, node: *Node, db_path: []const u8) !void {
@@ -2190,6 +2199,10 @@ fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.N
         }
         if (result.message) |message| allocator.free(message);
         if (result.owns_log_output) if (result.log_output) |messages| allocator.free(messages);
+        if (result.owns_log_events) {
+            for (result.log_events) |entry| allocator.free(entry.message);
+            allocator.free(result.log_events);
+        }
     }
 }
 

@@ -89,6 +89,9 @@ fn compileResource(runtime: types.Runtime, graph_readonly: *const types.Graph, r
     defer messages.deinit();
     var host = try commands.OperationHost.initLazy(runtime, &graph, database_path, &messages.writer);
     defer host.deinit();
+    var log_events: std.ArrayList(results.LogMessage) = .empty;
+    defer log_events.deinit(runtime.allocator);
+    host.log_events = &log_events;
     graph.execution_hooks = host.host();
     const started = clock.now(runtime.io);
     var row = resource.result("success");
@@ -103,6 +106,8 @@ fn compileResource(runtime: types.Runtime, graph_readonly: *const types.Graph, r
         row.log_output = try runtime.allocator.dupe(u8, messages.written());
         row.owns_log_output = true;
     }
+    row.log_events = try log_events.toOwnedSlice(runtime.allocator);
+    row.owns_log_events = true;
     // Compilation statements share one transaction. Disconnecting the host
     // rolls it back, including when a later statement raises an error.
     return row;
@@ -147,6 +152,10 @@ fn freeResult(allocator: std.mem.Allocator, row: results.NodeResult) void {
     if (row.owns_relation_name) if (row.relation_name) |relation| allocator.free(relation);
     if (row.message) |message| allocator.free(message);
     if (row.owns_log_output) if (row.log_output) |messages| allocator.free(messages);
+    if (row.owns_log_events) {
+        for (row.log_events) |entry| allocator.free(entry.message);
+        allocator.free(row.log_events);
+    }
     if (row.owns_compiled_ctes) {
         for (row.compiled_ctes) |cte| allocator.free(cte.sql);
         allocator.free(row.compiled_ctes);

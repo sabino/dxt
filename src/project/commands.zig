@@ -217,7 +217,7 @@ pub const OperationHost = struct {
                 try self.stdout.writeAll("{\"data\":{\"msg\":");
                 try std.json.Stringify.value(text, .{}, self.stdout);
                 try self.stdout.writeAll("},\"info\":{\"name\":");
-                try std.json.Stringify.value(if (is_print) "PrintEvent" else "JinjaLog", .{}, self.stdout);
+                try std.json.Stringify.value(if (is_print) "PrintEvent" else if (std.mem.eql(u8, level, "debug")) "JinjaLogDebug" else "JinjaLogInfo", .{}, self.stdout);
                 try self.stdout.writeAll(",\"level\":");
                 try std.json.Stringify.value(level, .{}, self.stdout);
                 try self.stdout.writeAll(",\"thread\":\"MainThread\",\"ts\":");

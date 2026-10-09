@@ -210,6 +210,7 @@ fn runMode(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
             };
             try emitEvent(runtime, options, events, "NodeFinished", job.resource.id(), output.status, output.thread_number, output.execution_time);
             if (output.log_output) |messages| try emitMessages(runtime, options, events, job.resource.id(), output.thread_number, messages);
+            try emitLogMessages(runtime, events, job.resource.id(), output.thread_number, output.log_events);
             if (failed(output)) {
                 if (mode == .compile or job.resource == .node) summary.had_execution_error = true else {
                     summary.failed_tests += 1;
@@ -386,11 +387,24 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
     output.owns_compiled_ctes = false;
     output.log_output = null;
     output.owns_log_output = false;
+    output.log_events = &.{};
+    output.owns_log_events = false;
     errdefer freeResult(allocator, output);
     if (source.message) |value| output.message = try allocator.dupe(u8, value);
     if (source.log_output) |value| {
         output.log_output = try allocator.dupe(u8, value);
         output.owns_log_output = true;
+    }
+    if (source.log_events.len != 0) {
+        const entries = try allocator.alloc(results.LogMessage, source.log_events.len);
+        for (entries) |*entry| entry.* = .{ .message = "", .level = "info" };
+        output.log_events = entries;
+        output.owns_log_events = true;
+        for (source.log_events, entries) |original, *entry| {
+            entry.level = original.level;
+            entry.is_print = original.is_print;
+            entry.message = try allocator.dupe(u8, original.message);
+        }
     }
     if (source.owns_compiled_code) if (source.compiled_code) |value| {
         output.compiled_code = try allocator.dupe(u8, value);
@@ -421,6 +435,29 @@ fn freeResult(allocator: std.mem.Allocator, output: results.NodeResult) void {
     if (output.owns_compiled_code) if (output.compiled_code) |value| allocator.free(value);
     if (output.owns_relation_name) if (output.relation_name) |value| allocator.free(value);
     if (output.owns_log_output) if (output.log_output) |value| allocator.free(value);
+    if (output.owns_log_events) {
+        for (output.log_events) |entry| if (entry.message.len != 0) allocator.free(entry.message);
+        allocator.free(output.log_events);
+    }
+}
+
+pub fn emitLogMessages(runtime: types.Runtime, writer: *std.Io.Writer, id: []const u8, worker: u16, messages: []const results.LogMessage) !void {
+    for (messages) |entry| {
+        try writer.writeAll("{\"data\":{\"unique_id\":");
+        try std.json.Stringify.value(id, .{}, writer);
+        try writer.writeAll(",\"msg\":");
+        try std.json.Stringify.value(entry.message, .{}, writer);
+        try writer.writeAll("},\"info\":{\"name\":");
+        try std.json.Stringify.value(if (entry.is_print) "PrintEvent" else if (std.mem.eql(u8, entry.level, "debug")) "JinjaLogDebug" else "JinjaLogInfo", .{}, writer);
+        try writer.writeAll(",\"level\":");
+        try std.json.Stringify.value(entry.level, .{}, writer);
+        try writer.print(",\"thread\":\"Thread-{d}\",\"ts\":", .{worker});
+        try clock.writeTimestamp(writer, clock.now(runtime.io));
+        try writer.writeAll(",\"invocation_id\":");
+        if (runtime.invocation) |invocation| try std.json.Stringify.value(&invocation.id, .{}, writer) else try writer.writeAll("null");
+        try writer.writeAll("}}\n");
+    }
+    try writer.flush();
 }
 
 fn emitMessages(runtime: types.Runtime, options: types.Options, writer: *std.Io.Writer, id: []const u8, worker: u16, messages: []const u8) !void {
@@ -453,7 +490,10 @@ pub fn emitEvent(runtime: types.Runtime, options: types.Options, writer: *std.Io
     try std.json.Stringify.value(status, .{}, writer);
     try writer.print(",\"execution_time\":{d}}},\"info\":{{\"name\":", .{execution_time});
     try std.json.Stringify.value(name, .{}, writer);
-    try writer.writeAll(",\"level\":\"info\",\"thread\":");
+    const level = if (std.mem.eql(u8, status, "error") or std.mem.eql(u8, status, "fail") or std.mem.eql(u8, status, "runtime error")) "error" else if (std.mem.eql(u8, status, "warn")) "warn" else "info";
+    try writer.writeAll(",\"level\":");
+    try std.json.Stringify.value(level, .{}, writer);
+    try writer.writeAll(",\"thread\":");
     if (worker == 0) try writer.writeAll("\"MainThread\"") else try writer.print("\"Thread-{d}\"", .{worker});
     try writer.writeAll(",\"ts\":");
     try clock.writeTimestamp(writer, clock.now(runtime.io));

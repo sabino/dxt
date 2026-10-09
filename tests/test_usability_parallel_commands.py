@@ -193,7 +193,7 @@ def test_worker_macro_logs_survive_owned_result_transfer(tmp_path,command,log_fo
     assert result.returncode==0,result.stderr
     if log_format=='json':
         events=[json.loads(line) for line in result.stderr.splitlines()]
-        messages=[event for event in events if event['info']['name']=='JinjaLog']
+        messages=[event for event in events if event['info']['name']=='JinjaLogInfo']
         assert len(messages)==2
         assert {event['data']['unique_id'] for event in messages}=={'model.scheduler_demo.one','model.scheduler_demo.two'}
         assert all(event['data']['msg']=='native worker message' and event['info']['invocation_id'] for event in messages)

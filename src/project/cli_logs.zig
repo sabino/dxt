@@ -109,7 +109,7 @@ fn displayedEvent(allocator: std.mem.Allocator, line: []const u8) !?DisplayedEve
     const name = info.object.get("name") orelse return null;
     if (name != .string) return null;
     const printed = std.mem.eql(u8, name.string, "PrintEvent");
-    if (!printed and !std.mem.eql(u8, name.string, "JinjaLog")) return null;
+    if (!printed and !std.mem.startsWith(u8, name.string, "JinjaLog")) return null;
     const data = parsed.value.object.get("data") orelse return null;
     if (data != .object) return null;
     const message = data.object.get("msg") orelse data.object.get("message") orelse return null;
