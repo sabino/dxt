@@ -183,10 +183,10 @@ def test_analysis_macros_cannot_escape_readonly_transaction_or_publish_secrets(t
     assert "synthetic_secret" not in (project / "target/.dxt_sql_analysis_cache.json").read_text()
 
 def test_postgres_native_grammar_binding_lineage_errors_and_readonly_recovery(tmp_path):
-    if importlib.util.find_spec("pgserver") is None:
+    if not __import__("postgres_fixture").available():
         if os.environ.get("DXT_NATIVE_ADAPTER_CERTIFY") == "1": pytest.fail("Native SQL analysis certification requires pgserver")
         pytest.skip("Native PostgreSQL fixture unavailable")
-    import pgserver
+    import postgres_fixture as pgserver
     import psycopg2
     with pgserver.get_server(tmp_path / "server") as server:
         info = server.get_uri()

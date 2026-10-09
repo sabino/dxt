@@ -20,9 +20,9 @@ CERTIFY = os.environ.get("DXT_NATIVE_ADAPTER_CERTIFY") == "1"
 @pytest.fixture(scope="module")
 def native_environment():
     library = os.environ.get("DXT_DUCKDB_LIBRARY") or ctypes.util.find_library("duckdb")
-    missing = [name for name in ("pgserver", "psycopg2", "duckdb")
+    missing = [name for name in ("psycopg2", "duckdb")
                if importlib.util.find_spec(name) is None]
-    if not library or missing:
+    if not library or missing or not __import__("postgres_fixture").available():
         if CERTIFY:
             pytest.fail("Native cross-database certification requires DuckDB and PostgreSQL fixtures")
         pytest.skip("Native cross-database fixture requires libduckdb, duckdb, psycopg2 and pgserver")
@@ -33,7 +33,7 @@ def native_environment():
 
 @pytest.fixture(scope="module")
 def postgres(tmp_path_factory, native_environment):
-    import pgserver
+    import postgres_fixture as pgserver
     import psycopg2
     with pgserver.get_server(tmp_path_factory.mktemp("cross-postgres") / "data") as server:
         connection = psycopg2.connect(server.get_uri())

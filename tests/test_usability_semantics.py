@@ -473,7 +473,7 @@ def test_metric_invalid_dimension_and_grain_fail_before_warehouse(tmp_path):
 
 
 def test_postgres_native_metric_execution_and_atomic_saved_export(tmp_path, core_runner):
-    import pgserver
+    import postgres_fixture as pgserver
     import psycopg2
     with pgserver.get_server(tmp_path / 'postgres-data') as server:
         project = semantic_project(tmp_path / 'metric')
@@ -568,7 +568,7 @@ def test_saved_query_order_builder_honors_boolean(tmp_path, core_runner, descend
 def cross_metric_project(tmp_path, monkeypatch, core_runner):
     import os
     import ctypes.util
-    import pgserver
+    import postgres_fixture as pgserver
     import psycopg2
     import yaml
     library = os.environ.get('DXT_DUCKDB_LIBRARY') or ctypes.util.find_library('duckdb')
@@ -740,7 +740,7 @@ def test_metric_saved_export_database_is_validated_before_execution(tmp_path):
 def test_metric_cross_database_duckdb_to_postgres_exact_decimal_export(tmp_path, monkeypatch, core_runner):
     import os
     import ctypes.util
-    import pgserver
+    import postgres_fixture as pgserver
     import psycopg2
     import duckdb
     from decimal import Decimal

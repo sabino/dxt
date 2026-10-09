@@ -110,7 +110,7 @@ def certify(source, temporary, binary, core, adapter):
                 connect = lambda path=database: duckdb.connect(str(path), read_only=True)
                 database_name = database.stem
             else:
-                import pgserver
+                import postgres_fixture as pgserver
                 import psycopg2
                 server = stack.enter_context(pgserver.get_server(package.parent / 'postgres'))
                 info = server.get_postmaster_info()

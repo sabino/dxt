@@ -181,7 +181,7 @@ def postgres_rows(server, schema):
 
 
 def test_core_postgres_microbatch_first_repeat_full_refresh_and_explicit_interval(tmp_path, core_runner):
-    import pgserver
+    import postgres_fixture as pgserver
     from importlib.metadata import version
     assert version('dbt-postgres') == '1.9.1'
     today = datetime.now(timezone.utc).date()
@@ -218,7 +218,7 @@ def test_core_postgres_microbatch_first_repeat_full_refresh_and_explicit_interva
 
 @pytest.mark.parametrize('bad_id,expected_status', [(1, 'error'), (2, 'partial success')])
 def test_core_postgres_microbatch_batch_errors_rollback_and_retry(tmp_path, core_runner, bad_id, expected_status):
-    import pgserver
+    import postgres_fixture as pgserver
     import psycopg2
     broken = EVENTS.replace('select * from', f"select id,case when id={bad_id} then cast(concat(id,'invalid') as integer) else amount end as amount,occurred_at from")
     with pgserver.get_server(tmp_path / 'postgres-data') as server:
@@ -249,7 +249,7 @@ def test_core_postgres_microbatch_batch_errors_rollback_and_retry(tmp_path, core
 
 @pytest.mark.parametrize('dialect', ['duckdb', 'postgres'])
 def test_core_microbatch_failed_full_refresh_preserves_existing_relation(tmp_path, core_runner, dialect):
-    import pgserver
+    import postgres_fixture as pgserver
     import psycopg2
     from contextlib import nullcontext
     with pgserver.get_server(tmp_path / 'postgres-data') if dialect == 'postgres' else nullcontext(None) as server:
@@ -269,7 +269,7 @@ def test_core_microbatch_failed_full_refresh_preserves_existing_relation(tmp_pat
 
 @pytest.mark.parametrize('unique_key,end,expected_status', [('none','2024-01-02','success'), ('none','2024-01-03','partial success'), ('[]','2024-01-03','partial success')])
 def test_core_postgres_microbatch_unique_key_required_when_merging_existing_table(tmp_path, core_runner, unique_key, end, expected_status):
-    import pgserver
+    import postgres_fixture as pgserver
     events = EVENTS.replace("unique_key='id'", f'unique_key={unique_key}')
     with pgserver.get_server(tmp_path / 'postgres-data') as server:
         projects = {engine: postgres_project(tmp_path / engine, server, engine, events=events)
@@ -284,7 +284,7 @@ def test_core_postgres_microbatch_unique_key_required_when_merging_existing_tabl
 
 @pytest.mark.parametrize('dialect', ['duckdb','postgres'])
 def test_core_custom_microbatch_strategy_requires_batched_behavior_opt_in(tmp_path, core_runner, dialect):
-    import pgserver
+    import postgres_fixture as pgserver
     from contextlib import nullcontext
     with pgserver.get_server(tmp_path / 'postgres-data') if dialect == 'postgres' else nullcontext(None) as server:
         projects = {engine: (postgres_project(tmp_path / engine, server, engine) if server else project(tmp_path / engine))
@@ -339,7 +339,7 @@ def test_core_microbatch_build_partial_failure_skips_dependents_and_runs_indepen
 @pytest.mark.parametrize('dialect', ['duckdb','postgres'])
 @pytest.mark.parametrize('begin', ['2024-01-01','2024-01-01T00:00:00+02:00'])
 def test_core_microbatch_model_datetime_and_typed_strategy_context(tmp_path, core_runner, dialect, begin):
-    import pgserver
+    import postgres_fixture as pgserver
     from contextlib import nullcontext
     metadata = """{% if model.batch %}
 select *, '{{ model.batch.id }}' as batch_id,
@@ -412,7 +412,7 @@ def test_core_microbatch_parallel_models_use_isolated_temporary_stages(tmp_path,
 
 @pytest.mark.parametrize('config', ["merge_update_columns=['amount']", "merge_exclude_columns=['occurred_at']"])
 def test_core_postgres_microbatch_preserves_excluded_update_columns(tmp_path, core_runner, config):
-    import pgserver
+    import postgres_fixture as pgserver
     events = EVENTS.replace("batch_size='day'", f"batch_size='day', {config}")
     with pgserver.get_server(tmp_path / 'postgres-data') as server:
         projects = {engine: postgres_project(tmp_path / engine, server, engine, events=events)

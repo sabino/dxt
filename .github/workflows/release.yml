@@ -159,14 +159,17 @@ jobs:
           ./zig-out/bin/dxt --help
           test "$(./zig-out/bin/dxt version)" = "${{ needs.verify.outputs.version }}"
 
-      - name: Install native fixtures on the actual target
-        uses: ./.github/actions/setup-native-duckdb
-
-      - name: Install complete artifact and database validation tools
-        run: python -m pip install dbt-core==1.10.5 dbt-duckdb==1.9.6 dbt-postgres==1.9.1 duckdb==1.4.2 jsonschema==4.26.0
+      - name: Install complete compatibility fixtures on the actual target
+        uses: ./.github/actions/setup-oracles
 
       - name: Run all native tests on the actual target
         run: zig build test -Dtarget=${{ matrix.target }} --summary all
+
+      - name: Certify the complete compatibility suite on the actual target
+        run: pytest -q --junitxml=.agent/runs/release-${{ matrix.target }}.xml
+
+      - name: Rebuild the release-safe binary after integration fixtures
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
 
       - name: Package the actual release target with docs and upstream licenses
         run: python scripts/package_release.py --version "${{ needs.verify.outputs.version }}" --target "${{ matrix.target }}"

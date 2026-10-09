@@ -49,11 +49,11 @@ def duckdb_environment():
 
 @pytest.fixture(scope="module")
 def postgres_fixture(tmp_path_factory):
-    if importlib.util.find_spec("pgserver") is None:
+    if not __import__("postgres_fixture").available():
         if CERTIFY:
             pytest.fail("Native certification requires pinned pgserver developer fixture")
         pytest.skip("Native PostgreSQL fixture requires pgserver")
-    import pgserver
+    import postgres_fixture as pgserver
     with pgserver.get_server(tmp_path_factory.mktemp("native-postgres") / "data") as server:
         environment = dict(os.environ, DXT_TEST_POSTGRES_CONNINFO=server.get_uri())
         yield server, environment

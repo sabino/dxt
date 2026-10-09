@@ -102,6 +102,10 @@ Native/static parser and macro third-party notices must ship in binary archives.
 Release packaging now uses one deterministic developer archive builder. Native
 installation certification extracts that exact, safety-validated archive with all
 upstream notices and runs both adapters with PATH empty on each actual target.
+The developer PostgreSQL fixture now selects installed native tools where the
+pinned pgserver wheel is unavailable; the full compatibility CI/release matrix
+includes an actual Linux ARM runner. Local forced-native fixtures pass all 14
+PostgreSQL adapter checks; ARM verification remains pending remote execution.
 The supervisor now owns native group definitions, model access validation and
 selection in focused group_access.zig plus narrow graph/parser/artifact hooks.
 The configuration worker retains adapter contexts, catalog, contracts and hooks;

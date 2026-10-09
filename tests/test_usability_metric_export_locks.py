@@ -46,7 +46,7 @@ def test_saved_export_target_lock_precedes_query_execution_and_releases(cross_me
 
 @pytest.mark.parametrize('named', [False,True])
 def test_postgres_saved_export_uses_transaction_advisory_lock_and_preserves_target(tmp_path,core_runner,named):
-    import pgserver
+    import postgres_fixture as pgserver
     import psycopg2
     with pgserver.get_server(tmp_path / 'postgres-data') as server:
         project = metric_project(tmp_path / 'metric')

@@ -20,11 +20,11 @@ DXT = ROOT / "zig-out/bin/dxt"
 
 @pytest.fixture(scope="module")
 def postgres_server(tmp_path_factory):
-    if importlib.util.find_spec("pgserver") is None:
+    if not __import__("postgres_fixture").available():
         if os.environ.get("DXT_NATIVE_ADAPTER_CERTIFY") == "1":
             pytest.fail("Native materialization certification requires pgserver")
         pytest.skip("PostgreSQL fixture unavailable")
-    import pgserver
+    import postgres_fixture as pgserver
     with pgserver.get_server(tmp_path_factory.mktemp("materialization-postgres") / "data") as server:
         yield server
 

@@ -3,5 +3,5 @@ dbt-core==1.10.5
 dbt-duckdb==1.9.6
 dbt-postgres==1.9.1
 duckdb==1.4.2
-pgserver==0.1.4
+pgserver==0.1.4; platform_machine != "aarch64" or platform_system != "Linux"
 metricflow==0.208.1

@@ -71,7 +71,7 @@ class ConfigurationPair:
 
 @pytest.fixture(scope="module")
 def configuration_postgres(tmp_path_factory):
-    import pgserver
+    import postgres_fixture as pgserver
     with pgserver.get_server(tmp_path_factory.mktemp("configuration-postgres") / "data") as server:
         yield server
 

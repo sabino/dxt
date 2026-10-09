@@ -141,15 +141,22 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe --summary all
 
   integration:
-    name: test py${{ matrix.python-version }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    name: ${{ matrix.context }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        python-version:
-          - "3.11"
-          - "3.12"
+        include:
+          - python-version: "3.11"
+            runner: ubuntu-24.04
+            context: test py3.11
+          - python-version: "3.12"
+            runner: ubuntu-24.04
+            context: test py3.12
+          - python-version: "3.12"
+            runner: ubuntu-24.04-arm
+            context: test py3.12 aarch64
 
     steps:
       - name: Checkout
@@ -178,14 +185,14 @@ jobs:
           python --version
 
       - name: Run tests
-        run: pytest -q --junitxml=reports/pytest-${{ matrix.python-version }}.xml
+        run: pytest -q --junitxml=reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
 
       - name: Upload pytest report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-${{ matrix.python-version }}
-          path: reports/pytest-${{ matrix.python-version }}.xml
+          name: pytest-${{ matrix.python-version }}-${{ runner.arch }}
+          path: reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
           if-no-files-found: ignore
 
   performance:
