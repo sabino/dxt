@@ -3,7 +3,7 @@
 Releases package a native Zig executable, public documentation and upstream
 license/provenance notices. Python scripts build and verify release artifacts
 in developer/CI environments; they are not part of product execution. The
-initial adapter scope is DuckDB and PostgreSQL. A tag or successful binary build
+initial SQL execution adapter scope is DuckDB and PostgreSQL. A tag or successful binary build
 alone does not establish full dbt compatibility: the integrated release gates
 must pass for each published platform.
 
@@ -36,6 +36,8 @@ installed file. Set `DXT_DUCKDB_BACKEND=native` to require that driver and fail
 clearly when its library is unavailable. PostgreSQL loads `libpq.so.5` by
 default; `DXT_POSTGRES_LIBRARY` selects an explicit library. Database/profile
 credentials are supplied by the project or environment and never bundled.
+Dependency transports use external `git`, `curl` and `tar` when fetching and
+extracting packages; install those tools for the corresponding `deps` workflows.
 
 The YAML parser, PostgreSQL SQL grammar, default SQL macro sources and docs
 application are embedded in the executable. End users do not install dbt,

@@ -1,6 +1,6 @@
 # dxt Primer
 
-`dxt` means **Data eXecution & Transformation**. It runs dbt projects through a
+`dxt` means **Data eXecution & Transformation**. It executes dbt SQL projects through a
 native Zig binary, with DuckDB and PostgreSQL as the initial adapter targets.
 Compatibility is checked against pinned upstream behavior and complete artifact
 schemas. Consult [Compatibility](COMPATIBILITY.md) for supported combinations;
@@ -60,9 +60,13 @@ Python/dbt runtime to execute through dxt.
 
 Use `dxt --help` and command-specific help for accepted options. The semantic,
 cross-database and environment commands are dxt extensions with separate plan
-and state artifacts. In the current integrated implementation, snapshot
-execution and clone view copies use DuckDB; PostgreSQL support for these two
-lifecycles is tracked separately in the active plan.
+and state artifacts. Native snapshot execution covers DuckDB and PostgreSQL.
+Clone view copies currently use DuckDB; PostgreSQL clone support is tracked in
+the active plan. Python-authored model execution requires a separate contract
+before the initial SQL execution scope can be broadened.
+Package fetching/extraction can require `git`, `curl` and `tar` on PATH for its
+declared transports. Local packages and existing installed packages are read by
+the native loader.
 
 ## Selection, Failures And State
 

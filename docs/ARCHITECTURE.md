@@ -1,10 +1,12 @@
 # Architecture
 
-dxt is a native Zig engine for dbt projects. Project loading, Jinja evaluation,
+dxt is a native Zig engine with an initial dbt SQL execution scope. Project loading, Jinja evaluation,
 selection, SQL planning, warehouse execution and artifact writing run inside the
 binary. Python belongs to developer fixtures, upstream comparisons and release
 checks. DuckDB and PostgreSQL are the initial execution targets; support for
 another adapter requires its own driver and warehouse certification.
+Python-authored model execution is outside that initial SQL scope; its resource
+and execution contract must be stated separately before claiming broader parity.
 
 ## Runtime Boundary
 
@@ -40,6 +42,8 @@ macro namespaces; selector expressions operate on that shared graph.
 model in Zig, including tags, aliases, merges and source diagnostics. Project,
 profile and resource configuration use the same reader. Dependency installation
 supports local, Git and registry packages with lock-file and offline behavior.
+Git/network/archive transports invoke system `git`, `curl` and `tar` tools;
+dependency resolution, validation and installation orchestration remain Zig.
 
 The Jinja compiler evaluates native typed values, macro defaults and keyword
 arguments, nested returns, filters, mutable containers and control blocks.
