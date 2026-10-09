@@ -254,3 +254,42 @@ def test_core_docs_server_address_is_primary_output_under_quiet_json_logs(tmp_pa
         assert f"Serving docs at {port}" in output
         assert f"http://" in output
         assert '"CommandStart"' not in diagnostics
+
+
+def test_core_version_requirement_default_flag_and_environment_overrides(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    with (root / "dbt_project.yml").open("a") as stream:
+        stream.write("require-dbt-version: ['>=99.0.0']\n")
+    for engine in ["dxt", "core"]:
+        target = tmp_path / f"{engine}-target"
+        args = ["-q", "parse", "--project-dir", root, "--target-path", target]
+        failure = invoke(engine, args, root, environment(duckdb_environment), ok=False)
+        assert failure.returncode == 2
+        assert not (target / "manifest.json").exists()
+        invoke(engine, ["--no-version-check", *args], root, environment(duckdb_environment))
+        assert node(target)["name"] == "a"
+        invoke(engine, args, root, environment(duckdb_environment, DBT_VERSION_CHECK="false"))
+        failure = invoke(engine, ["--version-check", *args], root, environment(duckdb_environment, DBT_VERSION_CHECK="false"), ok=False)
+        assert failure.returncode == 2
+
+
+def test_core_print_quiet_and_no_print_preserve_debug_file_messages(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    (root / "models/a.sql").write_text("{{ print('VISIBLE_PRINT') }}{{ log('DEBUG_MARKER') }}{{ log('INFO_MARKER', info=true) }} select 7 as id\n")
+    for engine in ["dxt", "core"]:
+        log_dir = tmp_path / f"{engine}-logs"
+        args = ["--no-use-colors", "--no-use-colors-file", "--log-path", log_dir, "--log-level-file", "debug", "compile", "--project-dir", root, "-s", "a"]
+        printed = invoke(engine, ["-q", *args], root, environment(duckdb_environment))
+        assert "VISIBLE_PRINT" in printed.stdout + printed.stderr
+        assert "DEBUG_MARKER" not in printed.stdout + printed.stderr
+        assert "INFO_MARKER" not in printed.stdout + printed.stderr
+        file = (log_dir / "dbt.log").read_text()
+        assert "DEBUG_MARKER" in file and "INFO_MARKER" in file and "VISIBLE_PRINT" in file
+        suppressed = invoke(engine, ["-q", "--no-print", *args], root, environment(duckdb_environment))
+        assert "VISIBLE_PRINT" not in suppressed.stdout + suppressed.stderr
+        env_suppressed = invoke(engine, ["-q", *args], root, environment(duckdb_environment, DBT_PRINT="false"))
+        assert "VISIBLE_PRINT" not in env_suppressed.stdout + env_suppressed.stderr
+        restored = invoke(engine, ["-q", "--print", *args], root, environment(duckdb_environment, DBT_PRINT="false"))
+        assert "VISIBLE_PRINT" in restored.stdout + restored.stderr
+        debugging = invoke(engine, ["--debug", "--log-level", "info", *args], root, environment(duckdb_environment))
+        assert "DEBUG_MARKER" in debugging.stdout + debugging.stderr
