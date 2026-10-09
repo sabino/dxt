@@ -8,6 +8,11 @@ const csv = @import("seed_csv.zig");
 const values = @import("config_value.zig");
 
 pub fn execute(runtime: types.Runtime, graph: *const types.Graph, path: []const u8, node: *const types.Node) !void {
+    return executeWithPolicy(runtime, graph, path, node, .{});
+}
+
+pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, path: []const u8, node: *const types.Node, policy: @import("postgres_materialization.zig").ExecutionPolicy) !void {
+    if (!policy.manage_transaction and runtime.adapter_session == null) return error.NativeAdapterSessionRequired;
     var owned: ?adapter.Session = null;
     defer if (owned) |*session| session.deinit();
     const session = runtime.adapter_session orelse blk: {
@@ -39,13 +44,13 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, path: []const 
     const create = old_kind == null or full_refresh;
     const sql = if (create) try csv.renderSql(a, graph, node) else try csv.renderInsertSql(a, graph, node);
     defer a.free(sql);
-    try session.begin();
-    errdefer session.rollback() catch {};
+    if (policy.manage_transaction) try session.begin();
+    errdefer if (policy.manage_transaction) session.rollback() catch {};
     if (old_kind != null) {
         const reset = try std.fmt.allocPrint(a, "{s} {s}{s}", .{ if (full_refresh) "drop table" else if (std.mem.eql(u8, graph.adapter_type, "postgres")) "truncate table" else "delete from", relation, if (full_refresh and std.mem.eql(u8, graph.adapter_type, "postgres")) " cascade" else "" });
         defer a.free(reset);
         try session.execute(reset);
     }
     try session.execute(sql);
-    try session.commit();
+    if (policy.manage_transaction) try session.commit();
 }

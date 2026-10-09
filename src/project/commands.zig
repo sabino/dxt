@@ -172,6 +172,14 @@ pub const OperationHost = struct {
         return if (self.session) |*session| session else null;
     }
 
+    pub fn begin(self: *OperationHost) !void {
+        if (self.transaction_open) return;
+        try self.ensureSession();
+        const session = self.currentSession() orelse return error.NativeDuckDbPoolRequired;
+        try session.begin();
+        self.transaction_open = true;
+    }
+
     pub fn commit(self: *OperationHost) !void {
         if (!self.transaction_open) return;
         const session = self.currentSession() orelse return error.NativeDuckDbPoolRequired;

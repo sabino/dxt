@@ -297,6 +297,15 @@ fn requiresNativeRendering(sql: []const u8) bool {
     return false;
 }
 
+/// Generic schema tests bind typed arguments before rendering with execute=false.
+/// Config calls and dependencies are recorded on the caller-owned test probe.
+pub fn scanMacroDependencies(allocator: std.mem.Allocator, graph: *const Graph, node: *Node, macro_name: []const u8, arguments: []const native_expr.Argument) !void {
+    var context = CompileContext.init(allocator, graph, node);
+    defer context.deinit();
+    context.parse_node = node;
+    _ = try callExpressionValue(&context, macro_name, arguments, context.value_arena.allocator());
+}
+
 pub fn renderOperation(runtime: types.Runtime, graph: *const Graph, macro_name: []const u8, kwargs: std.json.Value) ![]const u8 {
     const node = Node{ .package_name = graph.project_name, .unique_id = "operation", .name = "operation", .path = "", .original_file_path = "", .raw_code = "" };
     var context = CompileContext.init(runtime.allocator, graph, &node);
@@ -1110,6 +1119,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, args[0].value.string, .{}) catch return if (args.len == 2) args[1].value else .none;
         return try valueFromJson(allocator, parsed.value);
     }
+    if (try @import("adapter_context.zig").credentialValue(allocator, context.graph, name, args)) |value| return value;
     if (context.parse_node != null) {
         if (try @import("adapter_context.zig").parseReplacement(allocator, name)) |value| return value;
         if (std.mem.eql(u8, name, "run_query") or std.mem.eql(u8, name, "load_result")) return .none;
@@ -3747,4 +3757,20 @@ test "compiler exposes configured nullable equality through flags and adapter be
     graph.enable_truthy_nulls_equals_macro = true;
     const truthy = try compileModel(allocator, &graph, &node);
     try std.testing.expectEqualStrings("True:True", truthy);
+}
+
+test "typed generic parse rendering captures macro configs and dependencies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.macros.append(allocator, .{ .unique_id = "macro.demo.test_positive", .package_name = "demo", .name = "test_positive", .path = "positive.sql", .original_file_path = "macros/positive.sql", .macro_sql = "{% test positive(model, threshold=2) %}{{ config(tags=['macro']) }}select * from {{ model }} where id < {{ threshold }} and id in (select id from {{ ref('parent') }}){% endtest %}" });
+    var probe = Node{ .resource_type = "test", .package_name = "demo", .unique_id = "test.demo.positive", .name = "positive", .path = "positive.sql", .original_file_path = "schema.yml", .raw_code = "" };
+    defer types.deinitNode(allocator, &probe);
+    try scanMacroDependencies(allocator, &graph, &probe, "test_positive", &.{.{ .name = "model", .value = .{ .string = "fixture" } }});
+    try std.testing.expectEqual(@as(usize, 1), probe.refs.items.len);
+    try std.testing.expectEqualStrings("parent", probe.refs.items[0].name);
+    try std.testing.expectEqualStrings("macro", @import("config_value.zig").get(probe.inline_config, "tags").?.array.items[0].string);
+    try std.testing.expectEqualStrings("macro.demo.test_positive", probe.macro_depends_on.items[0]);
 }

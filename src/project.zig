@@ -1750,9 +1750,9 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
         try executed.append(runtime.allocator, row);
         return std.mem.eql(u8, row.status, "success");
     }
-    const execution = if (std.mem.eql(u8, node.resource_type, "snapshot")) snapshot_runner.execute(runtime, db_path, graph, node) else duckdb.executeModel(runtime, db_path, graph, node);
+    const execution = @import("project/materialization_runtime.zig").execute(runtime, db_path, graph, node);
     execution catch |err| switch (err) {
-        error.DuckDbExecutionFailed => {
+        error.DuckDbExecutionFailed, error.PostgresExecutionFailed => {
             try appendExecutionErrorResult(runtime.allocator, executed, node);
             return false;
         },
@@ -1763,7 +1763,8 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
 }
 
 fn executeSeedAppendingResult(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node, executed: *std.ArrayList(run_results.NodeResult)) !bool {
-    duckdb.executeSeed(runtime, db_path, project_dir, graph, node) catch |err| switch (err) {
+    _ = project_dir;
+    @import("project/materialization_runtime.zig").execute(runtime, db_path, graph, node) catch |err| switch (err) {
         error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.CannotSeedView => {
             try appendExecutionErrorResult(runtime.allocator, executed, node);
             return false;

@@ -117,7 +117,12 @@ pub fn executeModelWithPolicy(runtime: Runtime, db_path: []const u8, graph: *con
 }
 
 pub fn executeSeed(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node) !void {
-    if (runtime.adapter_session != null or std.mem.eql(u8, graph.adapter_type, "postgres")) return @import("seed_lifecycle.zig").execute(runtime, graph, db_path, node);
+    return executeSeedWithPolicy(runtime, db_path, project_dir, graph, node, .{});
+}
+
+pub fn executeSeedWithPolicy(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
+    if (!policy.manage_transaction and runtime.adapter_session == null) return error.NativeAdapterSessionRequired;
+    if (runtime.adapter_session != null or std.mem.eql(u8, graph.adapter_type, "postgres")) return @import("seed_lifecycle.zig").executeWithPolicy(runtime, graph, db_path, node, policy);
     try dropRelationIfExists(runtime, db_path, graph, node, .view);
 
     const sql = try renderSeedSql(runtime.allocator, project_dir, graph, node);

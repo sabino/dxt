@@ -34,6 +34,7 @@ pub fn parseReplacement(allocator: std.mem.Allocator, name: []const u8) !?Value 
 }
 
 pub fn call(allocator: std.mem.Allocator, graph: *const types.Graph, state: *State, executor: Executor, name: []const u8, args: []const Argument) !?Value {
+    if (try credentialValue(allocator, graph, name, args)) |value| return value;
     if (is(name, "verify_database") and std.mem.eql(u8, graph.adapter_type, "postgres")) {
         const database = argument(args, "database", 0);
         const expected = @import("config_value.zig").get(graph.target_context, "database") orelse return error.MissingPostgresDatabase;
@@ -169,6 +170,44 @@ pub fn call(allocator: std.mem.Allocator, graph: *const types.Graph, state: *Sta
         return .none;
     };
     return null;
+}
+
+/// These adapter methods use rendered credentials and never open a connection.
+pub fn credentialValue(allocator: std.mem.Allocator, graph: *const types.Graph, name: []const u8, args: []const Argument) !?Value {
+    if (is(name, "is_motherduck") and std.mem.eql(u8, graph.adapter_type, "duckdb")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        const path = @import("config_value.zig").get(graph.target_context, "path") orelse return Value{ .boolean = false };
+        if (path != .string) return error.InvalidJinjaArguments;
+        return .{ .boolean = std.mem.startsWith(u8, path.string, "md:") or std.mem.startsWith(u8, path.string, "motherduck:") };
+    }
+    if (!is(name, "is_ducklake") or !std.mem.eql(u8, graph.adapter_type, "duckdb")) return null;
+    if (args.len != 1) return error.InvalidJinjaArguments;
+    if (args[0].value == .none) return .{ .boolean = false };
+    const relation = try contexts.relationFromValue(allocator, args[0].value);
+    const database = relation.database orelse return Value{ .boolean = false };
+    const json = @import("config_value.zig");
+    const target_database = json.get(graph.target_context, "database");
+    if (isDucklakeConfig(graph.target_context) and target_database != null and target_database.? == .string and std.mem.eql(u8, database, target_database.?.string)) return .{ .boolean = true };
+    if (json.get(graph.target_context, "attach")) |attachments| if (attachments == .array) {
+        for (attachments.array.items) |attachment| {
+            if (!isDucklakeConfig(attachment)) continue;
+            const path = json.get(attachment, "path") orelse continue;
+            const alias = json.get(attachment, "alias");
+            const identifier = if (alias != null and alias.? == .string and alias.?.string.len != 0) alias.?.string else if (path == .string) std.fs.path.stem(path.string) else continue;
+            if (std.mem.eql(u8, database, identifier)) return .{ .boolean = true };
+        }
+    };
+    return .{ .boolean = false };
+}
+
+fn isDucklakeConfig(config: std.json.Value) bool {
+    const json = @import("config_value.zig");
+    if (json.get(config, "is_ducklake")) |flag| if (flag == .bool and flag.bool) return true;
+    if (json.get(config, "path")) |path| if (path == .string) {
+        var index: usize = 0;
+        while (index + "ducklake:".len <= path.string.len) : (index += 1) if (std.ascii.eqlIgnoreCase(path.string[index .. index + "ducklake:".len], "ducklake:")) return true;
+    };
+    return false;
 }
 
 fn removeCached(state: *State, allocator: std.mem.Allocator, definition: contexts.RelationDef) void {
