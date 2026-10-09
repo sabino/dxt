@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = optimize != .Debug,
         .link_libc = true,
     });
     mod.addAnonymousImport("docs_ui", .{ .root_source_file = b.path("vendor/dbt-docs/embed.zig") });
@@ -24,7 +25,7 @@ pub fn build(b: *std.Build) void {
     const pg_parser = b.addLibrary(.{
         .name = "dxt_pg_query",
         .linkage = .static,
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .strip = optimize != .Debug, .link_libc = true }),
     });
     pg_parser.root_module.addIncludePath(b.path("vendor/libpg_query"));
     pg_parser.root_module.addIncludePath(b.path("vendor/libpg_query/vendor"));
@@ -43,6 +44,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .link_libc = true,
             .optimize = optimize,
+            .strip = optimize != .Debug,
             .imports = &.{
                 .{ .name = "dxt", .module = mod },
             },

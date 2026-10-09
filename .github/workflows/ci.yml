@@ -21,6 +21,76 @@ env:
   JAFFLE_SHOP_DUCKDB_REF: "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb"
 
 jobs:
+  platform-installation:
+    name: native installation ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-linux-gnu
+            runner: ubuntu-24.04-arm
+    services:
+      postgres:
+        image: postgres:17.7
+        env:
+          POSTGRES_PASSWORD: installation_fixture
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DXT_INSTALL_POSTGRES_URI: postgresql://postgres:installation_fixture@localhost:5432/postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install complete artifact and database validation tools
+        run: python -m pip install dbt-core==1.10.5 dbt-duckdb==1.9.6 dbt-postgres==1.9.1 duckdb==1.4.2 jsonschema==4.26.0
+      - name: Install native adapter fixtures
+        uses: ./.github/actions/setup-native-duckdb
+      - name: Test the actual target
+        run: zig build test -Dtarget=${{ matrix.target }} --summary all
+      - name: Build the release-safe target
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
+      - name: Certify both adapters from an extracted binary with PATH empty
+        run: python scripts/check_install.py --require-postgres
+
+  public-package:
+    name: unchanged public dbt-utils PostgreSQL project
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
+      - name: Build the release-safe native binary
+        run: zig build -Doptimize=ReleaseSafe
+      - name: Certify unchanged package installation, SQL, artifacts and rows against Core
+        run: python scripts/check_dbt_utils.py --adapter postgres
+
   native:
     name: native zig and safety
     runs-on: ubuntu-latest

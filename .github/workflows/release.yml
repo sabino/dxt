@@ -109,16 +109,31 @@ jobs:
 
   package:
     name: package ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     needs: verify
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-linux-gnu
-            smoke: true
+            runner: ubuntu-24.04
           - target: aarch64-linux-gnu
-            smoke: false
+            runner: ubuntu-24.04-arm
+
+    services:
+      postgres:
+        image: postgres:17.7
+        env:
+          POSTGRES_PASSWORD: installation_fixture
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DXT_INSTALL_POSTGRES_URI: postgresql://postgres:installation_fixture@localhost:5432/postgres
 
     steps:
       - name: Checkout
@@ -140,10 +155,21 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
 
       - name: Smoke test native target
-        if: matrix.smoke
         run: |
           ./zig-out/bin/dxt --help
           test "$(./zig-out/bin/dxt version)" = "${{ needs.verify.outputs.version }}"
+
+      - name: Install native fixtures on the actual target
+        uses: ./.github/actions/setup-native-duckdb
+
+      - name: Install complete artifact and database validation tools
+        run: python -m pip install dbt-core==1.10.5 dbt-duckdb==1.9.6 dbt-postgres==1.9.1 duckdb==1.4.2 jsonschema==4.26.0
+
+      - name: Run all native tests on the actual target
+        run: zig build test -Dtarget=${{ matrix.target }} --summary all
+
+      - name: Certify extracted target with both live adapters and PATH empty
+        run: python scripts/check_install.py --version "${{ needs.verify.outputs.version }}" --require-postgres
 
       - name: Package
         shell: bash
