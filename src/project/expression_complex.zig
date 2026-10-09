@@ -70,7 +70,7 @@ fn component(a: std.mem.Allocator, value: f64) ![]const u8 {
 }
 pub fn text(a: std.mem.Allocator, value: Complex) ![]const u8 {
     if (value.real == 0 and !std.math.signbit(value.real)) return std.fmt.allocPrint(a, "{s}j", .{try component(a, value.imaginary)});
-    return std.fmt.allocPrint(a, "({s}{c}{s}j)", .{ try component(a, value.real), @as(u8, if (std.math.signbit(value.imaginary)) '-' else '+'), try component(a, @abs(value.imaginary)) });
+    return std.fmt.allocPrint(a, "({s}{c}{s}j)", .{ try component(a, value.real), @as(u8, if (!std.math.isNan(value.imaginary) and std.math.signbit(value.imaginary)) '-' else '+'), try component(a, @abs(value.imaginary)) });
 }
 
 test "native complex power, stable division and signed component rendering" {
@@ -81,6 +81,7 @@ test "native complex power, stable division and signed component rendering" {
     try std.testing.expectEqualStrings("(6.123233995736766e-17+1j)", try text(a, root));
     try std.testing.expectEqualStrings("(-1+0j)", try text(a, .{ .real = -1, .imaginary = 0 }));
     try std.testing.expectEqualStrings("(-0+1j)", try text(a, .{ .real = -0.0, .imaginary = 1 }));
+    try std.testing.expectEqualStrings("(nan+nanj)", try text(a, .{ .real = -std.math.nan(f64), .imaginary = -std.math.nan(f64) }));
     const divided = try divide(.{ .real = 1e300, .imaginary = 1e300 }, .{ .real = 1e300, .imaginary = 1e300 });
     try std.testing.expectEqual(@as(f64, 1), divided.real);
     try std.testing.expectEqual(@as(f64, 0), divided.imaginary);
