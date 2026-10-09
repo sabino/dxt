@@ -16,11 +16,13 @@ pub const Diagnostic = struct {
 };
 
 pub const Document = struct {
-    arena: std.heap.ArenaAllocator,
+    arena: *std.heap.ArenaAllocator,
+    owner: std.mem.Allocator,
     value: Value,
 
     pub fn deinit(self: *Document) void {
         self.arena.deinit();
+        self.owner.destroy(self.arena);
         self.* = undefined;
     }
 };
@@ -31,8 +33,12 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Document {
 
 pub fn parseWithDiagnostics(allocator: std.mem.Allocator, text: []const u8, diagnostic: ?*Diagnostic) !Document {
     if (diagnostic) |out| out.* = .{};
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    errdefer arena.deinit();
+    const arena = try allocator.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer {
+        arena.deinit();
+        allocator.destroy(arena);
+    }
     var parser: Parser = .{ .allocator = arena.allocator(), .diagnostic = diagnostic, .anchors = std.StringHashMap(Anchor).init(arena.allocator()) };
     if (c.yaml_parser_initialize(&parser.syntax) == 0) return error.OutOfMemory;
     defer c.yaml_parser_delete(&parser.syntax);
@@ -49,7 +55,7 @@ pub fn parseWithDiagnostics(allocator: std.mem.Allocator, text: []const u8, diag
         try parser.next();
     }
     if (parser.event.type != c.YAML_STREAM_END_EVENT) return parser.fail("expected one YAML document; multiple documents are not supported", error.YamlMultipleDocuments);
-    return .{ .arena = arena, .value = value };
+    return .{ .arena = arena, .owner = allocator, .value = value };
 }
 
 const Node = struct { value: Value, merge: bool = false, mapping_keys: ?[]const Value = null };
@@ -572,4 +578,12 @@ test "native YAML safe tags and diagnostics reject unsafe or malformed construct
     try std.testing.expectError(error.YamlUnsupportedTag, parse(std.testing.allocator, "value: !!python/object {}"));
     try std.testing.expectError(error.YamlMultipleDocuments, parse(std.testing.allocator, "---\na: 1\n---\nb: 2"));
     try std.testing.expectError(error.InvalidYamlScalar, parse(std.testing.allocator, "value: 2021-02-29"));
+}
+
+test "owned YAML collections retain stable allocators after parse returns" {
+    var document = try parse(std.testing.allocator, "[]");
+    defer document.deinit();
+    for (0..100) |index| try document.value.array.append(.{ .integer = @intCast(index) });
+    try std.testing.expectEqual(@as(usize, 100), document.value.array.items.len);
+    try std.testing.expectEqual(@as(i64, 99), document.value.array.items[99].integer);
 }
