@@ -9,7 +9,8 @@ test "shared native YAML reader is available" {
     _ = yaml;
 }
 
-pub const version = "0.0.0";
+pub const Invocation = @import("project/invocation.zig").Metadata;
+pub const version = @import("project/invocation.zig").version;
 pub const Runtime = project.Runtime;
 
 pub const ExitCode = enum(u8) {

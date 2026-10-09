@@ -65,6 +65,7 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     var graph = Graph{
         .allocator = runtime.allocator,
         .environment = runtime.environment,
+        .invocation = runtime.invocation,
         .project_name = config.name,
         .validate_macro_args = config.validate_macro_args,
         .full_refresh = options.full_refresh,

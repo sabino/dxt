@@ -16,12 +16,14 @@ pub fn main(init: std.process.Init) !void {
     const stderr = &stderr_file_writer.interface;
 
     var pool = dxt.DuckDBPool.init(arena, init.io, init.environ_map);
+    const invocation = dxt.Invocation.init(init.io, init.environ_map);
     var pool_live = true;
     defer if (pool_live) pool.deinit();
     const code = try dxt.run(args, stdout, stderr, .{
         .allocator = arena,
         .io = init.io,
         .environment = init.environ_map,
+        .invocation = &invocation,
         .duckdb_pool = &pool,
     });
     try stdout.flush();

@@ -253,7 +253,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     }
 
     const catalog_path = try pathJoin(runtime.allocator, &.{ target_dir, "catalog.json" });
-    const catalog_json = try catalog.renderCatalog(runtime.allocator, catalog_entries.nodes.items, catalog_entries.sources.items);
+    const catalog_json = try catalog.renderCatalogWithInvocation(runtime.allocator, catalog_entries.nodes.items, catalog_entries.sources.items, runtime.invocation);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = catalog_path, .data = catalog_json });
 
     try stdout.print("Generated docs artifacts for {d} compiled model(s) into {s}\n", .{
@@ -351,7 +351,7 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
     }
 
     const sources_path = try pathJoin(runtime.allocator, &.{ target_dir, "sources.json" });
-    const sources_json = try source_freshness.renderSources(runtime.allocator, results.items);
+    const sources_json = try source_freshness.renderSourcesWithInvocation(runtime.allocator, results.items, runtime.invocation);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = sources_path, .data = sources_json });
     try stdout.print("Checked freshness for {d} source(s); wrote artifacts into {s}\n", .{
         results.items.len,
@@ -1734,7 +1734,7 @@ fn appendUniqueString(allocator: std.mem.Allocator, values: *std.ArrayList([]con
 
 fn writeRunResults(runtime: Runtime, target_dir: []const u8, results: []const run_results.NodeResult) !void {
     const run_results_path = try pathJoin(runtime.allocator, &.{ target_dir, "run_results.json" });
-    const run_results_json = try run_results.renderRunResults(runtime.allocator, results);
+    const run_results_json = try run_results.renderRunResultsWithInvocation(runtime.allocator, results, runtime.invocation);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = run_results_path, .data = run_results_json });
 }
 

@@ -177,6 +177,7 @@ pub fn parseJson(allocator: std.mem.Allocator, text: []const u8) !QueryResult {
                 .string => |string| try allocator.dupe(u8, string),
                 .integer => |integer| try std.fmt.allocPrint(allocator, "{d}", .{integer}),
                 .float => |number| try std.fmt.allocPrint(allocator, "{d}", .{number}),
+                .number_string => |number| try allocator.dupe(u8, number),
                 .bool => |boolean| try allocator.dupe(u8, if (boolean) "true" else "false"),
                 else => try std.json.Stringify.valueAlloc(allocator, field, .{}),
             };
@@ -188,6 +189,7 @@ pub fn parseJson(allocator: std.mem.Allocator, text: []const u8) !QueryResult {
 fn jsonKind(value: std.json.Value) Kind {
     return switch (value) {
         .integer => .integer,
+        .number_string => .decimal,
         .float => .floating,
         .bool => .boolean,
         .string => .text,

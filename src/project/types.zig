@@ -6,6 +6,7 @@ pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: Io,
     environment: ?*const std.process.Environ.Map = null,
+    invocation: ?*const @import("invocation.zig").Metadata = null,
     duckdb_pool: ?*@import("native_duckdb.zig").Pool = null,
 };
 
@@ -499,6 +500,7 @@ pub const SingularTestNode = struct {
 };
 
 pub const Graph = struct {
+    invocation: ?*const @import("invocation.zig").Metadata = null,
     allocator: std.mem.Allocator,
     environment: ?*const std.process.Environ.Map = null,
     execution_hooks: ?@import("expression.zig").Host = null,

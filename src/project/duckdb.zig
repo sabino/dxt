@@ -352,6 +352,7 @@ fn jsonObjectNumber(object: std.json.ObjectMap, key: []const u8) ?f64 {
     return switch (value) {
         .float => |float| float,
         .integer => |integer| @floatFromInt(integer),
+        .number_string => |number| std.fmt.parseFloat(f64, number) catch null,
         else => null,
     };
 }

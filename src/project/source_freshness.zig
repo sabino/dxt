@@ -153,23 +153,23 @@ fn periodSeconds(period: []const u8) !u64 {
 }
 
 pub fn renderSources(allocator: std.mem.Allocator, results: []const CheckResult) ![]const u8 {
+    return renderSourcesWithInvocation(allocator, results, null);
+}
+
+pub fn renderSourcesWithInvocation(allocator: std.mem.Allocator, results: []const CheckResult, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
 
-    try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": ");
-    try json.string(writer, "https://schemas.getdbt.com/dbt/sources/v3.json");
-    try writer.writeAll(", \"dbt_version\": ");
-    try json.string(writer, "0.0.0");
-    try writer.writeAll(", \"generated_at\": ");
-    try json.string(writer, "1970-01-01T00:00:00Z");
-    try writer.writeAll(", \"invocation_id\": null, \"invocation_started_at\": null, \"env\": {}},\n");
+    try writer.writeAll("{\n  \"metadata\": {");
+    try @import("invocation.zig").writeFields(writer, "https://schemas.getdbt.com/dbt/sources/v3.json", metadata);
+    try writer.writeAll("},\n");
     try writer.writeAll("  \"results\": [");
     for (results, 0..) |result, index| {
         if (index != 0) try writer.writeAll(",");
         try writeResult(writer, result);
     }
-    try writer.writeAll("\n  ],\n  \"elapsed_time\": 0.0\n}\n");
+    try writer.print("\n  ],\n  \"elapsed_time\": {d}\n}}\n", .{if (metadata) |value| value.elapsed() else @as(f64, 0)});
     return try out.toOwnedSlice();
 }
 

@@ -44,17 +44,16 @@ pub fn deinitEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Catal
 }
 
 pub fn renderCatalog(allocator: std.mem.Allocator, nodes: []const CatalogEntry, sources: []const CatalogEntry) ![]const u8 {
+    return renderCatalogWithInvocation(allocator, nodes, sources, null);
+}
+
+pub fn renderCatalogWithInvocation(allocator: std.mem.Allocator, nodes: []const CatalogEntry, sources: []const CatalogEntry, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
 
-    try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": ");
-    try json.string(writer, "https://schemas.getdbt.com/dbt/catalog/v1.json");
-    try writer.writeAll(", \"dbt_version\": ");
-    try json.string(writer, "0.0.0");
-    try writer.writeAll(", \"generated_at\": ");
-    try json.string(writer, "1970-01-01T00:00:00Z");
-    try writer.writeAll(", \"invocation_id\": null, \"invocation_started_at\": null, \"env\": {}");
+    try writer.writeAll("{\n  \"metadata\": {");
+    try @import("invocation.zig").writeFields(writer, "https://schemas.getdbt.com/dbt/catalog/v1.json", metadata);
     try writer.writeAll("},\n  \"nodes\": {");
     try writeCatalogEntryMap(writer, nodes);
     try writer.writeAll("},\n  \"sources\": {");
@@ -106,7 +105,7 @@ test "catalog writer emits deterministic empty dbt catalog shape" {
     defer std.testing.allocator.free(rendered);
 
     try std.testing.expectEqualStrings(
-        "{\n  \"metadata\": {\"dbt_schema_version\": \"https://schemas.getdbt.com/dbt/catalog/v1.json\", \"dbt_version\": \"0.0.0\", \"generated_at\": \"1970-01-01T00:00:00Z\", \"invocation_id\": null, \"invocation_started_at\": null, \"env\": {}},\n  \"nodes\": {},\n  \"sources\": {},\n  \"errors\": null\n}\n",
+        "{\n  \"metadata\": {\"dbt_schema_version\":\"https://schemas.getdbt.com/dbt/catalog/v1.json\",\"dbt_version\":\"0.0.0\",\"generated_at\":\"1970-01-01T00:00:00Z\",\"invocation_id\":null,\"invocation_started_at\":null,\"env\":{}},\n  \"nodes\": {},\n  \"sources\": {},\n  \"errors\": null\n}\n",
         rendered,
     );
 

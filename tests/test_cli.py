@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import json
+import datetime
+import uuid
 import hashlib
 import shutil
 import importlib.util
@@ -29,6 +31,14 @@ assert SCHEMA_SPEC is not None
 assert SCHEMA_SPEC.loader is not None
 schema_validator = importlib.util.module_from_spec(SCHEMA_SPEC)
 SCHEMA_SPEC.loader.exec_module(schema_validator)
+
+
+def assert_invocation_metadata(metadata):
+    assert uuid.UUID(metadata["invocation_id"]).version == 4
+    generated = datetime.datetime.fromisoformat(metadata["generated_at"].replace("Z", "+00:00"))
+    started = datetime.datetime.fromisoformat(metadata["invocation_started_at"].replace("Z", "+00:00"))
+    assert started <= generated
+    assert (datetime.datetime.now(datetime.timezone.utc) - generated).total_seconds() < 120
 
 
 @pytest.fixture(autouse=True)
@@ -6794,8 +6804,7 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
     assert manifest["metadata"].get("dbt_schema_version") == "https://schemas.getdbt.com/dbt/manifest/v12.json"
     assert manifest["metadata"].get("dbt_version") == "0.0.0"
     assert isinstance(manifest["metadata"].get("generated_at"), str)
-    assert manifest["metadata"].get("invocation_id") is None
-    assert manifest["metadata"].get("invocation_started_at") is None
+    assert_invocation_metadata(manifest["metadata"])
     assert manifest["metadata"].get("env") == {}
     assert isinstance(manifest["metadata"].get("project_name"), str)
     assert isinstance(manifest["metadata"].get("adapter_type"), str)
@@ -7112,7 +7121,15 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     first_manifest = manifest_path.read_text()
     second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
     assert second.returncode == 0, second.stderr
-    assert manifest_path.read_text() == first_manifest
+    first_value = json.loads(first_manifest)
+    second_value = json.loads(manifest_path.read_text())
+    assert_invocation_metadata(first_value["metadata"])
+    assert_invocation_metadata(second_value["metadata"])
+    assert first_value["metadata"]["invocation_id"] != second_value["metadata"]["invocation_id"]
+    for value in (first_value, second_value):
+        for key in ("generated_at", "invocation_id", "invocation_started_at"):
+            value["metadata"].pop(key)
+    assert second_value == first_value
 
     manifest = json.loads(first_manifest)
     assert_manifest_schema_slice(manifest_path)
@@ -8332,7 +8349,15 @@ def test_parse_ref_dependency_maps_are_deterministic(tmp_path: Path):
     first_manifest = manifest_path.read_text()
     second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
     assert second.returncode == 0, second.stderr
-    assert manifest_path.read_text() == first_manifest
+    first_value = json.loads(first_manifest)
+    second_value = json.loads(manifest_path.read_text())
+    assert_invocation_metadata(first_value["metadata"])
+    assert_invocation_metadata(second_value["metadata"])
+    assert first_value["metadata"]["invocation_id"] != second_value["metadata"]["invocation_id"]
+    for value in (first_value, second_value):
+        for key in ("generated_at", "invocation_id", "invocation_started_at"):
+            value["metadata"].pop(key)
+    assert second_value == first_value
 
     manifest = json.loads(first_manifest)
     customer = manifest["nodes"]["model.model_ref.customers"]
@@ -8508,7 +8533,15 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     first_manifest = manifest_path.read_text()
     second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
     assert second.returncode == 0, second.stderr
-    assert manifest_path.read_text() == first_manifest
+    first_value = json.loads(first_manifest)
+    second_value = json.loads(manifest_path.read_text())
+    assert_invocation_metadata(first_value["metadata"])
+    assert_invocation_metadata(second_value["metadata"])
+    assert first_value["metadata"]["invocation_id"] != second_value["metadata"]["invocation_id"]
+    for value in (first_value, second_value):
+        for key in ("generated_at", "invocation_id", "invocation_started_at"):
+            value["metadata"].pop(key)
+    assert second_value == first_value
 
     manifest = json.loads(first_manifest)
     assert_partial_manifest_schema(manifest)
@@ -8563,7 +8596,15 @@ def test_parse_docs_blocks_and_literal_doc_descriptions(tmp_path: Path):
     first_manifest = manifest_path.read_text()
     second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
     assert second.returncode == 0, second.stderr
-    assert manifest_path.read_text() == first_manifest
+    first_value = json.loads(first_manifest)
+    second_value = json.loads(manifest_path.read_text())
+    assert_invocation_metadata(first_value["metadata"])
+    assert_invocation_metadata(second_value["metadata"])
+    assert first_value["metadata"]["invocation_id"] != second_value["metadata"]["invocation_id"]
+    for value in (first_value, second_value):
+        for key in ("generated_at", "invocation_id", "invocation_started_at"):
+            value["metadata"].pop(key)
+    assert second_value == first_value
 
     manifest = json.loads(first_manifest)
     assert_partial_manifest_schema(manifest)
@@ -11223,8 +11264,7 @@ def test_docs_generate_writes_manifest_catalog_and_compiled_sql(tmp_path: Path):
     assert_catalog_schema_slice(catalog_path)
     assert catalog["metadata"]["dbt_schema_version"] == "https://schemas.getdbt.com/dbt/catalog/v1.json"
     assert catalog["metadata"]["dbt_version"] == "0.0.0"
-    assert catalog["metadata"]["invocation_id"] is None
-    assert catalog["metadata"]["invocation_started_at"] is None
+    assert_invocation_metadata(catalog["metadata"])
     assert catalog["metadata"]["env"] == {}
     assert catalog["nodes"] == {}
     assert catalog["sources"] == {}
@@ -11509,8 +11549,7 @@ def test_source_freshness_checks_selected_duckdb_source_and_writes_sources_json(
     sources = json.loads(sources_path.read_text())
     assert sources["metadata"]["dbt_schema_version"] == "https://schemas.getdbt.com/dbt/sources/v3.json"
     assert sources["metadata"]["dbt_version"] == "0.0.0"
-    assert sources["metadata"]["invocation_id"] is None
-    assert sources["metadata"]["invocation_started_at"] is None
+    assert_invocation_metadata(sources["metadata"])
     assert sources["metadata"]["env"] == {}
     assert len(sources["results"]) == 1
     result_row = sources["results"][0]

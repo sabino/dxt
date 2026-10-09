@@ -287,13 +287,9 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
 }
 
 fn writeManifestMetadata(writer: *Io.Writer, graph: *const Graph) !void {
-    try writer.writeAll("{\"dbt_schema_version\":");
-    try json.string(writer, manifest_schema_version);
-    try writer.writeAll(",\"dbt_version\":");
-    try json.string(writer, deterministic_dbt_version);
-    try writer.writeAll(",\"generated_at\":");
-    try json.string(writer, deterministic_generated_at);
-    try writer.writeAll(",\"invocation_id\":null,\"invocation_started_at\":null,\"env\":{},\"project_name\":");
+    try writer.writeAll("{");
+    try @import("invocation.zig").writeFields(writer, manifest_schema_version, graph.invocation);
+    try writer.writeAll(",\"project_name\":");
     try json.string(writer, graph.project_name);
     try writer.writeAll(",\"adapter_type\":");
     try json.string(writer, graph.adapter_type);
