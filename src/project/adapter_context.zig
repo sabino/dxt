@@ -131,8 +131,8 @@ pub fn call(allocator: std.mem.Allocator, graph: *const types.Graph, state: *Sta
         const rows = expression.sequence(result) orelse return error.InvalidAdapterIntrospection;
         if (rows.len < 1) return error.InvalidAdapterIntrospection;
         const cells = expression.sequence(rows[0]) orelse return error.InvalidAdapterIntrospection;
-        if (cells.len < 1 or cells[0] != .number) return error.InvalidAdapterIntrospection;
-        return .{ .boolean = cells[0].number > 0 };
+        if (cells.len < 1) return error.InvalidAdapterIntrospection;
+        return .{ .boolean = (expression.integerIndex(cells[0]) catch return error.InvalidAdapterIntrospection) > 0 };
     }
     if (is(name, "cache_added") or is(name, "cache_dropped") or is(name, "drop_relation")) {
         const relation = try relationArg(args, "relation", 0);

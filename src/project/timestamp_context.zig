@@ -44,9 +44,9 @@ fn datetimeValue(a: std.mem.Allocator, epoch_ns: i96, date_only: bool, utc_offse
     var entries: std.ArrayList(expression.Entry) = .empty;
     try entries.append(a, .{ .key = "__dxt_rendered", .value = .{ .string = rendered } });
     inline for (.{ .{ "year", 0, 4 }, .{ "month", 5, 7 }, .{ "day", 8, 10 }, .{ "hour", 11, 13 }, .{ "minute", 14, 16 }, .{ "second", 17, 19 } }) |field| {
-        if (!date_only or field[1] < 10) try entries.append(a, .{ .key = field[0], .value = .{ .number = @floatFromInt(try std.fmt.parseInt(u64, label[field[1]..field[2]], 10)) } });
+        if (!date_only or field[1] < 10) try entries.append(a, .{ .key = field[0], .value = try expression.integerValue(a, try std.fmt.parseInt(u64, label[field[1]..field[2]], 10)) });
     }
-    if (!date_only) try entries.appendSlice(a, &.{ .{ .key = "microsecond", .value = .{ .number = @floatFromInt(micros) } }, .{ .key = "tzinfo", .value = if (utc_offset) |offset| .{ .string = try zoneName(a, offset) } else .none } });
+    if (!date_only) try entries.appendSlice(a, &.{ .{ .key = "microsecond", .value = try expression.integerValue(a, micros) }, .{ .key = "tzinfo", .value = if (utc_offset) |offset| .{ .string = try zoneName(a, offset) } else .none } });
     for ([_][]const u8{ "strftime", "isoformat", "date", "timestamp", "weekday", "isoweekday", "replace" }) |method| {
         try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime:{s}:{d}:{s}:{s}", .{ method, epoch_ns, if (date_only) "date" else "datetime", if (utc_offset) |offset| try std.fmt.allocPrint(a, "{d}", .{offset}) else "naive" }) } });
     }
@@ -89,8 +89,8 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
     if (std.mem.eql(u8, method, "date")) return try datetimeValue(a, @divFloor(ns, std.time.ns_per_day) * std.time.ns_per_day, true, null);
     if (std.mem.eql(u8, method, "timestamp") and !date_only) return .{ .number = @as(f64, @floatFromInt(ns)) / std.time.ns_per_s - @as(f64, @floatFromInt(utc_offset orelse 0)) * 60 };
     const day = @divFloor(ns, std.time.ns_per_day);
-    if (std.mem.eql(u8, method, "weekday")) return .{ .number = @floatFromInt(@mod(day + 3, 7)) };
-    if (std.mem.eql(u8, method, "isoweekday")) return .{ .number = @floatFromInt(@mod(day + 3, 7) + 1) };
+    if (std.mem.eql(u8, method, "weekday")) return try expression.integerValue(a, @mod(day + 3, 7));
+    if (std.mem.eql(u8, method, "isoweekday")) return try expression.integerValue(a, @mod(day + 3, 7) + 1);
     if (std.mem.eql(u8, method, "replace")) {
         const original = try calendar.formatTimestamp(a, @intCast(@divFloor(ns, std.time.ns_per_s)));
         var fields: [7]u64 = undefined;
@@ -109,8 +109,9 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
 }
 
 fn integer(v: Value) !u64 {
-    if (v != .number or !std.math.isFinite(v.number) or v.number < 0 or v.number > 999999999 or @floor(v.number) != v.number) return error.JinjaTypeError;
-    return @intFromFloat(v.number);
+    const count = try expression.integerIndex(v);
+    if (count < 0 or count > 999999999) return error.JinjaTypeError;
+    return @intCast(count);
 }
 
 fn isoformat(a: std.mem.Allocator, ns: i96, separator: []const u8, timespec: []const u8, utc_offset: ?i32) ![]const u8 {
@@ -189,7 +190,7 @@ test "native UTC datetime values retain microseconds and Python ISO/format behav
     try std.testing.expectEqualStrings("2024-02-29T16:17:18.123+00:00", (try call(a, dt.attribute("isoformat").callable, &.{.{ .name = "timespec", .value = .{ .string = "milliseconds" } }})).?.string);
     const date = (try call(a, dt.attribute("date").callable, &.{})).?;
     try std.testing.expectEqualStrings("2024-02-29", try date.text(a));
-    const replaced = (try call(a, dt.attribute("replace").callable, &.{ .{ .name = "hour", .value = .{ .number = 0 } }, .{ .name = "microsecond", .value = .{ .number = 0 } } })).?;
+    const replaced = (try call(a, dt.attribute("replace").callable, &.{ .{ .name = "hour", .value = .{ .integer = "0" } }, .{ .name = "microsecond", .value = .{ .integer = "0" } } })).?;
     try std.testing.expectEqualStrings("2024-02-29 00:17:18+00:00", try replaced.text(a));
-    try std.testing.expectEqual(@as(f64, 3), (try call(a, dt.attribute("weekday").callable, &.{})).?.number);
+    try std.testing.expectEqual(@as(i64, 3), try expression.integerIndex((try call(a, dt.attribute("weekday").callable, &.{})).?));
 }

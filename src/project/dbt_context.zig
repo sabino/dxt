@@ -8,11 +8,12 @@ const Argument = expression.Argument;
 pub fn cloneValue(allocator: std.mem.Allocator, value: Value) anyerror!Value {
     return switch (value) {
         .string => |text| .{ .string = try allocator.dupe(u8, text) },
+        .integer => |text| .{ .integer = try allocator.dupe(u8, text) },
         .callable => |name| .{ .callable = try allocator.dupe(u8, name) },
-        .list => |items| blk: {
+        .list, .tuple => |items| blk: {
             const copied = try expression.allocateValues(allocator, items.len);
             for (items, copied) |item, *copy| copy.* = try cloneValue(allocator, item);
-            break :blk .{ .list = copied };
+            break :blk if (value == .tuple) Value{ .tuple = copied } else Value{ .list = copied };
         },
         .object => |entries| blk: {
             const copied = try expression.allocateEntries(allocator, entries.len);
@@ -82,7 +83,7 @@ pub fn columnValue(allocator: std.mem.Allocator, definition: ColumnDef) !Value {
         .{ .key = "dtype", .value = .{ .string = definition.dtype } },
         .{ .key = "data_type", .value = .{ .string = try columnDataType(allocator, definition) } },
         .{ .key = "quoted", .value = .{ .string = try std.fmt.allocPrint(allocator, "\"{s}\"", .{definition.column}) } },
-        .{ .key = "char_size", .value = if (definition.char_size) |size| .{ .number = @floatFromInt(size) } else .none },
+        .{ .key = "char_size", .value = if (definition.char_size) |size| try expression.integerValue(allocator, size) else .none },
         .{ .key = "numeric_precision", .value = try @import("config_value.zig").toExpression(allocator, definition.numeric_precision) },
         .{ .key = "numeric_scale", .value = try @import("config_value.zig").toExpression(allocator, definition.numeric_scale) },
     });
@@ -104,8 +105,9 @@ fn callColumn(allocator: std.mem.Allocator, adapter_type: []const u8, name: []co
         if (!create) {
             const size = named(args, "char_size", 2);
             if (size != .none and size != .undefined) {
-                if (size != .number or size.number < 0 or @floor(size.number) != size.number or size.number >= 9007199254740992) return error.InvalidJinjaArguments;
-                definition.char_size = @intFromFloat(size.number);
+                const count = expression.integerIndex(size) catch return error.InvalidJinjaArguments;
+                if (count < 0) return error.InvalidJinjaArguments;
+                definition.char_size = @intCast(count);
             }
             const precision = named(args, "numeric_precision", 3);
             const scale = named(args, "numeric_scale", 4);
@@ -148,7 +150,7 @@ fn callColumn(allocator: std.mem.Allocator, adapter_type: []const u8, name: []co
         return .{ .boolean = isString(definition.dtype) and isString(other_definition.dtype) and try columnStringSize(other_definition) > try columnStringSize(definition) };
     }
     if (args.len != 0) return error.InvalidJinjaArguments;
-    if (std.mem.eql(u8, method, "string_size")) return .{ .number = @floatFromInt(try columnStringSize(definition)) };
+    if (std.mem.eql(u8, method, "string_size")) return try expression.integerValue(allocator, try columnStringSize(definition));
     if (std.mem.eql(u8, method, "is_string")) return .{ .boolean = isString(definition.dtype) };
     if (std.mem.eql(u8, method, "is_numeric")) return .{ .boolean = isNumeric(definition.dtype) };
     if (std.mem.eql(u8, method, "is_float")) {

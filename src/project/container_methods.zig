@@ -18,9 +18,9 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Argume
             try output.appendSlice(allocator, receiver.list);
             try output.append(allocator, args[1].value);
         } else if (std.mem.eql(u8, method, "extend")) {
-            if (args.len != 2 or args[1].value != .list) return error.InvalidJinjaArguments;
+            if (args.len != 2) return error.InvalidJinjaArguments;
             try output.appendSlice(allocator, receiver.list);
-            try output.appendSlice(allocator, args[1].value.list);
+            try output.appendSlice(allocator, try expression.iterableValues(allocator, args[1].value));
         } else if (std.mem.eql(u8, method, "clear")) {
             if (args.len != 1) return error.InvalidJinjaArguments;
         } else if (std.mem.eql(u8, method, "pop")) {
@@ -28,8 +28,7 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Argume
             if (receiver.list.len == 0) return error.JinjaIndexError;
             var index: i64 = @as(i64, @intCast(receiver.list.len)) - 1;
             if (args.len == 2) {
-                if (args[1].value != .number or @floor(args[1].value.number) != args[1].value.number or @abs(args[1].value.number) >= 9007199254740992) return error.JinjaTypeError;
-                index = @intFromFloat(args[1].value.number);
+                index = try expression.integerIndex(args[1].value);
                 if (index < 0) index += @intCast(receiver.list.len);
             }
             if (index < 0 or index >= receiver.list.len) return error.JinjaIndexError;
@@ -53,12 +52,13 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Argume
                     if (positional > 1) return error.InvalidJinjaArguments;
                     if (arg.value == .object) {
                         for (arg.value.object) |entry| try put(allocator, &output, entry.key, entry.value);
-                    } else if (arg.value == .list) {
-                        for (arg.value.list) |pair| {
-                            if (pair != .list or pair.list.len != 2 or pair.list[0] != .string) return error.JinjaTypeError;
-                            try put(allocator, &output, pair.list[0].string, pair.list[1]);
+                    } else {
+                        for (try expression.iterableValues(allocator, arg.value)) |pair| {
+                            const cells = try expression.iterableValues(allocator, pair);
+                            if (cells.len != 2 or cells[0] != .string) return error.JinjaTypeError;
+                            try put(allocator, &output, cells[0].string, cells[1]);
                         }
-                    } else return error.JinjaTypeError;
+                    }
                 }
             }
         } else if (std.mem.eql(u8, method, "clear")) {
@@ -110,6 +110,8 @@ pub fn replaceAliases(value: *Value, original: Value, replacement: Value, depth:
             return;
         }
         for (@constCast(value.list)) |*child| try replaceAliases(child, original, replacement, depth + 1);
+    } else if (value.* == .tuple) {
+        for (@constCast(value.tuple)) |*child| try replaceAliases(child, original, replacement, depth + 1);
     } else if (value.* == .object) {
         if (original == .object and value.object.ptr == original.object.ptr and value.object.len == original.object.len) {
             value.* = replacement;

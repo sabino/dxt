@@ -368,7 +368,7 @@ pub const OperationHost = struct {
                 }
             }
             code = .{ .string = try label.toOwnedSlice(allocator) };
-            affected = .{ .number = if (has_count) @floatFromInt(output.rows_changed) else -1 };
+            affected = if (has_count) try expression.integerValue(allocator, output.rows_changed) else .{ .integer = "-1" };
         }
         self.last_response = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "__dxt_rendered", .value = .{ .string = message } }, .{ .key = "_message", .value = .{ .string = message } }, .{ .key = "code", .value = code }, .{ .key = "rows_affected", .value = affected } }) };
         if (std.ascii.eqlIgnoreCase(trimmed, "begin") or std.ascii.eqlIgnoreCase(trimmed, "begin transaction")) self.transaction_open = true;
@@ -449,7 +449,8 @@ fn cellValue(allocator: std.mem.Allocator, kind: adapter.Kind, cell: ?[]const u8
     const text = cell orelse return .none;
     return switch (kind) {
         .boolean => .{ .boolean = std.mem.eql(u8, text, "true") or std.mem.eql(u8, text, "t") or std.mem.eql(u8, text, "1") },
-        .integer, .decimal, .floating => .{ .number = try std.fmt.parseFloat(f64, text) },
+        .integer => .{ .integer = try allocator.dupe(u8, text) },
+        .decimal, .floating => .{ .number = try std.fmt.parseFloat(f64, text) },
         else => .{ .string = try allocator.dupe(u8, text) },
     };
 }

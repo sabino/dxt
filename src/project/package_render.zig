@@ -68,7 +68,7 @@ pub const Context = struct {
             const result = try self.evaluate(input);
             if (result == .undefined) return error.UndefinedJinjaValue;
             const has_marker = std.mem.indexOf(u8, input, "as_native") != null or std.mem.indexOf(u8, input, "as_number") != null or std.mem.indexOf(u8, input, "as_bool") != null or std.mem.indexOf(u8, input, "as_text") != null;
-            if (has_marker and result == .number) {
+            if (has_marker and (result == .number or result == .integer)) {
                 const pipe = std.mem.indexOfScalar(u8, input, '|') orelse input.len;
                 const before = std.mem.trim(u8, input[0..pipe], " \t");
                 const original = try self.evaluate(before);
@@ -80,7 +80,7 @@ pub const Context = struct {
             // context value or a native marker retains its type.
             const constant = expression.evaluate(self.runtime.allocator, input, null) catch .undefined;
             if (!has_marker and constant != .undefined) {
-                if (constant == .number) {
+                if (constant == .number or constant == .integer) {
                     var literal = yaml.parse(self.runtime.allocator, input) catch null;
                     if (literal) |*document| {
                         defer document.deinit();
@@ -177,15 +177,7 @@ pub const Context = struct {
                 const block = try findBlock(allocator, text, position, "for", "endfor");
                 const body_end = if (block.branches.len != 0) block.branches[0].start else block.start;
                 var items: std.ArrayList(Value) = .empty;
-                switch (value) {
-                    .list => |list| try items.appendSlice(allocator, list),
-                    .object => |object| for (object) |entry| try items.append(allocator, .{ .string = entry.key }),
-                    .string => |string| {
-                        var view = (try std.unicode.Utf8View.init(string)).iterator();
-                        while (view.nextCodepointSlice()) |codepoint| try items.append(allocator, .{ .string = codepoint });
-                    },
-                    else => return error.JinjaTypeError,
-                }
+                try items.appendSlice(allocator, try expression.iterableValues(allocator, value));
                 const saved = try self.bindings.clone();
                 for (items.items, 0..) |item, i| {
                     self.iterations += 1;
@@ -193,20 +185,21 @@ pub const Context = struct {
                     if (std.mem.indexOfScalar(u8, names, ',')) |comma| {
                         const first = std.mem.trim(u8, names[0..comma], " \t");
                         const second = std.mem.trim(u8, names[comma + 1 ..], " \t");
-                        if (!identifier(first) or !identifier(second) or item != .list or item.list.len != 2) return error.JinjaTypeError;
-                        try self.bindings.put(first, item.list[0]);
-                        try self.bindings.put(second, item.list[1]);
+                        const pair = try expression.iterableValues(allocator, item);
+                        if (!identifier(first) or !identifier(second) or pair.len != 2) return error.JinjaTypeError;
+                        try self.bindings.put(first, pair[0]);
+                        try self.bindings.put(second, pair[1]);
                     } else {
                         if (!identifier(names)) return error.InvalidJinjaExpression;
                         try self.bindings.put(names, item);
                     }
                     const loop = try allocator.alloc(expression.Entry, 6);
-                    loop[0] = .{ .key = "index", .value = .{ .number = @floatFromInt(i + 1) } };
-                    loop[1] = .{ .key = "index0", .value = .{ .number = @floatFromInt(i) } };
+                    loop[0] = .{ .key = "index", .value = try expression.integerValue(allocator, i + 1) };
+                    loop[1] = .{ .key = "index0", .value = try expression.integerValue(allocator, i) };
                     loop[2] = .{ .key = "first", .value = .{ .boolean = i == 0 } };
                     loop[3] = .{ .key = "last", .value = .{ .boolean = i + 1 == items.items.len } };
-                    loop[4] = .{ .key = "length", .value = .{ .number = @floatFromInt(items.items.len) } };
-                    loop[5] = .{ .key = "revindex", .value = .{ .number = @floatFromInt(items.items.len - i) } };
+                    loop[4] = .{ .key = "length", .value = try expression.integerValue(allocator, items.items.len) };
+                    loop[5] = .{ .key = "revindex", .value = try expression.integerValue(allocator, items.items.len - i) };
                     try self.bindings.put("loop", .{ .object = loop });
                     try self.template(text[position..body_end], out, depth + 1);
                     self.bindings = try saved.clone();
@@ -426,47 +419,11 @@ pub fn clone(allocator: std.mem.Allocator, value: std.json.Value) anyerror!std.j
 }
 
 pub fn fromJson(allocator: std.mem.Allocator, value: std.json.Value) anyerror!Value {
-    return switch (value) {
-        .null => .none,
-        .bool => |v| .{ .boolean = v },
-        .integer => |v| .{ .number = @floatFromInt(v) },
-        .float => |v| .{ .number = v },
-        .number_string => |v| .{ .number = try std.fmt.parseFloat(f64, v) },
-        .string => |v| .{ .string = try allocator.dupe(u8, v) },
-        .array => |v| blk: {
-            const result = try allocator.alloc(Value, v.items.len);
-            for (v.items, 0..) |item, i| result[i] = try fromJson(allocator, item);
-            break :blk .{ .list = result };
-        },
-        .object => |v| blk: {
-            const result = try allocator.alloc(expression.Entry, v.count());
-            var iterator = v.iterator();
-            var i: usize = 0;
-            while (iterator.next()) |entry| : (i += 1) result[i] = .{ .key = try allocator.dupe(u8, entry.key_ptr.*), .value = try fromJson(allocator, entry.value_ptr.*) };
-            break :blk .{ .object = result };
-        },
-    };
+    return try @import("config_value.zig").toExpression(allocator, value);
 }
 
 pub fn toJson(allocator: std.mem.Allocator, value: Value) anyerror!std.json.Value {
-    return switch (value) {
-        .undefined => error.UndefinedJinjaValue,
-        .callable => error.JinjaTypeError,
-        .none => .null,
-        .boolean => |v| .{ .bool = v },
-        .number => |v| if (std.math.isFinite(v) and @abs(v) < 9007199254740992 and @floor(v) == v) .{ .integer = @intFromFloat(v) } else .{ .float = v },
-        .string => |v| .{ .string = try allocator.dupe(u8, v) },
-        .list => |v| blk: {
-            var result: std.json.Array = .init(allocator);
-            for (v) |item| try result.append(try toJson(allocator, item));
-            break :blk .{ .array = result };
-        },
-        .object => |v| blk: {
-            var result: std.json.ObjectMap = .empty;
-            for (v) |entry| try result.put(allocator, try allocator.dupe(u8, entry.key), try toJson(allocator, entry.value));
-            break :blk .{ .object = result };
-        },
-    };
+    return try @import("config_value.zig").fromExpression(allocator, value);
 }
 
 test "package expressions preserve dynamic values and Core native marker types" {
@@ -493,7 +450,7 @@ test "package templates render nested control flow scoped loops macros and white
     defer arena.deinit();
     var context = Context.init(.{ .allocator = arena.allocator(), .io = std.testing.io }, .null);
     try std.testing.expectEqualStrings("../utils", (try context.renderString("{% set prefix = '../' %}{% if true %}{{ prefix }}{% for p in ['u','t','i','l','s'] %}{{ p }}{% else %}unused{% endfor %}{% else %}unused{% endif %}")).string);
-    try std.testing.expectEqual(@as(f64, 2), (try context.renderString("{% set revision = 2 %}{{ revision }}")).number);
+    try std.testing.expectEqual(@as(i64, 2), try expression.integerIndex(try context.renderString("{% set revision = 2 %}{{ revision }}")));
     try std.testing.expectEqualStrings("fallback", (try context.renderString("{% for p in [] %}unused{% else %}fallback{% endfor %}")).string);
     try std.testing.expectEqualStrings("../utils", (try context.renderString("{% macro path(name='utils') %}{{ '../' ~ name }}{% endmacro %}{{ path() }}")).string);
     try std.testing.expect((try context.renderString("{% macro flag() %}{{ return(true) }}unreachable{% endmacro %}{{ flag() }}")).boolean);

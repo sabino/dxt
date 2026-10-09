@@ -110,8 +110,9 @@ fn entryForRelation(allocator: std.mem.Allocator, unique_id: []const u8, relatio
         const comment = try optionalString(allocator, row.attribute("column_comment"));
         errdefer if (comment) |value| allocator.free(value);
         const ordinal = row.attribute("column_index");
-        if (ordinal != .number or ordinal.number < 1 or @floor(ordinal.number) != ordinal.number) return error.InvalidCatalogResult;
-        try result.?.columns.append(allocator, .{ .name = column_name, .data_type = column_type, .index = @intFromFloat(ordinal.number), .comment = comment });
+        const index = expression.integerIndex(ordinal) catch return error.InvalidCatalogResult;
+        if (index < 1) return error.InvalidCatalogResult;
+        try result.?.columns.append(allocator, .{ .name = column_name, .data_type = column_type, .index = @intCast(index), .comment = comment });
     }
     return result;
 }

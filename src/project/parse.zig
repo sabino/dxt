@@ -872,7 +872,7 @@ pub fn refDepFromValue(allocator: std.mem.Allocator, value: []const u8) !RefDep 
         for (arguments) |arg| {
             if (arg.name) |key| {
                 if (version != .null or (!std.mem.eql(u8, key, "v") and !std.mem.eql(u8, key, "version"))) return error.UnsupportedRef;
-                if (arg.value != .number and arg.value != .string) return error.UnsupportedRef;
+                if (arg.value != .integer and arg.value != .number and arg.value != .string) return error.UnsupportedRef;
                 version = try @import("config_value.zig").fromExpression(allocator, arg.value);
             } else {
                 if (arg.value != .string or count >= names.len) return error.UnsupportedRef;

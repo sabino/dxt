@@ -309,26 +309,7 @@ pub fn renderMacroForNode(allocator: std.mem.Allocator, graph: *const Graph, nod
 }
 
 fn valueFromJson(allocator: std.mem.Allocator, value: std.json.Value) anyerror!native_expr.Value {
-    return switch (value) {
-        .null => .none,
-        .bool => |v| .{ .boolean = v },
-        .integer => |v| .{ .number = @floatFromInt(v) },
-        .float => |v| .{ .number = v },
-        .number_string => |v| .{ .number = try std.fmt.parseFloat(f64, v) },
-        .string => |v| .{ .string = v },
-        .array => |items| blk: {
-            const values = try native_expr.allocateValues(allocator, items.items.len);
-            for (items.items, values) |item, *result| result.* = try valueFromJson(allocator, item);
-            break :blk .{ .list = values };
-        },
-        .object => |object| blk: {
-            const entries = try native_expr.allocateEntries(allocator, object.count());
-            var iterator = object.iterator();
-            var i: usize = 0;
-            while (iterator.next()) |entry| : (i += 1) entries[i] = .{ .key = entry.key_ptr.*, .value = try valueFromJson(allocator, entry.value_ptr.*) };
-            break :blk .{ .object = entries };
-        },
-    };
+    return try @import("config_value.zig").toExpression(allocator, value);
 }
 
 pub fn compileModelWithInjectedCtes(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) !CompiledModel {
@@ -704,12 +685,12 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                     context.pushScope();
                     try context.setValue(block.variable_name, value);
                     const entries = try context.value_arena.allocator().alloc(native_expr.Entry, 6);
-                    entries[0] = .{ .key = "index", .value = .{ .number = @floatFromInt(loop_index + 1) } };
-                    entries[1] = .{ .key = "index0", .value = .{ .number = @floatFromInt(loop_index) } };
+                    entries[0] = .{ .key = "index", .value = try native_expr.integerValue(context.value_arena.allocator(), loop_index + 1) };
+                    entries[1] = .{ .key = "index0", .value = try native_expr.integerValue(context.value_arena.allocator(), loop_index) };
                     entries[2] = .{ .key = "first", .value = .{ .boolean = loop_index == 0 } };
                     entries[3] = .{ .key = "last", .value = .{ .boolean = loop_index + 1 == values.len } };
-                    entries[4] = .{ .key = "length", .value = .{ .number = @floatFromInt(values.len) } };
-                    entries[5] = .{ .key = "revindex", .value = .{ .number = @floatFromInt(values.len - loop_index) } };
+                    entries[4] = .{ .key = "length", .value = try native_expr.integerValue(context.value_arena.allocator(), values.len) };
+                    entries[5] = .{ .key = "revindex", .value = try native_expr.integerValue(context.value_arena.allocator(), values.len - loop_index) };
                     try context.setValue("loop", .{ .object = entries });
                     renderRange(context, sql, block.body_start, block.body_end, out) catch |err| {
                         context.popScope();
@@ -776,16 +757,8 @@ fn afterTag(sql: []const u8, end: usize, limit: usize) usize {
 }
 
 fn iterationValues(allocator: std.mem.Allocator, iterable: native_expr.Value) ![]const native_expr.Value {
-    if (native_expr.sequence(iterable)) |items| return items;
     if (iterable == .undefined) return error.UndefinedJinjaValue;
-    const count: usize = switch (iterable) {
-        .object => |v| v.len,
-        .string => |v| v.len,
-        else => return error.JinjaTypeError,
-    };
-    const values = try native_expr.allocateValues(allocator, count);
-    for (values, 0..) |*value, i| value.* = .{ .string = if (iterable == .object) iterable.object[i].key else iterable.string[i .. i + 1] };
-    return values;
+    return try native_expr.iterableValues(allocator, iterable);
 }
 
 fn validateSkippedLoopBody(context: *CompileContext, sql: []const u8, block: ForBlock) anyerror!void {
@@ -964,7 +937,7 @@ fn flagsValue(allocator: std.mem.Allocator, graph: *const Graph) !native_expr.Va
         .{ .key = "CACHE_SELECTED_ONLY", .value = .{ .boolean = false } },
         .{ .key = "INTROSPECT", .value = .{ .boolean = true } },
         .{ .key = "EMPTY", .value = .{ .boolean = false } },
-        .{ .key = "PRINTER_WIDTH", .value = .{ .number = 80 } },
+        .{ .key = "PRINTER_WIDTH", .value = .{ .integer = "80" } },
         .{ .key = "DEBUG", .value = .{ .boolean = graph.command_options.log_level == .debug } },
     }) |default| {
         var present = false;

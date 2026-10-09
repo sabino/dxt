@@ -538,21 +538,5 @@ pub fn overlayConfig(allocator: std.mem.Allocator, base: *types.SnapshotConfig, 
 }
 
 fn jsonFromExpression(allocator: std.mem.Allocator, value: expression.Value) anyerror!std.json.Value {
-    return switch (value) {
-        .none => .null,
-        .boolean => .{ .bool = value.boolean },
-        .number => .{ .float = value.number },
-        .string => .{ .string = value.string },
-        .list => blk: {
-            var values = std.array_list.Managed(std.json.Value).init(allocator);
-            for (value.list) |item| try values.append(try jsonFromExpression(allocator, item));
-            break :blk .{ .array = values };
-        },
-        .object => blk: {
-            var object = std.json.ObjectMap{};
-            for (value.object) |entry| try object.put(allocator, entry.key, try jsonFromExpression(allocator, entry.value));
-            break :blk .{ .object = object };
-        },
-        .undefined, .callable => error.UnsupportedSnapshotConfig,
-    };
+    return @import("config_value.zig").fromExpression(allocator, value) catch return error.UnsupportedSnapshotConfig;
 }
