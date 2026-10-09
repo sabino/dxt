@@ -27,6 +27,7 @@ pub fn toExpression(allocator: std.mem.Allocator, value: std.json.Value) anyerro
 pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) anyerror!std.json.Value {
     if (expression.integerProtocol(value)) |number| return fromExpression(allocator, .{ .integer = number });
     if (expression.floatProtocol(value)) |number| return .{ .float = number };
+    if (@import("set_context.zig").isSet(value)) return error.InvalidConfiguration;
     if (value.attribute("__dxt_noniterable").truthy()) return error.InvalidConfiguration;
     return switch (value) {
         .none => .null,

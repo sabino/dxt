@@ -4,6 +4,7 @@ const sequences = @import("expression_sequence.zig");
 const unicode = @import("expression_unicode.zig");
 const complex_numbers = @import("expression_complex.zig");
 const mapping_keys = @import("mapping_keys.zig");
+const sets = @import("set_context.zig");
 
 /// Native Jinja expression values. Allocations belong to the caller's render
 /// arena; values can cross macro returns without borrowing a temporary frame.
@@ -63,6 +64,7 @@ pub const Value = union(enum) {
                 break :blk try out.toOwnedSlice(allocator);
             },
             .object => |entries| blk: {
+                if (sets.isSet(self)) break :blk try sets.text(allocator, self);
                 if (try sequences.text(allocator, self)) |rendered| break :blk rendered;
                 // Adapter relation objects retain typed attributes for package
                 // macros while their string conversion is the SQL identity.
@@ -675,7 +677,9 @@ const Parser = struct {
         if (self.take("(")) {
             const args = try self.arguments();
             if (!self.active) return .none;
-            if (try builtin(self.allocator, path, args)) |value| return value;
+            if (!(self.host != null and std.mem.eql(u8, path, "zip"))) {
+                if (try builtin(self.allocator, path, args)) |value| return value;
+            }
             const host = self.host orelse return error.UnsupportedJinjaCall;
             if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| {
                 const receiver = try host.resolve(host.context, path[0..dot], self.allocator);
@@ -790,6 +794,7 @@ fn ownedEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry)) ![
 }
 
 fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument) !?Value {
+    if (sets.isSet(receiver)) return (try sets.call(allocator, receiver, name_, args)) orelse error.UndefinedJinjaValue;
     if (complexProtocol(receiver)) |number| if (std.mem.eql(u8, name_, "conjugate")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         return try complexValue(allocator, .{ .real = number.real, .imaginary = -number.imaginary });
@@ -1117,6 +1122,7 @@ fn equalMember(a: Value, b: Value) bool {
 }
 pub fn equalValues(a: Value, b: Value) bool {
     if (isUndefined(a) or isUndefined(b)) return isUndefined(a) and isUndefined(b) and (a == .capture_undefined) == (b == .capture_undefined);
+    if (sets.isSet(a) or sets.isSet(b)) return sets.equal(a, b);
     const complex_a = complexProtocol(a);
     const complex_b = complexProtocol(b);
     if (complex_a != null or complex_b != null) {
@@ -1168,6 +1174,7 @@ pub fn equalValues(a: Value, b: Value) bool {
 }
 fn contains(allocator: std.mem.Allocator, container: Value, item: Value) !bool {
     if (isUndefined(container)) return false;
+    if (sets.isSet(container)) return try sets.contains(container, item);
     if (container.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError;
     if (sequences.kind(container) != null) {
         for (try iterableValues(allocator, container)) |value| if (equalMember(value, item)) return true;
@@ -1189,6 +1196,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     if (std.mem.eql(u8, op, "in")) return .{ .boolean = try contains(allocator, b, a) };
     if (std.mem.eql(u8, op, "not in")) return .{ .boolean = !(try contains(allocator, b, a)) };
     if (std.mem.eql(u8, op, "~") or (std.mem.eql(u8, op, "+") and a == .string and b == .string)) return .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ try a.text(allocator), try b.text(allocator) }) };
+    if (try sets.apply(allocator, op, a, b)) |value| return value;
     const complex_a = complexProtocol(a);
     const complex_b = complexProtocol(b);
     if (complex_a != null or complex_b != null) {
@@ -1248,6 +1256,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
 fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
     if (value == .capture_undefined) return value;
     if (isUndefined(value)) return error.UndefinedJinjaValue;
+    if (sets.isSet(value)) return .undefined;
     if (value == .object) {
         const names = value.attribute("__dxt_string_index");
         if (names == .object and key == .string) return names.attribute(key.string);
@@ -1291,6 +1300,7 @@ fn integer(value: Value) !i64 {
 fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?Value, step: ?Value) !Value {
     if (value == .capture_undefined) return value;
     if (isUndefined(value)) return error.UndefinedJinjaValue;
+    if (sets.isSet(value)) return error.JinjaTypeError;
     const values = try iterableValues(allocator, value);
     const length: i64 = @intCast(values.len);
     const stride = if (step) |v| integer(v) catch return .undefined else 1;
@@ -1391,6 +1401,10 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
             else => equalValues(value, other),
         };
     }
+    if (sets.isSet(value)) {
+        if (std.mem.eql(u8, name, "mapping") or std.mem.eql(u8, name, "sequence") or std.mem.eql(u8, name, "callable")) return false;
+        if (std.mem.eql(u8, name, "iterable")) return true;
+    }
     if (value.attribute("__dxt_noniterable") == .boolean and value.attribute("__dxt_noniterable").boolean) {
         if (std.mem.eql(u8, name, "mapping") or std.mem.eql(u8, name, "iterable") or std.mem.eql(u8, name, "sequence")) return false;
     }
@@ -1437,7 +1451,7 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
         const inputs = try allocateValues(allocator, args.len);
         for (args, inputs) |arg, *input| {
             if (arg.name != null) return error.InvalidJinjaArguments;
-            if (arg.value != .list and arg.value != .tuple and arg.value != .object and arg.value != .string) return error.JinjaTypeError;
+            if (!isIterable(arg.value)) return error.JinjaTypeError;
             input.* = arg.value;
         }
         return try sequences.zip(allocator, inputs);
@@ -1468,7 +1482,7 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
             const key = arg.name orelse {
                 positional += 1;
                 if (positional > 1) return error.InvalidJinjaArguments;
-                if (arg.value == .object and !arg.value.attribute("__dxt_noniterable").truthy() and sequences.kind(arg.value) == null) {
+                if (arg.value == .object and !arg.value.attribute("__dxt_noniterable").truthy() and sequences.kind(arg.value) == null and !sets.isSet(arg.value)) {
                     for (arg.value.object) |entry| try mappingPut(allocator, &entries, entryKey(entry), entry.value);
                 } else {
                     for (try iterableValues(allocator, arg.value)) |item| {
@@ -1877,4 +1891,51 @@ test "parse undefined captures mutable alias names and stable subscript call ide
     try std.testing.expectEqualStrings("", try (try evaluate(a, "missing.field.call()", host)).text(a));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "missing + 1", host));
     try std.testing.expectError(error.UndefinedJinjaValue, checkedAttribute(original, "__reduce__"));
+}
+
+test "set expressions preserve aliases comparisons iteration and typed map conversion" {
+    const Fixture = struct {
+        left: Value,
+        right: Value,
+        pairs: Value,
+        fn resolve(context: *anyopaque, name: []const u8, _: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (std.mem.eql(u8, name, "left")) return self.left;
+            if (std.mem.eql(u8, name, "right")) return self.right;
+            if (std.mem.eql(u8, name, "pairs")) return self.pairs;
+            return .undefined;
+        }
+        fn call(_: *anyopaque, name: []const u8, _: []const Argument, _: std.mem.Allocator) !Value {
+            if (std.mem.eql(u8, name, "zip")) return .{ .string = "host zip" };
+            return error.UnsupportedJinjaCall;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var context = Fixture{
+        .left = try sets.construct(a, try evaluate(a, "[1,2,1.0]", null)),
+        .right = try sets.construct(a, try evaluate(a, "[2,3]", null)),
+        .pairs = try sets.construct(a, try evaluate(a, "[(1,'one'),(2,'two')]", null)),
+    };
+    const host = Host{ .context = &context, .resolve = Fixture.resolve, .call = Fixture.call };
+    const alias = context.left;
+    try std.testing.expect((try evaluate(a, "1.0 in left", host)).boolean);
+    try std.testing.expect(!(try evaluate(a, "left is mapping or left is sequence or left is callable", host)).boolean);
+    try std.testing.expect((try evaluate(a, "left is iterable", host)).boolean);
+    try std.testing.expectEqualStrings("[1, 2, 3]", try (try evaluate(a, "left.union(right)|list|sort", host)).text(a));
+    try std.testing.expectEqualStrings("[1]", try (try evaluate(a, "(left - right)|list", host)).text(a));
+    try std.testing.expect((try evaluate(a, "left < left.union(right)", host)).boolean);
+    try std.testing.expect((try evaluate(a, "left == left.copy()", host)).boolean);
+    try std.testing.expectEqualStrings("{1: 'one', 2: 'two'}", try (try evaluate(a, "dict(pairs)", host)).text(a));
+    try std.testing.expectEqualStrings("missing", try (try evaluate(a, "left[0]|default('missing')", host)).text(a));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "left[:1]", host));
+    try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "left.keys()", host));
+    _ = try evaluate(a, "left.add(3)", host);
+    try std.testing.expect(try sets.contains(alias, .{ .number = 3.0 }));
+    _ = try evaluate(a, "left.clear()", host);
+    try std.testing.expect(!alias.truthy());
+    try std.testing.expectEqualStrings("set()", try alias.text(a));
+    try std.testing.expectEqualStrings("host zip", (try evaluate(a, "zip([], default=[])", host)).string);
+    try std.testing.expectEqualStrings("[]", try (try evaluate(a, "zip(missing)|list", null)).text(a));
 }
