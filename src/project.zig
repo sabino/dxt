@@ -257,7 +257,7 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
         deinitRunResults(runtime.allocator, compile_rows.items);
         compile_rows.deinit(runtime.allocator);
     }
-    const compile_result = compileSelectedModelsWithResults(runtime, &graph, selected, target_dir, true, true, &compile_rows) catch |err| {
+    const compile_result = compileWithHost(runtime, &graph, selected, target_dir, &compile_rows, stdout) catch |err| {
         if (err == error.OutOfMemory) return err;
         _ = try writeManifest(runtime, &graph, target_dir);
         try writeRunResults(runtime, target_dir, compile_rows.items);
@@ -309,7 +309,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
         deinitRunResults(runtime.allocator, compile_rows.items);
         compile_rows.deinit(runtime.allocator);
     }
-    const compile_result = if (options.docs_compile) compileSelectedModelsWithResults(runtime, &graph, selected, target_dir, true, true, &compile_rows) catch |err| {
+    const compile_result = if (options.docs_compile) compileWithHost(runtime, &graph, selected, target_dir, &compile_rows, stdout) catch |err| {
         if (err == error.OutOfMemory) return err;
         _ = try writeManifest(runtime, &graph, target_dir);
         try writeRunResults(runtime, target_dir, compile_rows.items);
@@ -1976,6 +1976,20 @@ fn targetDir(runtime: Runtime, options: Options) ![]const u8 {
     const target_path = options.target_path orelse project_loader.graphDefaultTarget(runtime, options.project_dir) catch "target";
     if (std.fs.path.isAbsolute(target_path)) return target_path;
     return try pathJoin(runtime.allocator, &.{ options.project_dir, target_path });
+}
+
+fn compileWithHost(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, rows: *std.ArrayList(run_results.NodeResult), stdout: *Io.Writer) !CompileResult {
+    const db_path = duckdb.databasePath(runtime.allocator, target_dir, graph) catch |err| switch (err) {
+        error.UnsupportedDuckDbPath => try runtime.allocator.dupe(u8, graph.database_path orelse return err),
+        else => return err,
+    };
+    defer runtime.allocator.free(db_path);
+    var host = try commands.OperationHost.initLazy(runtime, graph, db_path, stdout);
+    defer host.deinit();
+    const previous = graph.execution_hooks;
+    graph.execution_hooks = host.host();
+    defer graph.execution_hooks = previous;
+    return compileSelectedModelsWithResults(runtime, graph, selected, target_dir, true, true, rows);
 }
 
 fn compileSelectedModels(runtime: Runtime, graph: *Graph, selected: []const selector.SelectedResource, target_dir: []const u8, include_singular_tests: bool, include_analyses: bool) !CompileResult {

@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import duckdb
 
 from test_usability_commands import core_runner
 from test_usability_artifacts import contracts
@@ -41,6 +42,7 @@ def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path
     oracle = core_runner.invoke(["--quiet", *args, *common, "--target-path", str(core_target), "--select", "bad", "--no-partial-parse"])
     assert not oracle.success
     contracts.assert_artifact(native_target / "run_results.json")
+
     actual = json.loads((native_target / "run_results.json").read_text())
     assert actual["args"]["which"] == command
     assert {(row["unique_id"], row["status"], row["compiled"], row["failures"]) for row in actual["results"]} == {("model.compile_tasks.bad", "error", False, None)}
@@ -80,3 +82,30 @@ def test_compile_seed_emits_success_without_sql_execution(tmp_path, core_runner)
     for field in ["unique_id", "status", "compiled", "compiled_code", "message", "failures", "adapter_response"]:
         assert native_row[field] == core_row[field], field
     contracts.assert_artifact(native_target / "run_results.json")
+
+
+@pytest.mark.parametrize("commit", [False, True])
+def test_compile_database_jinja_and_statement_transactions_match_core(tmp_path, core_runner, commit):
+    observed = {}
+    for engine in ["native", "core"]:
+        project = tmp_path / engine
+        project_pair(project)
+        (project / "models/bad.sql").unlink()
+        (project / "models/query.sql").write_text("""{% if execute %}
+{% set result = run_query('select 7 as id') %}
+{% call statement('create_rows') %}create table created as select 9 as id{% endcall %}
+""" + ("{% do adapter.commit() %}\n" if commit else "") + """select {{ result.columns[0].values()[0] }} as id
+{% else %}select 0 as id{% endif %}""")
+        common = ["compile", "--project-dir", str(project), "--profiles-dir", str(project), "--select", "query"]
+        if engine == "native":
+            completed = subprocess.run([DXT, *common], capture_output=True, text=True)
+            assert completed.returncode == 0, completed.stderr
+        else:
+            completed = core_runner.invoke(["--quiet", *common, "--no-partial-parse"])
+            assert completed.success, completed.exception
+        artifact = json.loads((project / "target/run_results.json").read_text())["results"][0]
+        with duckdb.connect(str(project / "warehouse.duckdb")) as database:
+            count = database.execute("select count(*) from information_schema.tables where table_name='created'").fetchone()[0]
+        observed[engine] = (artifact["compiled_code"].strip(), artifact["status"], count)
+        contracts.assert_artifact(project / "target/run_results.json")
+    assert observed["native"] == observed["core"] == ("select 7 as id", "success", int(commit))
