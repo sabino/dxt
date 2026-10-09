@@ -116,6 +116,35 @@ jobs:
           path: reports/pytest-${{ matrix.python-version }}.xml
           if-no-files-found: ignore
 
+  performance:
+    name: cold and warm native performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
+      - name: Build release-safe binary
+        run: zig build -Doptimize=ReleaseSafe
+      - name: Certify compiled SQL and cold/warm budgets against Core
+        run: python scripts/check_performance.py --report .agent/runs/performance.json
+      - name: Upload measured performance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-performance
+          path: .agent/runs/performance.json
+          if-no-files-found: error
+
   snapshot-oracle:
     name: dbt snapshot oracle
     runs-on: ubuntu-latest
