@@ -83,3 +83,31 @@ def test_failed_model_compilation_preserves_completed_write_without_compiled_fie
         assert node['compiled_path'] is None
         assert node.get('compiled_code') is None
         assert (project / node['build_path']).read_text() == 'actual completed compile write'
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('command', ['compile', 'run', 'build'])
+@pytest.mark.parametrize('outer_write', [False, True])
+def test_ephemeral_compilation_write_belongs_to_its_own_resource(tmp_path, configuration_oracle, request, adapter, command, outer_write):
+    pair = setup_pair(tmp_path, configuration_oracle, request, adapter)
+    pair.write('models/marts/input.sql', "{{ config(materialized='ephemeral') }}{% if execute %}{{ write('actual ephemeral compilation write') }}{% endif %}select 1 as id")
+    write = "{% if execute %}{{ write('actual outer compilation write') }}{% endif %}" if outer_write else ''
+    pair.write('models/marts/rendered.sql', "{{ config(materialized='write_probe') }}" + write + "select * from {{ ref('input') }}")
+    own_path = 'target/run/configuration_fixture/models/marts/rendered.sql'
+    expected_early = json.dumps(own_path) if outer_write else 'none'
+    pair.write('macros/materialization.sql', "{% materialization write_probe, default %}"
+               "{% if model.get('build_path') != " + expected_early + " %}{{ exceptions.raise_compiler_error('ephemeral write replaced outer resource provenance') }}{% endif %}"
+               "{% call noop_statement('main', message='OK') %}-- actual later materialization statement{% endcall %}"
+               "{{ return({'relations': []}) }}{% endmaterialization %}")
+    manifests = pair.invoke(command)
+    for manifest, project in zip(manifests, pair.projects):
+        node = manifest['nodes']['model.configuration_fixture.rendered']
+        assert node['build_path'] == (own_path if outer_write or command != 'compile' else None)
+        if outer_write:
+            # Materializations write their later main statement here;
+            # compile itself retains the completed earlier template write.
+            path = project / 'target/run/configuration_fixture/models/marts/rendered.sql'
+            if command == 'compile':
+                assert path.read_text() == 'actual outer compilation write'
+        path = project / 'target/run/configuration_fixture/models/marts/input.sql'
+        assert path.read_text() == 'actual ephemeral compilation write'

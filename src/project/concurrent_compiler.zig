@@ -172,7 +172,8 @@ fn compileResource(runtime: types.Runtime, graph_readonly: *const types.Graph, r
         row.compiled_override = false;
         row.message = if (@import("compile_diagnostics.zig").message(err)) |message| try runtime.allocator.dupe(u8, message) else try std.fmt.allocPrint(runtime.allocator, "Compilation failed: {s}", .{@errorName(err)});
     };
-    if (host.written_path) |path| {
+    const written_path = if (resource == .node) host.writtenPathForResource(resource.node.unique_id) else host.written_path;
+    if (written_path) |path| {
         row.build_path = try runtime.allocator.dupe(u8, path);
         row.owns_build_path = true;
     }

@@ -1488,7 +1488,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
         const compilation_started = execution_clock.now(runtime.io);
         compileConcurrentNode(runtime, &graph, &node, db_path, &compilation_dependencies) catch |err| {
             var row = resource.result("error");
-            if (host.written_path) |path| {
+            if (host.writtenPathForResource(node.unique_id)) |path| {
                 row.build_path = try runtime.allocator.dupe(u8, path);
                 row.owns_build_path = true;
             }
@@ -1501,7 +1501,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
             return row;
         };
         const compilation_completed = execution_clock.now(runtime.io);
-        node.build_path = host.written_path orelse node.build_path;
+        node.build_path = host.writtenPathForResource(node.unique_id) orelse node.build_path;
         try host.commit();
         const execution = if (std.mem.eql(u8, node.resource_type, "seed")) executeSeedAppendingResult(runtime, db_path, project_dir, &graph, &node, &rows) else executeModelAppendingResult(runtime, db_path, &graph, &node, &rows);
         _ = execution catch |err| blk: {

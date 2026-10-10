@@ -154,6 +154,7 @@ pub const OperationHost = struct {
     current_node: ?*const types.Node = null,
     written_path: ?[]const u8 = null,
     written_node_id: ?[]const u8 = null,
+    written_paths: std.StringHashMapUnmanaged(?[]const u8) = .empty,
     adapter_state: @import("adapter_context.zig").State = .{},
     last_response: expression.Value = .none,
     warned: std.ArrayList([]const u8) = .empty,
@@ -242,8 +243,7 @@ pub const OperationHost = struct {
     }
 
     pub fn writtenPathForResource(self: *const OperationHost, id: []const u8) ?[]const u8 {
-        const written_id = self.written_node_id orelse return null;
-        return if (std.mem.eql(u8, written_id, id)) self.written_path else null;
+        return self.written_paths.get(id) orelse null;
     }
 
     fn getWrittenPath(raw: *anyopaque, id: []const u8) ?[]const u8 {
@@ -293,6 +293,7 @@ pub const OperationHost = struct {
             self.runtime.allocator.destroy(pool);
         }
         self.stored.deinit(self.runtime.allocator);
+        self.written_paths.deinit(self.runtime.allocator);
         self.warned.deinit(self.runtime.allocator);
         self.adapter_state.deinit(self.values.allocator());
         self.values.deinit();
@@ -320,10 +321,18 @@ pub const OperationHost = struct {
             const base = if (std.fs.path.isAbsolute(target_path)) target_path else try std.fs.path.join(a, &.{ self.graph.command_options.project_dir, target_path });
             const relative = if (std.mem.eql(u8, node.resource_type, "test")) try @import("artifact_paths.zig").relative(a, node.path, node.original_file_path) else if (node.snapshot_yaml_definition) try std.fmt.allocPrint(a, "{s}/{s}.sql", .{ node.original_file_path, node.name }) else node.original_file_path;
             const path = try std.fs.path.join(a, &.{ base, "run", node.package_name, relative });
+            const logical = try std.fs.path.join(a, &.{ target_path, "run", node.package_name, relative });
+            const owned_id = try a.dupe(u8, node.unique_id);
+            const written = try self.written_paths.getOrPut(self.runtime.allocator, owned_id);
+            if (!written.found_existing) {
+                written.key_ptr.* = owned_id;
+                written.value_ptr.* = null;
+            }
             if (std.fs.path.dirname(path)) |parent| try std.Io.Dir.cwd().createDirPath(self.runtime.io, parent);
             try std.Io.Dir.cwd().writeFile(self.runtime.io, .{ .sub_path = path, .data = payload.string });
-            self.written_path = try std.fs.path.join(a, &.{ target_path, "run", node.package_name, relative });
-            self.written_node_id = node.unique_id;
+            written.value_ptr.* = logical;
+            self.written_path = logical;
+            self.written_node_id = written.key_ptr.*;
             return .{ .string = "" };
         }
         if (std.mem.eql(u8, name, "exceptions.warn")) {

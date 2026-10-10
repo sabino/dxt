@@ -44,7 +44,7 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
     defer output.deinit();
     var host = try commands.OperationHost.init(held_runtime, &runtime_graph, db_path, &output.writer);
     defer host.deinit();
-    errdefer @import("resource_artifacts.zig").capture(runtime.allocator, body.build_path, host.written_path) catch {};
+    errdefer @import("resource_artifacts.zig").capture(runtime.allocator, body.build_path, host.writtenPathForResource(node.unique_id)) catch {};
     var journal = @import("materialization_journal.zig").Journal.init(runtime.allocator, runtime.io);
     defer journal.deinit();
     errdefer switch (held_runtime.adapter_session.?.*) {
@@ -71,7 +71,7 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
     if (body.materialized == null and try @import("postgres_materialization.zig").skipsInnerLifecycle(held_runtime, &runtime_graph, node, existing_type)) {
         try body.execute(body.context, held_runtime, &runtime_graph, node, db_path, .{ .manage_transaction = false, .file_effects = &journal, .artifact_writer = .{ .context = &host, .write = writeStockMain } });
         try runHooks(allocator, &runtime_graph, node, config, "post-hook", false);
-        try @import("resource_artifacts.zig").capture(runtime.allocator, body.build_path, host.written_path);
+        try @import("resource_artifacts.zig").capture(runtime.allocator, body.build_path, host.writtenPathForResource(node.unique_id));
         return;
     }
     try host.begin();
@@ -88,7 +88,7 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
     try host.commit();
     try journal.finalize();
     try runHooks(allocator, &runtime_graph, node, config, "post-hook", false);
-    try @import("resource_artifacts.zig").capture(runtime.allocator, body.build_path, host.written_path);
+    try @import("resource_artifacts.zig").capture(runtime.allocator, body.build_path, host.writtenPathForResource(node.unique_id));
 }
 
 fn applyRelationConfig(allocator: std.mem.Allocator, graph: *const types.Graph, node: *const types.Node, config: std.json.Value, target: @import("dbt_context.zig").RelationDef, existing: @import("expression.zig").Value, materialized: []const u8) !void {
