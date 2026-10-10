@@ -81,13 +81,13 @@ capacity certificate also passes all 708 native tests and all 81 actual Core
 seed/alias cases. Its native budget retains the genuine 16,384-cell capacity
 buffer, while active buffers still traverse future mutable aliases. The same
 unchanged wide-seed execution improves from 321 seconds through 145 seconds to
-31.5 seconds, against Core's 8.4 seconds. This closes the observed minutes-long
-alias traversal; production ReleaseSafe timing and the final combined query
-transport certificate remain required before performance completion.
-The unchanged wide seed also exposes repeated alias traversal of the full
-Agate/loop graph. The expression worker owns a bounded performance diagnosis
-and any reviewed ownership-preserving repair; the running unchanged fixture
-remains intact and no reduced test shape can replace its completion evidence.
+31.5 seconds, against Core's 8.4 seconds, in Debug. The same unchanged fixture
+also passes on the immutable ReleaseSafe CLI: 6.15 seconds native and 15.41
+seconds Core in that shared-machine invocation, including exact SQL/artifact
+parity, 70,000 placeholders, 10,000 rows and both sums of 49,995,000. This closes
+the observed minutes-long alias traversal with production-build evidence;
+it is not a universal speed claim. The original slow fixture remains intact.
+The final combined query transport must retain this complete workload.
 The oracle worker also owns native result transport, embedded-NUL/composite
 parameters and the authored cursor contract, with the cache worker owning a
 separate PostgreSQL typed-cell/description module. The release worker's ELF
@@ -120,8 +120,15 @@ hooks and compiler local-callable routing immediately before callable-name
 resolution; these hunks are separate from the expression worker's alias
 publication and seed-performance changes. Constructor wiring stays with the
 oracle worker.
-The source worker's 62 Decimal comparisons pass on both the first and corrected
-typed CLIs. Its independent transport review found cursor
+The source worker's 62 Decimal comparisons pass on the first, corrected and
+expanded typed CLIs. The expanded query gate retains 182 passing and seven
+failing cases: type subscription, keyword field names, infinite timestamps and
+parameter adaptation exposed concrete native differences, plus a fixture's
+process-specific memory address. Corrections use actual Core witnesses; only
+the address output changes to deterministic bytes/format/type evidence. UUID
+safety and bytea lifecycle/method companions remain pending the final combined
+native build and unchanged actual Core comparisons. Its independent transport
+review found cursor
 consumption, eager Agate serialization and duplicate-name mismatches; the oracle
 worker owns their corrections. The supervisor owns final integration, docs and
 publication. The release worker preserves completed ignored proof data through
