@@ -66,10 +66,10 @@ def write_project(path: Path, files: dict[str, str], database: Path | None = Non
     return database
 
 
-def run_dxt(project: Path, command: str, *args: str, target: Path | None = None):
+def run_dxt(project: Path, command: str, *args: str, target: Path | None = None, cwd: Path | None = None):
     return subprocess.run(
         [DXT, command, *args, '--project-dir', str(project), *([] if command == 'debug' else ['--target-path', str(target or project / 'target')])],
-        cwd=ROOT, text=True, capture_output=True,
+        cwd=cwd or ROOT, text=True, capture_output=True,
     )
 
 
@@ -90,7 +90,7 @@ def test_init_scaffolds_a_buildable_duckdb_project(tmp_path):
     result = subprocess.run([DXT, 'init', 'starter', '--project-dir', str(tmp_path)], text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     project = tmp_path / 'starter'
-    build = run_dxt(project, 'build')
+    build = run_dxt(project, 'build', cwd=project)
     assert build.returncode == 0, build.stderr
     data = artifact(project)
     assert data['args']['which'] == 'build'
@@ -103,10 +103,14 @@ def test_init_scaffolds_a_buildable_duckdb_project(tmp_path):
 
 
 @pytest.mark.parametrize('name', ['../escape', 'invalid-name', '1project'])
-def test_init_rejects_invalid_names_without_writing(tmp_path, name):
+def test_init_rejects_invalid_names_without_scaffolding(tmp_path, name):
     result = subprocess.run([DXT, 'init', name, '--project-dir', str(tmp_path)], text=True, capture_output=True)
     assert result.returncode == 2
-    assert list(tmp_path.iterdir()) == []
+    assert [path.name for path in tmp_path.iterdir()] == ['logs']
+    assert [path.name for path in (tmp_path / 'logs').iterdir()] == ['dbt.log']
+    diagnostic = 'project name must contain only letters, digits, and underscores and start with a letter or underscore'
+    assert diagnostic in result.stderr
+    assert diagnostic in (tmp_path / 'logs' / 'dbt.log').read_text()
 
 
 def test_init_preserves_existing_project_and_profile(tmp_path):
@@ -414,7 +418,7 @@ def test_core_1105_statement_auto_begin_false_and_empty_select_metadata(tmp_path
     for engine in ('dxt', 'core'):
         project = tmp_path / engine
         database = write_project(project, {'macros/statement.sql': macro})
-        result = run_dxt(project, 'run-operation', 'statement_rows') if engine == 'dxt' else invoke_core(core_runner, project, 'run-operation', 'statement_rows')
+        result = run_dxt(project, 'run-operation', 'statement_rows', '--no-use-colors') if engine == 'dxt' else invoke_core(core_runner, project, 'run-operation', 'statement_rows', '--no-use-colors')
         assert (result.returncode == 0) if engine == 'dxt' else result.success
         if engine == 'dxt':
             assert 'id\n0\n' in result.stdout
