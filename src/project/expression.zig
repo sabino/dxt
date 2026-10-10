@@ -1897,7 +1897,7 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
     }
     if (std.mem.eql(u8, name, "as_text")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
-        return .{ .string = try value.text(allocator) };
+        return .{ .string = try textWithHost(allocator, value, host) };
     }
     if (std.mem.eql(u8, name, "as_native") or std.mem.eql(u8, name, "as_bool") or std.mem.eql(u8, name, "as_number")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
@@ -1944,18 +1944,18 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
             return fallback;
         });
     }
-    if (std.mem.eql(u8, name, "upper") or std.mem.eql(u8, name, "lower")) return .{ .string = try unicode.convert(allocator, try value.text(allocator), if (std.mem.eql(u8, name, "upper")) .upper else .lower) };
+    if (std.mem.eql(u8, name, "upper") or std.mem.eql(u8, name, "lower")) return .{ .string = try unicode.convert(allocator, try textWithHost(allocator, value, host), if (std.mem.eql(u8, name, "upper")) .upper else .lower) };
     if (std.mem.eql(u8, name, "trim")) {
         const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{"chars"}, &.{.none}, 0);
         if (bound[0] != .string and bound[0] != .none) return error.JinjaTypeError;
-        return .{ .string = try unicode.strip(try value.text(allocator), if (bound[0] == .string) bound[0].string else null, true, true) };
+        return .{ .string = try unicode.strip(try textWithHost(allocator, value, host), if (bound[0] == .string) bound[0].string else null, true, true) };
     }
     if (std.mem.eql(u8, name, "replace")) {
         const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{ "old", "new", "count" }, &.{ .undefined, .undefined, .none }, 2);
-        const text = Value{ .string = try value.text(allocator) };
+        const text = Value{ .string = try textWithHost(allocator, value, host) };
         const method_args = [_]Argument{
-            .{ .value = .{ .string = try bound[0].text(allocator) } },
-            .{ .value = .{ .string = try bound[1].text(allocator) } },
+            .{ .value = .{ .string = try textWithHost(allocator, bound[0], host) } },
+            .{ .value = .{ .string = try textWithHost(allocator, bound[1], host) } },
             .{ .value = if (bound[2] == .none) .{ .integer = "-1" } else bound[2] },
         };
         return (try pureMethod(allocator, text, "replace", &method_args, host)) orelse error.UnsupportedJinjaFilter;

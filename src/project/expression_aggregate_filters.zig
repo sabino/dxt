@@ -44,12 +44,12 @@ pub fn callWithHost(a: std.mem.Allocator, name: []const u8, value: Value, args: 
         const bound = try arguments.bind(a, args, &.{ "d", "attribute" }, &.{ .{ .string = "" }, .none }, 0);
         const path = try attributes.parts(a, bound[1]);
         const prepared = if (bound[1] != .none) try sequence.iter(a, value) else null;
-        const separator = try bound[0].text(a);
+        const separator = try expression.textWithHost(a, bound[0], host);
         const iterator = prepared orelse try sequence.iter(a, value);
         var output: std.ArrayList(u8) = .empty;
         var count: usize = 0;
         while (try sequence.next(a, iterator, host)) |item| {
-            const text = try (try attributes.get(a, item, path, .none, host)).text(a);
+            const text = try expression.textWithHost(a, try attributes.get(a, item, path, .none, host), host);
             if (count != 0) try output.appendSlice(a, separator);
             try output.appendSlice(a, text);
             count += 1;
@@ -132,4 +132,32 @@ test "aggregate callbacks are evaluated only through the failing row" {
         try std.testing.expectError(error.InvalidJinjaArguments, expression.filterValue(a, name, stream, &.{.{ .name = "attribute", .value = .{ .string = "²" } }}, host));
         try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) 1 else 0), frame.calls);
     }
+}
+
+test "text filters retain deferred rendering callbacks and mapping keys" {
+    const Frame = struct {
+        calls: usize = 0,
+        fn resolve(_: *anyopaque, _: []const u8, _: std.mem.Allocator) !Value {
+            return .undefined;
+        }
+        fn call(context: *anyopaque, _: []const u8, _: []const expression.Argument, _: std.mem.Allocator) !Value {
+            const frame: *@This() = @ptrCast(@alignCast(context));
+            frame.calls += 1;
+            return .{ .string = "<LoopContext 1/2>" };
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var frame = Frame{};
+    const host = expression.Host{ .context = &frame, .resolve = Frame.resolve, .call = Frame.call };
+    const loop = Value{ .object = &.{.{ .key = "__dxt_repr", .value = .{ .callable = "repr" } }} };
+    try std.testing.expectEqualStrings("<LoopContext 1/2>", (try expression.filterValue(a, "join", .{ .list = &.{loop} }, &.{}, host)).string);
+    try std.testing.expectEqualStrings("a<LoopContext 1/2>b", (try expression.filterValue(a, "join", .{ .list = &.{ .{ .string = "a" }, .{ .string = "b" } } }, &.{.{ .value = loop }}, host)).string);
+    for ([_][]const u8{ "as_text", "trim", "lower", "upper" }) |name| _ = try expression.filterValue(a, name, loop, &.{}, host);
+    try std.testing.expectEqualStrings("<row 1/2>", (try expression.filterValue(a, "replace", loop, &.{ .{ .value = .{ .string = "LoopContext" } }, .{ .value = .{ .string = "row" } } }, host)).string);
+    try std.testing.expectEqualStrings("x=%3CLoopContext+1%2F2%3E", (try expression.filterValue(a, "urlencode", .{ .list = &.{.{ .tuple = &.{ .{ .string = "x" }, loop } }} }, &.{}, host)).string);
+    const proxy = Value{ .object = &.{ .{ .key = "__dxt_mapping_uppercase", .value = .{ .boolean = false } }, .{ .key = "__dxt_mapping_source", .value = .{ .object = &.{.{ .key = "ab", .value = .{ .string = "ignored" } }} } }, .{ .key = "__dxt_private", .value = .{ .string = "hidden" } } } };
+    try std.testing.expectEqualStrings("a=b", (try expression.filterValue(a, "urlencode", proxy, &.{}, host)).string);
+    try std.testing.expectEqual(@as(usize, 8), frame.calls);
 }

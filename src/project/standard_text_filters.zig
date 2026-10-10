@@ -27,9 +27,9 @@ pub fn callWithHost(a: std.mem.Allocator, name: []const u8, value: Value, args: 
     return .{ .string = try wrap(a, value.string, bound[0], bound[1].truthy(), separator, bound[3]) };
 }
 
-fn quote(a: std.mem.Allocator, value: Value, query: bool) ![]const u8 {
+fn quote(a: std.mem.Allocator, value: Value, query: bool, host: ?expression.Host) ![]const u8 {
     const binary = value.attribute("__dxt_binary");
-    const text = if (binary == .string) binary.string else try value.text(a);
+    const text = if (binary == .string) binary.string else try expression.textWithHost(a, value, host);
     var out: std.Io.Writer.Allocating = .init(a);
     for (text) |byte| {
         if (std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "-._~", byte) != null or (!query and byte == '/')) {
@@ -42,13 +42,15 @@ fn quote(a: std.mem.Allocator, value: Value, query: bool) ![]const u8 {
 }
 
 fn urlencode(a: std.mem.Allocator, value: Value, host: ?expression.Host) ![]const u8 {
-    if (value == .string or !expression.isIterable(value)) return quote(a, value, false);
+    if (value == .string or !expression.isIterable(value)) return quote(a, value, false, host);
     var out: std.Io.Writer.Allocating = .init(a);
     var count: usize = 0;
-    if (value == .object and @import("expression_sequence.zig").kind(value) == null and value.attribute("__dxt_iterable") != .list and !@import("set_context.zig").isSet(value)) {
+    // Jinja special-cases actual dicts. Mapping providers such as pytz's
+    // LazyDict instead supply their visible keys to pair unpacking.
+    if (value == .object and expression.mappingSource(value) == null and @import("expression_sequence.zig").kind(value) == null and value.attribute("__dxt_iterable") != .list and !@import("set_context.zig").isSet(value)) {
         for (value.object) |entry| {
             if (count != 0) try out.writer.writeByte('&');
-            try out.writer.print("{s}={s}", .{ try quote(a, expression.entryKey(entry), true), try quote(a, entry.value, true) });
+            try out.writer.print("{s}={s}", .{ try quote(a, expression.entryKey(entry), true, host), try quote(a, entry.value, true, host) });
             count += 1;
         }
     } else {
@@ -61,7 +63,7 @@ fn urlencode(a: std.mem.Allocator, value: Value, host: ?expression.Host) ![]cons
             const member = (try sequence.next(a, pair, host)) orelse return error.JinjaValueError;
             if (try sequence.next(a, pair, host) != null) return error.JinjaValueError;
             if (count != 0) try out.writer.writeByte('&');
-            try out.writer.print("{s}={s}", .{ try quote(a, key, true), try quote(a, member, true) });
+            try out.writer.print("{s}={s}", .{ try quote(a, key, true, host), try quote(a, member, true, host) });
             count += 1;
         }
     }
