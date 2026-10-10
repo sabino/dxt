@@ -38,10 +38,11 @@ Eight functional Core tracks and four proposed feature tracks have native
 implementations and focused evidence; release acceptance is a separate track.
 The current combined candidate includes reviewed compile/docs durability,
 Core retry interoperability, declared-secret diagnostic publication and
-authored catalog hook/dispatch corrections. A fresh native/CLI build and all
-focused checks precede publication, followed by the complete unfiltered suite,
-unchanged public projects, release/install/performance checks and actual
-x86_64/ARM CI. Exact candidate identities, counts and outcomes are recorded in
+authored catalog hook/dispatch corrections. Development commits remain in a
+draft PR while candidate-specific builds and affected focused checks run.
+Merge acceptance requires the complete unfiltered suite, unchanged public
+projects, release/install/performance checks and actual x86_64/ARM CI on the
+final candidate. Exact source identities, counts and outcomes are recorded in
 [PR #221](https://github.com/sabino/dxt/pull/221) and
 [issue #220](https://github.com/sabino/dxt/issues/220).
 
@@ -125,6 +126,39 @@ and CLI builds, exact 5,819-case collection and original fixture builders are
 required; preserve strict artifact/row/rollback checks and default all-directory
 retention. Its result is focused evidence only. Both complete platform suites
 and candidate-specific public/release gates remain required before acceptance.
+
+The `d5da592` focused run completes all 664 original cases with zero failures,
+errors or skipped/xfail cases. The complete report and original builder receipt
+are validated; all tracked source bytes are held and both private build caches
+close normally. This closes that source's focused regressions, not the release.
+Its actual x86_64 native tests and 326 Python 3.11 developer checks pass, and
+seven main CI jobs pass while the two complete platform suites remain active.
+
+Actual ARM native installation exposes a separate ownership defect after
+815 of 816 tests pass. The workflow identity fixture supplies string literals
+where resolved identities require owned strings. Allocating its six components
+gets past that teardown in the first actual ARM diagnostic, which then exposes
+borrowed workflow deferred-relation IDs in a graph-owned collection. The
+workflow worker owns the bounded production correction: stage graph-allocator
+copies of both relation strings, clean partial replacements on error, and
+release previous bindings only after the complete replacement succeeds. Keep
+input aliases, physical naming, ephemeral exclusion and ordering intact. A new
+freeing-allocator regression checks mutation isolation, repeated binding,
+allocation-failure preservation and empty cleanup. The corrected worker source
+passes a genuine clean x86_64 native run with 817 of 817 tests; actual ARM
+validation and affected both-adapter workflow execution remain required.
+
+The supervisor integrates only the fixture and production commits after the
+664-case source closes; diagnostic workflow changes stay on separate branches.
+The native source fingerprint changes, so earlier binaries, public/performance
+results and release archives cannot certify this corrected runtime. Build a
+fresh CLI/ReleaseSafe binary and run the original applicable checks. Once the
+bounded checks pass, push the next development candidate and run both complete
+5,819-case suites. Superseded jobs from the already blocked prior candidate may
+be cancelled by configured CI concurrency; record them as incomplete and never
+as complete compatibility evidence. Preserve the completed negative reports
+and the 664-case result. No cases may be filtered or skipped in the final
+canonical suites; merge readiness still requires all applicable green gates.
 
 Fresh `8fe99a7` local gates pass the unchanged PostgreSQL dbt-utils ladder
 (seven Native/Core command pairs), all six public Jaffle steps, a genuine
