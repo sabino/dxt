@@ -23,6 +23,11 @@ pub const Pool = struct {
             const scoped_key = try std.fmt.allocPrint(allocator, "{d}:{s}:{s}", .{ scope.len, scope, key });
             if (self.values.get(scoped_key)) |previous| return previous;
             var constant = constants.globalString(value);
+            if (expression.floatProtocol(value)) |number| {
+                constant = try expression.floatValue(allocator, number);
+            } else if (expression.complexProtocol(value)) |number| {
+                constant = try expression.complexValue(allocator, number);
+            }
             if (value == .tuple) {
                 const members = try expression.allocateValues(allocator, value.tuple.len);
                 for (value.tuple, members) |member, *target| target.* = try self.internDepth(allocator, function, member, depth + 1);
@@ -70,4 +75,9 @@ test "function constants remain distinct and mutable literal containers stay fre
     const right = try pool.intern(a, "macro.first", .{ .list = &values });
     try std.testing.expect(left.list.ptr != right.list.ptr);
     try std.testing.expect(left.list[0].integer.ptr == right.list[0].integer.ptr);
+    const default_float = (try constants.probe(a, "'invalid'|float")).?;
+    const first_float = try pool.intern(a, "macro.first", default_float);
+    const second_float = try pool.intern(a, "macro.second", default_float);
+    try std.testing.expect(expression.equalValues(first_float, second_float));
+    try std.testing.expect(!try expression.testValue("sameas", first_float, &.{.{ .value = second_float }}));
 }
