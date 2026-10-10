@@ -56,6 +56,10 @@ pinned Core behavior on both adapters; no alternate fixture bypass is accepted.
 The bounded native adaptive-sort helper records its pinned upstream source and
 reuses the shipped PSF notices. Complete focused certification precedes a fresh
 unfiltered run, final public/release checks and both architecture CI suites.
+The reviewed filter and adaptive-sort implementation are integrated, and the
+fresh unfiltered collection contains 5,760 tests. Product-source edits are now
+held while the worker certifies all 134 actual Core filter comparisons and the
+corrected base-context and quiet-log fixtures on its frozen native CLI.
 
 The preceding candidate passes both unchanged public-project ladders and the
 original autocommit check. Its actual x86_64 and ARM native/install CI jobs,
