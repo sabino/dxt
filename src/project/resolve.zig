@@ -130,6 +130,10 @@ pub fn findMacroIdForAdapterDispatch(graph: *const Graph, current_package: []con
         }
     }
 
+    if (std.mem.eql(u8, namespace, "dbt") and hasMacroPackage(graph, "dbt")) {
+        return findDispatchMacroIdInConfiguredOrder(graph, &.{ graph.project_name, "dbt" }, adapter_prefixes, macro_name);
+    }
+
     const use_dependency_namespace = namespace.len != 0 and
         !std.mem.eql(u8, namespace, graph.project_name) and
         !std.mem.eql(u8, namespace, "dbt") and
@@ -787,6 +791,48 @@ test "adapter dispatch lookup follows prefixes and package search order" {
     try std.testing.expectEqualStrings("macro.dbt.default__internal_only", findMacroIdForAdapterDispatch(&graph, "pkg", "internal_only", "dbt", prefixes).?);
     try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "pkg", "pkg.render", null, prefixes) == null);
     try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "pkg", "missing", "pkg", prefixes) == null);
+}
+
+test "explicit dbt dispatch searches project packages before adapter prefixes" {
+    const adapters = [_]struct { name: []const u8, package: []const u8 }{
+        .{ .name = "duckdb", .package = "dbt_duckdb" },
+        .{ .name = "postgres", .package = "dbt_postgres" },
+    };
+    for (adapters) |adapter| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo", .adapter_type = adapter.name };
+        defer graph.deinit();
+        const prefixes = &[_][]const u8{ adapter.name, "default" };
+        const adapter_catalog = try std.fmt.allocPrint(graph.allocator, "{s}__get_catalog", .{adapter.name});
+        const adapter_stock = try std.fmt.allocPrint(graph.allocator, "{s}__stock_only", .{adapter.name});
+        const bundled_catalog_id = try std.fmt.allocPrint(graph.allocator, "macro.{s}.{s}", .{ adapter.package, adapter_catalog });
+        const bundled_stock_id = try std.fmt.allocPrint(graph.allocator, "macro.{s}.{s}", .{ adapter.package, adapter_stock });
+
+        try appendMacro(&graph, "demo", "default__get_catalog");
+        try appendMacro(&graph, adapter.package, adapter_catalog);
+        try appendMacro(&graph, adapter.package, adapter_stock);
+        // Preserve the existing fallback when the dbt package is not loaded.
+        try std.testing.expectEqualStrings(bundled_catalog_id, findMacroIdForAdapterDispatch(&graph, "pkg", "get_catalog", "dbt", prefixes).?);
+
+        try appendMacro(&graph, "dbt", "get_catalog");
+        try appendMacro(&graph, "dbt", "default__get_catalog");
+        try appendMacro(&graph, "dbt", "default__core_only");
+        try std.testing.expectEqualStrings("macro.demo.default__get_catalog", findMacroIdForAdapterDispatch(&graph, "dbt", "get_catalog", "dbt", prefixes).?);
+        try std.testing.expectEqualStrings(bundled_stock_id, findMacroIdForAdapterDispatch(&graph, "demo", "stock_only", "dbt", prefixes).?);
+        try std.testing.expectEqualStrings("macro.dbt.default__core_only", findMacroIdForAdapterDispatch(&graph, "demo", "core_only", "dbt", prefixes).?);
+        // Unqualified dispatch still follows the existing prefix-first path.
+        try std.testing.expectEqualStrings(bundled_catalog_id, findMacroIdForAdapterDispatch(&graph, "dbt", "get_catalog", null, prefixes).?);
+
+        try appendMacro(&graph, "demo", adapter_catalog);
+        const root_catalog_id = try std.fmt.allocPrint(graph.allocator, "macro.demo.{s}", .{adapter_catalog});
+        try std.testing.expectEqualStrings(root_catalog_id, findMacroIdForAdapterDispatch(&graph, "dbt", "get_catalog", "dbt", prefixes).?);
+
+        try appendDispatchConfig(&graph, "dbt", &.{"dbt"});
+        try std.testing.expectEqualStrings(bundled_catalog_id, findMacroIdForAdapterDispatch(&graph, "demo", "get_catalog", "dbt", prefixes).?);
+        graph.dispatch_configs.items[0].search_order.items[0] = "missing";
+        try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "demo", "get_catalog", "dbt", prefixes) == null);
+    }
 }
 
 test "adapter dispatch configured search order overrides dependency fallback" {
