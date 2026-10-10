@@ -110,6 +110,10 @@ const CompileContext = struct {
     documentation: bool = false,
     documentation_block: bool = false,
     caller_blocks: std.ArrayList(*CallerBlock) = .empty,
+    suspended_binding_frames: std.ArrayList([]ValueBinding) = .empty,
+    lexical_frame: usize = 0,
+    next_lexical_frame: usize = 1,
+    inline_macro_depth: usize = 0,
     loop_states: std.ArrayList(*LoopFrame) = .empty,
     loop_filter_bindings: std.ArrayList([]ValueBinding) = .empty,
 
@@ -215,10 +219,38 @@ const CompileContext = struct {
             i -= 1;
             if (self.bindings.items[i].scope_depth == self.scope_depth and std.mem.eql(u8, self.bindings.items[i].name, name)) {
                 self.bindings.items[i].value = value;
+                try self.updateInlineBindings(name, value);
                 return;
             }
         }
         try self.bindings.append(self.allocator, .{ .name = name, .value = value, .scope_depth = self.scope_depth });
+        try self.updateInlineBindings(name, value);
+    }
+
+    fn updateInlineBindings(self: *CompileContext, name: []const u8, value: native_expr.Value) !void {
+        for (self.caller_blocks.items) |macro| {
+            if (!macro.inline_macro or macro.lexical_frame != self.lexical_frame or self.scope_depth > macro.scope_depth) continue;
+            var updated = false;
+            for (macro.bindings) |*binding| {
+                if (binding.scope_depth == self.scope_depth and std.mem.eql(u8, binding.name, name)) {
+                    binding.value = value;
+                    updated = true;
+                }
+            }
+            if (!updated) {
+                const bindings = try self.value_arena.allocator().alloc(ValueBinding, macro.bindings.len + 1);
+                @memcpy(bindings[0..macro.bindings.len], macro.bindings);
+                bindings[macro.bindings.len] = .{ .name = name, .value = value, .scope_depth = self.scope_depth };
+                macro.bindings = bindings;
+            }
+        }
+    }
+
+    fn enterLexicalFrame(self: *CompileContext) usize {
+        const previous = self.lexical_frame;
+        self.lexical_frame = self.next_lexical_frame;
+        self.next_lexical_frame += 1;
+        return previous;
     }
 
     fn host(self: *CompileContext) native_expr.Host {
@@ -1084,6 +1116,41 @@ fn renderRange(context: *CompileContext, authored: []const u8, start: usize, aut
             defer context.allocator.free(rendered);
             try out.appendSlice(context.allocator, rendered);
         } else {
+            if (std.mem.startsWith(u8, span, "macro") and span.len > 5 and std.ascii.isWhitespace(span[5])) {
+                const block = try findCaptureBlock(sql, close + 2, end_index, "macro", "endmacro");
+                const arena = context.value_arena.allocator();
+                const declaration = std.mem.trim(u8, span[5..], " \t\r\n");
+                const paren = std.mem.indexOfScalar(u8, declaration, '(') orelse return error.UnsupportedJinja;
+                const name = std.mem.trim(u8, declaration[0..paren], " \t\r\n");
+                if (name.len == 0 or !jinja.isIdentStart(name[0])) return error.UnsupportedJinja;
+                for (name) |character| if (!jinja.isIdentChar(character)) return error.UnsupportedJinja;
+                const finish = findMatchingParen(declaration, paren) orelse return error.UnsupportedJinja;
+                if (std.mem.trim(u8, declaration[finish + 1 ..], " \t\r\n").len != 0) return error.UnsupportedJinja;
+                const macro = try arena.create(CallerBlock);
+                macro.* = .{
+                    .sql = sql,
+                    .body = .{ .start = afterTag(sql, close + 2, end_index), .end = block.start },
+                    .parameters = try macroParameters(arena, declaration[paren + 1 .. finish]),
+                    .bindings = try arena.dupe(CompileContext.ValueBinding, context.bindings.items),
+                    .vars = try arena.dupe(StaticVar, context.vars.items),
+                    .lists = try arena.dupe(StaticList, context.lists.items),
+                    .scope_depth = context.scope_depth,
+                    .macro_package = context.current_macro_package,
+                    .capture_undefined = context.capturesUndefined(),
+                    .binding_visibility = context.binding_visibility,
+                    .constant_function = try std.fmt.allocPrint(arena, "{s}:inline:{d}", .{ context.constant_function orelse context.node.unique_id, block.start }),
+                    .inline_macro = true,
+                    .lexical_frame = context.lexical_frame,
+                };
+                const callable = try std.fmt.allocPrint(arena, "__dxt_caller:{d}", .{context.caller_blocks.items.len});
+                try context.caller_blocks.append(arena, macro);
+                // dbt's MacroFuzzEnvironment rewrites declarations, while the
+                // authored call sites retain their original spelling.
+                const mangled = try std.fmt.allocPrint(arena, "dbt_macro__{s}", .{name});
+                try context.setValue(mangled, try inlineMacroValue(arena, mangled, callable, macro));
+                index = afterTag(sql, block.close, end_index);
+                continue;
+            }
             if (std.mem.eql(u8, span, "raw")) {
                 const block = try findCaptureBlock(sql, close + 2, end_index, "raw", "endraw");
                 try out.appendSlice(context.allocator, sql[close + 2 .. block.start]);
@@ -1362,6 +1429,7 @@ fn loopLength(context: *CompileContext, frame: *LoopFrame) anyerror!void {
 fn replaceContextAliases(context: *CompileContext, original: native_expr.Value, replacement: native_expr.Value) !void {
     const aliases = @import("container_methods.zig");
     for (context.bindings.items) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
+    for (context.suspended_binding_frames.items) |bindings| for (bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
     for (context.loop_filter_bindings.items) |bindings| for (bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
     for (context.caller_blocks.items) |caller| for (caller.bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
     for (context.loop_states.items) |frame| {
@@ -2001,7 +2069,33 @@ const CallerBlock = struct {
     capture_undefined: bool,
     binding_visibility: BindingVisibility,
     constant_function: []const u8,
+    inline_macro: bool = false,
+    lexical_frame: usize = 0,
 };
+
+fn inlineMacroValue(allocator: std.mem.Allocator, name: []const u8, callable: []const u8, macro: *const CallerBlock) !native_expr.Value {
+    const parameters = try native_expr.allocateValues(allocator, macro.parameters.len);
+    var specials = try macroSpecials(macro.sql, macro.body);
+    for (macro.parameters, parameters) |parameter, *value| {
+        value.* = .{ .string = parameter.name };
+        if (std.mem.eql(u8, parameter.name, "kwargs")) specials.kwargs = false;
+        if (std.mem.eql(u8, parameter.name, "varargs")) specials.varargs = false;
+    }
+    const label = try std.fmt.allocPrint(allocator, "<Macro '{s}'>", .{name});
+    const entries = try native_expr.allocateEntries(allocator, 9);
+    @memcpy(entries, &[_]native_expr.Entry{
+        .{ .key = "__dxt_callable", .value = .{ .callable = callable } },
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = label } },
+        .{ .key = "name", .value = .{ .string = name } },
+        .{ .key = "arguments", .value = .{ .tuple = parameters } },
+        .{ .key = "catch_kwargs", .value = .{ .boolean = specials.kwargs } },
+        .{ .key = "catch_varargs", .value = .{ .boolean = specials.varargs } },
+        .{ .key = "caller", .value = .{ .boolean = specials.caller } },
+    });
+    return .{ .object = entries };
+}
 
 fn macroParameters(allocator: std.mem.Allocator, declaration: []const u8) ![]const MacroParameter {
     var parameters: std.ArrayList(MacroParameter) = .empty;
@@ -2014,7 +2108,15 @@ fn macroParameters(allocator: std.mem.Allocator, declaration: []const u8) ![]con
             const eq = std.mem.indexOfScalar(u8, part, '=');
             if (eq != null) saw_default = true else if (saw_default) return error.InvalidJinjaArguments;
             if (eq) |at| if (std.mem.trim(u8, part[at + 1 ..], " \t\r\n").len == 0) return error.InvalidJinjaArguments;
-            const name = std.mem.trim(u8, if (eq) |at| part[0..at] else part, " \t\r\n");
+            const signature = std.mem.trim(u8, if (eq) |at| part[0..at] else part, " \t\r\n");
+            const colon = std.mem.indexOfScalar(u8, signature, ':');
+            const name = std.mem.trim(u8, if (colon) |at| signature[0..at] else signature, " \t\r\n");
+            if (colon) |at| {
+                // MacroFuzz validates annotation syntax without enforcing a
+                // particular type vocabulary or runtime argument type.
+                var annotation = MacroAnnotationSyntax{ .text = signature[at + 1 ..] };
+                if (!annotation.parseType(0) or !annotation.finished()) return error.InvalidJinjaArguments;
+            }
             if (name.len == 0 or !jinja.isIdentStart(name[0])) return error.InvalidJinjaArguments;
             for (name) |char| if (!jinja.isIdentChar(char)) return error.InvalidJinjaArguments;
             for (parameters.items) |previous| if (std.mem.eql(u8, previous.name, name)) return error.InvalidJinjaArguments;
@@ -2024,6 +2126,45 @@ fn macroParameters(allocator: std.mem.Allocator, declaration: []const u8) ![]con
     }
     return try parameters.toOwnedSlice(allocator);
 }
+
+const MacroAnnotationSyntax = struct {
+    text: []const u8,
+    offset: usize = 0,
+
+    fn skipWhitespace(self: *MacroAnnotationSyntax) void {
+        while (self.offset < self.text.len and std.ascii.isWhitespace(self.text[self.offset])) self.offset += 1;
+    }
+
+    fn parseType(self: *MacroAnnotationSyntax, depth: usize) bool {
+        if (depth >= max_macro_render_depth) return false;
+        self.skipWhitespace();
+        if (self.offset == self.text.len or !jinja.isIdentStart(self.text[self.offset])) return false;
+        self.offset += 1;
+        while (self.offset < self.text.len and jinja.isIdentChar(self.text[self.offset])) self.offset += 1;
+        self.skipWhitespace();
+        if (self.offset == self.text.len or self.text[self.offset] != '[') return true;
+        self.offset += 1;
+        self.skipWhitespace();
+        if (self.offset < self.text.len and self.text[self.offset] == ']') {
+            self.offset += 1;
+            return true;
+        }
+        while (true) {
+            if (!self.parseType(depth + 1)) return false;
+            self.skipWhitespace();
+            if (self.offset == self.text.len) return false;
+            const next = self.text[self.offset];
+            self.offset += 1;
+            if (next == ']') return true;
+            if (next != ',') return false;
+        }
+    }
+
+    fn finished(self: *MacroAnnotationSyntax) bool {
+        self.skipWhitespace();
+        return self.offset == self.text.len;
+    }
+};
 
 const MacroSpecials = struct { caller: bool = false, kwargs: bool = false, varargs: bool = false };
 
@@ -2165,6 +2306,11 @@ fn missingMacroArgument(context: *CompileContext, name: []const u8, caller: bool
 
 fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args: []const native_expr.Argument) anyerror!native_expr.Value {
     if (context.macro_render_depth >= max_macro_render_depth) return error.JinjaExpressionDepthExceeded;
+    if (caller.inline_macro and context.inline_macro_depth >= max_macro_render_depth) return error.JinjaExpressionDepthExceeded;
+    if (caller.inline_macro) context.inline_macro_depth += 1;
+    defer if (caller.inline_macro) {
+        context.inline_macro_depth -= 1;
+    };
     const previous_bindings = context.bindings;
     const previous_vars = context.vars;
     const previous_lists = context.lists;
@@ -2175,6 +2321,12 @@ fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args:
     const previous_capture = context.capture_undefined_override;
     const previous_visibility = context.binding_visibility;
     const previous_constants = context.constant_function;
+    // A callback has its own lexical bindings. Keep the suspended invocation's
+    // aliases reachable when a callback mutates a captured or supplied value.
+    try context.suspended_binding_frames.append(context.value_arena.allocator(), previous_bindings.items);
+    defer _ = context.suspended_binding_frames.pop();
+    const previous_frame = context.enterLexicalFrame();
+    defer context.lexical_frame = previous_frame;
     context.bindings = .empty;
     context.vars = .empty;
     context.lists = .empty;
@@ -2185,7 +2337,7 @@ fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args:
     context.capture_undefined_override = caller.capture_undefined;
     context.binding_visibility = caller.binding_visibility;
     context.constant_function = caller.constant_function;
-    context.macro_render_depth += 1;
+    if (!caller.inline_macro) context.macro_render_depth += 1;
     defer {
         context.bindings.deinit(context.allocator);
         context.vars.deinit(context.allocator);
@@ -2200,7 +2352,7 @@ fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args:
         context.capture_undefined_override = previous_capture;
         context.binding_visibility = previous_visibility;
         context.constant_function = previous_constants;
-        context.macro_render_depth -= 1;
+        if (!caller.inline_macro) context.macro_render_depth -= 1;
     }
     try context.bindings.appendSlice(context.allocator, caller.bindings);
     try context.vars.appendSlice(context.allocator, caller.vars);
@@ -2211,18 +2363,6 @@ fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args:
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(context.allocator);
     try renderRange(context, caller.sql, caller.body.start, caller.body.end, &out);
-    // Mutation helpers replace immutable container payloads in aliases. Keep
-    // those changes visible in suspended frames and repeated caller closures.
-    for (caller.bindings, context.bindings.items[0..caller.bindings.len]) |original, current| {
-        const changed = switch (original.value) {
-            .list => |items| current.value != .list or items.ptr != current.value.list.ptr or items.len != current.value.list.len,
-            .object => |entries| current.value != .object or entries.ptr != current.value.object.ptr or entries.len != current.value.object.len,
-            else => false,
-        };
-        if (!changed) continue;
-        for (previous_bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original.value, current.value, 0);
-        for (context.caller_blocks.items) |block| for (block.bindings) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original.value, current.value, 0);
-    }
     return context.returned orelse .{ .string = try context.value_arena.allocator().dupe(u8, out.items) };
 }
 
@@ -2231,6 +2371,8 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     defer timing.finish();
     if (context.macro_render_depth >= max_macro_render_depth) return error.JinjaExpressionDepthExceeded;
     const allocator = context.value_arena.allocator();
+    const previous_frame = context.enterLexicalFrame();
+    defer context.lexical_frame = previous_frame;
     const sql = try template_source.normalize(allocator, macro.macro_sql);
     const open_start = std.mem.indexOf(u8, sql, "{%") orelse return error.UnsupportedJinja;
     const open_end = std.mem.indexOfPos(u8, sql, open_start + 2, "%}") orelse return error.UnsupportedJinja;
@@ -2394,6 +2536,28 @@ test "dynamic native tuple configuration bypasses textual repr reparsing" {
     try std.testing.expectEqual(@as(i64, 53), calendar[1].integer);
     try std.testing.expectEqual(@as(i64, 5), calendar[2].integer);
     try std.testing.expectEqual(@as(usize, 1), config_values.get(node.effective_config, "pre-hook").?.array.items.len);
+}
+
+test "inline macros retain MacroFuzz names and lexical binding cells" {
+    const cases = [_]struct { template: []const u8, expected: []const u8 }{
+        .{ .template = "{% macro up(x) %}{{x|upper}}{% endmacro %}{{dbt_macro__up('abc')}}", .expected = "ABC" },
+        .{ .template = "{% macro up(x: string, options: dict[str,list[int]]={'ids':[1,2]}) %}{{x|upper}}:{{options.ids|length}}{% endmacro %}{{dbt_macro__up('abc')}}", .expected = "ABC:2" },
+        .{ .template = "{% set value='before' %}{% macro local() %}{{value}}{% endmacro %}{% set value='after' %}{{dbt_macro__local()}}", .expected = "after" },
+        .{ .template = "{% macro local() %}{{value}}{% endmacro %}{% set value='after' %}{{dbt_macro__local()}}", .expected = "after" },
+        .{ .template = "{% macro local(x) %}{% if x>0 %}{{x}}{{dbt_macro__local(x-1)}}{% endif %}{% endmacro %}{{dbt_macro__local(3)}}", .expected = "321" },
+        .{ .template = "{% set values=[] %}{% macro local(x) %}{% do values.append(x) %}{{values|join(',')}}{% endmacro %}{{dbt_macro__local(1)}}|{{dbt_macro__local(2)}}|{{values|join(',')}}", .expected = "1|1,2|1,2" },
+        .{ .template = "{% macro mutate(xs) %}{% do xs.append(1) %}{% endmacro %}{% macro local() %}{% set xs=[] %}{% do dbt_macro__mutate(xs) %}{{xs|join(',')}}{% endmacro %}{{dbt_macro__local()}}", .expected = "1" },
+        .{ .template = "{% macro first(x=1000) %}{{x is sameas 1000}}:{{dbt_macro__second(x)}}{% endmacro %}{% macro second(x=1000) %}{{x is sameas 1000}}{% endmacro %}{{dbt_macro__first()}}", .expected = "True:False" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var graph = Graph{ .allocator = a, .project_name = "demo" };
+        defer graph.deinit();
+        const node = Node{ .package_name = "demo", .unique_id = "model.demo.rendered", .name = "rendered", .path = "rendered.sql", .original_file_path = "models/rendered.sql", .raw_code = case.template };
+        try std.testing.expectEqualStrings(case.expected, try compileModel(a, &graph, &node));
+    }
 }
 
 test "macro argument collection and lexical caller callbacks" {
