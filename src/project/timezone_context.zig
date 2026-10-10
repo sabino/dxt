@@ -124,7 +124,7 @@ fn zoneList(a: Allocator, common: bool) !Value {
 }
 pub fn countryLookup(a: Allocator, kind: []const u8, key: Value) !Value {
     if (key.attribute("__dxt_binary") == .string) return .undefined;
-    if (key != .string) return error.JinjaTypeError;
+    if (key != .string) return error.InvalidCountryCode;
     const uppercase = try @import("expression_unicode.zig").convert(a, key.string, .upper);
     for (0..country_count) |index| {
         const at = countries_at + index * 16;
@@ -462,6 +462,8 @@ test "pytz native exports fixed offsets duration methods and exceptions" {
     try std.testing.expectEqualStrings("330000000", fixed.attribute("__dxt_timezone_offset_us").integer);
     const country = try countryLookup(a, "names", .{ .string = "us" });
     try std.testing.expectEqualStrings("United States", country.string);
+    try std.testing.expectEqualStrings("United States", (try countryLookup(a, "names", .{ .string = "uſ" })).string);
+    try std.testing.expectError(error.InvalidCountryCode, countryLookup(a, "names", .{ .integer = "1" }));
     const module = (try resolve(a, "modules.pytz")).?;
     try std.testing.expectEqual(exports.len, module.object.len);
     try std.testing.expect(sets.isSet(module.attribute("all_timezones_set")));
