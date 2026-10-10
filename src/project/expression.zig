@@ -595,7 +595,7 @@ const Parser = struct {
                 const filter_name = try self.name();
                 const args = if (self.take("(")) try self.arguments() else &.{};
                 if (self.active) {
-                    value = try filter(self.allocator, filter_name, value, args);
+                    value = try filterValue(self.allocator, filter_name, value, args, self.host);
                     if (value == .undefined) value = try self.missing(null);
                 }
             } else break;
@@ -1468,7 +1468,7 @@ fn argument(args: []const Argument, name: []const u8, position: usize, fallback:
     return fallback;
 }
 
-fn attributeValue(allocator: std.mem.Allocator, value: Value, attribute: Value) !Value {
+pub fn attributeValue(allocator: std.mem.Allocator, value: Value, attribute: Value) !Value {
     if (attribute == .none) return value;
     if (attribute == .integer or attribute == .number or attribute == .boolean) return try indexValue(allocator, value, attribute);
     if (attribute != .string) return error.JinjaTypeError;
@@ -1483,7 +1483,7 @@ fn attributeValue(allocator: std.mem.Allocator, value: Value, attribute: Value) 
     return result;
 }
 
-fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
+pub fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     inline for (.{ "defined", "undefined", "none", "None", "string", "number", "integer", "float", "boolean", "true", "false", "mapping", "iterable", "sequence", "callable", "odd", "even" }) |test_name| {
         if (std.mem.eql(u8, name, test_name) and args.len != 0) return error.InvalidJinjaArguments;
     }
@@ -1621,6 +1621,10 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
     return null;
 }
 fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []const Argument) !Value {
+    return filterValue(allocator, name, value, args, null);
+}
+pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []const Argument, host: ?Host) !Value {
+    if (try @import("standard_text_filters.zig").callWithHost(allocator, name, value, args, host)) |result| return result;
     if (std.mem.eql(u8, name, "tojson")) {
         if (args.len > 1) return error.InvalidJinjaArguments;
         if (args.len == 1 and args[0].name != null and !std.mem.eql(u8, args[0].name.?, "indent")) return error.InvalidJinjaArguments;
@@ -1680,7 +1684,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
         return value.attribute(args[0].value.string);
     }
     if (std.mem.eql(u8, name, "map")) {
-        const values = try iterableValues(allocator, value);
+        const values = try iterableValuesWithHost(allocator, value, host);
         const attribute = argument(args, "attribute", std.math.maxInt(usize), .none);
         const fallback = argument(args, "default", std.math.maxInt(usize), .undefined);
         const mapped = try allocateValues(allocator, values.len);
@@ -1691,12 +1695,12 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
             }
         } else {
             if (args.len == 0 or args[0].name != null or args[0].value != .string) return error.InvalidJinjaArguments;
-            for (values, mapped) |v, *out| out.* = try filter(allocator, args[0].value.string, v, args[1..]);
+            for (values, mapped) |v, *out| out.* = try filterValue(allocator, args[0].value.string, v, args[1..], host);
         }
         return .{ .list = mapped };
     }
     if (std.mem.eql(u8, name, "select") or std.mem.eql(u8, name, "reject") or std.mem.eql(u8, name, "selectattr") or std.mem.eql(u8, name, "rejectattr")) {
-        const values = try iterableValues(allocator, value);
+        const values = try iterableValuesWithHost(allocator, value, host);
         const has_attribute = std.mem.endsWith(u8, name, "attr");
         const reject = std.mem.startsWith(u8, name, "reject");
         if (has_attribute and args.len == 0) return error.InvalidJinjaArguments;
@@ -1713,7 +1717,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
         return .{ .list = try ownedValues(allocator, &result) };
     }
     if (std.mem.eql(u8, name, "sort") or std.mem.eql(u8, name, "unique") or std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
-        const values = try iterableValues(allocator, value);
+        const values = try iterableValuesWithHost(allocator, value, host);
         const sorted = std.mem.eql(u8, name, "sort");
         const bound = if (sorted)
             try @import("filter_arguments.zig").bind(allocator, args, &.{ "reverse", "case_sensitive", "attribute" }, &.{ .{ .boolean = false }, .{ .boolean = false }, .none }, 0)
@@ -1788,12 +1792,12 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
     if (std.mem.eql(u8, name, "sum")) {
         var result = argument(args, "start", 1, .{ .integer = "0" });
         const attribute = argument(args, "attribute", 0, .none);
-        for (try iterableValues(allocator, value)) |v| result = try apply(allocator, "+", result, try attributeValue(allocator, v, attribute));
+        for (try iterableValuesWithHost(allocator, value, host)) |v| result = try apply(allocator, "+", result, try attributeValue(allocator, v, attribute));
         return result;
     }
     if (std.mem.eql(u8, name, "reverse")) {
         if (value == .string) return sliceValue(allocator, value, null, null, .{ .integer = "-1" });
-        const values = try allocator.dupe(Value, try iterableValues(allocator, value));
+        const values = try allocator.dupe(Value, try iterableValuesWithHost(allocator, value, host));
         std.mem.reverse(Value, values);
         return .{ .list = values };
     }
@@ -1874,7 +1878,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
         const separator = try argument(args, "d", 0, .{ .string = "" }).text(allocator);
         const attribute = argument(args, "attribute", 1, .none);
         var out: std.ArrayList(u8) = .empty;
-        for (try iterableValues(allocator, value), 0..) |v, i| {
+        for (try iterableValuesWithHost(allocator, value, host), 0..) |v, i| {
             if (i != 0) try out.appendSlice(allocator, separator);
             try out.appendSlice(allocator, try (try attributeValue(allocator, v, attribute)).text(allocator));
         }
@@ -1890,7 +1894,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
         return try indexValue(allocator, value, .{ .integer = if (std.mem.eql(u8, name, "first")) "0" else "-1" });
     }
     if (std.mem.eql(u8, name, "list")) {
-        return .{ .list = try iterableValues(allocator, value) };
+        return .{ .list = try iterableValuesWithHost(allocator, value, host) };
     }
     return error.UnsupportedJinjaFilter;
 }
