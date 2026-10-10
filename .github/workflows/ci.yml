@@ -1,4 +1,4 @@
-name: Diagnose original c81 ARM64 pytest report tail
+name: Diagnose original c81 X64 pytest report
 
 on:
   push:
@@ -11,16 +11,16 @@ permissions:
   actions: read
 
 jobs:
-  failed-arm64-report-diagnostic:
-    name: diagnose sealed original ARM64 failure tail
+  failed-x64-report-diagnostic:
+    name: diagnose sealed original X64 failure report
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       AUDIT_SOURCE_HEAD: c81a20b2de35f2bb0d409d41eb24002792247a31
       AUDIT_SOURCE_TREE: c45add2e6422a5e0ff14eb88c9d7988e4c3156b7
       AUDIT_ORIGINAL_RUN: "38057848796"
-      AUDIT_ARM_JOB: "114229930898"
-      AUDIT_ARM_ARTIFACT: "11676079670"
+      AUDIT_X64_JOB: "114229930872"
+      AUDIT_X64_ARTIFACT: "11678034382"
       AUDIT_WORKFLOW_HEAD: ${{ github.sha }}
     steps:
       - name: Checkout the exact original candidate
@@ -35,43 +35,46 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = "$AUDIT_SOURCE_TREE"
           git diff --quiet --exit-code
           git diff --cached --quiet --exit-code
-          CI_REPORT_AUDIT_DIR="$RUNNER_TEMP/dxt-c81-arm-report-diagnostic"
+          CI_REPORT_AUDIT_DIR="$RUNNER_TEMP/dxt-c81-x64-report-diagnostic"
           echo "CI_REPORT_AUDIT_DIR=$CI_REPORT_AUDIT_DIR" >> "$GITHUB_ENV"
           mkdir -p "$CI_REPORT_AUDIT_DIR"
 
-      - name: Verify the sealed failed ARM job and original artifact provenance
+      - name: Verify the sealed failed X64 job and original artifact provenance
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
             const run_id = Number(process.env.AUDIT_ORIGINAL_RUN);
-            const job_id = Number(process.env.AUDIT_ARM_JOB);
-            const artifact_id = Number(process.env.AUDIT_ARM_ARTIFACT);
+            const job_id = Number(process.env.AUDIT_X64_JOB);
+            const artifact_id = Number(process.env.AUDIT_X64_ARTIFACT);
             const source_head = process.env.AUDIT_SOURCE_HEAD;
             const { data: run } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id });
             if (run.id !== run_id || run.head_sha !== source_head || run.run_attempt !== 1 ||
-                run.repository.full_name !== `${owner}/${repo}` || run.path !== '.github/workflows/ci.yml') {
+                run.repository.full_name !== `${owner}/${repo}` || run.path !== '.github/workflows/ci.yml' ||
+                run.status !== 'completed' || run.conclusion !== 'failure') {
               throw new Error('Original CI run source, repository, workflow or attempt does not match');
             }
             const { data: job } = await github.rest.actions.getJobForWorkflowRun({ owner, repo, job_id });
             if (job.id !== job_id || job.run_id !== run_id || job.head_sha !== source_head ||
-                job.name !== 'test py3.12 aarch64' || job.status !== 'completed' || job.conclusion !== 'failure') {
-              throw new Error('Original ARM64 job must be the sealed completed failed canonical job');
+                job.name !== 'test py3.12' || job.status !== 'completed' || job.conclusion !== 'failure') {
+              throw new Error('Original X64 job must be the sealed completed failed canonical job');
             }
             const test_step = job.steps.filter(step => step.name === 'Run the complete canonical Core compatibility suite');
             if (test_step.length !== 1 || test_step[0].status !== 'completed' || test_step[0].conclusion !== 'failure') {
-              throw new Error('Original ARM64 canonical test step must be completed with failure');
+              throw new Error('Original X64 canonical test step must be completed with failure');
             }
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, { owner, repo, run_id });
-            const matches = artifacts.filter(artifact => artifact.name === 'pytest-3.12-ARM64');
+            const matches = artifacts.filter(artifact => artifact.name === 'pytest-3.12-X64');
             if (matches.length !== 1 || matches[0].id !== artifact_id || matches[0].expired ||
-                matches[0].workflow_run?.id !== run_id || matches[0].workflow_run?.head_sha !== source_head) {
-              throw new Error('Original ARM64 artifact ID, source-run metadata or expiry does not match');
+                matches[0].workflow_run?.id !== run_id || matches[0].workflow_run?.head_sha !== source_head ||
+                matches[0].size_in_bytes !== 650141 ||
+                matches[0].digest !== 'sha256:71c007e123de624acc7cc19c146f760848a398c7f298115bfd87f52864f68938') {
+              throw new Error('Original X64 artifact ID, source-run metadata or expiry does not match');
             }
             console.log(JSON.stringify({ kind: 'DIAGNOSTIC FAILED REPORT', acceptance: false, original_run_id: run_id,
               source_head, source_tree: process.env.AUDIT_SOURCE_TREE, original_run_attempt: run.run_attempt,
               original_run_status: run.status, original_run_conclusion: run.conclusion,
-              sealed_arm_job_id: job_id, arm_job_status: job.status, arm_job_conclusion: job.conclusion,
+              sealed_x64_job_id: job_id, x64_job_status: job.status, x64_job_conclusion: job.conclusion,
               artifact_id, artifact_name: matches[0].name }));
 
       - name: Set up the canonical Python runtime
@@ -86,11 +89,11 @@ jobs:
         run: |
           python -m pytest --collect-only -q > "$CI_REPORT_AUDIT_DIR/collection.log"
 
-      - name: Download the original ARM64 pytest report
+      - name: Download the original X64 pytest report
         uses: actions/download-artifact@v4
         with:
-          name: pytest-3.12-ARM64
-          path: ${{ env.CI_REPORT_AUDIT_DIR }}/reports/arm64
+          name: pytest-3.12-X64
+          path: ${{ env.CI_REPORT_AUDIT_DIR }}/reports/x64
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: 38057848796
@@ -120,12 +123,10 @@ jobs:
               if key in expected_keys:
                   raise SystemExit('Collected identities have an ambiguous JUnit mapping')
               expected_keys[key] = node_id
-          reports = [path for path in (directory / 'reports' / 'arm64').rglob('*') if path.is_file()]
-          if len(reports) != 1 or reports[0].name != 'pytest-3.12-ARM64.xml':
-              raise SystemExit('Artifact must contain exactly its original ARM64 XML report')
+          reports = [path for path in (directory / 'reports' / 'x64').rglob('*') if path.is_file()]
+          if len(reports) != 1 or reports[0].name != 'pytest-3.12-X64.xml':
+              raise SystemExit('Artifact must contain exactly its original X64 XML report')
           report = reports[0]
-          if hashlib.sha256(report.read_bytes()).hexdigest() != '953d7b33d918a74e7e92f3fda46b49746b0470b1a0e3e4f6a2ab615dad90f607':
-              raise SystemExit('Original sealed ARM64 XML changed from its first diagnostic')
           root = ET.parse(report).getroot()
           if root.tag not in {'testsuite', 'testsuites'}:
               raise SystemExit('Expected original pytest JUnit report')
@@ -159,13 +160,15 @@ jobs:
                                    for _, element in details)
                   full_details.append((descriptor, text))
           ids_hash = lambda values: hashlib.sha256(('\n'.join(sorted(values)) + '\n').encode()).hexdigest()
+          if ids_hash(expected) != '96257d8ef271320a31929990a0fc7cbfbeafff6adb8ae2da06ef0af4411bd011':
+              raise SystemExit('Original collected identity digest differs from the held 5819 identities')
           summary = {'kind': 'DIAGNOSTIC FAILED REPORT', 'acceptance': False,
-                     'diagnostic_mode': 'final_failure_tail_and_snapshot_panics', 'failure_text_start': 40,
+                     'diagnostic_mode': 'all_failures_bounded_text', 'failure_text_start': 0,
                      'source_head': os.environ['AUDIT_SOURCE_HEAD'], 'source_tree': os.environ['AUDIT_SOURCE_TREE'],
                      'audit_workflow_head': os.environ['AUDIT_WORKFLOW_HEAD'],
                      'original_run_id': int(os.environ['AUDIT_ORIGINAL_RUN']),
-                     'sealed_arm_job_id': int(os.environ['AUDIT_ARM_JOB']),
-                     'original_artifact_id': int(os.environ['AUDIT_ARM_ARTIFACT']),
+                     'sealed_x64_job_id': int(os.environ['AUDIT_X64_JOB']),
+                     'original_artifact_id': int(os.environ['AUDIT_X64_ARTIFACT']),
                      'report_sha256': hashlib.sha256(report.read_bytes()).hexdigest(),
                      'expected_tests': len(expected), 'declared_counts': declared,
                      'actual_counts': {'tests': len(cases), 'passed': counts['passed'], 'failures': counts['failure'],
@@ -190,26 +193,24 @@ jobs:
               raise SystemExit('Complete diagnostic identities exceed the 100 KiB log budget; original report and complete ID file retained')
           secrets = sorted((value for name, value in os.environ.items()
                             if name.startswith('DBT_ENV_SECRET_') and value.strip()), key=len, reverse=True)
-          selected_details = [(descriptor, text, False) for descriptor, text in full_details[40:]]
-          selected_details += [(descriptor, text, True) for descriptor, text in full_details
-                               if descriptor['node_id'] in {
-                                   'tests/test_usability_snapshots.py::test_modern_yaml_snapshot_inherited_config_and_tests',
-                                   'tests/test_usability_snapshots.py::test_modern_yaml_pinned_dbt_snapshot_oracle'}]
-          for descriptor, raw_text, panic_tail in selected_details:
+          # Divide the remaining log budget fairly so every diagnostic case
+          # receives bounded text, rather than silently clipping the tail.
+          for index, (descriptor, raw_text) in enumerate(full_details):
               text = raw_text
               for value in secrets:
                   text = text.replace(value, '*****')
               text = re.sub(r'\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9]+)\b', '*****', text)
               text = re.sub(r'(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer *****', text)
-              text = text[-8000:] if panic_tail else text[:3000]
               record = dict(descriptor, kind='DIAGNOSTIC BOUNDED FAILURE TEXT', original_text_chars=len(raw_text),
-                            text_slice='last_8000' if panic_tail else 'first_3000', text=text)
+                            text_slice='first_up_to_2000_budgeted', text=text[:2000])
+              remaining_cases = len(full_details) - index
+              case_budget = (102400 - used) // remaining_cases
               line = encode(record)
-              while len(line.encode()) > 102400 - used and record['text']:
+              while len(line.encode()) > case_budget and record['text']:
                   record['text'] = record['text'][:max(0, len(record['text']) - max(1, len(record['text']) // 4))]
                   line = encode(record)
-              if len(line.encode()) > 102400 - used:
-                  continue  # Complete IDs are already retained and printed; only optional text is omitted.
+              if len(line.encode()) > case_budget:
+                  continue  # Counts and every identity remain printed and retained.
               lines.append(line)
               used += len(line.encode())
           if subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() != os.environ['AUDIT_SOURCE_HEAD']:
@@ -227,9 +228,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostic-original-c81-ARM64-report-tail
+          name: diagnostic-original-c81-X64-report
           path: |
-            ${{ env.CI_REPORT_AUDIT_DIR }}/reports/arm64/pytest-3.12-ARM64.xml
+            ${{ env.CI_REPORT_AUDIT_DIR }}/reports/x64/pytest-3.12-X64.xml
             ${{ env.CI_REPORT_AUDIT_DIR }}/diagnostic-case-ids.json
             ${{ env.CI_REPORT_AUDIT_DIR }}/collection.log
           if-no-files-found: error
