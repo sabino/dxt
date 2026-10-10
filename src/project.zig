@@ -454,12 +454,18 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     var catalog_entries: catalog.CatalogEntries = .{};
     defer catalog.deinitCatalogEntries(runtime.allocator, &catalog_entries);
+    var catalog_error: ?[]const u8 = null;
+    defer if (catalog_error) |message| runtime.allocator.free(message);
     if (!options.docs_empty_catalog) if (duckdb.databasePath(runtime.allocator, target_dir, &graph)) |db_path| {
         defer runtime.allocator.free(db_path);
-        catalog_entries = if (std.mem.eql(u8, graph.adapter_type, "postgres"))
-            try @import("project/postgres_catalog.zig").collect(runtime, db_path, &graph, selected, stdout)
+        catalog_entries = (if (std.mem.eql(u8, graph.adapter_type, "postgres"))
+            @import("project/postgres_catalog.zig").collect(runtime, db_path, &graph, selected, stdout)
         else
-            try duckdb.collectCatalogEntries(runtime, db_path, &graph, selected);
+            duckdb.collectCatalogEntries(runtime, db_path, &graph, selected)) catch |err| blk: {
+            if (err == error.OutOfMemory) return err;
+            catalog_error = try runtime.allocator.dupe(u8, @import("project/compile_diagnostics.zig").message(err) orelse @errorName(err));
+            break :blk .{};
+        };
     } else |err| switch (err) {
         error.UnsupportedDuckDbPath => {},
         else => return err,
@@ -467,9 +473,14 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     const catalog_path = try pathJoin(runtime.allocator, &.{ target_dir, "catalog.json" });
     try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
-    const catalog_json = try catalog.renderCatalogWithInvocation(runtime.allocator, catalog_entries.nodes.items, catalog_entries.sources.items, runtime.invocation);
+    const catalog_errors: ?[]const []const u8 = if (catalog_error) |message| &.{message} else null;
+    const catalog_json = try catalog.renderCatalogWithInvocationAndErrors(runtime.allocator, catalog_entries.nodes.items, catalog_entries.sources.items, runtime.invocation, catalog_errors);
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = catalog_path, .data = catalog_json });
     try docs_serve.writeIndex(runtime, target_dir, options.docs_static);
+    if (catalog_error) |message| {
+        try @import("project/sql_operations.zig").emitError(runtime, message, stderr);
+        return error.ExecutionFailure;
+    }
 
     try stdout.print("Generated docs artifacts for {d} compiled model(s) into {s}\n", .{
         compile_result.count,
