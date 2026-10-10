@@ -92,6 +92,7 @@ const CompileContext = struct {
     modules_cache: @import("modules_context.zig").Cache = .{},
     receivers: @import("compiler_receivers.zig").Registry = .{},
     list_growth: @import("mutable_list_growth.zig").Store(native_expr.Value) = .{},
+    alias_publication: @import("compiler_aliases.zig").Publication = .{},
     constants: @import("compiler_constants.zig").Pool = .{},
     constant_function: ?[]const u8 = null,
     bindings: std.ArrayList(ValueBinding) = .empty,
@@ -159,6 +160,7 @@ const CompileContext = struct {
         self.vars.deinit(self.allocator);
         self.bindings.deinit(self.allocator);
         self.list_growth.deinit(self.value_arena.allocator());
+        self.alias_publication.deinit(self.allocator);
         self.value_arena.deinit();
     }
 
@@ -1469,19 +1471,80 @@ fn loopLength(context: *CompileContext, frame: *LoopFrame) anyerror!void {
 }
 
 fn replaceContextAliases(context: *CompileContext, original: native_expr.Value, replacement: native_expr.Value) !void {
-    const aliases = @import("container_methods.zig");
+    const aliases = &context.alias_publication;
+    aliases.begin(original);
     try context.receivers.forward(context.value_arena.allocator(), original, replacement);
-    for (context.bindings.items) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
-    for (context.suspended_binding_frames.items) |bindings| for (bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
-    for (context.loop_filter_bindings.items) |bindings| for (bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
-    for (context.caller_blocks.items) |caller| for (caller.bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
+    for (context.bindings.items) |*binding| try aliases.replace(context.allocator, &binding.value, original, replacement, 0);
+    for (context.suspended_binding_frames.items) |bindings| for (bindings) |*binding| try aliases.replace(context.allocator, &binding.value, original, replacement, 0);
+    for (context.loop_filter_bindings.items) |bindings| for (bindings) |*binding| try aliases.replace(context.allocator, &binding.value, original, replacement, 0);
+    for (context.caller_blocks.items) |caller| for (caller.bindings) |*binding| try aliases.replace(context.allocator, &binding.value, original, replacement, 0);
     for (context.loop_states.items) |frame| {
-        for (frame.bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
-        try aliases.replaceAliases(&frame.iterable, original, replacement, 0);
-        try aliases.replaceAliases(&frame.state.iterator, original, replacement, 0);
-        for (frame.state.items.items) |*item| try aliases.replaceAliases(item, original, replacement, 0);
-        if (frame.state.last_changed) |*previous| try aliases.replaceAliases(previous, original, replacement, 0);
+        for (frame.bindings) |*binding| try aliases.replace(context.allocator, &binding.value, original, replacement, 0);
+        try aliases.replace(context.allocator, &frame.iterable, original, replacement, 0);
+        try aliases.replace(context.allocator, &frame.state.iterator, original, replacement, 0);
+        for (frame.state.items.items) |*item| try aliases.replace(context.allocator, item, original, replacement, 0);
+        if (frame.state.last_changed) |*previous| try aliases.replace(context.allocator, previous, original, replacement, 0);
     }
+}
+
+test "ten thousand seven-column CSV extensions certify native table backing once" {
+    var fixture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer fixture_arena.deinit();
+    const a = fixture_arena.allocator();
+    var csv: std.Io.Writer.Allocating = .init(a);
+    try csv.writer.writeAll("a,b,c,d,e,f,g\n");
+    for (0..10000) |row| try csv.writer.print("{d},2,3,4,5,6,7\n", .{row + 2});
+    var graph = Graph{ .allocator = a, .project_name = "demo" };
+    const node = Node{ .package_name = "demo", .unique_id = "seed.demo.wide", .name = "wide", .resource_type = "seed", .path = "wide.csv", .original_file_path = "seeds/wide.csv", .project_root = "project", .raw_code = csv.written() };
+    var output: std.Io.Writer.Allocating = .init(a);
+    var operation = try @import("commands.zig").OperationHost.init(.{ .allocator = a, .io = std.testing.io }, &graph, "unused", &output.writer);
+    defer operation.deinit();
+    const operation_host = operation.host();
+    _ = operation_host.set_node.?(operation_host.context, &node);
+    const table = try operation_host.call(operation_host.context, "load_agate_table", &.{}, a);
+    var context = CompileContext.init(std.testing.allocator, &graph, &node);
+    defer context.deinit();
+    const values = context.value_arena.allocator();
+    var bindings = native_expr.Value{ .list = try native_expr.allocateValues(values, 0) };
+    try context.setValue("table", table);
+    try context.setValue("table_alias", .{ .tuple = try values.dupe(native_expr.Value, &.{table}) });
+    try context.setValue("bindings", bindings);
+    const entries = try native_expr.allocateEntries(values, 1);
+    entries[0] = .{ .key = "nested", .value = .{ .tuple = try values.dupe(native_expr.Value, &.{bindings}) } };
+    try context.setValue("alias", .{ .object = entries });
+    const method = (try @import("builtin_bound_method.zig").lookup(values, bindings, "append")).?;
+    try context.setValue("method", .{ .object = try values.dupe(native_expr.Entry, &.{.{ .key = "", .typed_key = .{ .tuple = try values.dupe(native_expr.Value, &.{method}) }, .value = .{ .integer = "1" } }}) });
+    for (table.attribute("__dxt_data").tuple) |row| {
+        const replacement = try CompileContext.extendList(&context, bindings, row.tuple, values);
+        try replaceContextAliases(&context, bindings, replacement);
+        bindings = replacement;
+    }
+    try std.testing.expectEqual(@as(usize, 70000), context.bindings.items[2].value.list.len);
+    try std.testing.expectEqual(@as(usize, 70000), context.bindings.items[3].value.attribute("nested").tuple[0].list.len);
+    const saved_method = context.bindings.items[4].value.object[0].typed_key.?.tuple[0];
+    try std.testing.expectEqual(@as(usize, 70000), saved_method.attribute("__dxt_builtin_receiver").list.len);
+    try std.testing.expectEqual(@as(usize, 10000), native_expr.sequence(table.attribute("rows")).?.len);
+    try std.testing.expectEqual(@as(usize, 1), context.alias_publication.sealed_tables);
+    // Counts cover the real constructor's row, column and exact Decimal graph,
+    // including duplicate exports. They cannot grow per receiver mutation.
+    try std.testing.expect(context.alias_publication.certificate_visits < 2000000);
+    try std.testing.expect(context.alias_publication.alias_visits < 500000);
+    const temporal_node = Node{ .package_name = "demo", .unique_id = "seed.demo.temporal", .name = "temporal", .resource_type = "seed", .path = "temporal.csv", .original_file_path = "seeds/temporal.csv", .project_root = "project", .raw_code = "day,stamp\n2024-02-29,2024-02-29 12:34:56\n" };
+    _ = operation_host.set_node.?(operation_host.context, &temporal_node);
+    const temporal_table = try operation_host.call(operation_host.context, "load_agate_table", &.{}, a);
+    var temporal_alias = temporal_table;
+    context.alias_publication.begin(bindings);
+    try context.alias_publication.replace(context.allocator, &temporal_alias, bindings, bindings, 0);
+    try std.testing.expectEqual(@as(usize, 2), context.alias_publication.sealed_tables);
+    // A later namespace write can introduce a receiver into a previously
+    // visited graph. Certification is disabled before that write, not delayed
+    // until a subsequent publication happens to encounter the table again.
+    try context.setValue("overlay", .{ .object = try values.dupe(native_expr.Entry, &.{.{ .key = "new", .value = .none }}) });
+    try assignValue(&context, "overlay.new", bindings);
+    try std.testing.expect(context.alias_publication.disabled);
+    const final = try CompileContext.extendList(&context, bindings, &.{.{ .integer = "99" }}, values);
+    try replaceContextAliases(&context, bindings, final);
+    try std.testing.expectEqual(@as(usize, 70001), context.bindings.items[5].value.attribute("new").list.len);
 }
 
 fn validateSkippedLoopBody(context: *CompileContext, sql: []const u8, block: ForBlock) anyerror!void {
@@ -3285,7 +3348,11 @@ fn assignValue(context: *CompileContext, target: []const u8, value: native_expr.
     if (std.mem.lastIndexOfScalar(u8, target, '.')) |dot| {
         const object = try context.evaluate(target[0..dot]);
         if (object != .object) return error.JinjaTypeError;
+        // Core attribute assignment is for namespaces, never readonly provider
+        // instances such as Agate tables, rows, columns or temporal scalars.
+        if (@import("builtin_bound_method.zig").isContextObject(object) or @import("datetime_protocol.zig").kind(object) != null or native_expr.floatProtocol(object) != null) return error.JinjaTypeError;
         for (@constCast(object.object)) |*entry| if (std.mem.eql(u8, entry.key, target[dot + 1 ..])) {
+            context.alias_publication.disableReadonly();
             entry.value = value;
             return;
         };
