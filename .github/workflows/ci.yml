@@ -1,9 +1,9 @@
-name: Diagnose original c81 X64 pytest report
+name: Extract sealed final 2b761f2 pytest reports
 
 on:
   push:
     branches:
-      - ci/diagnose-c81-arm64-report
+      - ci/diagnose-final-2b761f2-reports
   workflow_dispatch:
 
 permissions:
@@ -11,22 +11,28 @@ permissions:
   actions: read
 
 jobs:
-  failed-x64-report-diagnostic:
-    name: diagnose sealed original X64 failure report
+  sealed-report-diagnostic:
+    name: extract sealed final X64 and ARM64 reports
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      AUDIT_SOURCE_HEAD: c81a20b2de35f2bb0d409d41eb24002792247a31
-      AUDIT_SOURCE_TREE: c45add2e6422a5e0ff14eb88c9d7988e4c3156b7
-      AUDIT_ORIGINAL_RUN: "38057848796"
-      AUDIT_X64_JOB: "114229930872"
-      AUDIT_X64_ARTIFACT: "11678034382"
+      AUDIT_SOURCE_HEAD: 2b761f2c11419ce9316e5dd1226b1c24aee77ac3
+      AUDIT_SOURCE_TREE: abb47b1d72c9d66bb90ed8752a03f8d789b3c9a2
+      AUDIT_ORIGINAL_RUN: "38082038493"
+      AUDIT_X64_JOB: "114300842476"
+      AUDIT_ARM64_JOB: "114300842552"
+      AUDIT_X64_ARTIFACT: "11685926189"
+      AUDIT_X64_ARTIFACT_SIZE: "100815"
+      AUDIT_X64_ARTIFACT_DIGEST: "sha256:9bba4ee7eebcdb5fb9726ba4b2446647ccc6ed0f19068e9ea520b3055baf50cb"
+      AUDIT_ARM64_ARTIFACT: "11685661439"
+      AUDIT_ARM64_ARTIFACT_SIZE: "101650"
+      AUDIT_ARM64_ARTIFACT_DIGEST: "sha256:ba15042ad910f5dcf635e421be7c217ae8d7051f9430be6b49bdfb88073ec5a8"
       AUDIT_WORKFLOW_HEAD: ${{ github.sha }}
     steps:
       - name: Checkout the exact original candidate
         uses: actions/checkout@v4
         with:
-          ref: c81a20b2de35f2bb0d409d41eb24002792247a31
+          ref: 2b761f2c11419ce9316e5dd1226b1c24aee77ac3
           persist-credentials: false
 
       - name: Verify source commit and tree
@@ -35,47 +41,63 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = "$AUDIT_SOURCE_TREE"
           git diff --quiet --exit-code
           git diff --cached --quiet --exit-code
-          CI_REPORT_AUDIT_DIR="$RUNNER_TEMP/dxt-c81-x64-report-diagnostic"
+          CI_REPORT_AUDIT_DIR="$RUNNER_TEMP/dxt-final-2b761f2-report-diagnostic"
           echo "CI_REPORT_AUDIT_DIR=$CI_REPORT_AUDIT_DIR" >> "$GITHUB_ENV"
           mkdir -p "$CI_REPORT_AUDIT_DIR"
 
-      - name: Verify the sealed failed X64 job and original artifact provenance
+      - name: Bind both sealed original jobs and immutable artifact provenance
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
-            const run_id = Number(process.env.AUDIT_ORIGINAL_RUN);
-            const job_id = Number(process.env.AUDIT_X64_JOB);
-            const artifact_id = Number(process.env.AUDIT_X64_ARTIFACT);
             const source_head = process.env.AUDIT_SOURCE_HEAD;
+            const run_id = Number(process.env.AUDIT_ORIGINAL_RUN);
+            const configurations = [
+              { platform: 'X64', job_id: Number(process.env.AUDIT_X64_JOB), job_name: 'test py3.12',
+                artifact_name: 'pytest-3.12-X64', artifact_id: Number(process.env.AUDIT_X64_ARTIFACT),
+                size: Number(process.env.AUDIT_X64_ARTIFACT_SIZE), digest: process.env.AUDIT_X64_ARTIFACT_DIGEST },
+              { platform: 'ARM64', job_id: Number(process.env.AUDIT_ARM64_JOB), job_name: 'test py3.12 aarch64',
+                artifact_name: 'pytest-3.12-ARM64', artifact_id: Number(process.env.AUDIT_ARM64_ARTIFACT),
+                size: Number(process.env.AUDIT_ARM64_ARTIFACT_SIZE), digest: process.env.AUDIT_ARM64_ARTIFACT_DIGEST }
+            ];
+            if (configurations.some(item => !Number.isSafeInteger(item.artifact_id) || item.artifact_id <= 0 ||
+                !Number.isSafeInteger(item.size) || item.size <= 0 || !/^sha256:[a-f0-9]{64}$/.test(item.digest))) {
+              throw new Error('Preparation only: sealed artifact IDs, sizes and digests must be explicitly bound before activation');
+            }
             const { data: run } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id });
             if (run.id !== run_id || run.head_sha !== source_head || run.run_attempt !== 1 ||
                 run.repository.full_name !== `${owner}/${repo}` || run.path !== '.github/workflows/ci.yml' ||
-                run.status !== 'completed' || run.conclusion !== 'failure') {
-              throw new Error('Original CI run source, repository, workflow or attempt does not match');
-            }
-            const { data: job } = await github.rest.actions.getJobForWorkflowRun({ owner, repo, job_id });
-            if (job.id !== job_id || job.run_id !== run_id || job.head_sha !== source_head ||
-                job.name !== 'test py3.12' || job.status !== 'completed' || job.conclusion !== 'failure') {
-              throw new Error('Original X64 job must be the sealed completed failed canonical job');
-            }
-            const test_step = job.steps.filter(step => step.name === 'Run the complete canonical Core compatibility suite');
-            if (test_step.length !== 1 || test_step[0].status !== 'completed' || test_step[0].conclusion !== 'failure') {
-              throw new Error('Original X64 canonical test step must be completed with failure');
+                run.status !== 'completed' || !['success', 'failure'].includes(run.conclusion)) {
+              throw new Error('Original run must be sealed and match the exact source, repository, workflow and attempt');
             }
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, { owner, repo, run_id });
-            const matches = artifacts.filter(artifact => artifact.name === 'pytest-3.12-X64');
-            if (matches.length !== 1 || matches[0].id !== artifact_id || matches[0].expired ||
-                matches[0].workflow_run?.id !== run_id || matches[0].workflow_run?.head_sha !== source_head ||
-                matches[0].size_in_bytes !== 650141 ||
-                matches[0].digest !== 'sha256:71c007e123de624acc7cc19c146f760848a398c7f298115bfd87f52864f68938') {
-              throw new Error('Original X64 artifact ID, source-run metadata or expiry does not match');
+            const reports = [];
+            for (const item of configurations) {
+              const { data: job } = await github.rest.actions.getJobForWorkflowRun({ owner, repo, job_id: item.job_id });
+              if (job.id !== item.job_id || job.run_id !== run_id || job.head_sha !== source_head ||
+                  job.name !== item.job_name || job.status !== 'completed' || !['success', 'failure'].includes(job.conclusion)) {
+                throw new Error(`Original ${item.platform} job is not the sealed expected job`);
+              }
+              const steps = job.steps.filter(step => step.name === 'Run the complete canonical Core compatibility suite');
+              if (steps.length !== 1 || steps[0].status !== 'completed' || !['success', 'failure'].includes(steps[0].conclusion)) {
+                throw new Error(`Original ${item.platform} canonical test step must be sealed`);
+              }
+              const matches = artifacts.filter(artifact => artifact.name === item.artifact_name);
+              if (matches.length !== 1 || matches[0].id !== item.artifact_id || matches[0].expired ||
+                  matches[0].workflow_run?.id !== run_id || matches[0].workflow_run?.head_sha !== source_head ||
+                  matches[0].size_in_bytes !== item.size || matches[0].digest !== item.digest) {
+                throw new Error(`Original ${item.platform} artifact provenance does not match`);
+              }
+              reports.push({ platform: item.platform, job_id: job.id, job_conclusion: job.conclusion,
+                canonical_step_conclusion: steps[0].conclusion, artifact_id: item.artifact_id,
+                artifact_name: item.artifact_name, artifact_size: item.size, artifact_zip_digest: item.digest });
             }
-            console.log(JSON.stringify({ kind: 'DIAGNOSTIC FAILED REPORT', acceptance: false, original_run_id: run_id,
-              source_head, source_tree: process.env.AUDIT_SOURCE_TREE, original_run_attempt: run.run_attempt,
-              original_run_status: run.status, original_run_conclusion: run.conclusion,
-              sealed_x64_job_id: job_id, x64_job_status: job.status, x64_job_conclusion: job.conclusion,
-              artifact_id, artifact_name: matches[0].name }));
+            const provenance = { kind: 'DIAGNOSTIC REPORT EXTRACTION', acceptance: false,
+              source_head, source_tree: process.env.AUDIT_SOURCE_TREE, original_run_id: run_id,
+              original_run_attempt: run.run_attempt, original_run_status: run.status,
+              original_run_conclusion: run.conclusion, audit_workflow_head: process.env.AUDIT_WORKFLOW_HEAD, reports };
+            require('fs').writeFileSync(`${process.env.CI_REPORT_AUDIT_DIR}/provenance.json`, JSON.stringify(provenance, null, 2) + '\n');
+            console.log(JSON.stringify(provenance));
 
       - name: Set up the canonical Python runtime
         uses: actions/setup-python@v5
@@ -85,20 +107,29 @@ jobs:
       - name: Install original collection dependencies and native fixtures
         uses: ./.github/actions/setup-oracles
 
-      - name: Collect all original test identities without running tests or builds
+      - name: Collect all original identities without running tests or builds
         run: |
           python -m pytest --collect-only -q > "$CI_REPORT_AUDIT_DIR/collection.log"
 
-      - name: Download the original X64 pytest report
+      - name: Download the original X64 report
         uses: actions/download-artifact@v4
         with:
           name: pytest-3.12-X64
-          path: ${{ env.CI_REPORT_AUDIT_DIR }}/reports/x64
+          path: ${{ env.CI_REPORT_AUDIT_DIR }}/reports/X64
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: 38057848796
+          run-id: 38082038493
 
-      - name: Diagnose original failed report without an acceptance claim
+      - name: Download the original ARM64 report
+        uses: actions/download-artifact@v4
+        with:
+          name: pytest-3.12-ARM64
+          path: ${{ env.CI_REPORT_AUDIT_DIR }}/reports/ARM64
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 38082038493
+
+      - name: Extract counts identities and bounded failures without acceptance
         run: |
           python - <<'PY'
           import collections
@@ -112,10 +143,13 @@ jobs:
           from _pytest.junitxml import mangle_test_address
 
           directory = Path(os.environ['CI_REPORT_AUDIT_DIR'])
+          provenance = json.loads((directory / 'provenance.json').read_text())
           expected = [line.strip() for line in (directory / 'collection.log').read_text().splitlines()
                       if line.startswith('tests/') and '::' in line]
-          if len(expected) != 5819 or len(set(expected)) != 5819:
-              raise SystemExit('Original collection must contain exactly 5819 unique test identities')
+          ids_hash = lambda values: hashlib.sha256(('\n'.join(sorted(values)) + '\n').encode()).hexdigest()
+          held_ids_sha = '96257d8ef271320a31929990a0fc7cbfbeafff6adb8ae2da06ef0af4411bd011'
+          if len(expected) != len(set(expected)) or len(expected) != 5819 or ids_hash(expected) != held_ids_sha:
+              raise SystemExit('Original collection must match exactly the held 5819 unique identities')
           expected_keys = {}
           for node_id in expected:
               names = mangle_test_address(node_id)
@@ -123,79 +157,77 @@ jobs:
               if key in expected_keys:
                   raise SystemExit('Collected identities have an ambiguous JUnit mapping')
               expected_keys[key] = node_id
-          reports = [path for path in (directory / 'reports' / 'x64').rglob('*') if path.is_file()]
-          if len(reports) != 1 or reports[0].name != 'pytest-3.12-X64.xml':
-              raise SystemExit('Artifact must contain exactly its original X64 XML report')
-          report = reports[0]
-          root = ET.parse(report).getroot()
-          if root.tag not in {'testsuite', 'testsuites'}:
-              raise SystemExit('Expected original pytest JUnit report')
-          suites = [root] if root.tag == 'testsuite' else list(root.iter('testsuite'))
-          if not suites or any(suite.find('testsuite') is not None for suite in suites):
-              raise SystemExit('Expected pytest leaf suites')
-          declared = {name: sum(int(suite.attrib[name]) for suite in suites)
-                      for name in ('tests', 'failures', 'errors', 'skipped')}
-          cases = list(root.iter('testcase'))
-          keys = [(case.attrib.get('classname'), case.attrib.get('name')) for case in cases]
-          identities = [expected_keys.get(key) for key in keys]
-          complete = (len(cases) == 5819 and len(set(keys)) == 5819 and set(keys) == set(expected_keys))
-          identity_guard_failed = len(cases) == 5819 and not complete
-          counts = collections.Counter()
-          diagnostic_cases = []
-          full_details = []
-          for index, case in enumerate(cases):
-              details = [(name, case.find(name)) for name in ('failure', 'error', 'skipped') if case.find(name) is not None]
-              status = details[0][0] if details else 'passed'
-              if details:
-                  counts.update(name for name, _ in details)
-              else:
-                  counts['passed'] += 1
-              if details:
-                  identity = identities[index]
-                  descriptor = {'node_id': identity, 'status': status, 'statuses': [name for name, _ in details]}
-                  if identity is None:
-                      descriptor['unmapped_junit_identity'] = {'classname': keys[index][0], 'name': keys[index][1]}
-                  diagnostic_cases.append(descriptor)
-                  text = '\n'.join((element.attrib.get('message', '') + '\n' + (element.text or '')).strip()
-                                   for _, element in details)
-                  full_details.append((descriptor, text))
-          ids_hash = lambda values: hashlib.sha256(('\n'.join(sorted(values)) + '\n').encode()).hexdigest()
-          if ids_hash(expected) != '96257d8ef271320a31929990a0fc7cbfbeafff6adb8ae2da06ef0af4411bd011':
-              raise SystemExit('Original collected identity digest differs from the held 5819 identities')
-          summary = {'kind': 'DIAGNOSTIC FAILED REPORT', 'acceptance': False,
-                     'diagnostic_mode': 'all_failures_bounded_text', 'failure_text_start': 0,
-                     'source_head': os.environ['AUDIT_SOURCE_HEAD'], 'source_tree': os.environ['AUDIT_SOURCE_TREE'],
-                     'audit_workflow_head': os.environ['AUDIT_WORKFLOW_HEAD'],
-                     'original_run_id': int(os.environ['AUDIT_ORIGINAL_RUN']),
-                     'sealed_x64_job_id': int(os.environ['AUDIT_X64_JOB']),
-                     'original_artifact_id': int(os.environ['AUDIT_X64_ARTIFACT']),
-                     'report_sha256': hashlib.sha256(report.read_bytes()).hexdigest(),
-                     'expected_tests': len(expected), 'declared_counts': declared,
-                     'actual_counts': {'tests': len(cases), 'passed': counts['passed'], 'failures': counts['failure'],
-                                       'errors': counts['error'], 'skipped': counts['skipped']},
-                     'complete_exact_unique_identity_set': complete, 'duplicate_identities': len(keys) - len(set(keys)),
-                     'missing_expected_identities': len(set(expected_keys) - set(keys)),
-                     'unexpected_identities': len(set(keys) - set(expected_keys)),
-                     'expected_ids_sha256': ids_hash(expected),
-                     'actual_ids_sha256': ids_hash(identities) if complete else None,
-                     'all_failed_error_skipped_cases': len(diagnostic_cases), 'maximum_output_bytes': 102400}
-          # Retain complete diagnostic identities next to the unchanged downloaded XML.
-          (directory / 'diagnostic-case-ids.json').write_text(json.dumps(diagnostic_cases, indent=2) + '\n')
+          summaries, all_details, structural_errors = [], [], []
+          for item in provenance['reports']:
+              platform = item['platform']
+              reports = [path for path in (directory / 'reports' / platform).rglob('*') if path.is_file()]
+              if len(reports) != 1 or reports[0].name != item['artifact_name'] + '.xml':
+                  raise SystemExit('Each artifact must contain exactly its original named XML report')
+              report = reports[0]
+              root = ET.parse(report).getroot()
+              if root.tag not in {'testsuite', 'testsuites'}:
+                  raise SystemExit('Expected original pytest JUnit report')
+              suites = [root] if root.tag == 'testsuite' else list(root.iter('testsuite'))
+              if not suites or any(suite.find('testsuite') is not None for suite in suites):
+                  raise SystemExit('Expected pytest leaf suites')
+              declared = {name: sum(int(suite.attrib[name]) for suite in suites)
+                          for name in ('tests', 'failures', 'errors', 'skipped')}
+              cases = list(root.iter('testcase'))
+              keys = [(case.attrib.get('classname'), case.attrib.get('name')) for case in cases]
+              identities = [expected_keys.get(key) for key in keys]
+              complete = len(cases) == len(set(keys)) == 5819 and set(keys) == set(expected_keys)
+              counts = collections.Counter()
+              diagnostics = []
+              for index, case in enumerate(cases):
+                  details = [(name, case.find(name)) for name in ('failure', 'error', 'skipped') if case.find(name) is not None]
+                  status = details[0][0] if details else 'passed'
+                  if details:
+                      counts.update(name for name, _ in details)
+                  else:
+                      counts['passed'] += 1
+                  if details:
+                      descriptor = {'platform': platform, 'node_id': identities[index], 'status': status,
+                                    'statuses': [name for name, _ in details]}
+                      if identities[index] is None:
+                          descriptor['unmapped_junit_identity'] = {'classname': keys[index][0], 'name': keys[index][1]}
+                      diagnostics.append(descriptor)
+                      text = '\n'.join((element.attrib.get('message', '') + '\n' + (element.text or '')).strip()
+                                       for _, element in details)
+                      all_details.append((descriptor, text))
+              actual = {'tests': len(cases), 'passed': counts['passed'], 'failures': counts['failure'],
+                        'errors': counts['error'], 'skipped': counts['skipped']}
+              counts_match = declared == {name: actual[name] for name in declared} and all(value >= 0 for value in declared.values())
+              if not complete or not counts_match:
+                  structural_errors.append(platform)
+              zero_report = complete and counts_match and not any(actual[name] for name in ('failures', 'errors', 'skipped'))
+              if zero_report:
+                  subprocess.run(['python', 'scripts/check_pytest_report.py', str(report), '--expected-tests', '5819'], check=True)
+              summary = dict(item, kind='DIAGNOSTIC REPORT EXTRACTION', acceptance=False,
+                             source_head=provenance['source_head'], source_tree=provenance['source_tree'],
+                             original_run_id=provenance['original_run_id'], original_run_attempt=provenance['original_run_attempt'],
+                             audit_workflow_head=provenance['audit_workflow_head'],
+                             report_sha256=hashlib.sha256(report.read_bytes()).hexdigest(), expected_tests=5819,
+                             declared_counts=declared, actual_counts=actual, complete_exact_unique_identity_set=complete,
+                             duplicate_identities=len(keys)-len(set(keys)), missing_expected_identities=len(set(expected_keys)-set(keys)),
+                             unexpected_identities=len(set(keys)-set(expected_keys)), counts_match=counts_match,
+                             expected_ids_sha256=held_ids_sha, actual_ids_sha256=ids_hash(identities) if complete else None,
+                             official_zero_failure_error_skip_xfail_check_passed=zero_report)
+              summaries.append(summary)
+              (directory / (platform + '-diagnostic-case-ids.json')).write_text(json.dumps(diagnostics, indent=2) + '\n')
+          (directory / 'report-summaries.json').write_text(json.dumps(summaries, indent=2) + '\n')
           encode = lambda value: json.dumps(value, ensure_ascii=True, sort_keys=True) + '\n'
-          summary_line = encode(summary)
-          print(summary_line, end='')
+          summary_lines = [encode(value) for value in summaries]
+          print(''.join(summary_lines), end='')
           lines = []
-          for start in range(0, len(diagnostic_cases), 10):
+          for start in range(0, len(all_details), 10):
               lines.append(encode({'kind': 'DIAGNOSTIC CASE IDS', 'start': start,
-                                   'cases': diagnostic_cases[start:start + 10]}))
-          used = len(summary_line.encode()) + sum(len(line.encode()) for line in lines)
+                                   'cases': [descriptor for descriptor, _ in all_details[start:start+10]]}))
+          used = sum(len(line.encode()) for line in summary_lines + lines)
           if used > 102400:
-              raise SystemExit('Complete diagnostic identities exceed the 100 KiB log budget; original report and complete ID file retained')
+              raise SystemExit('Complete diagnostic identities exceed the 100 KiB budget; summaries, XML and all identities retained')
           secrets = sorted((value for name, value in os.environ.items()
                             if name.startswith('DBT_ENV_SECRET_') and value.strip()), key=len, reverse=True)
-          # Divide the remaining log budget fairly so every diagnostic case
-          # receives bounded text, rather than silently clipping the tail.
-          for index, (descriptor, raw_text) in enumerate(full_details):
+          for index, (descriptor, raw_text) in enumerate(all_details):
               text = raw_text
               for value in secrets:
                   text = text.replace(value, '*****')
@@ -203,34 +235,36 @@ jobs:
               text = re.sub(r'(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer *****', text)
               record = dict(descriptor, kind='DIAGNOSTIC BOUNDED FAILURE TEXT', original_text_chars=len(raw_text),
                             text_slice='first_up_to_2000_budgeted', text=text[:2000])
-              remaining_cases = len(full_details) - index
-              case_budget = (102400 - used) // remaining_cases
+              budget = (102400-used) // (len(all_details)-index)
               line = encode(record)
-              while len(line.encode()) > case_budget and record['text']:
-                  record['text'] = record['text'][:max(0, len(record['text']) - max(1, len(record['text']) // 4))]
+              while len(line.encode()) > budget and record['text']:
+                  record['text'] = record['text'][:max(0, len(record['text'])-max(1, len(record['text'])//4))]
                   line = encode(record)
-              if len(line.encode()) > case_budget:
-                  continue  # Counts and every identity remain printed and retained.
+              if len(line.encode()) > budget:
+                  continue
               lines.append(line)
               used += len(line.encode())
-          if subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() != os.environ['AUDIT_SOURCE_HEAD']:
-              raise SystemExit('Source commit changed during diagnosis')
-          if subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip() != os.environ['AUDIT_SOURCE_TREE']:
-              raise SystemExit('Source tree changed during diagnosis')
+          if subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() != provenance['source_head']:
+              raise SystemExit('Source commit changed during report extraction')
+          if subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip() != provenance['source_tree']:
+              raise SystemExit('Source tree changed during report extraction')
           subprocess.run(['git', 'diff', '--quiet', '--exit-code'], check=True)
           subprocess.run(['git', 'diff', '--cached', '--quiet', '--exit-code'], check=True)
           print(''.join(lines), end='')
-          if identity_guard_failed:
-              raise SystemExit('A complete-count report has incorrect or duplicate test identities')
+          if structural_errors:
+              raise SystemExit('Original reports have incomplete/duplicate identities or inconsistent counts: ' + ','.join(structural_errors))
           PY
 
-      - name: Preserve the original report and complete diagnostic identities
+      - name: Preserve both original XML reports and complete diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostic-original-c81-X64-report
+          name: diagnostic-final-2b761f2-pytest-reports
           path: |
-            ${{ env.CI_REPORT_AUDIT_DIR }}/reports/x64/pytest-3.12-X64.xml
-            ${{ env.CI_REPORT_AUDIT_DIR }}/diagnostic-case-ids.json
+            ${{ env.CI_REPORT_AUDIT_DIR }}/reports/X64/pytest-3.12-X64.xml
+            ${{ env.CI_REPORT_AUDIT_DIR }}/reports/ARM64/pytest-3.12-ARM64.xml
+            ${{ env.CI_REPORT_AUDIT_DIR }}/*-diagnostic-case-ids.json
+            ${{ env.CI_REPORT_AUDIT_DIR }}/report-summaries.json
+            ${{ env.CI_REPORT_AUDIT_DIR }}/provenance.json
             ${{ env.CI_REPORT_AUDIT_DIR }}/collection.log
           if-no-files-found: error
