@@ -53,7 +53,8 @@ The broader Python 3.11 developer job exposed four historical expectations:
 two pre-COPY seed diagnostics and two alphabetically ordered macro arrays.
 Fresh Core CLI witnesses confirm the exact CSV diagnostic fields and authored
 macro dependency order. All four bounded corrections are integrated and pass
-on the unchanged verified product candidate; fresh Actions remains required.
+on the unchanged verified product candidate. The fresh Actions developer job
+passes all 326 tests at the published checkpoint.
 Product semantics and the strict public comparison remain intact.
 The full Python 3.12 compatibility jobs are still running on both architectures.
 
@@ -75,8 +76,11 @@ passes all 63 primary seed cases, including the new Column cases and unchanged
 10,000-row, 70,000-binding PostgreSQL workload. It also passes 707 native tests
 and all 14 new alias/provider boundary comparisons. Its wide-seed execution
 still takes 321 seconds against Core's 8.5 seconds, so practical scaling remains
-open. The expression worker owns a separately reviewed append-only loop-prefix
-and copied-row certificate follow-up with pre-mutation invalidation.
+open. The expression worker's separately reviewed append-only loop-prefix and
+copied-row certificate follow-up preserves pre-mutation invalidation. It passes
+708 native tests and all 18 actual Core alias/provider comparisons. Its full
+unchanged 63-case primary seed run remains active; practical wide-seed timing
+is required before integrating this follow-up.
 The unchanged wide seed also exposes repeated alias traversal of the full
 Agate/loop graph. The expression worker owns a bounded performance diagnosis
 and any reviewed ownership-preserving repair; the running unchanged fixture
