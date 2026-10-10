@@ -86,6 +86,13 @@ pub fn isFlag(value: Value) bool {
     const identity = value.attribute("__dxt_immutable_identity");
     return identity == .callable and std.mem.startsWith(u8, identity.callable, "__dxt_regex_flag:");
 }
+pub fn isFlagClass(value: Value) bool {
+    const marker = value.attribute("__dxt_native_regex_enum");
+    return marker == .callable and std.mem.eql(u8, marker.callable, "__dxt_regex_enum_class");
+}
+pub fn isFlagOrClass(value: Value) bool {
+    return isFlag(value) or isFlagClass(value);
+}
 fn flagFromText(a: Allocator, authored: []const u8) !Value {
     const numbers = @import("expression_number.zig");
     var number = authored;
@@ -119,7 +126,7 @@ fn flagFromText(a: Allocator, authored: []const u8) !Value {
         label = try std.fmt.allocPrint(a, "re.{s}{s}", .{ try std.mem.join(a, "|re.", names.items), suffix });
         name_value = .{ .string = try std.fmt.allocPrint(a, "{s}{s}", .{ try std.mem.join(a, "|", names.items), suffix }) };
     }
-    return try entry(a, &.{
+    const value = try entry(a, &.{
         .{ .key = "__dxt_immutable_identity", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_regex_flag:{s}", .{number}) } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_integer", .value = .{ .string = number } },
@@ -127,13 +134,47 @@ fn flagFromText(a: Allocator, authored: []const u8) !Value {
         .{ .key = "value", .value = .{ .integer = number } },
         .{ .key = "name", .value = name_value },
     });
+    // KEEP normalizes out-of-range negative inputs before Python records a
+    // negative alias. Only negatives within the declared nine-bit mask retain
+    // their authored key in the Enum cache.
+    const cache_key = if (numbers.order(authored, "-512") == .lt) number else authored;
+    try @import("regex_enum_cache.zig").remember(cache_key, number);
+    return value;
 }
 fn classValue(a: Allocator, name: []const u8) !Value {
+    if (std.mem.eql(u8, name, "RegexFlag")) return flagClassValue(a);
     return try entry(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_callable", .value = .{ .callable = try std.fmt.allocPrint(a, "modules.re.{s}", .{name}) } },
         .{ .key = "__dxt_rendered", .value = .{ .string = if (std.mem.eql(u8, name, "RegexFlag")) "<flag 'RegexFlag'>" else try std.fmt.allocPrint(a, "<class 're.{s}'>", .{name}) } },
     });
+}
+
+fn flagClassValue(a: Allocator) !Value {
+    var members: std.ArrayList(expr.Entry) = .empty;
+    for (flags) |flag| try members.append(a, .{ .key = flag.name, .value = try flagValue(a, flag.value) });
+    for ([_][]const u8{ "TEMPLATE", "T" }) |name| try members.append(a, .{ .key = name, .value = try flagValue(a, 1) });
+    try members.append(a, .{ .key = "DEBUG", .value = try flagValue(a, 128) });
+    const ordered = try expr.allocateValues(a, 9);
+    for ([_]u32{ 256, 2, 4, 32, 8, 16, 64, 1, 128 }, ordered) |number, *value| value.* = try flagValue(a, number);
+    var fields: std.ArrayList(expr.Entry) = .empty;
+    try fields.appendSlice(a, members.items);
+    try fields.appendSlice(a, &.{
+        .{ .key = "__dxt_native_regex_enum", .value = .{ .callable = "__dxt_regex_enum_class" } },
+        .{ .key = "__dxt_callable", .value = .{ .callable = "modules.re.RegexFlag" } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = "<flag 'RegexFlag'>" } },
+        .{ .key = "__dxt_iterable", .value = .{ .list = ordered } },
+        .{ .key = "__dxt_string_index", .value = .{ .object = try members.toOwnedSlice(a) } },
+    });
+    return .{ .object = try fields.toOwnedSlice(a) };
+}
+
+pub fn enumContains(a: Allocator, value: Value) !bool {
+    _ = call(a, "modules.re.RegexFlag", &.{.{ .value = value }}, null) catch |err| switch (err) {
+        error.InvalidRegularExpressionFlags => return false,
+        else => return err,
+    };
+    return true;
 }
 
 pub fn resolve(a: Allocator, path: []const u8) !?Value {
@@ -498,8 +539,9 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, host: ?expr.
         try validateArguments(args, &.{"value"}, 1);
         const value = argument(args, "value", 0);
         const number = if (value == .integer) value.integer else if (expr.integerProtocol(value)) |number| number else if (value == .boolean) (if (value.boolean) "1" else "0") else if (expr.floatProtocol(value)) |floating| blk: {
-            for ([_]f64{ 0, 1, 2, 4, 8, 16, 32, 64, 128, 256 }) |member| if (member == floating) break :blk (try expr.integerValue(a, @as(u32, @intFromFloat(member)))).integer;
-            return error.InvalidRegularExpressionFlags;
+            if (!std.math.isFinite(floating) or @floor(floating) != floating) return error.InvalidRegularExpressionFlags;
+            const authored = try @import("expression_number.zig").floatToInteger(a, floating);
+            break :blk @import("regex_enum_cache.zig").lookup(authored) orelse return error.InvalidRegularExpressionFlags;
         } else return error.InvalidRegularExpressionFlags;
         return try flagFromText(a, number);
     }
@@ -568,4 +610,24 @@ test "RegexFlag identities share normalized values without merging ordinary inte
     const authored = try expr.evaluate(a, "{'__dxt_immutable_identity':'__dxt_regex_flag:2'}", null);
     try std.testing.expect(!isFlag(authored));
     try std.testing.expect(!try expr.testValue("sameas", ignorecase, &.{.{ .value = authored }}));
+}
+
+test "RegexFlag class iteration, subscription and cached float constructors retain enum semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const class = (try resolve(a, "modules.re.RegexFlag")).?;
+    try std.testing.expect(isFlagClass(class));
+    try std.testing.expectEqual(@as(usize, 9), (try expr.iterableValues(a, class)).len);
+    try std.testing.expect(isFlag(try expr.indexValue(a, class, .{ .string = "I" })));
+    try std.testing.expect((try expr.indexValue(a, class, .{ .integer = "0" })) == .undefined);
+    const constructed = (try call(a, "modules.re.RegexFlag", &.{.{ .value = .{ .integer = "3" } }}, null)).?;
+    const cached_float = (try call(a, "modules.re.RegexFlag", &.{.{ .value = try expr.floatValue(a, 3) }}, null)).?;
+    try std.testing.expect(try expr.testValue("sameas", constructed, &.{.{ .value = cached_float }}));
+    try std.testing.expect(try enumContains(a, .{ .integer = "512" }));
+    try std.testing.expect(!try enumContains(a, .{ .string = "I" }));
+    try std.testing.expectError(error.InvalidRegularExpressionFlags, call(a, "modules.re.RegexFlag", &.{.{ .value = try expr.floatValue(a, 3.5) }}, null));
+    const authored = try expr.evaluate(a, "{'__dxt_integer':'1'}", null);
+    try std.testing.expect(expr.integerProtocol(authored) == null);
+    try std.testing.expect(try expr.testValue("mapping", authored, &.{}));
 }

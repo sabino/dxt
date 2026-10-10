@@ -429,7 +429,7 @@ pub fn checkedAttribute(value: Value, name: []const u8) !Value {
     if (sequences.kind(value) != null) return .undefined;
     if (tupleProtocol(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (nativeNumeric(value) and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
-    if (@import("regex_context.zig").isFlag(value) and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
+    if (@import("regex_context.zig").isFlagOrClass(value) and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (value == .capture_undefined) {
         if (std.mem.eql(u8, name, "name") or std.mem.eql(u8, name, "hint") or std.mem.eql(u8, name, "unsafe_callable") or std.mem.eql(u8, name, "alters_data")) return value.attribute(name);
         const captured = value.capture_undefined;
@@ -1341,6 +1341,7 @@ fn numeric(v: Value) !f64 {
     return numericFloat(v);
 }
 pub fn integerProtocol(value: Value) ?[]const u8 {
+    if (!@import("regex_context.zig").isFlag(value)) return null;
     const marker = value.attribute("__dxt_integer");
     return if (marker == .string) marker.string else null;
 }
@@ -1592,6 +1593,7 @@ fn contains(allocator: std.mem.Allocator, container: Value, item: Value) anyerro
     return containsWithHost(allocator, container, item, null);
 }
 pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Value, host: ?Host) anyerror!bool {
+    if (@import("regex_context.zig").isFlagClass(container)) return @import("regex_context.zig").enumContains(allocator, item);
     if (sequences.isIterator(container)) {
         while (try sequences.next(allocator, container, host)) |row| if (try equalMemberChecked(row, item)) return true;
         return false;
@@ -1709,6 +1711,7 @@ pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value
     if (sets.isSet(value)) return .undefined;
     if (nativeNumeric(value)) return if (key == .string) promoteNumericValue(allocator, try checkedAttribute(value, key.string)) else .undefined;
     if (@import("regex_context.zig").isFlag(value)) return if (key == .string) checkedAttribute(value, key.string) else .undefined;
+    if (@import("regex_context.zig").isFlagClass(value)) return if (key == .string) value.attribute("__dxt_string_index").attribute(key.string) else .undefined;
     if (value == .object and tupleProtocol(value) != null and key == .string) return checkedAttribute(value, key.string);
     if (value == .object) {
         const names = value.attribute("__dxt_string_index");
@@ -2078,7 +2081,7 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
         if (sequences.kind(value) != null) return .undefined;
         if (nativeNumeric(value)) return attributeWithHost(allocator, value, args[0].value.string, host);
-        if (@import("regex_context.zig").isFlag(value)) return checkedAttribute(value, args[0].value.string);
+        if (@import("regex_context.zig").isFlagOrClass(value)) return checkedAttribute(value, args[0].value.string);
         if (tupleProtocol(value) != null) return checkedAttribute(value, args[0].value.string);
         if (value == .capture_undefined and std.mem.startsWith(u8, args[0].value.string, "__") and std.mem.endsWith(u8, args[0].value.string, "__") and !undefinedUnsafeAttribute(args[0].value.string, true)) return try captureUndefined(allocator, args[0].value.string);
         if (isUndefined(value)) return try checkedAttribute(value, args[0].value.string);

@@ -1,5 +1,7 @@
 """Regex flag singletons, subclass conversion and opaque identities against Core."""
 import subprocess
+import json
+import sys
 
 import pytest
 
@@ -59,3 +61,50 @@ def test_as_text_retains_string_aliases(tmp_path, core_runner):
         + ";".join("{{ " + item + " }}" for item in expressions) + "' as value"
     )
     compare(root, core_runner)
+
+
+def test_regex_flag_class_and_constructor_cache_match_core(tmp_path, core_runner):
+    root = tmp_path / "project"
+    write_project(root, "0")
+    expressions = [
+        "modules.re.RegexFlag.I is sameas modules.re.I",
+        "modules.re.RegexFlag.TEMPLATE.value", "modules.re.RegexFlag.DEBUG.value",
+        "modules.re.RegexFlag['I'] is sameas modules.re.I",
+        "modules.re.RegexFlag[0]|default('missing')", "modules.re.RegexFlag|list",
+        "modules.re.RegexFlag|length", "modules.re.RegexFlag is iterable",
+        "modules.re.RegexFlag is sequence", "modules.re.RegexFlag is mapping",
+        "'I' in modules.re.RegexFlag", "modules.re.I in modules.re.RegexFlag",
+        "modules.re.RegexFlag(3.0) is sameas three",
+        "modules.re.RegexFlag(512.0) is sameas unknown",
+        "modules.re.RegexFlag(-257.0) is sameas negative",
+        "modules.re.RegexFlag(255.0) is sameas negative",
+        "modules.re.RegexFlag|attr('__dxt_native_regex_enum')|default('missing')",
+        "{'__dxt_integer':'1'} is mapping", "{'__dxt_integer':'1'}|tojson",
+        "{'__dxt_integer':'1'} == 1",
+    ]
+    prefix = "{% set three=modules.re.RegexFlag(3) %}{% set unknown=modules.re.RegexFlag(512) %}{% set negative=modules.re.RegexFlag(-257) %}"
+    (root / "models/value.sql").write_text(
+        prefix + "select '" + ";".join("{{ " + item + " }}" for item in expressions) + "' as value"
+    )
+    compare(root, core_runner)
+
+
+@pytest.mark.parametrize("value,prefix", [
+    ("7999.0", ""), ("-7999.0", ""), ("3.5", ""),
+    ("authored|float", "{% set authored='nan' %}"),
+    ("authored|float", "{% set authored='inf' %}"),
+    ("-513.0", "{% set normalized=modules.re.RegexFlag(-513) %}"),
+])
+def test_uncached_or_invalid_regex_flag_floats_fail_in_fresh_core(tmp_path, core_runner, value, prefix):
+    root = tmp_path / "project"
+    write_project(root, "0")
+    (root / "models/value.sql").write_text(prefix + "select '{{ modules.re.RegexFlag(" + value + ") }}' as value")
+    common = ["compile", "--project-dir", str(root), "--profiles-dir", str(root)]
+    native = subprocess.run([ROOT / "zig-out/bin/dxt", *common], capture_output=True, text=True)
+    assert native.returncode != 0, native.stdout + native.stderr
+    assert "InvalidRegularExpressionFlags" in native.stderr, native.stderr
+    # The Enum cache belongs to the process, so each cold-cache failure needs
+    # a fresh actual Core process rather than the suite's reusable dbtRunner.
+    script = "from dbt.cli.main import dbtRunner; import json,sys; r=dbtRunner().invoke(json.loads(sys.argv[1])); assert not r.success, 'Core accepted the invalid flag'; assert 'is not a valid RegexFlag' in str(r.exception), r.exception"
+    core = subprocess.run([sys.executable, "-c", script, json.dumps(["--quiet", *common, "--no-partial-parse"])], capture_output=True, text=True)
+    assert core.returncode == 0, core.stdout + core.stderr
