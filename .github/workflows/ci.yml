@@ -1,4 +1,4 @@
-name: Diagnose original c81 ARM64 pytest report
+name: Diagnose original c81 ARM64 pytest report tail
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   failed-arm64-report-diagnostic:
-    name: diagnose sealed original ARM64 failure
+    name: diagnose sealed original ARM64 failure tail
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -124,6 +124,8 @@ jobs:
           if len(reports) != 1 or reports[0].name != 'pytest-3.12-ARM64.xml':
               raise SystemExit('Artifact must contain exactly its original ARM64 XML report')
           report = reports[0]
+          if hashlib.sha256(report.read_bytes()).hexdigest() != '953d7b33d918a74e7e92f3fda46b49746b0470b1a0e3e4f6a2ab615dad90f607':
+              raise SystemExit('Original sealed ARM64 XML changed from its first diagnostic')
           root = ET.parse(report).getroot()
           if root.tag not in {'testsuite', 'testsuites'}:
               raise SystemExit('Expected original pytest JUnit report')
@@ -158,6 +160,7 @@ jobs:
                   full_details.append((descriptor, text))
           ids_hash = lambda values: hashlib.sha256(('\n'.join(sorted(values)) + '\n').encode()).hexdigest()
           summary = {'kind': 'DIAGNOSTIC FAILED REPORT', 'acceptance': False,
+                     'diagnostic_mode': 'final_failure_tail_and_snapshot_panics', 'failure_text_start': 40,
                      'source_head': os.environ['AUDIT_SOURCE_HEAD'], 'source_tree': os.environ['AUDIT_SOURCE_TREE'],
                      'audit_workflow_head': os.environ['AUDIT_WORKFLOW_HEAD'],
                      'original_run_id': int(os.environ['AUDIT_ORIGINAL_RUN']),
@@ -187,13 +190,20 @@ jobs:
               raise SystemExit('Complete diagnostic identities exceed the 100 KiB log budget; original report and complete ID file retained')
           secrets = sorted((value for name, value in os.environ.items()
                             if name.startswith('DBT_ENV_SECRET_') and value.strip()), key=len, reverse=True)
-          for descriptor, raw_text in full_details:
+          selected_details = [(descriptor, text, False) for descriptor, text in full_details[40:]]
+          selected_details += [(descriptor, text, True) for descriptor, text in full_details
+                               if descriptor['node_id'] in {
+                                   'tests/test_usability_snapshots.py::test_modern_yaml_snapshot_inherited_config_and_tests',
+                                   'tests/test_usability_snapshots.py::test_modern_yaml_pinned_dbt_snapshot_oracle'}]
+          for descriptor, raw_text, panic_tail in selected_details:
               text = raw_text
               for value in secrets:
                   text = text.replace(value, '*****')
               text = re.sub(r'\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9]+)\b', '*****', text)
-              text = re.sub(r'(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer *****', text)[:2000]
-              record = dict(descriptor, kind='DIAGNOSTIC BOUNDED FAILURE TEXT', original_text_chars=len(raw_text), text=text)
+              text = re.sub(r'(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer *****', text)
+              text = text[-8000:] if panic_tail else text[:3000]
+              record = dict(descriptor, kind='DIAGNOSTIC BOUNDED FAILURE TEXT', original_text_chars=len(raw_text),
+                            text_slice='last_8000' if panic_tail else 'first_3000', text=text)
               line = encode(record)
               while len(line.encode()) > 102400 - used and record['text']:
                   record['text'] = record['text'][:max(0, len(record['text']) - max(1, len(record['text']) // 4))]
@@ -217,7 +227,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostic-original-c81-ARM64-report
+          name: diagnostic-original-c81-ARM64-report-tail
           path: |
             ${{ env.CI_REPORT_AUDIT_DIR }}/reports/arm64/pytest-3.12-ARM64.xml
             ${{ env.CI_REPORT_AUDIT_DIR }}/diagnostic-case-ids.json
