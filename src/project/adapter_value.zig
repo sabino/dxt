@@ -27,6 +27,7 @@ pub const Cell = union(enum) {
     interval: Interval,
     uuid: []const u8,
     list: []Cell,
+    tuple: []Cell,
     object: []Field,
     map: []Pair,
     range: Range,
@@ -38,7 +39,7 @@ pub const Cell = union(enum) {
                 a.free(value.timezone.?);
                 value.timezone = owned;
             },
-            .list => |values| for (values) |*value| try value.setTimezone(a, name),
+            .list, .tuple => |values| for (values) |*value| try value.setTimezone(a, name),
             .object => |values| for (values) |*field| try field.value.setTimezone(a, name),
             .map => |values| for (values) |*pair| {
                 try pair.key.setTimezone(a, name);
@@ -56,7 +57,7 @@ pub const Cell = union(enum) {
         switch (self.*) {
             .integer, .decimal, .text, .binary, .memoryview, .uuid => |bytes| a.free(bytes),
             .timestamp => |value| if (value.timezone) |zone| a.free(zone),
-            .list => |values| {
+            .list, .tuple => |values| {
                 for (values) |*value| value.deinit(a);
                 a.free(values);
             },
@@ -123,4 +124,13 @@ test "PostgreSQL ranges retain owned typed endpoints and unbounded nulls" {
     try std.testing.expect(range.range.upper == null);
     try std.testing.expectEqualStrings("1.000000000000000000001", range.range.lower.?.decimal);
     try std.testing.expectEqualSlices(u8, "[)", &range.range.bounds);
+}
+
+test "fixed DuckDB arrays retain distinct owned tuple identity" {
+    const a = std.testing.allocator;
+    var cell: Cell = .{ .tuple = try a.alloc(Cell, 1) };
+    cell.tuple[0] = .{ .text = try a.dupe(u8, "owned") };
+    try std.testing.expectEqualStrings("owned", cell.tuple[0].text);
+    cell.deinit(a);
+    try std.testing.expect(cell == .none);
 }
