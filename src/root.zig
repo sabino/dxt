@@ -673,7 +673,7 @@ fn commandError(err: anyerror, stderr: *Io.Writer) ExitCode {
         error.UnsupportedDuckDbPath => stderr.writeAll("error: DuckDB connection requires a supported database path\n") catch {},
         error.CyclicModelDependency => stderr.writeAll("error: selected model graph contains a cycle\n") catch {},
         error.DuckDbCliNotFound => stderr.writeAll("error: DuckDB execution requires libduckdb or the duckdb CLI on PATH\n") catch {},
-        error.NativeDuckDbLibraryNotFound => stderr.writeAll("error: native DuckDB library unavailable; set DXT_DUCKDB_LIBRARY to a compatible libduckdb library or use DXT_DUCKDB_BACKEND=cli\n") catch {},
+        error.NativeDuckDbLibraryNotFound => stderr.writeAll("error: this DuckDB operation requires a native session; set DXT_DUCKDB_LIBRARY to a compatible libduckdb library and DXT_DUCKDB_BACKEND=native\n") catch {},
         error.NativeDuckDbAbiMismatch => stderr.writeAll("error: native DuckDB library does not provide the required C API\n") catch {},
         error.NativeDuckDbConnectionFailed => stderr.writeAll("error: native DuckDB connection failed\n") catch {},
         error.NativeDuckDbReadOnlyConnection => stderr.writeAll("error: DuckDB connection permits read-only queries\n") catch {},
