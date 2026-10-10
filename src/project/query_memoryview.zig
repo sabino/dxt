@@ -101,6 +101,14 @@ pub fn length(input: Value) !usize {
     return size(view.shape[0]);
 }
 pub fn render(a: A, input: Value) !?[]const u8 {
+    if (isMethod(input)) {
+        const name = field(input, "__dxt_memoryview_method_name");
+        if (name != .string) return error.JinjaTypeError;
+        const receiver = state(field(input, "__dxt_memoryview_receiver")) orelse return error.JinjaTypeError;
+        // Built-in method repr keeps its receiver's identity even after the
+        // buffer is released; rendering never reads the buffer contents.
+        return try std.fmt.allocPrint(a, "<built-in method {s} of memoryview object at 0x{s}>", .{ name.string, receiver.identity });
+    }
     const view = state(input) orelse return null;
     return try std.fmt.allocPrint(a, "<{s}memory at 0x{s}>", .{ if (view.released) @as([]const u8, "released ") else "", view.identity });
 }
@@ -500,6 +508,33 @@ test "psycopg bytea memoryview keeps character elements and opaque shared chunk"
     try std.testing.expect(equal(empty, try bytes.fromBytes(a, "")).?);
     const cast = try invoke(a, try slice(a, original, .{ .integer = "1" }, null, null), "cast", &.{.{ .value = .{ .string = "B" } }});
     try std.testing.expectEqualStrings(original.attribute("obj").attribute("__dxt_rendered").string, cast.attribute("obj").attribute("__dxt_rendered").string);
+}
+
+test "psycopg saved method rendering retains method names and receiver identity after release" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const view = try value(a, "ab", 'c', null);
+    const identity = state(view).?.identity;
+    const saved = try attribute(a, view, "tobytes");
+    const before = (try render(a, saved.?)).?;
+    for (methods) |name| {
+        const first = (try attribute(a, view, name)).?;
+        const second = (try attribute(a, view, name)).?;
+        const expected = try std.fmt.allocPrint(a, "<built-in method {s} of memoryview object at 0x{s}>", .{ name, identity });
+        try std.testing.expectEqualStrings(expected, (try render(a, first)).?);
+        try std.testing.expectEqualStrings(expected, (try render(a, second)).?);
+    }
+    const peer = try invoke(a, view, "cast", &.{.{ .value = .{ .string = "B" } }});
+    try std.testing.expect(!std.mem.eql(u8, before, (try render(a, (try attribute(a, peer, "tobytes")).?)).?));
+    _ = try invoke(a, view, "release", &.{});
+    try std.testing.expectEqualStrings(before, (try render(a, saved.?)).?);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "<released memory at 0x{s}>", .{identity}), (try render(a, view)).?);
+    const authored = Value{ .object = &.{
+        .{ .key = "__dxt_context_object", .value = .{ .string = "__dxt_context_object" } },
+        .{ .key = "__dxt_memoryview_method", .value = .{ .string = "__dxt_memoryview_method" } },
+    } };
+    try std.testing.expect((try render(a, authored)) == null);
 }
 
 test "psycopg memoryview casts native numeric formats and validates method arguments" {
