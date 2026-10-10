@@ -364,8 +364,10 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     }
     const compile_result = compileWithHost(runtime, options, &graph, selected, target_dir, &compile_rows, stderr) catch |err| {
         if (err == error.OutOfMemory) return err;
+        _ = try writeManifest(runtime, &graph, target_dir);
+        try writeRunResults(runtime, target_dir, compile_rows.items);
         try reportCompilationFailure(runtime, compile_rows.items, err, stderr);
-        return error.SqlOperationFailure;
+        return error.ExecutionFailure;
     };
 
     _ = try writeManifest(runtime, &graph, target_dir);
@@ -441,8 +443,10 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     }
     const compile_result = if (options.docs_compile) compileWithHost(runtime, options, &graph, selected, target_dir, &compile_rows, stderr) catch |err| {
         if (err == error.OutOfMemory) return err;
+        _ = try writeManifest(runtime, &graph, target_dir);
+        try writeRunResults(runtime, target_dir, compile_rows.items);
         try reportCompilationFailure(runtime, compile_rows.items, err, stderr);
-        return error.SqlOperationFailure;
+        return error.ExecutionFailure;
     } else CompileResult{ .count = 0, .saw_model = false, .compiled_base = "" };
 
     _ = try writeManifestWithPolicy(runtime, &graph, target_dir, cli_options.writeJson(runtime) or options.docs_compile);
