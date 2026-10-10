@@ -40,7 +40,7 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Argume
         return .{ .original = receiver, .replacement = .{ .list = try ownedList(allocator, output.items) } };
     }
     if (receiver == .object) {
-        if (receiver.attribute("__dxt_noniterable").truthy() or receiver.attribute("__dxt_relation") != .undefined or @import("expression_sequence.zig").kind(receiver) != null) return null;
+        if (!@import("builtin_bound_method.zig").isMapping(receiver) or expression.mappingSource(receiver) != null) return null;
         var output: std.ArrayList(expression.Entry) = .empty;
         if (std.mem.eql(u8, method, "update")) {
             try output.appendSlice(allocator, receiver.object);
@@ -51,9 +51,9 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Argume
                 } else {
                     positional += 1;
                     if (positional > 1) return error.InvalidJinjaArguments;
-                    if (arg.value == .object and @import("expression_sequence.zig").kind(arg.value) == null) {
-                        if (arg.value.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError;
-                        for (arg.value.object) |entry| try expression.mappingPut(allocator, &output, expression.entryKey(entry), entry.value);
+                    if (@import("builtin_bound_method.zig").isMapping(arg.value)) {
+                        const source = expression.mappingSource(arg.value) orelse arg.value;
+                        for (source.object) |entry| try expression.mappingPut(allocator, &output, expression.entryKey(entry), entry.value);
                     } else {
                         for (try expression.iterableValues(allocator, arg.value)) |pair| {
                             const cells = try expression.iterableValues(allocator, pair);

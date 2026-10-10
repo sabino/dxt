@@ -187,9 +187,8 @@ pub fn isUndefined(value: Value) bool {
 
 /// Probe the iterable protocol without consuming one-shot iterators.
 pub fn isIterable(value: Value) bool {
-    const noniterable = value.attribute("__dxt_noniterable");
-    if (noniterable == .boolean and noniterable.boolean) return false;
-    return isUndefined(value) or value == .list or value == .tuple or value == .object or value == .string;
+    return isUndefined(value) or value == .list or value == .tuple or value == .string or
+        @import("builtin_bound_method.zig").isMapping(value) or sequence(value) != null or sequences.kind(value) != null;
 }
 
 pub const Entry = struct { key: []const u8, value: Value, typed_key: ?Value = null };
@@ -284,7 +283,7 @@ pub fn tupleProtocol(value: Value) ?[]const Value {
 pub fn sequence(value: Value) ?[]const Value {
     if (value == .list) return value.list;
     if (value == .tuple) return value.tuple;
-    if (value == .object) {
+    if (value == .object and (@import("builtin_bound_method.zig").isContextObject(value) or tupleProtocol(value) != null or sets.isSet(value))) {
         const items = value.attribute("__dxt_iterable");
         if (items == .list) return items.list;
     }
@@ -1651,7 +1650,7 @@ pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Va
     if (mappingSource(container)) |source| return if (item == .string) (try mapping_keys.entry(source, item)) != null else false;
     if (container.attribute("__dxt_binary") == .string) return yaml_values.contains(container, item);
     if (sets.isSet(container)) return try sets.contains(container, item);
-    if (container.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError;
+    if (!isIterable(container)) return error.JinjaTypeError;
     if (sequences.kind(container) != null) {
         for (try iterableValuesWithHost(allocator, container, host)) |value| if (try equalMemberChecked(value, item)) return true;
         return false;
@@ -1761,7 +1760,7 @@ pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value
     if (@import("regex_context.zig").isFlag(value)) return if (key == .string) checkedAttribute(value, key.string) else .undefined;
     if (@import("regex_context.zig").isFlagClass(value)) return if (key == .string) value.attribute("__dxt_string_index").attribute(key.string) else .undefined;
     if (value == .object and tupleProtocol(value) != null and key == .string) return checkedAttribute(value, key.string);
-    if (value == .object) {
+    if (value == .object and @import("builtin_bound_method.zig").isContextObject(value)) {
         const names = value.attribute("__dxt_string_index");
         if (names == .object and key == .string) return names.attribute(key.string);
         const indexed = value.attribute("__dxt_indexed");
@@ -1878,7 +1877,7 @@ pub fn iterableValues(allocator: std.mem.Allocator, value: Value) anyerror![]con
     return iterableValuesWithHost(allocator, value, null);
 }
 pub fn iterableValuesWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) anyerror![]const Value {
-    if (value.attribute("__dxt_noniterable") == .boolean and value.attribute("__dxt_noniterable").boolean) return error.JinjaTypeError;
+    if (!isIterable(value)) return error.JinjaTypeError;
     if (try sequences.itemsWithHost(allocator, value, host)) |items| return items;
     if (sequence(value)) |items| return items;
     if (isUndefined(value)) return &.{};
@@ -1979,12 +1978,10 @@ pub fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
         if (std.mem.eql(u8, name, "mapping") or std.mem.eql(u8, name, "sequence") or std.mem.eql(u8, name, "callable")) return false;
         if (std.mem.eql(u8, name, "iterable")) return true;
     }
-    if (value.attribute("__dxt_noniterable") == .boolean and value.attribute("__dxt_noniterable").boolean) {
-        if (std.mem.eql(u8, name, "mapping") or std.mem.eql(u8, name, "iterable") or std.mem.eql(u8, name, "sequence")) return false;
-    }
-    if (std.mem.eql(u8, name, "mapping")) return value == .object and sequence(value) == null and sequences.kind(value) == null;
+    if (std.mem.eql(u8, name, "mapping")) return @import("builtin_bound_method.zig").isMapping(value);
     if (std.mem.eql(u8, name, "iterable")) return isIterable(value);
-    if (std.mem.eql(u8, name, "sequence")) return isUndefined(value) or value == .list or value == .tuple or (value == .object and sequences.kind(value) == null) or value == .string;
+    if (std.mem.eql(u8, name, "sequence")) return isUndefined(value) or value == .list or value == .tuple or value == .string or
+        @import("builtin_bound_method.zig").isMapping(value) or (sequence(value) != null and !sets.isSet(value));
     if (std.mem.eql(u8, name, "callable")) return isUndefined(value) or callableName(value) != null;
     if (std.mem.eql(u8, name, "equalto") or std.mem.eql(u8, name, "eq") or std.mem.eql(u8, name, "==")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
@@ -2056,8 +2053,9 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
             const key = arg.name orelse {
                 positional += 1;
                 if (positional > 1) return error.InvalidJinjaArguments;
-                if (arg.value == .object and !arg.value.attribute("__dxt_noniterable").truthy() and sequences.kind(arg.value) == null and !sets.isSet(arg.value) and tupleProtocol(arg.value) == null) {
-                    for (arg.value.object) |entry| try mappingPut(allocator, &entries, entryKey(entry), entry.value);
+                if (@import("builtin_bound_method.zig").isMapping(arg.value)) {
+                    const source = mappingSource(arg.value) orelse arg.value;
+                    for (source.object) |entry| try mappingPut(allocator, &entries, entryKey(entry), entry.value);
                 } else {
                     for (try iterableValuesWithHost(allocator, arg.value, host)) |item| {
                         const pair = try iterableValuesWithHost(allocator, item, host);

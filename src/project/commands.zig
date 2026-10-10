@@ -463,6 +463,7 @@ pub const OperationHost = struct {
             const table = argument(args, "agate_table", 4) orelse expression.Value.none;
             const response: expression.Value = .{ .object = try self.values.allocator().dupe(expression.Entry, &.{
                 .{ .key = "__dxt_adapter_response", .value = .{ .boolean = true } },
+                .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
                 .{ .key = "__dxt_rendered", .value = message },
                 .{ .key = "_message", .value = message },
                 .{ .key = "code", .value = code },
@@ -547,7 +548,7 @@ pub const OperationHost = struct {
             code = .{ .string = try label.toOwnedSlice(allocator) };
             affected = if (has_count) try expression.integerValue(allocator, output.rows_changed) else .{ .integer = "-1" };
         }
-        self.last_response = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "__dxt_adapter_response", .value = .{ .boolean = true } }, .{ .key = "__dxt_rendered", .value = .{ .string = message } }, .{ .key = "_message", .value = .{ .string = message } }, .{ .key = "code", .value = code }, .{ .key = "rows_affected", .value = affected } }) };
+        self.last_response = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } }, .{ .key = "__dxt_adapter_response", .value = .{ .boolean = true } }, .{ .key = "__dxt_rendered", .value = .{ .string = message } }, .{ .key = "_message", .value = .{ .string = message } }, .{ .key = "code", .value = code }, .{ .key = "rows_affected", .value = affected } }) };
         if (std.ascii.eqlIgnoreCase(trimmed, "begin") or std.ascii.eqlIgnoreCase(trimmed, "begin transaction")) self.transaction_open = true;
         if (std.ascii.eqlIgnoreCase(trimmed, "commit") or std.ascii.eqlIgnoreCase(trimmed, "rollback")) self.transaction_open = false;
         // Native query results distinguish empty SELECTs from statements.
@@ -578,6 +579,7 @@ pub const OperationHost = struct {
         try self.stored.append(self.runtime.allocator, .{ .name = method, .value = .{ .list = data } });
         return .{ .object = try allocator.dupe(expression.Entry, &.{
             .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
+            .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
             .{ .key = "__dxt_data", .value = .{ .list = data } },
             .{ .key = "rows", .value = .{ .list = rows } },
             .{ .key = "columns", .value = column_values },
@@ -599,13 +601,14 @@ pub const OperationHost = struct {
             entry.* = .{ .key = name.string, .value = value };
             pair.* = .{ .tuple = try allocator.dupe(expression.Value, &.{ name, value }) };
         }
-        const entries = try expression.allocateEntries(allocator, names.len + 5);
+        const entries = try expression.allocateEntries(allocator, names.len + 6);
         entries[0] = .{ .key = "__dxt_iterable", .value = .{ .list = values } };
         entries[1] = .{ .key = "__dxt_string_index", .value = .{ .object = named } };
         entries[2] = .{ .key = "keys", .value = try self.callback(.{ .tuple = names }) };
         entries[3] = .{ .key = "values", .value = try self.callback(.{ .tuple = values }) };
         entries[4] = .{ .key = "items", .value = try self.callback(.{ .tuple = pairs }) };
-        @memcpy(entries[5..], named);
+        entries[5] = .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } };
+        @memcpy(entries[6..], named);
         return .{ .object = entries };
     }
 
@@ -619,8 +622,11 @@ pub const OperationHost = struct {
         const allocator = self.values.allocator();
         const empty: expression.Value = .{ .list = try expression.allocateValues(allocator, 0) };
         return .{ .object = try allocator.dupe(expression.Entry, &.{
-            .{ .key = "__dxt_iterable", .value = empty },                        .{ .key = "__dxt_data", .value = empty },
-            .{ .key = "rows", .value = empty },                                  .{ .key = "column_names", .value = empty },
+            .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+            .{ .key = "__dxt_iterable", .value = empty },
+            .{ .key = "__dxt_data", .value = empty },
+            .{ .key = "rows", .value = empty },
+            .{ .key = "column_names", .value = empty },
             .{ .key = "columns", .value = try self.mappedSequence(&.{}, &.{}) },
         }) };
     }

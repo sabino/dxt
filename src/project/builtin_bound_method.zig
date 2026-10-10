@@ -18,7 +18,7 @@ pub fn isContextObject(value: Value) bool {
 
 pub fn isMapping(value: Value) bool {
     if (value != .object or isContextObject(value) or isBound(value) or @import("datetime_bound_method.zig").isBound(value)) return false;
-    if (@import("expression_sequence.zig").kind(value) != null or expression.sequence(value) != null) return false;
+    if (@import("expression_sequence.zig").kind(value) != null or expression.tupleProtocol(value) != null) return false;
     if (@import("set_context.zig").isSet(value) or (expression.floatProtocol(value) != null or expression.complexProtocol(value) != null or expression.integerProtocol(value) != null)) return false;
     if (@import("datetime_protocol.zig").kind(value) != null or @import("timezone_context.zig").isTimezone(value)) return false;
     const getter = value.attribute("__dxt_getattr");

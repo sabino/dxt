@@ -87,12 +87,13 @@ pub fn binary(a: std.mem.Allocator, encoded: []const u8) !Value {
         else => try out.writer.print("\\x{x:0>2}", .{byte}),
     };
     try out.writer.writeByte(quote);
-    const entries = try expression.allocateEntries(a, 5);
+    const entries = try expression.allocateEntries(a, 6);
     entries[0] = .{ .key = "__dxt_binary", .value = .{ .string = bytes } };
     entries[1] = .{ .key = "__dxt_iterable", .value = .{ .list = members } };
     entries[2] = .{ .key = "__dxt_rendered", .value = .{ .string = try out.toOwnedSlice() } };
     entries[3] = .{ .key = "decode", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_yaml_bytes_decode:{s}", .{encoded}) } };
     entries[4] = .{ .key = "hex", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_yaml_bytes_hex:{s}", .{encoded}) } };
+    entries[5] = .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } };
     return .{ .object = entries };
 }
 

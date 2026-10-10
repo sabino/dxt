@@ -66,6 +66,39 @@ test "both JSON serializers expose opaque tuples as arrays and preserve authored
     try std.testing.expectError(error.JinjaCircularReference, stringify(allocator, cycle));
 }
 
+test "authored protocol names stay dictionary data through traits and serialization" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = "{'__dxt_noniterable':true,'__dxt_set':true,'__dxt_native_tuple':'__dxt_native_tuple','__dxt_iterable':[1,2]}";
+    const value = try expression.evaluate(a, source, null);
+    try std.testing.expect(try expression.testValue("mapping", value, &.{}));
+    try std.testing.expect(try expression.testValue("sequence", value, &.{}));
+    try std.testing.expect(expression.isIterable(value));
+    try std.testing.expect(expression.sequence(value) == null);
+    const keys = try expression.iterableValues(a, value);
+    try std.testing.expectEqual(value.object.len, keys.len);
+    try std.testing.expectEqualStrings("__dxt_noniterable", keys[0].string);
+    try std.testing.expect(try expression.containsWithHost(a, value, keys[0], null));
+    try std.testing.expectEqualStrings("{\"__dxt_noniterable\": true, \"__dxt_set\": true, \"__dxt_native_tuple\": \"__dxt_native_tuple\", \"__dxt_iterable\": [1, 2]}", try stringify(a, value));
+    try std.testing.expectEqualStrings("{\"__dxt_iterable\": [1, 2], \"__dxt_native_tuple\": \"__dxt_native_tuple\", \"__dxt_noniterable\": true, \"__dxt_set\": true}", try @import("expression_json.zig").render(a, value, null));
+    const config = try @import("config_value.zig").fromExpression(a, value);
+    try std.testing.expect(config.object.get("__dxt_noniterable").?.bool);
+    try std.testing.expectEqual(@as(usize, 2), config.object.get("__dxt_iterable").?.array.items.len);
+    const updated = (try @import("container_methods.zig").call(a, "__dxt_value.update", &.{ .{ .value = value }, .{ .name = "added", .value = .{ .integer = "7" } } })).?.replacement.?;
+    try std.testing.expectEqualStrings("7", updated.attribute("added").integer);
+    const proxy = expression.Value{ .object = &.{
+        .{ .key = "__dxt_native_mapping", .value = .{ .callable = "__dxt_native_mapping" } },
+        .{ .key = "__dxt_mapping_source", .value = value },
+    } };
+    try std.testing.expect(try expression.testValue("mapping", proxy, &.{}));
+    try std.testing.expect(try expression.testValue("sequence", proxy, &.{}));
+    try std.testing.expect(expression.isIterable(proxy));
+    try std.testing.expectError(error.JinjaTypeError, stringify(a, proxy));
+    try std.testing.expectError(error.JinjaTypeError, @import("expression_json.zig").render(a, proxy, null));
+    try std.testing.expectError(error.InvalidConfiguration, @import("config_value.zig").fromExpression(a, proxy));
+}
+
 pub fn stringifySorted(allocator: std.mem.Allocator, value: expression.Value, sort_keys: bool) ![]const u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
@@ -121,7 +154,7 @@ fn write(allocator: std.mem.Allocator, writer: *std.Io.Writer, value: expression
                 try writer.writeByte(']');
                 return;
             }
-            if (value.attribute("__dxt_noniterable").truthy() or value.attribute("__dxt_relation") != .undefined or @import("expression_sequence.zig").kind(value) != null or @import("set_context.zig").isSet(value)) return error.JinjaTypeError;
+            if (!@import("builtin_bound_method.zig").isMapping(value) or expression.mappingSource(value) != null) return error.JinjaTypeError;
             const sorted = if (sort_keys) try allocator.dupe(expression.Entry, entries) else null;
             defer if (sorted) |items| allocator.free(items);
             if (sorted) |items| try @import("mapping_keys.zig").sortJsonKeys(allocator, items);

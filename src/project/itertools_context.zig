@@ -14,6 +14,7 @@ fn object(a: Allocator, entries: []const expression.Entry) !Value {
 }
 fn function(a: Allocator, name: []const u8) !Value {
     var fields: std.ArrayList(expression.Entry) = .empty;
+    try fields.append(a, .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } });
     try fields.append(a, .{ .key = "__dxt_callable", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_itertools:{s}", .{name}) } });
     try fields.append(a, .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } });
     try fields.append(a, .{ .key = "__dxt_rendered", .value = .{ .string = if (std.mem.eql(u8, name, "tee")) "<built-in function tee>" else try std.fmt.allocPrint(a, "<class 'itertools.{s}'>", .{name}) } });

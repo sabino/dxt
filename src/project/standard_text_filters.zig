@@ -47,7 +47,7 @@ fn urlencode(a: std.mem.Allocator, value: Value, host: ?expression.Host) ![]cons
     var count: usize = 0;
     // Jinja special-cases actual dicts. Mapping providers such as pytz's
     // LazyDict instead supply their visible keys to pair unpacking.
-    if (value == .object and expression.mappingSource(value) == null and @import("expression_sequence.zig").kind(value) == null and value.attribute("__dxt_iterable") != .list and !@import("set_context.zig").isSet(value)) {
+    if (@import("builtin_bound_method.zig").isMapping(value) and expression.mappingSource(value) == null) {
         for (value.object) |entry| {
             if (count != 0) try out.writer.writeByte('&');
             try out.writer.print("{s}={s}", .{ try quote(a, expression.entryKey(entry), true, host), try quote(a, entry.value, true, host) });
