@@ -5,6 +5,7 @@ test {
     _ = @import("project/timezone_context.zig");
 }
 pub const DuckDBPool = @import("project/native_duckdb.zig").Pool;
+pub const NativeAdapter = @import("project/adapter.zig");
 const Io = std.Io;
 const project = @import("project.zig");
 const dependencies = @import("project/dependencies.zig");

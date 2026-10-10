@@ -113,6 +113,20 @@ pub fn build(b: *std.Build) void {
     });
     const oracle_install = b.addInstallArtifact(yaml_oracle, .{});
     b.step("yaml-oracle", "Build the developer YAML conformance oracle").dependOn(&oracle_install.step);
+
+    // Developer conformance uses the exact product dependencies and C sources.
+    // Only this named step installs the driver; ordinary installs stay unchanged.
+    const adapter_driver = b.addExecutable(.{
+        .name = "dxt-adapter-driver",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/native_adapter_driver.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "dxt", .module = mod }},
+        }),
+    });
+    const adapter_driver_install = b.addInstallArtifact(adapter_driver, .{});
+    b.step("adapter-driver", "Build the developer native adapter conformance driver").dependOn(&adapter_driver_install.step);
 }
 
 /// A cache written by another build must never retain graph values produced

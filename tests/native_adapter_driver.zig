@@ -1,7 +1,7 @@
 //! Developer conformance driver: all adapter behavior is imported from the
 //! product's native Zig implementation and runs against actual databases.
 const std = @import("std");
-const adapter = @import("adapter");
+const adapter = @import("dxt").NativeAdapter;
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
@@ -105,6 +105,14 @@ fn run(init: std.process.Init) !void {
             return;
         };
         return error.ReadOnlyWriteWasAllowed;
+    }
+    if (std.mem.eql(u8, args[2], "autocommit-query")) {
+        if (args.len != 5) return error.MissingSql;
+        if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return error.UnsupportedAdapterExecution;
+        const json = try adapter.queryJson(runtime, args[3], args[4], false);
+        defer allocator.free(json);
+        try emit(init.io, json);
+        return;
     }
     if (std.mem.eql(u8, args[2], "query") or std.mem.eql(u8, args[2], "profile")) {
         if (args.len != 5) return error.MissingSql;

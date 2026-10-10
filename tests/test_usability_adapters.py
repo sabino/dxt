@@ -17,25 +17,14 @@ CERTIFY = os.environ.get("DXT_NATIVE_ADAPTER_CERTIFY") == "1"
 
 
 @pytest.fixture(scope="module")
-def driver(tmp_path_factory):
-    output = tmp_path_factory.mktemp("native-driver") / "adapter-driver"
+def driver():
     compiled = subprocess.run(
-        ["zig", "build-exe", "-lc", "--dep", "adapter",
-         "-Mroot=tests/native_adapter_driver.zig",
-         "-Ivendor/libyaml/include", "-cflags", "-std=gnu99",
-         '-DYAML_VERSION_STRING="0.2.5"', "-DYAML_VERSION_MAJOR=0",
-         "-DYAML_VERSION_MINOR=2", "-DYAML_VERSION_PATCH=5", "--",
-         "vendor/libyaml/src/api.c", "vendor/libyaml/src/reader.c",
-         "vendor/libyaml/src/scanner.c", "vendor/libyaml/src/parser.c",
-         "vendor/libyaml/src/writer.c", "vendor/libyaml/src/emitter.c",
-         "-Madapter=src/project/adapter.zig",
-         f"-femit-bin={output}"],
-        cwd=ROOT, text=True, capture_output=True,
+        ["zig", "build", "adapter-driver"], cwd=ROOT, text=True, capture_output=True,
     )
     assert compiled.returncode == 0, compiled.stderr
     built = subprocess.run(["zig", "build"], cwd=ROOT, text=True, capture_output=True)
     assert built.returncode == 0, built.stderr
-    return output
+    return ROOT / "zig-out/bin/dxt-adapter-driver"
 
 
 @pytest.fixture(scope="module")
@@ -254,10 +243,14 @@ def test_explicit_missing_postgres_library_fails_closed(driver, tmp_path):
 def test_cli_fallback_remains_available_and_normalizes_empty_rows(driver, tmp_path):
     environment = dict(os.environ, DXT_DUCKDB_BACKEND="cli")
     environment.pop("DXT_DUCKDB_LIBRARY", None)
-    assert decoded(invoke(driver, "duckdb", "query", tmp_path / "fallback.duckdb", environment,
+    assert decoded(invoke(driver, "duckdb", "autocommit-query", tmp_path / "fallback.duckdb", environment,
                           "select 1 as id where false")) == []
-    assert decoded(invoke(driver, "duckdb", "query", tmp_path / "fallback.duckdb", environment,
+    assert decoded(invoke(driver, "duckdb", "autocommit-query", tmp_path / "fallback.duckdb", environment,
                           "select 17 as id, null::text as absent")) == [{"id": 17, "absent": None}]
+
+    held = invoke(driver, "duckdb", "query", tmp_path / "fallback.duckdb", environment, "select 1")
+    assert held.returncode == 1
+    assert held.stderr == "error: NativeDuckDbLibraryNotFound\n"
 
 
 def test_native_cli_build_runs_without_external_duckdb_executable(driver, tmp_path, duckdb_environment):
