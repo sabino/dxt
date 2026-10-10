@@ -1434,6 +1434,12 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
 
 fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
+    // Instance class attributes use their native provider even when a local
+    // variable shadows the public modules namespace.
+    if (std.mem.startsWith(u8, path, "__dxt_modules.")) {
+        if (context.documentation_block) return error.UndefinedJinjaValue;
+        return (try @import("modules_context.zig").resolveCached(context.value_arena.allocator(), path["__dxt_".len..], &context.modules_cache)) orelse .undefined;
+    }
     var parts = std.mem.splitScalar(u8, path, '.');
     const name = parts.next() orelse return .undefined;
     var index = context.bindings.items.len;
@@ -4940,4 +4946,22 @@ test "runtime compilation captures direct macro calls in argument evaluation ord
     try std.testing.expectEqual(@as(usize, 2), dependencies.items.len);
     try std.testing.expectEqualStrings("macro.fixture.z_inner", dependencies.items[0]);
     try std.testing.expectEqualStrings("macro.fixture.a_outer", dependencies.items[1]);
+}
+
+test "native module class lookup preserves cached identity under local shadows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "fixture" };
+    defer graph.deinit();
+    const node = Node{ .unique_id = "model.fixture.shadow", .package_name = "fixture", .name = "shadow", .path = "shadow.sql", .original_file_path = "models/shadow.sql", .raw_code = "" };
+    var context = CompileContext.init(a, &graph, &node);
+    defer context.deinit();
+    const expected = try resolveExpressionValue(&context, "modules.datetime.date.min", a);
+    try context.bindings.append(a, .{ .name = "modules", .value = .{ .string = "shadow" }, .scope_depth = 0 });
+    const actual = try resolveExpressionValue(&context, "__dxt_modules.datetime.date.min", a);
+    try std.testing.expect(actual == .object and expected == .object);
+    try std.testing.expect(actual.object.ptr == expected.object.ptr);
+    context.documentation_block = true;
+    try std.testing.expectError(error.UndefinedJinjaValue, resolveExpressionValue(&context, "__dxt_modules.datetime.date.min", a));
 }
