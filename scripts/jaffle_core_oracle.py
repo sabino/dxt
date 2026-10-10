@@ -25,6 +25,12 @@ def validate_metadata(metadata, *, engine):
         raise GateError(f'invalid {engine} invocation UUID or timestamp ordering') from error
 
 
+def validate_related_metadata(artifact, manifest, *, engine):
+    from check_jaffle_shop_duckdb_parse import assert_equal
+    validate_metadata(artifact['metadata'], engine=engine)
+    assert_equal(f'{engine} artifact invocation_id matches its manifest', artifact['metadata']['invocation_id'], manifest['metadata']['invocation_id'])
+
+
 @contextmanager
 def reference(project, command='parse'):
     from check_jaffle_shop_duckdb_parse import GateError, run
@@ -75,11 +81,13 @@ def compare_results(actual_path, expected_path):
     validator = load_schema_validator()
     actual = json.loads(actual_path.read_text())
     expected = json.loads(expected_path.read_text())
-    for artifact in [actual, expected]:
+    for artifact, path, engine in [(actual, actual_path, 'dxt'), (expected, expected_path, 'core')]:
         errors = validator.validate_artifact(artifact)
         if errors:
             from check_jaffle_shop_duckdb_parse import GateError
             raise GateError(f'complete Run Results schema failed: {errors}')
+        manifest = json.loads((path.parent / 'manifest.json').read_text())
+        validate_related_metadata(artifact, manifest, engine=engine)
     rows = {row['unique_id']: row for row in actual['results']}
     oracle = {row['unique_id']: row for row in expected['results']}
     assert_equal('complete run-result IDs against Core', sorted(rows), sorted(oracle))

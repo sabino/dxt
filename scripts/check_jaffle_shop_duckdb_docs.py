@@ -117,10 +117,12 @@ def validate_docs_manifest(path: Path, project_dir: Path) -> None:
     manifest = load_manifest(path)
     compiled = sorted(unique_id for unique_id, node in manifest["nodes"].items() if node.get("compiled") is True)
     assert_equal("docs compiled models and tests", compiled, sorted(EXPECTED_MODELS + EXPECTED_TESTS))
-    from jaffle_core_oracle import reference
+    from jaffle_core_oracle import reference, validate_related_metadata
     with reference(project_dir, 'generate') as (_, core_target, _):
         expected = load_json(core_target / 'catalog.json')
         actual = load_json(path.parent / 'catalog.json')
+        validate_related_metadata(actual, manifest, engine='dxt')
+        validate_related_metadata(expected, load_json(core_target / 'manifest.json'), engine='core')
         for key in ['nodes', 'sources', 'errors']:
             assert_equal(f'complete catalog {key} against Core', actual[key], expected[key])
 
