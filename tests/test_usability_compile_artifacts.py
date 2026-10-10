@@ -1,5 +1,6 @@
 """Compile/docs task durability and retry compared with pinned Core."""
 import json
+import os
 import subprocess
 import shutil
 from pathlib import Path
@@ -40,8 +41,9 @@ def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path
     native_target = project / "native"
     core_target = project / "core"
     common = ["--project-dir", str(project), "--profiles-dir", str(project)]
-    native = subprocess.run([DXT, *args, *common, "--target-path", native_target, "--select", "bad"], text=True, capture_output=True)
-    assert native.returncode == 1, native.stdout + native.stderr
+    native_environment = dict(os.environ, DXT_DURABLE_COMPILE_ERRORS="true")
+    native = subprocess.run([DXT, *args, *common, "--target-path", native_target, "--select", "bad"], text=True, capture_output=True, env=native_environment)
+    assert native.returncode == 2, native.stdout + native.stderr
     oracle = core_runner.invoke(["--quiet", *args, *common, "--target-path", str(core_target), "--select", "bad", "--no-partial-parse"])
     assert not oracle.success
     contracts.assert_artifact(native_target / "run_results.json")
@@ -59,7 +61,7 @@ def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path
         if not static:
             assert "static" not in actual["args"]
     # Core CompileTask.raise_on_first_error aborts before writing run results.
-    # dxt's durable error artifact is an extension. Certify it by asking Core
+    # dxt's opted-in durable error artifact is an extension. Certify it by asking Core
     # itself to load that exact artifact and retry the failed model.
     assert not (core_target / "run_results.json").exists()
     shutil.copyfile(native_target / "run_results.json", core_target / "run_results.json")

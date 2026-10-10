@@ -1,5 +1,6 @@
 """Authored compiler exceptions remain useful across native render cleanup."""
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -28,9 +29,12 @@ def test_compiler_exception_retains_authored_message_and_resource_path(tmp_path,
         failing = '{% if execute %}' + failing + '{% endif %}'
     (project / 'models/orders.sql').write_text(failing + 'select 1 as id')
     common = [command, '--project-dir', str(project), '--profiles-dir', str(project)]
-    native = subprocess.run([DXT, *common, '--target-path', 'native'], capture_output=True, text=True)
+    native_environment = dict(os.environ)
+    if command == 'compile':
+        native_environment['DXT_DURABLE_COMPILE_ERRORS'] = 'true'
+    native = subprocess.run([DXT, *common, '--target-path', 'native'], capture_output=True, text=True, env=native_environment)
     core = core_runner.invoke(['--quiet', *common, '--target-path', 'core', '--no-partial-parse'])
-    assert native.returncode != 0
+    assert native.returncode == 2
     assert not core.success
     assert message in native.stderr
     assert 'orders' in native.stderr
