@@ -124,6 +124,10 @@ that bypass checked released/zero-dimensional buffer behavior. The cache worker
 owns their narrow `expression_filter_iterator.zig` correction and native
 regressions; the source worker owns the finite actual Core negative witnesses.
 The oracle worker integrates this companion before the final combined build.
+The cache worker also owns the bounded saved-memoryview-method string/repr
+formatter: methods must render their real method/class/receiver identity rather
+than expose private native callable metadata. Actual Core witnesses use authored
+stable shape/identity comparisons; comparison SQL is never normalized.
 The source worker's 62 Decimal comparisons pass on the first, corrected and
 expanded typed CLIs. The expanded query gate retains 182 passing and seven
 failing cases: type subscription, keyword field names, infinite timestamps and
