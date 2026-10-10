@@ -21,10 +21,10 @@ pub fn offsetError(value: Value) bool {
 }
 pub fn validateComparison(left: Value, right: Value) !void {
     if (!offsetError(left) and !offsetError(right)) return;
-    const left_zone = if (time(left) != null) left.attribute("tzinfo") else left.attribute("__dxt_timezone");
-    const right_zone = if (time(right) != null) right.attribute("tzinfo") else right.attribute("__dxt_timezone");
-    const a = left_zone.attribute("__dxt_timezone_identity");
-    const b = right_zone.attribute("__dxt_timezone_identity");
+    const zone_left = if (time(left) != null) left.attribute("tzinfo") else left.attribute("__dxt_timezone");
+    const zone_right = if (time(right) != null) right.attribute("tzinfo") else right.attribute("__dxt_timezone");
+    const a = zone_left.attribute("__dxt_timezone_identity");
+    const b = zone_right.attribute("__dxt_timezone_identity");
     if (a == .string and b == .string and std.mem.eql(u8, a.string, b.string)) return;
     if ((time(left) != null and time(right) != null) or (dates.state(left) != null and dates.state(right) != null)) return error.AbstractTimeZoneMethod;
 }
