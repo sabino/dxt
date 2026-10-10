@@ -137,9 +137,11 @@ and all 62 Decimal pairs pass on the same immutable CLI, with zero failures,
 errors, skips or deselections: 346 complete API comparisons. The supervisor
 integrated all 33 reviewed helper commits and the certified transport commit;
 every native source file matches the certified worker tree byte for byte.
-The unchanged 63 seed/18 alias comparisons and final unfiltered campaign gates
-remain required. No product edits occur during an immutable candidate's
-comparisons.
+The unchanged 63 seed/18 alias comparisons also pass on that same CLI in 217
+seconds, including all 70,000 PostgreSQL bindings, 10,000 rows and both sums of
+49,995,000. This checkpoint therefore passes 427 actual Core comparisons and
+772 native tests. Final unfiltered campaign gates remain required. No product
+edits occur during an immutable candidate's comparisons.
 
 A final actual Core witness confirms that all six returned PostgreSQL range
 types can be rebound as parameters, including finite, empty and unbounded
