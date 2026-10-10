@@ -15,6 +15,19 @@ pub fn time(value: Value) ?i64 {
     const marker = value.attribute("__dxt_time");
     return if (marker == .integer) std.fmt.parseInt(i64, marker.integer, 10) catch null else null;
 }
+pub fn offsetError(value: Value) bool {
+    const marker = value.attribute("__dxt_temporal_offset_error");
+    return marker == .callable and std.mem.eql(u8, marker.callable, "__dxt_temporal_offset_error");
+}
+pub fn validateComparison(left: Value, right: Value) !void {
+    if (!offsetError(left) and !offsetError(right)) return;
+    const left_zone = if (time(left) != null) left.attribute("tzinfo") else left.attribute("__dxt_timezone");
+    const right_zone = if (time(right) != null) right.attribute("tzinfo") else right.attribute("__dxt_timezone");
+    const a = left_zone.attribute("__dxt_timezone_identity");
+    const b = right_zone.attribute("__dxt_timezone_identity");
+    if (a == .string and b == .string and std.mem.eql(u8, a.string, b.string)) return;
+    if ((time(left) != null and time(right) != null) or (dates.state(left) != null and dates.state(right) != null)) return error.AbstractTimeZoneMethod;
+}
 pub fn hashable(value: Value) bool {
     return duration(value) != null or time(value) != null;
 }
@@ -34,6 +47,7 @@ fn offset(value: Value) ?i64 {
     return if (marker == .integer) std.fmt.parseInt(i64, marker.integer, 10) catch null else null;
 }
 pub fn order(left: Value, right: Value) !std.math.Order {
+    try validateComparison(left, right);
     if (duration(left)) |lhs| return std.math.order(lhs, duration(right) orelse return error.JinjaTypeError);
     if (time(left)) |lhs| {
         const rhs = time(right) orelse return error.JinjaTypeError;

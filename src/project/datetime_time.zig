@@ -2,7 +2,7 @@
 const std = @import("std");
 const expr = @import("expression.zig");
 const zones = @import("timezone_context.zig");
-const dates = @import("timestamp_context.zig");
+const abstract_zone = @import("datetime_tzinfo.zig");
 const strftime = @import("datetime_strftime.zig");
 const bind = @import("filter_arguments.zig").bind;
 const Value = expr.Value;
@@ -50,7 +50,9 @@ pub fn isoformat(a: Allocator, micros: i64, offset: ?i64, timespec: []const u8) 
 }
 pub fn value(a: Allocator, micros: i64, timezone: ?Value, fold: u1) anyerror!Value {
     if (micros < 0 or micros >= std.time.us_per_day) return error.InvalidDatetime;
-    const offset = try effectiveOffset(a, timezone);
+    if (timezone) |zone| if (!zones.isTimezone(zone)) return error.JinjaTypeError;
+    const abstract = if (timezone) |zone| abstract_zone.isAbstract(zone) else false;
+    const offset = if (abstract) null else try effectiveOffset(a, timezone);
     const hour = @divFloor(micros, std.time.us_per_hour);
     const minute = @divFloor(@mod(micros, std.time.us_per_hour), std.time.us_per_min);
     const second = @divFloor(@mod(micros, std.time.us_per_min), std.time.us_per_s);
@@ -65,6 +67,8 @@ pub fn value(a: Allocator, micros: i64, timezone: ?Value, fold: u1) anyerror!Val
     var entries: std.ArrayList(expr.Entry) = .empty;
     try entries.appendSlice(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_temporal_offset_error", .value = if (abstract) .{ .callable = "__dxt_temporal_offset_error" } else .none },
+        .{ .key = "__dxt_string_error", .value = .{ .boolean = abstract } },
         .{ .key = "__dxt_time", .value = try expr.integerValue(a, micros) },
         .{ .key = "__dxt_offset_us", .value = if (offset) |actual| try expr.integerValue(a, actual) else .none },
         .{ .key = "__dxt_rendered", .value = .{ .string = try isoformat(a, micros, offset, "auto") } },
@@ -87,7 +91,6 @@ pub fn call(a: Allocator, name: []const u8, args: []const expr.Argument) anyerro
     const micros = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidDatetime, 10);
     const fold = try std.fmt.parseInt(u1, parts.next() orelse return error.InvalidDatetime, 10);
     const timezone: ?Value = if (parts.rest().len == 0) null else try zones.fromIdentity(a, parts.rest());
-    const offset = try effectiveOffset(a, timezone);
     if (std.mem.eql(u8, method, "replace")) {
         const defaults = [_]Value{ try expr.integerValue(a, @divFloor(micros, std.time.us_per_hour)), try expr.integerValue(a, @divFloor(@mod(micros, std.time.us_per_hour), std.time.us_per_min)), try expr.integerValue(a, @divFloor(@mod(micros, std.time.us_per_min), std.time.us_per_s)), try expr.integerValue(a, @mod(micros, std.time.us_per_s)), timezone orelse .none, try expr.integerValue(a, fold) };
         const bound = try bind(a, args, &.{ "hour", "minute", "second", "microsecond", "tzinfo", "fold" }, &defaults, 0);
@@ -107,14 +110,14 @@ pub fn call(a: Allocator, name: []const u8, args: []const expr.Argument) anyerro
     if (std.mem.eql(u8, method, "isoformat")) {
         const bound = try bind(a, args, &.{"timespec"}, &.{.{ .string = "auto" }}, 0);
         if (bound[0] != .string) return error.JinjaTypeError;
-        return .{ .string = try isoformat(a, micros, offset, bound[0].string) };
+        return .{ .string = try isoformat(a, micros, try effectiveOffset(a, timezone), bound[0].string) };
     }
     if (std.mem.eql(u8, method, "strftime")) {
         const bound = try bind(a, args, &.{"format"}, &.{.undefined}, 1);
         if (bound[0] != .string) return error.JinjaTypeError;
         const abbreviation = try zoneCall(a, timezone, "tzname");
         const dst = try zoneCall(a, timezone, "dst");
-        return .{ .string = try strftime.render(a, -2208988800 * @as(i96, std.time.ns_per_s) + @as(i96, micros) * std.time.ns_per_us, bound[0].string, .{ .offset_us = offset, .abbreviation = if (abbreviation == .string) abbreviation.string else null, .dst_us = if (dst == .none) null else @intCast(@import("datetime_operations.zig").duration(dst) orelse return error.JinjaTypeError) }) };
+        return .{ .string = try strftime.render(a, -2208988800 * @as(i96, std.time.ns_per_s) + @as(i96, micros) * std.time.ns_per_us, bound[0].string, .{ .offset_us = try effectiveOffset(a, timezone), .abbreviation = if (abbreviation == .string) abbreviation.string else null, .dst_us = if (dst == .none) null else @intCast(@import("datetime_operations.zig").duration(dst) orelse return error.JinjaTypeError) }) };
     }
     if (args.len != 0) return error.InvalidJinjaArguments;
     return try zoneCall(a, timezone, method);

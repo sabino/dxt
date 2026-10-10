@@ -6,6 +6,7 @@ const calendar = @import("workflow_intervals.zig");
 const local_time = @import("native_local_time.zig");
 const timezone_context = @import("timezone_context.zig");
 const iso_parser = @import("datetime_parse.zig");
+const abstract_zone = @import("datetime_tzinfo.zig");
 const times = @import("datetime_time.zig");
 const operations = @import("datetime_operations.zig");
 const Value = expr.Value;
@@ -97,6 +98,8 @@ fn component(value: Value, min: i64, max: i64) !i64 {
 }
 fn timezoneOffsetUs(value: Value) !?i64 {
     if (value == .none) return null;
+    if (!timezone_context.isTimezone(value)) return error.JinjaTypeError;
+    if (abstract_zone.isAbstract(value)) return null;
     const exact = value.attribute("__dxt_timezone_offset_us");
     if (exact == .integer) return try expr.integerIndex(exact);
     return if (try timezoneOffset(value)) |minutes| @as(i64, minutes) * std.time.us_per_min else null;
@@ -110,10 +113,7 @@ fn timezoneOffset(value: Value) !?i32 {
 fn fromComponents(a: Allocator, kind: []const u8, args: []const Argument) !Value {
     if (std.mem.eql(u8, kind, "tzinfo")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
-        return object(a, &.{
-            .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
-            .{ .key = "__dxt_rendered", .value = .{ .string = "<datetime.tzinfo object>" } },
-        });
+        return abstract_zone.value(a);
     }
     if (std.mem.eql(u8, kind, "timedelta")) {
         const names = [_][]const u8{ "days", "seconds", "microseconds", "milliseconds", "minutes", "hours", "weeks" };
@@ -205,6 +205,7 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, options: Opt
         return .{ .number = @as(f64, @floatFromInt(micros)) / std.time.us_per_s };
     }
     if (try times.call(a, name, args)) |result| return result;
+    if (try abstract_zone.call(a, name, args)) |result| return result;
     const prefix = "__dxt_datetime_class:";
     var kind: []const u8 = undefined;
     var method: []const u8 = undefined;
@@ -358,4 +359,25 @@ test "native ISO constructors and full time methods preserve zones and exact off
     for (cases) |case| try std.testing.expectEqualStrings(case[1], try (try expr.evaluate(a, case[0], host)).text(a));
     try std.testing.expectError(error.InvalidDatetime, expr.evaluate(a, "modules.datetime.date.fromisoformat('2023-W53')", host));
     try std.testing.expectError(error.InvalidJinjaArguments, expr.evaluate(a, "modules.datetime.date.fromtimestamp(timestamp=0)", host));
+}
+
+test "abstract timezone constructors defer offset errors while preserving identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const zone = try abstract_zone.value(a);
+    const other = try abstract_zone.value(a);
+    try std.testing.expect(!expr.equalValues(zone, other));
+    try std.testing.expect(expr.equalValues(zone, try abstract_zone.fromIdentity(a, zone.attribute("__dxt_timezone_identity").string)));
+    const clock = try times.value(a, 0, zone, 1);
+    try std.testing.expect(clock.truthy());
+    try std.testing.expectError(error.JinjaTypeError, clock.text(a));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, times.call(a, clock.attribute("utcoffset").callable, &.{}));
+    const moment = try dates.datetimeValueWithOffsetUs(a, 0, false, null, zone, 1);
+    try std.testing.expect(moment.truthy());
+    try std.testing.expectEqualStrings("Thu Jan  1 00:00:00 1970", (try dates.call(a, moment.attribute("ctime").callable, &.{})).?.string);
+    try std.testing.expectError(error.AbstractTimeZoneMethod, dates.call(a, moment.attribute("isoformat").callable, &.{}));
+    try std.testing.expect(operations.offsetError(moment));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, operations.validateComparison(moment, try dates.datetimeValue(a, 0, false, null)));
+    try std.testing.expectError(error.JinjaTypeError, call(a, "modules.datetime.datetime", &.{ .{ .value = .{ .integer = "2024" } }, .{ .value = .{ .integer = "1" } }, .{ .value = .{ .integer = "1" } }, .{ .name = "tzinfo", .value = .{ .object = &.{.{ .key = "__dxt_timezone_offset_us", .value = .{ .integer = "0" } }} } } }, .{}));
 }

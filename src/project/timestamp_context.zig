@@ -5,6 +5,7 @@ const calendar = @import("workflow_intervals.zig");
 const timezones = @import("timezone_context.zig");
 const local_time = @import("native_local_time.zig");
 const calendar_methods = @import("datetime_calendar.zig");
+const abstract_zone = @import("datetime_tzinfo.zig");
 const times = @import("datetime_time.zig");
 const native_strftime = @import("datetime_strftime.zig");
 const Value = expression.Value;
@@ -96,6 +97,7 @@ pub fn attachTimezone(a: std.mem.Allocator, civil_ns: i96, zone: Value) anyerror
 }
 pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, input_ns: i96, date_only: bool, offset_us: ?i64, timezone: ?Value, fold: u1) anyerror!Value {
     const civil_ns = if (date_only) @divFloor(input_ns, std.time.ns_per_day) * std.time.ns_per_day else @divFloor(input_ns, std.time.ns_per_us) * std.time.ns_per_us;
+    if (timezone) |zone| if (!timezones.isTimezone(zone)) return error.JinjaTypeError;
     const actual_timezone: ?Value = if (timezone) |zone| zone else if (offset_us) |offset| try timezones.builtinValue(a, offset, null) else null;
     if (civil_ns < -62135596800 * @as(i96, std.time.ns_per_s) or civil_ns >= 253402300800 * @as(i96, std.time.ns_per_s)) return error.JinjaNumericOverflow;
     if (offset_us) |offset| if (@abs(offset) >= std.time.us_per_day) return error.InvalidTimeZoneOffset;
@@ -107,6 +109,8 @@ pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, input_ns: i96, date_only:
     var entries: std.ArrayList(expression.Entry) = .empty;
     try entries.appendSlice(a, &.{
         .{ .key = "__dxt_rendered", .value = .{ .string = rendered } },
+        .{ .key = "__dxt_temporal_offset_error", .value = if (actual_timezone != null and abstract_zone.isAbstract(actual_timezone.?)) .{ .callable = "__dxt_temporal_offset_error" } else .none },
+        .{ .key = "__dxt_string_error", .value = .{ .boolean = actual_timezone != null and abstract_zone.isAbstract(actual_timezone.?) } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_civil_ns", .value = try expression.integerValue(a, civil_ns) },
         .{ .key = "__dxt_date_only", .value = .{ .boolean = date_only } },
@@ -126,20 +130,7 @@ pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, input_ns: i96, date_only:
         try representation.writer.print(", {d}, {d}", .{ hour, minute });
         if (second != 0 or micros != 0) try representation.writer.print(", {d}", .{second});
         if (micros != 0) try representation.writer.print(", {d}", .{micros});
-        if (offset_us) |offset| {
-            if (actual_timezone) |zone| {
-                try representation.writer.print(", tzinfo={s}", .{try expression.repr(zone, a)});
-            } else if (offset == 0) try representation.writer.writeAll(", tzinfo=datetime.timezone.utc") else {
-                const days = @divFloor(offset, std.time.us_per_day);
-                const seconds = @divFloor(@mod(offset, std.time.us_per_day), std.time.us_per_s);
-                const fraction = @mod(offset, std.time.us_per_s);
-                try representation.writer.writeAll(", tzinfo=datetime.timezone(datetime.timedelta(");
-                if (days != 0) try representation.writer.print("days={d}, ", .{days});
-                try representation.writer.print("seconds={d}", .{seconds});
-                if (fraction != 0) try representation.writer.print(", microseconds={d}", .{fraction});
-                try representation.writer.writeAll("))");
-            }
-        }
+        if (actual_timezone) |zone| try representation.writer.print(", tzinfo={s}", .{try expression.repr(zone, a)});
         if (fold != 0) try representation.writer.print(", fold={d}", .{fold});
     }
     try representation.writer.writeByte(')');
@@ -205,6 +196,10 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) anye
     const offset_us: ?i64 = if (exact_text) |exact| (if (std.mem.eql(u8, exact, "naive")) null else try std.fmt.parseInt(i64, exact, 10)) else if (std.mem.eql(u8, offset_text, "naive")) null else @as(i64, try std.fmt.parseInt(i32, offset_text, 10)) * std.time.us_per_min;
     const fold: u1 = if (parts.next()) |field| try std.fmt.parseInt(u1, field, 10) else 0;
     const timezone: ?Value = if (parts.rest().len != 0) try timezones.fromIdentity(a, parts.rest()) else null;
+    const abstract = if (timezone) |zone| abstract_zone.isAbstract(zone) else false;
+    if (abstract) {
+        for ([_][]const u8{ "strftime", "isoformat", "timestamp", "utcoffset", "dst", "tzname", "astimezone", "timetuple", "utctimetuple" }) |dependent| if (std.mem.eql(u8, method, dependent)) return error.AbstractTimeZoneMethod;
+    }
     if (std.mem.eql(u8, method, "strftime")) {
         try checkArgs(args, &.{"format"}, 1);
         return .{ .string = try strftime(a, ns, try textArg(args, "format", 0, ""), date_only, offset_us, timezone) };
@@ -240,7 +235,7 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) anye
         var replaced_offset = offset_us;
         if (named(args, "tzinfo", 7)) |zone| {
             replaced_zone = if (zone == .none) null else zone;
-            replaced_offset = if (zone == .none) null else signedInteger(i64, zone.attribute("__dxt_timezone_offset_us")) orelse return error.JinjaTypeError;
+            replaced_offset = if (zone == .none or abstract_zone.isAbstract(zone)) null else signedInteger(i64, zone.attribute("__dxt_timezone_offset_us")) orelse return error.JinjaTypeError;
         }
         const replacement_fold = if (named(args, "fold", 8)) |value_| signedInteger(u1, value_) orelse return error.InvalidDatetime else fold;
         return try datetimeValueWithOffsetUs(a, timestamp + @as(i96, @intCast(fields[6])) * std.time.ns_per_us, date_only, replaced_offset, replaced_zone, replacement_fold);

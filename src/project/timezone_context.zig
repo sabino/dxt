@@ -290,7 +290,11 @@ fn parseIdentity(encoded: []const u8) !Identity {
     if (id.zone < -2 or id.zone >= zone_count) return error.InvalidTimeZone;
     return id;
 }
+pub fn isTimezone(value: Value) bool {
+    return value == .object and value.attribute("__dxt_timezone_identity") == .string and value.attribute("utcoffset") == .callable;
+}
 pub fn fromIdentity(a: Allocator, encoded: []const u8) !Value {
+    if (std.mem.startsWith(u8, encoded, "abstract_datetime:")) return @import("datetime_tzinfo.zig").fromIdentity(a, encoded);
     if (std.mem.startsWith(u8, encoded, "builtin:")) return builtin.fromIdentity(a, encoded);
     return timezoneObject(a, try parseIdentity(encoded));
 }
@@ -381,6 +385,7 @@ fn methodCall(a: Allocator, encoded: []const u8, args: []const Argument) anyerro
     return error.UndefinedJinjaValue;
 }
 pub fn call(a: Allocator, name: []const u8, args: []const Argument) anyerror!?Value {
+    if (try @import("datetime_tzinfo.zig").call(a, name, args)) |result| return result;
     if (try builtin.call(a, name, args)) |result| return result;
     if (std.mem.startsWith(u8, name, "__dxt_pytz_method:")) return try methodCall(a, name[18..], args);
     if (std.mem.eql(u8, name, "modules.pytz.timezone")) {

@@ -1423,6 +1423,7 @@ pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Va
 fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Value {
     if (a == .object) if (tupleProtocol(a)) |items| return apply(allocator, op, .{ .tuple = items }, b);
     if (b == .object) if (tupleProtocol(b)) |items| return apply(allocator, op, a, .{ .tuple = items });
+    if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) try temporal.validateComparison(a, b);
     if (std.mem.eql(u8, op, "==")) return .{ .boolean = equal(a, b) };
     if (std.mem.eql(u8, op, "!=")) return .{ .boolean = !equal(a, b) };
     if (std.mem.eql(u8, op, "in")) return .{ .boolean = try contains(allocator, b, a) };
