@@ -197,7 +197,9 @@ jobs:
       # remains mandatory on both architectures under that reference runtime.
       - name: Run the complete canonical Core compatibility suite
         if: matrix.python-version == '3.12'
-        run: python -m pytest -q --junitxml=reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
+        run: |
+          python -m pytest -q --junitxml=reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
+          python scripts/check_pytest_report.py reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
 
       - name: Upload pytest report
         if: always()

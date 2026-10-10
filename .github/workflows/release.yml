@@ -94,7 +94,9 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe --summary all
 
       - name: Certify complete compatibility suite
-        run: pytest -q --junitxml=.agent/runs/release-tests.xml
+        run: |
+          pytest -q --junitxml=.agent/runs/release-tests.xml
+          python scripts/check_pytest_report.py .agent/runs/release-tests.xml
 
       - name: Certify clean native installation and performance budgets
         run: |
@@ -167,7 +169,9 @@ jobs:
         run: zig build test -Dtarget=${{ matrix.target }} --summary all
 
       - name: Certify the complete compatibility suite on the actual target
-        run: pytest -q --junitxml=.agent/runs/release-${{ matrix.target }}.xml
+        run: |
+          pytest -q --junitxml=.agent/runs/release-${{ matrix.target }}.xml
+          python scripts/check_pytest_report.py .agent/runs/release-${{ matrix.target }}.xml
 
       - name: Rebuild the release-safe binary after integration fixtures
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
