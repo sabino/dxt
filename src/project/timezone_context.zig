@@ -157,11 +157,13 @@ fn classValue(a: Allocator, name: []const u8) !Value {
     const module = if (std.mem.eql(u8, name, "BaseTzInfo")) "tzinfo" else "exceptions";
     return object(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_class_identity", .value = .{ .string = try std.fmt.allocPrint(a, "pytz.{s}.{s}", .{ module, name }) } },
         .{ .key = "__dxt_callable", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_pytz_class:{s}", .{name}) } },
         .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<class 'pytz.{s}.{s}'>", .{ module, name }) } },
         .{ .key = "zone", .value = .none },
     });
 }
+var base_instance_ids: std.atomic.Value(u64) = .init(1);
 fn exportValue(a: Allocator, name: []const u8) !Value {
     if (std.mem.eql(u8, name, "timezone")) return global("modules.pytz.timezone");
     if (std.mem.eql(u8, name, "FixedOffset")) return global("modules.pytz.FixedOffset");
@@ -410,7 +412,7 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument) anyerror!?Va
         const kind = name[17..];
         if (std.mem.eql(u8, kind, "BaseTzInfo")) {
             if (args.len != 0) return error.InvalidJinjaArguments;
-            return try timezoneObject(a, .{ .zone = -2, .offset_us = 0, .dst_us = 0, .abbreviation = "" });
+            return try timezoneObject(a, .{ .zone = -2, .offset_us = 0, .dst_us = 0, .abbreviation = try std.fmt.allocPrint(a, "base={d}", .{base_instance_ids.fetchAdd(1, .monotonic)}) });
         }
         const values = try expr.allocateValues(a, args.len);
         for (args, values) |arg, *value| {
@@ -461,6 +463,21 @@ test "pytz native transitions preserve gaps folds negative DST and historical of
     try std.testing.expectEqual(@as(i32, 20460), (try localizeInfo("Asia/Kathmandu", try calendar.parseTimestamp("1800-01-01 00:00:00"), false)).offset_seconds);
     try std.testing.expectEqual(@as(i32, 20700), (try offsetAtUtc("asia/kathmandu", try calendar.parseTimestamp("2020-01-01 00:00:00"))).offset_seconds);
     try std.testing.expectError(error.UnknownTimeZoneError, findZone("Mars/Olympus"));
+}
+test "pytz classes share identity while abstract timezone instances remain distinct" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const class = (try resolve(a, "modules.pytz.BaseTzInfo")).?;
+    const other_class = (try resolve(a, "modules.pytz.BaseTzInfo")).?;
+    try std.testing.expect(expr.equalValues(class, other_class));
+    const first = (try call(a, class.attribute("__dxt_callable").callable, &.{})).?;
+    const second = (try call(a, class.attribute("__dxt_callable").callable, &.{})).?;
+    try std.testing.expect(!expr.equalValues(first, second));
+    try std.testing.expect(expr.equalValues(first, try fromIdentity(a, first.attribute("__dxt_timezone_identity").string)));
+    const keys = @import("mapping_keys.zig");
+    try std.testing.expect(keys.matches(try keys.create(first, .none), first));
+    try std.testing.expect(!keys.matches(try keys.create(first, .none), second));
 }
 test "pytz native exports fixed offsets duration methods and exceptions" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
