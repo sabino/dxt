@@ -118,7 +118,8 @@ pub fn apply(a: A, op: []const u8, x: Number, y: Number) !Number {
         const modulo = std.mem.eql(u8, op, "%");
         const coefficient = if (modulo) remainder else quotient;
         const negative = if (modulo) negative_left else negative_left != negative_right;
-        return .{ .coefficient = if (negative) try numbers.negate(a, coefficient) else coefficient, .exponent = if (modulo) exponent else 0, .negative_zero = negative and std.mem.eql(u8, coefficient, "0") };
+        const output: Number = .{ .coefficient = if (negative) try numbers.negate(a, coefficient) else coefficient, .exponent = if (modulo) exponent else 0, .negative_zero = negative and std.mem.eql(u8, coefficient, "0") };
+        return if (modulo) try round(a, output) else output;
     }
     if (std.mem.eql(u8, op, "/")) {
         if (std.mem.eql(u8, y.coefficient, "0")) return error.JinjaDivisionByZero;
@@ -177,10 +178,11 @@ test "Decimal values preserve scale, exact comparison and half-even context" {
     try std.testing.expectEqualStrings("-0.0", try render(a, try parse(a, "-0.0")));
 }
 
-test "Decimal division and signed zero avoid contextual remainder rounding" {
+test "Decimal quotient is exact before context rounds the final remainder" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    try std.testing.expectEqualStrings("0.1234567890123456789012345679", try render(a, try apply(a, "%", try parse(a, "0.123456789012345678901234567890"), try parse(a, "2"))));
     try std.testing.expectEqualStrings("18", try render(a, try apply(a, "%", try parse(a, "123456789012345678901234567890"), try parse(a, "99"))));
     try std.testing.expectError(error.DecimalDivisionImpossible, apply(a, "//", try parse(a, "1E28"), try parse(a, "1")));
     try std.testing.expectError(error.DecimalDivisionImpossible, apply(a, "%", try parse(a, "1E28"), try parse(a, "1")));
