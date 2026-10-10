@@ -34,6 +34,7 @@ pub fn hashable(candidate: Value) anyerror!void {
 
 fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (@import("query_column.zig").items(candidate) != null) return error.JinjaTypeError;
     if (@import("query_type.zig").name(candidate) != null) return;
     if (@import("builtin_bound_method.zig").isBound(candidate)) return;
     if (@import("datetime_bound_method.zig").isBound(candidate)) return;

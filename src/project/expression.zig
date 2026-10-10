@@ -635,6 +635,33 @@ test "cursor DuckDB type equality keeps canonical dictionary key spelling" {
     try std.testing.expectError(error.JinjaTypeError, hashableKey(authored));
 }
 
+test "cursor PostgreSQL Columns compare and slice as unhashable metadata sequences" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fields = [_]Value{ .{ .string = "n" }, .{ .integer = "23" }, .none, .{ .integer = "4" }, .none, .none, .none };
+    const column = try @import("query_column.zig").value(allocator, &fields);
+    const equivalent = try @import("query_column.zig").value(allocator, &fields);
+    const tuple: Value = .{ .tuple = &fields };
+    const list: Value = .{ .list = &fields };
+    try std.testing.expect(tupleProtocol(column) == null);
+    try std.testing.expect(equalValues(column, equivalent));
+    try std.testing.expect(equalValues(column, tuple));
+    try std.testing.expect(equalValues(tuple, column));
+    try std.testing.expect(try equalMemberChecked(tuple, column));
+    try std.testing.expect(!equalValues(column, list));
+    try std.testing.expectEqual(std.math.Order.eq, try valueOrder(allocator, column, tuple));
+    try std.testing.expectError(error.JinjaTypeError, valueOrder(allocator, column, list));
+    try std.testing.expectError(error.JinjaTypeError, hashableKey(column));
+    const sliced = try sliceValue(allocator, column, .{ .integer = "1" }, .{ .integer = "3" }, null);
+    try std.testing.expect(sliced == .tuple);
+    try std.testing.expectEqualStrings("(23, None)", try reprWithHost(allocator, sliced, null));
+    try std.testing.expectError(error.JinjaTypeError, apply(allocator, "+", column, tuple));
+    try std.testing.expectError(error.JinjaTypeError, apply(allocator, "*", column, .{ .integer = "2" }));
+    try std.testing.expect((try pureMethod(allocator, column, "count", &.{.{ .value = .none }}, null)) == null);
+    try std.testing.expect((try pureMethod(allocator, column, "index", &.{.{ .value = .none }}, null)) == null);
+}
+
 pub fn repr(value: Value, allocator: std.mem.Allocator) ![]const u8 {
     if (isUndefined(value)) return "Undefined";
     const rendered = value.attribute("__dxt_repr");
@@ -1541,6 +1568,7 @@ pub fn valueOrder(allocator: std.mem.Allocator, left: Value, right: Value) !std.
 }
 fn valueOrderDepth(allocator: std.mem.Allocator, left: Value, right: Value, depth: usize) anyerror!std.math.Order {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (try @import("query_column.zig").order(allocator, left, right)) |matched| return matched;
     if (decimals.state(left) != null or decimals.state(right) != null) return decimals.order(allocator, left, right);
     if (temporal.hashable(left) or temporal.hashable(right)) return temporal.order(left, right);
     if (yaml_values.isHashable(left) or yaml_values.isHashable(right)) return yaml_values.order(left, right);
@@ -1581,6 +1609,7 @@ fn equalMemberCheckedDepth(left: Value, right: Value, depth: usize) anyerror!boo
     if (@import("expression_identity.zig").immutableSame(left, right)) |same| if (same) return true;
     const builtin_methods = @import("builtin_bound_method.zig");
     if (builtin_methods.isBound(left) or builtin_methods.isBound(right)) return builtin_methods.equal(left, right);
+    if (try @import("query_column.zig").equalChecked(left, right)) |matched| return matched;
     try temporal.validateComparison(left, right);
     if (tupleProtocol(left)) |members| {
         const other = tupleProtocol(right) orelse return false;
@@ -1625,6 +1654,7 @@ fn immutableEqual(left: Value, right: Value) bool {
 }
 pub fn equalValues(a: Value, b: Value) bool {
     if (@import("query_type.zig").equal(a, b)) |matched| return matched;
+    if (@import("query_column.zig").equal(a, b)) |matched| return matched;
     if (ranges.isRange(a) or ranges.isRange(b)) return ranges.equal(a, b);
     if (decimals.state(a) != null or decimals.state(b) != null) {
         const other = if (decimals.state(a) != null) b else a;
@@ -2010,7 +2040,7 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
     }
     const values_result = try ownedValues(allocator, &result);
     if (value.attribute("__dxt_binary") == .string) return yaml_values.fromMembers(allocator, values_result);
-    return if (tupleProtocol(value) != null) .{ .tuple = values_result } else .{ .list = values_result };
+    return if (tupleProtocol(value) != null or @import("query_column.zig").items(value) != null) .{ .tuple = values_result } else .{ .list = values_result };
 }
 
 pub fn iterableValues(allocator: std.mem.Allocator, value: Value) anyerror![]const Value {
