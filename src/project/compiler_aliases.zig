@@ -11,6 +11,7 @@ pub const Publication = struct {
     visited: std.AutoHashMapUnmanaged(Key, usize) = .empty,
     slots: std.AutoHashMapUnmanaged(usize, void) = .empty,
     disabled: bool = false,
+    original_key: ?Key = null,
     certificate_visits: usize = 0,
     alias_visits: usize = 0,
     sealed_tables: usize = 0,
@@ -34,6 +35,7 @@ pub const Publication = struct {
     pub fn begin(self: *Publication, original: Value) void {
         self.visited.clearRetainingCapacity();
         self.slots.clearRetainingCapacity();
+        self.original_key = Key.from(original);
         // Even a borrowed internal list must retain the old native alias
         // semantics if it is actually used as a mutable receiver.
         if (Key.from(original)) |key| if (self.readonly.contains(key)) self.disableReadonly();
@@ -102,6 +104,12 @@ pub const Publication = struct {
         var candidate: std.AutoHashMapUnmanaged(Key, void) = .empty;
         defer candidate.deinit(a);
         if (!try self.seal(a, &candidate, table, false, false, 0)) return;
+        // Certification can happen during this very publication. A receiver
+        // borrowed before the first scan must also take the ordinary path.
+        if (self.original_key) |original| if (candidate.contains(original)) {
+            self.disableReadonly();
+            return;
+        };
         var keys = candidate.keyIterator();
         while (keys.next()) |key| try self.readonly.put(a, key.*, {});
         self.sealed_tables += 1;
@@ -213,4 +221,16 @@ test "readonly certificates preserve depth errors and mutable receiver fallback"
     try std.testing.expect(publication.disabled);
     try publication.replace(a, &table, .{ .list = cells }, replacement, 0);
     try std.testing.expectEqual(@as(usize, 2), table.attribute("__dxt_iterable").list.len);
+    var first_publication: Publication = .{};
+    defer first_publication.deinit(a);
+    var untouched = Value{ .object = try a.dupe(expression.Entry, &.{
+        .{ .key = "__dxt_seed_table", .value = .{ .callable = "__dxt_seed_table" } },
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_data", .value = .{ .tuple = try a.dupe(Value, &.{.{ .tuple = cells }}) } },
+        .{ .key = "__dxt_iterable", .value = .{ .list = cells } },
+    }) };
+    first_publication.begin(.{ .list = cells });
+    try first_publication.replace(a, &untouched, .{ .list = cells }, replacement, 0);
+    try std.testing.expect(first_publication.disabled);
+    try std.testing.expectEqual(@as(usize, 2), untouched.attribute("__dxt_iterable").list.len);
 }
