@@ -134,6 +134,20 @@ PostgreSQL failure fixture. Preserve all existing catalog, successful compile,
 index, SQL and complete-schema checks. These cases join the same final native
 build and focused certificate before publication and the fresh whole run.
 
+An actual Core/native run-operation witness now confirms the explicit dbt
+namespace resolves packages before adapter prefixes: a root default catalog
+override wins over the bundled DuckDB implementation. The source worker owns
+only that namespace branch in the existing dispatch resolver, after configured
+search-order handling, using its existing package-order helper with root and
+dbt when the dbt package is loaded. Preserve unqualified and other namespace
+paths and explicit search-order semantics. Add a native competing-prefix
+regression. The oracle worker adds the root default override to its existing
+actual Core catalog comparison without weakening artifact or warehouse checks.
+The expression worker rebuilds the combined native tests and CLI after these
+disjoint commits, then certifies every focused case. The earlier 792-test native
+pass and 5,818-case collection are partial evidence for their recorded source;
+they cannot certify this subsequent resolver correction.
+
 The older known-failing 5,808-case run is intentionally interrupted with SIGINT
 after preserving its current progress, failures and source/binary receipts.
 It cannot reach acceptance, and continued fixture growth threatens the space
