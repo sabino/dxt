@@ -24,7 +24,7 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 - Parse dbt projects and reproduce graph semantics.
 - Compile common dbt SQL/Jinja behavior.
 - Execute models, seeds, tests, snapshots, and docs workflows for supported adapters.
-- Emit dbt-compatible artifacts such as `manifest.json`, `run_results.json`, `catalog.json`, `sources.json`, and later `semantic_manifest.json`.
+- Emit dbt-compatible artifacts such as `manifest.json`, `run_results.json`, `catalog.json`, `sources.json`, and `semantic_manifest.json`.
 - Support semantic models and metrics as first-class graph resources.
 - Add efficient cross-database transformation through explicit multi-connection planning, pushdown, staging, and cost controls.
 - Maintain public-safe repo hygiene and a PR/green-check release workflow.
@@ -520,7 +520,8 @@ Initial flags:
 - `--full-refresh`
 - `--output json` for listing and machine-readable inspection
 
-Deferred commands:
+Commands implemented after the original MVP, with final campaign acceptance
+still required:
 
 - `debug`
 - `deps`
@@ -540,7 +541,7 @@ The implementation must account for:
 - Parse-time versus execute-time Jinja behavior.
 - Macro namespace resolution, package overrides, and adapter dispatch.
 - Resource configs, column properties, tests, tags, meta, groups, access, versions, contracts, disabled nodes, docs blocks, exposures, metrics, and semantic models.
-- Materializations: view, table, incremental, ephemeral, seed, test, snapshot, materialized view where supported, and custom materializations later.
+- Materializations: view, table, incremental, ephemeral, seed, test, snapshot, materialized view where supported, and custom materializations.
 - Selectors: names, `+`, `@`, comma intersection, `--exclude`, tags, paths, files, packages, configs, resource types, sources, exposures, states, results, source status, test types, and YAML selectors.
 - State/defer: `--state`, `--defer`, `--defer-state`, `--favor-state`, `state:new`, `state:modified`, and result selectors.
 
@@ -554,11 +555,11 @@ Required:
 - `run_results.json`
 - `catalog.json`
 - `sources.json`
-
-Later:
-
 - `semantic_manifest.json`
-- `partial_parse.msgpack` or a separate dxt parse cache
+- `dxt_parse_cache.json` for native parse caching
+
+Namespaced extensions:
+
 - `dxt_metadata.json` for namespaced data that does not belong in dbt schemas
 
 Rules:
@@ -1800,7 +1801,11 @@ Exit criteria:
   they must still use one issue, one branch, and one worktree per slice, and
   merge only after green checks.
 
-## Current Status
+## Historical Implementation Notes
+
+These notes record earlier slices and their original boundaries. The active
+Full Usability Implementation Campaign above and the replacement roadmap govern
+current scope, known gaps, validation evidence and release status.
 
 - Issue #213 adds the read-only SQL snapshot foundation: default/configured
   root and installed-package discovery, named blocks, literal configs, disabled
