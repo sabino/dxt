@@ -467,6 +467,7 @@ pub fn attributeWithHost(a: std.mem.Allocator, value: Value, name: []const u8, h
         const current = host orelse return error.UnsupportedJinjaCall;
         return current.call(current.context, getter.callable, &.{.{ .value = .{ .string = name } }}, a);
     }
+    if (try @import("builtin_bound_method.zig").lookupWithHost(a, value, name, host)) |method_value| return method_value;
     const direct = try promoteNumericValue(a, try checkedAttribute(value, name));
     if (direct != .undefined) return try @import("datetime_bound_method.zig").attribute(a, value, name, direct);
     const datetime = @import("modules_datetime.zig");
@@ -760,14 +761,7 @@ const Parser = struct {
                 const args = try self.arguments();
                 if (self.active) {
                     if (self.host != null and self.host.?.static_only) return error.NotStaticJinjaExpression;
-                    if (value == .capture_undefined) {
-                        value = try callUndefined(value);
-                        continue;
-                    }
-                    if (isUndefined(value)) return error.UndefinedJinjaValue;
-                    const function = callableName(value) orelse return error.JinjaTypeError;
-                    const host = self.host orelse return error.UnsupportedJinjaCall;
-                    value = try promoteNumericValue(self.allocator, try host.call(host.context, function, args, self.allocator));
+                    value = try callValue(self.allocator, value, args, self.host);
                 }
             } else if (self.take("[")) {
                 const start: ?Value = if (self.take(":")) null else try self.binary(0);
@@ -970,6 +964,7 @@ const Parser = struct {
             }
             const host = self.host orelse return error.UnsupportedJinjaCall;
             const callee = try host.resolve(host.context, path, self.allocator);
+            if (@import("builtin_bound_method.zig").isBound(callee)) return try callValue(self.allocator, callee, args, self.host);
             if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| {
                 const receiver = try host.resolve(host.context, path[0..dot], self.allocator);
                 if (receiver == .capture_undefined or receiver == .object or receiver == .list or receiver == .tuple or receiver == .string or receiver == .complex) return try self.method(receiver, path[dot + 1 ..], args);
@@ -1004,10 +999,7 @@ const Parser = struct {
         }
         if (isUndefined(receiver)) return error.UndefinedJinjaValue;
         const bound = try attributeWithHost(self.allocator, receiver, method_name, self.host);
-        if (callableName(bound)) |function| {
-            const host = self.host orelse return error.UnsupportedJinjaCall;
-            return promoteNumericValue(self.allocator, try host.call(host.context, function, args, self.allocator));
-        }
+        if (callableName(bound) != null) return callValue(self.allocator, bound, args, self.host);
         if (try pureMethod(self.allocator, receiver, method_name, args, self.host)) |value| return value;
         if (mappingSource(receiver) != null or sequences.kind(receiver) != null) return if (self.capturing()) try callUndefined(try captureUndefined(self.allocator, method_name)) else error.UndefinedJinjaValue;
         const host = self.host orelse return error.UnsupportedJinjaCall;
@@ -1098,10 +1090,10 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
         if (args.len != 0) return error.InvalidJinjaArguments;
         return try complexValue(allocator, .{ .real = number.real, .imaginary = -number.imaginary });
     };
-    if (receiver.attribute("__dxt_noniterable").truthy()) return null;
+    if (receiver == .object and !@import("builtin_bound_method.zig").isMapping(receiver)) return null;
     const positional_only = if (receiver == .object) isMethod(name_, &.{ "get", "keys", "values", "items", "copy" }) else if (receiver == .list or receiver == .tuple) isMethod(name_, &.{ "copy", "count", "index" }) else if (receiver == .string) isMethod(name_, &.{ "lower", "upper", "casefold", "startswith", "endswith", "find", "rfind", "count", "index", "rindex", "strip", "lstrip", "rstrip", "join", "replace" }) else false;
     if (positional_only) for (args) |arg| if (arg.name != null) return error.InvalidJinjaArguments;
-    if (receiver == .object and floatProtocol(receiver) == null and complexProtocol(receiver) == null) {
+    if (@import("builtin_bound_method.zig").isMapping(receiver)) {
         if (std.mem.eql(u8, name_, "get")) {
             if (args.len < 1 or args.len > 2) return error.InvalidJinjaArguments;
             return if (try mappingEntry(receiver, args[0].value)) |entry| entry.value else if (args.len == 2) args[1].value else .none;
@@ -1789,7 +1781,9 @@ pub fn indexValueWithHost(allocator: std.mem.Allocator, value: Value, key: Value
     const constructor = value.attribute("__dxt_callable");
     if (key == .string and constructor == .callable and std.mem.startsWith(u8, constructor.callable, "__dxt_datetime_class:") and std.mem.endsWith(u8, constructor.callable, ":new")) return attributeWithHost(allocator, value, key.string, host);
     if (key == .string and value.attribute("__dxt_getattr") == .callable) return attributeWithHost(allocator, value, key.string, host);
-    return indexValue(allocator, value, key);
+    const item = try indexValue(allocator, value, key);
+    if (item == .undefined and key == .string) return attributeWithHost(allocator, value, key.string, host);
+    return item;
 }
 
 test "string indexing binds native class and timezone methods" {
@@ -1807,6 +1801,23 @@ test "string indexing binds native class and timezone methods" {
         try std.testing.expect(first.object.ptr != second.object.ptr);
         try std.testing.expect((try first.text(a)).len > 0);
     }
+}
+
+test "builtin attribute lookup prefers methods and subscription prefers authored keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evaluate(a, "{'get':'key', 'x':7}.get is callable", null)).boolean);
+    try std.testing.expectEqualStrings("key", (try evaluate(a, "{'get':'key'}['get']", null)).string);
+    try std.testing.expectEqualStrings("7", (try evaluate(a, "{'get':'key', 'x':7}.get('x')", null)).integer);
+    try std.testing.expectEqualStrings("7", (try evaluate(a, "{'x':7}['get']('x')", null)).integer);
+    try std.testing.expect((try evaluate(a, "{'field':7}|attr('field') is undefined", null)).boolean);
+    try std.testing.expectEqualStrings("7", (try evaluate(a, "({'field':7}|attr('get'))('field')", null)).integer);
+    try std.testing.expectEqualStrings("HELLO", (try evaluate(a, "('hello'.upper)()", null)).string);
+    try std.testing.expectEqualStrings("2", (try evaluate(a, "(1,2,1).count(1)", null)).integer);
+    try std.testing.expect((try evaluate(a, "{}.get.__dxt_builtin_receiver is undefined", null)).boolean);
+    try std.testing.expect((try evaluate(a, "{}.get|attr('__dxt_native_builtin_method') is undefined", null)).boolean);
+    try std.testing.expect((try evaluate(a, "{}.get['__dxt_native_builtin_method'] is undefined", null)).boolean);
 }
 
 fn integer(value: Value) !i64 {
@@ -2113,13 +2124,14 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
     }
     if (std.mem.eql(u8, name, "attr")) {
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
+        const builtin_methods = @import("builtin_bound_method.zig");
+        if (builtin_methods.isMapping(value)) return (try builtin_methods.lookupWithHost(allocator, value, args[0].value.string, host)) orelse .undefined;
         if (sequences.kind(value) != null) return .undefined;
         if (nativeNumeric(value)) return attributeWithHost(allocator, value, args[0].value.string, host);
         if (@import("regex_context.zig").isFlagOrClass(value)) return checkedAttribute(value, args[0].value.string);
-        if (tupleProtocol(value) != null) return checkedAttribute(value, args[0].value.string);
         if (value == .capture_undefined and std.mem.startsWith(u8, args[0].value.string, "__") and std.mem.endsWith(u8, args[0].value.string, "__") and !undefinedUnsafeAttribute(args[0].value.string, true)) return try captureUndefined(allocator, args[0].value.string);
         if (isUndefined(value)) return try checkedAttribute(value, args[0].value.string);
-        return value.attribute(args[0].value.string);
+        return attributeWithHost(allocator, value, args[0].value.string, host);
     }
     const generators = @import("expression_filter_iterator.zig");
     if (std.mem.eql(u8, name, "map")) return generators.map(allocator, value, args);

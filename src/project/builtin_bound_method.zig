@@ -32,7 +32,9 @@ fn owner(value: Value) ?[]const u8 {
     if (expression.tupleProtocol(value) != null) return "tuple";
     if (@import("set_context.zig").isSet(value)) return "set";
     if (expression.complexProtocol(value) != null) return "complex";
-    if (isMapping(value)) return "dict";
+    // Read-only Mapping providers implement their own class methods. They are
+    // not Python dict builtins, and must keep their existing provider dispatch.
+    if (isMapping(value) and expression.mappingSource(value) == null) return "dict";
     return null;
 }
 
