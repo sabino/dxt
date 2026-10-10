@@ -4,6 +4,8 @@ const expression = @import("expression.zig");
 const calendar = @import("workflow_intervals.zig");
 const timezones = @import("timezone_context.zig");
 const local_time = @import("native_local_time.zig");
+const calendar_methods = @import("datetime_calendar.zig");
+const times = @import("datetime_time.zig");
 const native_strftime = @import("datetime_strftime.zig");
 const Value = expression.Value;
 const Argument = expression.Argument;
@@ -151,8 +153,8 @@ pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, input_ns: i96, date_only:
         .{ .key = "fold", .value = try expression.integerValue(a, fold) },
     });
     const spec = try std.fmt.allocPrint(a, "{d}:{s}:{s}:{s}:{d}:{s}", .{ civil_ns, if (date_only) "date" else "datetime", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{@divTrunc(offset, std.time.us_per_min)}) else "naive", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{offset}) else "naive", fold, if (actual_timezone) |zone| zone.attribute("__dxt_timezone_identity").string else "" });
-    for ([_][]const u8{ "strftime", "isoformat", "date", "timestamp", "weekday", "isoweekday", "replace", "utcoffset", "dst", "tzname", "astimezone" }) |method| {
-        if (date_only and (std.mem.eql(u8, method, "date") or std.mem.eql(u8, method, "timestamp") or std.mem.eql(u8, method, "utcoffset") or std.mem.eql(u8, method, "dst") or std.mem.eql(u8, method, "tzname") or std.mem.eql(u8, method, "astimezone"))) continue;
+    for ([_][]const u8{ "strftime", "isoformat", "date", "timestamp", "weekday", "isoweekday", "replace", "utcoffset", "dst", "tzname", "astimezone", "toordinal", "isocalendar", "ctime", "timetuple", "utctimetuple", "time", "timetz" }) |method| {
+        if (date_only and (std.mem.eql(u8, method, "date") or std.mem.eql(u8, method, "timestamp") or std.mem.eql(u8, method, "utcoffset") or std.mem.eql(u8, method, "dst") or std.mem.eql(u8, method, "tzname") or std.mem.eql(u8, method, "astimezone") or std.mem.eql(u8, method, "utctimetuple") or std.mem.eql(u8, method, "time") or std.mem.eql(u8, method, "timetz"))) continue;
         try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime:{s}:{s}", .{ method, spec }) } });
     }
     return .{ .object = try entries.toOwnedSlice(a) };
@@ -268,7 +270,17 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) anye
     if (std.mem.eql(u8, method, "utcoffset")) return if (offset_us) |offset| try timezones.durationValue(a, offset) else .none;
     if (std.mem.eql(u8, method, "dst")) return if (timezone) |zone| (if (signedInteger(i64, zone.attribute("__dxt_timezone_dst_us"))) |dst_us| try timezones.durationValue(a, dst_us) else .none) else .none;
     if (std.mem.eql(u8, method, "tzname")) return if (timezone) |zone| zone.attribute("__dxt_timezone_abbreviation") else if (offset_us) |offset| .{ .string = try zoneName(a, offset) } else .none;
+    if (std.mem.eql(u8, method, "ctime")) return .{ .string = try calendar_methods.ctime(a, ns) };
+    if (std.mem.eql(u8, method, "isocalendar")) return try calendar_methods.isoCalendar(a, ns);
+    if (std.mem.eql(u8, method, "time") or std.mem.eql(u8, method, "timetz")) return try times.value(a, @intCast(@divFloor(@mod(ns, std.time.ns_per_day), std.time.ns_per_us)), if (std.mem.eql(u8, method, "timetz")) timezone else null, fold);
+    if (std.mem.eql(u8, method, "timetuple") or std.mem.eql(u8, method, "utctimetuple")) {
+        const utc = std.mem.eql(u8, method, "utctimetuple");
+        const tuple_ns = if (utc) ns - @as(i96, offset_us orelse 0) * std.time.ns_per_us else ns;
+        const dst_us: ?i64 = if (timezone) |zone| signedInteger(i64, zone.attribute("__dxt_timezone_dst_us")) else null;
+        return try calendar_methods.timeTuple(a, tuple_ns, if (utc) 0 else if (dst_us) |dst| (if (dst == 0) 0 else 1) else -1);
+    }
     const day = @divFloor(ns, std.time.ns_per_day);
+    if (std.mem.eql(u8, method, "toordinal")) return try expression.integerValue(a, day + 719163);
     if (std.mem.eql(u8, method, "weekday")) return try expression.integerValue(a, @mod(day + 3, 7));
     if (std.mem.eql(u8, method, "isoweekday")) return try expression.integerValue(a, @mod(day + 3, 7) + 1);
     return error.JinjaTypeError;

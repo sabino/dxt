@@ -215,6 +215,14 @@ pub const Host = struct {
     capture_undefined: bool = false,
 };
 
+/// Named tuples use an internal callable marker, never authored string metadata.
+pub fn tupleProtocol(value: Value) ?[]const Value {
+    if (value == .tuple) return value.tuple;
+    const marker = value.attribute("__dxt_native_tuple");
+    if (marker != .callable or !std.mem.eql(u8, marker.callable, "__dxt_native_tuple")) return null;
+    const items = value.attribute("__dxt_iterable");
+    return if (items == .list) items.list else null;
+}
 pub fn sequence(value: Value) ?[]const Value {
     if (value == .list) return value.list;
     if (value == .tuple) return value.tuple;
@@ -294,6 +302,7 @@ test "NaN scalar equality and container identity follow separate Python rules" {
 
 pub fn checkedAttribute(value: Value, name: []const u8) !Value {
     if (sequences.kind(value) != null) return .undefined;
+    if (tupleProtocol(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (value == .capture_undefined) {
         if (std.mem.eql(u8, name, "name") or std.mem.eql(u8, name, "hint") or std.mem.eql(u8, name, "unsafe_callable") or std.mem.eql(u8, name, "alters_data")) return value.attribute(name);
         const captured = value.capture_undefined;
@@ -903,6 +912,7 @@ fn ownedEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry)) ![
 
 fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument, host: ?Host) !?Value {
     if (sequences.kind(receiver) != null) return null;
+    if (receiver == .object) if (tupleProtocol(receiver)) |items| return pureMethod(allocator, .{ .tuple = items }, name_, args, host);
     if (sets.isSet(receiver)) return (try sets.call(allocator, receiver, name_, args)) orelse error.UndefinedJinjaValue;
     if (complexProtocol(receiver)) |number| if (std.mem.eql(u8, name_, "conjugate")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
@@ -1230,10 +1240,10 @@ fn valueOrderDepth(allocator: std.mem.Allocator, left: Value, right: Value, dept
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
     if (temporal.hashable(left) or temporal.hashable(right)) return temporal.order(left, right);
     if (yaml_values.isHashable(left) or yaml_values.isHashable(right)) return yaml_values.order(left, right);
-    if (left == .list or left == .tuple or right == .list or right == .tuple) {
-        if (std.meta.activeTag(left) != std.meta.activeTag(right)) return error.JinjaTypeError;
-        const lhs = sequence(left).?;
-        const rhs = sequence(right).?;
+    if (left == .list or tupleProtocol(left) != null or right == .list or tupleProtocol(right) != null) {
+        if ((left == .list) != (right == .list)) return error.JinjaTypeError;
+        const lhs = (if (left == .list) left.list else tupleProtocol(left)) orelse return error.JinjaTypeError;
+        const rhs = (if (right == .list) right.list else tupleProtocol(right)) orelse return error.JinjaTypeError;
         for (lhs[0..@min(lhs.len, rhs.len)], rhs[0..@min(lhs.len, rhs.len)]) |x, y| {
             if (equalMember(x, y)) continue;
             return valueOrderDepth(allocator, x, y, depth + 1);
@@ -1270,6 +1280,13 @@ fn immutableEqual(left: Value, right: Value) bool {
     return immutableSame(left, right);
 }
 pub fn equalValues(a: Value, b: Value) bool {
+    if (tupleProtocol(a)) |items| {
+        const other = tupleProtocol(b) orelse return false;
+        if (items.len != other.len) return false;
+        for (items, other) |left, right| if (!equalMember(left, right)) return false;
+        return true;
+    }
+    if (tupleProtocol(b) != null) return false;
     if (immutableIdentity(a) != null or immutableIdentity(b) != null) return immutableEqual(a, b);
     if (isUndefined(a) or isUndefined(b)) return isUndefined(a) and isUndefined(b) and (a == .capture_undefined) == (b == .capture_undefined);
     if (yaml_values.isHashable(a) or yaml_values.isHashable(b)) return yaml_values.keyEqual(a, b);
@@ -1402,6 +1419,8 @@ pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Va
     };
 }
 fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Value {
+    if (a == .object) if (tupleProtocol(a)) |items| return apply(allocator, op, .{ .tuple = items }, b);
+    if (b == .object) if (tupleProtocol(b)) |items| return apply(allocator, op, a, .{ .tuple = items });
     if (std.mem.eql(u8, op, "==")) return .{ .boolean = equal(a, b) };
     if (std.mem.eql(u8, op, "!=")) return .{ .boolean = !equal(a, b) };
     if (std.mem.eql(u8, op, "in")) return .{ .boolean = try contains(allocator, b, a) };
@@ -1471,6 +1490,7 @@ pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value
     if (value == .capture_undefined) return value;
     if (isUndefined(value)) return error.UndefinedJinjaValue;
     if (sets.isSet(value)) return .undefined;
+    if (value == .object and tupleProtocol(value) != null and key == .string) return checkedAttribute(value, key.string);
     if (value == .object) {
         const names = value.attribute("__dxt_string_index");
         if (names == .object and key == .string) return names.attribute(key.string);
@@ -1539,7 +1559,7 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
     }
     const values_result = try ownedValues(allocator, &result);
     if (value.attribute("__dxt_binary") == .string) return yaml_values.fromMembers(allocator, values_result);
-    return if (value == .tuple) .{ .tuple = values_result } else .{ .list = values_result };
+    return if (tupleProtocol(value) != null) .{ .tuple = values_result } else .{ .list = values_result };
 }
 
 pub fn iterableValues(allocator: std.mem.Allocator, value: Value) anyerror![]const Value {
@@ -1799,6 +1819,7 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
         return .{ .string = try indent.render(allocator, value.string, width, bound[1].truthy(), bound[2].truthy()) };
     }
     if (std.mem.eql(u8, name, "attr")) {
+        if (sequences.kind(value) != null) return .undefined;
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
         if (value == .capture_undefined and std.mem.startsWith(u8, args[0].value.string, "__") and std.mem.endsWith(u8, args[0].value.string, "__") and !undefinedUnsafeAttribute(args[0].value.string, true)) return try captureUndefined(allocator, args[0].value.string);
         if (isUndefined(value)) return try checkedAttribute(value, args[0].value.string);
