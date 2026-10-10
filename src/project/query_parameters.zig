@@ -1,6 +1,8 @@
 //! Typed native query bindings. Text is data, never SQL interpolation.
 const std = @import("std");
 const calendar = @import("workflow_intervals.zig");
+pub const Field = struct { name: []const u8, value: Parameter };
+pub const ZonedTime = struct { micros: i64, offset_us: i64 };
 
 pub const Parameter = union(enum) {
     none,
@@ -14,6 +16,16 @@ pub const Parameter = union(enum) {
     time: i64,
     timestamp: i64,
     timestamp_tz: i64,
+    time_tz: ZonedTime,
+    interval: i64,
+    uuid: []const u8,
+    list: []const Parameter,
+    tuple: []const Parameter,
+    object: []const Field,
+
+    pub fn recursive(self: Parameter) bool {
+        return self == .list or self == .tuple or self == .object;
+    }
 
     pub fn postgresType(self: Parameter) u32 {
         return switch (self) {
@@ -21,14 +33,18 @@ pub const Parameter = union(enum) {
             // determines its type, including explicit CSV column overrides.
             .none, .text => 0,
             .boolean => 16,
-            .integer => |text| if (std.fmt.parseInt(i64, text, 10)) |_| 20 else |_| 1700,
+            .integer => |text| if (std.fmt.parseInt(i32, text, 10)) |_| 23 else |_| if (std.fmt.parseInt(i64, text, 10)) |_| 20 else |_| 1700,
             .decimal => 1700,
-            .floating => 701,
+            .floating => |number| if (std.math.isFinite(number)) 1700 else 701,
             .binary => 17,
             .date => 1082,
             .time => 1083,
             .timestamp => 1114,
             .timestamp_tz => 1184,
+            .time_tz => 1266,
+            .interval => 1186,
+            .uuid => 2950,
+            .list, .tuple, .object => 0,
         };
     }
 
@@ -45,7 +61,7 @@ pub const Parameter = union(enum) {
                 break :blk value;
             },
             .decimal => |value| value,
-            .floating => |value| try std.fmt.allocPrint(scratch, "{d}", .{value}),
+            .floating => |value| try @import("expression_number.zig").floatText(scratch, value),
             .text => |value| value,
             .binary => |value| try std.fmt.allocPrint(scratch, "\\x{s}", .{try hex(scratch, value)}),
             .date => |days| (try calendar.formatTimestamp(scratch, @as(i64, days) * std.time.s_per_day))[0..10],
@@ -55,11 +71,25 @@ pub const Parameter = union(enum) {
             },
             .timestamp => |micros| try timestampText(scratch, micros),
             .timestamp_tz => |micros| try std.fmt.allocPrint(scratch, "{s}+00:00", .{try timestampText(scratch, micros)}),
+            .time_tz => |clock| try std.fmt.allocPrint(scratch, "{s}{s}", .{ (try timestampText(scratch, clock.micros))[11..], try offsetText(scratch, clock.offset_us) }),
+            .interval => |micros| try std.fmt.allocPrint(scratch, "{d} microseconds", .{micros}),
+            .uuid, .list, .tuple, .object => return error.InvalidQueryParameter,
         };
         if (std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidQueryParameter;
         return try a.dupeZ(u8, text);
     }
 };
+
+pub fn offsetText(a: std.mem.Allocator, micros: i64) ![]const u8 {
+    if (@abs(micros) >= std.time.us_per_day) return error.InvalidQueryParameter;
+    const absolute = @abs(micros);
+    const seconds = absolute / std.time.us_per_s;
+    const fraction = absolute % std.time.us_per_s;
+    const base = try std.fmt.allocPrint(a, "{c}{d:0>2}:{d:0>2}", .{ @as(u8, if (micros < 0) '-' else '+'), seconds / 3600, seconds / 60 % 60 });
+    if (seconds % 60 == 0 and fraction == 0) return base;
+    if (fraction == 0) return std.fmt.allocPrint(a, "{s}:{d:0>2}", .{ base, seconds % 60 });
+    return std.fmt.allocPrint(a, "{s}:{d:0>2}.{d:0>6}", .{ base, seconds % 60, fraction });
+}
 
 fn timestampText(a: std.mem.Allocator, micros: i64) ![]const u8 {
     const base = try calendar.formatTimestamp(a, @divFloor(micros, std.time.us_per_s));
@@ -235,4 +265,16 @@ test "native decimal binding retains trailing scale and exponent without roundin
     try std.testing.expectEqualDeep(Decimal{ .width = 4, .scale = 0, .coefficient = 1200 }, (try decimal(a, "1.2e3")).?);
     try std.testing.expect((try decimal(a, "123456789012345678901234567890123456789")) == null);
     try std.testing.expectError(error.InvalidQueryParameter, decimal(a, "12x"));
+}
+
+test "PostgreSQL standalone bindings retain psycopg2 literal inference" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(u32, 23), Parameter.postgresType(.{ .integer = "42" }));
+    try std.testing.expectEqual(@as(u32, 20), Parameter.postgresType(.{ .integer = "2147483648" }));
+    try std.testing.expectEqual(@as(u32, 1700), Parameter.postgresType(.{ .floating = 1.25 }));
+    try std.testing.expectEqual(@as(u32, 701), Parameter.postgresType(.{ .floating = std.math.inf(f64) }));
+    try std.testing.expectEqualStrings("-0.0", (try Parameter.postgresText(.{ .floating = -0.0 }, a)).?);
+    try std.testing.expectEqualStrings("1e+20", (try Parameter.postgresText(.{ .floating = 1e20 }, a)).?);
 }
