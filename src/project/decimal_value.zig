@@ -38,7 +38,7 @@ pub fn value(a: A, text: []const u8) anyerror!Value {
 pub fn truthy(v: Value) ?bool {
     const text = state(v) orelse return null;
     if (special(text)) return true;
-    for (text) |ch| if (ch >= '1' and ch <= '9') return true;
+    for (text[0 .. std.mem.indexOfAny(u8, text, "eE") orelse text.len]) |ch| if (ch >= '1' and ch <= '9') return true;
     return false;
 }
 fn operand(a: A, v: Value, allow_float: bool) !decimal.Number {
@@ -160,4 +160,19 @@ test "Decimal cursor wrappers preserve scale and cannot be forged with string ma
         .{ .key = "__dxt_decimal_text", .value = .{ .string = "1" } },
     } };
     try std.testing.expect(state(fake) == null);
+}
+
+pub fn unary(a: A, op: []const u8, v: Value) !Value {
+    const text = state(v) orelse return error.JinjaTypeError;
+    if (special(text)) {
+        if (nan(text)) return value(a, text);
+        if (std.mem.eql(u8, op, "abs")) return value(a, if (text[0] == '-') text[1..] else text);
+        if (std.mem.eql(u8, op, "-")) return value(a, if (text[0] == '-') text[1..] else try std.fmt.allocPrint(a, "-{s}", .{text}));
+        return value(a, text);
+    }
+    var number = try operand(a, v, false);
+    if (std.mem.eql(u8, op, "-")) number.coefficient = try ints.negate(a, number.coefficient);
+    if (std.mem.eql(u8, op, "abs") and number.coefficient[0] == '-') number.coefficient = number.coefficient[1..];
+    number.negative_zero = false;
+    return value(a, try decimal.render(a, try decimal.contextual(a, number)));
 }

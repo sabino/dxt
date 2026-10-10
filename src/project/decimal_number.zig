@@ -10,6 +10,7 @@ fn positive(a: A, text: []const u8) ![]const u8 {
     return a.dupe(u8, magnitude(text));
 }
 fn appendZeros(a: A, text: []const u8, count: usize) ![]const u8 {
+    if (std.mem.eql(u8, text, "0")) return a.dupe(u8, "0");
     if (count > 1000000) return error.JinjaNumericOverflow;
     const output = try a.alloc(u8, text.len + count);
     @memcpy(output[0..text.len], text);
@@ -69,6 +70,9 @@ pub fn render(a: A, n: Number) ![]const u8 {
     }
     return out.toOwnedSlice();
 }
+pub fn contextual(a: A, n: Number) !Number {
+    return round(a, n);
+}
 fn round(a: A, n: Number) !Number {
     const digits = magnitude(n.coefficient);
     if (digits.len <= 28) return n;
@@ -95,10 +99,28 @@ pub fn apply(a: A, op: []const u8, x: Number, y: Number) !Number {
         const exponent = @min(x.exponent, y.exponent);
         const left = try appendZeros(a, x.coefficient, @intCast(@as(i64, x.exponent) - exponent));
         const right = try appendZeros(a, y.coefficient, @intCast(@as(i64, y.exponent) - exponent));
-        return round(a, .{ .coefficient = try numbers.apply(a, op, left, right), .exponent = exponent });
+        const coefficient = try numbers.apply(a, op, left, right);
+        const negative_left = x.coefficient[0] == '-' or x.negative_zero;
+        const negative_right = (y.coefficient[0] == '-' or y.negative_zero) != std.mem.eql(u8, op, "-");
+        return round(a, .{ .coefficient = coefficient, .exponent = exponent, .negative_zero = std.mem.eql(u8, coefficient, "0") and negative_left and negative_right });
     }
     if (std.mem.eql(u8, op, "*")) return round(a, .{ .coefficient = try numbers.apply(a, op, x.coefficient, y.coefficient), .exponent = std.math.add(i32, x.exponent, y.exponent) catch return error.JinjaNumericOverflow, .negative_zero = (x.coefficient[0] == '-' or x.negative_zero) != (y.coefficient[0] == '-' or y.negative_zero) });
-    if (std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "//") or std.mem.eql(u8, op, "%")) {
+    if (std.mem.eql(u8, op, "//") or std.mem.eql(u8, op, "%")) {
+        if (std.mem.eql(u8, y.coefficient, "0")) return error.JinjaDivisionByZero;
+        const exponent = @min(x.exponent, y.exponent);
+        const left = try appendZeros(a, magnitude(x.coefficient), @intCast(@as(i64, x.exponent) - exponent));
+        const right = try appendZeros(a, magnitude(y.coefficient), @intCast(@as(i64, y.exponent) - exponent));
+        const quotient = try numbers.apply(a, "//", left, right);
+        if (quotient.len > 28) return error.DecimalDivisionImpossible;
+        const remainder = try numbers.apply(a, "%", left, right);
+        const negative_left = x.coefficient[0] == '-' or x.negative_zero;
+        const negative_right = y.coefficient[0] == '-' or y.negative_zero;
+        const modulo = std.mem.eql(u8, op, "%");
+        const coefficient = if (modulo) remainder else quotient;
+        const negative = if (modulo) negative_left else negative_left != negative_right;
+        return .{ .coefficient = if (negative) try numbers.negate(a, coefficient) else coefficient, .exponent = if (modulo) exponent else 0, .negative_zero = negative and std.mem.eql(u8, coefficient, "0") };
+    }
+    if (std.mem.eql(u8, op, "/")) {
         if (std.mem.eql(u8, y.coefficient, "0")) return error.JinjaDivisionByZero;
         const left = try positive(a, x.coefficient);
         const right = try positive(a, y.coefficient);
@@ -123,7 +145,7 @@ pub fn apply(a: A, op: []const u8, x: Number, y: Number) !Number {
                 exponent += 1;
             }
         }
-        if (std.mem.eql(u8, op, "%")) return apply(a, "-", x, try apply(a, "*", .{ .coefficient = quotient, .exponent = 0 }, y));
+
         return round(a, .{ .coefficient = quotient, .exponent = exponent });
     }
     return error.JinjaTypeError;
@@ -153,4 +175,17 @@ test "Decimal values preserve scale, exact comparison and half-even context" {
     try std.testing.expectEqualStrings("-1", try render(a, try apply(a, "%", try parse(a, "-7"), try parse(a, "3"))));
     try std.testing.expectEqual(std.math.Order.lt, try order(a, try parse(a, "0.1"), try fromFloat(a, 0.1)));
     try std.testing.expectEqualStrings("-0.0", try render(a, try parse(a, "-0.0")));
+}
+
+test "Decimal division and signed zero avoid contextual remainder rounding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("18", try render(a, try apply(a, "%", try parse(a, "123456789012345678901234567890"), try parse(a, "99"))));
+    try std.testing.expectError(error.DecimalDivisionImpossible, apply(a, "//", try parse(a, "1E28"), try parse(a, "1")));
+    try std.testing.expectError(error.DecimalDivisionImpossible, apply(a, "%", try parse(a, "1E28"), try parse(a, "1")));
+    try std.testing.expectEqualStrings("-0", try render(a, try apply(a, "%", try parse(a, "-6"), try parse(a, "3"))));
+    try std.testing.expectEqualStrings("-0.00", try render(a, try apply(a, "+", try parse(a, "-0.00"), try parse(a, "-0"))));
+    try std.testing.expectEqualStrings("0.5", try render(a, try apply(a, "/", try parse(a, "1"), try parse(a, "2"))));
+    try std.testing.expectEqual(std.math.Order.lt, try order(a, try parse(a, "0"), try parse(a, "0.1")));
 }
