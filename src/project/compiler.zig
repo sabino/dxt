@@ -289,6 +289,7 @@ const CompileContext = struct {
         const self: *CompileContext = @ptrCast(@alignCast(raw));
         const current = self.receivers.current(value);
         if (current != .list) return error.JinjaTypeError;
+        self.alias_publication.invalidateReceiver(current);
         const arena = self.value_arena.allocator();
         const id = try self.receivers.identity(arena, current);
         return .{ .list = try self.list_growth.extend(arena, id, current.list, additions) };
@@ -1376,6 +1377,7 @@ const LoopFrame = struct {
     capture_undefined: bool,
     binding_visibility: BindingVisibility,
     constant_function: []const u8,
+    immutable_items: usize = 0,
 };
 
 fn loopItem(context: *CompileContext, frame: *LoopFrame, index: usize) anyerror!?native_expr.Value {
@@ -1482,7 +1484,14 @@ fn replaceContextAliases(context: *CompileContext, original: native_expr.Value, 
         for (frame.bindings) |*binding| try aliases.replace(context.allocator, &binding.value, original, replacement, 0);
         try aliases.replace(context.allocator, &frame.iterable, original, replacement, 0);
         try aliases.replace(context.allocator, &frame.state.iterator, original, replacement, 0);
-        for (frame.state.items.items) |*item| try aliases.replace(context.allocator, item, original, replacement, 0);
+        // loopItem only appends to this semantic slice. Existing items change
+        // only through alias publication; targeting certified backing or a
+        // namespace write invalidates certificates before that change. Native
+        // provider fields reject authored in-place writes. Spare capacity and
+        // evolving iterator buffers are outside this prefix.
+        if (aliases.disabled) frame.immutable_items = 0;
+        while (frame.immutable_items < frame.state.items.items.len and aliases.nativeReadonly(frame.state.items.items[frame.immutable_items])) frame.immutable_items += 1;
+        for (frame.state.items.items[frame.immutable_items..]) |*item| try aliases.replace(context.allocator, item, original, replacement, 0);
         if (frame.state.last_changed) |*previous| try aliases.replace(context.allocator, previous, original, replacement, 0);
     }
 }
@@ -1514,7 +1523,27 @@ test "ten thousand seven-column CSV extensions certify native table backing once
     try context.setValue("alias", .{ .object = entries });
     const method = (try @import("builtin_bound_method.zig").lookup(values, bindings, "append")).?;
     try context.setValue("method", .{ .object = try values.dupe(native_expr.Entry, &.{.{ .key = "", .typed_key = .{ .tuple = try values.dupe(native_expr.Value, &.{method}) }, .value = .{ .integer = "1" } }}) });
-    for (table.attribute("__dxt_data").tuple) |row| {
+    // Retain the genuine loader's copied chunk and growing row history too.
+    // A table-only benchmark misses quadratic scans of these loop roots.
+    const rows = native_expr.sequence(table.attribute("rows")).?;
+    const chunk = native_expr.Value{ .list = try values.dupe(native_expr.Value, rows) };
+    const frame = try values.create(LoopFrame);
+    frame.* = .{
+        .state = .{ .iterator = try @import("expression_sequence.zig").iter(values, chunk) },
+        .iterable = chunk,
+        .block = .{ .variable_name = "row", .list_name = "chunk", .body_start = 0, .body_end = 0, .end_tag_close = 0 },
+        .bindings = try values.dupe(CompileContext.ValueBinding, context.bindings.items),
+        .vars = &.{},
+        .lists = &.{},
+        .scope_depth = context.scope_depth,
+        .macro_package = context.current_macro_package,
+        .capture_undefined = context.capturesUndefined(),
+        .binding_visibility = context.binding_visibility,
+        .constant_function = node.unique_id,
+    };
+    try context.loop_states.append(values, frame);
+    for (table.attribute("__dxt_data").tuple, rows) |row, mapped| {
+        try frame.state.items.append(values, mapped);
         const replacement = try CompileContext.extendList(&context, bindings, row.tuple, values);
         try replaceContextAliases(&context, bindings, replacement);
         bindings = replacement;
@@ -1528,7 +1557,9 @@ test "ten thousand seven-column CSV extensions certify native table backing once
     // Counts cover the real constructor's row, column and exact Decimal graph,
     // including duplicate exports. They cannot grow per receiver mutation.
     try std.testing.expect(context.alias_publication.certificate_visits < 2000000);
-    try std.testing.expect(context.alias_publication.alias_visits < 500000);
+    try std.testing.expect(context.alias_publication.alias_visits < 1000000);
+    try std.testing.expectEqual(@as(usize, 2), context.alias_publication.sealed_containers);
+    try std.testing.expectEqual(@as(usize, 10000), frame.immutable_items);
     const temporal_node = Node{ .package_name = "demo", .unique_id = "seed.demo.temporal", .name = "temporal", .resource_type = "seed", .path = "temporal.csv", .original_file_path = "seeds/temporal.csv", .project_root = "project", .raw_code = "day,stamp\n2024-02-29,2024-02-29 12:34:56\n" };
     _ = operation_host.set_node.?(operation_host.context, &temporal_node);
     const temporal_table = try operation_host.call(operation_host.context, "load_agate_table", &.{}, a);
@@ -1543,8 +1574,12 @@ test "ten thousand seven-column CSV extensions certify native table backing once
     try assignValue(&context, "overlay.new", bindings);
     try std.testing.expect(context.alias_publication.disabled);
     const final = try CompileContext.extendList(&context, bindings, &.{.{ .integer = "99" }}, values);
+    const visits_before_fallback = context.alias_publication.alias_visits;
     try replaceContextAliases(&context, bindings, final);
     try std.testing.expectEqual(@as(usize, 70001), context.bindings.items[5].value.attribute("new").list.len);
+    try std.testing.expectEqual(@as(usize, 0), frame.immutable_items);
+    // The readonly-disabled path still traverses every retained row history.
+    try std.testing.expect(context.alias_publication.alias_visits - visits_before_fallback >= 10000);
 }
 
 fn validateSkippedLoopBody(context: *CompileContext, sql: []const u8, block: ForBlock) anyerror!void {

@@ -7,6 +7,7 @@ const Key = @import("compiler_receivers.zig").Key;
 
 pub const Publication = struct {
     readonly: std.AutoHashMapUnmanaged(Key, void) = .empty,
+    copied_containers: std.AutoHashMapUnmanaged(Key, void) = .empty,
     checked_tables: std.AutoHashMapUnmanaged(Key, void) = .empty,
     visited: std.AutoHashMapUnmanaged(Key, usize) = .empty,
     slots: std.AutoHashMapUnmanaged(usize, void) = .empty,
@@ -15,9 +16,11 @@ pub const Publication = struct {
     certificate_visits: usize = 0,
     alias_visits: usize = 0,
     sealed_tables: usize = 0,
+    sealed_containers: usize = 0,
 
     pub fn deinit(self: *Publication, a: std.mem.Allocator) void {
         self.readonly.deinit(a);
+        self.copied_containers.deinit(a);
         self.checked_tables.deinit(a);
         self.visited.deinit(a);
         self.slots.deinit(a);
@@ -29,6 +32,7 @@ pub const Publication = struct {
     pub fn disableReadonly(self: *Publication) void {
         self.disabled = true;
         self.readonly.clearRetainingCapacity();
+        self.copied_containers.clearRetainingCapacity();
         self.checked_tables.clearRetainingCapacity();
     }
 
@@ -38,7 +42,38 @@ pub const Publication = struct {
         self.original_key = Key.from(original);
         // Even a borrowed internal list must retain the old native alias
         // semantics if it is actually used as a mutable receiver.
-        if (Key.from(original)) |key| if (self.readonly.contains(key)) self.disableReadonly();
+        self.invalidateReceiver(original);
+    }
+
+    pub fn invalidateReceiver(self: *Publication, original: Value) void {
+        if (Key.from(original)) |key| if (self.readonly.contains(key) or self.copied_containers.contains(key)) self.disableReadonly();
+    }
+
+    /// Only native CSV descendants and scalar values can advance a retained
+    /// loop's immutable prefix. Copied containers are deliberately excluded.
+    pub fn nativeReadonly(self: *const Publication, value: Value) bool {
+        if (self.disabled) return false;
+        return switch (value) {
+            .none, .boolean, .integer, .number, .string => true,
+            .list, .tuple, .object => self.readonly.contains(Key.from(value).?),
+            else => false,
+        };
+    }
+
+    fn certifyCopiedContainer(self: *Publication, a: std.mem.Allocator, value: Value, key: Key) !bool {
+        if (value != .list and value != .tuple) return false;
+        const members = if (value == .list) value.list else value.tuple;
+        var native_child = false;
+        for (members) |member| {
+            if (!self.nativeReadonly(member)) return false;
+            if (Key.from(member)) |child| if (self.readonly.contains(child)) {
+                native_child = true;
+            };
+        }
+        if (!native_child) return false;
+        try self.copied_containers.put(a, key, {});
+        self.sealed_containers += 1;
+        return true;
     }
 
     pub fn replace(self: *Publication, a: std.mem.Allocator, value: *Value, original: Value, replacement: Value, depth: usize) anyerror!void {
@@ -67,6 +102,13 @@ pub const Publication = struct {
         // Certificates are limited to relative height 32. At a deeper authored
         // path, walk normally so the existing depth-128 error stays observable.
         if (!self.disabled and depth <= 96 and self.readonly.contains(key)) return;
+        // A published chunk may be mutable, but it contains no mutable alias
+        // until one is inserted. Every list mutation publishes its original
+        // receiver first; begin() disables this cache before changing it.
+        // Native iterator buffers are never discovered here: only root values
+        // are eligible, and cached-container children cannot certify parents.
+        // One extra container level preserves the original depth bound.
+        if (!self.disabled and depth <= 95 and self.copied_containers.contains(key)) return;
         if (!self.disabled and @import("seed_table.zig").isTable(value.*)) {
             if (!self.checked_tables.contains(key)) {
                 try self.checked_tables.put(a, key, {});
@@ -74,6 +116,7 @@ pub const Publication = struct {
             }
             if (depth <= 96 and self.readonly.contains(key)) return;
         }
+        if (!self.disabled and depth == 0 and try self.certifyCopiedContainer(a, value.*, key)) return;
         if (self.visited.get(key)) |previous_depth| {
             // A previously checked deeper path covers this one's depth limit.
             if (previous_depth >= depth) return;
@@ -233,4 +276,43 @@ test "readonly certificates preserve depth errors and mutable receiver fallback"
     try first_publication.replace(a, &untouched, .{ .list = cells }, replacement, 0);
     try std.testing.expect(first_publication.disabled);
     try std.testing.expectEqual(@as(usize, 2), untouched.attribute("__dxt_iterable").list.len);
+}
+
+test "published immutable chunks invalidate before mutation and never seal later iterator buffers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var publication: Publication = .{};
+    defer publication.deinit(a);
+    const row = Value{ .tuple = try a.dupe(Value, &.{.{ .integer = "1" }}) };
+    var table = Value{ .object = try a.dupe(expression.Entry, &.{
+        .{ .key = "__dxt_seed_table", .value = .{ .callable = "__dxt_seed_table" } },
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_data", .value = .{ .tuple = try a.dupe(Value, &.{row}) } },
+    }) };
+    const original = Value{ .list = try expression.allocateValues(a, 0) };
+    const replacement = Value{ .list = try a.dupe(Value, &.{.{ .integer = "7" }}) };
+    publication.begin(original);
+    try publication.replace(a, &table, original, replacement, 0);
+    const batches = try @import("expression_filter_iterator.zig").batch(a, .{ .list = try a.dupe(Value, &.{ row, .none, original }) }, &.{.{ .value = .{ .integer = "1" } }});
+    var first = (try @import("expression_sequence.zig").next(a, batches, null)).?;
+    publication.begin(original);
+    try publication.replace(a, &first, original, replacement, 0);
+    try std.testing.expectEqual(@as(usize, 1), publication.sealed_containers);
+    _ = try @import("expression_sequence.zig").next(a, batches, null);
+    var retained = batches;
+    publication.begin(original);
+    try publication.replace(a, &retained, original, replacement, 0);
+    try std.testing.expectEqual(@as(usize, 1), batches.attribute("__dxt_filter_buffer").list[0].list.len);
+    // A saved alias must follow append/pop replacement of a certified chunk.
+    var alias = Value{ .tuple = try a.dupe(Value, &.{first}) };
+    const mutated = Value{ .list = try a.dupe(Value, &.{ row, replacement }) };
+    publication.invalidateReceiver(first);
+    try std.testing.expect(publication.disabled);
+    publication.begin(first);
+    try publication.replace(a, &alias, first, mutated, 0);
+    publication.begin(replacement);
+    const later = Value{ .list = try a.dupe(Value, &.{ .{ .integer = "7" }, .{ .integer = "8" } }) };
+    try publication.replace(a, &alias, replacement, later, 0);
+    try std.testing.expectEqual(@as(usize, 2), alias.tuple[0].list[1].list.len);
 }

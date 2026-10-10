@@ -11,6 +11,34 @@ from validate_dbt_artifacts import read_artifact
 
 CASES = [
     (
+        'published_chunk_append',
+        "{% set xs=[] %}{% set saved=[] %}"
+        "{% for chunk in agate_table.rows|batch(1) %}"
+        "{% for row in chunk %}{% do xs.extend(row) %}{% endfor %}"
+        "{% if loop.first %}{% set append=chunk.append %}{% do saved.append(chunk) %}"
+        "{% do append(xs) %}{% do xs.append(99) %}"
+        "{% if saved[0][-1] is not sameas xs or append != chunk.append %}"
+        "{{ exceptions.raise_compiler_error('published chunk append alias') }}{% endif %}"
+        "{% endif %}{% endfor %}{% do xs.append(100) %}"
+        "{% if saved[0][-1] is not sameas xs or xs|length != 6 %}"
+        "{{ exceptions.raise_compiler_error('retained chunk append alias') }}{% endif %}",
+    ),
+    (
+        'published_chunk_pop',
+        "{% set xs=[] %}{% set saved=[] %}"
+        "{% for chunk in agate_table.rows|batch(2) %}"
+        "{% for row in chunk %}{% do xs.extend(row) %}{% endfor %}"
+        "{% set pop=chunk.pop %}{% do saved.append(chunk) %}{% set removed=pop() %}"
+        "{% if removed[0] != 2 or saved[0]|length != 1 or pop != chunk.pop %}"
+        "{{ exceptions.raise_compiler_error('published chunk pop alias') }}{% endif %}"
+        "{% do chunk.append(xs) %}{% do xs.append(99) %}"
+        "{% if saved[0][-1] is not sameas xs %}"
+        "{{ exceptions.raise_compiler_error('published chunk pop receiver') }}{% endif %}"
+        "{% endfor %}{% do xs.append(100) %}"
+        "{% if saved[0][-1] is not sameas xs or xs|length != 6 %}"
+        "{{ exceptions.raise_compiler_error('retained chunk pop receiver') }}{% endif %}",
+    ),
+    (
         'nested_saved_receiver',
         "{% set xs=[] %}{% set nested={'item':(xs,)} %}{% set append=xs.append %}"
         "{% for row in agate_table.rows %}{% do xs.extend(row) %}{% endfor %}"
