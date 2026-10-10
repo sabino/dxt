@@ -58,6 +58,17 @@ fn write(a: std.mem.Allocator, w: *std.Io.Writer, value: Value, indent: ?[]const
             try w.writeByte(']');
         },
         .object => |entries| {
+            if (@import("native_tuple.zig").items(value)) |values| {
+                try w.writeByte('[');
+                for (values, 0..) |item, index| {
+                    if (index != 0) try w.writeAll(if (indent != null) "," else ", ");
+                    if (indent) |spacing| try newline(w, spacing, depth + 1);
+                    try write(a, w, item, indent, depth + 1);
+                }
+                if (values.len != 0) if (indent) |spacing| try newline(w, spacing, depth);
+                try w.writeByte(']');
+                return;
+            }
             if (value.attribute("__dxt_noniterable").truthy() or value.attribute("__dxt_rendered") != .undefined or @import("expression_sequence.zig").kind(value) != null or expression.sequence(value) != null) return error.JinjaTypeError;
             const sorted = try a.dupe(expression.Entry, entries);
             defer a.free(sorted);

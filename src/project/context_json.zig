@@ -39,6 +39,33 @@ test "context JSON rejects iterable sets without serializing native protocol fie
     try std.testing.expectError(error.JinjaTypeError, @import("expression_json.zig").render(allocator, set, null));
 }
 
+test "both JSON serializers expose opaque tuples as arrays and reject forged markers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const items = [_]expression.Value{ .{ .integer = "2026" }, .{ .integer = "41" }, .{ .integer = "6" } };
+    const tuple = expression.Value{ .object = &.{
+        .{ .key = "__dxt_native_tuple", .value = .{ .callable = "__dxt_native_tuple" } },
+        .{ .key = "__dxt_iterable", .value = .{ .list = &items } },
+        .{ .key = "year", .value = items[0] },
+    } };
+    try std.testing.expectEqualStrings("[2026, 41, 6]", try stringifySorted(allocator, tuple, true));
+    try std.testing.expectEqualStrings("[\n  2026,\n  41,\n  6\n]", try @import("expression_json.zig").render(allocator, tuple, "  "));
+    const forged = expression.Value{ .object = &.{
+        .{ .key = "__dxt_native_tuple", .value = .{ .string = "__dxt_native_tuple" } },
+        .{ .key = "__dxt_iterable", .value = .{ .list = &items } },
+    } };
+    try std.testing.expectError(error.JinjaTypeError, stringify(allocator, forged));
+    try std.testing.expectError(error.JinjaTypeError, @import("expression_json.zig").render(allocator, forged, null));
+    const cycle_items = try expression.allocateValues(allocator, 1);
+    const cycle = expression.Value{ .object = &.{
+        .{ .key = "__dxt_native_tuple", .value = .{ .callable = "__dxt_native_tuple" } },
+        .{ .key = "__dxt_iterable", .value = .{ .list = cycle_items } },
+    } };
+    cycle_items[0] = cycle;
+    try std.testing.expectError(error.JinjaCircularReference, stringify(allocator, cycle));
+}
+
 pub fn stringifySorted(allocator: std.mem.Allocator, value: expression.Value, sort_keys: bool) ![]const u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
@@ -85,6 +112,15 @@ fn write(allocator: std.mem.Allocator, writer: *std.Io.Writer, value: expression
             try writer.writeByte(']');
         },
         .object => |entries| {
+            if (@import("native_tuple.zig").items(value)) |items| {
+                try writer.writeByte('[');
+                for (items, 0..) |item, index| {
+                    if (index != 0) try writer.writeAll(", ");
+                    try write(allocator, writer, item, sort_keys, next_path);
+                }
+                try writer.writeByte(']');
+                return;
+            }
             if (value.attribute("__dxt_noniterable").truthy() or value.attribute("__dxt_relation") != .undefined or value.attribute("__dxt_sequence_kind") != .undefined or value.attribute("__dxt_iterable") != .undefined) return error.JinjaTypeError;
             const sorted = if (sort_keys) try allocator.dupe(expression.Entry, entries) else null;
             defer if (sorted) |items| allocator.free(items);

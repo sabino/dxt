@@ -34,6 +34,10 @@ pub fn hashable(candidate: Value) anyerror!void {
 
 fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (@import("native_tuple.zig").items(candidate)) |items| {
+        for (items) |item| try checkHashable(item, depth + 1);
+        return;
+    }
     if (@import("yaml_values.zig").isHashable(candidate)) return;
     if (expression.integerProtocol(candidate) != null) return;
     if (expression.floatProtocol(candidate) != null) return;
@@ -64,6 +68,13 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
 }
 
 pub fn keyEqual(left: Value, right: Value) bool {
+    if (@import("native_tuple.zig").items(left)) |a| {
+        const b = @import("native_tuple.zig").items(right) orelse return false;
+        if (a.len != b.len) return false;
+        for (a, b) |lhs, rhs| if (!keyEqual(lhs, rhs)) return false;
+        return true;
+    }
+    if (@import("native_tuple.zig").items(right) != null) return false;
     const yaml_values = @import("yaml_values.zig");
     if (yaml_values.isHashable(left) or yaml_values.isHashable(right))
         return yaml_values.keyEqual(left, right);
@@ -211,6 +222,32 @@ test "dictionary keys reject mutable containers, including nested tuples" {
     try std.testing.expectError(error.JinjaTypeError, hashable(.{ .object = &.{} }));
     try std.testing.expectError(error.JinjaTypeError, hashable(.{ .tuple = &.{.{ .list = &.{} }} }));
     try hashable(.{ .tuple = &.{ .none, .{ .integer = "7" }, .{ .tuple = &.{} } } });
+}
+
+test "opaque tuple keys share immutable tuple equality and recursive hashability" {
+    const items = [_]Value{ .{ .integer = "2026" }, .{ .boolean = true } };
+    const tuple: Value = .{ .object = &.{
+        .{ .key = "__dxt_native_tuple", .value = .{ .callable = "__dxt_native_tuple" } },
+        .{ .key = "__dxt_iterable", .value = .{ .list = &items } },
+    } };
+    try hashable(tuple);
+    const plain: Value = .{ .tuple = &.{ .{ .integer = "2026" }, .{ .integer = "1" } } };
+    try std.testing.expect(keyEqual(tuple, plain));
+    try std.testing.expect(keyEqual(plain, tuple));
+    try std.testing.expect(!keyEqual(tuple, .{ .list = &items }));
+    const item = try create(tuple, .{ .string = "calendar" });
+    try std.testing.expect(matches(item, plain));
+    const mutable: Value = .{ .object = &.{
+        .{ .key = "__dxt_native_tuple", .value = .{ .callable = "__dxt_native_tuple" } },
+        .{ .key = "__dxt_iterable", .value = .{ .list = &.{.{ .list = &.{} }} } },
+    } };
+    try std.testing.expectError(error.JinjaTypeError, hashable(.{ .tuple = &.{mutable} }));
+    const forged: Value = .{ .object = &.{
+        .{ .key = "__dxt_native_tuple", .value = .{ .string = "__dxt_native_tuple" } },
+        .{ .key = "__dxt_iterable", .value = .{ .list = &items } },
+    } };
+    try std.testing.expectError(error.JinjaTypeError, hashable(forged));
+    try std.testing.expect(!keyEqual(forged, tuple));
 }
 
 test "immutable timezone and class keys retain identities across copies" {
