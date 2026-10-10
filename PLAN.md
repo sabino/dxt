@@ -115,6 +115,24 @@ Any additional facade seam needs a grounded handoff before editing. The
 expression worker integrates these disjoint commits and certifies the combined
 native CLI; no independent heavy build starts without disk headroom.
 
+The catalog secret control proves Core masks durable catalog errors and exposes
+a separate native DuckDB routing gap: docs ignores authored get_catalog hooks.
+The source worker owns only reuse of the existing held catalog collector for
+selected authored DuckDB catalog hooks. Detect the effective global/dispatched
+entry through the existing resolver, retaining stock DuckDB introspection when
+the selected hook is bundled. DuckDB calls get_catalog with its genuine
+InformationSchema object and case-folded schema set; PostgreSQL retains its
+relation-set/get_catalog_relations path. Reuse existing row ownership/filtering,
+native query context and Unicode/set helpers; no compiler or dispatch semantics
+are expanded. The expression worker owns only the docs facade's bounded DuckDB
+routing branch and projection of its owned catalog error before artifact
+publication, propagating OOM and preserving authored resources. The oracle
+worker owns two actual Core positive DuckDB entry/dispatch comparisons, a
+declared-secret DuckDB negative and a declared-secret case in the existing
+PostgreSQL failure fixture. Preserve all existing catalog, successful compile,
+index, SQL and complete-schema checks. These cases join the same final native
+build and focused certificate before publication and the fresh whole run.
+
 The older known-failing 5,808-case run is intentionally interrupted with SIGINT
 after preserving its current progress, failures and source/binary receipts.
 It cannot reach acceptance, and continued fixture growth threatens the space
