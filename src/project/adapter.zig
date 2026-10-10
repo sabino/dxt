@@ -104,7 +104,8 @@ pub const Session = union(enum) {
             .postgres => try std.fmt.allocPrint(allocator, "select a.attname as column_name, pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type, case when a.attnotnull then 'NO' else 'YES' end as is_nullable, a.attnum as ordinal_position from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace join pg_catalog.pg_attribute a on a.attrelid = c.oid where current_database() = {s} and n.nspname = {s} and c.relname = {s} and a.attnum > 0 and not a.attisdropped order by a.attnum", .{ database_expression, schema_literal, relation_literal }),
         };
         defer allocator.free(sql);
-        const column_result = try self.query(sql);
+        var column_result = try self.query(sql);
+        errdefer column_result.deinit(allocator);
         if (context) |cache| if (cache.usable()) try cache.cache.putColumns(&cache.scope, database, schema, relation, column_result, generation);
         return column_result;
     }
@@ -268,10 +269,10 @@ pub fn parseJson(allocator: std.mem.Allocator, text: []const u8) !QueryResult {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
     if (parsed.value != .array) return error.DuckDbExecutionFailed;
-    if (parsed.value.array.items.len == 0) return .{};
+    if (parsed.value.array.items.len == 0) return .{ .owner_allocator = allocator };
     const first = parsed.value.array.items[0];
     if (first != .object) return error.DuckDbExecutionFailed;
-    var output: QueryResult = .{};
+    var output: QueryResult = .{ .owner_allocator = allocator };
     errdefer output.deinit(allocator);
     output.columns = try allocator.alloc(Column, first.object.count());
     for (output.columns) |*column| column.* = .{ .name = "", .kind = .other };
@@ -312,4 +313,28 @@ fn jsonKind(value: std.json.Value) Kind {
         .string => .text,
         else => .other,
     };
+}
+
+test "parsed query result retains its owner across independent caller cleanup" {
+    var owner: std.heap.DebugAllocator(.{}) = .init;
+    defer std.testing.expectEqual(.ok, owner.deinit()) catch @panic("parsed query owner leaked");
+    var caller: std.heap.DebugAllocator(.{}) = .init;
+    defer std.testing.expectEqual(.ok, caller.deinit()) catch @panic("parsed query caller leaked");
+    var output = try parseJson(owner.allocator(), "[{\"number\":17,\"text\":\"held\",\"missing\":null}]");
+    try std.testing.expect(output.owner_allocator != null);
+    try std.testing.expectEqualStrings("17", output.firstScalar().?);
+    output.deinit(caller.allocator());
+    var empty = try parseJson(owner.allocator(), "[]");
+    try std.testing.expect(empty.owner_allocator != null);
+    empty.deinit(caller.allocator());
+}
+
+test "parsed query result cleans every partially allocated result" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, parseResultAllocationFailures, .{});
+}
+
+fn parseResultAllocationFailures(a: std.mem.Allocator) !void {
+    var output = try parseJson(a, "[{\"number\":17,\"text\":\"held\",\"missing\":null},{\"number\":18,\"text\":\"other\",\"missing\":null}]");
+    defer output.deinit(a);
+    try std.testing.expectEqual(@as(usize, 2), output.rows.len);
 }

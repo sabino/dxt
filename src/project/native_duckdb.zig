@@ -445,7 +445,7 @@ pub const Connection = struct {
             self.captureError(message);
             return error.DuckDbExecutionFailed;
         }
-        var output: QueryResult = .{};
+        var output: QueryResult = .{ .owner_allocator = self.allocator };
         errdefer output.deinit(self.allocator);
         for (0..count) |index| {
             if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;

@@ -24,6 +24,11 @@ fn run(init: std.process.Init) !void {
     var graph: adapter.Graph = .{ .allocator = allocator, .project_name = "native_demo", .adapter_type = args[1], .connection_info = init.environ_map.get("DXT_TEST_POSTGRES_CONNINFO") };
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+    if (std.mem.eql(u8, args[2], "result-ownership")) {
+        try resultOwnership(init, &graph, args[3]);
+        try emit(init.io, "{\"independent_allocators\":true,\"held_session_reused\":true,\"copied_result_survives_disconnect\":true}");
+        return;
+    }
     if (std.mem.eql(u8, args[2], "cache") or std.mem.eql(u8, args[2], "cache-parallel")) {
         var cache: adapter.RelationCache = .init(std.heap.smp_allocator, init.io);
         defer cache.deinit();
@@ -162,6 +167,57 @@ fn run(init: std.process.Init) !void {
         try expectScalar(&output, "7");
         try emit(init.io, "{\"cancelled\":true,\"connection_recovered\":true}\n");
     } else return error.InvalidDriverMode;
+}
+
+fn resultOwnership(init: std.process.Init, graph: *const adapter.Graph, path: []const u8) !void {
+    var owner: std.heap.DebugAllocator(.{}) = .init;
+    defer if (owner.deinit() != .ok) @panic("native query owner leaked");
+    var caller: std.heap.DebugAllocator(.{}) = .init;
+    defer if (caller.deinit() != .ok) @panic("native query caller leaked");
+    var retained: adapter.QueryResult = .{};
+    defer retained.deinit(caller.allocator());
+    {
+        var pool = adapter.DuckDBPool.init(owner.allocator(), init.io, init.environ_map);
+        defer pool.deinit();
+        const runtime: adapter.Runtime = .{ .allocator = owner.allocator(), .io = init.io, .environment = init.environ_map, .duckdb_pool = &pool };
+        var session = try adapter.openSession(runtime, graph, path);
+        defer session.deinit();
+        try session.execute("create temporary table owned_rows(id integer, note varchar)");
+        // Each transaction represents a batch whose caller does not own the
+        // held session's allocator. Include command, nullable and empty results.
+        for (0..8) |batch| {
+            try session.begin();
+            const sql = try std.fmt.allocPrint(caller.allocator(), "insert into owned_rows values ({d}, 'held')", .{batch});
+            defer caller.allocator().free(sql);
+            var command = try session.query(sql);
+            defer command.deinit(caller.allocator());
+            if (command.owner_allocator == null) return error.QueryResultOwnerMissing;
+            var nullable = try session.query("select 'copied' as value, null::varchar as missing");
+            defer nullable.deinit(caller.allocator());
+            if (nullable.owner_allocator == null or nullable.rows.len != 1 or nullable.rows[0][1] != null) return error.InvalidOwnedQueryResult;
+            try expectScalar(&nullable, "copied");
+            var empty = try session.query("select id from owned_rows where false");
+            defer empty.deinit(caller.allocator());
+            if (empty.owner_allocator == null or empty.rows.len != 0) return error.InvalidOwnedEmptyQueryResult;
+            try session.commit();
+        }
+        try session.begin();
+        if (session.query("select * from missing_ownership_fixture")) |output| {
+            var unexpected = output;
+            unexpected.deinit(caller.allocator());
+            return error.OwnershipFixtureErrorMissing;
+        } else |_| {}
+        try session.rollback();
+        retained = try session.query("select count(*) as count from owned_rows");
+        if (retained.owner_allocator == null) return error.QueryResultOwnerMissing;
+        try expectScalar(&retained, "8");
+    }
+    // Native results copy their storage: disconnecting the held session does
+    // not invalidate data that still belongs to the live owner allocator.
+    try expectScalar(&retained, "8");
+    const json = try retained.json(caller.allocator());
+    defer caller.allocator().free(json);
+    if (!std.mem.eql(u8, json, "[{\"count\":8}]")) return error.OwnedQueryJsonChanged;
 }
 
 fn cacheConformance(runtime: adapter.Runtime, graph: *const adapter.Graph, path: []const u8, cache: *adapter.RelationCache) !void {

@@ -331,21 +331,44 @@ fn relationKey(a: std.mem.Allocator, scope: []const u8, database: ?[]const u8, s
 fn clone(a: std.mem.Allocator, source: QueryResult) !QueryResult {
     var copy: QueryResult = .{ .owner_allocator = a, .rows_changed = source.rows_changed };
     errdefer copy.deinit(a);
-    var columns: std.ArrayList(result.Column) = .empty;
-    for (source.columns) |column| {
-        var owned = column;
+    if (source.command_tag) |tag| copy.command_tag = try a.dupe(u8, tag);
+    copy.columns = try a.alloc(result.Column, source.columns.len);
+    for (copy.columns) |*column| column.* = .{ .name = "", .kind = .other };
+    for (source.columns, copy.columns) |column, *owned| {
+        owned.* = column;
+        owned.name = "";
         owned.name = try a.dupe(u8, column.name);
-        try columns.append(a, owned);
     }
-    copy.columns = try columns.toOwnedSlice(a);
-    var rows: std.ArrayList([]?[]const u8) = .empty;
-    for (source.rows) |row| {
-        const owned = try a.alloc(?[]const u8, row.len);
-        for (row, owned) |cell, *target| target.* = if (cell) |text| try a.dupe(u8, text) else null;
-        try rows.append(a, owned);
+    copy.rows = try a.alloc([]?[]const u8, source.rows.len);
+    for (copy.rows) |*row| row.* = &.{};
+    for (source.rows, copy.rows) |row, *owned| {
+        owned.* = try a.alloc(?[]const u8, row.len);
+        @memset(owned.*, null);
+        for (row, owned.*) |cell, *target| target.* = if (cell) |text| try a.dupe(u8, text) else null;
     }
-    copy.rows = try rows.toOwnedSlice(a);
     return copy;
+}
+
+test "cached query copy owns complete metadata and partial allocations" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, cloneAllocationFailures, .{});
+}
+
+fn cloneAllocationFailures(a: std.mem.Allocator) !void {
+    const source: QueryResult = .{
+        .columns = @constCast(&[_]result.Column{ .{ .name = "value", .kind = .text, .native_type = 25 }, .{ .name = "missing", .kind = .other } }),
+        .rows = @constCast(&[_][]?[]const u8{ @constCast(&[_]?[]const u8{ "first", null }), @constCast(&[_]?[]const u8{ "second", null }) }),
+        .rows_changed = 2,
+        .command_tag = "SELECT 2",
+    };
+    var copied = try clone(a, source);
+    defer copied.deinit(std.testing.allocator);
+    try std.testing.expect(copied.owner_allocator != null);
+    try std.testing.expect(copied.columns.ptr != source.columns.ptr);
+    try std.testing.expect(copied.rows.ptr != source.rows.ptr);
+    try std.testing.expect(copied.rows[0][0].?.ptr != source.rows[0][0].?.ptr);
+    try std.testing.expectEqualStrings("SELECT 2", copied.command_tag.?);
+    try std.testing.expectEqual(@as(u64, 2), copied.rows_changed);
+    try std.testing.expectEqual(@as(u32, 25), copied.columns[0].native_type);
 }
 
 /// Configure required physical relation schemas without opening a connection.

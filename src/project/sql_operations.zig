@@ -102,7 +102,7 @@ fn seedTable(a: std.mem.Allocator, node: *const types.Node) !@import("adapter.zi
     if (delimiter != .string) return error.InvalidSeedDelimiter;
     var document = try csv.parseWithDelimiter(a, node.raw_code, delimiter.string);
     defer document.deinit();
-    var table: @import("adapter.zig").QueryResult = .{};
+    var table: @import("adapter.zig").QueryResult = .{ .owner_allocator = a };
     errdefer table.deinit(a);
     table.columns = try a.alloc(@import("adapter.zig").Column, document.headers.len);
     for (table.columns) |*column| column.* = .{ .name = "", .kind = .other };
@@ -129,6 +129,26 @@ fn seedTable(a: std.mem.Allocator, node: *const types.Node) !@import("adapter.zi
         }
     }
     return table;
+}
+
+test "seed preview result retains owner for independent caller cleanup" {
+    var owner: std.heap.DebugAllocator(.{}) = .init;
+    defer std.testing.expectEqual(.ok, owner.deinit()) catch @panic("seed preview owner leaked");
+    var caller: std.heap.DebugAllocator(.{}) = .init;
+    defer std.testing.expectEqual(.ok, caller.deinit()) catch @panic("seed preview caller leaked");
+    const node: types.Node = .{
+        .package_name = "example",
+        .name = "preview",
+        .unique_id = "seed.example.preview",
+        .path = "seeds/preview.csv",
+        .original_file_path = "seeds/preview.csv",
+        .raw_code = "id,name\n17,held\n18,\n",
+    };
+    var output = try seedTable(owner.allocator(), &node);
+    defer output.deinit(caller.allocator());
+    try std.testing.expect(output.owner_allocator != null);
+    try std.testing.expectEqualStrings("17", output.firstScalar().?);
+    try std.testing.expect(output.rows[1][1] == null);
 }
 
 pub fn emit(runtime: types.Runtime, options: types.Options, rows: []const results.NodeResult, stdout: *std.Io.Writer) !void {
@@ -215,12 +235,7 @@ pub fn showDirect(runtime: types.Runtime, options: types.Options, graph: *types.
     // its unbounded fetch path. Ordinary show uses a literal SQL LIMIT 0.
     if (options.query_limit > 0 and table.rows.len > @as(u64, @intCast(options.query_limit))) {
         const count: usize = @intCast(options.query_limit);
-        const owner = table.owner_allocator orelse runtime.allocator;
-        for (table.rows[count..]) |row| {
-            for (row) |cell| if (cell) |value| owner.free(value);
-            owner.free(row);
-        }
-        table.rows = try owner.realloc(table.rows, count);
+        try table.truncateRows(runtime.allocator, count);
     }
     const rendered = try @import("sql_preview.zig").render(runtime.allocator, &table, options.output);
     defer runtime.allocator.free(rendered);

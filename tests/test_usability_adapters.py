@@ -106,6 +106,19 @@ def test_actual_native_dml_returning_rows(driver, tmp_path, request, adapter):
 
 
 @pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
+def test_native_held_session_results_use_owner_allocator_across_batches(
+    driver, tmp_path, request, adapter,
+):
+    environment = (request.getfixturevalue("duckdb_environment") if adapter == "duckdb"
+                   else request.getfixturevalue("postgres_fixture")[1])
+    assert decoded(invoke(driver, adapter, "result-ownership", tmp_path / "owned.duckdb", environment)) == {
+        "independent_allocators": True,
+        "held_session_reused": True,
+        "copied_result_survives_disconnect": True,
+    }
+
+
+@pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
 def test_actual_native_cancellation_and_reusable_connection(driver, tmp_path, request, adapter):
     environment = (request.getfixturevalue("duckdb_environment") if adapter == "duckdb"
                    else request.getfixturevalue("postgres_fixture")[1])

@@ -231,6 +231,7 @@ pub fn infer(a: std.mem.Allocator, rows: []const []const []const u8, column: usi
         const value = std.mem.trim(u8, row[column], " \t\r\n");
         if (isNull(value)) continue;
         if (number(a, value)) |parsed| {
+            defer a.free(parsed);
             if (std.mem.indexOfAny(u8, parsed, ".eE") != null) {
                 const point = std.mem.indexOfScalar(u8, parsed, '.');
                 const exponent_index = std.mem.indexOfAny(u8, parsed, "eE");
@@ -238,7 +239,10 @@ pub fn infer(a: std.mem.Allocator, rows: []const []const []const u8, column: usi
                 const decimal_places: i32 = if (point) |index| @intCast((exponent_index orelse parsed.len) - index - 1) else 0;
                 if (decimal_places - exponent > 0) fractional = true;
             }
-        } else |_| numeric = false;
+        } else |err| {
+            if (err == error.OutOfMemory) return err;
+            numeric = false;
+        }
         if (!isIsoDate(value)) date = false;
         if (value.len <= 10) timestamp = false else _ = freshness.parseFreshnessTimestamp(value) catch blk: {
             timestamp = false;
@@ -277,6 +281,7 @@ pub fn number(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
         while (std.mem.endsWith(u8, text, symbol)) text = text[0 .. text.len - symbol.len];
     }
     const grouped = try std.mem.replaceOwned(u8, a, text, ",", "");
+    errdefer a.free(grouped);
     if (grouped.len == 0) return error.InvalidSeedNumber;
     var digits: usize = 0;
     var point = false;
@@ -299,7 +304,28 @@ pub fn number(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
         return error.InvalidSeedNumber;
     }
     if (digits == 0) return error.InvalidSeedNumber;
-    return if (negative) std.fmt.allocPrint(a, "-{s}", .{grouped}) else grouped;
+    if (negative) {
+        const signed = try std.fmt.allocPrint(a, "-{s}", .{grouped});
+        a.free(grouped);
+        return signed;
+    }
+    return grouped;
+}
+
+test "seed number inference owns successful and rejected numeric buffers" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, numberAllocationFailures, .{});
+}
+
+fn numberAllocationFailures(a: std.mem.Allocator) !void {
+    const value = try number(a, "-$1,234.50");
+    defer a.free(value);
+    try std.testing.expectEqualStrings("-1234.50", value);
+    if (number(a, "not numeric")) |unexpected| {
+        a.free(unexpected);
+        return error.ExpectedInvalidSeedNumber;
+    } else |err| if (err != error.InvalidSeedNumber) return err;
+    const rows: []const []const []const u8 = &.{ &.{"17"}, &.{"18"} };
+    try std.testing.expectEqual(Kind.integer, try infer(a, rows, 0));
 }
 
 fn columnOverride(node: *const types.Node, name: []const u8) ?[]const u8 {
