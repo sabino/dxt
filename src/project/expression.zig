@@ -210,6 +210,11 @@ pub fn mappingSource(container: Value) ?Value {
     return if (native) source else null;
 }
 pub fn mappingEntry(container: Value, key: Value) !?Entry {
+    if (@import("builtin_bound_method.zig").isRelationMapping(container)) {
+        if (key != .string) return null;
+        const value = try checkedAttribute(container, key.string);
+        return if (value == .undefined) null else .{ .key = key.string, .value = value };
+    }
     if (mappingSource(container)) |source| {
         // Raw metadata lookup avoids reentering proxy lookup for absent fields.
         var uppercase = false;
@@ -1050,7 +1055,7 @@ const Parser = struct {
                 const expanded = try self.binary(0);
                 if (self.active) {
                     if (!@import("builtin_bound_method.zig").isMapping(expanded)) return error.InvalidJinjaArguments;
-                    for ((mappingSource(expanded) orelse expanded).object) |entry| {
+                    for (try @import("builtin_bound_method.zig").mappingEntries(expanded)) |entry| {
                         const key = entryKey(entry);
                         if (key != .string) return error.InvalidJinjaArguments;
                         for (args.items) |arg| if (arg.name) |argument_name| {
@@ -1108,6 +1113,7 @@ fn ownedEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry)) ![
 }
 
 fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument, host: ?Host) !?Value {
+    if (@import("builtin_bound_method.zig").isRelationMapping(receiver)) return null;
     if (sequences.kind(receiver) != null) return null;
     if (receiver == .object) if (tupleProtocol(receiver)) |items| return pureMethod(allocator, .{ .tuple = items }, name_, args, host);
     if (sets.isSet(receiver)) return (try sets.call(allocator, receiver, name_, args)) orelse error.UndefinedJinjaValue;
@@ -1901,6 +1907,7 @@ pub fn iterableValues(allocator: std.mem.Allocator, value: Value) anyerror![]con
     return iterableValuesWithHost(allocator, value, null);
 }
 pub fn iterableValuesWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) anyerror![]const Value {
+    if (@import("builtin_bound_method.zig").isRelationMapping(value)) return error.JinjaTypeError;
     if (!isIterable(value)) return error.JinjaTypeError;
     if (try sequences.itemsWithHost(allocator, value, host)) |items| return items;
     if (sequence(value)) |items| return items;
@@ -2003,9 +2010,12 @@ pub fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
         if (std.mem.eql(u8, name, "iterable")) return true;
     }
     if (std.mem.eql(u8, name, "mapping")) return @import("builtin_bound_method.zig").isMapping(value);
-    if (std.mem.eql(u8, name, "iterable")) return isIterable(value);
+    if (std.mem.eql(u8, name, "iterable")) {
+        if (@import("builtin_bound_method.zig").isRelationMapping(value)) return error.JinjaTypeError;
+        return isIterable(value);
+    }
     if (std.mem.eql(u8, name, "sequence")) return isUndefined(value) or value == .list or value == .tuple or value == .string or
-        @import("builtin_bound_method.zig").isMapping(value) or (sequence(value) != null and !sets.isSet(value));
+        (@import("builtin_bound_method.zig").isMapping(value) and !@import("builtin_bound_method.zig").isRelationMapping(value)) or (sequence(value) != null and !sets.isSet(value));
     if (std.mem.eql(u8, name, "callable")) return isUndefined(value) or callableName(value) != null;
     if (std.mem.eql(u8, name, "equalto") or std.mem.eql(u8, name, "eq") or std.mem.eql(u8, name, "==")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
@@ -2078,8 +2088,7 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
                 positional += 1;
                 if (positional > 1) return error.InvalidJinjaArguments;
                 if (@import("builtin_bound_method.zig").isMapping(arg.value)) {
-                    const source = mappingSource(arg.value) orelse arg.value;
-                    for (source.object) |entry| try mappingPut(allocator, &entries, entryKey(entry), entry.value);
+                    for (try @import("builtin_bound_method.zig").mappingEntries(arg.value)) |entry| try mappingPut(allocator, &entries, entryKey(entry), entry.value);
                 } else {
                     for (try iterableValuesWithHost(allocator, arg.value, host)) |item| {
                         const pair = try iterableValuesWithHost(allocator, item, host);
@@ -2169,7 +2178,7 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
     if (std.mem.eql(u8, name, "attr")) {
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
         const builtin_methods = @import("builtin_bound_method.zig");
-        if (builtin_methods.isMapping(value)) {
+        if (builtin_methods.isMapping(value) and !builtin_methods.isRelationMapping(value)) {
             if (try builtin_methods.lookupWithHost(allocator, value, args[0].value.string, host)) |method_value| return method_value;
             return if (host != null and host.?.capture_undefined) try captureUndefined(allocator, args[0].value.string) else try undefinedValue(allocator, args[0].value.string);
         }

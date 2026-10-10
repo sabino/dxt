@@ -47,7 +47,7 @@ pub fn callWithHost(allocator: std.mem.Allocator, name: []const u8, args: []cons
         return .{ .original = receiver, .replacement = .{ .list = try ownedList(allocator, output.items) } };
     }
     if (receiver == .object) {
-        if (!@import("builtin_bound_method.zig").isMapping(receiver) or expression.mappingSource(receiver) != null) return null;
+        if (!@import("builtin_bound_method.zig").isDictionary(receiver)) return null;
         var output: std.ArrayList(expression.Entry) = .empty;
         if (std.mem.eql(u8, method, "update")) {
             try output.appendSlice(allocator, receiver.object);
@@ -59,8 +59,7 @@ pub fn callWithHost(allocator: std.mem.Allocator, name: []const u8, args: []cons
                     positional += 1;
                     if (positional > 1) return error.InvalidJinjaArguments;
                     if (@import("builtin_bound_method.zig").isMapping(arg.value)) {
-                        const source = expression.mappingSource(arg.value) orelse arg.value;
-                        for (source.object) |entry| try expression.mappingPut(allocator, &output, expression.entryKey(entry), entry.value);
+                        for (try @import("builtin_bound_method.zig").mappingEntries(arg.value)) |entry| try expression.mappingPut(allocator, &output, expression.entryKey(entry), entry.value);
                     } else {
                         for (try expression.iterableValues(allocator, arg.value)) |pair| {
                             const cells = try expression.iterableValues(allocator, pair);

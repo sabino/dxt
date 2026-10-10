@@ -248,6 +248,7 @@ pub fn relationValue(allocator: std.mem.Allocator, definition: RelationDef) !Val
     try entries.appendSlice(allocator, &.{
         .{ .key = "__dxt_relation", .value = .{ .string = serialized } },
         .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_relation_mapping", .value = .{ .callable = "__dxt_relation_mapping" } },
         .{ .key = "__dxt_rendered", .value = .{ .string = definition.rendered_sql orelse rendered } },
         .{ .key = "__dxt_repr", .value = .{ .string = try std.fmt.allocPrint(allocator, "<{s} {s}>", .{ class_name, rendered }) } },
         .{ .key = "database", .value = optional(definition.database) },
@@ -274,7 +275,7 @@ pub fn relationValue(allocator: std.mem.Allocator, definition: RelationDef) !Val
         .{ .key = "can_be_renamed", .value = .{ .boolean = replaceable } },
         .{ .key = "can_be_replaced", .value = .{ .boolean = replaceable } },
     });
-    for ([_][]const u8{ "get", "render", "quote", "include", "incorporate", "replace_path", "without_identifier", "matches", "information_schema", "information_schema_only" }) |method| try entries.append(allocator, .{
+    for ([_][]const u8{ "get", "render", "quote", "include", "incorporate", "replace_path", "without_identifier", "matches", "information_schema", "information_schema_only", "keys", "values", "items" }) |method| try entries.append(allocator, .{
         .key = method,
         .value = .{ .callable = try std.fmt.allocPrint(allocator, "__dxt_relation:{s}:{s}", .{ method, serialized }) },
     });
@@ -372,9 +373,18 @@ pub fn call(allocator: std.mem.Allocator, adapter_type: []const u8, name: []cons
         const key = named(args, "key", 0);
         if (key != .string or args.len > 2) return error.InvalidJinjaArguments;
         if (std.mem.eql(u8, key.string, "metadata")) return .{ .object = try allocator.dupe(expression.Entry, &.{.{ .key = "type", .value = .{ .string = if (definition.information_schema_relation) "InformationSchema" else if (std.mem.eql(u8, definition.adapter_type, "postgres")) "PostgresRelation" else "DuckDBRelation" } }}) };
-        const value = (try relationValue(allocator, definition)).attribute(key.string);
+        const value = try expression.checkedAttribute(try relationValue(allocator, definition), key.string);
         const fallback = named(args, "default", 1);
         return if (value == .undefined) (if (fallback == .undefined) Value.none else fallback) else value;
+    } else if (std.mem.eql(u8, method, "keys") or std.mem.eql(u8, method, "values") or std.mem.eql(u8, method, "items")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        const view = try @import("expression_sequence.zig").view(allocator, try relationValue(allocator, definition), method);
+        const entries = try expression.allocateEntries(allocator, view.object.len + 1);
+        @memcpy(entries[0..view.object.len], view.object);
+        entries[view.object.len] = .{ .key = "__dxt_len", .value = .{ .callable = try std.fmt.allocPrint(allocator, "__dxt_relation:mapping_length:{s}", .{name[boundary + 1 ..]}) } };
+        return .{ .object = entries };
+    } else if (std.mem.eql(u8, method, "mapping_length")) {
+        return error.JinjaTypeError;
     } else if (std.mem.eql(u8, method, "render")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         return .{ .string = try renderRelation(allocator, definition) };
@@ -505,4 +515,43 @@ test "capture Undefined cloning owns payload and preserves scalar identity" {
     try std.testing.expect(duplicate == .ordinary_undefined);
     try std.testing.expectEqual(missing.ordinary_undefined.identity, duplicate.ordinary_undefined.identity);
     try std.testing.expectError(error.JinjaTypeError, @import("context_json.zig").stringify(allocator, duplicate));
+}
+
+test "Relation Mapping preserves provider methods and rejects dictionary consumers" {
+    const Fixture = struct {
+        relation: Value,
+        fn resolve(raw: *anyopaque, name: []const u8, _: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return if (std.mem.eql(u8, name, "r")) self.relation else .undefined;
+        }
+        fn invoke(_: *anyopaque, name: []const u8, args: []const Argument, a: std.mem.Allocator) !Value {
+            return (try call(a, "postgres", name, args)) orelse error.UnresolvedMacro;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture: Fixture = .{ .relation = try relationValue(a, .{ .adapter_type = "postgres", .database = "db", .schema = "main", .identifier = "events" }) };
+    const host = expression.Host{ .context = &fixture, .resolve = Fixture.resolve, .call = Fixture.invoke };
+    const methods = @import("builtin_bound_method.zig");
+    try std.testing.expect(methods.isMapping(fixture.relation));
+    try std.testing.expect(!methods.isDictionary(fixture.relation));
+    try std.testing.expect((try expression.evaluate(a, "r is mapping", host)).boolean);
+    try std.testing.expect(!(try expression.evaluate(a, "r is sequence", host)).boolean);
+    try std.testing.expectEqualStrings("PostgresRelation", (try expression.evaluate(a, "r.get('metadata').type", host)).string);
+    try std.testing.expectEqualStrings("fallback", (try expression.evaluate(a, "r.get('__dxt_relation_mapping', 'fallback')", host)).string);
+    try std.testing.expect((try expression.evaluate(a, "'database' in r", host)).boolean);
+    try std.testing.expect(!(try expression.evaluate(a, "'metadata' in r", host)).boolean);
+    try std.testing.expect((try expression.evaluate(a, "r.keys() is iterable", host)).boolean);
+    try std.testing.expectEqualStrings("KeysView(<PostgresRelation \"db\".\"main\".\"events\">)", (try expression.evaluate(a, "r.keys()|string", host)).string);
+    try std.testing.expectError(error.JinjaTypeError, expression.evaluate(a, "r is iterable", host));
+    try std.testing.expectError(error.JinjaTypeError, expression.evaluate(a, "r.keys()|list", host));
+    try std.testing.expectError(error.JinjaTypeError, expression.evaluate(a, "dict(**r)", host));
+    try std.testing.expectError(error.JinjaTypeError, @import("context_json.zig").stringify(a, fixture.relation));
+    try std.testing.expectError(error.JinjaTypeError, @import("expression_json.zig").render(a, fixture.relation, null));
+    try std.testing.expectError(error.InvalidConfiguration, @import("config_value.zig").fromExpression(a, fixture.relation));
+    try std.testing.expect((try @import("container_methods.zig").call(a, "__dxt_value.clear", &.{.{ .value = fixture.relation }})) == null);
+    const ordinary = try expression.evaluate(a, "{'__dxt_context_object':true,'__dxt_relation_mapping':['ordinary']}", null);
+    try std.testing.expect(methods.isDictionary(ordinary));
+    try std.testing.expectEqual(@as(usize, 2), (try methods.mappingEntries(ordinary)).len);
 }

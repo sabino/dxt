@@ -16,7 +16,22 @@ pub fn isContextObject(value: Value) bool {
     return tag == .callable and std.mem.eql(u8, tag.callable, "__dxt_context_object");
 }
 
+pub fn isRelationMapping(value: Value) bool {
+    if (value != .object) return false;
+    // Inspect protocol fields directly: Mapping attribute fallback calls
+    // mappingEntry, which must not recursively reenter this classifier.
+    var context = false;
+    var relation = false;
+    for (value.object) |entry| {
+        if (entry.value != .callable) continue;
+        if (std.mem.eql(u8, entry.key, "__dxt_context_object") and std.mem.eql(u8, entry.value.callable, "__dxt_context_object")) context = true;
+        if (std.mem.eql(u8, entry.key, "__dxt_relation_mapping") and std.mem.eql(u8, entry.value.callable, "__dxt_relation_mapping")) relation = true;
+    }
+    return context and relation;
+}
+
 pub fn isMapping(value: Value) bool {
+    if (isRelationMapping(value)) return true;
     if (value != .object or isContextObject(value) or isBound(value) or @import("datetime_bound_method.zig").isBound(value)) return false;
     if (@import("expression_sequence.zig").kind(value) != null or expression.tupleProtocol(value) != null) return false;
     if (@import("set_context.zig").isSet(value) or (expression.floatProtocol(value) != null or expression.complexProtocol(value) != null or expression.integerProtocol(value) != null)) return false;
@@ -24,6 +39,17 @@ pub fn isMapping(value: Value) bool {
     const getter = value.attribute("__dxt_getattr");
     if (getter == .callable and std.mem.startsWith(u8, getter.callable, "__dxt_loop_attribute:")) return false;
     return true;
+}
+
+/// Mapping membership does not imply Python dict methods or serialization.
+pub fn isDictionary(value: Value) bool {
+    return isMapping(value) and !isRelationMapping(value) and expression.mappingSource(value) == null;
+}
+
+/// Relation's Mapping protocol deliberately rejects dictionary iteration.
+pub fn mappingEntries(value: Value) ![]const expression.Entry {
+    if (!isMapping(value) or isRelationMapping(value)) return error.JinjaTypeError;
+    return (expression.mappingSource(value) orelse value).object;
 }
 
 fn owner(value: Value) ?[]const u8 {
@@ -34,7 +60,7 @@ fn owner(value: Value) ?[]const u8 {
     if (expression.complexProtocol(value) != null) return "complex";
     // Read-only Mapping providers implement their own class methods. They are
     // not Python dict builtins, and must keep their existing provider dispatch.
-    if (isMapping(value) and expression.mappingSource(value) == null) return "dict";
+    if (isDictionary(value)) return "dict";
     return null;
 }
 

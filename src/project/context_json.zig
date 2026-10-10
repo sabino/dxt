@@ -154,7 +154,7 @@ fn write(allocator: std.mem.Allocator, writer: *std.Io.Writer, value: expression
                 try writer.writeByte(']');
                 return;
             }
-            if (!@import("builtin_bound_method.zig").isMapping(value) or expression.mappingSource(value) != null) return error.JinjaTypeError;
+            if (!@import("builtin_bound_method.zig").isDictionary(value)) return error.JinjaTypeError;
             const sorted = if (sort_keys) try allocator.dupe(expression.Entry, entries) else null;
             defer if (sorted) |items| allocator.free(items);
             if (sorted) |items| try @import("mapping_keys.zig").sortJsonKeys(allocator, items);

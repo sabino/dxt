@@ -30,7 +30,7 @@ pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) any
     if (expression.floatProtocol(value)) |number| return .{ .float = number };
     if (@import("yaml_values.zig").isHashable(value)) return error.InvalidConfiguration;
     if (@import("set_context.zig").isSet(value)) return error.InvalidConfiguration;
-    if (value == .object and (!@import("builtin_bound_method.zig").isMapping(value) or expression.mappingSource(value) != null)) return error.InvalidConfiguration;
+    if (value == .object and !@import("builtin_bound_method.zig").isDictionary(value)) return error.InvalidConfiguration;
     return switch (value) {
         .none => .null,
         .missing, .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined, .callable, .complex => error.InvalidConfiguration,

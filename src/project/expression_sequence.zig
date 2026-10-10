@@ -53,6 +53,7 @@ pub fn isIterator(value: Value) bool {
 
 /// Creating an iterator is non-consuming; aliases share each one-shot cursor.
 pub fn iter(a: std.mem.Allocator, input: Value) !Value {
+    if (@import("builtin_bound_method.zig").isRelationMapping(input)) return error.JinjaTypeError;
     if (isIterator(input)) return input;
     if (!expression.isIterable(input)) return error.JinjaTypeError;
     const entries = try expression.allocateEntries(a, 3);
@@ -104,8 +105,9 @@ fn nextIterator(a: std.mem.Allocator, value: Value, host: ?expression.Host) !?Va
         if (view_name != null) mapping = source.attribute("__dxt_sequence_source");
         if (mapping != .object) return error.JinjaTypeError;
         mapping = expression.mappingSource(mapping) orelse mapping;
-        if (index >= mapping.object.len) return null;
-        const entry = mapping.object[index];
+        const entries = try @import("builtin_bound_method.zig").mappingEntries(mapping);
+        if (index >= entries.len) return null;
+        const entry = entries[index];
         try cursorAdvance(a, value, index + 1);
         if (view_name) |name| {
             if (std.mem.eql(u8, name, "values")) return entry.value;
@@ -127,8 +129,9 @@ fn nextIterator(a: std.mem.Allocator, value: Value, host: ?expression.Host) !?Va
 fn viewItems(a: std.mem.Allocator, value: Value, name: []const u8) ![]const Value {
     const source = value.attribute("__dxt_sequence_source");
     if (source != .object) return error.JinjaTypeError;
-    const values = try expression.allocateValues(a, source.object.len);
-    for (source.object, values) |entry, *result| {
+    const entries = try @import("builtin_bound_method.zig").mappingEntries(source);
+    const values = try expression.allocateValues(a, entries.len);
+    for (entries, values) |entry, *result| {
         if (std.mem.eql(u8, name, "keys")) result.* = expression.entryKey(entry) else if (std.mem.eql(u8, name, "values")) result.* = entry.value else {
             const pair = try expression.allocateValues(a, 2);
             pair[0] = expression.entryKey(entry);
@@ -200,6 +203,11 @@ pub fn textWithHost(a: std.mem.Allocator, value: Value, host: ?expression.Host) 
         }
         return try std.fmt.allocPrint(a, "<{s} object at 0x{x}>", .{ label, @intFromPtr(value.object.ptr) });
     }
+    const source = value.attribute("__dxt_sequence_source");
+    if (@import("builtin_bound_method.zig").isRelationMapping(source)) {
+        const class_name = if (std.mem.eql(u8, name, "keys")) "KeysView" else if (std.mem.eql(u8, name, "values")) "ValuesView" else "ItemsView";
+        return try std.fmt.allocPrint(a, "{s}({s})", .{ class_name, try expression.repr(source, a) });
+    }
     const values = try viewItems(a, value, name);
     return try std.fmt.allocPrint(a, "dict_{s}({s})", .{ name, try expression.textWithHost(a, .{ .list = values }, host) });
 }
@@ -208,6 +216,7 @@ pub fn length(value: Value) !?usize {
     _ = kind(value) orelse return null;
     if (isIterator(value)) return error.JinjaTypeError;
     const source = value.attribute("__dxt_sequence_source");
+    if (@import("builtin_bound_method.zig").isRelationMapping(source)) return error.JinjaTypeError;
     return if (source == .object) source.object.len else error.JinjaTypeError;
 }
 

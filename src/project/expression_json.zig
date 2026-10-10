@@ -69,7 +69,7 @@ fn write(a: std.mem.Allocator, w: *std.Io.Writer, value: Value, indent: ?[]const
                 try w.writeByte(']');
                 return;
             }
-            if (!@import("builtin_bound_method.zig").isMapping(value) or expression.mappingSource(value) != null) return error.JinjaTypeError;
+            if (!@import("builtin_bound_method.zig").isDictionary(value)) return error.JinjaTypeError;
             const sorted = try a.dupe(expression.Entry, entries);
             defer a.free(sorted);
             try @import("mapping_keys.zig").sortJsonKeys(a, sorted);
