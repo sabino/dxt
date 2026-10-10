@@ -686,7 +686,6 @@ pub const OperationHost = struct {
         const table: expression.Value = .{ .object = try allocator.dupe(expression.Entry, &.{
             .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
             .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
-            .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
             .{ .key = "__dxt_data", .value = .{ .list = data } },
             .{ .key = "rows", .value = .{ .list = rows } },
             .{ .key = "columns", .value = column_values },
