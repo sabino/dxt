@@ -560,3 +560,15 @@ test "native count and repeat representations reflect next state without consumi
     _ = try sequence.next(a, repeat, null);
     try std.testing.expectEqualStrings("repeat('x', 0)", (try render(a, repeat)).?);
 }
+
+test "attr filter hides iterator state while validating its arguments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const iterator = (try call(a, "modules.itertools.count", &.{}, null)).?;
+    const field = [_]Argument{.{ .value = .{ .string = "current" } }};
+    try std.testing.expect((try expression.filterValue(a, "attr", iterator, &field, null)) == .undefined);
+    try std.testing.expectError(error.InvalidJinjaArguments, expression.filterValue(a, "attr", iterator, &.{}, null));
+    const invalid = [_]Argument{ .{ .value = .{ .string = "current" } }, .{ .value = .{ .string = "other" } } };
+    try std.testing.expectError(error.InvalidJinjaArguments, expression.filterValue(a, "attr", iterator, &invalid, null));
+}
