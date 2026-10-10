@@ -33,6 +33,19 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 
 ### Full Usability Implementation Campaign
 
+The fresh unfiltered 5,808-case run on the published sorting candidate has
+exposed eight failures across initialization, a colored-output expectation and
+durable compile/docs error artifacts. The original whole run continues without
+source changes to collect integrated evidence; its failed scratch and reports
+are retained and cannot count as acceptance. Read-only triage is disjoint:
+the oracle worker grounds generated DuckDB profile paths and invalid-init
+logging, the source worker grounds the statement-output color expectation, and
+the expression worker traces compile/docs error publication. Any correction
+must retain the original database effects, diagnostics, retry and full-schema
+assertions. The supervisor records planning in a separate worktree during the
+original run, integrates only reviewed bounded corrections after its closure,
+then restarts the complete unfiltered suite and applicable final gates.
+
 The final unfiltered 5,626-case candidate run was intentionally interrupted
 after its first failure was grounded: a fixture rendered a dictionary created
 from a salted Python set, whose iteration order changes with PYTHONHASHSEED.
