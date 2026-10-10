@@ -38,6 +38,7 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (expression.integerProtocol(candidate) != null) return;
     if (expression.floatProtocol(candidate) != null) return;
     if (expression.complexProtocol(candidate) != null) return;
+    if (immutableIdentity(candidate) != null) return;
     switch (candidate) {
         .none,
         .boolean,
@@ -66,6 +67,11 @@ pub fn keyEqual(left: Value, right: Value) bool {
     const yaml_values = @import("yaml_values.zig");
     if (yaml_values.isHashable(left) or yaml_values.isHashable(right))
         return yaml_values.keyEqual(left, right);
+    if (immutableIdentity(left)) |a| {
+        const b = immutableIdentity(right) orelse return false;
+        return std.mem.eql(u8, a.kind, b.kind) and std.mem.eql(u8, a.value, b.value);
+    }
+    if (immutableIdentity(right) != null) return false;
     if (expression.complexProtocol(left)) |a| {
         if (expression.complexProtocol(right)) |b| {
             const a_nan = std.math.isNan(a.real) or std.math.isNan(a.imaginary);
@@ -104,6 +110,17 @@ pub fn keyEqual(left: Value, right: Value) bool {
         return true;
     }
     return expression.equalValues(left, right);
+}
+
+const ImmutableIdentity = struct { kind: []const u8, value: []const u8 };
+
+fn immutableIdentity(value: Value) ?ImmutableIdentity {
+    if (value != .object) return null;
+    inline for (.{ "__dxt_timezone_identity", "__dxt_class_identity" }) |kind| {
+        const identity = value.attribute(kind);
+        if (identity == .string) return .{ .kind = kind, .value = identity.string };
+    }
+    return null;
 }
 
 /// Python's JSON encoder accepts primitive scalar keys and converts their
@@ -187,6 +204,22 @@ test "dictionary keys reject mutable containers, including nested tuples" {
     try std.testing.expectError(error.JinjaTypeError, hashable(.{ .object = &.{} }));
     try std.testing.expectError(error.JinjaTypeError, hashable(.{ .tuple = &.{.{ .list = &.{} }} }));
     try hashable(.{ .tuple = &.{ .none, .{ .integer = "7" }, .{ .tuple = &.{} } } });
+}
+
+test "immutable timezone and class keys retain identities across copies" {
+    const zone: Value = .{ .object = &.{.{ .key = "__dxt_timezone_identity", .value = .{ .string = "UTC" } }} };
+    const copy: Value = .{ .object = &.{.{ .key = "__dxt_timezone_identity", .value = .{ .string = "UTC" } }} };
+    const other: Value = .{ .object = &.{.{ .key = "__dxt_timezone_identity", .value = .{ .string = "Europe/London" } }} };
+    const class: Value = .{ .object = &.{.{ .key = "__dxt_class_identity", .value = .{ .string = "UTC" } }} };
+    try hashable(zone);
+    try hashable(class);
+    const item = try create(zone, .{ .string = "stored" });
+    try std.testing.expect(matches(item, copy));
+    try std.testing.expect(!matches(item, other));
+    try std.testing.expect(!matches(item, class));
+    try std.testing.expect(!matches(item, .{ .string = "UTC" }));
+    try std.testing.expectError(error.JinjaTypeError, jsonKey(std.testing.allocator, zone));
+    try std.testing.expectError(error.JinjaTypeError, jsonKey(std.testing.allocator, class));
 }
 
 test "relation keys compare complete identity and do not collapse to rendered SQL" {
