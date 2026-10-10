@@ -33,7 +33,7 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 
 ### Full Usability Implementation Campaign
 
-The latest unchanged public PostgreSQL dbt-utils baseline passes all seven
+The latest combined unchanged public PostgreSQL dbt-utils candidate passes all seven
 commands, complete artifact schemas, resource/config/dependency identities,
 every compiled SQL resource, catalog columns and every typed relation row.
 The developer gate fixes realtime only inside its isolated fixture process
@@ -43,22 +43,22 @@ SQL or comparison value is rewritten. Jaffle and native/safety jobs are green
 on the published checkpoint, along with native archive installation on Linux
 x86_64 and ARM. The complete canonical compatibility jobs remain in progress.
 
-The combined callable/ownership candidate passes 703 native tests and 70
+The combined callable/ownership candidate passes 704 native tests and 70
 developer acceptance checks. The Relation Mapping closure is integrated after
 48 actual Core comparisons; earlier callable certificates include 18
 both-adapter list-growth cases, 44 inline cases and the complete 213-case
-saved-method/base/receiver suite. The fresh public PostgreSQL rerun reaches
-seed execution and exposes invalid spare cells in a lazy iterator's private
-capacity buffer during alias publication. The expression worker owns this
-bounded buffer/loop ownership regression; completed LoopContext behavior must
-remain intact. Failed public and small seed fixtures remain regression evidence.
-These results are candidate-specific and do not establish merge readiness.
+saved-method/base/receiver suite. The lazy iterator capacity repair initializes
+spare tagged cells before alias publication and passes eight actual Core cases
+for live and completed saved loop contexts. The fresh strict public PostgreSQL
+ladder passes on this combined candidate in 156 seconds. Failed earlier public
+and small seed fixtures remain regression evidence. These results are
+candidate-specific and do not establish merge readiness.
 
 The primary seed implementation, genuine sequence markers and borrowed
 transaction cleanup are integrated after 72 actual Core cases for bundled
 DuckDB COPY and native PostgreSQL bindings. The oracle worker owns the combined
 seed rerun, including the new Column cases and unchanged 70,000-binding seed;
-none can count as final evidence before the iterator regression is repaired.
+the corrected complete seed certificate is still running.
 The oracle worker also owns native result transport, embedded-NUL/composite
 parameters and the authored cursor contract, with the cache worker owning a
 separate PostgreSQL typed-cell/description module. The release worker's ELF
@@ -73,6 +73,8 @@ cached developer helper now performs that fixture's clean CLI build and native
 test run once per pytest process; every registration still checks the binary
 exists, and native driver/browser fixtures remain mandatory. This removes
 redundant compilation without reducing test selection or oracle assertions.
+An actual clean-build check across two existing modules passes, with a receipt
+showing one completed build/test helper invocation and one cache reuse.
 
 The current CI repair checkpoint has all 263 historical CLI tests passing with
 zero skips after Core-grounded expectation migrations and the profileless audit
