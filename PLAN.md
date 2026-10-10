@@ -123,6 +123,21 @@ and actual DuckDB COPY/PostgreSQL parameterized seed loading. These known gaps
 and full final candidate gates remain open; focused green results do not make
 the branch merge-ready.
 
+The rendering-source closure now passes 14 mandatory Core projects while
+preserving authored bytes. The fresh unchanged PostgreSQL package passes all
+seven commands, schemas, graph/config/dependency identities, build outcomes and
+every compiled SQL resource. Its time-dependent views expose the developer
+gate's separate-query clock mismatch; deterministic comparison must retain
+every relation and typed value. The namespace worker owns the combined static
+dependency and saved-dispatch certificate. The compiler worker's inline macro
+closure has 44 mandatory passing Core cases and now owns receiver forwarding
+and memoized public context cloning. The expression worker owns saved builtin
+method activation and its native receiver API. The supervisor owns genuine
+mapping/iterable and JSON/config classification; shared edits integrate in this
+order. The filter worker owns amortized native list mutation to close the
+authentic wide seed's quadratic binding accumulation. These slices and their
+combined final candidate gates remain required before merge readiness.
+
 PR #219 is merged. The user has authorized completing the replacement roadmap,
 including its proposed features, from fresh main on `feat/full-usability`.
 The previous snapshot slice's stop boundary is historical and does not constrain
