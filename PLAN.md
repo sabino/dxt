@@ -73,6 +73,25 @@ only through the documented native opt-in. Keep docs catches and preflight,
 infrastructure, out-of-memory and earlier-artifact policies unchanged. Integrate
 this bounded facade commit before any subsequent worker edits that shared file.
 
+The compile fail-fast correction is integrated. The source worker now owns only
+the concurrent data-test queue seam in that facade, reusing the existing merged
+test order while preserving dependency readiness and result completion. Its
+other bounded slices retain contextual Core-backed data errors, declared-secret
+snapshot rollback checks and stock DuckDB stored-audit transaction behavior.
+The native long-error control also exposes a secret prefix cut by diagnostic
+truncation; preserve the memory bound and mask declared values before publishing
+that truncated boundary. Do not treat complete-value masking alone as proof of
+this boundary's privacy. The oracle worker owns the deprecation fixture's
+serial Core policy baseline while native concurrent deduplication remains
+strictly tested; the supervisor owns nullable incremental normalization.
+
+The metric movement failure fixture now deliberately keeps its declared source
+estimate below the row limit while making actual source rows exceed it. Actual
+native controls prove three moved rows fit the limit and six rows fail at the
+same limit, with no retained stages. Destination-local result rows do not count
+as movement. The original case identity and failure/privacy/cleanup assertions
+remain intact. This fixture correction is not combined-candidate acceptance.
+
 The compile-policy candidate `000eb74` passes all 796 native tests and all 95
 affected focused checks. Its interrupted complete-suite run is negative
 evidence, not final acceptance. Subsequent namespace corrections require fresh
