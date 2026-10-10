@@ -1316,11 +1316,11 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
         if (!std.mem.eql(u8, node.resource_type, "seed") and node.relation_name == null) node.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
         try resources.append(runtime.allocator, .{ .node = node });
     }
-    for (graph.tests.items) |*node| if (node.enabled and selectionContains(selected, node.unique_id)) {
-        try resources.append(runtime.allocator, .{ .generic = node });
-    };
-    for (graph.singular_tests.items) |*node| if (node.enabled and selectionContains(selected, node.unique_id)) {
-        try resources.append(runtime.allocator, .{ .singular = node });
+    const data_tests = try selectedDataTestExecutionOrder(runtime, graph, selected);
+    defer runtime.allocator.free(data_tests);
+    for (data_tests) |test_node| switch (test_node) {
+        .generic => |node| try resources.append(runtime.allocator, .{ .generic = node }),
+        .singular => |node| try resources.append(runtime.allocator, .{ .singular = node }),
     };
     for (graph.unit_tests.items) |*node| if (node.enabled and selectionContains(selected, node.unique_id)) {
         try resources.append(runtime.allocator, .{ .unit = node });

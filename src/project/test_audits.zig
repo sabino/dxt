@@ -148,6 +148,26 @@ pub fn executeNodeWithArtifacts(runtime: types.Runtime, graph: *const types.Grap
     var scratch = std.heap.ArenaAllocator.init(runtime.allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
+    const options = runtime.invocation_options orelse runtime.global_options orelse &graph.command_options;
+    if (shouldStore(config, options.*) and stockDuckTestMaterialization(graph, materialization)) {
+        // Core fills this relation cache before entering the test connection.
+        // Listing here would start a transaction before the autocommitted DROP.
+        const context = @import("dbt_context.zig");
+        const value_allocator = host.values.allocator();
+        var definition = try context.relationFromValue(value_allocator, try compiler.relationValueForNode(value_allocator, graph, node, false));
+        if (definition.database == null and graph.profile_name == null) {
+            var database = try host.queryResult("select current_database()");
+            defer database.deinit(runtime.allocator);
+            definition.database = try value_allocator.dupe(u8, database.firstScalar() orelse return error.InvalidAdapterIntrospection);
+        }
+        const session = host.borrowed_session orelse if (host.session) |*connection| connection else return error.NativeAdapterSessionRequired;
+        if (try session.relationTypeInDatabase(runtime.allocator, definition.database, definition.schema orelse return error.InvalidAdapterIntrospection, definition.identifier orelse return error.InvalidAdapterIntrospection)) |kind| {
+            defer runtime.allocator.free(kind);
+            definition.relation_type = try value_allocator.dupe(u8, kind);
+            definition.dbt_created = true;
+            try host.adapter_state.added.append(value_allocator, try context.relationValue(value_allocator, definition));
+        }
+    }
     // TestRunner ignores the materialization return value and consumes main.
     const rendered = compiler.renderMaterializationForNode(a, &runtime_graph, node, materialization, runtime.allocator, dependencies);
     if (build_path) |output_path| if (host.writtenPathForResource(node.unique_id)) |path| {
@@ -183,7 +203,6 @@ pub fn executeNodeWithArtifacts(runtime: types.Runtime, graph: *const types.Grap
     const failure_value = row[failures orelse return error.InvalidTestResult];
     const warn_value = row[warn orelse return error.InvalidTestResult];
     const error_value = row[err orelse return error.InvalidTestResult];
-    const options = runtime.invocation_options orelse runtime.global_options orelse &graph.command_options;
     var result = Result{
         .failures = try parseFailures(if (failure_value == .none) null else try failure_value.text(a)),
         .should_warn = if (warn_value == .boolean) warn_value.boolean else try parseBoolean(if (warn_value == .none) null else try warn_value.text(a)),
@@ -195,6 +214,20 @@ pub fn executeNodeWithArtifacts(runtime: types.Runtime, graph: *const types.Grap
     runtime.allocator.free(response.message);
     result.adapter_response = response.response;
     return result;
+}
+
+fn stockDuckTestMaterialization(graph: *const types.Graph, materialization: *const types.MacroDef) bool {
+    if (!std.mem.eql(u8, graph.adapter_type, "duckdb") or
+        !std.mem.eql(u8, materialization.unique_id, "macro.dbt.materialization_test_default") or
+        !std.mem.eql(u8, materialization.package_name, "dbt") or
+        !std.mem.eql(u8, materialization.name, "materialization_test_default") or
+        !std.mem.eql(u8, materialization.path, "macros/materializations/tests/test.sql") or
+        !std.mem.eql(u8, materialization.original_file_path, "macros/materializations/tests/test.sql")) return false;
+    for (@import("dbt_includes").files) |file| {
+        if (std.mem.eql(u8, file.package, "dbt") and std.mem.eql(u8, file.path, materialization.original_file_path))
+            return std.mem.eql(u8, std.mem.trim(u8, materialization.macro_sql, " \t\r\n"), std.mem.trim(u8, file.text, " \t\r\n"));
+    }
+    return false;
 }
 
 pub fn renderExecutionSql(a: std.mem.Allocator, query: []const u8, config: types.GenericTestConfig) ![]const u8 {
@@ -229,4 +262,27 @@ test "test result coercion and normalized audit policies preserve signed failure
     const sql = try renderExecutionSql(std.testing.allocator, "select 1 as n;\n", .{ .fail_calc = "sum(n)", .warn_if = "between 1 and 3", .error_if = "> 3" });
     defer std.testing.allocator.free(sql);
     try std.testing.expectEqualStrings("select sum(n) as failures, (sum(n) between 1 and 3) as should_warn, (sum(n) > 3) as should_error from (select 1 as n) dbt_internal_test", sql);
+}
+
+test "audit cache preparation recognizes the bundle and excludes authored materializations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = types.Graph{ .allocator = a, .project_name = "project", .adapter_type = "duckdb" };
+    defer graph.deinit();
+    try @import("bundled_macros.zig").load(a, &graph);
+    var node = auditNode(.{}, "audit", "project");
+    node.materialized = "test";
+    const bundled = (try @import("custom_materialization.zig").selected(&graph, &node)).?;
+    try std.testing.expect(stockDuckTestMaterialization(&graph, bundled));
+    var changed = bundled.*;
+    changed.macro_sql = "{% materialization test, default %}{{ return({'relations': []}) }}{% endmaterialization %}";
+    try std.testing.expect(!stockDuckTestMaterialization(&graph, &changed));
+    graph.adapter_type = "postgres";
+    try std.testing.expect(!stockDuckTestMaterialization(&graph, bundled));
+    graph.adapter_type = "duckdb";
+    try @import("parse.zig").parseMacrosFromText(a, changed.macro_sql, "macros/custom.sql", "project", &graph);
+    const authored = (try @import("custom_materialization.zig").selected(&graph, &node)).?;
+    try std.testing.expectEqualStrings("project", authored.package_name);
+    try std.testing.expect(!stockDuckTestMaterialization(&graph, authored));
 }
