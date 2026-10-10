@@ -270,6 +270,9 @@ pub const Host = struct {
     // its native backing slice is replaced. Methods retain only this ID.
     receiver_identity: ?*const fn (*anyopaque, Value) anyerror!usize = null,
     receiver_value: ?*const fn (*anyopaque, Value) anyerror!Value = null,
+    // Render-owned amortized storage grows mutable lists without recopying the
+    // entire receiver. The host retains its stable identity and publishes aliases.
+    list_extend: ?*const fn (*anyopaque, Value, []const Value, std.mem.Allocator) anyerror!Value = null,
     capture_undefined: bool = false,
     // Compiled template hosts retain immutable constants per generated
     // function. Probes forbid runtime names and calls before executing them.
