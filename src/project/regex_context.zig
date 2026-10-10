@@ -82,6 +82,10 @@ fn bound(a: Allocator, prefix: []const u8, method: []const u8, definition: anyty
 fn flagValue(a: Allocator, number: u32) !Value {
     return flagFromText(a, (try expr.integerValue(a, number)).integer);
 }
+pub fn isFlag(value: Value) bool {
+    const identity = value.attribute("__dxt_immutable_identity");
+    return identity == .callable and std.mem.startsWith(u8, identity.callable, "__dxt_regex_flag:");
+}
 fn flagFromText(a: Allocator, authored: []const u8) !Value {
     const numbers = @import("expression_number.zig");
     var number = authored;
@@ -116,6 +120,7 @@ fn flagFromText(a: Allocator, authored: []const u8) !Value {
         name_value = .{ .string = try std.fmt.allocPrint(a, "{s}{s}", .{ try std.mem.join(a, "|", names.items), suffix }) };
     }
     return try entry(a, &.{
+        .{ .key = "__dxt_immutable_identity", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_regex_flag:{s}", .{number}) } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_integer", .value = .{ .string = number } },
         .{ .key = "__dxt_rendered", .value = .{ .string = label } },
@@ -492,8 +497,8 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, host: ?expr.
     if (std.mem.eql(u8, method, "RegexFlag")) {
         try validateArguments(args, &.{"value"}, 1);
         const value = argument(args, "value", 0);
-        const number = if (value == .integer) value.integer else if (expr.integerProtocol(value)) |number| number else if (value == .boolean) (if (value.boolean) "1" else "0") else if (value == .number) blk: {
-            for ([_]f64{ 0, 1, 2, 4, 8, 16, 32, 64, 128, 256 }) |member| if (member == value.number) break :blk (try expr.integerValue(a, @as(u32, @intFromFloat(member)))).integer;
+        const number = if (value == .integer) value.integer else if (expr.integerProtocol(value)) |number| number else if (value == .boolean) (if (value.boolean) "1" else "0") else if (expr.floatProtocol(value)) |floating| blk: {
+            for ([_]f64{ 0, 1, 2, 4, 8, 16, 32, 64, 128, 256 }) |member| if (member == floating) break :blk (try expr.integerValue(a, @as(u32, @intFromFloat(member)))).integer;
             return error.InvalidRegularExpressionFlags;
         } else return error.InvalidRegularExpressionFlags;
         return try flagFromText(a, number);
@@ -547,4 +552,20 @@ test "native regular expressions expose capture tuples and substitution backrefe
     try std.testing.expectEqualStrings("[('a', ''), ('a', 'b')]", try found.text(a));
     const replaced = (try call(a, "modules.re.sub", &.{ .{ .value = .{ .string = "(?P<word>\\w+)" } }, .{ .value = .{ .string = "<\\g<word>>" } }, .{ .value = .{ .string = "é 好" } } }, null)).?;
     try std.testing.expectEqualStrings("<é> <好>", replaced.string);
+}
+
+test "RegexFlag identities share normalized values without merging ordinary integers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ignorecase = (try resolve(a, "modules.re.I")).?;
+    const constructed = (try call(a, "modules.re.RegexFlag", &.{.{ .value = try expr.floatValue(a, 2) }}, null)).?;
+    try std.testing.expect(try expr.testValue("sameas", ignorecase, &.{.{ .value = constructed }}));
+    try std.testing.expect(!try expr.testValue("sameas", ignorecase, &.{.{ .value = .{ .integer = "2" } }}));
+    const negative = try flagFromText(a, "-513");
+    try std.testing.expect(try expr.testValue("sameas", negative, &.{.{ .value = try flagFromText(a, "511") }}));
+    try std.testing.expect((try expr.checkedAttribute(ignorecase, "__dxt_immutable_identity")) == .undefined);
+    const authored = try expr.evaluate(a, "{'__dxt_immutable_identity':'__dxt_regex_flag:2'}", null);
+    try std.testing.expect(!isFlag(authored));
+    try std.testing.expect(!try expr.testValue("sameas", ignorecase, &.{.{ .value = authored }}));
 }

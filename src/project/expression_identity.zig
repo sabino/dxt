@@ -58,7 +58,7 @@ pub fn immutableSame(left: Value, right: Value) ?bool {
     return native and other_native and std.mem.eql(u8, identity.callable, other.callable);
 }
 fn nativeImmutableToken(token: []const u8) bool {
-    return std.mem.startsWith(u8, token, "__dxt_datetime_instance:") or std.mem.startsWith(u8, token, "__dxt_datetime_method_instance:");
+    return std.mem.startsWith(u8, token, "__dxt_datetime_instance:") or std.mem.startsWith(u8, token, "__dxt_datetime_method_instance:") or std.mem.startsWith(u8, token, "__dxt_regex_flag:");
 }
 
 test "Latin-1 characters share a cache while larger characters remain owned" {
