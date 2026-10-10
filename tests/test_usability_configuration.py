@@ -850,7 +850,7 @@ select '{{ information_schema.database }}' as table_database, '{{ relation.schem
         assert_run_results_schema_slice(project / 'target/run_results.json')
 
 
-@pytest.mark.parametrize('entry', ['get_catalog', 'duckdb__get_catalog'])
+@pytest.mark.parametrize('entry', ['get_catalog', 'duckdb__get_catalog', 'default__get_catalog'])
 def test_duckdb_catalog_uses_authored_entry_and_schema_set(tmp_path, configuration_oracle, entry):
     pair = ConfigurationPair(tmp_path, configuration_oracle)
     for project in pair.projects:
