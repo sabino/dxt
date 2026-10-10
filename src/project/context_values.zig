@@ -160,6 +160,8 @@ pub fn resourceContextValue(allocator: std.mem.Allocator, raw: std.json.Value) !
         const key = entry.key_ptr.*;
         const value = if (std.mem.eql(u8, key, "config"))
             try dataclassContextValue(allocator, entry.value_ptr.*, config_fields)
+        else if (std.mem.eql(u8, key, "refs"))
+            try refArgsContextValue(allocator, entry.value_ptr.*)
         else if (std.mem.eql(u8, key, "docs") or std.mem.eql(u8, key, "contract") or std.mem.eql(u8, key, "checksum") or std.mem.eql(u8, key, "test_metadata"))
             try dataclassContextValue(allocator, entry.value_ptr.*, null)
         else
@@ -167,6 +169,13 @@ pub fn resourceContextValue(allocator: std.mem.Allocator, raw: std.json.Value) !
         try entries.append(allocator, .{ .key = try allocator.dupe(u8, key), .value = value });
     }
     return .{ .object = try entries.toOwnedSlice(allocator) };
+}
+
+fn refArgsContextValue(allocator: std.mem.Allocator, raw: std.json.Value) !Value {
+    if (raw != .array) return metadataValue(allocator, raw);
+    const refs = try expression.allocateValues(allocator, raw.array.items.len);
+    for (raw.array.items, refs) |ref, *value| value.* = try dataclassContextValue(allocator, ref, null);
+    return .{ .list = refs };
 }
 
 fn dataclassContextValue(allocator: std.mem.Allocator, raw: std.json.Value, declared: ?std.json.Value) !Value {
@@ -277,4 +286,27 @@ test "resource context omits dataclass None while preserving arbitrary metadata 
     try std.testing.expect(context.attribute("config").attribute("docs").attribute("node_color") == .none);
     try std.testing.expect(context.attribute("test_metadata").attribute("namespace") == .undefined);
     try std.testing.expect(context.attribute("test_metadata").attribute("kwargs").attribute("payload").attribute("nullable") == .none);
+}
+
+test "runtime RefArgs omit dataclass nulls while raw refs and arbitrary kwargs retain them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"resource_type":"test","refs":[{"name":"input","package":null,"version":null},{"name":"versioned","package":"dependency","version":2}],"meta":{"package":null},"test_metadata":{"kwargs":{"payload":{"package":null,"version":null}}}}
+    , .{});
+    const context = try resourceContextValue(a, raw.value);
+    const refs = context.attribute("refs").list;
+    try std.testing.expectEqual(@as(usize, 2), refs.len);
+    try std.testing.expectEqualStrings("input", refs[0].attribute("name").string);
+    try std.testing.expect(refs[0].attribute("package") == .undefined);
+    try std.testing.expect(refs[0].attribute("version") == .undefined);
+    try std.testing.expectEqualStrings("dependency", refs[1].attribute("package").string);
+    try std.testing.expectEqual(@as(i64, 2), refs[1].attribute("version").integer);
+    try std.testing.expect(context.attribute("meta").attribute("package") == .none);
+    const payload = context.attribute("test_metadata").attribute("kwargs").attribute("payload");
+    try std.testing.expect(payload.attribute("package") == .none);
+    try std.testing.expect(payload.attribute("version") == .none);
+    try std.testing.expect(raw.value.object.get("refs").?.array.items[0].object.get("package").? == .null);
+    try std.testing.expect(raw.value.object.get("refs").?.array.items[0].object.get("version").? == .null);
 }
