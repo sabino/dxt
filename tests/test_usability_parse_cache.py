@@ -1,5 +1,6 @@
 """Native persistent parse reuse and invalidation, with actual pinned Core."""
 import json
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -132,8 +133,21 @@ def test_invalid_cache_falls_back_to_real_native_parser(tmp_path, damage):
         cache.write_text(json.dumps(stored))
     event, reparsed = native(project)
     assert not event["hit"]
-    equivalent(original, reparsed)
-    assert native(project)[0]["hit"]
+    for manifest in (original, reparsed):
+        tests = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
+        assert tests
+        for node in tests:
+            assert type(node["created_at"]) in (int, float)
+            assert math.isfinite(node["created_at"]) and node["created_at"] > 0
+    # Invalid caches trigger a fresh parse, so Core's test creation clock changes.
+    normalized = dict(reparsed, nodes={
+        key: dict(node, created_at=original["nodes"][key]["created_at"])
+        if node["resource_type"] == "test" else node
+        for key, node in reparsed["nodes"].items()})
+    equivalent(original, normalized)
+    warm_event, warm = native(project)
+    assert warm_event["hit"]
+    equivalent(reparsed, warm)
 
 
 def test_changed_literal_model_reuses_unchanged_files_before_applying_current_properties(tmp_path, core_runner):

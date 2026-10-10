@@ -433,7 +433,7 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
         error.FileNotFound => return,
         else => return err,
     };
-    sortStrings(package_dirs.items);
+    // Core's doc fallback preserves installed-directory discovery order.
 
     for (package_dirs.items) |package_dir| {
         var package_config = project_config.loadProjectConfigWithContext(runtime, package_dir, graph.vars.items, graph.target_context) catch |err| switch (err) {
