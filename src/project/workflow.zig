@@ -355,9 +355,7 @@ fn makePlan(context: *Context) !Plan {
     for (models.items) |*item| {
         const node = findNode(context.graph, item.model.unique_id).?;
         if (item.model.ephemeral) continue;
-        var clone = node.*;
-        clone.config_schema = "dxt_data";
-        clone.config_alias = try physicalIdentifier(a, item.model.unique_id, item.model.version);
+        const clone = try physicalClone(a, context.graph, node, item.model.version);
         if (eq(node.resource_type, "seed")) {
             item.model.sql = try seed_csv.renderSql(a, context.graph, &clone);
         } else {
@@ -433,9 +431,7 @@ const Builder = struct {
             try parts.append(a, if (old) |environment| environment.plan_id else "initial_restate");
         }
         const version = try hash(a, parts.items);
-        var clone = node.*;
-        clone.config_schema = "dxt_data";
-        clone.config_alias = try physicalIdentifier(a, node.unique_id, version);
+        const clone = try physicalClone(a, context.graph, node, version);
         const result: Model = .{ .unique_id = node.unique_id, .name = node.name, .resource_type = node.resource_type, .schema = try compiler.relationSchemaForNode(a, context.graph, node), .alias = compiler.relationIdentifierForNode(node), .own_hash = own_hash, .version = version, .relation = try compiler.relationNameForNode(a, context.graph, &clone), .ephemeral = eq(node.materialized, "ephemeral"), .time_column = time_column, .interval_unit = unit, .lookback = @intCast(lookback_value.integer), .depends_on = dependencies.items };
         self.models[index] = result;
         self.visiting[index] = false;
@@ -753,6 +749,22 @@ fn physicalIdentifier(a: std.mem.Allocator, id: []const u8, version: []const u8)
     return std.fmt.allocPrint(a, "m_{s}_{s}", .{ prefix[0..12], version[0..32] });
 }
 
+fn physicalClone(a: std.mem.Allocator, graph: *const types.Graph, node: *const types.Node, version: []const u8) !types.Node {
+    const database = compiler.relationDatabaseForNode(graph, node);
+    var clone = node.*;
+    // Physical versions have their own schema and identifier. The generated
+    // database still belongs to the authored model's resolved naming policy.
+    clone.resolved_identity = null;
+    clone.config_schema = "dxt_data";
+    clone.config_alias = try physicalIdentifier(a, node.unique_id, version);
+    clone.resolved_identity = .{
+        .database = database,
+        .schema = try compiler.relationSchemaForNode(a, graph, &clone),
+        .identifier = compiler.relationIdentifierForNode(&clone),
+    };
+    return clone;
+}
+
 fn findModel(models: []const Model, id: []const u8) ?Model {
     for (models) |model| if (eq(model.unique_id, id)) return model;
     return null;
@@ -875,4 +887,63 @@ test "workflow namespaces reject ambiguous environment names and quote aliases" 
     const relation = try environmentRelation(a, model, "preview");
     defer a.free(relation);
     try std.testing.expectEqualStrings("\"main__preview\".\"a\"\"b\"", relation);
+}
+
+test "workflow physical versions replace resolved identities for models seeds and references" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var graph: types.Graph = .{ .allocator = a, .project_name = "demo", .target_schema = "analytics", .database_path = "warehouse.duckdb" };
+    defer graph.deinit();
+    try graph.nodes.append(a, .{
+        .resource_type = "seed",
+        .package_name = "demo",
+        .unique_id = "seed.demo.raw",
+        .name = "raw",
+        .path = "raw.csv",
+        .original_file_path = "seeds/raw.csv",
+        .raw_code = "id\n1\n2\n",
+        .resolved_identity = .{ .database = "generated_catalog", .schema = "generated_schema", .identifier = "generated_raw" },
+    });
+    try graph.nodes.append(a, .{
+        .package_name = "demo",
+        .unique_id = "model.demo.orders",
+        .name = "orders",
+        .path = "orders.sql",
+        .original_file_path = "models/orders.sql",
+        .raw_code = "select '{{ this }}' as physical_relation, * from {{ ref('raw') }}",
+        .resolved_identity = .{ .database = "generated_catalog", .schema = "generated_schema", .identifier = "generated_orders" },
+    });
+    try graph.nodes.items[1].depends_on.append(a, "seed.demo.raw");
+    var context: Context = .{
+        .runtime = .{ .allocator = a, .io = std.testing.io },
+        .graph = &graph,
+        .common = .{ .project_dir = "." },
+        .options = .{},
+        .target_dir = "unused",
+        .db_path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/missing.duckdb", .{temporary.sub_path}),
+        .gateway = "test_gateway",
+    };
+    defer context.deinit();
+    const plan = try makePlan(&context);
+    try std.testing.expectEqual(@as(usize, 2), plan.models.len);
+    const seed = plan.models[0].model;
+    const model = plan.models[1].model;
+    for (plan.models) |item| {
+        try std.testing.expectEqualStrings("generated_schema", item.model.schema);
+        const expected = try std.fmt.allocPrint(a, "\"generated_catalog\".\"analytics_dxt_data\".\"{s}\"", .{try physicalIdentifier(a, item.model.unique_id, item.model.version)});
+        try std.testing.expectEqualStrings(expected, item.model.relation);
+    }
+    try std.testing.expectEqualStrings("generated_raw", seed.alias);
+    try std.testing.expectEqualStrings("generated_orders", model.alias);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "select '{s}' as physical_relation, * from {s}", .{ model.relation, seed.relation }), model.sql);
+    try std.testing.expect(std.mem.indexOf(u8, seed.sql, try std.fmt.allocPrint(a, "create table {s} (\"id\" integer)", .{seed.relation})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, seed.sql, try std.fmt.allocPrint(a, "insert into {s}", .{seed.relation})) != null);
+    try std.testing.expectEqualStrings("generated_schema", graph.nodes.items[0].resolved_identity.?.schema);
+    try std.testing.expectEqualStrings("generated_catalog", graph.nodes.items[0].resolved_identity.?.database.?);
+    try std.testing.expectEqualStrings("generated_catalog", graph.nodes.items[1].resolved_identity.?.database.?);
+    try std.testing.expectEqualStrings("generated_orders", graph.nodes.items[1].resolved_identity.?.identifier);
+    try std.testing.expect(context.session == null);
 }
