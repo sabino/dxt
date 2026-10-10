@@ -130,7 +130,12 @@ def test_fail_fast_cancels_live_native_query_and_skips_unstarted_work(tmp_path):
     assert status == {"model.scheduler_demo.a_slow": "error", "model.scheduler_demo.b_error": "error",
                       "model.scheduler_demo.c_pending": "skipped", "model.scheduler_demo.d_child": "skipped"}
     slow = next(row for row in artifact["results"] if row["unique_id"].endswith("a_slow"))
-    assert "cancel" in slow["message"].lower()
+    # A request before execution has no backend error; an interrupted query
+    # retains the native DuckDB diagnostic. Both must cancel the running work.
+    assert slow["message"] in {
+        "Database query cancelled",
+        "Runtime Error in a_slow (models/a_slow.sql):\nINTERRUPT Error: Interrupted!",
+    }
     assert slow["execution_time"] > 0
     events = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
     assert len([event for event in events if event["info"]["name"] == "NodeStart"]) == 2

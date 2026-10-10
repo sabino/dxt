@@ -293,9 +293,9 @@ def test_truncated_duckdb_error_output_is_sanitized_and_durable(tmp_path: Path):
     manifest = json.loads((target / "manifest.json").read_text())
     assert manifest["nodes"]["test.error_outcomes.m_broken"]["raw_code"] == sql.rstrip("\n")
     assert (project / "tests/m_broken.sql").read_text() == sql
-    from dbt.artifacts.schemas.manifest.v12.manifest import WritableManifest
-    WritableManifest.validate(manifest)
-    validate_core_artifact_schema(target)
+    from validate_dbt_artifacts import assert_artifact
+    assert_artifact(target / "manifest.json")
+    assert_artifact(target / "run_results.json")
 
 
 @pytest.mark.parametrize("kind", ["generic", "singular"])

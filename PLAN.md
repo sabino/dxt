@@ -45,12 +45,12 @@ x86_64/ARM CI. Exact candidate identities, counts and outcomes are recorded in
 [PR #221](https://github.com/sabino/dxt/pull/221) and
 [issue #220](https://github.com/sabino/dxt/issues/220).
 
-The complete ARM64 report for `c81a20b` contains all 5,819 expected unique
-identities: 5,759 passed, 60 failed, zero errors and zero skips. A separate
-same-repository diagnostic verifies the sealed original report and its source;
-its successful extraction is negative evidence, never compatibility acceptance.
-The original x86_64 suite continues unchanged to its terminal report. Preserve
-both reports before publishing a corrected candidate.
+Both complete platform reports for `c81a20b` contain all 5,819 expected unique
+identities: each has 5,759 passes, 60 failures, zero errors and zero skips.
+They share 56 failures, leaving 64 distinct negative cases. Separate
+same-repository diagnostics verify the sealed original reports and their source;
+successful extraction is negative evidence, never compatibility acceptance.
+Both original reports are retained before publishing a corrected candidate.
 
 Bounded failure triage has disjoint ownership: the workflow worker owns physical
 version identities in `workflow.zig`; the snapshot worker owns the two modern
@@ -96,15 +96,45 @@ environments per thread with cleanup; preserve authored SQL and successful
 metadata. This worker does not edit the concurrently owned data-test facade or
 stored-audit file.
 
-All bounded corrections are integrated for fresh combined validation. The
-focused selection contains 626 unique original cases: all 361 cases in the
-fourteen ARM-negative modules plus the earlier 265 focused cases, including
-every one of the sixty original failures. Collection preserves the complete
-5,819-case identity set. Native tests and the CLI require genuine clean builds;
-the focused run keeps original build fixtures, strict artifact/row/rollback
-checks and default temporary-directory retention. This preparation is not a
-pass certificate. The published candidate and its original platform reports
-remain separate until the corrected candidate has its own results.
+The corrected `8fe99a7` candidate passes a genuine clean native build with
+816/816 tests and a genuine Debug CLI build. Its original 626-case focused run
+finishes with 625 passes, one failure, zero errors and zero skips. Every
+original ARM failure and the earlier 265 focused cases executes; the complete
+5,819-case collection is unchanged. The only remaining failure calls pinned
+Core's intentionally prohibited `WritableManifest.validate` entry point after
+the privacy, durability and raw/compiled SQL assertions pass. Replace that
+entry point with the existing complete manifest/run-results schema validator.
+Retain the normally completed negative report and all fixture scratch.
+
+Two x86_64-only fixture assertions have actual read-only controls. Native
+fail-fast cancellation may report either pre-query cancellation or the exact
+DuckDB interrupted-query diagnostic; preserve status, timing, skipped work and
+event assertions while accepting those two exact messages. SQL unit sampling
+retains `random()` and its once-only comparison: cast the observed quoted
+DOUBLE text back to DOUBLE rather than converting a DECIMAL numeric literal,
+which actual Core and Native controls show can differ by one ULP. This native
+mock-input introspection fixture is documented separately from positive Core
+unit-fixture comparisons. No product source changes are needed for these
+three bounded fixture corrections.
+
+The final focused gate contains 664 unique original cases: all sixteen negative
+modules plus the earlier 265-case selection, covering all 64 platform-negative
+identities. Use the original literal selectors for partially selected modules;
+expanding them to whole modules would change the selected set. Fresh native
+and CLI builds, exact 5,819-case collection and original fixture builders are
+required; preserve strict artifact/row/rollback checks and default all-directory
+retention. Its result is focused evidence only. Both complete platform suites
+and candidate-specific public/release gates remain required before acceptance.
+
+Fresh `8fe99a7` local gates pass the unchanged PostgreSQL dbt-utils ladder
+(seven Native/Core command pairs), all six public Jaffle steps, a genuine
+ReleaseSafe build, byte-identical deterministic archives, extracted installation
+with both adapters and PATH empty, the unchanged 70,000-binding seed and the
+correctness-aware cold/warm benchmark. These source-bound receipts do not
+certify complete platform compatibility or production readiness. Final fixture,
+planning and documentation changes require their own held candidate source;
+any adoption of an unchanged native binary must verify every native input and
+package the final documentation bytes explicitly.
 
 The first combined clean native run on `e8f4998` completes with 815 passes and
 one crash out of 816 tests. The new workflow identity regression exposes an

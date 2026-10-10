@@ -406,7 +406,7 @@ unit_tests:
     given: [{input: "ref('base')", format: sql, rows: 'select random() as id'}]
     expect: {rows: [{same_sample: true}]}
 """
-    sql="{% if execute %}{% set data=run_query('select id from ' ~ ref('base')) %}{% set observed=data.rows[0][0] %}{% else %}{% set observed=0 %}{% endif %}select id={{ observed }} as same_sample from {{ ref('base') }}"
+    sql="{% if execute %}{% set data=run_query('select id from ' ~ ref('base')) %}{% set observed=data.rows[0][0] %}{% else %}{% set observed=0 %}{% endif %}select id=cast('{{ observed }}' as double) as same_sample from {{ ref('base') }}"
     project_at(project,'duckdb',request,props,{'base':'select 0.0 as id','final':sql})
     result=invoke(project,'test','--select','test_type:unit')
     assert result.returncode==0,result.stdout+result.stderr
