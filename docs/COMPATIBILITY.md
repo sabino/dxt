@@ -144,6 +144,9 @@ Package transports can require `git`, `curl` and `tar`.
   3.12. [Iterator version case](../tests/test_usability_itertools.py) and
   [aggregate precision cases](../tests/test_usability_aggregate_precision.py) record the
   version-specific results and consumption behavior explicitly.
+  Zero-dimensional memoryviews also follow 3.12: length and boolean evaluation
+  raise an error, whereas 3.11 treats their length as one. The complete cursor
+  oracle uses the canonical runtime; the 3.11 job runs developer/CLI checks.
 - `source_status:pass/warn/error` are dxt extensions. Core parity uses its
   `source_status:fresher` comparison.
 - Durable compilation-error results extend Core behavior where Core exits

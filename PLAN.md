@@ -128,6 +128,15 @@ The cache worker also owns the bounded saved-memoryview-method string/repr
 formatter: methods must render their real method/class/receiver identity rather
 than expose private native callable metadata. Actual Core witnesses use authored
 stable shape/identity comparisons; comparison SQL is never normalized.
+The immutable final typed-query worker candidate passes 772 native tests and
+the CLI build, including the checked filter and saved-method companions.
+Actual Core grounding covers Unicode/numeric parameter slots, token boundaries,
+nonfinite numeric bindings, finite date/timestamp string fallbacks, buffer
+lifetimes and method representation. Its strict 274 query plus ten UUID pairs,
+62 Decimal pairs and unchanged 63 seed/18 alias comparisons remain required
+before integration and the final unfiltered campaign gates. No product edits
+occur during an immutable candidate's comparisons.
+
 The source worker's 62 Decimal comparisons pass on the first, corrected and
 expanded typed CLIs. The expanded query gate retains 182 passing and seven
 failing cases: type subscription, keyword field names, infinite timestamps and
