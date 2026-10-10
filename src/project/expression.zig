@@ -1846,6 +1846,25 @@ test "builtin attribute lookup prefers methods and subscription prefers authored
     try std.testing.expect((try evaluate(a, "{}.get['__dxt_native_builtin_method'] is undefined", null)).boolean);
 }
 
+test "absent dictionary attr preserves the parse undefined attribute name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const TestHost = struct {
+        fn resolve(_: *anyopaque, _: []const u8, _: std.mem.Allocator) !Value {
+            return .undefined;
+        }
+        fn call(_: *anyopaque, _: []const u8, _: []const Argument, _: std.mem.Allocator) !Value {
+            return error.UnexpectedMethodInvocation;
+        }
+    };
+    var context: u8 = 0;
+    var host: Host = .{ .context = &context, .resolve = TestHost.resolve, .call = TestHost.call, .capture_undefined = true };
+    try std.testing.expectEqualStrings("absent", (try evaluate(a, "({}|attr('absent')).name", host)).string);
+    host.capture_undefined = false;
+    try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "({}|attr('absent')).name", host));
+}
+
 fn integer(value: Value) !i64 {
     return integerIndex(value);
 }
@@ -2150,7 +2169,10 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
     if (std.mem.eql(u8, name, "attr")) {
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
         const builtin_methods = @import("builtin_bound_method.zig");
-        if (builtin_methods.isMapping(value)) return (try builtin_methods.lookupWithHost(allocator, value, args[0].value.string, host)) orelse .undefined;
+        if (builtin_methods.isMapping(value)) {
+            if (try builtin_methods.lookupWithHost(allocator, value, args[0].value.string, host)) |method_value| return method_value;
+            return if (host != null and host.?.capture_undefined) try captureUndefined(allocator, args[0].value.string) else try undefinedValue(allocator, args[0].value.string);
+        }
         if (sequences.kind(value) != null) return .undefined;
         if (nativeNumeric(value)) return attributeWithHost(allocator, value, args[0].value.string, host);
         if (@import("regex_context.zig").isFlagOrClass(value)) return checkedAttribute(value, args[0].value.string);
