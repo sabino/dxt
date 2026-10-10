@@ -5,6 +5,7 @@ const unicode = @import("expression_unicode.zig");
 const complex_numbers = @import("expression_complex.zig");
 const mapping_keys = @import("mapping_keys.zig");
 const sets = @import("set_context.zig");
+const yaml_values = @import("yaml_values.zig");
 
 /// Native Jinja expression values. Allocations belong to the caller's render
 /// arena; values can cross macro returns without borrowing a temporary frame.
@@ -1175,6 +1176,11 @@ fn numericOrder(a: std.mem.Allocator, left: Value, right: Value) !std.math.Order
     if (std.math.isNan(x) or std.math.isNan(y)) return error.UnorderedJinjaNumber;
     return std.math.order(x, y);
 }
+fn valueOrder(allocator: std.mem.Allocator, left: Value, right: Value) !std.math.Order {
+    if (yaml_values.isHashable(left) or yaml_values.isHashable(right)) return yaml_values.order(left, right);
+    if (left == .string and right == .string) return std.mem.order(u8, left.string, right.string);
+    return numericOrder(allocator, left, right);
+}
 fn equal(a: Value, b: Value) bool {
     return equalValues(a, b);
 }
@@ -1185,6 +1191,7 @@ fn equalMember(a: Value, b: Value) bool {
 }
 pub fn equalValues(a: Value, b: Value) bool {
     if (isUndefined(a) or isUndefined(b)) return isUndefined(a) and isUndefined(b) and (a == .capture_undefined) == (b == .capture_undefined);
+    if (yaml_values.isHashable(a) or yaml_values.isHashable(b)) return yaml_values.keyEqual(a, b);
     if (sets.isSet(a) or sets.isSet(b)) return sets.equal(a, b);
     const complex_a = complexProtocol(a);
     const complex_b = complexProtocol(b);
@@ -1237,6 +1244,7 @@ pub fn equalValues(a: Value, b: Value) bool {
 }
 fn contains(allocator: std.mem.Allocator, container: Value, item: Value) !bool {
     if (isUndefined(container)) return false;
+    if (container.attribute("__dxt_binary") == .string) return yaml_values.contains(container, item);
     if (sets.isSet(container)) return try sets.contains(container, item);
     if (container.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError;
     if (sequences.kind(container) != null) {
@@ -1260,6 +1268,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     if (std.mem.eql(u8, op, "not in")) return .{ .boolean = !(try contains(allocator, b, a)) };
     if (std.mem.eql(u8, op, "~") or (std.mem.eql(u8, op, "+") and a == .string and b == .string)) return .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ try a.text(allocator), try b.text(allocator) }) };
     if (try sets.apply(allocator, op, a, b)) |value| return value;
+    if (try yaml_values.apply(allocator, op, a, b)) |value| return value;
     const complex_a = complexProtocol(a);
     const complex_b = complexProtocol(b);
     if (complex_a != null or complex_b != null) {
@@ -1287,7 +1296,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
         }
     }
     if (std.mem.indexOfScalar(u8, "<>", op[0]) != null) {
-        const order: std.math.Order = if (a == .string and b == .string) std.mem.order(u8, a.string, b.string) else numericOrder(allocator, a, b) catch |err| {
+        const order = valueOrder(allocator, a, b) catch |err| {
             if (err == error.UnorderedJinjaNumber) return .{ .boolean = false };
             return err;
         };
@@ -1383,6 +1392,7 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
         return .{ .string = try text_result.toOwnedSlice(allocator) };
     }
     const values_result = try ownedValues(allocator, &result);
+    if (value.attribute("__dxt_binary") == .string) return yaml_values.fromMembers(allocator, values_result);
     return if (value == .tuple) .{ .tuple = values_result } else .{ .list = values_result };
 }
 
@@ -1696,7 +1706,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
             const Context = struct {
                 descending: bool,
                 fn less(context: @This(), a: Item, b: Item) bool {
-                    const order = if (a.key == .string) std.mem.order(u8, a.key.string, b.key.string) else numericOrder(std.heap.page_allocator, a.key, b.key) catch unreachable;
+                    const order = valueOrder(std.heap.page_allocator, a.key, b.key) catch unreachable;
                     return if (context.descending) order == .gt else order == .lt;
                 }
             };
@@ -2042,4 +2052,47 @@ test "set expressions preserve aliases comparisons iteration and typed map conve
     try std.testing.expectEqualStrings("set()", try alias.text(a));
     try std.testing.expectEqualStrings("host zip", (try evaluate(a, "zip([], default=[])", host)).string);
     try std.testing.expectEqualStrings("[]", try (try evaluate(a, "zip(missing)|list", null)).text(a));
+}
+
+test "immutable YAML scalars use native bytes and timestamp expression protocols" {
+    const Fixture = struct {
+        entries: []const Entry,
+        fn resolve(context: *anyopaque, name: []const u8, _: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return (Value{ .object = self.entries }).attribute(name);
+        }
+        fn call(_: *anyopaque, _: []const u8, _: []const Argument, _: std.mem.Allocator) !Value {
+            return error.UnsupportedJinjaCall;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dates = @import("timestamp_context.zig");
+    var context = Fixture{ .entries = &.{
+        .{ .key = "bytes", .value = try yaml_values.fromBytes(a, "Hello") },
+        .{ .key = "same", .value = try yaml_values.fromBytes(a, "Hello") },
+        .{ .key = "part", .value = try yaml_values.fromBytes(a, "ell") },
+        .{ .key = "utc", .value = try dates.fromYaml(a, "2020-01-02T03:00:00Z") },
+        .{ .key = "offset", .value = try dates.fromYaml(a, "2020-01-02T04:00:00+01:00") },
+        .{ .key = "later", .value = try dates.fromYaml(a, "2020-01-02T04:01:00+01:00") },
+        .{ .key = "naive", .value = try dates.fromYaml(a, "2020-01-02T03:00:00") },
+        .{ .key = "date", .value = try dates.fromYaml(a, "2020-01-02") },
+    } };
+    const host = Host{ .context = &context, .resolve = Fixture.resolve, .call = Fixture.call };
+    try std.testing.expectEqualStrings("111", (try evaluate(a, "bytes[-1]", host)).integer);
+    try std.testing.expectEqualStrings("b'ell'", try (try evaluate(a, "bytes[1:4]", host)).text(a));
+    try std.testing.expectEqualStrings("b'olleH'", try (try evaluate(a, "bytes[::-1]", host)).text(a));
+    try std.testing.expectEqualStrings("b'Helloell'", try (try evaluate(a, "bytes+part", host)).text(a));
+    try std.testing.expectEqualStrings("b'HelloHello'", try (try evaluate(a, "2*bytes", host)).text(a));
+    try std.testing.expect((try evaluate(a, "101 in bytes and part in bytes and bytes == same and bytes != 'Hello'", host)).boolean);
+    try std.testing.expect((try evaluate(a, "utc == offset and utc < later and utc != naive and date != naive", host)).boolean);
+    try std.testing.expectEqualStrings("[b'Hello', b'ell']", try (try evaluate(a, "[part,bytes]|sort", host)).text(a));
+    try std.testing.expectEqualStrings("2020-01-02 03:00:00+00:00", try (try evaluate(a, "[later,utc]|min", host)).text(a));
+    try std.testing.expectEqualStrings("1", (try evaluate(a, "[utc,offset]|unique|list|length", host)).integer);
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "bytes+'x'", host));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "bytes*2.0", host));
+    try std.testing.expectError(error.JinjaValueError, evaluate(a, "256 in bytes", host));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "utc < naive", host));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "date < naive", host));
 }

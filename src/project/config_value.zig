@@ -27,6 +27,7 @@ pub fn toExpression(allocator: std.mem.Allocator, value: std.json.Value) anyerro
 pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) anyerror!std.json.Value {
     if (expression.integerProtocol(value)) |number| return fromExpression(allocator, .{ .integer = number });
     if (expression.floatProtocol(value)) |number| return .{ .float = number };
+    if (@import("yaml_values.zig").isHashable(value)) return error.InvalidConfiguration;
     if (@import("set_context.zig").isSet(value)) return error.InvalidConfiguration;
     if (value.attribute("__dxt_noniterable").truthy()) return error.InvalidConfiguration;
     return switch (value) {
@@ -137,4 +138,12 @@ test "typed configuration clones nested data and replaces independently" {
     try std.testing.expectEqualStrings("false", copy.object.get("list").?.array.items[3].object.get("label").?.string);
     try put(allocator, &copy, "list", .{ .integer = 3 });
     try std.testing.expectEqual(@as(i64, 3), copy.object.get("list").?.integer);
+}
+
+test "immutable YAML scalars cannot leak protocol metadata into JSON configuration" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectError(error.InvalidConfiguration, fromExpression(a, try @import("yaml_values.zig").fromBytes(a, "bytes")));
+    try std.testing.expectError(error.InvalidConfiguration, fromExpression(a, try @import("timestamp_context.zig").fromYaml(a, "2020-01-02")));
 }
