@@ -215,6 +215,9 @@ fn runMode(runtime: types.Runtime, graph: *const types.Graph, options: types.Opt
             try emitEvent(runtime, options, events, "NodeFinished", job.resource.id(), output.status, output.thread_number, output.execution_time);
             if (output.log_output) |messages| try emitMessages(runtime, options, events, job.resource.id(), output.thread_number, messages);
             try emitLogMessages(runtime, events, job.resource.id(), output.thread_number, output.log_events);
+            if (mode == .execute and (std.mem.eql(u8, output.status, "error") or std.mem.eql(u8, output.status, "runtime error"))) {
+                if (output.message) |message| try emitResultError(runtime, events, job.resource.id(), message);
+            }
             if (failed(output)) {
                 if (mode == .compile or job.resource == .node) summary.had_execution_error = true else {
                     summary.failed_tests += 1;
@@ -552,6 +555,25 @@ fn emitMessages(runtime: types.Runtime, options: types.Options, writer: *std.Io.
         if (runtime.invocation) |invocation| try std.json.Stringify.value(&invocation.id, .{}, writer) else try writer.writeAll("null");
         try writer.writeAll("}}\n");
     }
+    try writer.flush();
+}
+
+/// Core's end-of-run error event carries the result message on MainThread.
+/// Emit structured errors for every console format so quiet/file policies retain them.
+pub fn emitResultError(runtime: types.Runtime, writer: *std.Io.Writer, id: []const u8, message: []const u8) !void {
+    try writer.writeAll("{\"data\":{\"msg\":");
+    try std.json.Stringify.value(message, .{}, writer);
+    try writer.writeAll(",\"node_info\":{\"unique_id\":");
+    try std.json.Stringify.value(id, .{}, writer);
+    try writer.writeAll("}},\"info\":{\"name\":\"RunResultError\",\"code\":\"Z024\",\"level\":\"error\",\"msg\":");
+    const display = try std.fmt.allocPrint(runtime.allocator, "  {s}", .{message});
+    defer runtime.allocator.free(display);
+    try std.json.Stringify.value(display, .{}, writer);
+    try writer.writeAll(",\"thread\":\"MainThread\",\"ts\":");
+    try clock.writeTimestamp(writer, clock.now(runtime.io));
+    try writer.writeAll(",\"invocation_id\":");
+    if (runtime.invocation) |invocation| try std.json.Stringify.value(&invocation.id, .{}, writer) else try writer.writeAll("null");
+    try writer.writeAll("}}\n");
     try writer.flush();
 }
 

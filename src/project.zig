@@ -1494,7 +1494,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
             }
             row.macro_dependencies = try compilation_dependencies.toOwnedSlice(runtime.allocator);
             row.owns_macro_dependencies = true;
-            row.message = try runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource compilation failed");
+            row.message = try runtime.allocator.dupe(u8, @import("project/compile_diagnostics.zig").message(err) orelse if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource compilation failed");
             row.compile_started_at = compilation_started;
             row.compile_completed_at = execution_clock.now(runtime.io);
             try captureResourceLogs(runtime.allocator, &row, output.written(), &log_events);
@@ -1506,7 +1506,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
         const execution = if (std.mem.eql(u8, node.resource_type, "seed")) executeSeedAppendingResult(runtime, db_path, project_dir, &graph, &node, &rows) else executeModelAppendingResult(runtime, db_path, &graph, &node, &rows);
         _ = execution catch |err| blk: {
             var row = resource.result("error");
-            row.message = try runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource execution failed");
+            row.message = try runtime.allocator.dupe(u8, @import("project/compile_diagnostics.zig").message(err) orelse if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource execution failed");
             try rows.append(runtime.allocator, row);
             break :blk false;
         };

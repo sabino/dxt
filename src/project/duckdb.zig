@@ -94,7 +94,7 @@ fn executeModelBody(runtime: Runtime, db_path: []const u8, graph: *const Graph, 
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
         const sql = trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution);
         return postgres_materialization.executeWithPolicy(runtime, graph, node, sql, policy) catch |err| switch (err) {
-            error.PostgresExecutionFailed, error.PostgresMaterializedViewConfigurationChanged => error.DuckDbExecutionFailed,
+            error.PostgresMaterializedViewConfigurationChanged => error.DuckDbExecutionFailed,
             else => err,
         };
     }
