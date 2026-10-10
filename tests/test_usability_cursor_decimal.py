@@ -33,7 +33,7 @@ POSITIVE = [
     ('add_subtract', '(d+1)|string ~ ":" ~ (1-d)|string', '1.123456789012345678901234568:0.8765432109876543210987654321'),
     ('multiply', '(d*e)|string', '0.1543209862654320986265432099'),
     ('divide', '(1/e)|string ~ ":" ~ (e/3)|string', '0.8:0.4166666666666666666666666667'),
-    ('quotient_remainder', '(n//3)|string ~ ":" ~ (n%3)|string ~ ":" ~ (large%99)|string', '-2:-1:18'),
+    ('quotient_remainder', '(n//3)|string ~ ":" ~ (n%3)|string ~ ":" ~ (large%99)|string ~ ":" ~ (d%2)|string', '-2:-1:18:0.1234567890123456789012345679'),
     ('unary_context', '(+d)|string ~ ":" ~ (-d)|string ~ ":" ~ (n|abs)|string', '0.1234567890123456789012345679:-0.1234567890123456789012345679:7'),
     ('zero_truth', "(z|default('empty',true)) ~ ':' ~ (z==0)|string", 'empty:True'),
     ('conversions', '[large|int,n|int,e|float]', '[123456789012345678901234567890, -7, 1.25]'),

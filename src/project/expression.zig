@@ -577,6 +577,7 @@ test "cursor Decimal expressions retain exact coefficients and numeric interoper
     try std.testing.expectEqualStrings("1.123456789012345678901234568", try (try evaluate(a, "d+1", host)).text(a));
     try std.testing.expectEqualStrings("0.1234567890123456789012345679", try (try evaluate(a, "+d", host)).text(a));
     try std.testing.expectEqualStrings("18", try (try evaluate(a, "large%99", host)).text(a));
+    try std.testing.expectEqualStrings("0.1234567890123456789012345679", try (try evaluate(a, "d%2", host)).text(a));
     try std.testing.expectEqualStrings("123456789012345678901234567890", (try evaluate(a, "large|int", host)).integer);
     try std.testing.expect((try evaluate(a, "e==1.25 and tenth<0.1 and tenth!=0.1 and zero<tenth", host)).boolean);
     try std.testing.expect((try evaluate(a, "d is number and d is not float and d is not integer", host)).boolean);
