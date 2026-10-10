@@ -19,7 +19,8 @@ pub fn capture(path: []const u8, name: []const u8, authored: []const u8) void {
 pub fn captureError(path: []const u8, name: []const u8, authored: []const u8, err: anyerror) void {
     clear();
     captured_error = err;
-    append(errorLabel(err));
+    append(phase(err));
+    append(" in ");
     append(name);
     append(" (");
     append(path);
@@ -27,11 +28,11 @@ pub fn captureError(path: []const u8, name: []const u8, authored: []const u8, er
     append(authored);
     while (used != 0 and !std.unicode.utf8ValidateSlice(buffer[0..used])) used -= 1;
 }
-fn errorLabel(err: anyerror) []const u8 {
+pub fn phase(err: anyerror) []const u8 {
     return switch (err) {
-        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => "Runtime Error in ",
-        error.PostgresExecutionFailed, error.PostgresSerializationFailure, error.PostgresDeadlockDetected, error.PostgresLockNotAvailable => "Database Error in ",
-        else => "Compilation Error in ",
+        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => "Runtime Error",
+        error.PostgresExecutionFailed, error.PostgresSerializationFailure, error.PostgresDeadlockDetected, error.PostgresLockNotAvailable => "Database Error",
+        else => "Compilation Error",
     };
 }
 pub fn message(err: anyerror) ?[]const u8 {

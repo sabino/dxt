@@ -433,7 +433,12 @@ pub fn scanMacroDependencies(allocator: std.mem.Allocator, graph: *const Graph, 
 }
 
 pub fn renderOperation(runtime: types.Runtime, graph: *const Graph, macro_name: []const u8, kwargs: std.json.Value) ![]const u8 {
-    const node = Node{ .package_name = graph.project_name, .unique_id = "operation", .name = "operation", .path = "", .original_file_path = "", .raw_code = "" };
+    const macro_id = if (std.mem.lastIndexOfScalar(u8, macro_name, '.')) |dot|
+        resolve.findMacroIdByPackageAndName(graph, macro_name[0..dot], macro_name[dot + 1 ..])
+    else
+        resolve.findMacroIdForUnqualifiedNamespaceCall(graph, graph.project_name, macro_name);
+    const macro = findMacroByUniqueId(graph, macro_id orelse return error.UnresolvedMacro) orelse return error.UnresolvedMacro;
+    const node = Node{ .resource_type = "macro", .package_name = graph.project_name, .unique_id = macro.unique_id, .name = macro.name, .path = macro.path, .original_file_path = macro.original_file_path, .raw_code = macro.macro_sql };
     var context = CompileContext.init(runtime.allocator, graph, &node);
     defer context.deinit();
     if (kwargs != .object) return error.InvalidJinjaArguments;

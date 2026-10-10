@@ -7,6 +7,7 @@ const yaml = @import("yaml.zig");
 const config_values = @import("config_value.zig");
 const adapter = @import("adapter.zig");
 const results = @import("run_results.zig");
+const clock = @import("execution_clock.zig");
 const compiler = @import("compiler.zig");
 const resolve = @import("resolve.zig");
 const selector = @import("selector.zig");
@@ -100,6 +101,13 @@ pub fn operation(runtime: Runtime, options: Options, graph: *types.Graph, target
     defer graph.execution_hooks = null;
     const output = compiler.renderOperation(runtime, graph, name, kwargs) catch |err| {
         if (err == error.OutOfMemory) return err;
+        const diagnostics = @import("compile_diagnostics.zig");
+        const detail = if (!std.mem.eql(u8, diagnostics.phase(err), "Compilation Error") and context.lastError() != null)
+            try std.fmt.allocPrint(runtime.allocator, "{s}\n  {s}", .{ diagnostics.phase(err), context.lastError().? })
+        else
+            try runtime.allocator.dupe(u8, diagnostics.message(err) orelse @errorName(err));
+        defer runtime.allocator.free(detail);
+        try emitOperationError(runtime, stdout, detail);
         try writeResults(runtime, target_dir, &.{.{ .operation_id = macro_id, .status = "error", .failures = 1 }});
         return error.OperationFailure;
     };
@@ -107,6 +115,22 @@ pub fn operation(runtime: Runtime, options: Options, graph: *types.Graph, target
     // dbt invokes the macro. Returned SQL is a value, not an executable job.
     try writeResults(runtime, target_dir, &.{.{ .operation_id = macro_id, .failures = 0 }});
     try stdout.print("Completed operation {s}\n", .{name});
+}
+
+/// Core reports operation failures as events while its result.message stays null.
+fn emitOperationError(runtime: Runtime, writer: *std.Io.Writer, detail: []const u8) !void {
+    try writer.writeAll("{\"data\":{\"exc\":");
+    try std.json.Stringify.value(detail, .{}, writer);
+    try writer.writeAll("},\"info\":{\"name\":\"RunningOperationCaughtError\",\"code\":\"Q001\",\"level\":\"error\",\"msg\":");
+    const message = try std.fmt.allocPrint(runtime.allocator, "Encountered an error while running operation: {s}", .{detail});
+    defer runtime.allocator.free(message);
+    try std.json.Stringify.value(message, .{}, writer);
+    try writer.writeAll(",\"thread\":\"MainThread\",\"ts\":");
+    try clock.writeTimestamp(writer, clock.now(runtime.io));
+    try writer.writeAll(",\"invocation_id\":");
+    if (runtime.invocation) |invocation| try std.json.Stringify.value(&invocation.id, .{}, writer) else try writer.writeAll("null");
+    try writer.writeAll("}}\n");
+    try writer.flush();
 }
 
 const StoredValue = struct { name: []const u8, value: expression.Value, loaded: bool = false };

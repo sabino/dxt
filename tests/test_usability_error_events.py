@@ -66,3 +66,47 @@ def test_core_resource_errors_preserve_phase_and_actual_message_in_console_and_f
         observed[engine] = (row['unique_id'], row['status'], row['failures'], phase,
                             recorded['info']['name'], recorded['info']['code'], recorded['info']['level'])
     assert observed['dxt'] == observed['core']
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('warehouse', [False, True])
+@pytest.mark.parametrize('json_logs', [False, True])
+@pytest.mark.parametrize('quiet', [False, True])
+def test_core_operation_error_event_preserves_exception_and_null_result_message(tmp_path, request, duckdb_environment,
+                                                                              adapter, warehouse, json_logs, quiet):
+    from test_usability_sql_operations import project
+    observed = {}
+    marker = 'missing_runtime_column' if warehouse else 'operation authored diagnostic café'
+    phase = ('Database Error' if adapter == 'postgres' else 'Runtime Error') if warehouse else 'Compilation Error'
+    for engine in ['dxt', 'core']:
+        root, _ = project(tmp_path, engine, adapter, request)
+        body = "{% do run_query('select missing_runtime_column') %}" if warehouse else "{{ exceptions.raise_compiler_error('" + marker + "') }}"
+        (root / 'macros/broken.sql').write_text('{% macro broken() %}' + body + '{% endmacro %}')
+        result = command(engine, root, environment(duckdb_environment), 'run-operation',
+                         ['broken', '--log-format-file=json'], ok=False, json_logs=json_logs, quiet=quiet)
+        assert result.returncode == 1, result.stdout + result.stderr
+        for artifact in ['manifest.json', 'run_results.json']:
+            contracts.assert_artifact(root / 'target' / artifact)
+        artifact = json.loads((root / 'target/run_results.json').read_text())
+        row, = artifact['results']
+        fields = {key: row[key] for key in ['unique_id', 'status', 'message', 'failures', 'compiled', 'compiled_code', 'relation_name', 'adapter_response']}
+        assert fields == {'unique_id': 'macro.preview.broken', 'status': 'error', 'message': None, 'failures': 1,
+                          'compiled': False, 'compiled_code': None, 'relation_name': None, 'adapter_response': {}}
+        log = [json.loads(line) for line in (root / 'logs/dbt.log').read_text().splitlines() if line.startswith('{')]
+        recorded, = [event for event in log if event['info']['name'] == 'RunningOperationCaughtError']
+        assert recorded['info']['code'] == 'Q001'
+        assert recorded['info']['level'] == 'error' and recorded['info']['thread'] == 'MainThread'
+        assert recorded['info']['invocation_id'] == artifact['metadata']['invocation_id']
+        assert recorded['data']['exc'].startswith(phase), recorded['data']['exc']
+        assert marker in recorded['data']['exc']
+        if not warehouse:
+            assert 'broken' in recorded['data']['exc'] and 'macros/broken.sql' in recorded['data']['exc']
+        assert recorded['info']['msg'] == 'Encountered an error while running operation: ' + recorded['data']['exc']
+        if json_logs:
+            displayed, = events(result, 'RunningOperationCaughtError')
+            assert displayed == recorded
+            assert json.loads(next(line for line in result.stdout.splitlines() if line.startswith('{') and json.loads(line)['info']['name'] == 'RunningOperationCaughtError')) == recorded
+        else:
+            assert recorded['info']['msg'] in result.stdout
+        observed[engine] = (fields, phase, recorded['info']['name'], recorded['info']['code'])
+    assert observed['dxt'] == observed['core']
