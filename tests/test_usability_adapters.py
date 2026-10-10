@@ -97,6 +97,20 @@ def test_actual_native_transactions_introspection_and_error_recovery(
 
 
 @pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
+def test_synthesized_macro_host_preserves_borrowed_transaction_ownership(
+    driver, tmp_path, request, adapter,
+):
+    environment = (request.getfixturevalue("duckdb_environment") if adapter == "duckdb"
+                   else request.getfixturevalue("postgres_fixture")[1])
+    assert decoded(invoke(driver, adapter, "borrowed-host", tmp_path / "borrowed.duckdb", environment)) == {
+        "automatic_begin_reused_caller_transaction": True,
+        "cleanup_preserved_caller_transaction": True,
+        "caller_rollback_preserved": True,
+        "authored_commit_executed": True,
+    }
+
+
+@pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
 def test_actual_native_dml_returning_rows(driver, tmp_path, request, adapter):
     environment = (request.getfixturevalue("duckdb_environment") if adapter == "duckdb"
                    else request.getfixturevalue("postgres_fixture")[1])

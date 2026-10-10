@@ -17,6 +17,7 @@ pub const Runtime = types.Runtime;
 pub const Graph = types.Graph;
 pub const profile = @import("profile.zig");
 pub const ProjectConfig = types.ProjectConfig;
+pub const OperationHost = @import("commands.zig").OperationHost;
 
 pub const Session = union(enum) {
     duckdb: DuckDBConnection,

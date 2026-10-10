@@ -144,7 +144,10 @@ fn run(init: std.process.Init) !void {
     }
     var session = try adapter.openSession(runtime, &graph, args[3]);
     defer session.deinit();
-    if (std.mem.eql(u8, args[2], "conformance")) {
+    if (std.mem.eql(u8, args[2], "borrowed-host")) {
+        try borrowedHost(runtime, &graph, args[3], &session);
+        try emit(init.io, "{\"automatic_begin_reused_caller_transaction\":true,\"cleanup_preserved_caller_transaction\":true,\"caller_rollback_preserved\":true,\"authored_commit_executed\":true}");
+    } else if (std.mem.eql(u8, args[2], "conformance")) {
         try conformance(allocator, &session, graph.adapter_type);
         const json = try std.json.Stringify.valueAlloc(allocator, session.capabilities(), .{});
         defer allocator.free(json);
@@ -167,6 +170,40 @@ fn run(init: std.process.Init) !void {
         try expectScalar(&output, "7");
         try emit(init.io, "{\"cancelled\":true,\"connection_recovered\":true}\n");
     } else return error.InvalidDriverMode;
+}
+
+fn borrowedHost(runtime: adapter.Runtime, graph: *const adapter.Graph, database: []const u8, session: *adapter.Session) !void {
+    const a = runtime.allocator;
+    try session.execute("create temporary table borrowed_host_rows(id integer)");
+    try session.begin();
+    var borrowed = runtime;
+    borrowed.adapter_session = session;
+    var output: std.Io.Writer.Allocating = .init(a);
+    defer output.deinit();
+    {
+        var host = try adapter.OperationHost.initBorrowedTransaction(borrowed, graph, database, &output.writer);
+        defer host.deinit();
+        const callbacks = host.host();
+        _ = try callbacks.call(callbacks.context, "adapter.add_query", &.{.{ .value = .{ .string = "insert into borrowed_host_rows values (17)" } }}, a);
+    }
+    var retained = try session.query("select id from borrowed_host_rows");
+    defer retained.deinit(a);
+    try expectScalar(&retained, "17");
+    try session.rollback();
+    var reverted = try session.query("select count(*) from borrowed_host_rows");
+    defer reverted.deinit(a);
+    try expectScalar(&reverted, "0");
+    try session.begin();
+    {
+        var host = try adapter.OperationHost.initBorrowedTransaction(borrowed, graph, database, &output.writer);
+        defer host.deinit();
+        const callbacks = host.host();
+        _ = try callbacks.call(callbacks.context, "adapter.add_query", &.{.{ .value = .{ .string = "insert into borrowed_host_rows values (29)" } }}, a);
+        _ = try callbacks.call(callbacks.context, "adapter.commit", &.{}, a);
+    }
+    var committed = try session.query("select id from borrowed_host_rows");
+    defer committed.deinit(a);
+    try expectScalar(&committed, "29");
 }
 
 fn resultOwnership(init: std.process.Init, graph: *const adapter.Graph, path: []const u8) !void {

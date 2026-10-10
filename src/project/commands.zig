@@ -151,6 +151,7 @@ pub const OperationHost = struct {
     values: std.heap.ArenaAllocator,
 
     transaction_open: bool = false,
+    rollback_on_deinit: bool = true,
     current_node: ?*const types.Node = null,
     written_path: ?[]const u8 = null,
     written_node_id: ?[]const u8 = null,
@@ -170,6 +171,16 @@ pub const OperationHost = struct {
         var self = try initLazy(runtime, graph, db_path, stdout);
         errdefer self.deinit();
         try self.ensureSession();
+        return self;
+    }
+
+    /// The caller owns the already-open transaction. Automatic query helpers
+    /// reuse it; explicit authored commit/rollback calls retain their effects.
+    pub fn initBorrowedTransaction(runtime: Runtime, graph: *const types.Graph, db_path: []const u8, stdout: *std.Io.Writer) !OperationHost {
+        if (runtime.adapter_session == null) return error.NativeAdapterSessionRequired;
+        var self = try initLazy(runtime, graph, db_path, stdout);
+        self.transaction_open = true;
+        self.rollback_on_deinit = false;
         return self;
     }
 
@@ -287,7 +298,7 @@ pub const OperationHost = struct {
 
     pub fn deinit(self: *OperationHost) void {
         if (self.session != null) if (self.runtime.session_observer) |observer| observer.changed(observer.context, null);
-        self.rollback() catch {};
+        if (self.rollback_on_deinit) self.rollback() catch {};
         if (self.session) |*session| session.deinit();
         if (self.owned_pool) |pool| {
             pool.deinit();
@@ -673,6 +684,7 @@ pub const OperationHost = struct {
         const method = try std.fmt.allocPrint(allocator, "dxt.print_table.{d}", .{self.stored.items.len});
         try self.stored.append(self.runtime.allocator, .{ .name = method, .value = .{ .list = data } });
         const table: expression.Value = .{ .object = try allocator.dupe(expression.Entry, &.{
+            .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
             .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
             .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
             .{ .key = "__dxt_data", .value = .{ .list = data } },
@@ -741,6 +753,7 @@ pub const OperationHost = struct {
             .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
             .{ .key = "__dxt_data", .value = .{ .tuple = data } },
             .{ .key = "rows", .value = .{ .object = try a.dupe(expression.Entry, &.{
+                .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
                 .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
                 .{ .key = "keys", .value = try self.callback(.none) },
                 .{ .key = "values", .value = try self.callback(.{ .tuple = rows }) },
@@ -877,6 +890,11 @@ test "converted seed timestamps own their bytes after the caller frame ends" {
     try std.testing.expectEqual(@as(i32, 19782), (try @import("seed_table.zig").parameter(first[0])).date);
     try std.testing.expect((expression.sequence(rows[1]).?)[1] == .none);
     try std.testing.expectEqualStrings("day", expression.sequence(converted.attribute("column_names")).?[0].string);
+    try std.testing.expectEqual(@as(usize, 2), expression.sequence(converted.attribute("rows")).?.len);
+    const row = expression.sequence(converted.attribute("rows")).?[0];
+    try std.testing.expectEqualStrings("__dxt_context_object", row.attribute("__dxt_context_object").callable);
+    try std.testing.expectEqualStrings("__dxt_context_object", converted.attribute("rows").attribute("__dxt_context_object").callable);
+    try std.testing.expectEqualStrings("2024-02-29 12:34:56.123456", expression.sequence(row).?[1].string);
 }
 
 pub fn parseArgs(allocator: std.mem.Allocator, text: []const u8) !std.json.Value {

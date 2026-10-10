@@ -50,8 +50,7 @@ pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, path
     var local_host: ?commands.OperationHost = null;
     defer if (local_host) |*host| host.deinit();
     if (runtime_graph.execution_hooks == null) {
-        local_host = try commands.OperationHost.init(held_runtime, &runtime_graph, path, &output.writer);
-        local_host.?.transaction_open = policy.manage_transaction;
+        local_host = try commands.OperationHost.initBorrowedTransaction(held_runtime, &runtime_graph, path, &output.writer);
         runtime_graph.execution_hooks = local_host.?.host();
     }
     var scratch = std.heap.ArenaAllocator.init(a);
