@@ -8,6 +8,13 @@ const sets = @import("set_context.zig");
 const yaml_values = @import("yaml_values.zig");
 const temporal = @import("datetime_operations.zig");
 
+pub fn lengthWithHost(a: std.mem.Allocator, value: Value, host: ?Host) anyerror!Value {
+    return @import("expression_dynamic.zig").length(a, value, host);
+}
+pub fn truthyWithHost(a: std.mem.Allocator, value: Value, host: ?Host) anyerror!bool {
+    return @import("expression_dynamic.zig").truthy(a, value, host);
+}
+
 /// Native Jinja expression values. Allocations belong to the caller's render
 /// arena; values can cross macro returns without borrowing a temporary frame.
 pub const Value = union(enum) {
