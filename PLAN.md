@@ -72,6 +72,17 @@ fixtures; the supervisor owns integration and restarts the whole suite. The
 earlier native/public/install receipts remain candidate-specific. No other
 provider or feature family is broadened by this correction.
 
+The reviewed standard-sort correction is committed and integrated. It changes
+only ascending adaptive sorting and Python's input/output reversal, retaining
+stable ties, original typed payloads and comparison errors. Forty-eight actual
+Core regression cases cover both initial adapters, including all five required
+large unordered-float sizes; all 134 dictionary-sort cases remain mandatory.
+The complete unfiltered collection now contains 5,808 tests. All 784 native
+tests and the CLI build pass. The 182 paired sorting comparisons are running
+on one frozen CLI before the fresh whole-suite run. Product
+source is held during this candidate's certification; final public ladders,
+ReleaseSafe packaging/performance and both actual-platform suites remain gates.
+
 The preceding candidate passes both unchanged public-project ladders and the
 original autocommit check. Its actual x86_64 and ARM native/install CI jobs,
 all 776 native tests, 326 Python 3.11 cases, snapshots and performance pass.
