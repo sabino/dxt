@@ -54,6 +54,10 @@ pub fn renderCatalog(allocator: std.mem.Allocator, nodes: []const CatalogEntry, 
 }
 
 pub fn renderCatalogWithInvocation(allocator: std.mem.Allocator, nodes: []const CatalogEntry, sources: []const CatalogEntry, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
+    return renderCatalogWithInvocationAndErrors(allocator, nodes, sources, metadata, null);
+}
+
+pub fn renderCatalogWithInvocationAndErrors(allocator: std.mem.Allocator, nodes: []const CatalogEntry, sources: []const CatalogEntry, metadata: ?*const @import("invocation.zig").Metadata, errors: ?[]const []const u8) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
@@ -64,7 +68,16 @@ pub fn renderCatalogWithInvocation(allocator: std.mem.Allocator, nodes: []const 
     try writeCatalogEntryMap(writer, nodes);
     try writer.writeAll("},\n  \"sources\": {");
     try writeCatalogEntryMap(writer, sources);
-    try writer.writeAll("},\n  \"errors\": null\n}\n");
+    try writer.writeAll("},\n  \"errors\": ");
+    if (errors) |messages| {
+        try writer.writeByte('[');
+        for (messages, 0..) |message, index| {
+            if (index != 0) try writer.writeByte(',');
+            try json.string(writer, message);
+        }
+        try writer.writeByte(']');
+    } else try writer.writeAll("null");
+    try writer.writeAll("\n}\n");
     return try out.toOwnedSlice();
 }
 
@@ -132,6 +145,26 @@ test "catalog writer emits deterministic empty dbt catalog shape" {
     try std.testing.expect(root.get("nodes").?.object.count() == 0);
     try std.testing.expect(root.get("sources").?.object.count() == 0);
     try std.testing.expect(root.get("errors").? == .null);
+}
+
+test "catalog error arrays escape authored messages and clean up allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, catalogErrorAllocationProof, .{});
+}
+
+fn catalogErrorAllocationProof(allocator: std.mem.Allocator) !void {
+    const messages = [_][]const u8{ "catalog \"rejected\"\n\t\\ café🙂\x01", "second error" };
+    const rendered = try renderCatalogWithInvocationAndErrors(allocator, &.{}, &.{}, null, &messages);
+    defer allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqual(@as(usize, 4), root.count());
+    try std.testing.expectEqualStrings("https://schemas.getdbt.com/dbt/catalog/v1.json", root.get("metadata").?.object.get("dbt_schema_version").?.string);
+    try std.testing.expectEqual(@as(usize, 0), root.get("nodes").?.object.count());
+    try std.testing.expectEqual(@as(usize, 0), root.get("sources").?.object.count());
+    const errors = root.get("errors").?.array.items;
+    try std.testing.expectEqual(messages.len, errors.len);
+    for (messages, errors) |expected, actual| try std.testing.expectEqualStrings(expected, actual.string);
 }
 
 test "catalog writer emits selected relation metadata and ordered columns" {

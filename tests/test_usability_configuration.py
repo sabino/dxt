@@ -850,23 +850,45 @@ select '{{ information_schema.database }}' as table_database, '{{ relation.schem
         assert_run_results_schema_slice(project / 'target/run_results.json')
 
 
-def test_postgres_catalog_relations_reject_direct_subscript(tmp_path, configuration_oracle, request):
+@pytest.mark.parametrize('failure', ['direct-subscript', 'authored-error'])
+def test_postgres_catalog_errors_preserve_compilation_artifacts(tmp_path, configuration_oracle, request, failure):
     pair = ConfigurationPair(tmp_path, configuration_oracle)
     configure_adapter(pair, request, 'postgres')
     pair.write('models/marts/catalog_entry.sql', "{{ config(materialized='table') }}select 1::integer as id")
     pair.invoke('run')
-    pair.write('macros/catalog.sql', """{% macro postgres__get_catalog_relations(information_schema, relations) %}
+    macro = """{% macro postgres__get_catalog_relations(information_schema, relations) %}
 {% call statement('catalog_override', fetch_result=true, auto_begin=false) %}
 select '{{ information_schema.database }}' as table_database, '{{ relations[0].schema }}' as table_schema,
  '{{ relations[0].identifier }}' as table_name, 'BASE TABLE' as table_type,
  'Authored catalog metadata' as table_comment, 'id' as column_name, 1 as column_index,
  'integer' as column_type, 'Authored column metadata' as column_comment, 'Authored owner' as table_owner
-{% endcall %}{{ return(load_result('catalog_override').table) }}{% endmacro %}""")
-    pair.invoke('docs generate', success=False)
-    from test_cli import assert_catalog_schema_slice, assert_manifest_schema_slice
+{% endcall %}{{ return(load_result('catalog_override').table) }}{% endmacro %}"""
+    if failure == 'authored-error':
+        macro = "{% macro postgres__get_catalog_relations(information_schema, relations) %}{{ exceptions.raise_compiler_error('catalog rejected') }}{% endmacro %}"
+    pair.write('macros/catalog.sql', macro)
+    result, reference = pair.invoke('docs generate', success=False)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert reference.exception is None
+    from test_cli import assert_catalog_schema_slice, assert_manifest_schema_slice, assert_run_results_schema_slice
     for project in pair.projects:
         assert_catalog_schema_slice(project / 'target/catalog.json')
         assert_manifest_schema_slice(project / 'target/manifest.json')
+        assert_run_results_schema_slice(project / 'target/run_results.json')
+        catalog = json.loads((project / 'target/catalog.json').read_text())
+        assert catalog['nodes'] == catalog['sources'] == {}
+        assert len(catalog['errors']) == 1
+        assert isinstance(catalog['errors'][0], str)
+        assert (project / 'target/index.html').is_file()
+        manifest = json.loads((project / 'target/manifest.json').read_text())
+        node = manifest['nodes']['model.configuration_fixture.catalog_entry']
+        assert node['compiled'] is True
+        assert node['compiled_code'] == 'select 1::integer as id'
+        run_results = json.loads((project / 'target/run_results.json').read_text())
+        assert [row['status'] for row in run_results['results']] == ['success']
+        if failure == 'authored-error':
+            assert 'catalog rejected' in catalog['errors'][0]
+    if failure == 'authored-error':
+        assert 'catalog rejected' in result.stderr
 
 
 def test_postgres_catalog_rejects_unavailable_source_database(tmp_path, configuration_oracle, request):
