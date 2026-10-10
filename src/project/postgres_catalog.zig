@@ -8,6 +8,7 @@ const expression = @import("expression.zig");
 const commands = @import("commands.zig");
 const selector = @import("selector.zig");
 const contexts = @import("dbt_context.zig");
+const sets = @import("set_context.zig");
 
 pub fn collect(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, selected: []const selector.SelectedResource, stdout: *std.Io.Writer) !catalog.CatalogEntries {
     var arena = std.heap.ArenaAllocator.init(runtime.allocator);
@@ -51,7 +52,7 @@ pub fn collect(runtime: types.Runtime, db_path: []const u8, graph: *const types.
         const information_schema = try contexts.relationValue(allocator, .{ .adapter_type = "postgres", .database = database, .schema = "information_schema", .include_policy = .{ .identifier = false } });
         const table = try compiler.renderMacroForNode(allocator, &contextual_graph, &catalog_node, "get_catalog_relations", &.{
             .{ .name = "information_schema", .value = information_schema },
-            .{ .name = "relations", .value = .{ .list = database_relations.items } },
+            .{ .name = "relations", .value = try sets.fromMembers(allocator, database_relations.items) },
         });
         try all_rows.appendSlice(allocator, expression.sequence(table) orelse return error.InvalidCatalogResult);
     }

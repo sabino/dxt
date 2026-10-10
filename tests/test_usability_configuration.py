@@ -829,9 +829,13 @@ def test_postgres_catalog_respects_authored_dispatch(tmp_path, configuration_ora
     pair.write('models/marts/catalog_entry.sql', "{{ config(materialized='table') }}select 1::integer as id")
     pair.invoke('run')
     pair.write('macros/catalog.sql', """{% macro postgres__get_catalog_relations(information_schema, relations) %}
+{% if relations is mapping or relations is sequence or relations is not iterable %}
+{{ exceptions.raise_compiler_error('catalog relations require an iterable set') }}
+{% endif %}
+{% set relation = (relations | list)[0] %}
 {% call statement('catalog_override', fetch_result=true, auto_begin=false) %}
-select '{{ information_schema.database }}' as table_database, '{{ relations[0].schema }}' as table_schema,
- '{{ relations[0].identifier }}' as table_name, 'BASE TABLE' as table_type,
+select '{{ information_schema.database }}' as table_database, '{{ relation.schema }}' as table_schema,
+ '{{ relation.identifier }}' as table_name, 'BASE TABLE' as table_type,
  'Authored catalog metadata' as table_comment, 'id' as column_name, 1 as column_index,
  'integer' as column_type, 'Authored column metadata' as column_comment, 'Authored owner' as table_owner
 {% endcall %}{{ return(load_result('catalog_override').table) }}{% endmacro %}""")
@@ -839,6 +843,30 @@ select '{{ information_schema.database }}' as table_database, '{{ relations[0].s
     actual, expected = [json.loads((project / 'target/catalog.json').read_text()) for project in pair.projects]
     assert actual['nodes'] == expected['nodes']
     assert actual['nodes']['model.configuration_fixture.catalog_entry']['metadata']['owner'] == 'Authored owner'
+    from test_cli import assert_catalog_schema_slice, assert_manifest_schema_slice, assert_run_results_schema_slice
+    for project in pair.projects:
+        assert_catalog_schema_slice(project / 'target/catalog.json')
+        assert_manifest_schema_slice(project / 'target/manifest.json')
+        assert_run_results_schema_slice(project / 'target/run_results.json')
+
+
+def test_postgres_catalog_relations_reject_direct_subscript(tmp_path, configuration_oracle, request):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, 'postgres')
+    pair.write('models/marts/catalog_entry.sql', "{{ config(materialized='table') }}select 1::integer as id")
+    pair.invoke('run')
+    pair.write('macros/catalog.sql', """{% macro postgres__get_catalog_relations(information_schema, relations) %}
+{% call statement('catalog_override', fetch_result=true, auto_begin=false) %}
+select '{{ information_schema.database }}' as table_database, '{{ relations[0].schema }}' as table_schema,
+ '{{ relations[0].identifier }}' as table_name, 'BASE TABLE' as table_type,
+ 'Authored catalog metadata' as table_comment, 'id' as column_name, 1 as column_index,
+ 'integer' as column_type, 'Authored column metadata' as column_comment, 'Authored owner' as table_owner
+{% endcall %}{{ return(load_result('catalog_override').table) }}{% endmacro %}""")
+    pair.invoke('docs generate', success=False)
+    from test_cli import assert_catalog_schema_slice, assert_manifest_schema_slice
+    for project in pair.projects:
+        assert_catalog_schema_slice(project / 'target/catalog.json')
+        assert_manifest_schema_slice(project / 'target/manifest.json')
 
 
 def test_postgres_catalog_rejects_unavailable_source_database(tmp_path, configuration_oracle, request):
