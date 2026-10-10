@@ -29,11 +29,11 @@ def project_pair(path):
     (path / "models/bad.sql").write_text("{% if execute and var('broken', true) %}{{ exceptions.raise_compiler_error('synthetic failure') }}{% endif %}select 1 as id")
 
 
-@pytest.mark.parametrize("command", ["compile", "generate"])
-def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path, core_runner, command):
+@pytest.mark.parametrize(("command", "static"), [("compile", False), ("generate", True), ("generate", False)])
+def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path, core_runner, command, static):
     project = tmp_path / "project"
     project_pair(project)
-    args = ["compile"] if command == "compile" else ["docs", "generate", "--static"]
+    args = ["compile"] if command == "compile" else ["docs", "generate", *(["--static"] if static else [])]
     native_target = project / "native"
     core_target = project / "core"
     common = ["--project-dir", str(project), "--profiles-dir", str(project)]
@@ -47,6 +47,11 @@ def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path
     assert actual["args"]["which"] == command
     assert {(row["unique_id"], row["status"], row["compiled"], row["failures"]) for row in actual["results"]} == {("model.compile_tasks.bad", "error", False, None)}
     assert actual["results"][0]["execution_time"] > 0
+    if command == "generate":
+        # Core turns false one-way flags into unsupported --no-* options on retry.
+        assert "empty_catalog" not in actual["args"]
+        if not static:
+            assert "static" not in actual["args"]
     # Core CompileTask.raise_on_first_error aborts before writing run results.
     # dxt's durable error artifact is an extension. Certify it by asking Core
     # itself to load that exact artifact and retry the failed model.
@@ -62,8 +67,13 @@ def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path
     assert actual["results"][0]["compiled_code"].strip() == expected["results"][0]["compiled_code"].strip()
     assert [timing["name"] for timing in actual["results"][0]["timing"]] == ["compile", "execute"]
     if command == "generate":
-        assert actual["args"]["static"] is True
-        assert (native_target / "static_index.html").exists()
+        assert (native_target / "index.html").exists()
+        if static:
+            assert actual["args"]["static"] is True
+            assert (native_target / "static_index.html").exists()
+        else:
+            assert "static" not in actual["args"]
+            assert not (native_target / "static_index.html").exists()
     contracts.assert_artifact(native_target / "run_results.json")
 
 
