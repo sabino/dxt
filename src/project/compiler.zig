@@ -91,6 +91,7 @@ const CompileContext = struct {
     value_arena: std.heap.ArenaAllocator,
     modules_cache: @import("modules_context.zig").Cache = .{},
     receivers: @import("compiler_receivers.zig").Registry = .{},
+    list_growth: @import("mutable_list_growth.zig").Store(native_expr.Value) = .{},
     constants: @import("compiler_constants.zig").Pool = .{},
     constant_function: ?[]const u8 = null,
     bindings: std.ArrayList(ValueBinding) = .empty,
@@ -157,6 +158,7 @@ const CompileContext = struct {
         self.lists.deinit(self.allocator);
         self.vars.deinit(self.allocator);
         self.bindings.deinit(self.allocator);
+        self.list_growth.deinit(self.value_arena.allocator());
         self.value_arena.deinit();
     }
 
@@ -268,7 +270,7 @@ const CompileContext = struct {
     }
 
     fn host(self: *CompileContext) native_expr.Host {
-        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue, .capture_undefined = self.capturesUndefined(), .constant = retainConstant, .receiver_identity = receiverIdentity, .receiver_value = currentReceiver };
+        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue, .capture_undefined = self.capturesUndefined(), .constant = retainConstant, .receiver_identity = receiverIdentity, .receiver_value = currentReceiver, .list_extend = extendList };
     }
 
     fn receiverIdentity(raw: *anyopaque, value: native_expr.Value) anyerror!usize {
@@ -279,6 +281,15 @@ const CompileContext = struct {
     fn currentReceiver(raw: *anyopaque, value: native_expr.Value) anyerror!native_expr.Value {
         const self: *CompileContext = @ptrCast(@alignCast(raw));
         return self.receivers.current(value);
+    }
+
+    fn extendList(raw: *anyopaque, value: native_expr.Value, additions: []const native_expr.Value, _: std.mem.Allocator) anyerror!native_expr.Value {
+        const self: *CompileContext = @ptrCast(@alignCast(raw));
+        const current = self.receivers.current(value);
+        if (current != .list) return error.JinjaTypeError;
+        const arena = self.value_arena.allocator();
+        const id = try self.receivers.identity(arena, current);
+        return .{ .list = try self.list_growth.extend(arena, id, current.list, additions) };
     }
 
     fn retainConstant(raw: *anyopaque, value: native_expr.Value, allocator: std.mem.Allocator) anyerror!native_expr.Value {
@@ -1749,7 +1760,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return try renderCallerValue(context, context.caller_blocks.items[index], args);
     }
     if (context.documentation_block) {
-        if (try @import("container_methods.zig").call(allocator, name, args)) |mutation| {
+        if (try @import("container_methods.zig").callWithHost(allocator, name, args, context.host())) |mutation| {
             if (mutation.original) |original| try replaceContextAliases(context, original, mutation.replacement.?);
             return mutation.result;
         }
@@ -1774,7 +1785,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     if (try @import("base_context.zig").call(allocator, name, args)) |value| return value;
     if (try @import("bundled_macros.zig").callColumn(allocator, name, args)) |value| return value;
-    if (try @import("container_methods.zig").call(allocator, name, args)) |mutation| {
+    if (try @import("container_methods.zig").callWithHost(allocator, name, args, context.host())) |mutation| {
         if (mutation.original) |original| try replaceContextAliases(context, original, mutation.replacement.?);
         return mutation.result;
     }
