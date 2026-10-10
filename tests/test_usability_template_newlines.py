@@ -65,10 +65,10 @@ def test_physical_model_and_macro_newlines_match_core_without_rewriting_artifact
     assert '\\r' in actual_node['compiled_code']
 
 
-def test_render_keeps_decoded_carriage_returns_until_a_second_template_lex(tmp_path, core_runner):
+def test_plain_render_keeps_carriage_returns_and_template_render_lexes_them(tmp_path, core_runner):
     project = tmp_path / 'project'
     write_project(project, {
-        'models/rendered.sql': "select '{{ ['a\\rb', render('a\\rb'), render('a\\r\\nb')]|tojson }}' as value",
+        'models/rendered.sql': "select '{{ ['a\\rb', render('a\\rb'), render('a\\r\\nb'), render('a\\rb{# comment #}'), render('a\\r\\nb}}')]|tojson }}' as value",
     })
     common = ['--project-dir', str(project), '--profiles-dir', str(project), '--no-partial-parse']
     reference = core_runner.invoke(['compile', *common, '--target-path', 'core-target', '--quiet'])
@@ -77,4 +77,21 @@ def test_render_keeps_decoded_carriage_returns_until_a_second_template_lex(tmp_p
     assert result.returncode == 0, result.stdout + result.stderr
     manifests = [json.loads((project / target / 'manifest.json').read_text()) for target in ['native-target', 'core-target']]
     codes = [manifest['nodes']['model.commands.rendered']['compiled_code'] for manifest in manifests]
-    assert codes[0] == codes[1] == 'select \'["a\\rb", "a\\nb", "a\\nb"]\' as value'
+    assert codes[0] == codes[1] == 'select \'["a\\rb", "a\\rb", "a\\r\\nb", "a\\nb", "a\\nb}}"]\' as value'
+
+
+@pytest.mark.parametrize('newline', ['\n', '\r\n', '\r'])
+def test_plain_model_sql_bypasses_jinja_normalization(tmp_path, core_runner, newline):
+    project = tmp_path / 'project'
+    authored = 'select 1 as value' + newline + '-- plain'
+    write_project(project, {'models/plain.sql': authored})
+    common = ['--project-dir', str(project), '--profiles-dir', str(project), '--no-partial-parse']
+    reference = core_runner.invoke(['compile', *common, '--target-path', 'core-target', '--quiet'])
+    assert reference.success, reference.exception
+    result = subprocess.run([DXT, 'compile', *common, '--target-path', 'native-target'], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    manifests = [json.loads((project / target / 'manifest.json').read_text()) for target in ['native-target', 'core-target']]
+    for manifest in manifests:
+        node = manifest['nodes']['model.commands.plain']
+        assert node['compiled_code'] == node['raw_code'] == authored
+        assert node['checksum']['checksum'] == hashlib.sha256(authored.encode()).hexdigest()

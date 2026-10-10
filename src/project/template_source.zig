@@ -2,6 +2,15 @@
 //! Authored resource bytes and decoded expression results stay unchanged.
 const std = @import("std");
 
+/// dbt's non-native get_rendered bypasses Jinja for plain strings. Its trigger
+/// pattern includes both opening and closing delimiters, even unmatched ones.
+pub fn hasRenderCharacters(source: []const u8) bool {
+    inline for (.{ "{{", "{%", "{#", "#}", "%}", "}}" }) |marker| {
+        if (std.mem.indexOf(u8, source, marker) != null) return true;
+    }
+    return false;
+}
+
 pub fn normalize(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, source, '\r') == null) return source;
     var length = source.len;
@@ -56,6 +65,14 @@ test "unchanged LF templates keep their backing source" {
     const normalized = try normalize(std.testing.allocator, source);
     try std.testing.expect(source.ptr == normalized.ptr);
     try std.testing.expectEqualStrings(source, normalized);
+}
+
+test "Core plain-string fast path recognizes opening and closing delimiters" {
+    try std.testing.expect(!hasRenderCharacters("select 1\r\n-- no template"));
+    try std.testing.expect(!hasRenderCharacters("100% # comment { }"));
+    inline for (.{ "{{", "{%", "{#", "#}", "%}", "}}" }) |marker| {
+        try std.testing.expect(hasRenderCharacters(marker));
+    }
 }
 
 test "borrowed macro body offsets follow normalized complete template" {

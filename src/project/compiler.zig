@@ -322,6 +322,7 @@ pub fn recordGenericCompilationDependency(allocator: std.mem.Allocator, graph: *
 
 /// Render a runtime hook in the resource's own typed compilation context.
 pub fn renderTextForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, text: []const u8) ![]const u8 {
+    if (!template_source.hasRenderCharacters(text)) return allocator.dupe(u8, text);
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
     var out: std.ArrayList(u8) = .empty;
@@ -339,6 +340,7 @@ pub fn renderDocumentationBlock(allocator: std.mem.Allocator, graph: *const Grap
 }
 
 fn renderDocumentationContext(allocator: std.mem.Allocator, graph: *const Graph, package: []const u8, unique_id: []const u8, path: []const u8, text: []const u8, block: bool) ![]const u8 {
+    if (!block and !template_source.hasRenderCharacters(text)) return allocator.dupe(u8, text);
     var node = Node{ .package_name = package, .unique_id = unique_id, .name = unique_id, .path = path, .original_file_path = path, .raw_code = text };
     defer types.deinitNode(allocator, &node);
     var context = CompileContext.init(allocator, graph, &node);
@@ -632,6 +634,8 @@ fn compileModelBodyWithDependencies(allocator: std.mem.Allocator, graph: *const 
         return try out.toOwnedSlice(allocator);
     }
 
+    if (!template_source.hasRenderCharacters(node.raw_code)) return allocator.dupe(u8, node.raw_code);
+
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
@@ -795,7 +799,9 @@ fn compileSingularTestBody(allocator: std.mem.Allocator, graph: *const Graph, te
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    try renderRange(&context, test_node.raw_code, 0, test_node.raw_code.len, &out);
+    if (template_source.hasRenderCharacters(test_node.raw_code)) {
+        try renderRange(&context, test_node.raw_code, 0, test_node.raw_code.len, &out);
+    } else try out.appendSlice(allocator, test_node.raw_code);
     return try out.toOwnedSlice(allocator);
 }
 
@@ -1807,6 +1813,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     if (std.mem.eql(u8, name, "render")) {
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
+        if (!template_source.hasRenderCharacters(args[0].value.string)) return args[0].value;
         var rendered: std.ArrayList(u8) = .empty;
         defer rendered.deinit(context.allocator);
         try renderRange(context, args[0].value.string, 0, args[0].value.string.len, &rendered);
@@ -2260,6 +2267,17 @@ test "template newline normalization retains authored model and macro bytes" {
         try std.testing.expectEqualStrings(sql, node.raw_code);
         try std.testing.expectEqualStrings(macro_sql, graph.macros.items[0].macro_sql);
     }
+}
+
+test "plain Core rendering bypasses template newline normalization" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const graph = Graph{ .allocator = a, .project_name = "demo" };
+    const sql = "select 1\r\n-- plain\r";
+    const node = Node{ .package_name = "demo", .unique_id = "model.demo.value", .name = "value", .path = "value.sql", .original_file_path = "models/value.sql", .raw_code = sql };
+    try std.testing.expectEqualStrings(sql, try compileModel(a, &graph, &node));
+    try std.testing.expectEqualStrings(sql, try renderTextForNode(a, &graph, &node, sql));
 }
 
 test "static inline config normalizes physical strings before parsing" {
