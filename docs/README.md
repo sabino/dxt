@@ -1,14 +1,16 @@
 # dxt Documentation
 
-These docs describe the supported `dxt` pre-alpha behavior. They do not claim
-full dbt compatibility unless a page explicitly says that a surface is covered.
+These docs describe the native SQL DuckDB/PostgreSQL release candidate and its
+validation boundaries. Production replacement readiness remains unconfirmed
+until the final integrated and platform gates pass.
 
 ## Start Here
 
 | Page | Use it for |
 | --- | --- |
 | [Primer](PRIMER.md) | Product goals, runtime rules, development loop, and high-level flow. |
-| [Compatibility Matrix](COMPATIBILITY.md) | Current support levels and planned dbt surfaces. |
+| [Compatibility Matrix](COMPATIBILITY.md) | Implemented behavior, pinned references and explicit differences. |
+| [Replacement Roadmap](DBT_REPLACEMENT_ROADMAP.md) | Functional tracks and remaining acceptance gates. |
 | [Architecture](ARCHITECTURE.md) | Zig module ownership, artifact flow, and Mermaid diagrams. |
 | [Agent OS](AGENT_OS.md) | Multidisciplinary agent-team operating model plus local autonomous Codex worker loop across GitHub Issues, Projects, PRs, and worktrees. |
 | [Agent Protocols](AGENT_PROTOCOLS.md) | Public-safe issue/PR comment formats, role nudges, handoffs, and reflection protocol. |

@@ -705,7 +705,12 @@ empty artifacts, canned results or Python product code. Cloud adapter
 certification requires declared targets and usable warehouse connections;
 continue independent native work while those requirements are clarified.
 
-### Active Snapshot Foundation Slice
+### Historical Snapshot Foundation Slice
+
+The following records issue #213's earlier parser-only milestone. SQL/YAML
+snapshot execution is now implemented; current scope and remaining acceptance
+are defined by the Full Usability Implementation Campaign above and
+`docs/DBT_REPLACEMENT_ROADMAP.md`.
 
 Issue #213 is the next read-only dbt compatibility slice: discover legacy SQL
 snapshot blocks, add Snapshot nodes to Manifest v12 and the shared selector
@@ -1065,7 +1070,7 @@ Every compatibility slice must record:
 - Stop conditions that keep mechanical extractions separate from behavior
   changes and prevent Python from crossing into product runtime behavior.
 
-Immediate source-grounded queue, refreshed on 2026-10-09 after the public
+Historical source-grounded queue, recorded on 2026-10-09 after the public
 Jaffle command gates, state:new, custom generic execution, and dict-fixture
 unit-test execution slices shipped:
 
@@ -1092,7 +1097,14 @@ Each item must remain a Zig product-runtime slice with native tests first and
 Python/dbt oracle coverage only for CLI, filesystem, fixture, or artifact
 parity.
 
-## Future SQLMesh Reference Track
+## Stateful Planning Reference And Historical Slice Notes
+
+Native stateful plan/apply, environments, intervals, audits and rollback now
+have implementations and focused evidence in the replacement roadmap. The
+following retains the original reference rationale and earlier bounded slice
+notes through the Fixture Ladder section. Their "current" and "future" wording
+describes those historical slices, not today's support contract; use
+`docs/COMPATIBILITY.md` for the current product surface.
 
 After the dbt Core M1/M2/M3 baseline is materially stronger, evaluate SQLMesh
 as an architecture reference for dxt's state store, environment model,
