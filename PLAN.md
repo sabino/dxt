@@ -206,6 +206,26 @@ profile flag for nested generic-test arguments under Core 1.10.5. The shared
 developer harness provides the same external profile to both engines without
 editing authored project/profile files; this is not a Core 1.11 claim.
 
+The current native integration gate passes 544 cases. A complete historical
+CLI run reported 235 passes and 28 failures; Core-grounded assertion migrations
+have passing focused reruns, with the complete historical rerun and the
+configured test-limit regression still pending. Neither run is release
+acceptance. The supervisor now owns Core selector grammar closure and final
+historical reruns. The expression worker owns native datetime/pytz/itertools
+module providers and timestamp constructor protocols after delivering scalar
+operators. The byte worker owns codec/API certificates; the formatter worker
+owns string format/format_map and final public documentation. Shared compiler
+module hooks remain sequenced with the configuration worker's reference
+dependency guards, parse warnings and materialization result lifecycle.
+
+Draft PR #221 publishes the committed implementation on `feat/full-usability`.
+The branch uses the repository owner's GitHub noreply commit identity. The
+supervisor additionally owns source tag inheritance and selector config
+projection, followed by complete native parse-cache code/data fingerprinting.
+All 75 mandatory selector comparisons now pass against Core, including the
+complete source/table and legacy/config tag inheritance matrix. Full combined gates and platform CI
+remain required before marking this PR ready to merge.
+
 After its scheduling commit, the scheduler worker owns the focused native
 DuckDB/Postgres adapter contract in a second isolated worktree. Shared backend
 integration follows test-error, incremental and snapshot commits. Threaded

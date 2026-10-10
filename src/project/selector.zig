@@ -63,14 +63,10 @@ const SelectorSpec = struct {
 };
 
 pub fn validateSelectorSyntax(value: []const u8) !void {
-    if (value.len == 0) return error.UnsupportedSelector;
     var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
-    var matched_any = false;
     while (expressions.next()) |expression| {
         try validateSelectorExpression(expression);
-        matched_any = true;
     }
-    if (!matched_any) return error.UnsupportedSelector;
 }
 
 pub fn usesSourceStatusSelector(select: ?[]const u8, exclude: ?[]const u8) bool {
@@ -149,69 +145,28 @@ fn selectorValueUsesState(value: []const u8) bool {
 
 fn validateSelectorExpression(value: []const u8) !void {
     var terms = std.mem.splitScalar(u8, value, ',');
-    var matched_any = false;
     while (terms.next()) |raw_term| {
-        if (raw_term.len == 0) return error.UnsupportedSelector;
         const part = try selectorTermValueForValidation(if (std.mem.startsWith(u8, raw_term, "!")) raw_term[1..] else raw_term);
-        if (part.len == 0) return error.UnsupportedSelector;
         if (std.mem.indexOfAny(u8, part, " \t\r")) |_| return error.UnsupportedSelector;
-        if (std.mem.indexOfScalar(u8, part, '+')) |_| return error.UnsupportedSelector;
-        if (std.mem.indexOfScalar(u8, part, '@')) |_| return error.UnsupportedSelector;
-        if (std.mem.indexOfScalar(u8, part, ':')) |_| try validateSelectorMethod(part);
-        matched_any = true;
+        if (std.mem.indexOfScalar(u8, part, ':')) |colon| {
+            // Core recognizes a method only when its prefix is a word/dotted
+            // name. Operators inside the value remain literal FQN characters.
+            if (isMethodPrefix(part[0..colon])) try validateSelectorMethod(part);
+        }
     }
-    if (!matched_any) return error.UnsupportedSelector;
 }
 
 fn selectorTermValueForValidation(raw_term: []const u8) ![]const u8 {
-    var start: usize = 0;
-    var end: usize = raw_term.len;
-    var has_childrens_parents = false;
-
-    if (start < end and raw_term[start] == '@') {
-        has_childrens_parents = true;
-        start += 1;
-    }
-
-    if (has_childrens_parents and std.mem.indexOfScalar(u8, raw_term[start..], '+') != null) return error.UnsupportedSelector;
-
-    if (start < end) {
-        if (raw_term[start] == '+') {
-            start += 1;
-        } else {
-            var digit_end = start;
-            while (digit_end < end and isSelectorDigit(raw_term[digit_end])) digit_end += 1;
-            if (digit_end > start and digit_end < end and raw_term[digit_end] == '+') {
-                _ = std.fmt.parseInt(usize, raw_term[start..digit_end], 10) catch return error.UnsupportedSelector;
-                start = digit_end + 1;
-            }
-        }
-    }
-
-    if (start >= end or raw_term[start] == '+' or raw_term[start] == '@') return error.UnsupportedSelector;
-
-    if (start < end) {
-        if (raw_term[end - 1] == '+') {
-            end -= 1;
-        } else {
-            var digit_start = end;
-            while (digit_start > start and isSelectorDigit(raw_term[digit_start - 1])) digit_start -= 1;
-            if (digit_start < end and digit_start > start and raw_term[digit_start - 1] == '+') {
-                _ = std.fmt.parseInt(usize, raw_term[digit_start..end], 10) catch return error.UnsupportedSelector;
-                end = digit_start - 1;
-            }
-        }
-    }
-    if (start >= end or raw_term[end - 1] == '+') return error.UnsupportedSelector;
-    return raw_term[start..end];
+    const term = parseSelectorTerm(raw_term);
+    if (!term.valid) return error.UnsupportedSelector;
+    return term.value;
 }
 
 fn validateSelectorMethod(part: []const u8) !void {
-    if (std.mem.startsWith(u8, part, "config.")) {
-        const colon = std.mem.indexOfScalar(u8, part, ':') orelse return error.UnsupportedSelector;
-        if (colon == "config.".len or colon + 1 == part.len) return error.UnsupportedSelector;
-        return;
-    }
+    const colon = std.mem.indexOfScalar(u8, part, ':') orelse return error.UnsupportedSelector;
+    const method = part[0..colon];
+    const root = method[0 .. std.mem.indexOfScalar(u8, method, '.') orelse method.len];
+    if (std.mem.eql(u8, root, "config")) return;
     const prefixes = [_][]const u8{
         "tag:",
         "path:",
@@ -236,9 +191,8 @@ fn validateSelectorMethod(part: []const u8) !void {
         "state:",
     };
     for (prefixes) |prefix| {
-        if (std.mem.startsWith(u8, part, prefix)) {
-            if (part.len == prefix.len) return error.UnsupportedSelector;
-            const value = part[prefix.len..];
+        if (std.mem.eql(u8, root, prefix[0 .. prefix.len - 1])) {
+            const value = part[colon + 1 ..];
             if (std.mem.eql(u8, prefix, "resource_type:") and !isSupportedResourceType(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "test_type:") and !isSupportedTestType(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "source_status:") and !isSupportedSourceStatusSelector(value)) return error.UnsupportedSelector;
@@ -249,6 +203,37 @@ fn validateSelectorMethod(part: []const u8) !void {
         }
     }
     return error.UnsupportedSelector;
+}
+
+fn isMethodPrefix(prefix: []const u8) bool {
+    if (prefix.len == 0) return false;
+    var unicode = false;
+    for (prefix) |byte| {
+        if (byte >= 128) unicode = true else if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '.') return false;
+    }
+    if (!unicode) return true;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const engine = @import("regex_engine.zig");
+    const pattern = engine.compile(arena.allocator(), "\\A[\\w.]+\\Z", 0) catch return false;
+    defer pattern.deinit();
+    return (pattern.find(arena.allocator(), prefix, 0, prefix.len, 0) catch return false) != null;
+}
+
+const MethodValue = struct {
+    value: []const u8,
+    owned: bool = false,
+    fn deinit(self: MethodValue, allocator: std.mem.Allocator) void {
+        if (self.owned) allocator.free(self.value);
+    }
+};
+
+fn normalizeMethod(allocator: std.mem.Allocator, raw: []const u8) !MethodValue {
+    const colon = std.mem.indexOfScalar(u8, raw, ':') orelse return .{ .value = raw };
+    const method = raw[0..colon];
+    const dot = std.mem.indexOfScalar(u8, method, '.') orelse return .{ .value = raw };
+    if (!isMethodPrefix(method) or std.mem.eql(u8, method[0..dot], "config")) return .{ .value = raw };
+    return .{ .value = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ method[0..dot], raw[colon + 1 ..] }), .owned = true };
 }
 
 fn isSupportedResourceType(value: []const u8) bool {
@@ -563,7 +548,15 @@ fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value
     return matched_any;
 }
 
-fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []const u8, context: SelectionContext) bool {
+fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
+    if (std.mem.startsWith(u8, value, "config.")) {
+        var configured = @import("canonical_manifest_config.zig").node(graph.allocator, node) catch return false;
+        defer @import("config_value.zig").deinit(graph.allocator, &configured);
+        return @import("config_selector.zig").matches(configured, value[7..]);
+    }
     if (std.mem.startsWith(u8, value, "group:")) return if (@import("group_access.zig").group(node.effective_config)) |name| matchesSelectorPattern(value[6..], name) else false;
     if (std.mem.startsWith(u8, value, "access:")) return std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, value[7..], @import("group_access.zig").access(node));
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(node.unique_id, value, context);
@@ -608,10 +601,6 @@ fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []cons
     if (std.mem.startsWith(u8, value, "source:")) {
         return false;
     }
-    if (std.mem.startsWith(u8, value, "config.materialized:")) {
-        const materialized = value["config.materialized:".len..];
-        return (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "analysis") or std.mem.eql(u8, node.resource_type, "snapshot")) and std.mem.eql(u8, materialized, node.materialized);
-    }
     return false;
 }
 
@@ -643,7 +632,10 @@ fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const Generi
     return matched_any;
 }
 
-fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8, context: SelectionContext) bool {
+fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNode, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
     if (!test_node.enabled) return false;
     if (std.mem.startsWith(u8, value, "fqn:")) return matchesGenericTestFqnPattern(value[4..], test_node);
     if (std.mem.startsWith(u8, value, "test_name:")) return matchesSelectorPattern(value[10..], test_node.test_name);
@@ -651,7 +643,11 @@ fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNod
         for (test_node.tags.items) |tag| if (matchesSelectorPattern(value[4..], tag)) return true;
         return false;
     }
-    if (std.mem.startsWith(u8, value, "config.")) return @import("generic_test_config.zig").matchesConfig(test_node, value[7..]);
+    if (std.mem.startsWith(u8, value, "config.")) {
+        var configured = @import("canonical_manifest_config.zig").testConfig(graph.allocator, test_node.config, test_node.enabled, test_node.config_tags.items, test_node.config_values) catch return false;
+        defer @import("config_value.zig").deinit(graph.allocator, &configured);
+        return @import("config_selector.zig").matches(configured, value[7..]);
+    }
     if (std.mem.startsWith(u8, value, "group:")) {
         return if (@import("group_access.zig").group(test_node.config_values)) |name| matchesSelectorPattern(value[6..], name) else false;
     }
@@ -709,7 +705,15 @@ fn matchesSingularTestSelectorIntersection(graph: *const Graph, test_node: *cons
     return matched_any;
 }
 
-fn matchesSingularTestSelectorTerm(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8, context: SelectionContext) bool {
+fn matchesSingularTestSelectorTerm(graph: *const Graph, test_node: *const SingularTestNode, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
+    if (std.mem.startsWith(u8, value, "config.")) {
+        var configured = @import("canonical_manifest_config.zig").testConfig(graph.allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values) catch return false;
+        defer @import("config_value.zig").deinit(graph.allocator, &configured);
+        return @import("config_selector.zig").matches(configured, value[7..]);
+    }
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(test_node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(test_node.unique_id, value, context);
     if (matchesSelectorPattern(value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id) or matchesSingularTestFqnPattern(value, test_node)) return true;
@@ -780,7 +784,9 @@ fn evaluateExpression(graph: *const Graph, id: []const u8, expression: *const Se
     const mode = expression.indirect_selection orelse context.indirect_selection;
     const dependencies = indirectDependencies(graph, id);
     if (expression.kind == .leaf) {
+        if (expression.implicit_all) return .{ .direct = true };
         const value = expression.value orelse return .{ .direct = false };
+        if (value.len == 0) return .{ .direct = false };
         if (resourceDirectlyMatches(graph, id, value, context)) return .{ .direct = true };
         const parents = dependencies orelse return .{ .direct = false };
         if (std.mem.eql(u8, mode, "empty")) return .{ .direct = false };
@@ -904,7 +910,18 @@ fn matchesSourceSelectorIntersection(graph: *const Graph, source: *const SourceD
     return matched_any;
 }
 
-fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, value: []const u8, context: SelectionContext) bool {
+fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
+    if (std.mem.startsWith(u8, value, "config.")) {
+        var configured = @import("config_value.zig").clone(graph.allocator, source.effective_config) catch return false;
+        defer @import("config_value.zig").deinit(graph.allocator, &configured);
+        @import("config_value.zig").put(graph.allocator, &configured, "enabled", .{ .bool = source.enabled }) catch return false;
+        if (@import("config_value.zig").get(configured, "loaded_at_field") == null) @import("config_value.zig").put(graph.allocator, &configured, "loaded_at_field", if (source.loaded_at_field) |field| .{ .string = field } else .null) catch return false;
+        if (@import("config_value.zig").get(configured, "loaded_at_query") == null) @import("config_value.zig").put(graph.allocator, &configured, "loaded_at_query", if (source.loaded_at_query) |query| .{ .string = query } else .null) catch return false;
+        return @import("config_selector.zig").matches(configured, value[7..]);
+    }
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(source.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(source.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "resource_type:")) {
@@ -926,6 +943,12 @@ fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, valu
         }
         const status = index.statusFor(source.unique_id) orelse return false;
         return std.mem.eql(u8, requested, status);
+    }
+    if (std.mem.startsWith(u8, value, "tag:")) {
+        const tags = @import("config_value.zig").get(source.effective_config, "tags") orelse return false;
+        if (tags != .array) return false;
+        for (tags.array.items) |tag| if (tag == .string and matchesSelectorPattern(value[4..], tag.string)) return true;
+        return false;
     }
     if (std.mem.startsWith(u8, value, "source:")) {
         const source_value = value["source:".len..];
@@ -979,7 +1002,10 @@ fn matchesExposureSelectorIntersection(graph: *const Graph, exposure: *const Exp
     return matched_any;
 }
 
-fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef, value: []const u8, context: SelectionContext) bool {
+fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(exposure.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(exposure.unique_id, value, context);
     if (matchesSelectorPattern(value, exposure.name) or matchesUniqueIdFqnPattern(value, exposure.unique_id)) return true;
@@ -1042,7 +1068,10 @@ fn matchesUnitTestSelectorIntersection(graph: *const Graph, unit_test: *const Un
     return matched_any;
 }
 
-fn matchesUnitTestSelectorTerm(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8, context: SelectionContext) bool {
+fn matchesUnitTestSelectorTerm(graph: *const Graph, unit_test: *const UnitTestDef, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
     if (std.mem.startsWith(u8, value, "fqn:")) return matchesUnitTestFqnPattern(value[4..], unit_test);
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(unit_test.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(unit_test.unique_id, value, context);
@@ -1413,7 +1442,7 @@ fn parseSelectorTerm(raw: []const u8) SelectorSpec {
         }
     }
 
-    if (include_childrens_parents and (include_parents or include_children)) return .{ .active = true, .valid = false };
+    if (include_childrens_parents and include_children) return .{ .active = true, .valid = false };
 
     return .{
         .active = true,
@@ -1428,7 +1457,12 @@ fn parseSelectorTerm(raw: []const u8) SelectorSpec {
 
 fn parseSelectorDepth(value: []const u8) !?usize {
     if (value.len == 0) return null;
-    return try std.fmt.parseInt(usize, value, 10);
+    // Core accepts arbitrarily large Python integers. A saturated native
+    // depth reaches exactly the same finite graph without overflowing.
+    return std.fmt.parseInt(usize, value, 10) catch |err| switch (err) {
+        error.Overflow => std.math.maxInt(usize),
+        else => return err,
+    };
 }
 
 fn isSelectorDigit(byte: u8) bool {
@@ -2020,11 +2054,12 @@ test "selector terms parse dbt plus depth operators" {
 
     try std.testing.expect(!parseSelectorTerm("@orders+").valid);
     try std.testing.expect(!parseSelectorTerm("@orders+1").valid);
-    try std.testing.expect(!parseSelectorTerm("@+orders").valid);
-    try std.testing.expect(!parseSelectorTerm("@1+orders").valid);
+    try std.testing.expect(parseSelectorTerm("@+orders").valid);
+    try std.testing.expect(parseSelectorTerm("@1+orders").valid);
 
-    const invalid_depth = parseSelectorTerm("999999999999999999999999999999+orders");
-    try std.testing.expect(!invalid_depth.valid);
+    const large_depth = parseSelectorTerm("999999999999999999999999999999+orders");
+    try std.testing.expect(large_depth.valid);
+    try std.testing.expectEqual(@as(?usize, std.math.maxInt(usize)), large_depth.parents_depth);
 }
 
 test "snapshot file and block FQN selects separate nodes and expands dependencies" {
@@ -2063,7 +2098,10 @@ test "execution ID limits apply after indirect test selection" {
     try std.testing.expectEqual(@as(usize, 0), empty.len);
 }
 
-fn matchesSemanticSelectorTerm(graph: *const Graph, resource: *const types.SemanticResource, value: []const u8, context: SelectionContext) bool {
+fn matchesSemanticSelectorTerm(graph: *const Graph, resource: *const types.SemanticResource, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
     if (std.mem.startsWith(u8, value, "group:")) return std.mem.eql(u8, resource.resource_type, "metric") and (if (@import("group_access.zig").group(@import("config_value.zig").get(resource.data, "config") orelse .null)) |name| matchesSelectorPattern(value[6..], name) else false);
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(resource.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(resource.unique_id, value, context);

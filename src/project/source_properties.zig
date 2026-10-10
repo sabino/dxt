@@ -37,7 +37,9 @@ pub fn parse(runtime: types.Runtime, document: std.json.Value, path: []const u8,
             // replace project-level source tags rather than append to them.
             var tag_names: std.ArrayList([]const u8) = .empty;
             defer tag_names.deinit(runtime.allocator);
+            try tags(runtime.allocator, values.get(values.get(source, "config") orelse .null, "tags") orelse .null, &tag_names);
             try tags(runtime.allocator, values.get(source, "tags") orelse .null, &tag_names);
+            try tags(runtime.allocator, values.get(values.get(table, "config") orelse .null, "tags") orelse .null, &tag_names);
             try tags(runtime.allocator, values.get(table, "tags") orelse .null, &tag_names);
             @import("util.zig").sortStrings(tag_names.items);
             var tag_values = std.json.Array.init(runtime.allocator);

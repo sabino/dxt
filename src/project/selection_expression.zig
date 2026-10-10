@@ -4,6 +4,7 @@ const std = @import("std");
 /// combined at each boundary, rather than expanded after selecting all models.
 pub const Expression = struct {
     kind: enum { leaf, union_set, intersection, difference },
+    implicit_all: bool = false,
     value: ?[]const u8 = null,
     unmatched_criterion: ?[]const u8 = null,
     indirect_selection: ?[]const u8 = null,
@@ -25,6 +26,7 @@ pub const Expression = struct {
     pub fn clone(self: *const Expression, allocator: std.mem.Allocator) !*Expression {
         const result = try create(allocator, self.kind, self.indirect_selection);
         errdefer result.destroy(allocator);
+        result.implicit_all = self.implicit_all;
         if (self.value) |value| result.value = try allocator.dupe(u8, value);
         if (self.unmatched_criterion) |value| result.unmatched_criterion = try allocator.dupe(u8, value);
         for (self.children.items) |child| {
@@ -50,7 +52,11 @@ pub const Expression = struct {
 /// the invocation flag, while YAML set operators explicitly use Core's eager
 /// default and individual YAML criteria can override the flag.
 pub fn parseCli(allocator: std.mem.Allocator, value: ?[]const u8) !*Expression {
-    if (value == null) return try Expression.leaf(allocator, "", null);
+    if (value == null) {
+        const expression = try Expression.leaf(allocator, "", null);
+        expression.implicit_all = true;
+        return expression;
+    }
     const expression = try Expression.create(allocator, .union_set, null);
     errdefer expression.destroy(allocator);
     var clauses = std.mem.tokenizeAny(u8, value orelse "*", " \t\r\n");
