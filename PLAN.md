@@ -121,7 +121,8 @@ The source worker owns only reuse of the existing held catalog collector for
 selected authored DuckDB catalog hooks. Detect the effective global/dispatched
 entry through the existing resolver, retaining stock DuckDB introspection when
 the selected hook is bundled. DuckDB calls get_catalog with its genuine
-InformationSchema object and case-folded schema set; PostgreSQL retains its
+InformationSchema object and lowercased schema set, as defined by Core's
+SchemaSearchMap.add; PostgreSQL retains its
 relation-set/get_catalog_relations path. Reuse existing row ownership/filtering,
 native query context and Unicode/set helpers; no compiler or dispatch semantics
 are expanded. The expression worker owns only the docs facade's bounded DuckDB
