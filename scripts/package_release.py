@@ -28,6 +28,10 @@ NOTICES = {
     'tree-sitter-unicode-LICENSE': 'vendor/tree-sitter/src/unicode/LICENSE',
     'tree-sitter-python-LICENSE': 'vendor/tree-sitter-python/LICENSE',
     'tree-sitter-python-provenance.json': 'vendor/tree-sitter-python/provenance.json',
+    'pytz-LICENSE': 'vendor/pytz/LICENSE.txt',
+    'pytz-provenance.json': 'vendor/pytz/provenance.json',
+    'cpython-strptime-LICENSE': 'vendor/cpython-strptime/LICENSE.txt',
+    'cpython-strptime-UPSTREAM': 'vendor/cpython-strptime/README.md',
     **{f'{package}-LICENSE': f'vendor/dbt-includes/{package}/LICENSE'
        for package in ['dbt', 'dbt_duckdb', 'dbt_postgres']},
 }

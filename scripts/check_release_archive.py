@@ -42,6 +42,10 @@ REQUIRED_MEMBERS = {
     "docs/licenses/tree-sitter-unicode-LICENSE",
     "docs/licenses/tree-sitter-python-LICENSE",
     "docs/licenses/tree-sitter-python-provenance.json",
+    "docs/licenses/pytz-LICENSE",
+    "docs/licenses/pytz-provenance.json",
+    "docs/licenses/cpython-strptime-LICENSE",
+    "docs/licenses/cpython-strptime-UPSTREAM",
 }
 
 ALLOWED_TOP_LEVEL_FILES = {
