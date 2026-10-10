@@ -102,6 +102,14 @@ Cloud adapters, remote external publication/plugin registration and non-Linux
 platforms remain explicit later certification targets. The initial SQL scope
 does not authorize or require authored Python execution.
 
+The unchanged public package's positive ladder uses PostgreSQL. The pinned
+dbt-utils integration project does not configure DuckDB; actual Core CLI and
+native comparisons reproduce the same DuckDB date-spine binder error and
+relation-discovery catalog errors, with identical date-spine SQL and matching
+macro dependencies. Retain this shared-negative evidence and the unchanged
+fixture. DuckDB's positive public-project ladder is the six Jaffle gates,
+alongside the mandatory both-adapter focused compatibility comparisons.
+
 ## Completion Rule
 
 Close a feature only when its native implementation, negative cases, pinned

@@ -28,7 +28,7 @@ jobs:
   verify:
     name: verify release candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 360
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
@@ -110,6 +110,7 @@ jobs:
   package:
     name: package ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
     needs: verify
     strategy:
       fail-fast: false

@@ -60,10 +60,19 @@ outside the user-confirmed initial SQL scope.
 | Effective flags | Actual workers/cancellation for threads/fail-fast; adapter-specific full-refresh; empty/sample/event-time input bounds; failure audits; env/CLI precedence, warnings, quiet/print/colors, JSON/file logging and parser/cache/profiling controls. Unsupported command placements/values reject. [CLI options](../tests/test_usability_cli_options.py), [execution](../tests/test_usability_cli_execution.py), [profiling](../tests/test_usability_cli_profiling.py), [parser options](../tests/test_usability_parser_options.py), [worker logs](../tests/test_usability_worker_logs.py). |
 
 Package-heavy compatibility is checked separately from individual macro
-features. Native regular-expression provider comparisons have passed; the
-unchanged PostgreSQL dbt-utils public project still requires its final ladder
-rerun. A bundled macro definition or an accepted flag alone is not execution
-parity.
+features. The unchanged PostgreSQL dbt-utils baseline passes every command,
+complete schemas, graph/config/dependencies, compiled SQL, catalog columns and
+typed rows. Its final integrated candidate rerun remains required.
+
+The pinned dbt-utils integration project does not configure DuckDB. Running it
+on the pinned DuckDB adapter also fails under Core: its date-spine model emits
+an uncast string-plus-interval expression, and its relation-discovery models
+query a catalog-qualified information schema that DuckDB rejects. Actual Core
+CLI comparisons retain byte-identical date-spine SQL, matching macro dependencies
+and the shared database errors. These unchanged upstream failures are recorded
+separately from the positive PostgreSQL package ladder and the six positive
+DuckDB Jaffle gates. No project SQL or selected resource is changed to manufacture
+a successful package run.
 
 ## Adapters And Materializations
 
