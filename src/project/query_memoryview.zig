@@ -1,0 +1,130 @@
+//! Read-only psycopg2 bytea views retain their character-buffer protocol.
+const std = @import("std");
+const expr = @import("expression.zig");
+const bytes = @import("yaml_values.zig");
+const Value = expr.Value;
+const A = std.mem.Allocator;
+pub const State = struct { bytes: []const u8, format: u8 };
+pub fn state(input: Value) ?State {
+    const marker = input.attribute("__dxt_memoryview");
+    if (marker != .callable or !std.mem.eql(u8, marker.callable, "__dxt_memoryview")) return null;
+    const raw = input.attribute("__dxt_memoryview_bytes");
+    const format = input.attribute("format");
+    if (raw != .string or format != .string or format.string.len != 1) return null;
+    return .{ .bytes = raw.string, .format = format.string[0] };
+}
+pub fn chunkIdentity(input: Value) ?[]const u8 {
+    const marker = input.attribute("__dxt_memory_chunk");
+    if (marker != .callable or !std.mem.eql(u8, marker.callable, "__dxt_memory_chunk")) return null;
+    const identity = input.attribute("__dxt_memory_chunk_identity");
+    return if (identity == .string) identity.string else null;
+}
+pub fn equal(left: Value, right: Value) ?bool {
+    const lhs = state(left);
+    const rhs = state(right);
+    if (lhs == null and rhs == null) return null;
+    if (lhs != null and rhs != null) {
+        if ((lhs.?.format == 'c') != (rhs.?.format == 'c')) return false;
+        if (lhs.?.bytes.len != rhs.?.bytes.len) return false;
+        for (lhs.?.bytes, rhs.?.bytes) |x, y| {
+            const a: i16 = if (lhs.?.format == 'b') @as(i8, @bitCast(x)) else x;
+            const b: i16 = if (rhs.?.format == 'b') @as(i8, @bitCast(y)) else y;
+            if (a != b) return false;
+        }
+        return true;
+    }
+    const view = lhs orelse rhs.?;
+    const other = if (lhs != null) right else left;
+    if (view.format == 'c' or !bytes.isHashable(other)) return false;
+    const raw = other.attribute("__dxt_binary");
+    if (raw != .string or raw.string.len != view.bytes.len) return false;
+    for (view.bytes, raw.string) |x, y| if ((if (view.format == 'b') @as(i16, @as(i8, @bitCast(x))) else @as(i16, x)) != y) return false;
+    return true;
+}
+pub fn value(a: A, raw: []const u8, format: u8, original_chunk: ?Value) !Value {
+    if (format != 'c' and format != 'b' and format != 'B') return error.InvalidQueryMemoryviewFormat;
+    const owned = try a.dupe(u8, raw);
+    const object = try bytes.fromBytes(a, owned);
+    const chunk: Value = original_chunk orelse Value{ .object = try a.dupe(expr.Entry, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_memory_chunk", .value = .{ .callable = "__dxt_memory_chunk" } },
+        .{ .key = "__dxt_memory_chunk_identity", .value = .{ .string = try std.fmt.allocPrint(a, "{x}", .{@intFromPtr(owned.ptr)}) } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<memory chunk at 0x{x} size {d}>", .{ @intFromPtr(owned.ptr), owned.len }) } },
+    }) };
+    const members = try expr.allocateValues(a, raw.len);
+    for (raw, members) |byte, *member| member.* = if (format == 'c') try bytes.fromBytes(a, &.{byte}) else try expr.integerValue(a, if (format == 'b') @as(i16, @as(i8, @bitCast(byte))) else @as(i16, byte));
+    const encoded = try a.alloc(u8, std.base64.standard.Encoder.calcSize(raw.len));
+    _ = std.base64.standard.Encoder.encode(encoded, raw);
+    var fields: std.ArrayList(expr.Entry) = .empty;
+    try fields.appendSlice(a, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_iterable", .value = .{ .list = members } },
+        .{ .key = "__dxt_memoryview", .value = .{ .callable = "__dxt_memoryview" } },
+        .{ .key = "__dxt_memoryview_bytes", .value = .{ .string = owned } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<memory at 0x{x}>", .{@intFromPtr(members.ptr)}) } },
+        .{ .key = "obj", .value = chunk },
+        .{ .key = "format", .value = .{ .string = try a.dupe(u8, &.{format}) } },
+        .{ .key = "itemsize", .value = .{ .integer = "1" } },
+        .{ .key = "ndim", .value = .{ .integer = "1" } },
+        .{ .key = "nbytes", .value = try expr.integerValue(a, raw.len) },
+        .{ .key = "readonly", .value = .{ .boolean = true } },
+        .{ .key = "c_contiguous", .value = .{ .boolean = true } },
+        .{ .key = "f_contiguous", .value = .{ .boolean = true } },
+        .{ .key = "contiguous", .value = .{ .boolean = true } },
+        .{ .key = "shape", .value = .{ .tuple = try a.dupe(Value, &.{try expr.integerValue(a, raw.len)}) } },
+        .{ .key = "strides", .value = .{ .tuple = &.{.{ .integer = "1" }} } },
+        .{ .key = "suboffsets", .value = .{ .tuple = &.{} } },
+        .{ .key = "hex", .value = object.attribute("hex") },
+    });
+    for ([_][]const u8{ "tobytes", "tolist", "cast", "toreadonly" }) |method| try fields.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_memoryview:{s}:{c}:{s}:{s}", .{ method, format, chunkIdentity(chunk).?, encoded }) } });
+    return .{ .object = try fields.toOwnedSlice(a) };
+}
+pub fn call(a: A, name: []const u8, args: []const expr.Argument) anyerror!?Value {
+    if (!std.mem.startsWith(u8, name, "__dxt_memoryview:")) return null;
+    var parts = std.mem.splitScalar(u8, name["__dxt_memoryview:".len..], ':');
+    const method = parts.next() orelse return error.InvalidJinjaArguments;
+    const format = parts.next() orelse return error.InvalidJinjaArguments;
+    const identity = parts.next() orelse return error.InvalidJinjaArguments;
+    const encoded = parts.rest();
+    const binary = try bytes.binary(a, encoded);
+    const raw = binary.attribute("__dxt_binary").string;
+    if (std.mem.eql(u8, method, "tobytes")) {
+        if (args.len > 1) return error.InvalidJinjaArguments;
+        return binary;
+    }
+    var output_format = format[0];
+    if (std.mem.eql(u8, method, "cast")) {
+        if (args.len != 1 or args[0].value != .string or args[0].value.string.len != 1) return error.JinjaTypeError;
+        output_format = args[0].value.string[0];
+        if (output_format != 'c' and output_format != 'b' and output_format != 'B') return error.InvalidQueryMemoryviewFormat;
+    } else if (args.len != 0) return error.InvalidJinjaArguments;
+    const chunk: Value = .{ .object = try a.dupe(expr.Entry, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_memory_chunk", .value = .{ .callable = "__dxt_memory_chunk" } },
+        .{ .key = "__dxt_memory_chunk_identity", .value = .{ .string = identity } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<memory chunk at 0x{s} size {d}>", .{ identity, raw.len }) } },
+    }) };
+    const output = try value(a, raw, output_format, chunk);
+    if (std.mem.eql(u8, method, "tolist")) return output.attribute("__dxt_iterable");
+    return output;
+}
+
+test "psycopg bytea memoryview keeps character elements and opaque shared chunk" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const original = try value(a, &.{ 0, 255 }, 'c', null);
+    try std.testing.expect(state(original) != null);
+    try std.testing.expect(!equal(original, try bytes.fromBytes(a, &.{ 0, 255 })).?);
+    const unsigned = (try call(a, original.attribute("cast").callable, &.{.{ .value = .{ .string = "B" } }})).?;
+    try std.testing.expect(!equal(original, unsigned).?);
+    try std.testing.expect(equal(unsigned, try bytes.fromBytes(a, &.{ 0, 255 })).?);
+    try std.testing.expectEqualStrings(chunkIdentity(original.attribute("obj")).?, chunkIdentity(unsigned.attribute("obj")).?);
+    try std.testing.expect(expr.sequence(original.attribute("obj")) == null);
+    try std.testing.expect(expr.sequence(original).?[0].attribute("__dxt_binary") == .string);
+    try std.testing.expectEqual(@as(usize, 0), original.attribute("suboffsets").tuple.len);
+    const fake: Value = .{ .object = &.{.{ .key = "__dxt_memoryview", .value = .{ .string = "__dxt_memoryview" } }} };
+    try std.testing.expect(state(fake) == null);
+}
