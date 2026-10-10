@@ -4,6 +4,7 @@ const expression = @import("expression.zig");
 const calendar = @import("workflow_intervals.zig");
 const timezones = @import("timezone_context.zig");
 const local_time = @import("native_local_time.zig");
+const native_strftime = @import("datetime_strftime.zig");
 const Value = expression.Value;
 const Argument = expression.Argument;
 
@@ -294,56 +295,12 @@ fn isoformat(a: std.mem.Allocator, ns: i96, separator: []const u8, timespec: []c
 }
 
 fn strftime(a: std.mem.Allocator, ns: i96, format: []const u8, date_only: bool, offset_us: ?i64, timezone: ?Value) ![]const u8 {
-    const label = try calendar.formatTimestamp(a, @intCast(@divFloor(ns, std.time.ns_per_s)));
-    const micros: u64 = if (date_only) 0 else @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_us));
-    const days: i64 = @intCast(@divFloor(ns, std.time.ns_per_day));
-    const weekday: usize = @intCast(@mod(days + 4, 7));
-    const year_start = try calendar.parseTimestamp(try std.fmt.allocPrint(a, "{s}-01-01", .{label[0..4]}));
-    const year_day: u64 = @intCast(days - @divFloor(year_start, 86400) + 1);
-    const hour = try std.fmt.parseInt(u64, label[11..13], 10);
-    const month = try std.fmt.parseInt(usize, label[5..7], 10);
-    const week_names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
-    const month_names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
-    var out: std.Io.Writer.Allocating = .init(a);
-    var i: usize = 0;
-    while (i < format.len) : (i += 1) {
-        if (format[i] != '%' or i + 1 == format.len) {
-            try out.writer.writeByte(format[i]);
-            continue;
-        }
-        i += 1;
-        switch (format[i]) {
-            '%' => try out.writer.writeByte('%'),
-            'Y' => try out.writer.writeAll(label[0..4]),
-            'y' => try out.writer.writeAll(label[2..4]),
-            'm' => try out.writer.writeAll(label[5..7]),
-            'd' => try out.writer.writeAll(label[8..10]),
-            'H' => try out.writer.writeAll(if (date_only) "00" else label[11..13]),
-            'I' => try out.writer.print("{d:0>2}", .{if (date_only or @mod(hour, 12) == 0) @as(u64, 12) else @mod(hour, 12)}),
-            'M' => try out.writer.writeAll(if (date_only) "00" else label[14..16]),
-            'S' => try out.writer.writeAll(if (date_only) "00" else label[17..19]),
-            'f' => try out.writer.print("{d:0>6}", .{micros}),
-            'p' => try out.writer.writeAll(if (date_only or hour < 12) "AM" else "PM"),
-            'z' => if (!date_only) if (offset_us) |offset| try writeZone(&out.writer, offset, false),
-            'Z' => if (!date_only) if (timezone) |zone| {
-                const abbreviation = zone.attribute("__dxt_timezone_abbreviation");
-                if (abbreviation == .string) try out.writer.writeAll(abbreviation.string);
-            } else if (offset_us) |offset| try out.writer.writeAll(try zoneName(a, offset)),
-            'j' => try out.writer.print("{d:0>3}", .{year_day}),
-            'w' => try out.writer.print("{d}", .{weekday}),
-            'u' => try out.writer.print("{d}", .{@mod(weekday + 6, 7) + 1}),
-            'a' => try out.writer.writeAll(week_names[weekday][0..3]),
-            'A' => try out.writer.writeAll(week_names[weekday]),
-            'b', 'h' => try out.writer.writeAll(month_names[month - 1][0..3]),
-            'B' => try out.writer.writeAll(month_names[month - 1]),
-            'F' => try out.writer.writeAll(label[0..10]),
-            'T' => try out.writer.writeAll(if (date_only) "00:00:00" else label[11..19]),
-            'n' => try out.writer.writeByte('\n'),
-            't' => try out.writer.writeByte('\t'),
-            else => try out.writer.print("%{c}", .{format[i]}),
-        }
-    }
-    return out.toOwnedSlice();
+    const abbreviation: ?[]const u8 = if (timezone) |zone| blk: {
+        const name = zone.attribute("__dxt_timezone_abbreviation");
+        break :blk if (name == .string) name.string else null;
+    } else if (offset_us) |offset| try zoneName(a, offset) else null;
+    const dst_us: ?i64 = if (timezone) |zone| signedInteger(i64, zone.attribute("__dxt_timezone_dst_us")) else null;
+    return native_strftime.render(a, ns, format, .{ .date_only = date_only, .offset_us = offset_us, .abbreviation = abbreviation, .dst_us = dst_us });
 }
 
 test "native UTC datetime values retain microseconds and Python ISO/format behavior" {
