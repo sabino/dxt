@@ -2,6 +2,8 @@
 
 Python is exclusively a developer oracle: all product commands use the native
 dxt binary. Each engine receives the same project and external profile shape.
+The isolated fixture freezes SQL wall time so volatile views can be compared
+exactly; authored SQL and complete typed row comparisons remain unchanged.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ import tempfile
 import yaml
 
 from validate_dbt_artifacts import assert_artifact
+from oracle_clock import reexec_current_script, verify_python_clock, verify_sql_clock
 
 ROOT = Path(__file__).resolve().parents[1]
 REVISION = "ef562bac8583a3dd041437d1a0ed926d356da4fd"
@@ -107,6 +110,7 @@ def relation_rows(connection, schema, identifier):
 
 
 def certify(source, temporary, binary, core, adapter):
+    verify_python_clock()
     environment = dict(os.environ, DBT_SEND_ANONYMOUS_USAGE_STATS='false',
                        DXT_DUCKDB_BACKEND='native')
     with ExitStack() as stack:
@@ -170,6 +174,8 @@ def certify(source, temporary, binary, core, adapter):
                                     for identifier, node in run_[5]['nodes'].items() if 'compiled_code' in node}
         assert_same(f'{adapter} every compiled SQL resource', compiled_sql(actual), compiled_sql(expected))
         with expected[3]() as core_connection, actual[3]() as native_connection:
+            verify_sql_clock(core_connection, adapter)
+            verify_sql_clock(native_connection, adapter)
             for identifier, relation in expected[1]['nodes'].items():
                 other = actual[1]['nodes'][identifier]
                 assert_same(f'{adapter}/{identifier} catalog columns', other['columns'], relation['columns'])
@@ -186,6 +192,8 @@ def main():
     parser.add_argument('--dbt', default=shutil.which('dbt'))
     parser.add_argument('--adapter', choices=['duckdb', 'postgres', 'all'], default='postgres')
     arguments = parser.parse_args()
+    clock = datetime.datetime.fromtimestamp(verify_python_clock(), datetime.timezone.utc)
+    print(f'Public SQL fixture wall clock: {clock.isoformat()} (monotonic clocks remain real)', flush=True)
     for package, version in [('dbt-core', '1.10.5'), ('dbt-duckdb', '1.9.6'), ('dbt-postgres', '1.9.1')]:
         assert_same(f'pinned {package}', importlib.metadata.version(package), version)
     if not arguments.dbt:
@@ -205,4 +213,7 @@ def main():
 
 
 if __name__ == '__main__':
+    result = reexec_current_script(__file__)
+    if result is not None:
+        raise SystemExit(result)
     main()
