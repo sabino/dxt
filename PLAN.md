@@ -82,6 +82,14 @@ default Core fixtures are unchanged. The supervisor owns documentation,
 review and integration. A new native/CLI build and the affected default plus
 extension checks precede the corrected full-suite and final release gates.
 
+The frozen `0fd4457` full run confirms the three base CLI failures and three
+command-flag failures at the same compile catch. It is deliberately stopped
+with one normal pytest interrupt so standard finalizers and the partial JUnit
+report run before the corrected complete suite starts. The partial report,
+failed scratch, original clean/driver build receipts and candidate hashes
+remain negative evidence, never full acceptance. No assertions or fixture
+prerequisites are changed in that original run.
+
 The earlier unfiltered 5,808-case run on the published sorting candidate
 exposed eight failures across initialization, a colored-output expectation and
 durable compile/docs error artifacts. It continued without
