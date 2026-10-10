@@ -81,8 +81,12 @@ fn localInfo(zone: Zone, civil_seconds: i64, is_dst: ?bool, depth: u8) !Info {
     var candidates: [2]Info = undefined;
     var count: usize = 0;
     for ([_]i64{ -86400, 86400 }) |delta| {
-        const tentative = infoAt(zone, civil_seconds + delta);
-        const normalized = infoAt(zone, civil_seconds - tentative.offset_seconds);
+        const nearby = civil_seconds + delta;
+        if (nearby < -62135596800 or nearby > 253402300799) continue;
+        const tentative = infoAt(zone, nearby);
+        const utc_seconds = civil_seconds - tentative.offset_seconds;
+        if (utc_seconds < -62135596800 or utc_seconds > 253402300799) return error.JinjaNumericOverflow;
+        const normalized = infoAt(zone, utc_seconds);
         if (normalized.offset_seconds == tentative.offset_seconds) {
             if (count == 0 or !sameInfo(candidates[0], normalized)) {
                 candidates[count] = normalized;
@@ -119,10 +123,12 @@ fn zoneList(a: Allocator, common: bool) !Value {
     return .{ .list = values };
 }
 pub fn countryLookup(a: Allocator, kind: []const u8, key: Value) !Value {
+    if (key.attribute("__dxt_binary") == .string) return .undefined;
     if (key != .string) return error.JinjaTypeError;
+    const uppercase = try @import("expression_unicode.zig").convert(a, key.string, .upper);
     for (0..country_count) |index| {
         const at = countries_at + index * 16;
-        if (!std.ascii.eqlIgnoreCase(text(read(u32, at)), key.string)) continue;
+        if (!std.ascii.eqlIgnoreCase(text(read(u32, at)), uppercase)) continue;
         if (std.mem.eql(u8, kind, "names")) return .{ .string = text(read(u32, at + 4)) };
         const count = read(u32, at + 12);
         if (count == 0) return .undefined;
@@ -191,7 +197,7 @@ fn timezoneObject(a: Allocator, id: Identity) !Value {
     const utc = id.zone >= 0 and std.mem.eql(u8, zoneAt(@intCast(id.zone)).name, "UTC");
     const fixed = id.zone == -1;
     const base = id.zone == -2;
-    const zone_name = if (id.zone >= 0) zoneAt(@intCast(id.zone)).name else if (fixed) try std.fmt.allocPrint(a, "pytz.FixedOffset({d})", .{@divTrunc(id.offset_us, std.time.us_per_min)}) else "";
+    const zone_name = if (id.zone >= 0) zoneAt(@intCast(id.zone)).name else if (fixed) try std.fmt.allocPrint(a, "pytz.FixedOffset({d})", .{if (std.mem.startsWith(u8, id.abbreviation, "fixed=")) @as(i64, @intFromFloat(try std.fmt.parseFloat(f64, id.abbreviation[6..]))) else @divTrunc(id.offset_us, std.time.us_per_min)}) else "";
     const display = if (base) "<pytz.tzinfo.BaseTzInfo object>" else zone_name;
     const info = try identityText(a, id);
     const representation = if (utc) "<UTC>" else if (fixed) zone_name else if (base) display else if (!zoneAt(@intCast(id.zone)).dynamic) try std.fmt.allocPrint(a, "<StaticTzInfo '{s}'>", .{zone_name}) else try std.fmt.allocPrint(a, "<DstTzInfo '{s}' {s}{s}{s} {s}>", .{ zone_name, id.abbreviation, if (id.offset_us >= 0) @as([]const u8, "+") else "", try durationText(a, id.offset_us), if (id.dst_us == 0) @as([]const u8, "STD") else "DST" });
@@ -379,8 +385,13 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument) anyerror!?Va
         const minutes = try expr.numericFloat(args[0].value);
         if (!std.math.isFinite(minutes) or @abs(minutes) >= 1440) return error.InvalidTimeZoneOffset;
         if (minutes == 0) return try timezoneValue(a, "UTC", null);
-        const micros: i64 = @intFromFloat(@round(minutes * std.time.us_per_min));
-        return try timezoneObject(a, .{ .zone = -1, .offset_us = micros, .dst_us = 0, .abbreviation = "" });
+        const total = minutes * std.time.us_per_min;
+        const floor = @floor(total);
+        const fraction = total - floor;
+        const rounded = floor + @as(f64, if (fraction > 0.5 or (fraction == 0.5 and @mod(floor, 2) != 0)) 1 else 0);
+        const micros: i64 = @intFromFloat(rounded);
+        const key = if (minutes == @trunc(minutes)) try std.fmt.allocPrint(a, "{d}", .{@as(i64, @intFromFloat(minutes))}) else try expr.Value.text(.{ .number = minutes }, a);
+        return try timezoneObject(a, .{ .zone = -1, .offset_us = micros, .dst_us = 0, .abbreviation = try std.fmt.allocPrint(a, "fixed={s}", .{key}) });
     }
     if (std.mem.startsWith(u8, name, "__dxt_pytz_duration:")) {
         if (args.len != 0) return error.InvalidJinjaArguments;

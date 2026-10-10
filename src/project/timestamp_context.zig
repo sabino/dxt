@@ -91,6 +91,7 @@ pub fn attachTimezone(a: std.mem.Allocator, civil_ns: i96, zone: Value) anyerror
     return datetimeValueWithOffsetUs(a, civil_ns, false, offset_us, zone, 0);
 }
 pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, civil_ns: i96, date_only: bool, offset_us: ?i64, timezone: ?Value, fold: u1) anyerror!Value {
+    if (civil_ns < -62135596800 * @as(i96, std.time.ns_per_s) or civil_ns >= 253402300800 * @as(i96, std.time.ns_per_s)) return error.JinjaNumericOverflow;
     if (offset_us) |offset| if (@abs(offset) >= std.time.us_per_day) return error.InvalidTimeZoneOffset;
     const label = try calendar.formatTimestamp(a, @intCast(@divFloor(civil_ns, std.time.ns_per_s)));
     const year = try std.fmt.parseInt(u32, label[0..4], 10);
