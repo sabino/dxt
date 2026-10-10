@@ -130,25 +130,60 @@ fn ownedObject(allocator: std.mem.Allocator, items: []const expression.Entry) ![
 /// nested container. Updating every reachable alias preserves Python/Jinja's
 /// reference behavior without retaining pointers to temporary stack values.
 pub fn replaceAliases(value: *Value, original: Value, replacement: Value, depth: usize) !void {
+    var ancestry: [129]AliasIdentity = undefined;
+    return replaceAliasesPath(value, original, replacement, depth, &ancestry, 0);
+}
+
+const AliasIdentity = struct { tag: std.meta.Tag(Value), pointer: usize, length: usize };
+
+fn replaceAliasesPath(value: *Value, original: Value, replacement: Value, depth: usize, ancestry: *[129]AliasIdentity, count: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    // Owned context copies can close receiver/method-key cycles. Match the
+    // mutation first, then stop revisiting the same container on this path.
+    const identity: AliasIdentity = switch (value.*) {
+        .list => |items| .{ .tag = .list, .pointer = @intFromPtr(items.ptr), .length = items.len },
+        .tuple => |items| .{ .tag = .tuple, .pointer = @intFromPtr(items.ptr), .length = items.len },
+        .object => |items| .{ .tag = .object, .pointer = @intFromPtr(items.ptr), .length = items.len },
+        else => return,
+    };
+    const matches = switch (value.*) {
+        .list => original == .list and value.list.ptr == original.list.ptr and value.list.len == original.list.len,
+        .object => original == .object and value.object.ptr == original.object.ptr and value.object.len == original.object.len,
+        else => false,
+    };
+    if (matches) {
+        value.* = replacement;
+        return;
+    }
+    for (ancestry[0..count]) |previous| if (std.meta.eql(previous, identity)) return;
+    ancestry[count] = identity;
     if (value.* == .list) {
-        if (original == .list and value.list.ptr == original.list.ptr and value.list.len == original.list.len) {
-            value.* = replacement;
-            return;
-        }
-        for (@constCast(value.list)) |*child| try replaceAliases(child, original, replacement, depth + 1);
+        for (@constCast(value.list)) |*child| try replaceAliasesPath(child, original, replacement, depth + 1, ancestry, count + 1);
     } else if (value.* == .tuple) {
-        for (@constCast(value.tuple)) |*child| try replaceAliases(child, original, replacement, depth + 1);
+        for (@constCast(value.tuple)) |*child| try replaceAliasesPath(child, original, replacement, depth + 1, ancestry, count + 1);
     } else if (value.* == .object) {
-        if (original == .object and value.object.ptr == original.object.ptr and value.object.len == original.object.len) {
-            value.* = replacement;
-            return;
-        }
         for (@constCast(value.object)) |*entry| {
-            if (entry.typed_key) |*key| try replaceAliases(key, original, replacement, depth + 1);
-            try replaceAliases(&entry.value, original, replacement, depth + 1);
+            if (entry.typed_key) |*key| try replaceAliasesPath(key, original, replacement, depth + 1, ancestry, count + 1);
+            try replaceAliasesPath(&entry.value, original, replacement, depth + 1, ancestry, count + 1);
         }
     }
+}
+
+test "alias publication traverses cyclic owned method keys and updates reachable receivers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const original = Value{ .list = try ownedList(a, &.{.{ .integer = "1" }}) };
+    const replacement = Value{ .list = try ownedList(a, &.{ .{ .integer = "1" }, .{ .integer = "2" } }) };
+    const entries = try expression.allocateEntries(a, 2);
+    @memset(entries, .{ .key = "", .value = .none });
+    var object = Value{ .object = entries };
+    entries[0] = .{ .key = "method", .typed_key = (try @import("builtin_bound_method.zig").lookup(a, object, "get")).?, .value = original };
+    entries[1] = .{ .key = "again", .value = original };
+    try replaceAliases(&object, original, replacement, 0);
+    try std.testing.expect(object.object[0].typed_key.?.attribute("__dxt_builtin_receiver").object.ptr == object.object.ptr);
+    try std.testing.expect(object.object[0].value.list.ptr == replacement.list.ptr);
+    try std.testing.expect(object.object[1].value.list.ptr == replacement.list.ptr);
 }
 
 test "container mutations preserve nested shared receiver aliases" {
