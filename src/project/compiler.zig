@@ -1701,17 +1701,14 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
                     }
                 } else return error.InvalidJinjaArguments;
             }
-            var raw: std.ArrayList(u8) = .empty;
-            var count: usize = 0;
+            var config: std.json.Value = .{ .object = .empty };
+            defer @import("config_value.zig").deinit(context.allocator, &config);
             for (values.items) |entry| {
-                if (count != 0) try raw.appendSlice(allocator, ", ");
-                try raw.appendSlice(allocator, entry.key);
-                try raw.append(allocator, '=');
-                const value = entry.value;
-                if (value == .boolean) try raw.appendSlice(allocator, if (value.boolean) "true" else "false") else try raw.appendSlice(allocator, try native_expr.repr(value, allocator));
-                count += 1;
+                var value = try @import("config_value.zig").fromExpression(context.allocator, entry.value);
+                defer @import("config_value.zig").deinit(context.allocator, &value);
+                try @import("config_value.zig").put(context.allocator, &config, entry.key, value);
             }
-            try jinja.parseConfig(context.allocator, raw.items, node);
+            try @import("resource_config.zig").applyParsedInline(context.allocator, config, node);
         }
         return .{ .string = "" };
     }
@@ -2205,6 +2202,30 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     try bindMacroArguments(context, parameters, args, try macroSpecials(macro.macro_sql, .{ .start = open_end + 2, .end = body_end }));
     try renderRange(context, macro.macro_sql, afterTag(macro.macro_sql, open_end + 2, body_end), body_end, &out);
     return context.returned orelse .{ .string = try allocator.dupe(u8, out.items) };
+}
+
+test "dynamic native tuple configuration bypasses textual repr reparsing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.rendered",
+        .name = "rendered",
+        .path = "rendered.sql",
+        .original_file_path = "models/rendered.sql",
+        .raw_code = "{{ config(meta={'calendar': modules.datetime.date(2021,1,1).isocalendar()}, pre_hook=['select 1']) }}select 1",
+    };
+    defer types.deinitNode(allocator, &node);
+    try scanDependencies(allocator, node.raw_code, &node, &graph);
+    const config_values = @import("config_value.zig");
+    const calendar = config_values.get(config_values.get(node.effective_config, "meta").?, "calendar").?.array.items;
+    try std.testing.expectEqual(@as(i64, 2020), calendar[0].integer);
+    try std.testing.expectEqual(@as(i64, 53), calendar[1].integer);
+    try std.testing.expectEqual(@as(i64, 5), calendar[2].integer);
+    try std.testing.expectEqual(@as(usize, 1), config_values.get(node.effective_config, "pre-hook").?.array.items.len);
 }
 
 test "macro argument collection and lexical caller callbacks" {
