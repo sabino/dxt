@@ -59,3 +59,18 @@ def test_microbatch_runs_authored_incremental_materialization_for_each_batch(tmp
     pair.invoke('run', WINDOW)
     assert result_pair(pair)[0] == result_pair(pair)[1]
     assert rows(pair, request, adapter, 'select phase,batch_id from {schema}.batch_audit order by phase,batch_id')[0] == rows(pair, request, adapter, 'select phase,batch_id from {schema}.batch_audit order by phase,batch_id')[1]
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_legacy_unbatched_strategy_preserves_actual_main_statement_response(tmp_path, configuration_oracle, request, adapter):
+    pair = setup(tmp_path, configuration_oracle, request, adapter)
+    pair.write('macros/microbatch.sql', DUCKDB_STRATEGY)
+    for project in pair.projects:
+        path = project / 'dbt_project.yml'
+        path.write_text(path.read_text().replace('require_batched_execution_for_custom_microbatch_strategy: true', 'require_batched_execution_for_custom_microbatch_strategy: false').replace('{{ model.batch.id }}', '{{ model.name }}'))
+    for index in range(2 if adapter == 'postgres' else 1):
+        pair.invoke('run', WINDOW)
+        keys = ('status', 'message', 'adapter_response', 'failures')
+        actual, expected = [{key: row[key] for key in keys} for project in pair.projects for row in json.loads((project / 'target/run_results.json').read_text())['results']]
+        assert actual == expected
+        assert rows(pair, request, adapter, 'select id,amount from {schema}.events order by id')[0] == rows(pair, request, adapter, 'select id,amount from {schema}.events order by id')[1]
