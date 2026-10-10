@@ -78,10 +78,16 @@ stable ties, original typed payloads and comparison errors. Forty-eight actual
 Core regression cases cover both initial adapters, including all five required
 large unordered-float sizes; all 134 dictionary-sort cases remain mandatory.
 The complete unfiltered collection now contains 5,808 tests. All 784 native
-tests and the CLI build pass. The 182 paired sorting comparisons are running
-on one frozen CLI before the fresh whole-suite run. Product
-source is held during this candidate's certification; final public ladders,
+tests, the CLI build, all 182 paired sorting comparisons and the three original
+fixture regressions pass on one frozen CLI. Product source is held during this
+candidate's certification; the fresh whole-suite run, final public ladders,
 ReleaseSafe packaging/performance and both actual-platform suites remain gates.
+The local whole-suite run uses standard pytest failed-only temporary retention
+to bound scratch storage, without changing test selection, assertions or build,
+adapter and browser fixtures. Durable logs/JUnit reports remain outside the
+temporary root. Pytest retains call-failure scratch; setup/teardown-only failures
+can still lose their function scratch under its documented cleanup behavior.
+The former observation/archival tooling stays outside this fresh test process.
 
 The preceding candidate passes both unchanged public-project ladders and the
 original autocommit check. Its actual x86_64 and ARM native/install CI jobs,
