@@ -1769,6 +1769,17 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
         if (std.mem.eql(u8, name, parameterless) and args.len != 0) return error.InvalidJinjaArguments;
     }
     if (try @import("standard_text_filters.zig").callWithHost(allocator, name, value, args, host)) |result| return result;
+    if (std.mem.eql(u8, name, "abs")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        if (try temporal.unary(allocator, "abs", value)) |result| return result;
+        if (integerText(value)) |integer_text| return .{ .integer = if (integer_text[0] == '-') try numbers.negate(allocator, integer_text) else integer_text };
+        if (complexProtocol(value)) |complex| {
+            const magnitude = std.math.hypot(complex.real, complex.imaginary);
+            if (std.math.isInf(magnitude) and std.math.isFinite(complex.real) and std.math.isFinite(complex.imaginary)) return error.JinjaNumericOverflow;
+            return try floatValue(allocator, magnitude);
+        }
+        return try floatValue(allocator, @abs(try numericFloat(value)));
+    }
     if (std.mem.eql(u8, name, "tojson")) {
         if (args.len > 1) return error.InvalidJinjaArguments;
         if (args.len == 1 and args[0].name != null and !std.mem.eql(u8, args[0].name.?, "indent")) return error.InvalidJinjaArguments;
