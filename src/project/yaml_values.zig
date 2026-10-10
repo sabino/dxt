@@ -262,52 +262,5 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) !?Va
         present[at] = true;
         if (at == 0) encoding = arg.value.string else handling = arg.value.string;
     }
-    if (std.ascii.eqlIgnoreCase(encoding, "utf-8") or std.ascii.eqlIgnoreCase(encoding, "utf8")) {
-        return .{ .string = try decodeText(a, bytes, false, handling) };
-    }
-    if (std.ascii.eqlIgnoreCase(encoding, "ascii")) {
-        return .{ .string = try decodeText(a, bytes, true, handling) };
-    }
-    if (std.ascii.eqlIgnoreCase(encoding, "latin1") or std.ascii.eqlIgnoreCase(encoding, "latin-1") or std.ascii.eqlIgnoreCase(encoding, "iso-8859-1")) {
-        var out: std.Io.Writer.Allocating = .init(a);
-        for (bytes) |byte| {
-            var buffer: [4]u8 = undefined;
-            const length = try std.unicode.utf8Encode(byte, &buffer);
-            try out.writer.writeAll(buffer[0..length]);
-        }
-        return .{ .string = try out.toOwnedSlice() };
-    }
-    return error.JinjaTypeError;
-}
-
-fn decodeText(a: std.mem.Allocator, bytes: []const u8, ascii: bool, handling: []const u8) ![]const u8 {
-    var out: std.Io.Writer.Allocating = .init(a);
-    var i: usize = 0;
-    while (i < bytes.len) {
-        if (bytes[i] < 128) {
-            try out.writer.writeByte(bytes[i]);
-            i += 1;
-            continue;
-        }
-        var consumed: usize = 1;
-        if (!ascii) {
-            const width = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 0;
-            if (width != 0) {
-                var available: usize = 1;
-                while (available < width and i + available < bytes.len and bytes[i + available] >= 0x80 and bytes[i + available] <= 0xbf) : (available += 1) {}
-                const constrained = available >= 2 and ((bytes[i] == 0xe0 and bytes[i + 1] < 0xa0) or (bytes[i] == 0xed and bytes[i + 1] >= 0xa0) or (bytes[i] == 0xf0 and bytes[i + 1] < 0x90) or (bytes[i] == 0xf4 and bytes[i + 1] >= 0x90));
-                if (available == width and !constrained and std.unicode.utf8ValidateSlice(bytes[i..][0..width])) {
-                    try out.writer.writeAll(bytes[i..][0..width]);
-                    i += width;
-                    continue;
-                }
-                if (!constrained) consumed = available;
-            }
-        }
-        if (std.mem.eql(u8, handling, "replace")) try out.writer.writeAll("\xef\xbf\xbd") else if (std.mem.eql(u8, handling, "backslashreplace")) {
-            for (bytes[i..][0..consumed]) |byte| try out.writer.print("\\x{x:0>2}", .{byte});
-        } else if (!std.mem.eql(u8, handling, "ignore")) return error.JinjaTypeError;
-        i += consumed;
-    }
-    return out.toOwnedSlice();
+    return .{ .string = try @import("yaml_bytes_codec.zig").decode(a, bytes, encoding, handling) };
 }
