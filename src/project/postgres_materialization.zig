@@ -12,6 +12,7 @@ pub const ExecutionPolicy = struct {
     file_effects: ?*@import("materialization_journal.zig").Journal = null,
     // Owned by the caller, including when a later hook or commit fails.
     main_result: ?*?@import("materialization_result.zig").Result = null,
+    artifact_writer: ?@import("stock_artifacts.zig").Writer = null,
 };
 
 pub fn isSupported(value: []const u8) bool {
