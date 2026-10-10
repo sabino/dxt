@@ -133,9 +133,26 @@ the CLI build, including the checked filter and saved-method companions.
 Actual Core grounding covers Unicode/numeric parameter slots, token boundaries,
 nonfinite numeric bindings, finite date/timestamp string fallbacks, buffer
 lifetimes and method representation. Its strict 274 query plus ten UUID pairs,
-62 Decimal pairs and unchanged 63 seed/18 alias comparisons remain required
-before integration and the final unfiltered campaign gates. No product edits
-occur during an immutable candidate's comparisons.
+and all 62 Decimal pairs pass on the same immutable CLI, with zero failures,
+errors, skips or deselections: 346 complete API comparisons. The supervisor
+integrated all 33 reviewed helper commits and the certified transport commit;
+every native source file matches the certified worker tree byte for byte.
+The unchanged 63 seed/18 alias comparisons and final unfiltered campaign gates
+remain required. No product edits occur during an immutable candidate's
+comparisons.
+
+A final actual Core witness confirms that all six returned PostgreSQL range
+types can be rebound as parameters, including finite, empty and unbounded
+values. The native conversion currently rejects these genuine carriers. The
+oracle worker owns the bounded companion's genuine range kind/class metadata,
+recursive parameter endpoints, conversion, adapter wiring and paired fixtures;
+the source worker has released only those range-helper hunks. The cache worker
+owns PostgreSQL literal adaptation in its separate helper, sequenced after the
+oracle's parameter definition. NumericRange keeps unknown scalar/text-array
+inference; temporal ranges use the stock typed constructors and arrays. This
+adds no arbitrary provider or new authored constructor. Original passing
+candidate receipts stay intact; the combined companion must pass before the
+final canonical and release acceptance run.
 
 The source worker's 62 Decimal comparisons pass on the first, corrected and
 expanded typed CLIs. The expanded query gate retains 182 passing and seven
@@ -143,11 +160,10 @@ failing cases: type subscription, keyword field names, infinite timestamps and
 parameter adaptation exposed concrete native differences, plus a fixture's
 process-specific memory address. Corrections use actual Core witnesses; only
 the address output changes to deterministic bytes/format/type evidence. UUID
-safety and bytea lifecycle/method companions remain pending the final combined
-native build and unchanged actual Core comparisons. Its independent transport
-review found cursor
-consumption, eager Agate serialization and duplicate-name mismatches; the oracle
-worker owns their corrections. The supervisor owns final integration, docs and
+safety and bytea lifecycle/method companions now pass the final combined native
+build and unchanged actual Core comparisons. Its independent transport review
+found cursor consumption, eager Agate serialization and duplicate-name
+mismatches; the certified transport corrects all three. The supervisor owns final integration, docs and
 publication. The release worker preserves completed ignored proof data through
 verified lossless archives to make room for the complete final suite.
 
