@@ -132,6 +132,18 @@ pub fn parameter(a: std.mem.Allocator, input: Value) anyerror!params.Parameter {
 }
 fn convert(a: std.mem.Allocator, input: Value, depth: usize) anyerror!params.Parameter {
     if (depth == 128) return error.JinjaExpressionDepthExceeded;
+    if (@import("range_value.zig").className(input)) |class| {
+        const kind: params.RangeKind = if (std.mem.eql(u8, class, "NumericRange")) .numeric else if (std.mem.eql(u8, class, "DateRange")) .date else if (std.mem.eql(u8, class, "DateTimeRange")) .timestamp else if (std.mem.eql(u8, class, "DateTimeTZRange")) .timestamp_tz else return error.InvalidQueryParameter;
+        const empty = input.attribute("isempty").boolean;
+        const bounds = input.attribute("__dxt_range_bounds");
+        return .{ .range = .{
+            .kind = kind,
+            .lower = if (empty) null else try rangeEndpoint(a, input.attribute("lower"), depth + 1),
+            .upper = if (empty) null else try rangeEndpoint(a, input.attribute("upper"), depth + 1),
+            .bounds = if (empty) .{ '[', ')' } else .{ bounds.string[0], bounds.string[1] },
+            .empty = empty,
+        } };
+    }
     if (@import("decimal_value.zig").state(input)) |decimal| return .{ .decimal = decimal };
     if (@import("datetime_time.zig").state(input)) |clock| {
         if (clock.offset_us) |offset| {
@@ -161,6 +173,35 @@ fn convert(a: std.mem.Allocator, input: Value, depth: usize) anyerror!params.Par
         },
         else => return @import("seed_table.zig").parameter(input),
     }
+}
+
+fn rangeEndpoint(a: std.mem.Allocator, input: Value, depth: usize) !?*const params.Parameter {
+    if (input == .none) return null;
+    const endpoint = try a.create(params.Parameter);
+    endpoint.* = try convert(a, input, depth);
+    return endpoint;
+}
+
+test "genuine returned range bindings retain owned typed endpoints and class" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const range = try @import("range_value.zig").value(a, "NumericRange", try @import("decimal_value.zig").value(a, "1.234567890123456789"), .none, .{ '(', ')' }, false);
+    const bound = try parameter(a, range);
+    try std.testing.expectEqual(params.RangeKind.numeric, bound.range.kind);
+    try std.testing.expectEqualStrings("1.234567890123456789", bound.range.lower.?.decimal);
+    try std.testing.expect(bound.range.upper == null);
+    try std.testing.expectEqualDeep([2]u8{ '(', ')' }, bound.range.bounds);
+    try std.testing.expect(bound.recursive());
+    try std.testing.expectError(error.InvalidQueryParameter, bound.postgresText(a));
+    const empty = try parameter(a, try @import("range_value.zig").value(a, "DateRange", .none, .none, .{ '[', ')' }, true));
+    try std.testing.expect(empty.range.empty);
+    try std.testing.expectEqual(params.RangeKind.date, empty.range.kind);
+    const forged: Value = .{ .object = &.{
+        .{ .key = "__dxt_range", .value = .{ .string = "__dxt_range" } },
+        .{ .key = "__dxt_range_class", .value = .{ .string = "NumericRange" } },
+    } };
+    try std.testing.expect((try parameter(a, forged)) == .object);
 }
 
 test "mapping query bindings support positional slots without rewriting identifiers" {
