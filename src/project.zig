@@ -31,6 +31,7 @@ const project_defer = @import("project/defer.zig");
 const types = @import("project/types.zig");
 const workflow_engine = @import("project/workflow.zig");
 const cli_options = @import("project/cli_options.zig");
+const compile_error_policy = @import("project/compile_error_policy.zig");
 const util = @import("project/util.zig");
 
 const execution_failure_message = "DuckDB execution failed";
@@ -364,10 +365,12 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     }
     const compile_result = compileWithHost(runtime, options, &graph, selected, target_dir, &compile_rows, stderr) catch |err| {
         if (err == error.OutOfMemory) return err;
-        _ = try writeManifest(runtime, &graph, target_dir);
-        try writeRunResults(runtime, target_dir, compile_rows.items);
+        if (compile_error_policy.publish(options, err, compile_rows.items)) {
+            _ = try writeManifest(runtime, &graph, target_dir);
+            try writeRunResults(runtime, target_dir, compile_rows.items);
+        }
         try reportCompilationFailure(runtime, compile_rows.items, err, stderr);
-        return error.ExecutionFailure;
+        return error.SqlOperationFailure;
     };
 
     _ = try writeManifest(runtime, &graph, target_dir);
@@ -443,10 +446,12 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     }
     const compile_result = if (options.docs_compile) compileWithHost(runtime, options, &graph, selected, target_dir, &compile_rows, stderr) catch |err| {
         if (err == error.OutOfMemory) return err;
-        _ = try writeManifest(runtime, &graph, target_dir);
-        try writeRunResults(runtime, target_dir, compile_rows.items);
+        if (compile_error_policy.publish(options, err, compile_rows.items)) {
+            _ = try writeManifest(runtime, &graph, target_dir);
+            try writeRunResults(runtime, target_dir, compile_rows.items);
+        }
         try reportCompilationFailure(runtime, compile_rows.items, err, stderr);
-        return error.ExecutionFailure;
+        return error.SqlOperationFailure;
     } else CompileResult{ .count = 0, .saw_model = false, .compiled_base = "" };
 
     _ = try writeManifestWithPolicy(runtime, &graph, target_dir, cli_options.writeJson(runtime) or options.docs_compile);

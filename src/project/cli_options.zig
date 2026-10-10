@@ -106,6 +106,11 @@ pub fn prepare(runtime: types.Runtime, args: []const []const u8) !Prepared {
         if (stat.kind != .file) return error.InvalidPartialParseFilePath;
         options.partial_parse_file_path = std.Io.Dir.cwd().realPathFileAlloc(runtime.io, path, a) catch return error.InvalidPartialParseFilePath;
     }
+    if (eq(options.which, "compile") or eq(options.which, "retry") or
+        (eq(options.which, "docs") and normalized.items.len > 2 and eq(normalized.items[2], "generate")))
+    {
+        options.durable_compile_errors = try environmentBool(runtime, "DXT_DURABLE_COMPILE_ERRORS", false);
+    }
     try validateWarningOptions(runtime, options);
     if (options.resource_types) |kinds| for (kinds) |kind| if (!validResourceType(kind, false)) return error.UnsupportedResourceType;
     if (options.exclude_resource_types) |kinds| for (kinds) |kind| if (!validResourceType(kind, true)) return error.UnsupportedResourceType;
@@ -409,4 +414,30 @@ test "cache controls preserve environment precedence and global duplication rule
     const overridden = try prepare(runtime, &.{ "dxt", "--populate-cache", "run", "--no-cache-selected-only", "--no-log-cache-events" });
     try std.testing.expect(overridden.options.populate_cache and !overridden.options.cache_selected_only and !overridden.options.log_cache_events);
     try std.testing.expectError(error.DuplicateGlobalOption, prepare(runtime, &.{ "dxt", "--populate-cache", "run", "--no-populate-cache" }));
+}
+
+test "durable compile errors require a valid explicit native environment option" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    const runtime: types.Runtime = .{ .allocator = arena.allocator(), .io = std.testing.io, .environment = &env };
+    const invocations = [_][]const []const u8{
+        &.{ "dxt", "compile" },
+        &.{ "dxt", "docs", "generate" },
+        &.{ "dxt", "retry" },
+    };
+    for (invocations) |args| try std.testing.expect(!(try prepare(runtime, args)).options.durable_compile_errors);
+    for ([_][]const u8{ "true", "YES", "1" }) |value| {
+        try env.put("DXT_DURABLE_COMPILE_ERRORS", value);
+        for (invocations) |args| try std.testing.expect((try prepare(runtime, args)).options.durable_compile_errors);
+    }
+    for ([_][]const u8{ "false", "OFF", "0" }) |value| {
+        try env.put("DXT_DURABLE_COMPILE_ERRORS", value);
+        for (invocations) |args| try std.testing.expect(!(try prepare(runtime, args)).options.durable_compile_errors);
+    }
+    try env.put("DXT_DURABLE_COMPILE_ERRORS", "invalid");
+    for (invocations) |args| try std.testing.expectError(error.InvalidEnvironmentBoolean, prepare(runtime, args));
+    try std.testing.expect(!(try prepare(runtime, &.{ "dxt", "run" })).options.durable_compile_errors);
+    try std.testing.expect(!(try prepare(runtime, &.{ "dxt", "docs", "serve" })).options.durable_compile_errors);
 }

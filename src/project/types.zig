@@ -87,6 +87,7 @@ pub const Options = struct {
     docs_static: bool = false,
     docs_compile: bool = true,
     docs_empty_catalog: bool = false,
+    durable_compile_errors: bool = false,
     select: ?[]const u8 = null,
     selector: ?[]const u8 = null,
     exclude: ?[]const u8 = null,
