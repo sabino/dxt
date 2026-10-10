@@ -21,7 +21,8 @@ def invoke(pair, flags=(), success=True):
     pair.oracle.callbacks = [lambda message: events.append(message)]
     actual, expected = pair.projects
     result = subprocess.run([DXT, 'run', '--project-dir', str(actual), '--profiles-dir', str(actual), '--log-format', 'json', '--threads', '2', *flags], text=True, capture_output=True, cwd=ROOT)
-    reference = pair.oracle.invoke(['run', '--project-dir', str(expected), '--profiles-dir', str(expected), '--log-format', 'json', '--threads', '2', '--no-partial-parse', '--quiet', *flags])
+    # Core's deprecation check/update can race; serialize its exact-count baseline.
+    reference = pair.oracle.invoke(['run', '--project-dir', str(expected), '--profiles-dir', str(expected), '--log-format', 'json', '--threads', '1', '--no-partial-parse', '--quiet', *flags])
     from dbt.adapters.factory import reset_adapters
     from dbt.adapters.duckdb.connections import DuckDBConnectionManager
     reset_adapters()
