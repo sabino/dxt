@@ -1161,6 +1161,7 @@ fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const
     try std.json.Stringify.value(canonical_config, .{}, writer);
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
+    try writer.writeAll(",\"raw_code\":\"\"");
     try writer.writeAll(",\"depends_on\":{\"macros\":");
     try json.stringArray(writer, node.macro_depends_on.items);
     try writer.writeAll("}}");
