@@ -90,6 +90,33 @@ fresh combined native build and every focused case remain mandatory. The
 older whole run's additional external-reader diagnostic failure is being
 grounded read-only by the oracle worker before any correction is authorized.
 
+Actual Core and native external-reader witnesses confirm the plain authored
+invalid-boolean literal is part of the database diagnostic. Native rollback
+retains the original file bytes, relation rows and absence of staging files;
+those assertions stay intact. The oracle worker owns only correction of that
+literal expectation and an actual Core/native declared-secret regression in
+the same external-file fixture module. The separate declared DBT_ENV_SECRET_
+control proves a real native publication gap: Core masks the value in console,
+file log and result messages, while both engines retain authored raw SQL. The
+source worker owns a bounded native secret-value projection and its console,
+file-log and durable result-message seams, with allocation/overlap/empty-value
+checks. It must first trace the current publication owners, preserve authored
+SQL/config artifacts, retain useful non-secret diagnostics and propagate OOM.
+Any additional facade seam needs a grounded handoff before editing. The
+expression worker integrates these disjoint commits and certifies the combined
+native CLI; no independent heavy build starts without disk headroom.
+
+The older known-failing 5,808-case run is intentionally interrupted with SIGINT
+after preserving its current progress, failures and source/binary receipts.
+It cannot reach acceptance, and continued fixture growth threatens the space
+needed for corrected clean builds. Allow its normal finalizers and JUnit
+publication to close before changing that checkout. This is partial negative
+evidence only. All corrections still require a fresh complete unfiltered run,
+original build fixtures, both actual CI architectures and final public/release
+gates. Closed database scratch may be retired only by exact approved scope with
+two independently verified complete physical restores and durable recovery
+indexes; failed fixture scratch and unknown/live consumers remain protected.
+
 The final unfiltered 5,626-case candidate run was intentionally interrupted
 after its first failure was grounded: a fixture rendered a dictionary created
 from a salted Python set, whose iteration order changes with PYTHONHASHSEED.
