@@ -46,6 +46,17 @@ will restart the entire unfiltered canonical suite after focused certification.
 No test selection, assertion or schema check is weakened. The interrupted run
 and its failure remain recoverable and cannot count as final acceptance.
 
+The same interrupted run retains a second fixture failure: Core emits runtime
+errors on stdout under quiet logging. The corrected test keeps the return code,
+native stderr wrapper, exact database diagnostic and file-log assertions. Both
+test-only corrections are integrated. The filter's original focused pass also
+exposed genuine readonly Mapping dispatch and large unordered-float ordering
+differences. These remain product blockers until the native helper matches the
+pinned Core behavior on both adapters; no alternate fixture bypass is accepted.
+The bounded native adaptive-sort helper records its pinned upstream source and
+reuses the shipped PSF notices. Complete focused certification precedes a fresh
+unfiltered run, final public/release checks and both architecture CI suites.
+
 The preceding candidate passes both unchanged public-project ladders and the
 original autocommit check. Its actual x86_64 and ARM native/install CI jobs,
 all 776 native tests, 326 Python 3.11 cases, snapshots and performance pass.
