@@ -850,8 +850,124 @@ select '{{ information_schema.database }}' as table_database, '{{ relation.schem
         assert_run_results_schema_slice(project / 'target/run_results.json')
 
 
-@pytest.mark.parametrize('failure', ['direct-subscript', 'authored-error'])
-def test_postgres_catalog_errors_preserve_compilation_artifacts(tmp_path, configuration_oracle, request, failure):
+@pytest.mark.parametrize('entry', ['get_catalog', 'duckdb__get_catalog'])
+def test_duckdb_catalog_uses_authored_entry_and_schema_set(tmp_path, configuration_oracle, entry):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    for project in pair.projects:
+        profile = project / 'profiles.yml'
+        profile.write_text(profile.read_text().replace('schema: main', 'schema: MAIN'))
+    sql = "select 1::integer as id, 'hello'::varchar(24) as label"
+    pair.write('models/marts/catalog_entry.sql', "{{ config(materialized='table', persist_docs={'relation': true, 'columns': true}) }}" + sql)
+    pair.write('models/properties.yml', """version: 2
+models:
+  - name: catalog_entry
+    description: Catalog table description
+    columns:
+      - name: id
+        description: Catalog identifier
+      - name: label
+        description: Catalog label
+sources:
+  - name: warehouse
+    schema: MAIN
+    tables:
+      - name: same_relation
+        identifier: catalog_entry
+""")
+    pair.invoke('run')
+    pair.write('macros/catalog.sql', '{% macro ' + entry + '(information_schema, schemas) %}' + """
+{% if information_schema.database != database or information_schema.schema is not none or
+      information_schema.identifier != 'INFORMATION_SCHEMA' or information_schema.type != 'view' or
+      information_schema|string != adapter.quote(database) ~ '.INFORMATION_SCHEMA' %}
+{{ exceptions.raise_compiler_error('catalog requires a genuine InformationSchema') }}
+{% endif %}
+{% if schemas is mapping or schemas is sequence or schemas is not iterable or
+      (schemas | list | sort) != ['main'] %}
+{{ exceptions.raise_compiler_error('catalog schemas require a lowercase iterable set') }}
+{% endif %}
+{% call statement('catalog_override', fetch_result=true, auto_begin=false) %}
+select c.database_name as table_database, c.schema_name as table_schema,
+       c.table_name, 'BASE TABLE' as table_type,
+       t.comment || ' via authored catalog' as table_comment,
+       c.column_name, c.column_index, c.data_type as column_type,
+       c.comment || ' via authored catalog' as column_comment,
+       'Authored catalog owner' as table_owner
+from duckdb_columns() c join duckdb_tables() t
+  on c.database_name=t.database_name and c.schema_name=t.schema_name and c.table_name=t.table_name
+where c.database_name='{{ information_schema.database }}'
+  and lower(c.schema_name) in ({% for schema in schemas %}'{{ schema }}'{% if not loop.last %},{% endif %}{% endfor %})
+order by c.table_name, c.column_index
+{% endcall %}{{ return(load_result('catalog_override').table) }}{% endmacro %}
+{% macro get_catalog_relations(information_schema, relations) %}
+{{ exceptions.raise_compiler_error('DuckDB catalog must use its schema entry') }}{% endmacro %}
+""")
+    pair.invoke('docs generate')
+    actual, expected = [json.loads((project / 'target/catalog.json').read_text()) for project in pair.projects]
+    assert actual['errors'] == expected['errors'] is None
+    assert actual['nodes'] == expected['nodes']
+    assert actual['sources'] == expected['sources']
+    entry = actual['nodes']['model.configuration_fixture.catalog_entry']
+    assert entry['metadata']['comment'] == 'Catalog table description via authored catalog'
+    assert entry['metadata']['owner'] == 'Authored catalog owner'
+    assert set(entry['columns']) == {'id', 'label'}
+    assert entry['columns']['id']['comment'] == 'Catalog identifier via authored catalog'
+    assert entry['columns']['label']['comment'] == 'Catalog label via authored catalog'
+    from test_cli import assert_catalog_schema_slice, assert_manifest_schema_slice, assert_run_results_schema_slice
+    for project in pair.projects:
+        assert_catalog_schema_slice(project / 'target/catalog.json')
+        assert_manifest_schema_slice(project / 'target/manifest.json')
+        assert_run_results_schema_slice(project / 'target/run_results.json')
+        assert (project / 'target/index.html').is_file()
+        manifest = json.loads((project / 'target/manifest.json').read_text())
+        node = manifest['nodes']['model.configuration_fixture.catalog_entry']
+        assert node['compiled'] is True
+        assert node['compiled_code'] == sql
+        assert (project / 'target/compiled/configuration_fixture/models/marts/catalog_entry.sql').read_text() == sql
+        results = json.loads((project / 'target/run_results.json').read_text())['results']
+        assert [(row['status'], row['message']) for row in results] == [('success', None)]
+
+
+def test_duckdb_catalog_error_masks_declared_secret_and_keeps_authored_macro(tmp_path, configuration_oracle, monkeypatch, capsys):
+    secret = 'CATALOG_DECLARED_SECRET_VALUE_907'
+    monkeypatch.setenv('DBT_ENV_SECRET_CATALOG', secret)
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    pair.write('models/marts/catalog_entry.sql', "{{ config(materialized='table') }}select 1::integer as id")
+    pair.invoke('run')
+    macro = "{% macro duckdb__get_catalog(information_schema, schemas) %}{{ exceptions.raise_compiler_error('catalog rejected " + secret + "') }}{% endmacro %}"
+    pair.write('macros/catalog.sql', macro)
+    capsys.readouterr()
+    result, reference = pair.invoke('docs generate', flags=['--no-use-colors', '--no-quiet'], success=False)
+    core_console = capsys.readouterr()
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert reference.exception is None
+    for console in (result.stdout + result.stderr, core_console.out + core_console.err):
+        assert secret not in console
+        assert 'catalog rejected *****' in console
+    from test_cli import assert_catalog_schema_slice, assert_manifest_schema_slice, assert_run_results_schema_slice
+    for project in pair.projects:
+        assert_catalog_schema_slice(project / 'target/catalog.json')
+        assert_manifest_schema_slice(project / 'target/manifest.json')
+        assert_run_results_schema_slice(project / 'target/run_results.json')
+        catalog = json.loads((project / 'target/catalog.json').read_text())
+        assert catalog['nodes'] == catalog['sources'] == {}
+        assert len(catalog['errors']) == 1
+        assert secret not in catalog['errors'][0]
+        assert 'catalog rejected *****' in catalog['errors'][0]
+        log = (project / 'logs/dbt.log').read_text()
+        assert secret not in log
+        assert 'catalog rejected *****' in log
+        assert (project / 'target/index.html').is_file()
+        manifest = json.loads((project / 'target/manifest.json').read_text())
+        node = manifest['nodes']['model.configuration_fixture.catalog_entry']
+        assert node['compiled'] is True
+        assert node['compiled_code'] == 'select 1::integer as id'
+        assert manifest['macros']['macro.configuration_fixture.duckdb__get_catalog']['macro_sql'] == macro
+        results = json.loads((project / 'target/run_results.json').read_text())['results']
+        assert [(row['status'], row['message']) for row in results] == [('success', None)]
+
+
+@pytest.mark.parametrize('failure', ['direct-subscript', 'authored-error', 'declared-secret'])
+def test_postgres_catalog_errors_preserve_compilation_artifacts(tmp_path, configuration_oracle, request, failure, monkeypatch, capsys):
     pair = ConfigurationPair(tmp_path, configuration_oracle)
     configure_adapter(pair, request, 'postgres')
     pair.write('models/marts/catalog_entry.sql', "{{ config(materialized='table') }}select 1::integer as id")
@@ -865,8 +981,15 @@ select '{{ information_schema.database }}' as table_database, '{{ relations[0].s
 {% endcall %}{{ return(load_result('catalog_override').table) }}{% endmacro %}"""
     if failure == 'authored-error':
         macro = "{% macro postgres__get_catalog_relations(information_schema, relations) %}{{ exceptions.raise_compiler_error('catalog rejected') }}{% endmacro %}"
+    if failure == 'declared-secret':
+        secret = 'CATALOG_DECLARED_SECRET_VALUE_907'
+        monkeypatch.setenv('DBT_ENV_SECRET_CATALOG', secret)
+        macro = "{% macro postgres__get_catalog_relations(information_schema, relations) %}{{ exceptions.raise_compiler_error('catalog rejected " + secret + "') }}{% endmacro %}"
     pair.write('macros/catalog.sql', macro)
-    result, reference = pair.invoke('docs generate', success=False)
+    capsys.readouterr()
+    flags = ['--no-use-colors', '--no-quiet'] if failure == 'declared-secret' else []
+    result, reference = pair.invoke('docs generate', flags=flags, success=False)
+    core_console = capsys.readouterr()
     assert result.returncode == 1, result.stdout + result.stderr
     assert reference.exception is None
     from test_cli import assert_catalog_schema_slice, assert_manifest_schema_slice, assert_run_results_schema_slice
@@ -887,8 +1010,20 @@ select '{{ information_schema.database }}' as table_database, '{{ relations[0].s
         assert [row['status'] for row in run_results['results']] == ['success']
         if failure == 'authored-error':
             assert 'catalog rejected' in catalog['errors'][0]
+        if failure == 'declared-secret':
+            assert secret not in catalog['errors'][0]
+            assert 'catalog rejected *****' in catalog['errors'][0]
+            log = (project / 'logs/dbt.log').read_text()
+            assert secret not in log
+            assert 'catalog rejected *****' in log
+            assert manifest['macros']['macro.configuration_fixture.postgres__get_catalog_relations']['macro_sql'] == macro
+            assert [row['message'] for row in run_results['results']] == [None]
     if failure == 'authored-error':
         assert 'catalog rejected' in result.stderr
+    if failure == 'declared-secret':
+        for console in (result.stdout + result.stderr, core_console.out + core_console.err):
+            assert secret not in console
+            assert 'catalog rejected *****' in console
 
 
 def test_postgres_catalog_rejects_unavailable_source_database(tmp_path, configuration_oracle, request):
