@@ -160,6 +160,9 @@ fn append(a: std.mem.Allocator, value: Value, field: []const u8, item: Value) !v
     var storage = get(value, storage_field).list;
     if (storage.len == old.len) {
         const replacement = try expression.allocateValues(a, @min(100000, @max(@as(usize, 16), storage.len * 2)));
+        // Private capacity is still a typed list visited during alias
+        // publication. Its spare cells must carry valid Value tags too.
+        @memset(replacement, .none);
         @memcpy(replacement[0..old.len], old);
         storage = replacement;
         set(value, storage_field, .{ .list = storage });
@@ -304,4 +307,29 @@ test "unique preserves hash keys and map defaults apply at each path segment" {
     try std.testing.expect((try sequence.next(a, invalid, null)) == null);
     const mapped = try expression.evaluate(a, "[{}] | map(attribute='a.b',default={'b':7}) | list", null);
     try std.testing.expectEqualStrings("[7]", try mapped.text(a));
+}
+
+test "private batch and unique capacity remains typed during alias publication" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = try expression.allocateValues(a, 35);
+    for (source, 0..) |*item, i| item.* = try expression.integerValue(a, i);
+    const original = Value{ .list = try a.dupe(Value, &.{.{ .integer = "1" }}) };
+    const replacement = Value{ .list = try a.dupe(Value, &.{ .{ .integer = "1" }, .{ .integer = "2" } }) };
+    inline for (.{ "batch", "unique" }) |operation| {
+        var stream = if (std.mem.eql(u8, operation, "batch"))
+            try batch(a, .{ .list = source }, &.{.{ .value = .{ .integer = "19" } }})
+        else
+            try unique(a, .{ .list = source }, &.{});
+        while (try sequence.next(a, stream, null)) |_| {
+            const field = if (std.mem.eql(u8, operation, "batch")) "__dxt_filter_buffer" else "__dxt_filter_seen";
+            const capacity = get(stream, if (std.mem.eql(u8, operation, "batch")) "__dxt_filter_buffer_storage" else "__dxt_filter_seen_storage").list;
+            for (capacity[get(stream, field).list.len..]) |spare| try std.testing.expect(spare == .none);
+            // Mutating an unrelated list walks retained live generator state.
+            try @import("container_methods.zig").replaceAliases(&stream, original, replacement, 0);
+        }
+        // Completed LoopContext frames retain these descriptors too.
+        try @import("container_methods.zig").replaceAliases(&stream, original, replacement, 0);
+    }
 }
