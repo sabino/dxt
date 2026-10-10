@@ -55,6 +55,7 @@ pub fn isIterator(value: Value) bool {
 pub fn iter(a: std.mem.Allocator, input: Value) !Value {
     if (@import("builtin_bound_method.zig").isRelationMapping(input)) return error.JinjaTypeError;
     if (isIterator(input)) return input;
+    if (@import("query_memoryview.zig").isView(input) and !try @import("query_memoryview.zig").iterable(input)) return error.JinjaTypeError;
     if (@import("query_type.zig").name(input) != null) return (try @import("itertools_context.zig").call(a, "modules.itertools.repeat", &.{.{ .value = try @import("query_type.zig").notImplemented(a) }}, null)).?;
     if (!expression.isIterable(input)) return error.JinjaTypeError;
     const entries = try expression.allocateEntries(a, 3);
@@ -87,6 +88,12 @@ fn cursorAdvance(a: std.mem.Allocator, value: Value, position: usize) !void {
 fn nextIterator(a: std.mem.Allocator, value: Value, host: ?expression.Host) !?Value {
     const source = value.attribute("__dxt_sequence_source");
     const index: usize = @intCast(try expression.integerIndex(value.attribute("__dxt_sequence_cursor")));
+    if (@import("query_memoryview.zig").isView(source)) {
+        if (index >= try @import("query_memoryview.zig").length(source)) return null;
+        const item = try @import("query_memoryview.zig").index(a, source, try expression.integerValue(a, index));
+        try cursorAdvance(a, value, index + 1);
+        return item;
+    }
     if (source == .string) {
         if (index >= source.string.len) return null;
         const size = std.unicode.utf8ByteSequenceLength(source.string[index]) catch return error.JinjaTypeError;

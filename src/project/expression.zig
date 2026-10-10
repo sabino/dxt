@@ -9,6 +9,7 @@ const yaml_values = @import("yaml_values.zig");
 const temporal = @import("datetime_operations.zig");
 const decimals = @import("decimal_value.zig");
 const ranges = @import("range_value.zig");
+const buffers = @import("query_memoryview.zig");
 
 pub fn lengthWithHost(a: std.mem.Allocator, value: Value, host: ?Host) anyerror!Value {
     return @import("expression_dynamic.zig").length(a, value, host);
@@ -62,6 +63,7 @@ pub const Value = union(enum) {
     }
 
     pub fn text(self: Value, allocator: std.mem.Allocator) anyerror![]const u8 {
+        if (try buffers.render(allocator, self)) |rendered| return rendered;
         if (@import("builtin_bound_method.zig").isBound(self)) return @import("builtin_bound_method.zig").render(allocator, self);
         if (floatProtocol(self)) |number| return numbers.floatText(allocator, number);
         if (complexProtocol(self)) |number| return complex_numbers.text(allocator, number);
@@ -195,6 +197,7 @@ pub fn isNotImplemented(value: Value) bool {
 
 /// Probe the iterable protocol without consuming one-shot iterators.
 pub fn isIterable(value: Value) bool {
+    if (buffers.isView(value)) return buffers.iterable(value) catch false;
     if (@import("query_type.zig").name(value) != null) return true;
     return isUndefined(value) or value == .list or value == .tuple or value == .string or
         @import("builtin_bound_method.zig").isMapping(value) or sequence(value) != null or sequences.kind(value) != null;
@@ -501,6 +504,10 @@ pub fn checkedAttribute(value: Value, name: []const u8) !Value {
 
 /// Typed providers may defer a public attribute until it is actually used.
 pub fn attributeWithHost(a: std.mem.Allocator, value: Value, name: []const u8, host: ?Host) !Value {
+    if (buffers.isView(value)) {
+        if (std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
+        return (try buffers.attribute(a, value, name)) orelse .undefined;
+    }
     const getter = value.attribute("__dxt_getattr");
     if (getter == .callable) {
         const current = host orelse return error.UnsupportedJinjaCall;
@@ -668,6 +675,7 @@ test "cursor PostgreSQL Columns compare and slice as unhashable metadata sequenc
 }
 
 pub fn repr(value: Value, allocator: std.mem.Allocator) ![]const u8 {
+    if (try buffers.render(allocator, value)) |rendered| return rendered;
     if (isUndefined(value)) return "Undefined";
     const rendered = value.attribute("__dxt_repr");
     if (rendered == .string) return rendered.string;
@@ -690,6 +698,7 @@ pub fn callableName(value: Value) ?[]const u8 {
 pub fn callValue(a: std.mem.Allocator, value: Value, args: []const Argument, host: ?Host) anyerror!Value {
     if (value == .capture_undefined) return callUndefined(value);
     if (isUndefined(value)) return error.UndefinedJinjaValue;
+    if (try buffers.callValue(a, value, args)) |result| return result;
     if (@import("builtin_bound_method.zig").isBound(value)) return @import("builtin_bound_method.zig").call(a, value, args, host);
     const function = callableName(value) orelse return error.JinjaTypeError;
     if (try decimals.call(a, function, args)) |result| return result;
@@ -935,10 +944,21 @@ const Parser = struct {
                     try self.expect("]");
                     if (self.active) value = try sliceValue(self.allocator, value, start, end, step);
                 } else {
-                    try self.expect("]");
+                    var key = start.?;
+                    if (self.take(",")) {
+                        var keys: std.ArrayList(Value) = .empty;
+                        try keys.append(self.allocator, key);
+                        if (!self.take("]")) while (true) {
+                            try keys.append(self.allocator, try self.binary(0));
+                            if (self.take("]")) break;
+                            try self.expect(",");
+                            if (self.take("]")) break;
+                        };
+                        key = .{ .tuple = try ownedValues(self.allocator, &keys) };
+                    } else try self.expect("]");
                     if (self.active) {
-                        value = try indexValueWithHost(self.allocator, value, start.?, self.host);
-                        if (value == .undefined) value = try self.missing(if (start.? == .string) start.?.string else null);
+                        value = try indexValueWithHost(self.allocator, value, key, self.host);
+                        if (value == .undefined) value = try self.missing(if (key == .string) key.string else null);
                     }
                 }
             } else if (self.take(".")) {
@@ -1123,7 +1143,7 @@ const Parser = struct {
             }
             const host = self.host orelse return error.UnsupportedJinjaCall;
             const callee = try host.resolve(host.context, path, self.allocator);
-            if (@import("builtin_bound_method.zig").isBound(callee)) return try callValue(self.allocator, callee, args, self.host);
+            if (@import("builtin_bound_method.zig").isBound(callee) or buffers.isMethod(callee)) return try callValue(self.allocator, callee, args, self.host);
             if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| {
                 const receiver = try host.resolve(host.context, path[0..dot], self.allocator);
                 if (receiver == .capture_undefined or receiver == .object or receiver == .list or receiver == .tuple or receiver == .string or receiver == .complex) return try self.method(receiver, path[dot + 1 ..], args);
@@ -1158,7 +1178,7 @@ const Parser = struct {
         }
         if (isUndefined(receiver)) return error.UndefinedJinjaValue;
         const bound = try attributeWithHost(self.allocator, receiver, method_name, self.host);
-        if (callableName(bound) != null) return callValue(self.allocator, bound, args, self.host);
+        if (callableName(bound) != null or buffers.isMethod(bound)) return callValue(self.allocator, bound, args, self.host);
         if (try pureMethod(self.allocator, receiver, method_name, args, self.host)) |value| return value;
         if (mappingSource(receiver) != null or sequences.kind(receiver) != null) return if (self.capturing()) try callUndefined(try captureUndefined(self.allocator, method_name)) else error.UndefinedJinjaValue;
         const host = self.host orelse return error.UnsupportedJinjaCall;
@@ -1746,6 +1766,7 @@ pub fn equalValues(a: Value, b: Value) bool {
 /// Descriptors retain callable names, never borrowed Host pointers.
 threadlocal var text_depth: usize = 0;
 pub fn textWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) anyerror![]const u8 {
+    if (try buffers.render(allocator, value)) |rendered| return rendered;
     if (@import("builtin_bound_method.zig").isBound(value)) return @import("builtin_bound_method.zig").render(allocator, value);
     if (text_depth == 128) return error.JinjaExpressionDepthExceeded;
     text_depth += 1;
@@ -1782,6 +1803,7 @@ pub fn textWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) any
     return value.text(allocator);
 }
 pub fn reprWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) ![]const u8 {
+    if (try buffers.render(allocator, value)) |rendered| return rendered;
     const rendered = value.attribute("__dxt_repr");
     if (rendered == .string) return rendered.string;
     if (rendered == .callable or value == .list or value == .tuple or (value == .object and value.attribute("__dxt_rendered") == .undefined)) return textWithHost(allocator, value, host);
@@ -1800,8 +1822,8 @@ fn contains(allocator: std.mem.Allocator, container: Value, item: Value) anyerro
     return containsWithHost(allocator, container, item, null);
 }
 pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Value, host: ?Host) anyerror!bool {
-    if (@import("query_memoryview.zig").state(container) != null) {
-        for (sequence(container).?) |member| if (try equalMemberChecked(member, item)) return true;
+    if (buffers.isView(container)) {
+        for (try buffers.values(allocator, container)) |member| if (try equalMemberChecked(member, item)) return true;
         return false;
     }
     if (ranges.isRange(container)) return ranges.contains(allocator, container, item);
@@ -1918,6 +1940,16 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     return try floatValue(allocator, if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else return error.InvalidJinjaExpression);
 }
 pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
+    if (buffers.isView(value)) {
+        if (key == .string) {
+            _ = try buffers.checked(value);
+            return .undefined;
+        }
+        return buffers.index(allocator, value, key) catch |err| switch (err) {
+            error.JinjaTypeError, error.JinjaIndexError => .undefined,
+            else => return err,
+        };
+    }
     if (@import("query_type.zig").name(value) != null) return if (key == .string) try @import("query_type.zig").child(value, key.string) else try @import("query_type.zig").notImplemented(allocator);
     if (@import("query_memoryview.zig").chunkIdentity(value) != null) return .undefined;
     if (@import("builtin_bound_method.zig").isBound(value)) return .undefined;
@@ -2037,6 +2069,7 @@ fn integer(value: Value) !i64 {
 }
 
 fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?Value, step: ?Value) !Value {
+    if (buffers.isView(value)) return buffers.slice(allocator, value, start, stop, step);
     if (@import("query_type.zig").name(value) != null) return @import("query_type.zig").notImplemented(allocator);
     if (value == .capture_undefined) return value;
     if (isUndefined(value)) return error.UndefinedJinjaValue;
@@ -2061,13 +2094,6 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
         return .{ .string = @import("expression_identity.zig").cachedString(try text_result.toOwnedSlice(allocator)) };
     }
     const values_result = try ownedValues(allocator, &result);
-    if (@import("query_memoryview.zig").state(value)) |view| {
-        const raw = try allocator.alloc(u8, values_result.len);
-        for (values_result, raw) |member, *byte| {
-            byte.* = if (view.format == 'c') member.attribute("__dxt_binary").string[0] else if (view.format == 'b') @bitCast(@as(i8, @intCast(try integerIndex(member)))) else @intCast(try integerIndex(member));
-        }
-        return @import("query_memoryview.zig").value(allocator, raw, view.format, value.attribute("obj"));
-    }
     if (value.attribute("__dxt_binary") == .string) return yaml_values.fromMembers(allocator, values_result);
     return if (tupleProtocol(value) != null or @import("query_column.zig").items(value) != null) .{ .tuple = values_result } else .{ .list = values_result };
 }
@@ -2077,6 +2103,7 @@ pub fn iterableValues(allocator: std.mem.Allocator, value: Value) anyerror![]con
 }
 pub fn iterableValuesWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) anyerror![]const Value {
     if (@import("builtin_bound_method.zig").isRelationMapping(value)) return error.JinjaTypeError;
+    if (buffers.isView(value)) return buffers.values(allocator, value);
     if (@import("query_type.zig").name(value) != null) return (try sequences.itemsWithHost(allocator, try sequences.iter(allocator, value), host)).?;
     if (!isIterable(value)) return error.JinjaTypeError;
     if (try sequences.itemsWithHost(allocator, value, host)) |items| return items;
@@ -2189,11 +2216,15 @@ pub fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "mapping")) return @import("builtin_bound_method.zig").isMapping(value);
     if (std.mem.eql(u8, name, "iterable")) {
         if (@import("builtin_bound_method.zig").isRelationMapping(value)) return error.JinjaTypeError;
-        return isIterable(value);
+        return if (buffers.isView(value)) try buffers.iterable(value) else isIterable(value);
+    }
+    if (std.mem.eql(u8, name, "sequence") and buffers.isView(value)) {
+        _ = buffers.length(value) catch return false;
+        return true;
     }
     if (std.mem.eql(u8, name, "sequence")) return isUndefined(value) or value == .list or value == .tuple or value == .string or
         (@import("builtin_bound_method.zig").isMapping(value) and !@import("builtin_bound_method.zig").isRelationMapping(value)) or (sequence(value) != null and !sets.isSet(value));
-    if (std.mem.eql(u8, name, "callable")) return isUndefined(value) or callableName(value) != null;
+    if (std.mem.eql(u8, name, "callable")) return isUndefined(value) or callableName(value) != null or buffers.isMethod(value);
     if (std.mem.eql(u8, name, "equalto") or std.mem.eql(u8, name, "eq") or std.mem.eql(u8, name, "==")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
         return equal(value, args[0].value);
@@ -2450,7 +2481,7 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
     }
     if (std.mem.eql(u8, name, "default") or std.mem.eql(u8, name, "d")) {
         const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{ "default_value", "boolean" }, &.{ .{ .string = "" }, .{ .boolean = false } }, 0);
-        return if (isUndefined(value) or (bound[1].truthy() and !value.truthy())) bound[0] else value;
+        return if (isUndefined(value) or (bound[1].truthy() and !try truthyWithHost(allocator, value, host))) bound[0] else value;
     }
     if (std.mem.eql(u8, name, "length") or std.mem.eql(u8, name, "count")) return try lengthWithHost(allocator, value, host);
     if (std.mem.eql(u8, name, "string")) return .{ .string = try textWithHost(allocator, value, host) };
@@ -2959,8 +2990,8 @@ test "PostgreSQL buffer views preserve slice format and chunk identity" {
     const raw = [_]u8{ 0, 128, 255 };
     const original = try views.value(a, &raw, 'c', null);
     const binary = try yaml_values.fromBytes(a, &raw);
-    const unsigned = (try views.call(a, original.attribute("cast").callable, &.{.{ .value = .{ .string = "B" } }})).?;
-    const signed = (try views.call(a, original.attribute("cast").callable, &.{.{ .value = .{ .string = "b" } }})).?;
+    const unsigned = try callValue(a, original.attribute("cast"), &.{.{ .value = .{ .string = "B" } }}, null);
+    const signed = try callValue(a, original.attribute("cast"), &.{.{ .value = .{ .string = "b" } }}, null);
     try std.testing.expect(!equalValues(original, binary));
     try std.testing.expect(equalValues(unsigned, binary));
     try std.testing.expect(!equalValues(signed, binary));
@@ -2971,7 +3002,7 @@ test "PostgreSQL buffer views preserve slice format and chunk identity" {
     const sliced = try sliceValue(a, original, .{ .integer = "1" }, null, null);
     try std.testing.expectEqualStrings(raw[1..], views.state(sliced).?.bytes);
     try std.testing.expectEqual(@as(u8, 'c'), views.state(sliced).?.format);
-    const sliced_cast = (try views.call(a, sliced.attribute("cast").callable, &.{.{ .value = .{ .string = "B" } }})).?;
+    const sliced_cast = try callValue(a, sliced.attribute("cast"), &.{.{ .value = .{ .string = "B" } }}, null);
     try std.testing.expectEqualStrings(try original.attribute("obj").text(a), try sliced_cast.attribute("obj").text(a));
     const reversed = try sliceValue(a, signed, null, null, .{ .integer = "-1" });
     try std.testing.expectEqualStrings(&.{ 255, 128, 0 }, views.state(reversed).?.bytes);
@@ -2995,11 +3026,85 @@ test "PostgreSQL buffer views preserve slice format and chunk identity" {
     const empty = try views.value(a, "", 'c', null);
     const empty_copy = try views.value(a, "", 'c', null);
     const empty_bytes = try yaml_values.fromBytes(a, "");
-    const empty_unsigned = (try views.call(a, empty.attribute("cast").callable, &.{.{ .value = .{ .string = "B" } }})).?;
+    const empty_unsigned = try callValue(a, empty.attribute("cast"), &.{.{ .value = .{ .string = "B" } }}, null);
     try std.testing.expect(!try testValue("sameas", empty.attribute("obj"), &.{.{ .value = empty_copy.attribute("obj") }}));
     try std.testing.expect(equalValues(empty, empty_bytes));
     try std.testing.expect(equalValues(empty, empty_unsigned));
     try std.testing.expect(@import("mapping_keys.zig").keyEqual(empty, empty_bytes));
+}
+
+test "memoryview expressions check release state and retain shaped numeric slices" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const native = [_]i32{ 1, 2, 3, 4 };
+    const view = try buffers.value(a, std.mem.asBytes(&native), 'c', null);
+    const Fixture = struct {
+        view: Value,
+        saved: Value,
+        fn resolve(raw: *anyopaque, path: []const u8, allocator: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            var parts = std.mem.splitScalar(u8, path, '.');
+            const root = parts.next().?;
+            var result = if (std.mem.eql(u8, root, "v")) self.view else if (std.mem.eql(u8, root, "saved")) self.saved else return .undefined;
+            while (parts.next()) |name| result = try attributeWithHost(allocator, result, name, null);
+            return result;
+        }
+        fn call(_: *anyopaque, _: []const u8, _: []const Argument, _: std.mem.Allocator) !Value {
+            return error.UnexpectedHostMethodInvocation;
+        }
+    };
+    var fixture = Fixture{ .view = view, .saved = try attributeWithHost(a, view, "tobytes", null) };
+    const host = Host{ .context = &fixture, .resolve = Fixture.resolve, .call = Fixture.call };
+    try std.testing.expect((try evaluate(a, "saved() == v.tobytes()", host)).boolean);
+    try std.testing.expect((try evaluate(a, "saved is callable", host)).boolean);
+    try std.testing.expectEqualStrings("3", (try evaluate(a, "v.cast('i',shape=[2,2])[1,0]", host)).integer);
+    try std.testing.expectEqualStrings("i", (try evaluate(a, "v.cast('i',shape=[2,2])['format']", host)).string);
+    try std.testing.expect((try evaluate(a, "v.cast('i',shape=[2,2])[99,0] is undefined", host)).boolean);
+    try std.testing.expectEqualStrings("[4, 3, 2, 1]", try (try evaluate(a, "v.cast('i')[::-1].tolist()", host)).text(a));
+    const numeric = try evaluate(a, "v.cast('i')", host);
+    try std.testing.expectError(error.InvalidQueryMemoryviewHash, hashableKey(numeric));
+    const zero = try evaluate(a, "v[:4].cast('i',shape=[])", host);
+    try std.testing.expectEqualStrings("1", (try indexValue(a, zero, .{ .tuple = &.{} })).integer);
+    try std.testing.expect((try indexValue(a, zero, .{ .integer = "0" })) == .undefined);
+    try std.testing.expect(!try testValue("iterable", zero, &.{}));
+    try std.testing.expect(!try testValue("sequence", zero, &.{}));
+    try std.testing.expectError(error.JinjaTypeError, truthyWithHost(a, zero, null));
+    try std.testing.expectError(error.JinjaTypeError, filterValue(a, "default", zero, &.{ .{ .value = .none }, .{ .value = .{ .boolean = true } } }, null));
+    const iterator = try sequences.iter(a, view);
+    const peer = try evaluate(a, "v.cast('B')", host);
+    try hashableKey(view);
+    try std.testing.expect((try evaluate(a, "v.release()", host)) == .none);
+    try hashableKey(view);
+    try std.testing.expectError(error.ReleasedQueryMemoryview, evaluate(a, "saved()", host));
+    try std.testing.expectError(error.ReleasedQueryMemoryview, evaluate(a, "v.format", host));
+    try std.testing.expectError(error.ReleasedQueryMemoryview, evaluate(a, "v|list", host));
+    try std.testing.expectError(error.ReleasedQueryMemoryview, testValue("iterable", view, &.{}));
+    try std.testing.expect(!try testValue("sequence", view, &.{}));
+    try std.testing.expectError(error.ReleasedQueryMemoryview, sequences.next(a, iterator, host));
+    try std.testing.expect(std.mem.startsWith(u8, try reprWithHost(a, view, host), "<released memory at 0x"));
+    try std.testing.expectEqual(@as(usize, native.len * @sizeOf(i32)), (try iterableValues(a, peer)).len);
+}
+
+test "owned memoryview and saved method retain a shared release cell after source teardown" {
+    var destination = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer destination.deinit();
+    const a = destination.allocator();
+    const owned = blk: {
+        var source = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer source.deinit();
+        const temporary = source.allocator();
+        const view = try buffers.value(temporary, "abc", 'c', null);
+        const saved = try attributeWithHost(temporary, view, "tobytes", null);
+        break :blk try @import("dbt_context.zig").cloneValue(a, .{ .tuple = &.{ view, saved } });
+    };
+    const view = owned.tuple[0];
+    const saved = owned.tuple[1];
+    try std.testing.expectEqualStrings("abc", (try callValue(a, saved, &.{}, null)).attribute("__dxt_binary").string);
+    const release = try attributeWithHost(a, view, "release", null);
+    try std.testing.expect((try callValue(a, release, &.{}, null)) == .none);
+    try std.testing.expectError(error.ReleasedQueryMemoryview, callValue(a, saved, &.{}, null));
+    try std.testing.expectError(error.ReleasedQueryMemoryview, hashableKey(view));
 }
 
 test "genuine cursor UUID equality and dictionary keys exclude integers and text" {

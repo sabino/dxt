@@ -1880,6 +1880,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         if (!std.mem.eql(u8, context.bindings.items[binding_index].name, name[0..root_end])) continue;
         const bound = try resolveExpressionValue(context, name, allocator);
         if (bound == .capture_undefined) return try native_expr.callUndefined(bound);
+        if (@import("query_memoryview.zig").isMethod(bound)) return try native_expr.callValue(allocator, bound, args, context.host());
         if (@import("builtin_bound_method.zig").isBound(bound)) return try native_expr.callValue(allocator, bound, args, context.host());
         const callable = native_expr.callableName(bound);
         if (callable) |function| if (!std.mem.eql(u8, function, name)) return try callExpressionValue(context, function, args, allocator);
