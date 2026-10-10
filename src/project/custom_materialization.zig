@@ -80,6 +80,14 @@ pub fn supports(graph: *const types.Graph, node: *const types.Node) !bool {
 }
 
 pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node, macro: *const types.MacroDef) !Result {
+    if (!corePackage(macro.package_name) and !std.mem.eql(u8, macro.package_name, graph.project_name) and !explicitOverrides(graph)) {
+        for (graph.macros.items) |*builtin| if (candidate(graph, node, builtin)) |found| {
+            if (found.locality == 1) {
+                try @import("deprecation_events.zig").packageMaterializationOverride(runtime, graph, node, macro.package_name);
+                break;
+            }
+        };
+    }
     var owned: ?adapter.Session = null;
     defer if (owned) |*session| session.deinit();
     var held_runtime = runtime;

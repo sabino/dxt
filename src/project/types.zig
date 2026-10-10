@@ -62,6 +62,7 @@ pub const Options = struct {
     debug: bool = false,
     write_json: bool = true,
     warn_error: bool = false,
+    show_all_deprecations: bool = false,
     version_check: bool = true,
     warn_error_options: ?[]const u8 = null,
     log_level: LogLevel = .info,

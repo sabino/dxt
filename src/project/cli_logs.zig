@@ -117,7 +117,7 @@ fn consoleWarning(allocator: std.mem.Allocator, line: []const u8) bool {
     const info = parsed.value.object.get("info") orelse return false;
     if (info != .object) return false;
     const name = info.object.get("name") orelse return false;
-    return name == .string and (std.mem.eql(u8, name.string, "AdapterEventWarning") or std.mem.eql(u8, name.string, "JinjaLogWarning"));
+    return name == .string and (std.mem.eql(u8, name.string, "AdapterEventWarning") or std.mem.eql(u8, name.string, "JinjaLogWarning") or std.mem.eql(u8, name.string, "PackageMaterializationOverrideDeprecation"));
 }
 
 const DisplayedEvent = struct { message: []const u8, printed: bool, primary: bool = false };
@@ -132,7 +132,7 @@ fn displayedEvent(allocator: std.mem.Allocator, line: []const u8) !?DisplayedEve
     if (name != .string) return null;
     const printed = std.mem.eql(u8, name.string, "PrintEvent") or std.mem.eql(u8, name.string, "ShowNode") or std.mem.eql(u8, name.string, "CompiledNode");
     const primary = std.mem.eql(u8, name.string, "SeedSampleTable");
-    if (!primary and !printed and !std.mem.startsWith(u8, name.string, "JinjaLog") and !std.mem.eql(u8, name.string, "AdapterEventWarning") and !std.mem.eql(u8, name.string, "NothingToDo") and !std.mem.eql(u8, name.string, "NoNodesForSelectionCriteria") and !std.mem.eql(u8, name.string, "MainEncounteredError")) return null;
+    if (!primary and !printed and !std.mem.startsWith(u8, name.string, "JinjaLog") and !std.mem.eql(u8, name.string, "AdapterEventWarning") and !std.mem.eql(u8, name.string, "PackageMaterializationOverrideDeprecation") and !std.mem.eql(u8, name.string, "NothingToDo") and !std.mem.eql(u8, name.string, "NoNodesForSelectionCriteria") and !std.mem.eql(u8, name.string, "MainEncounteredError")) return null;
     const data = parsed.value.object.get("data") orelse return null;
     if (data != .object) return null;
     const message = info.object.get("msg") orelse data.object.get("msg") orelse data.object.get("message") orelse return null;

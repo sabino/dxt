@@ -168,7 +168,7 @@ fn defaults(runtime: types.Runtime, command: ?[]const u8) !types.Options {
 
 fn universal(options: *types.Options, args: []const []const u8, index: *usize) !bool {
     const arg = args[index.*];
-    if (eq(arg, "--quiet") or eq(arg, "--no-quiet")) options.quiet = eq(arg, "--quiet") else if (eq(arg, "--use-colors") or eq(arg, "--no-use-colors")) options.use_colors = eq(arg, "--use-colors") else if (eq(arg, "--use-colors-file") or eq(arg, "--no-use-colors-file")) options.use_colors_file = eq(arg, "--use-colors-file") else if (eq(arg, "--print") or eq(arg, "--no-print")) options.print_enabled = eq(arg, "--print") else if (eq(arg, "--write-json") or eq(arg, "--no-write-json")) options.write_json = eq(arg, "--write-json") else if (eq(arg, "--version-check") or eq(arg, "--no-version-check")) options.version_check = eq(arg, "--version-check") else if (eq(arg, "--warn-error") or eq(arg, "--no-warn-error")) options.warn_error = eq(arg, "--warn-error") else if (eq(arg, "--debug") or eq(arg, "--no-debug")) options.debug = eq(arg, "--debug") else if (eq(arg, "--single-threaded") or eq(arg, "--no-single-threaded")) options.single_threaded = eq(arg, "--single-threaded") else if (eq(arg, "--populate-cache") or eq(arg, "--no-populate-cache")) options.populate_cache = eq(arg, "--populate-cache") else if (eq(arg, "--cache-selected-only") or eq(arg, "--no-cache-selected-only")) options.cache_selected_only = eq(arg, "--cache-selected-only") else if (eq(arg, "--log-cache-events") or eq(arg, "--no-log-cache-events")) options.log_cache_events = eq(arg, "--log-cache-events") else if (eq(arg, "--partial-parse") or eq(arg, "--no-partial-parse")) options.partial_parse = eq(arg, "--partial-parse") else if (eq(arg, "--partial-parse-file-diff") or eq(arg, "--no-partial-parse-file-diff")) options.partial_parse_file_diff = eq(arg, "--partial-parse-file-diff") else if (eq(arg, "--static-parser") or eq(arg, "--no-static-parser")) options.static_parser = eq(arg, "--static-parser") else if (eq(arg, "--log-format") or eq(arg, "--log-format-file") or eq(arg, "--log-level") or eq(arg, "--log-level-file") or eq(arg, "--log-path") or eq(arg, "--log-file-max-bytes") or eq(arg, "--warn-error-options") or eq(arg, "--record-timing-info") or eq(arg, "--partial-parse-file-path")) {
+    if (eq(arg, "--quiet") or eq(arg, "--no-quiet")) options.quiet = eq(arg, "--quiet") else if (eq(arg, "--use-colors") or eq(arg, "--no-use-colors")) options.use_colors = eq(arg, "--use-colors") else if (eq(arg, "--use-colors-file") or eq(arg, "--no-use-colors-file")) options.use_colors_file = eq(arg, "--use-colors-file") else if (eq(arg, "--print") or eq(arg, "--no-print")) options.print_enabled = eq(arg, "--print") else if (eq(arg, "--write-json") or eq(arg, "--no-write-json")) options.write_json = eq(arg, "--write-json") else if (eq(arg, "--version-check") or eq(arg, "--no-version-check")) options.version_check = eq(arg, "--version-check") else if (eq(arg, "--show-all-deprecations") or eq(arg, "--no-show-all-deprecations")) options.show_all_deprecations = eq(arg, "--show-all-deprecations") else if (eq(arg, "--warn-error") or eq(arg, "--no-warn-error")) options.warn_error = eq(arg, "--warn-error") else if (eq(arg, "--debug") or eq(arg, "--no-debug")) options.debug = eq(arg, "--debug") else if (eq(arg, "--single-threaded") or eq(arg, "--no-single-threaded")) options.single_threaded = eq(arg, "--single-threaded") else if (eq(arg, "--populate-cache") or eq(arg, "--no-populate-cache")) options.populate_cache = eq(arg, "--populate-cache") else if (eq(arg, "--cache-selected-only") or eq(arg, "--no-cache-selected-only")) options.cache_selected_only = eq(arg, "--cache-selected-only") else if (eq(arg, "--log-cache-events") or eq(arg, "--no-log-cache-events")) options.log_cache_events = eq(arg, "--log-cache-events") else if (eq(arg, "--partial-parse") or eq(arg, "--no-partial-parse")) options.partial_parse = eq(arg, "--partial-parse") else if (eq(arg, "--partial-parse-file-diff") or eq(arg, "--no-partial-parse-file-diff")) options.partial_parse_file_diff = eq(arg, "--partial-parse-file-diff") else if (eq(arg, "--static-parser") or eq(arg, "--no-static-parser")) options.static_parser = eq(arg, "--static-parser") else if (eq(arg, "--log-format") or eq(arg, "--log-format-file") or eq(arg, "--log-level") or eq(arg, "--log-level-file") or eq(arg, "--log-path") or eq(arg, "--log-file-max-bytes") or eq(arg, "--warn-error-options") or eq(arg, "--record-timing-info") or eq(arg, "--partial-parse-file-path")) {
         index.* += 1;
         if (index.* >= args.len) return error.InvalidOption;
         const value = args[index.*];
@@ -351,7 +351,7 @@ fn globalFlag(arg: []const u8) bool {
 }
 fn globalKey(arg: []const u8) ?[]const u8 {
     if (globalValue(arg)) return arg;
-    for ([_][]const u8{ "quiet", "use-colors", "use-colors-file", "print", "write-json", "warn-error", "version-check", "debug", "defer", "favor-state", "fail-fast", "single-threaded", "populate-cache", "cache-selected-only", "log-cache-events", "partial-parse", "partial-parse-file-diff", "static-parser" }) |name| {
+    for ([_][]const u8{ "quiet", "use-colors", "use-colors-file", "print", "write-json", "show-all-deprecations", "warn-error", "version-check", "debug", "defer", "favor-state", "fail-fast", "single-threaded", "populate-cache", "cache-selected-only", "log-cache-events", "partial-parse", "partial-parse-file-diff", "static-parser" }) |name| {
         if (std.mem.startsWith(u8, arg, "--") and eq(arg[2..], name)) return name;
         if (std.mem.startsWith(u8, arg, "--no-") and eq(arg[5..], name)) return name;
     }
@@ -380,6 +380,19 @@ test "Core spelling preserves global precedence and nested commands" {
     try std.testing.expectEqualDeep(&[_][]const u8{ "dxt", "ls", "--select", "main", "--target", "prod", "--project-dir", "fixture" }, aliases.args);
     const debugging = try prepare(runtime, &.{ "dxt", "--debug", "parse", "--log-level", "info" });
     try std.testing.expect(debugging.options.debug and debugging.options.log_level == .info);
+}
+
+test "show all deprecations is a global CLI switch without an environment binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("DBT_SHOW_ALL_DEPRECATIONS", "true");
+    const runtime: types.Runtime = .{ .allocator = arena.allocator(), .io = std.testing.io, .environment = &env };
+    try std.testing.expect(!(try prepare(runtime, &.{ "dxt", "run" })).options.show_all_deprecations);
+    try std.testing.expect((try prepare(runtime, &.{ "dxt", "--show-all-deprecations", "run" })).options.show_all_deprecations);
+    try std.testing.expect(!(try prepare(runtime, &.{ "dxt", "run", "--no-show-all-deprecations" })).options.show_all_deprecations);
+    try std.testing.expectError(error.DuplicateGlobalOption, prepare(runtime, &.{ "dxt", "--show-all-deprecations", "run", "--no-show-all-deprecations" }));
 }
 
 test "cache controls preserve environment precedence and global duplication rules" {
