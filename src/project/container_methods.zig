@@ -129,7 +129,10 @@ pub fn replaceAliases(value: *Value, original: Value, replacement: Value, depth:
             value.* = replacement;
             return;
         }
-        for (@constCast(value.object)) |*entry| try replaceAliases(&entry.value, original, replacement, depth + 1);
+        for (@constCast(value.object)) |*entry| {
+            if (entry.typed_key) |*key| try replaceAliases(key, original, replacement, depth + 1);
+            try replaceAliases(&entry.value, original, replacement, depth + 1);
+        }
     }
 }
 
@@ -142,6 +145,30 @@ test "container mutations preserve nested shared receiver aliases" {
     const change = (try call(allocator, "__dxt_value.append", &.{ .{ .value = original }, .{ .value = .{ .number = 2 } } })).?;
     try replaceAliases(&alias, change.original.?, change.replacement.?, 0);
     try std.testing.expectEqual(@as(usize, 2), alias.attribute("child").list.len);
+}
+
+test "method dictionary keys follow mutated receivers through nested tuple keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const methods = @import("builtin_bound_method.zig");
+    const original = Value{ .object = try ownedObject(a, &.{}) };
+    const method = (try methods.lookup(a, original, "get")).?;
+    const nested_key = Value{ .tuple = try expression.allocateValues(a, 1) };
+    @constCast(nested_key.tuple)[0] = method;
+    var entries: std.ArrayList(expression.Entry) = .empty;
+    try expression.mappingPut(a, &entries, method, .{ .string = "direct" });
+    try expression.mappingPut(a, &entries, nested_key, .{ .string = "nested" });
+    var mapping = Value{ .object = entries.items };
+    const update = (try call(a, "__dxt_value.update", &.{
+        .{ .value = original },
+        .{ .value = .{ .object = &.{.{ .key = "x", .value = .{ .integer = "1" } }} } },
+    })).?;
+    try replaceAliases(&mapping, original, update.replacement.?, 0);
+    const fresh = (try methods.lookup(a, update.replacement.?, "get")).?;
+    try std.testing.expectEqualStrings("direct", (try expression.mappingGet(mapping, fresh)).string);
+    try std.testing.expectEqualStrings("nested", (try expression.mappingGet(mapping, .{ .tuple = &.{fresh} })).string);
+    try std.testing.expectEqualStrings("1", (try methods.call(a, expression.entryKey(mapping.object[0]), &.{.{ .value = .{ .string = "x" } }}, null)).integer);
 }
 
 test "dictionary updates preserve first numeric key and undefined stored values" {
