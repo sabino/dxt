@@ -2201,13 +2201,14 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
         try formatTestThresholdMessage(runtime.allocator, execution.failures, kind, classification.condition orelse "!= 0")
     else
         null;
+    const reported_failures: i64 = if (std.mem.eql(u8, classification.status, "pass")) 0 else execution.failures;
     errdefer if (!transferred) if (message) |detail| runtime.allocator.free(detail);
     switch (test_ref) {
         .generic => |test_node| try executed.append(runtime.allocator, .{
             .test_node = test_node,
             .status = classification.status,
             .message = message,
-            .failures = execution.failures,
+            .failures = reported_failures,
             .compiled_code = execution.compiled_code,
             .owns_compiled_code = true,
             .build_path = execution.build_path,
@@ -2227,7 +2228,7 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .singular_test_node = test_node,
             .status = classification.status,
             .message = message,
-            .failures = execution.failures,
+            .failures = reported_failures,
             .compiled_code = execution.compiled_code,
             .owns_compiled_code = true,
             .build_path = execution.build_path,
