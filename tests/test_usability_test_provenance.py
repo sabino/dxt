@@ -268,3 +268,92 @@ def test_core_generic_file_key_names_follow_model_seed_snapshot_and_source_origi
         assert actual == {'models.input', 'seeds.items', 'snapshots.state', 'sources.external'}
         observations[engine] = {node['unique_id']: node['file_key_name'] for node in nodes}
     assert observations['dxt'] == observations['core']
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('generic', [False, True])
+def test_core_test_context_preserves_arbitrary_nested_nulls_and_config_extras(tmp_path, request, duckdb_environment, adapter, generic):
+    from test_usability_sql_operations import events
+    observations = {}
+    for engine in ['dxt', 'core']:
+        root, _ = fixture(tmp_path, engine, adapter, request, store=False, generic=generic, override_limit=False)
+        metadata_policy(root, generic)
+        path = root / 'models/schema.yml'
+        document = yaml.safe_load(path.read_text())
+        config = document['models'][0]['data_tests'][0]['bad_rows']['config'] if generic else document['data_tests'][0]['config']
+        config.update({'meta': {'nullable': None, 'nested': {'nullable': None}, 'items': [None, {'nullable': None}]},
+                       'docs': {'show': True, 'node_color': None},
+                       'contract': {'enforced': False, 'alias_types': True, 'checksum': None},
+                       'custom_null': None})
+        if generic:
+            document['models'][0]['data_tests'][0]['bad_rows']['payload'] = {'nullable': None}
+            (root / 'macros/bad_rows.sql').write_text('{% test bad_rows(model, payload=None) %}{{ config(custom_null=None) }}select * from {{ model }}{% endtest %}')
+        path.write_text(json.dumps(document))
+        env = environment(duckdb_environment)
+        command(engine, root, env, 'run')
+        (root / 'macros/test_materialization.sql').write_text('''{% materialization test, default %}
+{{ log('NULL_CONTEXT:' ~ tojson(model.copy()), info=True) }}
+{% call statement('main', fetch_result=True) %}select 0 as failures, false as should_warn, false as should_error{% endcall %}
+{% endmaterialization %}
+''')
+        result = command(engine, root, env, 'test', quiet=False)
+        message, = [event['data']['msg'][len('NULL_CONTEXT:'):] for event in events(result, 'JinjaLogInfo')
+                    if event['data']['msg'].startswith('NULL_CONTEXT:')]
+        context = json.loads(message)
+        assert context['meta'] == context['config']['meta'] == config['meta']
+        assert context['config']['custom_null'] is None
+        assert context['config']['docs']['node_color'] is None
+        assert context['config']['contract']['checksum'] is None
+        assert 'node_color' not in context['docs'] and 'checksum' not in context['contract']
+        assert 'database' not in context['config'] and 'build_path' not in context
+        if generic:
+            assert context['test_metadata']['kwargs']['payload'] == {'nullable': None}
+            assert 'namespace' not in context['test_metadata']
+        observations[engine] = {field: context[field] for field in ['meta', 'docs', 'contract', 'config']}
+    assert observations['dxt'] == observations['core']
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('setting', [False, None])
+@pytest.mark.parametrize('generic', [False, True])
+def test_core_falsy_test_docs_and_contract_retain_inherited_defaults(tmp_path, request, duckdb_environment, adapter, setting, generic):
+    observations = {}
+    for engine in ['dxt', 'core']:
+        root, _ = fixture(tmp_path, engine, adapter, request, store=False, generic=generic, override_limit=False)
+        path = root / 'models/schema.yml'
+        document = yaml.safe_load(path.read_text()) if path.exists() else {'version': 2}
+        if generic:
+            document['models'][0]['data_tests'][0]['bad_rows']['config'].update({'docs': setting, 'contract': setting})
+        else:
+            document['data_tests'] = [{'name': 'check', 'config': {'docs': setting, 'contract': setting}}]
+        path.write_text(json.dumps(document))
+        result = command(engine, root, environment(duckdb_environment), 'parse', ok=False)
+        if generic and setting is False:
+            assert result.returncode == 2, result.stdout + result.stderr
+            assert not (root / 'target/manifest.json').exists()
+            observations[engine] = result.returncode
+            continue
+        assert result.returncode == 0, result.stdout + result.stderr
+        node = read_test_node(root)
+        assert node['docs'] == {'show': True, 'node_color': None}
+        assert node['contract'] == {'enforced': False, 'alias_types': True, 'checksum': None}
+        if generic:
+            assert 'docs' not in node['config'] and 'contract' not in node['config']
+        else:
+            assert node['config']['docs'] == node['config']['contract'] == setting
+        observations[engine] = {field: node[field] for field in ['docs', 'contract', 'config']}
+    assert observations['dxt'] == observations['core']
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('contract', [{'enforced': 'yes'}, {'custom': True}])
+def test_core_invalid_test_contract_types_and_unknown_fields_fail_before_artifacts(tmp_path, request, duckdb_environment, adapter, contract):
+    for engine in ['dxt', 'core']:
+        root, _ = fixture(tmp_path, engine, adapter, request, store=False, generic=True, override_limit=False)
+        path = root / 'models/schema.yml'
+        document = yaml.safe_load(path.read_text())
+        document['models'][0]['data_tests'][0]['bad_rows']['config']['contract'] = contract
+        path.write_text(json.dumps(document))
+        result = command(engine, root, environment(duckdb_environment), 'parse', ok=False)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert not (root / 'target/manifest.json').exists()

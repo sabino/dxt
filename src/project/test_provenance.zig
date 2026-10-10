@@ -8,6 +8,12 @@ const json = @import("json.zig");
 pub fn initialize(runtime: types.Runtime, graph: *types.Graph) !void {
     const created: f64 = @as(f64, @floatFromInt(@import("execution_clock.zig").now(runtime.io))) / std.time.ns_per_s;
     for (graph.tests.items) |*node| {
+        // Repeated generic config calls merge docs/contract as mappings.
+        // YAML null values are removed by TestBuilder before this stage.
+        inline for (.{ "docs", "contract" }) |field| {
+            const value = values.get(node.config_values, field) orelse .null;
+            if (value != .null and value != .object) return error.InvalidTestMetadataConfiguration;
+        }
         try validate(node.config_values);
         if (node.created_at == 0) node.created_at = created;
     }
@@ -18,14 +24,33 @@ pub fn initialize(runtime: types.Runtime, graph: *types.Graph) !void {
 }
 
 fn validate(config: std.json.Value) !void {
-    inline for (.{ "docs", "contract" }) |name| if (values.get(config, name)) |item| {
-        if (item != .object and item != .null) return error.InvalidTestMetadataConfiguration;
-        const fields = if (comptime std.mem.eql(u8, name, "docs")) &.{"show"} else &.{ "enforced", "alias_types" };
-        inline for (fields) |field| if (values.get(item, field)) |setting| {
-            if (setting != .bool) return error.InvalidTestMetadataConfiguration;
-        };
-        const text_field = if (comptime std.mem.eql(u8, name, "docs")) "node_color" else "checksum";
-        if (values.get(item, text_field)) |setting| if (setting != .string and setting != .null) return error.InvalidTestMetadataConfiguration;
+    const contract = values.get(config, "contract") orelse .null;
+    // Core copies/validates only truthy contract values, including config
+    // extras on tests. False, None and empty containers retain defaults.
+    if (truthy(contract)) {
+        if (contract != .object) return error.InvalidTestMetadataConfiguration;
+        var iterator = contract.object.iterator();
+        while (iterator.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (std.mem.eql(u8, key, "enforced") or std.mem.eql(u8, key, "alias_types")) {
+                if (entry.value_ptr.* != .bool) return error.InvalidTestMetadataConfiguration;
+            } else if (std.mem.eql(u8, key, "checksum")) {
+                if (entry.value_ptr.* != .string and entry.value_ptr.* != .null) return error.InvalidTestMetadataConfiguration;
+            } else return error.InvalidTestMetadataConfiguration;
+        }
+    }
+}
+
+fn truthy(value: std.json.Value) bool {
+    return switch (value) {
+        .null => false,
+        .bool => value.bool,
+        .integer => value.integer != 0,
+        .float => value.float != 0,
+        .number_string => !std.mem.eql(u8, value.number_string, "0"),
+        .string => value.string.len != 0,
+        .array => value.array.items.len != 0,
+        .object => value.object.count() != 0,
     };
 }
 

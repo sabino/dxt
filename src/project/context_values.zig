@@ -38,7 +38,7 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         defer values.deinit(allocator, &metadata);
         if (node.compiled_code) |sql| try values.put(allocator, &metadata, "compiled_sql", .{ .string = sql });
         // ModelContext uses to_dict(omit_none=True), including nested configs.
-        return try withoutNone(allocator, metadata);
+        return try resourceContextValue(allocator, metadata);
     };
     const compiler = @import("compiler.zig");
     const effective_config = try config(allocator, node);
@@ -128,25 +128,62 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
     return result;
 }
 
-fn withoutNone(allocator: std.mem.Allocator, raw: std.json.Value) !Value {
-    switch (raw) {
-        .object => |object| {
-            var entries: std.ArrayList(expression.Entry) = .empty;
-            var iterator = object.iterator();
-            while (iterator.next()) |entry| {
-                if (entry.value_ptr.* == .null) continue;
-                try entries.append(allocator, .{ .key = try allocator.dupe(u8, entry.key_ptr.*), .value = try withoutNone(allocator, entry.value_ptr.*) });
-            }
-            return .{ .object = try entries.toOwnedSlice(allocator) };
-        },
-        .array => |array| {
-            const items = try expression.allocateValues(allocator, array.items.len);
-            for (array.items, items) |item, *value| value.* = try withoutNone(allocator, item);
-            return .{ .list = items };
-        },
-        .string => |text| return .{ .string = try allocator.dupe(u8, text) },
-        else => return try values.toExpression(allocator, raw),
+/// Core omits None dataclass fields, while arbitrary dictionaries (meta,
+/// generic kwargs and config extras) retain their authored null values.
+pub fn resourceContextValue(allocator: std.mem.Allocator, raw: std.json.Value) !Value {
+    if (raw != .object) return metadataValue(allocator, raw);
+    const resource = values.get(raw, "resource_type") orelse std.json.Value{ .string = "model" };
+    var config_fields = try @import("canonical_manifest_config.zig").defaults(allocator, if (resource == .string) resource.string else "model");
+    defer values.deinit(allocator, &config_fields);
+    var entries: std.ArrayList(expression.Entry) = .empty;
+    var iterator = raw.object.iterator();
+    while (iterator.next()) |entry| {
+        if (entry.value_ptr.* == .null) continue;
+        const key = entry.key_ptr.*;
+        const value = if (std.mem.eql(u8, key, "config"))
+            try dataclassContextValue(allocator, entry.value_ptr.*, config_fields)
+        else if (std.mem.eql(u8, key, "docs") or std.mem.eql(u8, key, "contract") or std.mem.eql(u8, key, "checksum") or std.mem.eql(u8, key, "test_metadata"))
+            try dataclassContextValue(allocator, entry.value_ptr.*, null)
+        else
+            try metadataValue(allocator, entry.value_ptr.*);
+        try entries.append(allocator, .{ .key = try allocator.dupe(u8, key), .value = value });
     }
+    return .{ .object = try entries.toOwnedSlice(allocator) };
+}
+
+fn dataclassContextValue(allocator: std.mem.Allocator, raw: std.json.Value, declared: ?std.json.Value) !Value {
+    if (raw != .object) return metadataValue(allocator, raw);
+    var entries: std.ArrayList(expression.Entry) = .empty;
+    var iterator = raw.object.iterator();
+    while (iterator.next()) |entry| {
+        const known = if (declared) |fields| fields.object.contains(entry.key_ptr.*) else true;
+        if (known and entry.value_ptr.* == .null) continue;
+        try entries.append(allocator, .{ .key = try allocator.dupe(u8, entry.key_ptr.*), .value = try metadataValue(allocator, entry.value_ptr.*) });
+    }
+    return .{ .object = try entries.toOwnedSlice(allocator) };
+}
+
+// The parsed JSON projection is released before the context is evaluated.
+// Own strings/keys while retaining every authored value in arbitrary mappings.
+fn metadataValue(allocator: std.mem.Allocator, raw: std.json.Value) anyerror!Value {
+    return switch (raw) {
+        .string => |text| .{ .string = try allocator.dupe(u8, text) },
+        .object => |object| blk: {
+            const entries = try expression.allocateEntries(allocator, object.count());
+            var iterator = object.iterator();
+            for (entries) |*entry| {
+                const item = iterator.next().?;
+                entry.* = .{ .key = try allocator.dupe(u8, item.key_ptr.*), .value = try metadataValue(allocator, item.value_ptr.*) };
+            }
+            break :blk .{ .object = entries };
+        },
+        .array => |array| blk: {
+            const items = try expression.allocateValues(allocator, array.items.len);
+            for (array.items, items) |item, *value| value.* = try metadataValue(allocator, item);
+            break :blk .{ .list = items };
+        },
+        else => try values.toExpression(allocator, raw),
+    };
 }
 
 test "runtime tests preserve authored metadata and canonical compiled SQL" {
@@ -203,4 +240,23 @@ test "model batch and config boundaries expose native UTC datetime methods" {
     const end = attribute(context, "config.__dbt_internal_microbatch_event_time_end");
     const iso = (try @import("dbt_context.zig").call(allocator, "duckdb", end.attribute("isoformat").callable, &.{})).?;
     try std.testing.expectEqualStrings("1970-01-02T00:00:00+00:00", iso.string);
+}
+
+test "resource context omits dataclass None while preserving arbitrary metadata and config extras" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"resource_type":"test","database":null,"meta":{"nullable":null},"docs":{"show":true,"node_color":null},"contract":{"enforced":false,"checksum":null},"config":{"database":null,"custom_null":null,"meta":{"nullable":null},"docs":{"node_color":null}},"test_metadata":{"namespace":null,"kwargs":{"payload":{"nullable":null}}}}
+    , .{});
+    const context = try resourceContextValue(a, raw.value);
+    try std.testing.expect(context.attribute("database") == .undefined);
+    try std.testing.expect(context.attribute("meta").attribute("nullable") == .none);
+    try std.testing.expect(context.attribute("docs").attribute("node_color") == .undefined);
+    try std.testing.expect(context.attribute("contract").attribute("checksum") == .undefined);
+    try std.testing.expect(context.attribute("config").attribute("database") == .undefined);
+    try std.testing.expect(context.attribute("config").attribute("custom_null") == .none);
+    try std.testing.expect(context.attribute("config").attribute("docs").attribute("node_color") == .none);
+    try std.testing.expect(context.attribute("test_metadata").attribute("namespace") == .undefined);
+    try std.testing.expect(context.attribute("test_metadata").attribute("kwargs").attribute("payload").attribute("nullable") == .none);
 }
