@@ -1588,6 +1588,7 @@ pub fn equalValues(a: Value, b: Value) bool {
 /// Descriptors retain callable names, never borrowed Host pointers.
 threadlocal var text_depth: usize = 0;
 pub fn textWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) anyerror![]const u8 {
+    if (@import("builtin_bound_method.zig").isBound(value)) return @import("builtin_bound_method.zig").render(allocator, value);
     if (text_depth == 128) return error.JinjaExpressionDepthExceeded;
     text_depth += 1;
     defer text_depth -= 1;

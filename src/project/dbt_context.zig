@@ -6,34 +6,11 @@ const Value = expression.Value;
 const Argument = expression.Argument;
 
 pub fn cloneValue(allocator: std.mem.Allocator, value: Value) anyerror!Value {
-    return switch (value) {
-        .string => |text| .{ .string = try allocator.dupe(u8, text) },
-        .integer => |text| .{ .integer = try allocator.dupe(u8, text) },
-        .callable => |name| .{ .callable = try allocator.dupe(u8, name) },
-        .capture_undefined, .ordinary_undefined => |original| blk: {
-            const copied = try allocator.create(expression.CaptureUndefined);
-            copied.* = original.*;
-            copied.allocator = allocator;
-            copied.name = if (original.name) |name| try allocator.dupe(u8, name) else null;
-            copied.hint = if (original.hint) |hint| try allocator.dupe(u8, hint) else null;
-            break :blk if (value == .capture_undefined) Value{ .capture_undefined = copied } else Value{ .ordinary_undefined = copied };
-        },
-        .list, .tuple => |items| blk: {
-            const copied = try expression.allocateValues(allocator, items.len);
-            for (items, copied) |item, *copy| copy.* = try cloneValue(allocator, item);
-            break :blk if (value == .tuple) Value{ .tuple = copied } else Value{ .list = copied };
-        },
-        .object => |entries| blk: {
-            const copied = try expression.allocateEntries(allocator, entries.len);
-            for (entries, copied) |entry, *copy| copy.* = .{
-                .key = try allocator.dupe(u8, entry.key),
-                .typed_key = if (entry.typed_key) |key| try cloneValue(allocator, key) else null,
-                .value = try cloneValue(allocator, entry.value),
-            };
-            break :blk .{ .object = copied };
-        },
-        else => value,
-    };
+    return cloneValueWithHost(allocator, value, null);
+}
+
+pub fn cloneValueWithHost(allocator: std.mem.Allocator, value: Value, host: ?expression.Host) anyerror!Value {
+    return @import("value_clone.zig").clone(allocator, value, host);
 }
 
 pub const Policy = struct { database: bool = true, schema: bool = true, identifier: bool = true };

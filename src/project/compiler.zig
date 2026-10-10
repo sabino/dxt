@@ -90,6 +90,7 @@ const CompileContext = struct {
     validating_skipped_loop_body: bool = false,
     value_arena: std.heap.ArenaAllocator,
     modules_cache: @import("modules_context.zig").Cache = .{},
+    receivers: @import("compiler_receivers.zig").Registry = .{},
     constants: @import("compiler_constants.zig").Pool = .{},
     constant_function: ?[]const u8 = null,
     bindings: std.ArrayList(ValueBinding) = .empty,
@@ -267,7 +268,17 @@ const CompileContext = struct {
     }
 
     fn host(self: *CompileContext) native_expr.Host {
-        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue, .capture_undefined = self.capturesUndefined(), .constant = retainConstant };
+        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue, .capture_undefined = self.capturesUndefined(), .constant = retainConstant, .receiver_identity = receiverIdentity, .receiver_value = currentReceiver };
+    }
+
+    fn receiverIdentity(raw: *anyopaque, value: native_expr.Value) anyerror!usize {
+        const self: *CompileContext = @ptrCast(@alignCast(raw));
+        return self.receivers.identity(self.value_arena.allocator(), value);
+    }
+
+    fn currentReceiver(raw: *anyopaque, value: native_expr.Value) anyerror!native_expr.Value {
+        const self: *CompileContext = @ptrCast(@alignCast(raw));
+        return self.receivers.current(value);
     }
 
     fn retainConstant(raw: *anyopaque, value: native_expr.Value, allocator: std.mem.Allocator) anyerror!native_expr.Value {
@@ -522,7 +533,7 @@ pub fn renderOperation(runtime: types.Runtime, graph: *const Graph, macro_name: 
 pub fn renderMacroForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, macro_name: []const u8, args: []const native_expr.Argument) !native_expr.Value {
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
-    return try dbt_context.cloneValue(allocator, try callExpressionValue(&context, macro_name, args, context.value_arena.allocator()));
+    return try dbt_context.cloneValueWithHost(allocator, try callExpressionValue(&context, macro_name, args, context.value_arena.allocator()), context.host());
 }
 
 /// Core's materialization is the entry frame. Only its direct helper calls
@@ -533,7 +544,7 @@ pub fn renderMaterializationForNode(allocator: std.mem.Allocator, graph: *const 
     context.runtime_macro_dependencies = dependencies;
     context.runtime_dependency_allocator = dependency_allocator;
     context.dependency_depth = 1;
-    return try dbt_context.cloneValue(allocator, try renderMacroValue(&context, macro, &.{}));
+    return try dbt_context.cloneValueWithHost(allocator, try renderMacroValue(&context, macro, &.{}), context.host());
 }
 
 test "materialization uses the resource namespace and records direct helpers" {
@@ -568,13 +579,13 @@ pub fn renderNamingMacro(allocator: std.mem.Allocator, graph: *const Graph, macr
     context.execute_override = false;
     const name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ macro.package_name, macro.name });
     defer allocator.free(name);
-    return try dbt_context.cloneValue(allocator, try callExpressionValue(&context, name, args, context.value_arena.allocator()));
+    return try dbt_context.cloneValueWithHost(allocator, try callExpressionValue(&context, name, args, context.value_arena.allocator()), context.host());
 }
 
 pub fn renderGenericArgumentValue(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, argument: std.json.Value) !native_expr.Value {
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
-    return try dbt_context.cloneValue(allocator, try genericArgumentValue(&context, argument));
+    return try dbt_context.cloneValueWithHost(allocator, try genericArgumentValue(&context, argument), context.host());
 }
 
 pub fn parseGenericArgumentValue(allocator: std.mem.Allocator, graph: *const Graph, node: *Node, argument: std.json.Value) !native_expr.Value {
@@ -586,7 +597,7 @@ pub fn parseGenericArgumentValueInNamespace(allocator: std.mem.Allocator, graph:
     defer context.deinit();
     context.parse_node = node;
     context.generic_namespace = namespace;
-    return try dbt_context.cloneValue(allocator, try genericArgumentValue(&context, argument));
+    return try dbt_context.cloneValueWithHost(allocator, try genericArgumentValue(&context, argument), context.host());
 }
 
 fn genericArgumentValue(context: *CompileContext, argument: std.json.Value) anyerror!native_expr.Value {
@@ -1448,6 +1459,7 @@ fn loopLength(context: *CompileContext, frame: *LoopFrame) anyerror!void {
 
 fn replaceContextAliases(context: *CompileContext, original: native_expr.Value, replacement: native_expr.Value) !void {
     const aliases = @import("container_methods.zig");
+    try context.receivers.forward(context.value_arena.allocator(), original, replacement);
     for (context.bindings.items) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
     for (context.suspended_binding_frames.items) |bindings| for (bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
     for (context.loop_filter_bindings.items) |bindings| for (bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
@@ -2579,6 +2591,45 @@ test "inline macros retain MacroFuzz names and lexical binding cells" {
         const node = Node{ .package_name = "demo", .unique_id = "model.demo.rendered", .name = "rendered", .path = "rendered.sql", .original_file_path = "models/rendered.sql", .raw_code = case.template };
         try std.testing.expectEqualStrings(case.expected, try compileModel(a, &graph, &node));
     }
+}
+
+test "saved method receiver IDs and calls survive replacement and self keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "demo" };
+    defer graph.deinit();
+    const node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.rendered",
+        .name = "rendered",
+        .path = "rendered.sql",
+        .original_file_path = "models/rendered.sql",
+        .raw_code = "{% set a={'x':1} %}{% set get=a.get %}{% set before=get|string %}{% do a.update({a.get:11,'x':7}) %}{% set self_key=a.keys()|list|last %}{{self_key('x')}}:{{get==a.get}}:{{before==get|string}}:{{get|string==a.get|string}}:{% do a.update({'x':9}) %}{{self_key('x')}}",
+    };
+    try std.testing.expectEqualStrings("7:True:True:True:9", try compileModel(a, &graph, &node));
+}
+
+test "public macro values retain saved method receivers after nested mutation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "demo" };
+    defer graph.deinit();
+    try graph.macros.append(a, .{
+        .package_name = "demo",
+        .unique_id = "macro.demo.bundle",
+        .name = "bundle",
+        .path = "macros/bundle.sql",
+        .original_file_path = "macros/bundle.sql",
+        .macro_sql = "{% macro bundle() %}{% set xs=[] %}{% set first=xs.append %}{% do first(7) %}{{return({'receiver':xs,'method':first,'fresh':xs.append})}}{% endmacro %}",
+    });
+    const node = Node{ .package_name = "demo", .unique_id = "model.demo.rendered", .name = "rendered", .path = "rendered.sql", .original_file_path = "models/rendered.sql", .raw_code = "" };
+    const bundle = try renderMacroForNode(a, &graph, &node, "bundle", &.{});
+    const receiver = bundle.attribute("receiver");
+    try std.testing.expectEqualStrings("7", receiver.list[0].integer);
+    try std.testing.expect(receiver.list.ptr == bundle.attribute("method").attribute("__dxt_builtin_receiver").list.ptr);
+    try std.testing.expect(@import("builtin_bound_method.zig").equal(bundle.attribute("method"), bundle.attribute("fresh")));
 }
 
 test "macro argument collection and lexical caller callbacks" {
