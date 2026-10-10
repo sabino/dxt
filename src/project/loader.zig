@@ -72,6 +72,7 @@ pub fn loadConnectionGraph(base_runtime: Runtime, options: Options) !Graph {
     errdefer graph.deinit();
     graph.warning_registry = try runtime.allocator.create(@import("warning_registry.zig").Registry);
     graph.warning_registry.?.* = @import("warning_registry.zig").Registry.init(std.heap.smp_allocator, runtime.io);
+    graph.warning_registry.?.runtime = runtime;
     const identity = (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) orelse return error.MissingProfileFile;
     graph.adapter_type = identity.adapter_type;
     graph.target_schema = identity.target_schema;
@@ -117,6 +118,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     errdefer graph.deinit();
     graph.warning_registry = try runtime.allocator.create(@import("warning_registry.zig").Registry);
     graph.warning_registry.?.* = @import("warning_registry.zig").Registry.init(std.heap.smp_allocator, runtime.io);
+    graph.warning_registry.?.runtime = runtime;
     graph.relation_cache = try runtime.allocator.create(@import("relation_cache.zig").Cache);
     graph.relation_cache.?.* = @import("relation_cache.zig").Cache.init(std.heap.smp_allocator, runtime.io);
     graph.relation_cache.?.log_events = options.log_cache_events;

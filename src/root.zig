@@ -50,6 +50,7 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
     defer output.deinit();
     var diagnostics: Io.Writer.Allocating = .init(scoped.allocator);
     defer diagnostics.deinit();
+    scoped.event_writer = &diagnostics.writer;
     const result = runPrepared(prepared.args, &output.writer, &diagnostics.writer, scoped);
     timing.finish();
     if (profiling) try timing_profile.write(prepared.options.record_timing_info.?);

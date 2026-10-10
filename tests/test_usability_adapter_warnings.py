@@ -52,3 +52,30 @@ def test_adapter_warning_respects_quiet_console_and_keeps_file_event(tmp_path, d
         output = warnings((logs / 'dbt.log').read_text())
         assert len(output) == 1
         assert output[0]['data']['base_msg'] == 'quiet warning'
+
+
+@pytest.mark.parametrize('command', ['parse', 'list', 'compile', 'run'])
+def test_adapter_warnings_during_parse_share_runtime_scope_and_preserve_core_event(tmp_path, duckdb_environment, command):
+    root, _ = project(tmp_path)
+    (root / 'models/a.sql').write_text("{% do adapter.warn_once('parse warning') %}select 1 as id")
+    (root / 'models/b.sql').write_text("{% do adapter.warn_once('parse warning') %}select * from {{ ref('a') }}")
+    env = environment(duckdb_environment)
+    observed = {}
+    for engine in ['dxt', 'core']:
+        result = invoke(engine, ['--log-format', 'json', '--no-partial-parse', command, '--project-dir', root, '--profiles-dir', root], root, env)
+        observed[engine] = warnings(result.stdout)
+        assert len(observed[engine]) == 1
+    assert observed['dxt'] == observed['core']
+
+
+def test_adapter_warning_precedes_later_parse_error_without_getting_lost(tmp_path, duckdb_environment):
+    root, _ = project(tmp_path)
+    (root / 'models/a.sql').write_text("{% do adapter.warn_once('before parse error') %}{{ exceptions.raise_compiler_error('later parse error') }}select 1 as id")
+    env = environment(duckdb_environment)
+    observed = {}
+    for engine in ['dxt', 'core']:
+        result = invoke(engine, ['--log-format', 'json', '--no-partial-parse', 'parse', '--project-dir', root, '--profiles-dir', root], root, env, ok=False)
+        assert result.returncode == 2
+        observed[engine] = warnings(result.stdout)
+        assert len(observed[engine]) == 1
+    assert observed['dxt'] == observed['core']

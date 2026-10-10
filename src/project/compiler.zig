@@ -674,6 +674,7 @@ pub fn compileSingularTestWithInjectedCtes(allocator: std.mem.Allocator, graph: 
 
 fn compileSingularTestBody(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode) ![]const u8 {
     const node = Node{
+        .depends_on = test_node.depends_on,
         .resolved_identity = test_node.resolved_identity,
         .resource_type = "test",
         .package_name = test_node.package_name,
@@ -863,7 +864,7 @@ fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, t
 
     var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, test_node.enabled, &.{}, test_node.config_values);
     defer @import("config_value.zig").deinit(allocator, &canonical_config);
-    const node = Node{ .resolved_identity = test_node.resolved_identity, .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = canonical_config, .test_config = test_node.config, .enabled = test_node.enabled };
+    const node = Node{ .depends_on = test_node.depends_on, .resolved_identity = test_node.resolved_identity, .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = canonical_config, .test_config = test_node.config, .enabled = test_node.enabled };
     var context = CompileContext.init(allocator, graph, &node);
     defer context.deinit();
     const arena = context.value_arena.allocator();
@@ -902,7 +903,7 @@ fn genericTestModelSqlForNode(allocator: std.mem.Allocator, graph: *const Graph,
 
 fn genericTestModelValueForNode(a: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode, relation_name: []const u8) !native_expr.Value {
     if (resolve.findMacroIdForUnqualifiedNamespaceCall(graph, test_node.package_name, "get_where_subquery") == null) return .{ .string = try genericTestModelSql(a, relation_name, test_node.config.where) };
-    const node = Node{ .resolved_identity = test_node.resolved_identity, .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = test_node.config_values, .test_config = test_node.config, .enabled = test_node.enabled };
+    const node = Node{ .depends_on = test_node.depends_on, .resolved_identity = test_node.resolved_identity, .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = test_node.config_values, .test_config = test_node.config, .enabled = test_node.enabled };
     const relation = if (test_node.attached_node) |id| try relationValueForInputNode(a, graph, &node, findNodeByUniqueId(graph, id) orelse return error.UnresolvedRef) else if (test_node.attached_source_unique_id) |id| try relationValueForSource(a, graph, &node, findSourceByUniqueId(graph, id) orelse return error.UnresolvedSource) else native_expr.Value{ .string = relation_name };
     // The normal helper returns a Relation without a where clause and a string
     // for a filtered subquery. Preserve whichever value the resolved macro
@@ -1578,6 +1579,13 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return try valueFromJson(allocator, parsed.value);
     }
     if (try @import("adapter_context.zig").credentialValue(allocator, context.graph, name, args)) |value| return value;
+    if (context.parse_node != null and std.mem.eql(u8, name, "adapter.warn_once") and std.mem.eql(u8, context.graph.adapter_type, "duckdb")) {
+        if (args.len != 1 or args[0].value != .string or (args[0].name != null and !std.mem.eql(u8, args[0].name.?, "msg"))) return error.InvalidJinjaArguments;
+        if (context.graph.warning_registry) |registry| if (registry.runtime) |runtime| if (runtime.event_writer) |writer| {
+            if (try registry.first(args[0].value.string)) try @import("concurrent_runner.zig").emitLogMessages(runtime, writer, context.node.unique_id, 0, &.{.{ .message = args[0].value.string, .level = "warn", .is_adapter_warning = true }});
+        };
+        return .{ .string = "" };
+    }
     if (context.parse_node != null or context.execute_override == false) {
         if (try @import("adapter_context.zig").parseReplacement(allocator, name)) |value| return value;
         if (std.mem.eql(u8, name, "run_query") or std.mem.eql(u8, name, "load_result")) return .none;
@@ -1601,6 +1609,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
             return try relationValueForNode(allocator, context.graph, context.node, false);
         }
         const unique_id = try resolve.resolveRefDependency(context.graph, context.node.package_name, dep);
+        try @import("ref_context.zig").validate(context.graph, context.node, unique_id, dep);
         if (!context.graph.unit_fixture_relations and !std.mem.eql(u8, context.node.resource_type, "sql_operation") and !std.mem.eql(u8, context.node.resource_type, "rpc_call")) try @import("group_access.zig").validateReference(context.graph, context.node.package_name, context.node.effective_config, unique_id);
         const target = findNodeByUniqueId(context.graph, unique_id) orelse return error.UnresolvedRef;
         return try relationValueForInputNode(allocator, context.graph, context.node, target);
@@ -3216,6 +3225,8 @@ test "compileModel renders config refs and sources" {
         .schema_name = "raw_source",
     });
 
+    try graph.nodes.items[1].depends_on.append(allocator, "model.demo.customers");
+
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[1]);
     defer allocator.free(compiled);
     try std.testing.expectEqualStrings("select * from \"main\".\"customers\" union all select * from \"raw_source\".\"raw_payments\" ", compiled);
@@ -3254,6 +3265,8 @@ test "compileSingularTest renders refs and sources" {
         .original_file_path = "tests/assert_customers.sql",
         .raw_code = "select * from {{ ref('customers') }} union all select * from {{ source('raw', 'payments') }};",
     });
+
+    try graph.singular_tests.items[0].depends_on.append(allocator, "model.demo.customers");
 
     const compiled = try compileSingularTest(allocator, &graph, &graph.singular_tests.items[0]);
     defer allocator.free(compiled);
@@ -3655,6 +3668,8 @@ test "compileModel resolves vars inside refs and sources" {
         .original_file_path = "models/schema.yml",
     });
 
+    try graph.nodes.items[1].depends_on.append(allocator, "model.demo.customers");
+
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[1]);
     defer allocator.free(compiled);
     try std.testing.expectEqualStrings("select * from \"analytics\".\"customers\" union all select * from \"raw\".\"payments\"", compiled);
@@ -3697,6 +3712,8 @@ test "compileModel expands static string-list for loops" {
         .original_file_path = "models/payments.sql",
         .raw_code = "select 1",
     });
+
+    try graph.nodes.items[0].depends_on.append(allocator, "model.demo.payments");
 
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[0]);
     defer allocator.free(compiled);
@@ -3761,6 +3778,8 @@ test "compileModel resolves static loop vars inside refs and sources" {
         .original_file_path = "models/schema.yml",
     });
 
+    try graph.nodes.items[2].depends_on.appendSlice(allocator, &.{ "model.demo.customers", "model.demo.orders" });
+
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[2]);
     defer allocator.free(compiled);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"analytics\".\"customers\"") != null);
@@ -3806,6 +3825,8 @@ test "compileModel resolves package refs with static loop vars" {
         \\{% endfor %}
         ,
     });
+
+    try graph.nodes.items[2].depends_on.appendSlice(allocator, &.{ "model.pkg.pkg_customers", "model.pkg.pkg_orders" });
 
     const compiled = try compileModel(allocator, &graph, &graph.nodes.items[2]);
     defer allocator.free(compiled);

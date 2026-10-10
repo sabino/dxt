@@ -14,6 +14,7 @@ pub const Runtime = struct {
     invocation_options: ?*const Options = null,
     global_options: ?*const Options = null,
     timing_profile: ?*@import("timing_profile.zig").Registry = null,
+    event_writer: ?*std.Io.Writer = null,
 };
 
 pub const SessionObserver = struct {

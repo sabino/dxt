@@ -4,6 +4,7 @@ const std = @import("std");
 pub const Registry = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    runtime: ?@import("types.zig").Runtime = null,
     mutex: std.Io.Mutex = .init,
     messages: std.StringHashMap(void),
 

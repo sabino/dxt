@@ -1849,7 +1849,7 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
             try appendExecutionErrorResult(runtime.allocator, executed, node);
             return false;
         },
-        error.InvalidMaterializationReturn, error.MissingMaterializationMain, error.InvalidMaterializationResponse, error.UnsupportedMaterializationLanguage, error.JinjaCompilerError => {
+        error.InvalidMaterializationReturn, error.MissingMaterializationMain, error.InvalidMaterializationResponse, error.UnsupportedMaterializationLanguage, error.JinjaCompilerError, error.MissingRefDependency => {
             try appendMaterializationErrorResult(runtime.allocator, executed, node, err);
             return false;
         },
@@ -1866,7 +1866,7 @@ fn executeSeedAppendingResult(runtime: Runtime, db_path: []const u8, project_dir
             try appendExecutionErrorResult(runtime.allocator, executed, node);
             return false;
         },
-        error.InvalidMaterializationReturn, error.MissingMaterializationMain, error.InvalidMaterializationResponse, error.UnsupportedMaterializationLanguage, error.JinjaCompilerError => {
+        error.InvalidMaterializationReturn, error.MissingMaterializationMain, error.InvalidMaterializationResponse, error.UnsupportedMaterializationLanguage, error.JinjaCompilerError, error.MissingRefDependency => {
             try appendMaterializationErrorResult(runtime.allocator, executed, node, err);
             return false;
         },
