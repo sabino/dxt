@@ -54,7 +54,7 @@ outside the user-confirmed initial SQL scope.
 | Regular expressions | Native `modules.re` functions, pattern/match objects, captures, substitutions, iteration and flags use a Zig compatibility layer over statically linked PCRE2. [Regex implementation](../src/project/regex_context.zig), [positive and negative Core cases](../tests/test_usability_regex.py). |
 | String formatting | Native `str.format`/`format_map`, positional/named/subscript/member fields, conversions, nested numeric/Unicode specifications and date/datetime/time formatting. Actual Core failures cover invalid types, specs and sandbox traversal. [Formatting](../tests/test_usability_string_format.py), [temporal protocols](../tests/test_usability_temporal_format.py). |
 | Restricted module providers | Core's `datetime`, `pytz` and fourteen `itertools` exports use native typed values and pinned timezone data. Iterators preserve lazy consumption, shared cursors, tee buffering and active Jinja callbacks. [Provider cache](../tests/test_usability_modules_provider.py), [datetime](../tests/test_usability_datetime.py), [strptime](../tests/test_usability_datetime_strptime.py), [pytz](../tests/test_usability_pytz.py), [itertools](../tests/test_usability_itertools.py). These are defined native providers, not an arbitrary Python import facility. |
-| dbt context | Typed Relation/Column/timestamps; model/config/graph/flags; database queries, named results and native adapter introspection. Pinned bundled Core/adapter SQL macros are embedded with licenses. [Configuration/context](../tests/test_usability_configuration.py), [commands](../tests/test_usability_commands.py). |
+| dbt context | Typed Relation/Column/timestamps; model/config/graph/flags; database queries, named results and native adapter introspection. Held cursors and fetched Agate tables preserve their separate type, naming and consumption contracts. Pinned bundled Core/adapter SQL macros are embedded with licenses. [Configuration/context](../tests/test_usability_configuration.py), [commands](../tests/test_usability_commands.py), [cursor/bindings](../tests/test_usability_query_bindings.py). |
 | Selectors | Names/FQN, paths/packages/tags/resource/config/version/group/access, wildcards, graph expansion, recursive named YAML selectors and eager/cautious/buildable/empty indirect selection. [State/selector cases](../tests/test_usability_state.py), [versions](../tests/test_usability_configuration.py), [groups](../tests/test_usability_groups.py). |
 | State and defer | New/old/modified/unmodified and tested body/config/relation/macro/contract/description comparisons; result statuses, Core `source_status:fresher`, defer/favor-state and separate defer state. [State](../tests/test_usability_state.py). |
 | Effective flags | Actual workers/cancellation for threads/fail-fast; adapter-specific full-refresh; empty/sample/event-time input bounds; failure audits; env/CLI precedence, warnings, quiet/print/colors, JSON/file logging and parser/cache/profiling controls. Unsupported command placements/values reject. [CLI options](../tests/test_usability_cli_options.py), [execution](../tests/test_usability_cli_execution.py), [profiling](../tests/test_usability_cli_profiling.py), [parser options](../tests/test_usability_parser_options.py), [worker logs](../tests/test_usability_worker_logs.py). |
@@ -81,6 +81,19 @@ nullable typed results, DML responses, introspection, transactions, cancellation
 and recovery. [Adapter tests](../tests/test_usability_adapters.py) exercise real
 databases, including cancellation and simultaneous DuckDB writers.
 
+`adapter.add_query` uses actual typed bindings and held cursors. Its original
+driver values retain exact numerics, embedded NUL/binary data, temporal/session
+timezone values, composites and description metadata. `run_query` and fetched
+statements separately perform Agate's column inference and duplicate-name
+handling. Positive and negative cases cover recursive/named bindings, cursor
+aliases, PostgreSQL memoryview methods/release, DuckDB type descriptors and
+UUIDs. Returned PostgreSQL numeric/temporal ranges retain stock scalar/array
+type inference and the upstream nonfinite numeric-range adaptation error.
+See the [cursor/binding](../tests/test_usability_query_bindings.py),
+[Decimal](../tests/test_usability_cursor_decimal.py),
+[UUID](../tests/test_usability_cursor_uuid.py) and
+[range](../tests/test_usability_range_bindings.py) comparisons.
+
 | Materialization | Current execution evidence |
 | --- | --- |
 | Table/view | First/repeated runs, relation-kind switches and rollback on both adapters. PostgreSQL also supports unlogged tables, indexes and materialized-view policies. [Materializations](../tests/test_usability_materializations.py). |
@@ -88,7 +101,8 @@ databases, including cancellation and simultaneous DuckDB writers.
 | Authored materializations | Adapter/package selection and builtin override policy, native SQL and authored hook execution, relation-return validation, transaction cleanup and authored `main` response metadata. [Custom materializations](../src/project/custom_materialization.zig), [both-adapter Core cases](../tests/test_usability_custom_materializations.py). |
 | Incremental | Adapter-specific append/default/delete+insert/merge paths, composite/null keys, predicates, merge column controls, schema policies and full-refresh. [DuckDB](../tests/test_usability_incremental.py), [PostgreSQL](../tests/test_usability_postgres_incremental.py). |
 | Microbatch | Calendar batches/lookback, first/repeated/full-refresh runs, event-time/sample bounds, typed batch context, partial failures, atomic batch rollback and failed-batch retry. Authored materializations and first/last-batch hooks follow Core lifecycle boundaries; legacy unbatched custom strategies retain their main response. [Microbatch](../tests/test_usability_microbatch.py), [lifecycle](../tests/test_usability_microbatch_lifecycle.py). |
-| Seeds/snapshots/clone | Native lifecycles and state relation identities on both adapters, with focused repeated-run and failure fixtures linked above. |
+| CSV seeds | Actual DuckDB COPY and PostgreSQL client bindings through the bundled lifecycle macros; typed/null/quoted data, batch overrides, first/repeated/full-refresh behavior and load failure rollback. The unchanged wide PostgreSQL case retains all 10,000 rows, seven columns, 70,000 placeholders and actual main-file/warehouse assertions. [Seeds](../tests/test_usability_seed_bindings.py), [retained aliases](../tests/test_usability_seed_alias_scaling.py). |
+| Snapshots/clone | Native lifecycles and state relation identities on both adapters, with focused repeated-run and failure fixtures linked above. |
 | DuckDB external/table function | Local CSV/JSON/Parquet output, reader views, partitioned publication and parameterized table macros. Cloud publication and plugin registration are outside the current boundary. [File materializations](../tests/test_usability_duckdb_file_materializations.py). |
 | Resource/project hooks | Held-session pre/post resource hooks and on-run-start/on-run-end operation discovery/context/results. Transactional hook failures preserve prior relations. [Resource hooks](../tests/test_usability_resource_hooks.py), [global hooks](../tests/test_usability_global_hooks.py). |
 | Grants/persist-docs | Native adapter-dispatched privileges/comments, repeat behavior, PostgreSQL role revocation and rollback on invalid roles/comments. DuckDB follows its upstream grants warning capability. [Grants and docs](../tests/test_usability_grants_docs.py). |
@@ -109,9 +123,9 @@ other cloud adapters are not certified targets.
 
 Executed data-test helpers/publication, inherited test metadata, invocation-wide
 `warn_once`, stock main responses and microbatch custom-materialization/hooks
-have focused Core certificates. Final runtime path/null publication,
-builtin-override deprecation and class protocol and literal identity cases remain under
-validation. Native providers cover their declared APIs; general Python
+have focused Core certificates. Runtime path/null publication,
+builtin-override deprecation, class protocols and literal/receiver identity
+also have focused evidence. Native providers cover their declared APIs; general Python
 standard-library execution remains outside the product contract.
 
 DuckDB requires a native library; PostgreSQL requires libpq and a reachable
@@ -129,7 +143,7 @@ Package transports can require `git`, `curl` and `tar`.
 | --- | --- |
 | Complete dbt schemas | Manifest v12, Run Results v6, Catalog v1 and Sources v3 use the full pinned upstream schema classes. Semantic resources also validate against the semantic-interface contract. [Validator](../scripts/validate_dbt_artifacts.py), [artifacts](../tests/test_usability_artifacts.py), [semantic tests](../tests/test_usability_semantics.py). |
 | Results and metadata | Native invocation IDs/timestamps, timings/thread IDs/adapter responses; durable compile/docs and execution outcomes. [Compile artifacts](../tests/test_usability_compile_artifacts.py), [diagnostics](../tests/test_usability_compile_diagnostics.py). |
-| Test metadata/publication | Inherited meta/docs/group/column fields, source file keys and parse provenance; actual helper execution, compiled SQL/dependencies and retained audit kind switches. Write/build-path success/error cases have Core evidence; final runtime path/null details remain under validation. [Provenance](../tests/test_usability_test_provenance.py), [helpers](../tests/test_usability_test_helpers.py). |
+| Test metadata/publication | Inherited meta/docs/group/column fields, source file keys and parse provenance; actual helper execution, compiled SQL/dependencies and retained audit kind switches. Configured compiled paths, dataclass null omission and actual write/build-path publication before later errors have both-adapter Core evidence. [Provenance](../tests/test_usability_test_provenance.py), [helpers](../tests/test_usability_test_helpers.py). |
 | Caches | Content-safe whole-graph and unchanged literal-file parse reuse, invocation relation caches and typed SQL-analysis invalidation. `dxt_parse_cache.json` is a native versioned cache, not a claim of Core MessagePack interchange. [Parse cache](../tests/test_usability_parse_cache.py), [relation cache](../tests/test_usability_relation_cache.py), [SQL analysis](../tests/test_usability_sql_analysis.py). |
 | Semantic/MetricFlow-style planning | Models/entities/measures/dimensions, simple/derived/ratio/cumulative/conversion metrics, saved queries, join/grain checks, time spines, non-additive dimensions, offsets/windows and locked transactional exports. [Metric planner](../src/project/metric_plan.zig), [semantic/query evidence](../tests/test_usability_semantics.py), [export locks](../tests/test_usability_metric_export_locks.py). |
 | Typed SQL analysis | PostgreSQL grammar and DuckDB AST, logical IR, bound columns/types, lineage, source locations, readonly analysis and cache invalidation. [SQL analysis](../src/project/sql_analysis.zig), [evidence](../tests/test_usability_sql_analysis.py). |

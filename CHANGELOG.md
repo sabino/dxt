@@ -73,6 +73,13 @@ DuckDB and PostgreSQL.
 - Embedded pinned dbt Core/DuckDB/PostgreSQL SQL macros and native
   Relation/Column/timestamp/query-result objects, database queries/statements,
   named results and adapter metadata caches.
+- Separate original held-cursor values and fetched Agate tables, with exact
+  numeric, binary/NUL, temporal, composite and description metadata;
+  cursor aliases, typed recursive/named bindings, PostgreSQL buffer views and
+  returned range adaptation have actual driver/Core comparisons.
+- Genuine DuckDB COPY and PostgreSQL parameterized CSV seed execution through
+  the bundled macros, including the unchanged 70,000-binding batch and its
+  actual SQL artifacts, typed rows and retained mutable aliases.
 - Native Tree-sitter Python resource discovery, static literal metadata and
   dbt scaffold compilation. Authored Python is never evaluated; selected Python
   execution fails before warehouse writes under the initial SQL-only scope.
@@ -139,8 +146,10 @@ DuckDB and PostgreSQL.
   fixtures pin DuckDB **1.4.2** and Zig **0.16.0**.
 - Contracts, authored materializations, naming, native profile initialization,
   executed data-test helpers, warnings, stock responses and microbatch custom
-  lifecycle have focused upstream evidence. Final path/null publication,
-  builtin-override deprecation and class protocol and literal identity checks remain.
+  lifecycle have focused upstream evidence. Configured path/null publication,
+  builtin-override deprecation, class protocols, literal identity and saved
+  receiver behavior also have focused Core certificates. Whole-tree acceptance
+  remains a separate gate.
 - Native helper semantics target CPython **3.12**. Version-specific Core 3.11
   iterator identity and floating-sum differences are explicit compatibility
   boundaries, rather than changes to the installed native runtime.

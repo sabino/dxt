@@ -107,6 +107,25 @@ introspection. `native_duckdb.zig` dynamically loads DuckDB's C API and shares
 database handles across bounded workers. `native_postgres.zig` dynamically loads
 libpq and opens PostgreSQL sessions from the selected profile.
 
+Held cursor values and Agate query tables have separate representations.
+`duckdb_vectors.zig` copies length-delimited chunk/vector values before releasing
+native buffers; `postgres_cursor.zig` decodes the driver's OIDs and description
+metadata before releasing libpq results. `query_cursor.zig` preserves exact
+integers/Decimals, binary and temporal values, composites, UUIDs and PostgreSQL
+ranges. Cursor aliases retain the adapter's consumption behavior.
+`query_agate.zig` separately applies column-based inference, composite JSON
+conversion and duplicate-column naming for `run_query` and fetched statements.
+
+`query_bindings.zig` converts genuine typed values into owned native parameters.
+DuckDB uses prepared scalar bindings, including scalar leaves of recursive
+containers. PostgreSQL uses libpq parameters or actual client literal adaptation
+where the stock driver requires it, including wide seed batches and returned
+ranges. SQL artifacts retain the actual main payload used by materialization
+execution. The corresponding [cursor/binding](../tests/test_usability_query_bindings.py),
+[range](../tests/test_usability_range_bindings.py) and
+[seed](../tests/test_usability_seed_bindings.py) comparisons retain actual driver
+types, errors, consumption and executed artifacts.
+
 DuckDB defaults to automatic library discovery. `DXT_DUCKDB_LIBRARY` selects a
 specific library; `DXT_DUCKDB_BACKEND=native` requires native execution.
 Database-backed commands use held native sessions and reject forced CLI

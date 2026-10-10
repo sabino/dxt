@@ -23,6 +23,11 @@ Native semantic queries, typed SQL analysis, versioned environments and
 governed cross-database execution are also implemented. They have namespaced
 commands and artifacts alongside the dbt-compatible interface.
 
+Database-backed macros use native held sessions with typed bindings and cursor
+values. Fetched query tables apply dbt's separate Agate conversion contract.
+CSV seeds execute the actual COPY or bound INSERT lifecycle, with regression
+coverage for typed data and the unchanged 70,000-parameter PostgreSQL batch.
+
 Compatibility evidence targets dbt Core **1.10.5**, dbt-duckdb **1.9.6**,
 dbt-postgres **1.9.1**, MetricFlow **0.208.1** and semantic interfaces **0.9.0**.
 The integrated release checks are still in progress. Consult the
