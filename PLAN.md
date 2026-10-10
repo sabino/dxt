@@ -106,6 +106,15 @@ checks and default temporary-directory retention. This preparation is not a
 pass certificate. The published candidate and its original platform reports
 remain separate until the corrected candidate has its own results.
 
+The first combined clean native run on `e8f4998` completes with 815 passes and
+one crash out of 816 tests. The new workflow identity regression exposes an
+aggregate assignment whose schema/identifier helpers read the identity being
+initialized. The supervisor owns the bounded correction: compute both fields
+while the clone remains unresolved, then assign the complete identity. Keep
+the original regression and all logical/physical naming assertions. The failed
+build report is retained; the CLI and 626-case run did not start. A fresh source
+candidate must restart the genuine build and combined checks.
+
 The metric movement failure fixture now deliberately keeps its declared source
 estimate below the row limit while making actual source rows exceed it. Actual
 native controls prove three moved rows fit the limit and six rows fail at the

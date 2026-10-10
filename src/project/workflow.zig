@@ -757,10 +757,14 @@ fn physicalClone(a: std.mem.Allocator, graph: *const types.Graph, node: *const t
     clone.resolved_identity = null;
     clone.config_schema = "dxt_data";
     clone.config_alias = try physicalIdentifier(a, node.unique_id, version);
+    // Compute from the unresolved clone before assigning the destination.
+    // These helpers must not observe a partially initialized identity.
+    const schema = try compiler.relationSchemaForNode(a, graph, &clone);
+    const identifier = compiler.relationIdentifierForNode(&clone);
     clone.resolved_identity = .{
         .database = database,
-        .schema = try compiler.relationSchemaForNode(a, graph, &clone),
-        .identifier = compiler.relationIdentifierForNode(&clone),
+        .schema = schema,
+        .identifier = identifier,
     };
     return clone;
 }
