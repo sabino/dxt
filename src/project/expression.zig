@@ -31,6 +31,7 @@ pub const Value = union(enum) {
         if (integerProtocol(self)) |number| return !std.mem.eql(u8, number, "0");
         if (sequences.truthy(self)) |result| return result;
         if (self == .object) if (sequence(self)) |items| return items.len != 0;
+        if (mappingSource(self)) |source| return source.object.len != 0;
         return switch (self) {
             .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined, .none => false,
             .boolean => |v| v,
@@ -66,6 +67,7 @@ pub const Value = union(enum) {
                 break :blk try out.toOwnedSlice(allocator);
             },
             .object => |entries| blk: {
+                if (self.attribute("__dxt_string_error").truthy()) return error.JinjaTypeError;
                 if (sets.isSet(self)) break :blk try sets.text(allocator, self);
                 if (try sequences.text(allocator, self)) |rendered| break :blk rendered;
                 // Adapter relation objects retain typed attributes for package
@@ -106,6 +108,7 @@ pub const Value = union(enum) {
             .complex => |v| if (std.mem.eql(u8, name, "real")) .{ .number = v.real } else if (std.mem.eql(u8, name, "imag")) .{ .number = v.imaginary } else .undefined,
             .object => |entries| blk: {
                 for (entries) |entry| if ((entry.typed_key == null or entry.typed_key.? == .string) and std.mem.eql(u8, name, entry.key)) break :blk entry.value;
+                if (mappingSource(self) != null) break :blk mappingGet(self, .{ .string = name }) catch .undefined;
                 break :blk .undefined;
             },
             else => .undefined,
@@ -162,7 +165,23 @@ pub fn entryKey(entry: Entry) Value {
 pub fn hashableKey(key: Value) !void {
     try mapping_keys.hashable(key);
 }
+/// Mapping proxies keep metadata out of public keys and preserve their lookup policy.
+pub fn mappingSource(container: Value) ?Value {
+    if (container != .object) return null;
+    for (container.object) |entry| if (std.mem.eql(u8, entry.key, "__dxt_mapping_source") and entry.value == .object) return entry.value;
+    return null;
+}
 pub fn mappingEntry(container: Value, key: Value) !?Entry {
+    if (mappingSource(container)) |source| {
+        if (container.attribute("__dxt_mapping_uppercase").truthy()) {
+            if (key.attribute("__dxt_binary") == .string) return null;
+            if (key != .string) return error.InvalidCountryCode;
+            const normalized = try unicode.convert(std.heap.page_allocator, key.string, .upper);
+            defer std.heap.page_allocator.free(normalized);
+            return mapping_keys.entry(source, .{ .string = normalized });
+        }
+        return mapping_keys.entry(source, key);
+    }
     return try mapping_keys.entry(container, key);
 }
 pub fn mappingGet(container: Value, key: Value) !Value {
@@ -473,7 +492,7 @@ const Parser = struct {
                         return err;
                     };
                     self.active = previous_active;
-                    if (self.active and matched) matched = (try apply(self.allocator, comparison, previous, right)).truthy();
+                    if (self.active and matched) matched = (try applyWithHost(self.allocator, comparison, previous, right, self.host)).truthy();
                     previous = right;
                     const next_at = self.index;
                     const next = self.readOperator() orelse break;
@@ -499,7 +518,7 @@ const Parser = struct {
             } else if (std.mem.eql(u8, operator, "and") or std.mem.eql(u8, operator, "or")) {
                 if (!short) lhs = rhs;
             } else {
-                lhs = try apply(self.allocator, operator, lhs, rhs);
+                lhs = try applyWithHost(self.allocator, operator, lhs, rhs, self.host);
             }
         }
         return lhs;
@@ -787,6 +806,7 @@ const Parser = struct {
             return try host.call(host.context, function, args, self.allocator);
         }
         if (try pureMethod(self.allocator, receiver, method_name, args, self.host)) |value| return value;
+        if (mappingSource(receiver) != null) return if (self.capturing()) try callUndefined(try captureUndefined(self.allocator, method_name)) else error.UndefinedJinjaValue;
         const host = self.host orelse return error.UnsupportedJinjaCall;
         const arguments_with_receiver = try self.allocator.alloc(Argument, args.len + 1);
         arguments_with_receiver[0] = .{ .value = receiver };
@@ -883,9 +903,10 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
         }
         if (std.mem.eql(u8, name_, "keys") or std.mem.eql(u8, name_, "values") or std.mem.eql(u8, name_, "items")) {
             if (args.len != 0) return error.InvalidJinjaArguments;
-            return try sequences.view(allocator, receiver, name_);
+            return try sequences.view(allocator, mappingSource(receiver) orelse receiver, name_);
         }
         if (std.mem.eql(u8, name_, "copy")) {
+            if (mappingSource(receiver) != null) return null;
             if (args.len != 0) return error.InvalidJinjaArguments;
             const entries = try allocateEntries(allocator, receiver.object.len);
             @memcpy(entries, receiver.object);
@@ -1214,7 +1235,26 @@ fn equalMember(a: Value, b: Value) bool {
     if (complexProtocol(a)) |number| if ((std.math.isNan(number.real) or std.math.isNan(number.imaginary)) and mapping_keys.keyEqual(a, b)) return true;
     return equalValues(a, b);
 }
+fn immutableIdentity(value: Value) ?[]const u8 {
+    for ([_][]const u8{ "__dxt_timezone_identity", "__dxt_class_identity" }) |marker| {
+        const identity = value.attribute(marker);
+        if (identity == .string) return marker;
+    }
+    return null;
+}
+fn immutableSame(left: Value, right: Value) bool {
+    const marker = immutableIdentity(left) orelse return false;
+    const other = immutableIdentity(right) orelse return false;
+    return std.mem.eql(u8, marker, other) and std.mem.eql(u8, left.attribute(marker).string, right.attribute(marker).string);
+}
+fn immutableEqual(left: Value, right: Value) bool {
+    if (left.attribute("__dxt_timezone_builtin").truthy() or right.attribute("__dxt_timezone_builtin").truthy()) {
+        return left.attribute("__dxt_timezone_builtin").truthy() and right.attribute("__dxt_timezone_builtin").truthy() and equalValues(left.attribute("__dxt_timezone_offset_us"), right.attribute("__dxt_timezone_offset_us"));
+    }
+    return immutableSame(left, right);
+}
 pub fn equalValues(a: Value, b: Value) bool {
+    if (immutableIdentity(a) != null or immutableIdentity(b) != null) return immutableEqual(a, b);
     if (isUndefined(a) or isUndefined(b)) return isUndefined(a) and isUndefined(b) and (a == .capture_undefined) == (b == .capture_undefined);
     if (yaml_values.isHashable(a) or yaml_values.isHashable(b)) return yaml_values.keyEqual(a, b);
     if (sets.isSet(a) or sets.isSet(b)) return sets.equal(a, b);
@@ -1267,6 +1307,53 @@ pub fn equalValues(a: Value, b: Value) bool {
         },
     };
 }
+/// Rendering can request deferred native metadata through the active frame.
+/// Descriptors retain callable names, never borrowed Host pointers.
+threadlocal var text_depth: usize = 0;
+pub fn textWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) anyerror![]const u8 {
+    if (text_depth == 128) return error.JinjaExpressionDepthExceeded;
+    text_depth += 1;
+    defer text_depth -= 1;
+    const rendered = value.attribute("__dxt_repr");
+    if (rendered == .callable) {
+        const active = host orelse return error.UnsupportedJinjaCall;
+        return textWithHost(allocator, try active.call(active.context, rendered.callable, &.{}, allocator), host);
+    }
+    if (value == .list or value == .tuple) {
+        var result: std.ArrayList(u8) = .empty;
+        try result.append(allocator, if (value == .tuple) '(' else '[');
+        for (sequence(value).?, 0..) |item, i| {
+            if (i != 0) try result.appendSlice(allocator, ", ");
+            try result.appendSlice(allocator, try reprWithHost(allocator, item, host));
+        }
+        if (value == .tuple and sequence(value).?.len == 1) try result.append(allocator, ',');
+        try result.append(allocator, if (value == .tuple) ')' else ']');
+        return result.toOwnedSlice(allocator);
+    }
+    if (value == .object and value.attribute("__dxt_rendered") == .undefined and sequences.kind(value) == null and !sets.isSet(value)) {
+        var result: std.ArrayList(u8) = .empty;
+        try result.append(allocator, '{');
+        for ((mappingSource(value) orelse value).object, 0..) |entry, i| {
+            if (i != 0) try result.appendSlice(allocator, ", ");
+            try result.appendSlice(allocator, try reprWithHost(allocator, entryKey(entry), host));
+            try result.appendSlice(allocator, ": ");
+            try result.appendSlice(allocator, try reprWithHost(allocator, entry.value, host));
+        }
+        try result.append(allocator, '}');
+        return result.toOwnedSlice(allocator);
+    }
+    return value.text(allocator);
+}
+fn reprWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) ![]const u8 {
+    const rendered = value.attribute("__dxt_repr");
+    if (rendered == .string) return rendered.string;
+    if (rendered == .callable or value == .list or value == .tuple or (value == .object and value.attribute("__dxt_rendered") == .undefined)) return textWithHost(allocator, value, host);
+    return repr(value, allocator);
+}
+fn applyWithHost(allocator: std.mem.Allocator, op: []const u8, left: Value, right: Value, host: ?Host) !Value {
+    if (std.mem.eql(u8, op, "~")) return .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ try textWithHost(allocator, left, host), try textWithHost(allocator, right, host) }) };
+    return apply(allocator, op, left, right);
+}
 pub fn addValues(allocator: std.mem.Allocator, left: Value, right: Value) !Value {
     return apply(allocator, "+", left, right);
 }
@@ -1279,6 +1366,7 @@ pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Va
         return false;
     }
     if (isUndefined(container)) return false;
+    if (mappingSource(container)) |source| return if (item == .string) (try mapping_keys.entry(source, item)) != null else false;
     if (container.attribute("__dxt_binary") == .string) return yaml_values.contains(container, item);
     if (sets.isSet(container)) return try sets.contains(container, item);
     if (container.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError;
@@ -1444,8 +1532,9 @@ pub fn iterableValuesWithHost(allocator: std.mem.Allocator, value: Value, host: 
     if (sequence(value)) |items| return items;
     if (isUndefined(value)) return &.{};
     if (value == .object) {
-        const result = try allocateValues(allocator, value.object.len);
-        for (value.object, result) |entry, *v| v.* = entryKey(entry);
+        const source = mappingSource(value) orelse value;
+        const result = try allocateValues(allocator, source.object.len);
+        for (source.object, result) |entry, *v| v.* = entryKey(entry);
         return result;
     }
     if (value == .string) {
@@ -1521,6 +1610,7 @@ pub fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
         if (value == .capture_undefined and other == .capture_undefined) return value.capture_undefined.identity == other.capture_undefined.identity;
         if (value == .ordinary_undefined and other == .ordinary_undefined) return value.ordinary_undefined.identity == other.ordinary_undefined.identity;
         if (isUndefined(value) or isUndefined(other)) return false;
+        if (immutableIdentity(value) != null or immutableIdentity(other) != null) return immutableSame(value, other);
         if (floatProtocol(value)) |number| if (std.math.isNan(number)) return mapping_keys.keyEqual(value, other);
         if (complexProtocol(value)) |number| if (std.math.isNan(number.real) or std.math.isNan(number.imaginary)) return mapping_keys.keyEqual(value, other);
         if (std.meta.activeTag(value) != std.meta.activeTag(other)) return false;
@@ -1802,10 +1892,10 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
         .string => |v| try unicode.count(v),
         .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined => 0,
         .list, .tuple => |v| v.len,
-        .object => |v| if (value.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError else if (try sequences.length(value)) |length| length else if (sequence(value)) |items| items.len else v.len,
+        .object => |v| if (value.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError else if (try sequences.length(value)) |length| length else if (sequence(value)) |items| items.len else if (mappingSource(value)) |source| source.object.len else v.len,
         else => return error.JinjaTypeError,
     });
-    if (std.mem.eql(u8, name, "string")) return .{ .string = try value.text(allocator) };
+    if (std.mem.eql(u8, name, "string")) return .{ .string = try textWithHost(allocator, value, host) };
     if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "float")) {
         if (isUndefined(value)) return error.UndefinedJinjaValue;
         if (std.mem.eql(u8, name, "int")) {
@@ -2182,4 +2272,71 @@ test "typed lazy attributes dispatch through the consuming host and preserve ind
     try std.testing.expectEqualStrings("3", (try evaluate(a, "deferred['length']", host)).integer);
     try std.testing.expectEqual(@as(usize, 2), context.calls);
     try std.testing.expectEqualStrings("9007199254740994", (try addValues(a, .{ .integer = "9007199254740993" }, .{ .integer = "1" })).integer);
+}
+
+test "pytz mapping proxies preserve Unicode lookup and public views" {
+    const Fixture = struct {
+        countries: Value,
+        fn resolve(context: *anyopaque, name: []const u8, _: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return if (std.mem.eql(u8, name, "countries")) self.countries else .undefined;
+        }
+        fn call(_: *anyopaque, _: []const u8, _: []const Argument, _: std.mem.Allocator) !Value {
+            return error.UnsupportedJinjaCall;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var context = Fixture{ .countries = (try @import("timezone_context.zig").resolve(a, "modules.pytz.country_names")).? };
+    const host = Host{ .context = &context, .resolve = Fixture.resolve, .call = Fixture.call };
+    try std.testing.expectEqualStrings("United States", (try evaluate(a, "countries['uſ']", host)).string);
+    try std.testing.expectEqualStrings("United States", (try evaluate(a, "countries.get('us')", host)).string);
+    try std.testing.expectEqualStrings("249", (try evaluate(a, "countries|length", host)).integer);
+    try std.testing.expect((try evaluate(a, "'US' in countries and 'us' not in countries and 1 not in countries", host)).boolean);
+    try std.testing.expect((try evaluate(a, "countries is mapping and countries is sequence and countries is iterable", host)).boolean);
+    try std.testing.expectEqualStrings("249", (try evaluate(a, "countries.keys()|list|length", host)).integer);
+    try std.testing.expectError(error.InvalidCountryCode, evaluate(a, "countries[1]", host));
+    try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "countries.copy()", host));
+}
+
+test "immutable timezone and class equality preserve cached identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pytz = @import("timezone_context.zig");
+    const one = (try pytz.resolve(a, "modules.pytz.utc")).?;
+    const two = (try pytz.resolve(a, "modules.pytz.utc")).?;
+    try std.testing.expect(equalValues(one, two));
+    try std.testing.expect(try testValue("sameas", one, &.{.{ .value = two }}));
+    const kind = @import("modules_datetime.zig");
+    const cls = (try kind.resolve(a, "modules.datetime.date")).?;
+    const other = (try kind.resolve(a, "modules.datetime.date")).?;
+    try std.testing.expect(equalValues(cls, other));
+    try std.testing.expect(try testValue("sameas", cls, &.{.{ .value = other }}));
+}
+
+test "deferred repr uses current host through nested values" {
+    const Fixture = struct {
+        calls: usize = 0,
+        fn resolve(_: *anyopaque, _: []const u8, _: std.mem.Allocator) !Value {
+            return .undefined;
+        }
+        fn call(context: *anyopaque, name: []const u8, args: []const Argument, _: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, name, "loop_repr") or args.len != 0) return error.InvalidJinjaArguments;
+            self.calls += 1;
+            return .{ .string = "<LoopContext 1/3>" };
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture = Fixture{};
+    const host = Host{ .context = &fixture, .resolve = Fixture.resolve, .call = Fixture.call };
+    const value = Value{ .object = &.{.{ .key = "__dxt_repr", .value = .{ .callable = "loop_repr" } }} };
+    try std.testing.expectEqualStrings("<LoopContext 1/3>", try textWithHost(a, value, host));
+    try std.testing.expectEqualStrings("[<LoopContext 1/3>]", try textWithHost(a, .{ .list = &.{value} }, host));
+    try std.testing.expectEqualStrings("{'loop': <LoopContext 1/3>}", try textWithHost(a, .{ .object = &.{.{ .key = "loop", .value = value }} }, host));
+    try std.testing.expectEqual(@as(usize, 3), fixture.calls);
 }

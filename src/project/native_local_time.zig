@@ -16,6 +16,16 @@ pub fn civil(allocator: std.mem.Allocator, utc_ns: i96) !i96 {
     return @as(i96, try calendar.parseTimestamp(label)) * std.time.ns_per_s + @as(i96, local.tm_hour) * std.time.ns_per_hour + @as(i96, local.tm_min) * std.time.ns_per_min + @as(i96, local.tm_sec) * std.time.ns_per_s + @mod(utc_ns, std.time.ns_per_s);
 }
 
+pub fn zoneName(allocator: std.mem.Allocator, utc_ns: i96) ![]const u8 {
+    var seconds: c.time_t = @intCast(@divFloor(utc_ns, std.time.ns_per_s));
+    var local: c.struct_tm = undefined;
+    c.tzset();
+    if (c.localtime_r(&seconds, &local) == null) return error.InvalidDatetime;
+    var buffer: [128]u8 = undefined;
+    const length = c.strftime(&buffer, buffer.len, "%Z", &local);
+    return allocator.dupe(u8, buffer[0..length]);
+}
+
 fn candidate(civil_ns: i96, is_dst: c_int) !i96 {
     const seconds = @divFloor(civil_ns, std.time.ns_per_s);
     var utc: c.time_t = @intCast(seconds);
