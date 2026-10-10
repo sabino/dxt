@@ -83,6 +83,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 counts.tests += 1;
             } else if (row.singular_test_node) |original| {
                 const node = @constCast(original);
+                for (row.macro_dependencies) |id| try @import("util.zig").appendUnique(runtime.allocator, &node.macro_depends_on, id);
                 node.compiled = true;
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
                 node.compiled_path = try @import("test_provenance.zig").compiledPath(runtime.allocator, graph, node);
@@ -220,7 +221,11 @@ fn render(runtime: types.Runtime, graph: *const types.Graph, resource: runner.Re
             row.compiled_ctes = compiled.extra_ctes.items;
         },
         .singular => |node| {
-            const compiled = try compiler.compileSingularTestWithInjectedCtes(runtime.allocator, graph, node);
+            var dependencies: std.ArrayList([]const u8) = .empty;
+            defer dependencies.deinit(runtime.allocator);
+            const compiled = try compiler.compileSingularTestWithDependencies(runtime.allocator, graph, node, &dependencies);
+            row.macro_dependencies = try dependencies.toOwnedSlice(runtime.allocator);
+            row.owns_macro_dependencies = true;
             row.compiled_code = compiled.compiled_code;
             row.owns_compiled_code = true;
             row.compiled_ctes = compiled.extra_ctes.items;

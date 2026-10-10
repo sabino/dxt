@@ -732,11 +732,15 @@ pub fn compileSingularTest(allocator: std.mem.Allocator, graph: *const Graph, te
 }
 
 pub fn compileSingularTestWithInjectedCtes(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode) !CompiledModel {
-    const body = try compileSingularTestBody(allocator, graph, test_node);
+    return compileSingularTestWithDependencies(allocator, graph, test_node, null);
+}
+
+pub fn compileSingularTestWithDependencies(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode, dependencies: ?*std.ArrayList([]const u8)) !CompiledModel {
+    const body = try compileSingularTestBody(allocator, graph, test_node, dependencies);
     return try injectTestDependencies(allocator, graph, test_node.depends_on, body);
 }
 
-fn compileSingularTestBody(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode) ![]const u8 {
+fn compileSingularTestBody(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const SingularTestNode, dependencies: ?*std.ArrayList([]const u8)) ![]const u8 {
     const node = Node{
         .depends_on = test_node.depends_on,
         .resolved_identity = test_node.resolved_identity,
@@ -754,6 +758,8 @@ fn compileSingularTestBody(allocator: std.mem.Allocator, graph: *const Graph, te
     };
     var context = CompileContext.init(allocator, graph, &node);
     defer context.deinit();
+    context.runtime_macro_dependencies = dependencies;
+    context.runtime_dependency_allocator = allocator;
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);

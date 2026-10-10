@@ -222,8 +222,11 @@ fn executeCompiledDataTest(runtime: Runtime, db_path: []const u8, graph: *const 
 
 pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const SingularTestNode) !GenericTestExecutionResult {
     const compilation_started = clock.now(runtime.io);
-    var compiled = try compiler.compileSingularTestWithInjectedCtes(runtime.allocator, graph, test_node);
-    errdefer compiled.deinit(runtime.allocator);
+    var dependencies: std.ArrayList([]const u8) = .empty;
+    defer dependencies.deinit(runtime.allocator);
+    var compiled = try compiler.compileSingularTestWithDependencies(runtime.allocator, graph, test_node, &dependencies);
+    var owns_compilation = true;
+    errdefer if (owns_compilation) compiled.deinit(runtime.allocator);
     const compilation_completed = clock.now(runtime.io);
     var config = try @import("canonical_manifest_config.zig").testConfig(runtime.allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values);
     defer @import("config_value.zig").deinit(runtime.allocator, &config);
@@ -247,7 +250,23 @@ pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const 
     node.compiled_code = compiled.compiled_code;
     node.compiled = true;
     node.extra_ctes = compiled.extra_ctes;
-    return executeCompiledDataTest(runtime, db_path, graph, &node, test_node.config, &compiled, compilation_started, compilation_completed);
+    var execution = try executeCompiledDataTest(runtime, db_path, graph, &node, test_node.config, &compiled, compilation_started, compilation_completed);
+    owns_compilation = false;
+    errdefer {
+        runtime.allocator.free(execution.compiled_code);
+        for (execution.compiled_ctes) |cte| runtime.allocator.free(cte.sql);
+        runtime.allocator.free(execution.compiled_ctes);
+        runtime.allocator.free(execution.macro_dependencies);
+        if (execution.build_path) |path| runtime.allocator.free(path);
+        if (execution.execution_message) |message| runtime.allocator.free(message);
+        if (execution.adapter_response) |response| response.deinit(runtime.allocator);
+        if (execution.relation_name) |relation| runtime.allocator.free(relation);
+    }
+    for (execution.macro_dependencies) |id| try @import("util.zig").appendUnique(runtime.allocator, &dependencies, id);
+    runtime.allocator.free(execution.macro_dependencies);
+    execution.macro_dependencies = &.{};
+    execution.macro_dependencies = try dependencies.toOwnedSlice(runtime.allocator);
+    return execution;
 }
 
 pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !void {
