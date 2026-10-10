@@ -7,6 +7,11 @@ pub fn isRange(v: Value) bool {
     const marker = v.attribute("__dxt_range");
     return marker == .callable and std.mem.eql(u8, marker.callable, "__dxt_range");
 }
+pub fn className(v: Value) ?[]const u8 {
+    if (!isRange(v)) return null;
+    const name = v.attribute("__dxt_range_class");
+    return if (name == .string) name.string else null;
+}
 fn endpoint(a: A, v: Value, repr: bool) ![]const u8 {
     if (expr.floatProtocol(v)) |number| return @import("expression_number.zig").floatText(a, number);
     return switch (v) {
@@ -28,6 +33,7 @@ pub fn value(a: A, class_name: []const u8, lower: Value, upper: Value, bounds: [
         .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_range", .value = .{ .callable = "__dxt_range" } },
+        .{ .key = "__dxt_range_class", .value = .{ .string = try a.dupe(u8, class_name) } },
         .{ .key = "__dxt_rendered", .value = .{ .string = shown } },
         .{ .key = "__dxt_repr", .value = .{ .string = repr } },
         .{ .key = "__dxt_bool", .value = .{ .callable = if (empty) "__dxt_range_bool:0" else "__dxt_range_bool:1" } },
@@ -76,6 +82,7 @@ test "range carriers preserve empty and unbounded states without forged markers"
     defer arena.deinit();
     const a = arena.allocator();
     const empty = try value(a, "NumericRange", .none, .none, .{ '[', ')' }, true);
+    try std.testing.expectEqualStrings("NumericRange", className(empty).?);
     try std.testing.expect(!truthy(empty).?);
     try std.testing.expect(empty.attribute("__dxt_range_bounds") == .none);
     try std.testing.expect(!empty.attribute("lower_inf").boolean);
@@ -85,4 +92,5 @@ test "range carriers preserve empty and unbounded states without forged markers"
     try std.testing.expect(unbounded.attribute("lower_inf").boolean);
     const fake: Value = .{ .object = &.{.{ .key = "__dxt_range", .value = .{ .string = "__dxt_range" } }} };
     try std.testing.expect(!isRange(fake));
+    try std.testing.expect(className(fake) == null);
 }

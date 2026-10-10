@@ -571,7 +571,7 @@ pub const Connection = struct {
             .time => |v| self.api.duckdb_bind_time(statement, slot, .{ .micros = v }),
             .timestamp => |v| self.api.duckdb_bind_timestamp(statement, slot, .{ .micros = v }),
             .timestamp_tz => |v| self.api.duckdb_bind_timestamp_tz(statement, slot, .{ .micros = v }),
-            .time_tz, .interval, .uuid, .list, .tuple, .object => return error.InvalidQueryParameter,
+            .time_tz, .interval, .uuid, .list, .tuple, .object, .range => return error.InvalidQueryParameter,
         };
         if (status != 0) {
             self.captureError(self.api.duckdb_prepare_error(statement));

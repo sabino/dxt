@@ -3,6 +3,16 @@ const std = @import("std");
 const calendar = @import("workflow_intervals.zig");
 pub const Field = struct { name: []const u8, value: Parameter };
 pub const ZonedTime = struct { micros: i64, offset_us: i64 };
+pub const RangeKind = enum { numeric, date, timestamp, timestamp_tz };
+/// Endpoints and their nested storage belong to the binding conversion arena,
+/// like list/tuple/object members; adapters only borrow them during execution.
+pub const Range = struct {
+    kind: RangeKind,
+    lower: ?*const Parameter = null,
+    upper: ?*const Parameter = null,
+    bounds: [2]u8 = .{ '[', ')' },
+    empty: bool = false,
+};
 
 pub const Parameter = union(enum) {
     none,
@@ -22,9 +32,10 @@ pub const Parameter = union(enum) {
     list: []const Parameter,
     tuple: []const Parameter,
     object: []const Field,
+    range: Range,
 
     pub fn recursive(self: Parameter) bool {
-        return self == .list or self == .tuple or self == .object;
+        return self == .list or self == .tuple or self == .object or self == .range;
     }
 
     pub fn postgresType(self: Parameter) u32 {
@@ -44,7 +55,7 @@ pub const Parameter = union(enum) {
             .time_tz => 1266,
             .interval => 1186,
             .uuid => 2950,
-            .list, .tuple, .object => 0,
+            .list, .tuple, .object, .range => 0,
         };
     }
 
@@ -73,7 +84,7 @@ pub const Parameter = union(enum) {
             .timestamp_tz => |micros| try std.fmt.allocPrint(scratch, "{s}+00:00", .{try timestampText(scratch, micros)}),
             .time_tz => |clock| try std.fmt.allocPrint(scratch, "{s}{s}", .{ (try timestampText(scratch, clock.micros))[11..], try offsetText(scratch, clock.offset_us) }),
             .interval => |micros| try std.fmt.allocPrint(scratch, "{d} microseconds", .{micros}),
-            .uuid, .list, .tuple, .object => return error.InvalidQueryParameter,
+            .uuid, .list, .tuple, .object, .range => return error.InvalidQueryParameter,
         };
         if (std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidQueryParameter;
         return try a.dupeZ(u8, text);
