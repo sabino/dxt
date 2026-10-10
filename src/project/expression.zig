@@ -3062,8 +3062,8 @@ test "memoryview expressions check release state and retain shaped numeric slice
     try std.testing.expectEqualStrings("i", (try evaluate(a, "v.cast('i',shape=[2,2])['format']", host)).string);
     try std.testing.expect((try evaluate(a, "v.cast('i',shape=[2,2])[99,0] is undefined", host)).boolean);
     try std.testing.expectEqualStrings("[4, 3, 2, 1]", try (try evaluate(a, "v.cast('i')[::-1].tolist()", host)).text(a));
-    const numeric = try evaluate(a, "v.cast('i')", host);
-    try std.testing.expectError(error.InvalidQueryMemoryviewHash, hashableKey(numeric));
+    const numeric_view = try evaluate(a, "v.cast('i')", host);
+    try std.testing.expectError(error.InvalidQueryMemoryviewHash, hashableKey(numeric_view));
     const zero = try evaluate(a, "v[:4].cast('i',shape=[])", host);
     try std.testing.expectEqualStrings("1", (try indexValue(a, zero, .{ .tuple = &.{} })).integer);
     try std.testing.expect((try indexValue(a, zero, .{ .integer = "0" })) == .undefined);
