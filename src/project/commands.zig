@@ -1042,7 +1042,7 @@ pub fn parseRetry(allocator: std.mem.Allocator, text: []const u8, current: Optio
         if (isRetryableStatus(status.string)) try config_values.put(allocator, &microbatch_retries, try allocator.dupe(u8, id.string), try config_values.clone(allocator, batches));
     }
     if (microbatch_retries.object.count() != 0) options.microbatch_retry_results = microbatch_retries;
-    if (std.mem.eql(u8, which, "generate")) inline for (.{ .{ "compile", "docs_compile" }, .{ "static", "docs_static" } }) |field| {
+    if (std.mem.eql(u8, which, "generate")) inline for (.{ .{ "compile", "docs_compile" }, .{ "static", "docs_static" }, .{ "empty_catalog", "docs_empty_catalog" } }) |field| {
         if (args.get(field[0])) |value| {
             if (value != .bool) return error.MalformedRunResultsArtifact;
             @field(options, field[1]) = value.bool;

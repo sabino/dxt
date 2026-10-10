@@ -29,11 +29,14 @@ def project_pair(path):
     (path / "models/bad.sql").write_text("{% if execute and var('broken', true) %}{{ exceptions.raise_compiler_error('synthetic failure') }}{% endif %}select 1 as id")
 
 
-@pytest.mark.parametrize(("command", "static"), [("compile", False), ("generate", True), ("generate", False)])
-def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path, core_runner, command, static):
+@pytest.mark.parametrize(("command", "static", "empty_catalog"), [("compile", False, False), ("generate", True, False), ("generate", False, False), ("generate", True, True)])
+def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path, core_runner, command, static, empty_catalog):
     project = tmp_path / "project"
     project_pair(project)
-    args = ["compile"] if command == "compile" else ["docs", "generate", *(["--static"] if static else [])]
+    if empty_catalog:
+        with duckdb.connect(str(project / "warehouse.duckdb")) as database:
+            database.execute("create table bad as select 1 as id")
+    args = ["compile"] if command == "compile" else ["docs", "generate", *(["--static"] if static else []), *(["--empty-catalog"] if empty_catalog else [])]
     native_target = project / "native"
     core_target = project / "core"
     common = ["--project-dir", str(project), "--profiles-dir", str(project)]
@@ -49,7 +52,10 @@ def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path
     assert actual["results"][0]["execution_time"] > 0
     if command == "generate":
         # Core turns false one-way flags into unsupported --no-* options on retry.
-        assert "empty_catalog" not in actual["args"]
+        if empty_catalog:
+            assert actual["args"]["empty_catalog"] is True
+        else:
+            assert "empty_catalog" not in actual["args"]
         if not static:
             assert "static" not in actual["args"]
     # Core CompileTask.raise_on_first_error aborts before writing run results.
@@ -75,6 +81,16 @@ def test_compile_and_docs_errors_produce_results_readable_by_core_retry(tmp_path
             assert "static" not in actual["args"]
             assert not (native_target / "static_index.html").exists()
     contracts.assert_artifact(native_target / "run_results.json")
+    if empty_catalog:
+        for target in [native_target, core_target]:
+            results = json.loads((target / "run_results.json").read_text())
+            assert results["args"]["empty_catalog"] is True
+            contracts.assert_artifact(target / "run_results.json")
+            contracts.assert_artifact(target / "catalog.json")
+            catalog = json.loads((target / "catalog.json").read_text())
+            assert catalog["nodes"] == catalog["sources"] == {}
+        with duckdb.connect(str(project / "warehouse.duckdb")) as database:
+            assert database.execute("select id from bad").fetchall() == [(1,)]
 
 
 def test_compile_seed_emits_success_without_sql_execution(tmp_path, core_runner):
