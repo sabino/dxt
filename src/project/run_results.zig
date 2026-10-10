@@ -334,8 +334,10 @@ fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const 
     try writer.print(",\"defer\":{s},\"favor_state\":{s},\"indirect_selection\":", .{ if (opts.defer_enabled) "true" else "false", if (opts.favor_state) "true" else "false" });
     try json.string(writer, opts.indirect_selection);
     if (std.mem.eql(u8, opts.which, "generate")) {
-        try writer.print(",\"static\":{s},\"compile\":{s}", .{ if (opts.docs_static) "true" else "false", if (opts.docs_compile) "true" else "false" });
-        try writer.print(",\"empty_catalog\":{s}", .{if (opts.docs_empty_catalog) "true" else "false"});
+        // Core retry cannot replay negative options for these one-way flags.
+        if (opts.docs_static) try writer.writeAll(",\"static\":true");
+        try writer.print(",\"compile\":{s}", .{if (opts.docs_compile) "true" else "false"});
+        if (opts.docs_empty_catalog) try writer.writeAll(",\"empty_catalog\":true");
     }
     if (std.mem.eql(u8, opts.which, "run-operation")) {
         try writer.writeAll(",\"macro\":");
@@ -353,6 +355,36 @@ fn writeMapping(writer: *Io.Writer, allocator: std.mem.Allocator, text: ?[]const
         if (document.value != .object) return error.InvalidOperationArgs;
         try std.json.Stringify.value(document.value, .{}, writer);
     } else try writer.writeAll("{}");
+}
+
+test "docs replay arguments omit false one-way flags and retain enabled and dual flags" {
+    for ([_]bool{ false, true }) |static_enabled| {
+        for ([_]bool{ false, true }) |empty_catalog_enabled| {
+            for ([_]bool{ false, true }) |compile_enabled| {
+                const options = types.Options{
+                    .which = "generate",
+                    .docs_static = static_enabled,
+                    .docs_empty_catalog = empty_catalog_enabled,
+                    .docs_compile = compile_enabled,
+                };
+                const rendered = try renderRunResultsWithArgs(std.testing.allocator, &.{}, &options);
+                defer std.testing.allocator.free(rendered);
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+                defer parsed.deinit();
+                const args = parsed.value.object.get("args").?.object;
+                if (static_enabled) {
+                    try std.testing.expect(args.get("static").?.bool);
+                } else try std.testing.expect(args.get("static") == null);
+                if (empty_catalog_enabled) {
+                    try std.testing.expect(args.get("empty_catalog").?.bool);
+                } else try std.testing.expect(args.get("empty_catalog") == null);
+                try std.testing.expectEqual(compile_enabled, args.get("compile").?.bool);
+                try std.testing.expect(!args.get("full_refresh").?.bool);
+                try std.testing.expectEqualStrings("generate", args.get("which").?.string);
+                try std.testing.expectEqual(@as(usize, 0), parsed.value.object.get("results").?.array.items.len);
+            }
+        }
+    }
 }
 
 fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
