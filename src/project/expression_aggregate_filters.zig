@@ -32,12 +32,13 @@ pub fn callWithHost(a: std.mem.Allocator, name: []const u8, value: Value, args: 
         const bound = try arguments.bind(a, args, &.{ "attribute", "start" }, &.{ .none, .{ .integer = "0" } }, 0);
         const path = try attributes.parts(a, bound[0]);
         const iterator = try sequence.iter(a, value);
-        var result = bound[1];
+        const start = bound[1];
         // Python's sum rejects text starts even when the input is empty.
-        if (result == .string or result.attribute("__dxt_binary") == .string) return error.JinjaTypeError;
+        if (start == .string or start.attribute("__dxt_binary") == .string) return error.JinjaTypeError;
+        var result = @import("expression_sum.zig").Accumulator.init(start);
         while (try sequence.next(a, iterator, host)) |item|
-            result = try expression.addValues(a, result, try attributes.get(a, item, path, .none, host));
-        return result;
+            try result.add(a, try attributes.get(a, item, path, .none, host));
+        return try result.finish(a);
     }
     if (std.mem.eql(u8, name, "join")) {
         const bound = try arguments.bind(a, args, &.{ "d", "attribute" }, &.{ .{ .string = "" }, .none }, 0);
