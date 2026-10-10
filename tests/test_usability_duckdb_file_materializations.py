@@ -129,12 +129,52 @@ def test_external_native_reader_failure_restores_original_file_and_relation(tmp_
     model(project, "select 2 as id,3 as added", "external", f",location='{location}',parquet_read_options={{'hive_partitioning':'PRIVATE_INVALID_BOOLEAN'}}")
     result = invoke(project)
     assert result.returncode != 0
-    assert "PRIVATE_INVALID_BOOLEAN" not in result.stdout+result.stderr
+    diagnostic = "Could not convert string 'PRIVATE_INVALID_BOOLEAN' to BOOL"
+    assert diagnostic in result.stdout+result.stderr
+    assert diagnostic in (project / "logs/dbt.log").read_text()
+    assert diagnostic in json.loads((project / "target/run_results.json").read_text())["results"][0]["message"]
     assert location.read_bytes() == original
     assert query(project, "duckdb", "select * from history") == [(1,)]
     assert not list(project.glob("*.dxt-stage-*"))
     assert not list(project.glob("*.dxt-backup-*"))
     assert query(project, "duckdb", "select table_name from information_schema.tables where table_name='history__dbt_tmp'") == []
+
+
+@pytest.mark.parametrize("engine", ["dxt", "dbt"])
+def test_external_reader_error_redacts_declared_secret_and_preserves_authored_sql(tmp_path, monkeypatch, engine):
+    oracle_available("duckdb")
+    secret = "PRIVATE_INVALID_BOOLEAN"
+    monkeypatch.setenv("DBT_ENV_SECRET_EXTERNAL_READER", secret)
+    project = project_at(tmp_path / engine, "duckdb")
+    location = project / "history.parquet"
+    model(project, "select 1 as id", "external", f",location='{location}'")
+    successful(invoke(project, engine))
+    original = location.read_bytes()
+    model(project, "select 2 as id,3 as added", "external", f",location='{location}',parquet_read_options={{'hive_partitioning':'{secret}'}}")
+    result = invoke(project, engine)
+    assert result.returncode == 1
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    masked = "Could not convert string '*****' to BOOL"
+    assert masked in result.stdout+result.stderr
+    file_log = (project / "logs/dbt.log").read_text()
+    assert secret not in file_log
+    assert masked in file_log
+    artifact_validator.assert_artifact(project / "target/run_results.json")
+    rows = json.loads((project / "target/run_results.json").read_text())["results"]
+    assert len(rows) == 1
+    assert rows[0]["status"] == "error"
+    assert secret not in rows[0]["message"]
+    assert masked in rows[0]["message"]
+    manifest = json.loads((project / "target/manifest.json").read_text())
+    assert secret in manifest["nodes"]["model.materialization_contract.history"]["raw_code"]
+    if engine == "dxt":
+        # Native file rollback also protects the external bytes after reader failure.
+        assert location.read_bytes() == original
+        assert query(project, "duckdb", "select * from history") == [(1,)]
+        assert not list(project.glob("*.dxt-stage-*"))
+        assert not list(project.glob("*.dxt-backup-*"))
+        assert query(project, "duckdb", "select table_name from information_schema.tables where table_name='history__dbt_tmp'") == []
 
 
 def test_external_native_directory_reader_failure_restores_all_partition_files(tmp_path):
