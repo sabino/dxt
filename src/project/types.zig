@@ -622,6 +622,8 @@ pub const SnapshotConfig = struct {
 };
 
 pub const GenericTestNode = struct {
+    created_at: f64 = 0,
+    build_path: ?[]const u8 = null,
     extra_ctes: std.ArrayList(ExtraCte) = .empty,
     resolved_identity: ?ResolvedIdentity = null,
     doc_blocks: std.ArrayList([]const u8) = .empty,
@@ -667,6 +669,8 @@ pub const GenericTestNode = struct {
 };
 
 pub const SingularTestNode = struct {
+    created_at: f64 = 0,
+    build_path: ?[]const u8 = null,
     extra_ctes: std.ArrayList(ExtraCte) = .empty,
     resolved_identity: ?ResolvedIdentity = null,
     config_values: std.json.Value = .null,
@@ -995,6 +999,7 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
 }
 
 pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
+    if (test_node.build_path) |path| allocator.free(path);
     for (test_node.extra_ctes.items) |cte| allocator.free(cte.sql);
     test_node.extra_ctes.deinit(allocator);
     if (test_node.resolved_identity) |*identity| identity.deinit(allocator);
@@ -1015,6 +1020,7 @@ pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTe
 }
 
 pub fn deinitSingularTestNode(allocator: std.mem.Allocator, test_node: *SingularTestNode) void {
+    if (test_node.build_path) |path| allocator.free(path);
     for (test_node.extra_ctes.items) |cte| allocator.free(cte.sql);
     test_node.extra_ctes.deinit(allocator);
     if (test_node.resolved_identity) |*identity| identity.deinit(allocator);

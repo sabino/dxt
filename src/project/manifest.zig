@@ -1333,6 +1333,11 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try std.json.Stringify.value(@import("config_value.zig").get(test_node.config_values, "meta") orelse @as(std.json.Value, .{ .object = .empty }), .{}, writer);
     try writer.writeAll(",\"group\":");
     try writeNullableString(writer, @import("group_access.zig").genericGroup(graph, &test_node));
+    try @import("test_provenance.zig").writeInherited(writer, test_node.config_values, test_node.created_at, test_node.build_path);
+    try writer.writeAll(",\"file_key_name\":");
+    const file_key = try @import("test_provenance.zig").fileKeyName(allocator, graph, &test_node);
+    defer if (file_key) |key| allocator.free(key);
+    try writeNullableString(writer, file_key);
     try writer.writeAll(",\"attached_node\":");
     if (test_node.attached_node) |attached_node| {
         try json.string(writer, attached_node);
@@ -1454,6 +1459,11 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values);
     defer @import("config_value.zig").deinit(allocator, &canonical_config);
     try std.json.Stringify.value(canonical_config, .{}, writer);
+    try @import("test_provenance.zig").writeInherited(writer, canonical_config, test_node.created_at, test_node.build_path);
+    try writer.writeAll(",\"meta\":");
+    try std.json.Stringify.value(@import("config_value.zig").get(canonical_config, "meta") orelse @as(std.json.Value, .{ .object = .empty }), .{}, writer);
+    try writer.writeAll(",\"group\":");
+    try std.json.Stringify.value(@import("config_value.zig").get(canonical_config, "group") orelse @as(std.json.Value, .null), .{}, writer);
     try writer.writeAll(",\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");

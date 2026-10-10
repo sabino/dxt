@@ -80,3 +80,102 @@ def test_native_profileless_duckdb_replaces_audit_with_empty_relation(tmp_path, 
     assert test_row['relation_name'] == '"main_dbt_test__audit"."not_null_customers_customer_id"'
     with duckdb.connect(str(target / 'dxt.duckdb')) as connection:
         assert connection.execute('select count(*) from "main_dbt_test__audit"."not_null_customers_customer_id"').fetchone() == (0,)
+
+
+INHERITED = ['columns', 'docs', 'contract', 'metrics', 'meta', 'group']
+
+
+def read_test_node(root, target=None):
+    from test_usability_artifacts import contracts
+    target = target or root / 'target'
+    contracts.assert_artifact(target / 'manifest.json')
+    manifest = json.loads((target / 'manifest.json').read_text())
+    node, = [node for node in manifest['nodes'].values() if node['resource_type'] == 'test']
+    return node
+
+
+def metadata_policy(root, generic, *, attached_group=False):
+    config = {'meta': {'owner': 'analytics', 'levels': [1, True, None]},
+              'docs': {'show': False, 'node_color': '#123456'}, 'group': 'finance',
+              'contract': {'enforced': True, 'alias_types': False}}
+    path = root / 'models/schema.yml'
+    document = yaml.safe_load(path.read_text()) if path.exists() else {'version': 2}
+    document['groups'] = [{'name': 'finance', 'owner': {'name': 'Test owner'}}]
+    if generic:
+        model = document['models'][0]
+        model['columns'] = [{'name': 'id', 'description': 'Model column, not test columns'}]
+        if attached_group:
+            model['config'] = {'group': 'finance'}
+        model['data_tests'][0]['bad_rows']['config'].update(config)
+    else:
+        document['data_tests'] = [{'name': 'check', 'config': config}]
+    path.write_text(json.dumps(document))
+    return config
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('generic', [False, True])
+def test_core_inherited_test_metadata_and_parse_cache_creation_time(tmp_path, request, duckdb_environment, adapter, generic):
+    import time
+    observations = {}
+    for engine in ['dxt', 'core']:
+        root, _ = fixture(tmp_path, engine, adapter, request, store=True, generic=generic, override_limit=False)
+        config = metadata_policy(root, generic)
+        env = environment(duckdb_environment)
+        before = time.time()
+        command(engine, root, env, 'parse')
+        first = read_test_node(root)
+        assert before <= first['created_at'] <= time.time()
+        assert first['build_path'] is None
+        assert first['columns'] == {} and first['metrics'] == []
+        assert first['contract'] == {**config['contract'], 'checksum': None}
+        assert first['docs'] == config['docs'] and first['meta'] == config['meta']
+        assert first['group'] == (None if generic else 'finance')
+        if generic:
+            assert first['file_key_name'] == 'models.input'
+        else:
+            assert 'file_key_name' not in first
+        command(engine, root, env, 'parse')
+        cached = read_test_node(root)
+        assert cached['created_at'] == first['created_at']
+        if generic:
+            metadata_policy(root, generic, attached_group=True)
+            command(engine, root, env, 'parse')
+            updated = read_test_node(root)
+            assert updated['created_at'] > first['created_at']
+            assert updated['group'] == 'finance'
+        else:
+            updated = cached
+        observations[engine] = ({field: first[field] for field in INHERITED},
+                                {field: updated[field] for field in INHERITED})
+    assert observations['dxt'] == observations['core']
+
+
+
+
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_core_generic_file_key_names_follow_model_seed_snapshot_and_source_origins(tmp_path, request, duckdb_environment, adapter):
+    observations = {}
+    for engine in ['dxt', 'core']:
+        root, schema = fixture(tmp_path, engine, adapter, request, store=False, generic=True, override_limit=False)
+        (root / 'seeds/items.csv').write_text('id\n1\n')
+        (root / 'snapshots').mkdir()
+        (root / 'snapshots/state.sql').write_text("{% snapshot state %}{{ config(strategy='timestamp', unique_key='id', updated_at='updated_at', target_schema='" + schema + "') }}select 1 as id, current_timestamp as updated_at{% endsnapshot %}")
+        path = root / 'models/schema.yml'
+        document = yaml.safe_load(path.read_text())
+        document['seeds'] = [{'name': 'items', 'data_tests': ['bad_rows']}]
+        document['snapshots'] = [{'name': 'state', 'data_tests': ['bad_rows']}]
+        document['sources'] = [{'name': 'external', 'schema': schema, 'tables': [{'name': 'source_items', 'data_tests': ['bad_rows']}]}]
+        path.write_text(json.dumps(document))
+        command(engine, root, environment(duckdb_environment), 'parse')
+        from test_usability_artifacts import contracts
+        contracts.assert_artifact(root / 'target/manifest.json')
+        manifest = json.loads((root / 'target/manifest.json').read_text())
+        nodes = [node for node in manifest['nodes'].values() if node['resource_type'] == 'test']
+        assert len(nodes) == 4
+        actual = {node['file_key_name'] for node in nodes}
+        assert actual == {'models.input', 'seeds.items', 'snapshots.state', 'sources.external'}
+        observations[engine] = {node['unique_id']: node['file_key_name'] for node in nodes}
+    assert observations['dxt'] == observations['core']
