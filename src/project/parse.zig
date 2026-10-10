@@ -200,6 +200,16 @@ pub fn parseMacros(runtime: types.Runtime, project_dir: []const u8, relative_pat
 }
 
 pub fn parseMacrosFromText(allocator: std.mem.Allocator, raw_text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    try parseMacroBlocksFromText(allocator, raw_text, relative_path, package_name, graph, false);
+}
+
+pub fn parseGenericTestMacros(runtime: types.Runtime, project_dir: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
+    const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
+    try parseMacroBlocksFromText(runtime.allocator, text, relative_path, package_name, graph, true);
+}
+
+fn parseMacroBlocksFromText(allocator: std.mem.Allocator, raw_text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph, generic_tests_only: bool) !void {
     const text = std.mem.trim(u8, raw_text, " \t\r\n");
     var index: usize = 0;
     var control_depth: usize = 0;
@@ -222,7 +232,18 @@ pub fn parseMacrosFromText(allocator: std.mem.Allocator, raw_text: []const u8, r
             index = close + 2;
             continue;
         }
-        var macro_tag = parseMacroOpenTag(allocator, tag, graph.validate_macro_args) catch |err| switch (err) {
+        if (generic_tests_only) {
+            inline for (.{ .{ "macro", "endmacro" }, .{ "materialization", "endmaterialization" } }) |ignored| {
+                if (std.mem.startsWith(u8, tag, ignored[0]) and tag.len > ignored[0].len and std.ascii.isWhitespace(tag[ignored[0].len])) {
+                    const end = try findEndMacroTag(text, close + 2, ignored[1]);
+                    index = end.close + 2;
+                    break;
+                }
+            }
+            if (index > open) continue;
+        }
+        const extract_arguments = graph.validate_macro_args and !generic_tests_only;
+        var macro_tag = parseMacroOpenTag(allocator, tag, extract_arguments) catch |err| switch (err) {
             error.NotMacroBlock => {
                 index = close + 2;
                 continue;
@@ -247,7 +268,7 @@ pub fn parseMacrosFromText(allocator: std.mem.Allocator, raw_text: []const u8, r
         var macro = try macroDefFromParts(allocator, package_name, macro_tag.name, relative_path, macro_sql);
         macro.signature_arguments = macro_tag.arguments;
         macro_tag.arguments = .empty;
-        if (graph.validate_macro_args) {
+        if (extract_arguments) {
             try appendMacroArgumentClones(graph, &macro.arguments, macro.signature_arguments.items);
         }
         macro.supported_languages = macro_tag.supported_languages;
@@ -2030,6 +2051,26 @@ test "parseMacrosFromText extracts top-level macro blocks" {
     );
     try std.testing.expectEqual(@as(usize, 0), graph.macros.items[0].arguments.items.len);
     try std.testing.expectEqual(@as(usize, 0), graph.macros.items[0].signature_arguments.items.len);
+}
+
+test "generic test directories discover only test blocks and retain their original paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .validate_macro_args = true };
+    defer graph.deinit();
+    const sql =
+        \\{% macro ignored(model) %}{% if true %}ignored{% endif %}{% endmacro %}
+        \\{% test positive(model, column_name) %}select * from {{ model }} where {{ column_name }} < 0{% endtest %}
+        \\{% materialization ignored, default %}ignored{% endmaterialization %}
+    ;
+    try parseMacroBlocksFromText(allocator, sql, "data_tests/generic/nested/positive.sql", "demo", &graph, true);
+    try std.testing.expectEqual(@as(usize, 1), graph.macros.items.len);
+    const macro = graph.macros.items[0];
+    try std.testing.expectEqualStrings("macro.demo.test_positive", macro.unique_id);
+    try std.testing.expectEqualStrings("data_tests/generic/nested/positive.sql", macro.original_file_path);
+    try std.testing.expectEqualStrings("{% test positive(model, column_name) %}select * from {{ model }} where {{ column_name }} < 0{% endtest %}", macro.macro_sql);
+    try std.testing.expectEqual(@as(usize, 0), macro.arguments.items.len);
 }
 
 test "parseMacrosFromText extracts macro signature arguments when enabled" {

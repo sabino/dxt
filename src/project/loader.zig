@@ -163,7 +163,8 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     }
 
     try @import("bundled_macros.zig").load(runtime.allocator, &graph);
-    try loadProjectMacros(runtime, options.project_dir, config.name, config.macro_paths.items, true, callbacks, &graph);
+    try loadProjectMacros(runtime, options.project_dir, config.name, config.macro_paths.items, config.test_paths.items, true, callbacks, &graph);
+    try loadGenericTestMacros(runtime, options.project_dir, config.name, config.test_paths.items, &graph);
     try loadInstalledPackageMacros(runtime, options.project_dir, callbacks, &graph);
     try loadInstalledPackageResources(runtime, options.project_dir, callbacks, &graph);
     try @import("doc_blocks.zig").load(runtime, options.project_dir, &config, &graph);
@@ -323,7 +324,7 @@ fn appendSourceProjectConfigsToGraph(allocator: std.mem.Allocator, graph: *Graph
     }
 }
 
-fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []const u8, macro_paths: []const []const u8, parse_properties: bool, callbacks: Callbacks, graph: *Graph) !void {
+fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []const u8, macro_paths: []const []const u8, test_paths: []const []const u8, parse_properties: bool, callbacks: Callbacks, graph: *Graph) !void {
     for (macro_paths) |macro_path| {
         var macro_files: std.ArrayList([]const u8) = .empty;
         defer macro_files.deinit(runtime.allocator);
@@ -344,8 +345,34 @@ fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []
             }
         }
         for (macro_files.items) |relative_path| {
+            if (isGenericTestMacroPath(relative_path, test_paths)) continue;
             try callbacks.parse_macros(runtime, project_dir, relative_path, package_name, graph);
         }
+    }
+}
+
+fn isGenericTestMacroPath(relative_path: []const u8, test_paths: []const []const u8) bool {
+    for (test_paths) |test_path| {
+        const path = project_fs.relativeUnderResourcePath(relative_path, test_path);
+        if (path.len != relative_path.len and (std.mem.startsWith(u8, path, "generic/") or std.mem.startsWith(u8, path, "generic\\"))) return true;
+    }
+    return false;
+}
+
+fn loadGenericTestMacros(runtime: Runtime, project_dir: []const u8, package_name: []const u8, test_paths: []const []const u8, graph: *Graph) !void {
+    for (test_paths) |test_path| {
+        const generic_path = try pathJoin(runtime.allocator, &.{ test_path, "generic" });
+        var sql_files: std.ArrayList([]const u8) = .empty;
+        defer sql_files.deinit(runtime.allocator);
+        var yaml_files: std.ArrayList([]const u8) = .empty;
+        defer yaml_files.deinit(runtime.allocator);
+        const root = try pathJoin(runtime.allocator, &.{ project_dir, generic_path });
+        discoverMacroFiles(runtime, root, generic_path, &sql_files, &yaml_files) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        sortStrings(sql_files.items);
+        for (sql_files.items) |relative_path| try project_parse.parseGenericTestMacros(runtime, project_dir, relative_path, package_name, graph);
     }
 }
 
@@ -384,7 +411,8 @@ fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, callbac
             try graph.vars.append(runtime.allocator, .{ .name = entry.name, .value = entry.value, .typed_value = if (entry.typed_value) |v| try config_value.clone(runtime.allocator, v) else null, .package_name = scope, .priority = if (entry.package_name == null) 10 else 20 });
         }
 
-        try loadProjectMacros(runtime, package_dir, package_config.name, package_config.macro_paths.items, true, callbacks, graph);
+        try loadProjectMacros(runtime, package_dir, package_config.name, package_config.macro_paths.items, package_config.test_paths.items, true, callbacks, graph);
+        try loadGenericTestMacros(runtime, package_dir, package_config.name, package_config.test_paths.items, graph);
     }
 }
 
