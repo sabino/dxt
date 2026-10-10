@@ -16,6 +16,29 @@ pub fn name(value: Value) ?[]const u8 {
     const shown = value.attribute("__dxt_rendered");
     return if (shown == .string) shown.string else null;
 }
+pub fn child(value: Value, key: []const u8) !Value {
+    if (name(value) == null) return error.QueryTypeChildNotFound;
+    const children = value.attribute("children");
+    if (children == .list) for (children.list) |entry| {
+        if (entry == .tuple and entry.tuple.len == 2 and entry.tuple[0] == .string and std.mem.eql(u8, key, entry.tuple[0].string)) return entry.tuple[1];
+    };
+    return error.QueryTypeChildNotFound;
+}
+
+test "DuckDB nested type lookup uses exact declared child names" {
+    const integer: Value = .{ .object = &.{
+        .{ .key = "__dxt_duck_type", .value = .{ .callable = "__dxt_duck_type" } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = "INTEGER" } },
+    } };
+    const structure: Value = .{ .object = &.{
+        .{ .key = "__dxt_duck_type", .value = .{ .callable = "__dxt_duck_type" } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = "STRUCT(x INTEGER)" } },
+        .{ .key = "children", .value = .{ .list = &.{.{ .tuple = &.{ .{ .string = "x" }, integer } }} } },
+    } };
+    try std.testing.expectEqualStrings("INTEGER", name(try child(structure, "x")).?);
+    try std.testing.expectError(error.QueryTypeChildNotFound, child(structure, "X"));
+    try std.testing.expectError(error.QueryTypeChildNotFound, child(integer, "id"));
+}
 pub fn equal(lhs: Value, rhs: Value) ?bool {
     const left = name(lhs);
     const right = name(rhs);
