@@ -347,7 +347,7 @@ fn makePlan(context: *Context) !Plan {
         };
         if (!found) try removed.append(a, old.unique_id);
     };
-    try bindRelations(context.graph, models.items, a);
+    try bindRelations(context.graph, models.items);
     for (models.items, 0..) |item, index| {
         if (item.model.ephemeral) continue;
         for (models.items[0..index]) |other| if (!other.model.ephemeral and eq(other.model.schema, item.model.schema) and eq(other.model.alias, item.model.alias)) return error.WorkflowRelationCollision;
@@ -694,9 +694,31 @@ fn appendHistory(a: std.mem.Allocator, current: ?Environment) ![]const Revision 
     return history;
 }
 
-fn bindRelations(graph: *types.Graph, changes: []const Change, a: std.mem.Allocator) !void {
-    graph.deferred_relations.clearRetainingCapacity();
-    for (changes) |change| if (!change.model.ephemeral) try graph.deferred_relations.append(a, .{ .unique_id = change.model.unique_id, .relation_name = change.model.relation });
+fn bindRelations(graph: *types.Graph, changes: []const Change) !void {
+    const a = graph.allocator;
+    var replacement: std.ArrayList(types.DeferredRelation) = .empty;
+    errdefer {
+        for (replacement.items) |relation| {
+            a.free(relation.unique_id);
+            a.free(relation.relation_name);
+        }
+        replacement.deinit(a);
+    }
+    for (changes) |change| if (!change.model.ephemeral) {
+        const unique_id = try a.dupe(u8, change.model.unique_id);
+        errdefer a.free(unique_id);
+        const relation_name = try a.dupe(u8, change.model.relation);
+        errdefer a.free(relation_name);
+        try replacement.append(a, .{ .unique_id = unique_id, .relation_name = relation_name });
+    };
+    // Graph teardown owns these strings. Keep the previous bindings intact
+    // until every replacement succeeds, including inputs borrowed from them.
+    for (graph.deferred_relations.items) |relation| {
+        a.free(relation.unique_id);
+        a.free(relation.relation_name);
+    }
+    graph.deferred_relations.deinit(a);
+    graph.deferred_relations = replacement;
 }
 
 fn relationExists(session: *adapter.Session, a: std.mem.Allocator, relation: []const u8) !bool {
@@ -960,4 +982,63 @@ test "workflow physical versions replace resolved identities for models seeds an
     try std.testing.expectEqualStrings("generated_catalog", graph.nodes.items[1].resolved_identity.?.database.?);
     try std.testing.expectEqualStrings("generated_orders", graph.nodes.items[1].resolved_identity.?.identifier);
     try std.testing.expect(context.session == null);
+}
+
+test "workflow relation bindings own their inputs and replace atomically" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, bindingOwnershipAllocationProof, .{});
+}
+
+fn bindingOwnershipAllocationProof(a: std.mem.Allocator) !void {
+    var graph: types.Graph = .{ .allocator = a, .project_name = "demo" };
+    defer graph.deinit();
+    const source_id = try a.dupe(u8, "seed.demo.raw");
+    defer a.free(source_id);
+    const source_relation = try a.dupe(u8, "\"catalog\".\"dxt_data\".\"m_raw\"");
+    defer a.free(source_relation);
+    const seed: Model = .{ .unique_id = source_id, .name = "raw", .resource_type = "seed", .schema = "main", .alias = "raw", .own_hash = "", .version = "", .relation = source_relation };
+    var ephemeral = seed;
+    ephemeral.unique_id = "model.demo.ephemeral";
+    ephemeral.ephemeral = true;
+    var model = seed;
+    model.unique_id = "model.demo.orders";
+    model.resource_type = "model";
+    model.relation = "\"catalog\".\"dxt_data\".\"m_orders\"";
+    try bindRelations(&graph, &.{
+        .{ .model = seed, .change = .added },
+        .{ .model = ephemeral, .change = .added },
+        .{ .model = model, .change = .added },
+    });
+    try std.testing.expectEqual(@as(usize, 2), graph.deferred_relations.items.len);
+    try std.testing.expect(graph.deferred_relations.items[0].unique_id.ptr != source_id.ptr);
+    try std.testing.expect(graph.deferred_relations.items[0].relation_name.ptr != source_relation.ptr);
+    @memset(source_id, 'x');
+    @memset(source_relation, 'x');
+    try std.testing.expectEqualStrings("seed.demo.raw", graph.deferred_relations.items[0].unique_id);
+    try std.testing.expectEqualStrings("\"catalog\".\"dxt_data\".\"m_raw\"", graph.deferred_relations.items[0].relation_name);
+    try std.testing.expectEqualStrings("model.demo.orders", graph.deferred_relations.items[1].unique_id);
+    const prior = graph.deferred_relations.items;
+    var rebound_seed = seed;
+    rebound_seed.unique_id = prior[0].unique_id;
+    rebound_seed.relation = prior[0].relation_name;
+    model.relation = "\"catalog\".\"dxt_data\".\"m_orders_v2\"";
+    bindRelations(&graph, &.{
+        .{ .model = model, .change = .direct },
+        .{ .model = ephemeral, .change = .unchanged },
+        .{ .model = rebound_seed, .change = .unchanged },
+    }) catch |err| {
+        try std.testing.expect(graph.deferred_relations.items.ptr == prior.ptr);
+        try std.testing.expectEqual(@as(usize, 2), graph.deferred_relations.items.len);
+        try std.testing.expectEqualStrings("seed.demo.raw", graph.deferred_relations.items[0].unique_id);
+        try std.testing.expectEqualStrings("\"catalog\".\"dxt_data\".\"m_raw\"", graph.deferred_relations.items[0].relation_name);
+        try std.testing.expectEqualStrings("model.demo.orders", graph.deferred_relations.items[1].unique_id);
+        try std.testing.expectEqualStrings("\"catalog\".\"dxt_data\".\"m_orders\"", graph.deferred_relations.items[1].relation_name);
+        return err;
+    };
+    try std.testing.expectEqual(@as(usize, 2), graph.deferred_relations.items.len);
+    try std.testing.expectEqualStrings("model.demo.orders", graph.deferred_relations.items[0].unique_id);
+    try std.testing.expectEqualStrings("\"catalog\".\"dxt_data\".\"m_orders_v2\"", graph.deferred_relations.items[0].relation_name);
+    try std.testing.expectEqualStrings("seed.demo.raw", graph.deferred_relations.items[1].unique_id);
+    try std.testing.expectEqualStrings("\"catalog\".\"dxt_data\".\"m_raw\"", graph.deferred_relations.items[1].relation_name);
+    try bindRelations(&graph, &.{});
+    try std.testing.expectEqual(@as(usize, 0), graph.deferred_relations.items.len);
 }
