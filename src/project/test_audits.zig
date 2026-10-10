@@ -149,7 +149,7 @@ pub fn executeNodeWithArtifacts(runtime: types.Runtime, graph: *const types.Grap
     defer scratch.deinit();
     const a = scratch.allocator();
     const options = runtime.invocation_options orelse runtime.global_options orelse &graph.command_options;
-    if (shouldStore(config, options.*) and stockDuckTestMaterialization(graph, materialization)) {
+    if (shouldStore(config, options.*) and stockDuckAuditCache(graph, node, materialization)) {
         // Core fills this relation cache before entering the test connection.
         // Listing here would start a transaction before the autocommitted DROP.
         const context = @import("dbt_context.zig");
@@ -230,6 +230,46 @@ fn stockDuckTestMaterialization(graph: *const types.Graph, materialization: *con
     return false;
 }
 
+fn stockDuckAuditCache(graph: *const types.Graph, node: *const types.Node, materialization: *const types.MacroDef) bool {
+    if (!stockDuckTestMaterialization(graph, materialization)) return false;
+    const resolve = @import("resolve.zig");
+    const name = "list_relations_without_caching";
+    const entry_id = "macro.dbt." ++ name;
+    // Core's cache worker uses the global macro namespace. The held native
+    // context also has a resource-local namespace; either override must run.
+    const global = resolve.findMacroIdForGlobalMacroDependency(graph, name) orelse return false;
+    const local = resolve.findMacroIdForUnqualifiedNamespaceCall(graph, node.package_name, name) orelse return false;
+    if (!std.mem.eql(u8, global, entry_id) or !std.mem.eql(u8, local, entry_id)) return false;
+    const prefixes = @import("jinja.zig").dispatchPrefixesForAdapter(graph.adapter_type);
+    const dispatched = resolve.findMacroIdForAdapterDispatch(graph, "dbt", name, "dbt", prefixes.slice()) orelse return false;
+    if (!std.mem.eql(u8, dispatched, "macro.dbt_duckdb.duckdb__" ++ name)) return false;
+    var entry_matches = false;
+    var dispatch_matches = false;
+    for (graph.macros.items) |*macro| {
+        if (std.mem.eql(u8, macro.unique_id, entry_id))
+            entry_matches = bundledDiscoveryMacro(macro, "dbt", name, "macros/adapters/metadata.sql");
+        if (std.mem.eql(u8, macro.unique_id, dispatched))
+            dispatch_matches = bundledDiscoveryMacro(macro, "dbt_duckdb", "duckdb__" ++ name, "macros/adapters.sql");
+    }
+    return entry_matches and dispatch_matches;
+}
+
+fn bundledDiscoveryMacro(macro: *const types.MacroDef, comptime package: []const u8, comptime name: []const u8, comptime path: []const u8) bool {
+    if (!std.mem.eql(u8, macro.package_name, package) or !std.mem.eql(u8, macro.name, name) or
+        !std.mem.eql(u8, macro.path, path) or !std.mem.eql(u8, macro.original_file_path, path)) return false;
+    // These two pinned definitions have ordinary macro tags. Compare their
+    // complete blocks, including signatures, rather than a body substring.
+    const opening = "{% macro " ++ name ++ "(";
+    const closing = "{% endmacro %}";
+    for (@import("dbt_includes").files) |file| {
+        if (!std.mem.eql(u8, file.package, package) or !std.mem.eql(u8, file.path, path)) continue;
+        const start = std.mem.indexOf(u8, file.text, opening) orelse return false;
+        const end = std.mem.indexOfPos(u8, file.text, start + opening.len, closing) orelse return false;
+        return std.mem.eql(u8, std.mem.trim(u8, macro.macro_sql, " \t\r\n"), file.text[start .. end + closing.len]);
+    }
+    return false;
+}
+
 pub fn renderExecutionSql(a: std.mem.Allocator, query: []const u8, config: types.GenericTestConfig) ![]const u8 {
     return std.fmt.allocPrint(a, "select {s} as failures, ({s} {s}) as should_warn, ({s} {s}) as should_error from ({s}) dbt_internal_test", .{ config.fail_calc, config.fail_calc, config.warn_if, config.fail_calc, config.error_if, trimTerminator(query) });
 }
@@ -275,6 +315,7 @@ test "audit cache preparation recognizes the bundle and excludes authored materi
     node.materialized = "test";
     const bundled = (try @import("custom_materialization.zig").selected(&graph, &node)).?;
     try std.testing.expect(stockDuckTestMaterialization(&graph, bundled));
+    try std.testing.expect(stockDuckAuditCache(&graph, &node, bundled));
     var changed = bundled.*;
     changed.macro_sql = "{% materialization test, default %}{{ return({'relations': []}) }}{% endmaterialization %}";
     try std.testing.expect(!stockDuckTestMaterialization(&graph, &changed));
@@ -285,4 +326,36 @@ test "audit cache preparation recognizes the bundle and excludes authored materi
     const authored = (try @import("custom_materialization.zig").selected(&graph, &node)).?;
     try std.testing.expectEqualStrings("project", authored.package_name);
     try std.testing.expect(!stockDuckTestMaterialization(&graph, authored));
+}
+
+test "audit cache preparation preserves authored relation discovery and dispatch" {
+    const cases = [_]struct { package: []const u8, name: []const u8 }{
+        .{ .package = "project", .name = "list_relations_without_caching" },
+        .{ .package = "dependency", .name = "list_relations_without_caching" },
+        .{ .package = "project", .name = "duckdb__list_relations_without_caching" },
+        .{ .package = "project", .name = "default__list_relations_without_caching" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var graph = types.Graph{ .allocator = a, .project_name = "project", .adapter_type = "duckdb" };
+        defer graph.deinit();
+        try @import("bundled_macros.zig").load(a, &graph);
+        var node = auditNode(.{}, "audit", "project");
+        node.materialized = "test";
+        const sql = try std.fmt.allocPrint(a, "{{% macro {s}(schema_relation) %}}{{{{ return([]) }}}}{{% endmacro %}}", .{case.name});
+        try @import("parse.zig").parseMacrosFromText(a, sql, "macros/discovery.sql", case.package, &graph);
+        const materialization = (try @import("custom_materialization.zig").selected(&graph, &node)).?;
+        try std.testing.expect(stockDuckTestMaterialization(&graph, materialization));
+        if (std.mem.eql(u8, case.name, "list_relations_without_caching")) {
+            const selected = @import("resolve.zig").findMacroIdForGlobalMacroDependency(&graph, case.name).?;
+            try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "macro.{s}.{s}", .{ case.package, case.name }), selected);
+        } else {
+            const prefixes = @import("jinja.zig").dispatchPrefixesForAdapter("duckdb");
+            const selected = @import("resolve.zig").findMacroIdForAdapterDispatch(&graph, "dbt", "list_relations_without_caching", "dbt", prefixes.slice()).?;
+            try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "macro.{s}.{s}", .{ case.package, case.name }), selected);
+        }
+        try std.testing.expect(!stockDuckAuditCache(&graph, &node, materialization));
+    }
 }
