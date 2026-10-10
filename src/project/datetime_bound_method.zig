@@ -22,10 +22,14 @@ pub fn attribute(a: Allocator, receiver: Value, name: []const u8, direct: Value)
     const class_id = receiver.attribute("__dxt_class_identity");
     const class_method = class_id == .string and std.mem.startsWith(u8, direct.callable, "__dxt_datetime_class:") and !std.mem.endsWith(u8, direct.callable, ":new");
     const kind = protocol.kind(receiver);
-    if (!class_method and kind == null) return direct;
+    const builtin_timezone = receiver.attribute("__dxt_timezone_builtin").truthy();
+    const abstract_timezone = @import("datetime_tzinfo.zig").isAbstract(receiver);
+    if (!class_method and kind == null and !builtin_timezone and !abstract_timezone) return direct;
+    const kind_name = if (kind) |temporal_kind| @tagName(temporal_kind) else if (builtin_timezone) "timezone" else "tzinfo";
     const receiver_identity = receiver.attribute("__dxt_immutable_identity");
-    const self = if (class_method) class_id.string else if (receiver_identity == .callable) receiver_identity.callable else try std.fmt.allocPrint(a, "datetime.{s}.instance:{x}", .{ @tagName(kind.?), @intFromPtr(receiver.object.ptr) });
-    const rendered = if (class_method) try std.fmt.allocPrint(a, "<built-in method {s} of type object at 0x{x}>", .{ name, @intFromPtr(receiver.object.ptr) }) else try std.fmt.allocPrint(a, "<built-in method {s} of datetime.{s} object at 0x{x}>", .{ name, @tagName(kind.?), @intFromPtr(receiver.object.ptr) });
+    const timezone_identity = receiver.attribute("__dxt_timezone_identity");
+    const self = if (class_method) class_id.string else if (receiver_identity == .callable) receiver_identity.callable else if (timezone_identity == .string) timezone_identity.string else try std.fmt.allocPrint(a, "datetime.{s}.instance:{x}", .{ kind_name, @intFromPtr(receiver.object.ptr) });
+    const rendered = if (class_method) try std.fmt.allocPrint(a, "<built-in method {s} of type object at 0x{x}>", .{ name, @intFromPtr(receiver.object.ptr) }) else try std.fmt.allocPrint(a, "<built-in method {s} of datetime.{s} object at 0x{x}>", .{ name, kind_name, @intFromPtr(receiver.object.ptr) });
     return .{ .object = try a.dupe(expression.Entry, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_native_bound_method", .value = .{ .callable = "__dxt_native_bound_method" } },
@@ -54,4 +58,21 @@ test "lookup yields fresh method wrappers with receiver-based equality" {
     const separate = try dates.fromYaml(a, "2024-01-01");
     const different = try attribute(a, separate, "isoformat", separate.attribute("isoformat"));
     try std.testing.expect(!equal(first, different));
+}
+
+test "cloning immutable receivers preserves method-key identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const clock = try @import("datetime_time.zig").value(a, 0, null, 0);
+    const duration = try @import("modules_datetime.zig").durationValue(a, 1);
+    const zone = try @import("datetime_tzinfo.zig").value(a);
+    for ([_]Value{ clock, duration, zone }, [_][]const u8{ "isoformat", "total_seconds", "utcoffset" }) |receiver, name| {
+        const copied = try @import("dbt_context.zig").cloneValue(a, receiver);
+        const first = try attribute(a, receiver, name, receiver.attribute(name));
+        const clone_method = try attribute(a, copied, name, copied.attribute(name));
+        try std.testing.expect(isBound(first));
+        try std.testing.expect(equal(first, clone_method));
+        try std.testing.expect(first.object.ptr != clone_method.object.ptr);
+    }
 }

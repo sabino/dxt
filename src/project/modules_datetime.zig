@@ -225,6 +225,7 @@ pub fn durationValue(a: Allocator, micros: i96) !Value {
     if (fraction != 0) try text.writer.print(".{d:0>6}", .{@as(u64, @intCast(fraction))});
     return object(a, &.{
         .{ .key = "__dxt_temporal_value", .value = @import("datetime_protocol.zig").marker(.timedelta) },
+        .{ .key = "__dxt_immutable_identity", .value = try @import("datetime_protocol.zig").instanceIdentity(a, .timedelta) },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_duration", .value = try expr.integerValue(a, micros) },
         .{ .key = "__dxt_repr", .value = .{ .string = try durationRepr(a, days, seconds, fraction) } },

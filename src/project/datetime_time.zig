@@ -68,6 +68,7 @@ pub fn value(a: Allocator, micros: i64, timezone: ?Value, fold: u1) anyerror!Val
     var entries: std.ArrayList(expr.Entry) = .empty;
     try entries.appendSlice(a, &.{
         .{ .key = "__dxt_temporal_value", .value = @import("datetime_protocol.zig").marker(.time) },
+        .{ .key = "__dxt_immutable_identity", .value = try @import("datetime_protocol.zig").instanceIdentity(a, .time) },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_temporal_offset_error", .value = if (abstract) .{ .callable = "__dxt_temporal_offset_error" } else .none },
         .{ .key = "__dxt_string_error", .value = .{ .boolean = abstract } },

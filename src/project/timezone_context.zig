@@ -254,6 +254,7 @@ fn durationText(a: Allocator, micros: i64) ![]const u8 {
 pub fn durationValue(a: Allocator, micros: i64) !Value {
     return object(a, &.{
         .{ .key = "__dxt_temporal_value", .value = @import("datetime_protocol.zig").marker(.timedelta) },
+        .{ .key = "__dxt_immutable_identity", .value = try @import("datetime_protocol.zig").instanceIdentity(a, .timedelta) },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_duration", .value = try expr.integerValue(a, micros) },
         .{ .key = "__dxt_rendered", .value = .{ .string = try durationText(a, micros) } },

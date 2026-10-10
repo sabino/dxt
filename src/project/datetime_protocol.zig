@@ -1,6 +1,7 @@
 //! Native temporal carriers cannot be constructed by authored dictionary keys.
 const std = @import("std");
 const Value = @import("expression.zig").Value;
+var next_identity: std.atomic.Value(u64) = .init(0);
 pub const Kind = enum { date, datetime, time, timedelta };
 pub fn kind(value: Value) ?Kind {
     const tag_value = value.attribute("__dxt_temporal_value");
@@ -11,4 +12,7 @@ pub fn kind(value: Value) ?Kind {
 }
 pub fn marker(comptime temporal_kind: Kind) Value {
     return .{ .callable = "__dxt_temporal_value:" ++ @tagName(temporal_kind) };
+}
+pub fn instanceIdentity(a: std.mem.Allocator, comptime temporal_kind: Kind) !Value {
+    return .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime_instance:{s}:{d}", .{ @tagName(temporal_kind), next_identity.fetchAdd(1, .monotonic) + 1 }) };
 }
