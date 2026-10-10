@@ -76,12 +76,14 @@ DuckDB COPY and native PostgreSQL bindings. The integrated CSV certification
 and append-only loop-prefix repairs pass all 63 primary seed cases, including
 the new Column cases and unchanged 10,000-row, 70,000-binding PostgreSQL workload.
 They also pass 708 native tests and all 18 actual Core alias/provider comparisons,
-with pre-mutation invalidation intact. Wide-seed execution improves from 321
-seconds to 145 seconds against Core's 9.2 seconds, so practical scaling remains
-open. The expression worker owns a separately reviewed completed-batch-only
-capacity certificate follow-up. It must preserve live iterator traversal and
-mutable receiver invalidation, pass the actual full-descriptor native budget
-and complete the same unchanged seed.
+with pre-mutation invalidation intact. The integrated completed-batch-only
+capacity certificate also passes all 708 native tests and all 81 actual Core
+seed/alias cases. Its native budget retains the genuine 16,384-cell capacity
+buffer, while active buffers still traverse future mutable aliases. The same
+unchanged wide-seed execution improves from 321 seconds through 145 seconds to
+31.5 seconds, against Core's 8.4 seconds. This closes the observed minutes-long
+alias traversal; production ReleaseSafe timing and the final combined query
+transport certificate remain required before performance completion.
 The unchanged wide seed also exposes repeated alias traversal of the full
 Agate/loop graph. The expression worker owns a bounded performance diagnosis
 and any reviewed ownership-preserving repair; the running unchanged fixture
