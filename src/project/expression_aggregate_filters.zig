@@ -157,7 +157,7 @@ test "text filters retain deferred rendering callbacks and mapping keys" {
     for ([_][]const u8{ "as_text", "trim", "lower", "upper" }) |name| _ = try expression.filterValue(a, name, loop, &.{}, host);
     try std.testing.expectEqualStrings("<row 1/2>", (try expression.filterValue(a, "replace", loop, &.{ .{ .value = .{ .string = "LoopContext" } }, .{ .value = .{ .string = "row" } } }, host)).string);
     try std.testing.expectEqualStrings("x=%3CLoopContext+1%2F2%3E", (try expression.filterValue(a, "urlencode", .{ .list = &.{.{ .tuple = &.{ .{ .string = "x" }, loop } }} }, &.{}, host)).string);
-    const proxy = Value{ .object = &.{ .{ .key = "__dxt_mapping_uppercase", .value = .{ .boolean = false } }, .{ .key = "__dxt_mapping_source", .value = .{ .object = &.{.{ .key = "ab", .value = .{ .string = "ignored" } }} } }, .{ .key = "__dxt_private", .value = .{ .string = "hidden" } } } };
+    const proxy = Value{ .object = &.{ .{ .key = "__dxt_native_mapping", .value = .{ .callable = "__dxt_native_mapping" } }, .{ .key = "__dxt_mapping_source", .value = .{ .object = &.{.{ .key = "ab", .value = .{ .string = "ignored" } }} } }, .{ .key = "__dxt_private", .value = .{ .string = "hidden" } } } };
     try std.testing.expectEqualStrings("a=b", (try expression.filterValue(a, "urlencode", proxy, &.{}, host)).string);
     try std.testing.expectEqual(@as(usize, 8), frame.calls);
 }

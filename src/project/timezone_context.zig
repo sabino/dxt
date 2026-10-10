@@ -149,6 +149,7 @@ fn countries(a: Allocator, kind: []const u8) !Value {
     }
     // The wrapper keeps the visible entries free of implementation metadata.
     return object(a, &.{
+        .{ .key = "__dxt_native_mapping", .value = .{ .callable = "__dxt_native_mapping" } },
         .{ .key = "__dxt_mapping_uppercase", .value = .{ .boolean = true } },
         .{ .key = "__dxt_mapping_source", .value = .{ .object = try entries.toOwnedSlice(a) } },
     });

@@ -69,7 +69,7 @@ fn write(a: std.mem.Allocator, w: *std.Io.Writer, value: Value, indent: ?[]const
                 try w.writeByte(']');
                 return;
             }
-            if (value.attribute("__dxt_noniterable").truthy() or value.attribute("__dxt_rendered") != .undefined or @import("expression_sequence.zig").kind(value) != null or expression.sequence(value) != null) return error.JinjaTypeError;
+            if (value.attribute("__dxt_noniterable").truthy() or value.attribute("__dxt_rendered") != .undefined or @import("expression_sequence.zig").kind(value) != null or @import("set_context.zig").isSet(value)) return error.JinjaTypeError;
             const sorted = try a.dupe(expression.Entry, entries);
             defer a.free(sorted);
             try @import("mapping_keys.zig").sortJsonKeys(a, sorted);

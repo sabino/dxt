@@ -177,12 +177,23 @@ pub fn hashableKey(key: Value) !void {
 /// Mapping proxies keep metadata out of public keys and preserve their lookup policy.
 pub fn mappingSource(container: Value) ?Value {
     if (container != .object) return null;
-    for (container.object) |entry| if (std.mem.eql(u8, entry.key, "__dxt_mapping_source") and entry.value == .object) return entry.value;
-    return null;
+    var native = false;
+    var source: ?Value = null;
+    for (container.object) |entry| {
+        if (std.mem.eql(u8, entry.key, "__dxt_native_mapping") and entry.value == .callable and std.mem.eql(u8, entry.value.callable, "__dxt_native_mapping")) native = true;
+        if (std.mem.eql(u8, entry.key, "__dxt_mapping_source") and entry.value == .object) source = entry.value;
+    }
+    return if (native) source else null;
 }
 pub fn mappingEntry(container: Value, key: Value) !?Entry {
     if (mappingSource(container)) |source| {
-        if (container.attribute("__dxt_mapping_uppercase").truthy()) {
+        // Raw metadata lookup avoids reentering proxy lookup for absent fields.
+        var uppercase = false;
+        for (container.object) |entry| if (std.mem.eql(u8, entry.key, "__dxt_mapping_uppercase")) {
+            uppercase = entry.value == .boolean and entry.value.boolean;
+            break;
+        };
+        if (uppercase) {
             if (key.attribute("__dxt_binary") == .string) return null;
             if (key != .string) return error.InvalidCountryCode;
             const normalized = try unicode.convert(std.heap.page_allocator, key.string, .upper);
@@ -192,6 +203,22 @@ pub fn mappingEntry(container: Value, key: Value) !?Entry {
         return mapping_keys.entry(source, key);
     }
     return try mapping_keys.entry(container, key);
+}
+
+test "native mapping proxies handle absent policy without recursive lookup" {
+    const proxy = Value{ .object = &.{
+        .{ .key = "__dxt_native_mapping", .value = .{ .callable = "__dxt_native_mapping" } },
+        .{ .key = "__dxt_mapping_source", .value = .{ .object = &.{.{ .key = "x", .value = .{ .string = "a b" } }} } },
+    } };
+    try std.testing.expectEqualStrings("a b", (try mappingGet(proxy, .{ .string = "x" })).string);
+    try std.testing.expect((try mappingGet(proxy, .{ .string = "missing" })) == .undefined);
+    const ordinary = Value{ .object = &.{
+        .{ .key = "__dxt_native_mapping", .value = .{ .string = "__dxt_native_mapping" } },
+        .{ .key = "__dxt_mapping_source", .value = .{ .object = &.{.{ .key = "x", .value = .{ .string = "a b" } }} } },
+    } };
+    try std.testing.expect(mappingSource(ordinary) == null);
+    try std.testing.expect((try mappingGet(ordinary, .{ .string = "x" })) == .undefined);
+    try std.testing.expect((try mappingGet(ordinary, .{ .string = "__dxt_mapping_source" })) == .object);
 }
 pub fn mappingGet(container: Value, key: Value) !Value {
     return if (try mappingEntry(container, key)) |entry| entry.value else .undefined;

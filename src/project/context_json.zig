@@ -39,7 +39,7 @@ test "context JSON rejects iterable sets without serializing native protocol fie
     try std.testing.expectError(error.JinjaTypeError, @import("expression_json.zig").render(allocator, set, null));
 }
 
-test "both JSON serializers expose opaque tuples as arrays and reject forged markers" {
+test "both JSON serializers expose opaque tuples as arrays and preserve authored maps" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -55,8 +55,8 @@ test "both JSON serializers expose opaque tuples as arrays and reject forged mar
         .{ .key = "__dxt_native_tuple", .value = .{ .string = "__dxt_native_tuple" } },
         .{ .key = "__dxt_iterable", .value = .{ .list = &items } },
     } };
-    try std.testing.expectError(error.JinjaTypeError, stringify(allocator, forged));
-    try std.testing.expectError(error.JinjaTypeError, @import("expression_json.zig").render(allocator, forged, null));
+    try std.testing.expectEqualStrings("{\"__dxt_native_tuple\": \"__dxt_native_tuple\", \"__dxt_iterable\": [2026, 41, 6]}", try stringify(allocator, forged));
+    try std.testing.expectEqualStrings("{\"__dxt_iterable\": [2026, 41, 6], \"__dxt_native_tuple\": \"__dxt_native_tuple\"}", try @import("expression_json.zig").render(allocator, forged, null));
     const cycle_items = try expression.allocateValues(allocator, 1);
     const cycle = expression.Value{ .object = &.{
         .{ .key = "__dxt_native_tuple", .value = .{ .callable = "__dxt_native_tuple" } },
@@ -121,7 +121,7 @@ fn write(allocator: std.mem.Allocator, writer: *std.Io.Writer, value: expression
                 try writer.writeByte(']');
                 return;
             }
-            if (value.attribute("__dxt_noniterable").truthy() or value.attribute("__dxt_relation") != .undefined or value.attribute("__dxt_sequence_kind") != .undefined or value.attribute("__dxt_iterable") != .undefined) return error.JinjaTypeError;
+            if (value.attribute("__dxt_noniterable").truthy() or value.attribute("__dxt_relation") != .undefined or @import("expression_sequence.zig").kind(value) != null or @import("set_context.zig").isSet(value)) return error.JinjaTypeError;
             const sorted = if (sort_keys) try allocator.dupe(expression.Entry, entries) else null;
             defer if (sorted) |items| allocator.free(items);
             if (sorted) |items| try @import("mapping_keys.zig").sortJsonKeys(allocator, items);
