@@ -4,6 +4,7 @@ const std = @import("std");
 const expr = @import("expression.zig");
 const sets = @import("set_context.zig");
 const dates = @import("timestamp_context.zig");
+const builtin = @import("timezone_builtin.zig");
 const Value = expr.Value;
 const Argument = expr.Argument;
 const Allocator = std.mem.Allocator;
@@ -205,6 +206,7 @@ fn timezoneObject(a: Allocator, id: Identity) !Value {
     try entries.appendSlice(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_rendered", .value = .{ .string = display } },
+        .{ .key = "__dxt_string_error", .value = .{ .boolean = base } },
         .{ .key = "__dxt_repr", .value = .{ .string = representation } },
         .{ .key = "__dxt_timezone_offset", .value = try expr.integerValue(a, @divTrunc(id.offset_us, std.time.us_per_min)) },
         .{ .key = "__dxt_timezone_offset_us", .value = try expr.integerValue(a, id.offset_us) },
@@ -225,7 +227,11 @@ pub fn timezoneValue(a: Allocator, name: []const u8, localized: ?Info) !Value {
     const info = localized orelse transitionInfo(zone, 0);
     return timezoneObject(a, .{ .zone = @intCast(zone.index), .offset_us = @as(i64, info.offset_seconds) * std.time.us_per_s, .dst_us = @as(i64, info.dst_seconds) * std.time.us_per_s, .abbreviation = info.abbreviation });
 }
+pub fn builtinValue(a: Allocator, offset_us: i64, name: ?[]const u8) !Value {
+    return builtin.value(a, offset_us, name);
+}
 pub fn atUtc(a: Allocator, timezone: Value, utc_seconds: i64) !Value {
+    if (timezone.attribute("__dxt_timezone_builtin").truthy()) return timezone;
     const name = timezone.attribute("__dxt_timezone_name");
     if (name != .string) return error.JinjaTypeError;
     if (std.mem.startsWith(u8, name.string, "pytz.FixedOffset(")) return timezone;
@@ -283,6 +289,7 @@ fn parseIdentity(encoded: []const u8) !Identity {
     return id;
 }
 pub fn fromIdentity(a: Allocator, encoded: []const u8) !Value {
+    if (std.mem.startsWith(u8, encoded, "builtin:")) return builtin.fromIdentity(a, encoded);
     return timezoneObject(a, try parseIdentity(encoded));
 }
 fn parameter(args: []const Argument, name: []const u8, position: usize) ?Value {
@@ -372,6 +379,7 @@ fn methodCall(a: Allocator, encoded: []const u8, args: []const Argument) anyerro
     return error.UndefinedJinjaValue;
 }
 pub fn call(a: Allocator, name: []const u8, args: []const Argument) anyerror!?Value {
+    if (try builtin.call(a, name, args)) |result| return result;
     if (std.mem.startsWith(u8, name, "__dxt_pytz_method:")) return try methodCall(a, name[18..], args);
     if (std.mem.eql(u8, name, "modules.pytz.timezone")) {
         if (args.len != 1 or (args[0].name != null and !std.mem.eql(u8, args[0].name.?, "zone"))) return error.InvalidJinjaArguments;

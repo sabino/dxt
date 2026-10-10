@@ -3,6 +3,7 @@ const std = @import("std");
 const expression = @import("expression.zig");
 const calendar = @import("workflow_intervals.zig");
 const timezones = @import("timezone_context.zig");
+const local_time = @import("native_local_time.zig");
 const Value = expression.Value;
 const Argument = expression.Argument;
 
@@ -90,7 +91,9 @@ pub fn attachTimezone(a: std.mem.Allocator, civil_ns: i96, zone: Value) anyerror
     const offset_us = signedInteger(i64, zone.attribute("__dxt_timezone_offset_us")) orelse return error.JinjaTypeError;
     return datetimeValueWithOffsetUs(a, civil_ns, false, offset_us, zone, 0);
 }
-pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, civil_ns: i96, date_only: bool, offset_us: ?i64, timezone: ?Value, fold: u1) anyerror!Value {
+pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, input_ns: i96, date_only: bool, offset_us: ?i64, timezone: ?Value, fold: u1) anyerror!Value {
+    const civil_ns = if (date_only) @divFloor(input_ns, std.time.ns_per_day) * std.time.ns_per_day else @divFloor(input_ns, std.time.ns_per_us) * std.time.ns_per_us;
+    const actual_timezone: ?Value = if (timezone) |zone| zone else if (offset_us) |offset| try timezones.builtinValue(a, offset, null) else null;
     if (civil_ns < -62135596800 * @as(i96, std.time.ns_per_s) or civil_ns >= 253402300800 * @as(i96, std.time.ns_per_s)) return error.JinjaNumericOverflow;
     if (offset_us) |offset| if (@abs(offset) >= std.time.us_per_day) return error.InvalidTimeZoneOffset;
     const label = try calendar.formatTimestamp(a, @intCast(@divFloor(civil_ns, std.time.ns_per_s)));
@@ -105,7 +108,7 @@ pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, civil_ns: i96, date_only:
         .{ .key = "__dxt_civil_ns", .value = try expression.integerValue(a, civil_ns) },
         .{ .key = "__dxt_date_only", .value = .{ .boolean = date_only } },
         .{ .key = "__dxt_offset_us", .value = if (offset_us) |offset| try expression.integerValue(a, offset) else .none },
-        .{ .key = "__dxt_timezone", .value = timezone orelse .none },
+        .{ .key = "__dxt_timezone", .value = actual_timezone orelse .none },
     });
     var representation: std.Io.Writer.Allocating = .init(a);
     try representation.writer.writeAll(if (date_only) "datetime.date(" else "datetime.datetime(");
@@ -121,7 +124,7 @@ pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, civil_ns: i96, date_only:
         if (second != 0 or micros != 0) try representation.writer.print(", {d}", .{second});
         if (micros != 0) try representation.writer.print(", {d}", .{micros});
         if (offset_us) |offset| {
-            if (timezone) |zone| {
+            if (actual_timezone) |zone| {
                 try representation.writer.print(", tzinfo={s}", .{try expression.repr(zone, a)});
             } else if (offset == 0) try representation.writer.writeAll(", tzinfo=datetime.timezone.utc") else {
                 const days = @divFloor(offset, std.time.us_per_day);
@@ -143,10 +146,10 @@ pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, civil_ns: i96, date_only:
     }
     if (!date_only) try entries.appendSlice(a, &.{
         .{ .key = "microsecond", .value = try expression.integerValue(a, micros) },
-        .{ .key = "tzinfo", .value = if (timezone) |zone| zone else if (offset_us) |offset| .{ .string = try zoneName(a, offset) } else .none },
+        .{ .key = "tzinfo", .value = if (actual_timezone) |zone| zone else if (offset_us) |offset| .{ .string = try zoneName(a, offset) } else .none },
         .{ .key = "fold", .value = try expression.integerValue(a, fold) },
     });
-    const spec = try std.fmt.allocPrint(a, "{d}:{s}:{s}:{s}:{d}:{s}", .{ civil_ns, if (date_only) "date" else "datetime", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{@divTrunc(offset, std.time.us_per_min)}) else "naive", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{offset}) else "naive", fold, if (timezone) |zone| zone.attribute("__dxt_timezone_identity").string else "" });
+    const spec = try std.fmt.allocPrint(a, "{d}:{s}:{s}:{s}:{d}:{s}", .{ civil_ns, if (date_only) "date" else "datetime", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{@divTrunc(offset, std.time.us_per_min)}) else "naive", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{offset}) else "naive", fold, if (actual_timezone) |zone| zone.attribute("__dxt_timezone_identity").string else "" });
     for ([_][]const u8{ "strftime", "isoformat", "date", "timestamp", "weekday", "isoweekday", "replace", "utcoffset", "dst", "tzname", "astimezone" }) |method| {
         if (date_only and (std.mem.eql(u8, method, "date") or std.mem.eql(u8, method, "timestamp") or std.mem.eql(u8, method, "utcoffset") or std.mem.eql(u8, method, "dst") or std.mem.eql(u8, method, "tzname") or std.mem.eql(u8, method, "astimezone"))) continue;
         try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime:{s}:{s}", .{ method, spec }) } });
@@ -242,18 +245,27 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) anye
     if (std.mem.eql(u8, method, "astimezone")) {
         try checkArgs(args, &.{"tz"}, 0);
         const zone = named(args, "tz", 0) orelse .none;
-        const target = if (zone == .none) try timezones.timezoneValue(a, "UTC", null) else zone;
-        if (target.attribute("__dxt_timezone_offset_us") != .integer) return error.JinjaTypeError;
-        const utc_ns = ns - @as(i96, offset_us orelse 0) * std.time.ns_per_us;
-        const actual = try timezones.atUtc(a, target, @intCast(@divFloor(utc_ns, std.time.ns_per_s)));
+        const utc_ns = if (offset_us) |offset| ns - @as(i96, offset) * std.time.ns_per_us else try local_time.timestamp(a, ns, fold);
+        const actual = if (zone == .none) blk: {
+            const local_ns = try local_time.civil(a, utc_ns);
+            const local_offset: i64 = @intCast(@divTrunc(local_ns - utc_ns, std.time.ns_per_us));
+            break :blk try timezones.builtinValue(a, local_offset, try local_time.zoneName(a, utc_ns));
+        } else blk: {
+            if (zone.attribute("__dxt_timezone_offset_us") != .integer) return error.JinjaTypeError;
+            break :blk try timezones.atUtc(a, zone, @intCast(@divFloor(utc_ns, std.time.ns_per_s)));
+        };
         const offset = signedInteger(i64, actual.attribute("__dxt_timezone_offset_us")).?;
         return try attachTimezone(a, utc_ns + @as(i96, offset) * std.time.ns_per_us, actual);
     }
     try checkArgs(args, &.{}, 0);
     if (std.mem.eql(u8, method, "date")) return try datetimeValue(a, @divFloor(ns, std.time.ns_per_day) * std.time.ns_per_day, true, null);
-    if (std.mem.eql(u8, method, "timestamp") and !date_only) return .{ .number = @as(f64, @floatFromInt(ns - @as(i96, offset_us orelse 0) * std.time.ns_per_us)) / std.time.ns_per_s };
+    if (std.mem.eql(u8, method, "timestamp") and !date_only) {
+        const utc_ns = if (offset_us) |offset| ns - @as(i96, offset) * std.time.ns_per_us else try local_time.timestamp(a, ns, fold);
+        const seconds = if (offset_us != null) @as(f64, @floatFromInt(@divFloor(utc_ns, std.time.ns_per_us))) / std.time.us_per_s else @as(f64, @floatFromInt(@divFloor(utc_ns, std.time.ns_per_s))) + @as(f64, @floatFromInt(@mod(utc_ns, std.time.ns_per_s))) / std.time.ns_per_s;
+        return .{ .number = seconds };
+    }
     if (std.mem.eql(u8, method, "utcoffset")) return if (offset_us) |offset| try timezones.durationValue(a, offset) else .none;
-    if (std.mem.eql(u8, method, "dst")) return if (timezone) |zone| try timezones.durationValue(a, signedInteger(i64, zone.attribute("__dxt_timezone_dst_us")) orelse 0) else .none;
+    if (std.mem.eql(u8, method, "dst")) return if (timezone) |zone| (if (signedInteger(i64, zone.attribute("__dxt_timezone_dst_us"))) |dst_us| try timezones.durationValue(a, dst_us) else .none) else .none;
     if (std.mem.eql(u8, method, "tzname")) return if (timezone) |zone| zone.attribute("__dxt_timezone_abbreviation") else if (offset_us) |offset| .{ .string = try zoneName(a, offset) } else .none;
     const day = @divFloor(ns, std.time.ns_per_day);
     if (std.mem.eql(u8, method, "weekday")) return try expression.integerValue(a, @mod(day + 3, 7));
