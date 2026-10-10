@@ -119,7 +119,11 @@ bytea helper lands, the source worker owns its narrow expression call/slice
 hooks and compiler local-callable routing immediately before callable-name
 resolution; these hunks are separate from the expression worker's alias
 publication and seed-performance changes. Constructor wiring stays with the
-oracle worker.
+oracle worker. Independent bridge review found two filter truthiness paths
+that bypass checked released/zero-dimensional buffer behavior. The cache worker
+owns their narrow `expression_filter_iterator.zig` correction and native
+regressions; the source worker owns the finite actual Core negative witnesses.
+The oracle worker integrates this companion before the final combined build.
 The source worker's 62 Decimal comparisons pass on the first, corrected and
 expanded typed CLIs. The expanded query gate retains 182 passing and seven
 failing cases: type subscription, keyword field names, infinite timestamps and
