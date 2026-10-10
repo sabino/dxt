@@ -44,7 +44,8 @@ def native_binary():
     "set_strict([1]).issubset([1,2])",
     "set_strict([1,2]).issuperset([1])",
     "set_strict([1]).isdisjoint([2])",
-    "dict(set_strict([(1,'one'),(2,'two')]))",
+    # Sets have no iteration order; sort after conversion to retain every key/value.
+    "dict(set_strict([(1,'one'),(2,'two')]))|dictsort",
     "set_strict([1])[0]|default('undefined')",
     "diff_of_two_dicts({'READ':['Alice','BOB'],'Write':['ß']}, {'read':['ALICE']})",
 ])
