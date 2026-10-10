@@ -1,27 +1,20 @@
 const std = @import("std");
 const result = @import("adapter_result.zig");
 const parameters = @import("query_parameters.zig");
+const vectors = @import("duckdb_vectors.zig");
 const profile_config = @import("duckdb_profile.zig");
 const config_values = @import("config_value.zig");
 pub const QueryResult = result.QueryResult;
 const Handle = ?*anyopaque;
-const CResult = extern struct {
-    column_count: u64 = 0,
-    row_count: u64 = 0,
-    rows_changed: u64 = 0,
-    columns: Handle = null,
-    error_message: Handle = null,
-    internal_data: Handle = null,
-};
-
-const HugeInt = extern struct { lower: u64, upper: i64 };
-const Decimal = extern struct { width: u8, scale: u8, value: HugeInt };
-const Date = extern struct { days: i32 };
-const Time = extern struct { micros: i64 };
-const Timestamp = extern struct { micros: i64 };
-const CString = extern struct { data: ?[*]u8, size: u64 };
+const CResult = vectors.Result;
+const HugeInt = vectors.HugeInt;
+const Decimal = vectors.Decimal;
+const Date = vectors.Date;
+const Time = vectors.Time;
+const Timestamp = vectors.Timestamp;
 
 const Api = struct {
+    vectors: vectors.Api,
     duckdb_open_ext: *const fn ([*:0]const u8, *Handle, Handle, *?[*:0]u8) callconv(.c) c_uint,
     duckdb_close: *const fn (*Handle) callconv(.c) void,
     duckdb_connect: *const fn (Handle, *Handle) callconv(.c) c_uint,
@@ -39,8 +32,10 @@ const Api = struct {
     duckdb_bind_boolean: *const fn (Handle, u64, bool) callconv(.c) c_uint,
     duckdb_bind_int32: *const fn (Handle, u64, i32) callconv(.c) c_uint,
     duckdb_bind_int64: *const fn (Handle, u64, i64) callconv(.c) c_uint,
+    duckdb_bind_uint64: *const fn (Handle, u64, u64) callconv(.c) c_uint,
     duckdb_bind_hugeint: *const fn (Handle, u64, HugeInt) callconv(.c) c_uint,
     duckdb_bind_decimal: *const fn (Handle, u64, Decimal) callconv(.c) c_uint,
+    duckdb_bind_float: *const fn (Handle, u64, f32) callconv(.c) c_uint,
     duckdb_bind_double: *const fn (Handle, u64, f64) callconv(.c) c_uint,
     duckdb_bind_varchar_length: *const fn (Handle, u64, [*]const u8, u64) callconv(.c) c_uint,
     duckdb_bind_blob: *const fn (Handle, u64, ?*const anyopaque, u64) callconv(.c) c_uint,
@@ -48,7 +43,6 @@ const Api = struct {
     duckdb_bind_time: *const fn (Handle, u64, Time) callconv(.c) c_uint,
     duckdb_bind_timestamp: *const fn (Handle, u64, Timestamp) callconv(.c) c_uint,
     duckdb_bind_timestamp_tz: *const fn (Handle, u64, Timestamp) callconv(.c) c_uint,
-    duckdb_value_string: *const fn (*CResult, u64, u64) callconv(.c) CString,
     duckdb_prepare_error: *const fn (Handle) callconv(.c) ?[*:0]const u8,
     duckdb_destroy_prepare: *const fn (*Handle) callconv(.c) void,
     duckdb_execute_prepared: *const fn (Handle, *CResult) callconv(.c) c_uint,
@@ -57,13 +51,9 @@ const Api = struct {
     duckdb_result_return_type: *const fn (CResult) callconv(.c) c_uint,
     duckdb_destroy_result: *const fn (*CResult) callconv(.c) void,
     duckdb_column_count: *const fn (*CResult) callconv(.c) u64,
-    duckdb_row_count: *const fn (*CResult) callconv(.c) u64,
     duckdb_rows_changed: *const fn (*CResult) callconv(.c) u64,
     duckdb_column_name: *const fn (*CResult, u64) callconv(.c) ?[*:0]const u8,
     duckdb_column_type: *const fn (*CResult, u64) callconv(.c) c_uint,
-    duckdb_column_data: *const fn (*CResult, u64) callconv(.c) Handle,
-    duckdb_value_varchar: *const fn (*CResult, u64, u64) callconv(.c) ?[*:0]u8,
-    duckdb_value_is_null: *const fn (*CResult, u64, u64) callconv(.c) bool,
     duckdb_free: *const fn (?*anyopaque) callconv(.c) void,
     duckdb_interrupt: *const fn (Handle) callconv(.c) void,
     duckdb_library_version: *const fn () callconv(.c) [*:0]const u8,
@@ -78,7 +68,11 @@ const Library = struct {
         errdefer dyn.close();
         var api: Api = undefined;
         inline for (std.meta.fields(Api)) |field| {
-            @field(api, field.name) = dyn.lookup(field.type, field.name ++ "\x00") orelse return error.NativeDuckDbAbiMismatch;
+            if (comptime std.mem.eql(u8, field.name, "vectors")) {
+                api.vectors = try vectors.Api.load(&dyn);
+            } else {
+                @field(api, field.name) = dyn.lookup(field.type, field.name ++ "\x00") orelse return error.NativeDuckDbAbiMismatch;
+            }
         }
         return .{ .dyn = dyn, .api = api };
     }
@@ -387,6 +381,7 @@ pub const Pool = struct {
 };
 
 pub const Connection = struct {
+    cursor_types: bool = false,
     cache_context: ?@import("relation_cache.zig").Context = null,
     api: *const Api,
     handle: Handle,
@@ -422,11 +417,33 @@ pub const Connection = struct {
         return std.mem.span(self.api.duckdb_library_version());
     }
 
+    /// Preserve native driver values only for authored held-cursor queries.
+    pub fn queryTyped(self: *Connection, sql: []const u8) !QueryResult {
+        const previous = self.cursor_types;
+        self.cursor_types = true;
+        defer self.cursor_types = previous;
+        return self.query(sql);
+    }
+
+    pub fn queryParametersTyped(self: *Connection, sql: []const u8, bindings: []const parameters.Parameter) !QueryResult {
+        const previous = self.cursor_types;
+        self.cursor_types = true;
+        defer self.cursor_types = previous;
+        return self.queryParameters(sql, bindings);
+    }
+
     pub fn query(self: *Connection, sql: []const u8) !QueryResult {
         return self.queryBound(sql, null);
     }
 
     pub fn queryParameters(self: *Connection, sql: []const u8, bindings: []const parameters.Parameter) !QueryResult {
+        const nested = @import("duckdb_bindings.zig");
+        if (nested.needed(bindings)) {
+            var scratch = std.heap.ArenaAllocator.init(self.allocator);
+            defer scratch.deinit();
+            const expanded = try nested.expand(scratch.allocator(), sql, bindings);
+            return self.queryBound(expanded.sql, expanded.bindings);
+        }
         return self.queryBound(sql, bindings);
     }
 
@@ -514,7 +531,7 @@ pub const Connection = struct {
             // Transaction and DDL statements also expose an empty synthetic
             // result column in the C API. Preserve the last SELECT across the
             // ROLLBACK that closes an isolated unit-test fixture transaction.
-            if (self.api.duckdb_result_return_type(raw) == 3) {
+            if (self.cursor_types or self.api.duckdb_result_return_type(raw) == 3) {
                 output.deinit(self.allocator);
                 output = try self.copyResult(&raw);
                 if (output.rows_changed == 0 and (statement_type == 2 or statement_type == 3 or statement_type == 5)) output.rows_changed = output.rows.len;
@@ -532,10 +549,17 @@ pub const Connection = struct {
             .integer => |v| blk: {
                 if (std.fmt.parseInt(i32, v, 10)) |integer| break :blk self.api.duckdb_bind_int32(statement, slot, integer) else |_| {}
                 if (std.fmt.parseInt(i64, v, 10)) |integer| break :blk self.api.duckdb_bind_int64(statement, slot, integer) else |_| {}
-                if (std.fmt.parseInt(i128, v, 10)) |integer| break :blk self.api.duckdb_bind_hugeint(statement, slot, hugeInt(integer)) else |_| {}
+                if (std.fmt.parseInt(u64, v, 10)) |integer| break :blk self.api.duckdb_bind_uint64(statement, slot, integer) else |_| {}
+                // Stock Python int adaptation tries signed then unsigned
+                // 64-bit storage and promotes wider inputs to DOUBLE.
                 break :blk self.api.duckdb_bind_double(statement, slot, std.fmt.parseFloat(f64, v) catch return error.InvalidQueryParameter);
             },
             .decimal => |v| blk: {
+                // The pinned stock Python driver stores non-finite Decimal
+                // inputs as FLOAT, including its positive infinity adaptation
+                // for a negative Decimal infinity.
+                if (std.mem.indexOf(u8, v, "NaN") != null) break :blk self.api.duckdb_bind_float(statement, slot, std.math.nan(f32));
+                if (std.mem.indexOf(u8, v, "Infinity") != null) break :blk self.api.duckdb_bind_float(statement, slot, std.math.inf(f32));
                 const parsed = try parameters.decimal(self.allocator, v);
                 if (parsed) |d| break :blk self.api.duckdb_bind_decimal(statement, slot, .{ .width = d.width, .scale = d.scale, .value = hugeInt(d.coefficient) });
                 break :blk self.api.duckdb_bind_double(statement, slot, std.fmt.parseFloat(f64, v) catch return error.InvalidQueryParameter);
@@ -547,6 +571,7 @@ pub const Connection = struct {
             .time => |v| self.api.duckdb_bind_time(statement, slot, .{ .micros = v }),
             .timestamp => |v| self.api.duckdb_bind_timestamp(statement, slot, .{ .micros = v }),
             .timestamp_tz => |v| self.api.duckdb_bind_timestamp_tz(statement, slot, .{ .micros = v }),
+            .time_tz, .interval, .uuid, .list, .tuple, .object => return error.InvalidQueryParameter,
         };
         if (status != 0) {
             self.captureError(self.api.duckdb_prepare_error(statement));
@@ -602,34 +627,71 @@ pub const Connection = struct {
 
     fn copyResult(self: *Connection, raw: *CResult) anyerror!QueryResult {
         const n_columns = self.api.duckdb_column_count(raw);
-        const n_rows = self.api.duckdb_row_count(raw);
-        if (n_columns > 65536 or n_rows > 10_000_000 or n_columns * n_rows > 10_000_000) return error.AdapterResultTooLarge;
+        if (n_columns > 65536) return error.AdapterResultTooLarge;
         var output: QueryResult = .{ .owner_allocator = self.allocator, .rows_changed = self.api.duckdb_rows_changed(raw) };
         errdefer output.deinit(self.allocator);
+        const logical_types = try self.allocator.alloc(Handle, n_columns);
+        @memset(logical_types, null);
+        defer self.allocator.free(logical_types);
+        defer for (logical_types) |*logical| if (logical.* != null) self.api.vectors.duckdb_destroy_logical_type(logical);
         output.columns = try self.allocator.alloc(result.Column, n_columns);
         for (output.columns) |*column| column.* = .{ .name = "", .kind = .other };
         for (output.columns, 0..) |*column, index| {
             const type_id = self.api.duckdb_column_type(raw, index);
+            logical_types[index] = self.api.vectors.duckdb_column_logical_type(raw, index);
             column.* = .{ .name = try self.allocator.dupe(u8, std.mem.span(self.api.duckdb_column_name(raw, index).?)), .kind = duckdbKind(type_id), .native_type = type_id };
-        }
-        output.rows = try self.allocator.alloc([]?[]const u8, n_rows);
-        for (output.rows) |*row| row.* = &.{};
-        for (output.rows, 0..) |*row, r| {
-            row.* = try self.allocator.alloc(?[]const u8, n_columns);
-            @memset(row.*, null);
-            for (row.*, 0..) |*cell, c| {
-                if (self.api.duckdb_value_is_null(raw, c, r)) continue;
-                if (output.columns[c].native_type == 31) continue;
-                const value = self.api.duckdb_value_string(raw, c, r);
-                defer self.api.duckdb_free(value.data);
-                cell.* = try self.allocator.dupe(u8, if (value.data) |data| data[0..value.size] else "");
+            if (self.cursor_types) {
+                column.native_type_name = try vectors.typeName(self.allocator, &self.api.vectors, logical_types[index]);
+                column.native_type_description = try vectors.typeDescription(self.allocator, &self.api.vectors, logical_types[index]);
             }
         }
-        // The deprecated scalar C accessor cannot stringify TIMESTAMP_TZ.
-        // Read its signed microsecond transport, then let this connection's
-        // real timezone rules render values in bounded, read-only batches.
+        var rows: std.ArrayList([]?[]const u8) = .empty;
+        errdefer {
+            for (rows.items) |row| {
+                for (row) |cell| if (cell) |text| self.allocator.free(text);
+                self.allocator.free(row);
+            }
+            rows.deinit(self.allocator);
+        }
+        var native_rows: std.ArrayList([]result.Cell) = .empty;
+        errdefer {
+            for (native_rows.items) |row| {
+                for (row) |*cell| cell.deinit(self.allocator);
+                self.allocator.free(row);
+            }
+            native_rows.deinit(self.allocator);
+        }
+        while (self.api.vectors.duckdb_fetch_chunk(raw.*)) |fetched| {
+            var chunk: Handle = fetched;
+            defer self.api.vectors.duckdb_destroy_data_chunk(&chunk);
+            const count = self.api.vectors.duckdb_data_chunk_get_size(chunk);
+            if (rows.items.len + count > 10_000_000 or n_columns * (rows.items.len + count) > 10_000_000) return error.AdapterResultTooLarge;
+            for (0..count) |r| {
+                const row = try self.allocator.alloc(?[]const u8, n_columns);
+                @memset(row, null);
+                rows.append(self.allocator, row) catch |err| {
+                    self.allocator.free(row);
+                    return err;
+                };
+                for (row, logical_types, 0..) |*cell, logical, c| cell.* = try vectors.text(self.allocator, &self.api.vectors, logical, self.api.vectors.duckdb_data_chunk_get_vector(chunk, c), r);
+                if (self.cursor_types) {
+                    const cells = try self.allocator.alloc(result.Cell, n_columns);
+                    @memset(cells, .none);
+                    native_rows.append(self.allocator, cells) catch |err| {
+                        self.allocator.free(cells);
+                        return err;
+                    };
+                    for (cells, logical_types, 0..) |*cell, logical, c| cell.* = try vectors.native(self.allocator, &self.api.vectors, logical, self.api.vectors.duckdb_data_chunk_get_vector(chunk, c), r);
+                }
+            }
+        }
+        if (self.api.duckdb_result_error(raw) != null) return error.DuckDbExecutionFailed;
+        output.rows = try rows.toOwnedSlice(self.allocator);
+        if (self.cursor_types) output.cursor_rows = try native_rows.toOwnedSlice(self.allocator);
+        const n_rows = output.rows.len;
+        // The signed microseconds were copied from the chunk. Let the held
+        // connection render its actual timezone in bounded read-only batches.
         for (output.columns, 0..) |column, c| if (column.native_type == 31 and n_rows != 0) {
-            const data: [*]const i64 = @ptrCast(@alignCast(self.api.duckdb_column_data(raw, c) orelse return error.DuckDbExecutionFailed));
             var start: usize = 0;
             while (start < n_rows) {
                 const end = @min(start + 1000, n_rows);
@@ -638,18 +700,35 @@ pub const Connection = struct {
                 try sql.writer.writeAll("select stamp::varchar from (values ");
                 for (start..end) |r| {
                     if (r != start) try sql.writer.writeByte(',');
-                    if (self.api.duckdb_value_is_null(raw, c, r)) try sql.writer.print("({d},null::timestamptz)", .{r}) else try sql.writer.print("({d},make_timestamptz({d}))", .{ r, data[r] });
+                    if (output.rows[r][c]) |micros| {
+                        const infinite = std.mem.eql(u8, micros, "9223372036854775807") or std.mem.eql(u8, micros, "-9223372036854775807");
+                        if (infinite) try sql.writer.print("({d},'{s}'::timestamptz)", .{ r, if (micros[0] == '-') "-infinity" else "infinity" }) else try sql.writer.print("({d},make_timestamptz({s}))", .{ r, micros });
+                    } else try sql.writer.print("({d},null::timestamptz)", .{r});
                 }
                 try sql.writer.writeAll(") as timestamp_values(position,stamp) order by position");
+                const previous_types = self.cursor_types;
+                self.cursor_types = false;
+                defer self.cursor_types = previous_types;
                 var values = try self.queryStatements(sql.written(), self.readonly);
                 defer values.deinit(self.allocator);
                 if (values.rows.len != end - start) return error.DuckDbExecutionFailed;
                 for (values.rows, start..) |row, r| if (row[0]) |value| {
-                    output.rows[r][c] = try self.allocator.dupe(u8, value);
+                    const replacement = try self.allocator.dupe(u8, value);
+                    if (output.rows[r][c]) |micros| self.allocator.free(micros);
+                    output.rows[r][c] = replacement;
                 };
                 start = end;
             }
         };
+        if (output.cursor_rows) |cells| {
+            const previous_types = self.cursor_types;
+            self.cursor_types = false;
+            defer self.cursor_types = previous_types;
+            var timezone = try self.queryStatements("select current_setting('TimeZone')", self.readonly);
+            defer timezone.deinit(self.allocator);
+            const name = timezone.firstScalar() orelse return error.DuckDbExecutionFailed;
+            for (cells) |row| for (row) |*cell| try cell.setTimezone(self.allocator, name);
+        }
         return output;
     }
 };

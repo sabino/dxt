@@ -318,6 +318,8 @@ pub const OperationHost = struct {
 
     fn call(raw: *anyopaque, name: []const u8, args: []const expression.Argument, allocator: std.mem.Allocator) anyerror!expression.Value {
         const self: *OperationHost = @ptrCast(@alignCast(raw));
+        if (try @import("query_cursor.zig").call(self.values.allocator(), name, args)) |result_value| return result_value;
+        if (try @import("decimal_value.zig").call(self.values.allocator(), name, args)) |result_value| return result_value;
         if (std.mem.eql(u8, name, "write")) {
             const payload = argument(args, "payload", 0) orelse return error.InvalidJinjaArguments;
             if (args.len != 1 or payload != .string) return error.InvalidJinjaArguments;
@@ -387,13 +389,14 @@ pub const OperationHost = struct {
             if (sql != .string) return error.InvalidJinjaArguments;
             const authored = arguments[2];
             if (arguments[1].truthy() and !self.transaction_open) try self.begin();
-            var bound: ?[]adapter.Parameter = null;
+            var bound: ?[]const adapter.Parameter = null;
+            var query_sql = sql.string;
             if (authored != .none) {
-                const members = try expression.iterableValuesWithHost(a, authored, self.host());
-                bound = try a.alloc(adapter.Parameter, members.len);
-                for (members, bound.?) |member, *parameter| parameter.* = try @import("seed_table.zig").parameter(member);
+                const prepared = try @import("query_bindings.zig").bind(a, query_sql, authored, std.mem.eql(u8, self.graph.adapter_type, "postgres"));
+                query_sql = prepared.sql;
+                bound = prepared.values;
             }
-            const table = try self.queryBound(sql.string, bound);
+            const table = try self.queryBound(query_sql, bound, false, null);
             return .{ .tuple = try a.dupe(expression.Value, &.{ self.last_response, try self.queryCursor(table) }) };
         }
         if (std.mem.eql(u8, name, "adapter.convert_type")) {
@@ -496,6 +499,7 @@ pub const OperationHost = struct {
             const method = pieces.next() orelse return error.InvalidJinjaArguments;
             if (index >= self.stored.items.len) return error.InvalidJinjaArguments;
             const state = self.stored.items[index].value;
+            if (std.mem.eql(u8, self.graph.adapter_type, "postgres") and state.attribute("cursor").attribute("description") == .none) return error.CursorHasNoResults;
             const rows = expression.sequence(state.attribute("rows")) orelse return error.InvalidJinjaArguments;
             const start: usize = @intCast(try expression.integerIndex(state.attribute("position")));
             var count: usize = rows.len - start;
@@ -504,7 +508,11 @@ pub const OperationHost = struct {
                 count = @min(count, 1);
             } else if (std.mem.eql(u8, method, "fetchmany")) {
                 if (args.len > 1) return error.InvalidJinjaArguments;
+                for (args) |arg| if (arg.name) |key| {
+                    if (!std.mem.eql(u8, key, "size")) return error.InvalidJinjaArguments;
+                };
                 const size = try expression.integerIndex(argument(args, "size", 0) orelse expression.Value{ .integer = "1" });
+                if (size < 0 and std.mem.eql(u8, self.graph.adapter_type, "duckdb")) return error.JinjaTypeError;
                 count = if (size < 0) (if (std.mem.eql(u8, self.graph.adapter_type, "postgres")) count else 0) else @min(count, @as(usize, @intCast(size)));
             } else if (!std.mem.eql(u8, method, "fetchall") or args.len != 0) return error.InvalidJinjaArguments;
             @constCast(state.object)[1].value = try expression.integerValue(self.values.allocator(), start + count);
@@ -581,7 +589,14 @@ pub const OperationHost = struct {
                 try session.begin();
                 self.transaction_open = true;
             }
-            const queried = try self.query(sql.string, allocator);
+            const raw_limit = argument(args, "limit", 3) orelse .none;
+            var limit: ?usize = null;
+            if (raw_limit != .none and raw_limit.truthy()) {
+                const count = try expression.integerIndex(raw_limit);
+                if (count < 0 and std.mem.eql(u8, self.graph.adapter_type, "duckdb")) return error.JinjaTypeError;
+                if (count >= 0) limit = @intCast(count);
+            }
+            const queried = try self.queryBound(sql.string, null, fetch.truthy(), limit);
             const table = if (fetch.truthy() and queried != .none) queried else try self.emptyTable();
             return .{ .list = try self.values.allocator().dupe(expression.Value, &.{ self.last_response, table }) };
         }
@@ -601,8 +616,8 @@ pub const OperationHost = struct {
                 try session.begin();
                 self.transaction_open = true;
             }
-            const table = try self.query(sql.string, allocator);
             const fetch: expression.Value = argument(args, "fetch_result", 1) orelse .{ .boolean = false };
+            const table = try self.queryBound(sql.string, null, fetch.truthy(), null);
             const value: expression.Value = .{ .object = try self.values.allocator().dupe(expression.Entry, &.{
                 .{ .key = "table", .value = if (fetch.truthy()) table else .none },
                 .{ .key = "data", .value = if (fetch.truthy() and table != .none) table.attribute("__dxt_data") else .{ .list = &.{} } },
@@ -626,13 +641,13 @@ pub const OperationHost = struct {
     }
 
     fn query(self: *OperationHost, sql: []const u8, _: std.mem.Allocator) !expression.Value {
-        return self.queryBound(sql, null);
+        return self.queryBound(sql, null, true, null);
     }
 
-    fn queryBound(self: *OperationHost, sql: []const u8, bindings: ?[]const adapter.Parameter) !expression.Value {
+    fn queryBound(self: *OperationHost, sql: []const u8, bindings: ?[]const adapter.Parameter, fetch: bool, limit: ?usize) !expression.Value {
         try self.ensureSession();
         const allocator = self.values.allocator();
-        var output = if (bindings) |parameters| try (self.currentSession() orelse return error.NativeAdapterSessionRequired).queryParameters(sql, parameters) else if (self.currentSession()) |session| try session.query(sql) else try adapter.queryForGraph(self.runtime, self.graph, self.db_path, sql);
+        var output = if (bindings) |parameters| try (self.currentSession() orelse return error.NativeAdapterSessionRequired).queryParametersTyped(sql, parameters) else if (self.currentSession()) |session| try session.queryTyped(sql) else try adapter.queryForGraph(self.runtime, self.graph, self.db_path, sql);
         defer output.deinit(self.runtime.allocator);
         const trimmed = std.mem.trim(u8, sql, " \t\r\n;");
         const message = if (output.command_tag) |tag| try allocator.dupe(u8, tag) else "OK";
@@ -659,46 +674,74 @@ pub const OperationHost = struct {
             if (self.duckdb_cursor != null) _ = try self.queryCursor(.none);
             return .none;
         }
-        const rows = try expression.allocateValues(allocator, output.rows.len);
-        const data = try expression.allocateValues(allocator, output.rows.len);
-        const columns = try expression.allocateValues(allocator, output.columns.len);
+        const cursor_rows = try expression.allocateValues(allocator, output.rows.len);
+        if (output.cursor_rows) |native_rows| {
+            for (native_rows, cursor_rows) |native_row, *row| {
+                const members = try expression.allocateValues(allocator, native_row.len);
+                for (native_row, members) |cell, *member| member.* = try @import("query_cursor.zig").value(allocator, cell);
+                row.* = .{ .tuple = members };
+            }
+        } else return error.NativeCursorValuesMissing;
+        const cursor_description = try @import("query_cursor.zig").description(allocator, output.columns, std.mem.eql(u8, self.graph.adapter_type, "postgres"));
         const names = try expression.allocateValues(allocator, output.columns.len);
-        for (output.columns, 0..) |column, column_index| {
-            names[column_index] = .{ .string = try allocator.dupe(u8, column.name) };
-            const cells = try expression.allocateValues(allocator, output.rows.len);
-            for (output.rows, 0..) |row, row_index| cells[row_index] = try cellValue(allocator, column.kind, row[column_index]);
+        for (output.columns, names) |column, *name| name.* = .{ .string = try allocator.dupe(u8, column.name) };
+        const original_table: expression.Value = .{ .object = try allocator.dupe(expression.Entry, &.{
+            .{ .key = "__dxt_cursor_rows", .value = .{ .list = cursor_rows } },
+            .{ .key = "__dxt_cursor_description", .value = cursor_description },
+            .{ .key = "column_names", .value = .{ .tuple = names } },
+        }) };
+        const original_cursor = try self.queryCursor(original_table);
+        if (!fetch) return original_table;
+        const projection = try @import("query_agate.zig").names(allocator, names);
+        const agate_names = projection.names;
+        const fetched_count = @min(limit orelse output.rows.len, output.rows.len);
+        const cursor_index = std.fmt.parseUnsigned(usize, std.mem.sliceTo(original_cursor.attribute("fetchone").callable[11..], '.'), 10) catch return error.InvalidJinjaArguments;
+        @constCast(self.stored.items[cursor_index].value.object)[1].value = try expression.integerValue(allocator, fetched_count);
+        const rows = try expression.allocateValues(allocator, fetched_count);
+        const data = try expression.allocateValues(allocator, fetched_count);
+        const columns = try expression.allocateValues(allocator, output.columns.len);
+        for (output.columns, 0..) |_, column_index| {
+            const native_column = try allocator.alloc(@import("adapter_value.zig").Cell, fetched_count);
+            const original_column = try expression.allocateValues(allocator, fetched_count);
+            for (native_column, original_column, 0..) |*cell, *original, row_index| {
+                cell.* = output.cursor_rows.?[row_index][projection.indices[column_index]];
+                original.* = cursor_rows[row_index].tuple[projection.indices[column_index]];
+            }
+            const cells = try @import("query_agate.zig").column(allocator, native_column, original_column);
             columns[column_index] = .{ .object = try allocator.dupe(expression.Entry, &.{
                 .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
                 .{ .key = "__dxt_iterable", .value = .{ .list = cells } },
-                .{ .key = "name", .value = names[column_index] },
+                .{ .key = "name", .value = agate_names[column_index] },
                 .{ .key = "values", .value = try self.callback(.{ .tuple = cells }) },
             }) };
         }
-        for (output.rows, rows, data) |row, *target, *raw_target| {
+        for (rows, data, 0..) |*target, *raw_target, row_index| {
             const cells = try expression.allocateValues(allocator, output.columns.len);
-            for (row, output.columns, cells) |cell, column, *value| value.* = try cellValue(allocator, column.kind, cell);
-            target.* = try self.mappedSequence(names, cells);
+            for (cells, 0..) |*value, column_index| value.* = expression.sequence(columns[column_index].attribute("__dxt_iterable")).?[row_index];
+            target.* = try self.mappedSequence(agate_names, cells);
             raw_target.* = .{ .list = cells };
         }
-        const column_values = try self.mappedSequence(names, columns);
+        const column_values = try self.mappedSequence(agate_names, columns);
         const method = try std.fmt.allocPrint(allocator, "dxt.print_table.{d}", .{self.stored.items.len});
         try self.stored.append(self.runtime.allocator, .{ .name = method, .value = .{ .list = data } });
         const table: expression.Value = .{ .object = try allocator.dupe(expression.Entry, &.{
             .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
             .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
             .{ .key = "__dxt_data", .value = .{ .list = data } },
+            .{ .key = "__dxt_cursor_rows", .value = .{ .list = cursor_rows } },
+            .{ .key = "__dxt_cursor_description", .value = cursor_description },
             .{ .key = "rows", .value = .{ .list = rows } },
             .{ .key = "columns", .value = column_values },
-            .{ .key = "column_names", .value = .{ .list = names } },
+            .{ .key = "column_names", .value = .{ .tuple = agate_names } },
             .{ .key = "print_table", .value = .{ .callable = method } },
         }) };
-        if (self.duckdb_cursor != null) _ = try self.queryCursor(table);
         return table;
     }
 
     fn queryCursor(self: *OperationHost, table: expression.Value) !expression.Value {
         const a = self.values.allocator();
-        const values = if (table == .none) &.{} else expression.sequence(table.attribute("__dxt_data")) orelse return error.InvalidAgateTable;
+        const typed = table.attribute("__dxt_cursor_rows");
+        const values = if (table == .none) &.{} else expression.sequence(if (typed == .list) typed else table.attribute("__dxt_data")) orelse return error.InvalidAgateTable;
         const rows = try expression.allocateValues(a, values.len);
         for (values, rows) |value, *row| row.* = .{ .tuple = expression.sequence(value) orelse return error.InvalidAgateTable };
         const index = self.duckdb_cursor orelse self.stored.items.len;
@@ -714,7 +757,7 @@ pub const OperationHost = struct {
         const names = if (table == .none) &.{} else expression.sequence(table.attribute("column_names")) orelse return error.InvalidAgateTable;
         const description = try expression.allocateValues(a, names.len);
         for (names, description) |name, *field| field.* = .{ .tuple = try a.dupe(expression.Value, &.{ name, .none, .none, .none, .none, .none, .none }) };
-        try entries.append(a, .{ .key = "description", .value = if (table == .none) .none else .{ .tuple = description } });
+        try entries.append(a, .{ .key = "description", .value = if (table == .none) .none else if (table.attribute("__dxt_cursor_description") == .tuple) table.attribute("__dxt_cursor_description") else .{ .tuple = description } });
         for ([_][]const u8{ "fetchall", "fetchone", "fetchmany" }) |method| try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "dxt.cursor.{d}.{s}", .{ index, method }) } });
         const current = self.stored.items[index].value.attribute("cursor");
         if (current == .object) {

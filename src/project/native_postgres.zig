@@ -23,6 +23,7 @@ const Api = struct {
     PQfname: *const fn (Handle, c_int) callconv(.c) [*:0]const u8,
     PQftype: *const fn (Handle, c_int) callconv(.c) u32,
     PQfmod: *const fn (Handle, c_int) callconv(.c) c_int,
+    PQfsize: *const fn (Handle, c_int) callconv(.c) c_int,
     PQgetisnull: *const fn (Handle, c_int, c_int) callconv(.c) c_int,
     PQgetvalue: *const fn (Handle, c_int, c_int) callconv(.c) [*:0]const u8,
     PQgetlength: *const fn (Handle, c_int, c_int) callconv(.c) c_int,
@@ -37,6 +38,7 @@ const Api = struct {
 };
 
 pub const Connection = struct {
+    cursor_types: bool = false,
     cache_context: ?@import("relation_cache.zig").Context = null,
     cancellation_token: ?*const std.atomic.Value(bool) = null,
     allocator: std.mem.Allocator,
@@ -76,6 +78,20 @@ pub const Connection = struct {
         self.handle = null;
     }
 
+    pub fn queryTyped(self: *Connection, sql: []const u8) !QueryResult {
+        const previous = self.cursor_types;
+        self.cursor_types = true;
+        defer self.cursor_types = previous;
+        return self.query(sql);
+    }
+
+    pub fn queryParametersTyped(self: *Connection, sql: []const u8, bindings: []const parameters.Parameter) !QueryResult {
+        const previous = self.cursor_types;
+        self.cursor_types = true;
+        defer self.cursor_types = previous;
+        return self.queryParameters(sql, bindings);
+    }
+
     pub fn query(self: *Connection, sql: []const u8) !QueryResult {
         if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
         self.clearError();
@@ -97,6 +113,10 @@ pub const Connection = struct {
         // psycopg2 adapts values client-side and accepts multi-statement SQL
         // and batches beyond libpq's 16-bit extended-protocol parameter limit.
         if (bindings.len > 65535 or parameters.needsClientAdaptation(sql)) return self.queryAdapted(sql, bindings);
+        // Unknown NULL/text literals keep psycopg2's context-dependent type.
+        // An unspecified extended-protocol parameter is not equivalent in
+        // polymorphic expressions such as pg_typeof(NULL).
+        for (bindings) |binding| if (binding == .none or binding == .text or binding.recursive() or binding == .uuid or (binding == .decimal and std.mem.indexOf(u8, binding.decimal, "Infinity") != null)) return self.queryAdapted(sql, bindings);
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
         const a = scratch.allocator();
@@ -117,38 +137,17 @@ pub const Connection = struct {
         defer scratch.deinit();
         const a = scratch.allocator();
         const literals = try a.alloc([]const u8, bindings.len);
-        for (bindings, literals) |binding, *literal| {
-            if (binding == .none) {
-                literal.* = "NULL";
-                continue;
-            }
-            const text = (try binding.postgresText(a)).?;
-            switch (binding) {
-                .boolean, .integer => literal.* = text,
-                .decimal => {
-                    _ = try parameters.decimal(a, text);
-                    literal.* = text;
-                },
-                .floating => |value| {
-                    literal.* = if (std.math.isFinite(value)) text else if (std.math.isNan(value)) "'NaN'::float8" else if (value > 0) "'Infinity'::float8" else "'-Infinity'::float8";
-                },
-                else => {
-                    const quoted = self.api.PQescapeLiteral(self.handle, text.ptr, text.len) orelse return error.InvalidQueryParameter;
-                    defer self.api.PQfreemem(quoted);
-                    const cast = switch (binding) {
-                        .binary => "::bytea",
-                        .date => "::date",
-                        .time => "::time",
-                        .timestamp => "::timestamp",
-                        .timestamp_tz => "::timestamptz",
-                        else => "",
-                    };
-                    literal.* = try std.fmt.allocPrint(a, "{s}{s}", .{ std.mem.span(quoted), cast });
-                },
-            }
-        }
+        for (bindings, literals) |binding, *literal| literal.* = try @import("postgres_parameters.zig").literal(a, binding, self, quoteParameter);
         const adapted = try parameters.postgresAdaptedSql(a, sql, literals);
         return self.query(adapted);
+    }
+
+    fn quoteParameter(a: std.mem.Allocator, context: ?*anyopaque, text: []const u8) anyerror![]const u8 {
+        const self: *Connection = @ptrCast(@alignCast(context orelse return error.InvalidQueryParameter));
+        if (std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidQueryParameter;
+        const quoted = self.api.PQescapeLiteral(self.handle, text.ptr, text.len) orelse return error.InvalidQueryParameter;
+        defer self.api.PQfreemem(quoted);
+        return a.dupe(u8, std.mem.span(quoted));
     }
 
     fn drainResults(self: *Connection) !QueryResult {
@@ -242,7 +241,15 @@ pub const Connection = struct {
         for (output.columns) |*column| column.* = .{ .name = "", .kind = .other };
         for (output.columns, 0..) |*column, index| {
             const type_id = self.api.PQftype(raw, @intCast(index));
-            column.* = .{ .name = try self.allocator.dupe(u8, std.mem.span(self.api.PQfname(raw, @intCast(index)))), .kind = postgresKind(type_id), .native_type = type_id, .native_type_modifier = self.api.PQfmod(raw, @intCast(index)) };
+            column.* = .{ .name = try self.allocator.dupe(u8, std.mem.span(self.api.PQfname(raw, @intCast(index)))), .kind = postgresKind(type_id), .native_type = type_id, .native_type_modifier = self.api.PQfmod(raw, @intCast(index)), .native_type_size = self.api.PQfsize(raw, @intCast(index)) };
+        }
+        if (self.cursor_types) {
+            output.cursor_rows = try self.allocator.alloc([]result.Cell, n_rows);
+            for (output.cursor_rows.?) |*row| row.* = &.{};
+            for (output.cursor_rows.?) |*row| {
+                row.* = try self.allocator.alloc(result.Cell, n_columns);
+                @memset(row.*, .none);
+            }
         }
         output.rows = try self.allocator.alloc([]?[]const u8, n_rows);
         for (output.rows) |*row| row.* = &.{};
@@ -252,7 +259,9 @@ pub const Connection = struct {
             for (row.*, 0..) |*cell, c| {
                 if (self.api.PQgetisnull(raw, @intCast(r), @intCast(c)) != 0) continue;
                 const length: usize = @intCast(self.api.PQgetlength(raw, @intCast(r), @intCast(c)));
-                cell.* = try self.allocator.dupe(u8, self.api.PQgetvalue(raw, @intCast(r), @intCast(c))[0..length]);
+                const text = self.api.PQgetvalue(raw, @intCast(r), @intCast(c))[0..length];
+                cell.* = try self.allocator.dupe(u8, text);
+                if (output.cursor_rows) |rows| rows[r][c] = try @import("postgres_cursor.zig").cell(self.allocator, output.columns[c].native_type, text);
             }
         }
         return output;

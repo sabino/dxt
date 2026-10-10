@@ -39,6 +39,16 @@ pub const Session = union(enum) {
             inline else => |*connection| connection.deinit(),
         }
     }
+    pub fn queryTyped(self: *Session, sql: []const u8) !QueryResult {
+        return switch (self.*) {
+            inline else => |*connection| try connection.queryTyped(sql),
+        };
+    }
+    pub fn queryParametersTyped(self: *Session, sql: []const u8, bindings: []const Parameter) !QueryResult {
+        return switch (self.*) {
+            inline else => |*connection| try connection.queryParametersTyped(sql, bindings),
+        };
+    }
     pub fn query(self: *Session, sql: []const u8) !QueryResult {
         return switch (self.*) {
             inline else => |*connection| try connection.query(sql),

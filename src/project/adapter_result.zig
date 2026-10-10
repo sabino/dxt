@@ -1,7 +1,16 @@
 const std = @import("std");
 
 pub const Kind = enum { boolean, integer, decimal, floating, text, date, time, timestamp, binary, other };
-pub const Column = struct { name: []const u8, kind: Kind, native_type: u32 = 0, native_type_modifier: i32 = -1 };
+pub const Cell = @import("adapter_value.zig").Cell;
+pub const Column = struct {
+    name: []const u8,
+    kind: Kind,
+    native_type: u32 = 0,
+    native_type_modifier: i32 = -1,
+    native_type_size: i32 = -1,
+    native_type_name: ?[]const u8 = null,
+    native_type_description: ?Cell = null,
+};
 pub const QueryResult = struct {
     /// Allocating producers retain their allocator because a held connection
     /// can outlive the batch allocator used by the caller. The caller-supplied
@@ -9,19 +18,36 @@ pub const QueryResult = struct {
     owner_allocator: ?std.mem.Allocator = null,
     columns: []Column = &.{},
     rows: [][]?[]const u8 = &.{},
+    /// Only held cursor queries request these original driver types. Agate
+    /// consumers continue to apply their distinct coercions to rows above.
+    cursor_rows: ?[][]Cell = null,
     rows_changed: u64 = 0,
     command_tag: ?[]const u8 = null,
 
     pub fn deinit(self: *QueryResult, allocator: std.mem.Allocator) void {
         const owner = self.owner_allocator orelse allocator;
         if (self.command_tag) |tag| owner.free(tag);
-        for (self.columns) |column| owner.free(column.name);
+        for (self.columns) |column| {
+            owner.free(column.name);
+            if (column.native_type_name) |name| owner.free(name);
+            if (column.native_type_description) |description| {
+                var owned = description;
+                owned.deinit(owner);
+            }
+        }
         owner.free(self.columns);
         for (self.rows) |row| {
             for (row) |value| if (value) |text| owner.free(text);
             owner.free(row);
         }
         owner.free(self.rows);
+        if (self.cursor_rows) |rows| {
+            for (rows) |row| {
+                for (row) |*cell| cell.deinit(owner);
+                owner.free(row);
+            }
+            owner.free(rows);
+        }
         self.* = .{};
     }
 
@@ -33,6 +59,8 @@ pub const QueryResult = struct {
     pub fn truncateRows(self: *QueryResult, allocator: std.mem.Allocator, count: usize) !void {
         if (count >= self.rows.len) return;
         const owner = self.owner_allocator orelse allocator;
+        const retained_cells: ?[][]Cell = if (self.cursor_rows) |rows| try owner.dupe([]Cell, rows[0..count]) else null;
+        errdefer if (retained_cells) |rows| owner.free(rows);
         // Allocate before releasing row contents. A failed shrink must leave
         // the full result valid for its deferred cleanup.
         const retained = try owner.dupe([]?[]const u8, self.rows[0..count]);
@@ -42,6 +70,14 @@ pub const QueryResult = struct {
         }
         owner.free(self.rows);
         self.rows = retained;
+        if (self.cursor_rows) |rows| {
+            for (rows[count..]) |row| {
+                for (row) |*cell| cell.deinit(owner);
+                owner.free(row);
+            }
+            owner.free(rows);
+        }
+        self.cursor_rows = retained_cells;
     }
 
     pub fn json(self: *const QueryResult, allocator: std.mem.Allocator) ![]const u8 {
@@ -181,4 +217,41 @@ fn truncateAllocationFailures(a: std.mem.Allocator) !void {
     try std.testing.expectEqualStrings("owned", result.rows[0][0].?);
     try result.truncateRows(std.testing.allocator, 0);
     try std.testing.expectEqual(@as(usize, 0), result.rows.len);
+}
+
+test "typed cursor and metadata truncation preserves independent owned projections" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, typedTruncationFailures, .{});
+}
+fn typedTruncationFailures(a: std.mem.Allocator) !void {
+    var output: QueryResult = .{ .owner_allocator = a };
+    defer output.deinit(std.testing.allocator);
+    output.columns = try a.alloc(Column, 1);
+    output.columns[0] = .{ .name = "", .kind = .text };
+    output.columns[0].name = try a.dupe(u8, "binary");
+    output.columns[0].native_type_name = try a.dupe(u8, "BLOB");
+    const metadata_text = try a.dupe(u8, "owned metadata");
+    output.columns[0].native_type_description = .{ .text = metadata_text };
+    output.rows = try a.alloc([]?[]const u8, 2);
+    @memset(output.rows, &.{});
+    output.cursor_rows = try a.alloc([]Cell, 2);
+    @memset(output.cursor_rows.?, &.{});
+    for (0..2) |r| {
+        output.rows[r] = try a.alloc(?[]const u8, 1);
+        output.rows[r][0] = null;
+        output.rows[r][0] = try a.dupe(u8, "agate text");
+        output.cursor_rows.?[r] = try a.alloc(Cell, 1);
+        output.cursor_rows.?[r][0] = .none;
+        const binary = try a.dupe(u8, &.{ 'a', 0, 255 });
+        output.cursor_rows.?[r][0] = .{ .binary = binary };
+    }
+    output.truncateRows(std.testing.allocator, 1) catch |err| {
+        try std.testing.expectEqual(@as(usize, 2), output.rows.len);
+        try std.testing.expectEqual(@as(usize, 2), output.cursor_rows.?.len);
+        try std.testing.expectEqualSlices(u8, &.{ 'a', 0, 255 }, output.cursor_rows.?[1][0].binary);
+        return err;
+    };
+    try std.testing.expectEqualStrings("agate text", output.rows[0][0].?);
+    try std.testing.expectEqualSlices(u8, &.{ 'a', 0, 255 }, output.cursor_rows.?[0][0].binary);
+    try output.truncateRows(std.testing.allocator, 0);
+    try std.testing.expectEqual(@as(usize, 0), output.cursor_rows.?.len);
 }
