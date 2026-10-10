@@ -37,7 +37,7 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, node: *const t
         var compiled = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, &unbatched);
         errdefer compiled.deinit(runtime.allocator);
         unbatched.compiled_code = compiled.compiled_code;
-        const executor = custom_executor orelse executeBatch;
+        const executor = custom_executor orelse executeBatchWithLifecycle;
         try executor(runtime, graph, &unbatched, session);
         return .{ .node = node, .compiled_code = compiled.compiled_code, .owns_compiled_code = true, .compiled_ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator), .owns_compiled_ctes = true };
     }
@@ -66,6 +66,13 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, node: *const t
         batch_runtime.adapter_session = session;
         var batch_graph = graph.*;
         var batch_node = node.*;
+        // MicrobatchModelRunner sends pre-hooks to the first batch and
+        // post-hooks to the final batch; intermediate batches run neither.
+        batch_node.effective_config = try values.clone(batch_runtime.allocator, node.effective_config);
+        if (batch_node.effective_config == .object) {
+            if (index != 0) try batch_node.effective_config.object.put(batch_runtime.allocator, "pre-hook", .{ .array = std.array_list.Managed(std.json.Value).init(batch_runtime.allocator) });
+            if (index + 1 != batches.len) try batch_node.effective_config.object.put(batch_runtime.allocator, "post-hook", .{ .array = std.array_list.Managed(std.json.Value).init(batch_runtime.allocator) });
+        }
         batch_node.runtime_batch = batch;
         batch_node.runtime_batch_id = try microbatch.batchId(batch_runtime.allocator, batch.start, batch_config.batch_size);
         batch_node.runtime_is_incremental = incremental_batch;
@@ -95,7 +102,7 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, node: *const t
             if (index == 0 or graph.command_options.fail_fast) skip_remaining = true;
             continue;
         };
-        const executor = custom_executor orelse executeBatch;
+        const executor = custom_executor orelse executeBatchWithLifecycle;
         executor(batch_runtime, &batch_graph, &batch_node, session) catch {
             session.rollback() catch {};
             try failed.append(runtime.allocator, batch);
@@ -136,14 +143,35 @@ fn previousBatches(a: std.mem.Allocator, options: types.Options, id: []const u8)
     return parsed;
 }
 
+fn executeBatchWithLifecycle(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, session: *adapter.Session) !void {
+    var held = runtime;
+    held.adapter_session = session;
+    const db_path = try @import("duckdb.zig").databasePath(runtime.allocator, graph.command_options.project_dir, graph);
+    defer runtime.allocator.free(db_path);
+    if (try @import("custom_materialization.zig").custom(graph, node)) |macro| {
+        const result = try @import("custom_materialization.zig").execute(held, db_path, graph, node, macro);
+        result.deinit(runtime.allocator);
+        return;
+    }
+    try @import("materialization_runtime.zig").executeWithBody(held, db_path, graph, node, .{ .context = session, .execute = batchBody, .materialized = "incremental" });
+}
+
+fn batchBody(_: *anyopaque, runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, _: []const u8, policy: @import("duckdb.zig").ExecutionPolicy) anyerror!void {
+    return executeBatchWithPolicy(runtime, graph, node, runtime.adapter_session orelse return error.MissingMaterializationSession, policy);
+}
+
 pub fn executeBatch(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, session: *adapter.Session) !void {
+    return executeBatchWithPolicy(runtime, graph, node, session, .{});
+}
+
+pub fn executeBatchWithPolicy(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, session: *adapter.Session, policy: @import("duckdb.zig").ExecutionPolicy) !void {
     const a = runtime.allocator;
     const schema = try compiler.relationSchemaForNode(a, graph, node);
     const quoted_schema = try compiler.quoteIdentifier(a, schema);
     const target = try compiler.relationNameForNode(a, graph, node);
     const compiled = std.mem.trimEnd(u8, node.compiled_code orelse return error.UnsupportedModelExecution, " \t\r\n;");
-    try session.begin();
-    errdefer session.rollback() catch {};
+    if (policy.manage_transaction) try session.begin();
+    errdefer if (policy.manage_transaction) session.rollback() catch {};
     try session.execute(try std.fmt.allocPrint(a, "create schema if not exists {s}", .{quoted_schema}));
     if (!node.runtime_is_incremental) {
         const kind = try session.relationTypeInDatabase(a, compiler.relationDatabaseForNode(graph, node), schema, compiler.relationIdentifierForNode(node));
@@ -152,7 +180,7 @@ pub fn executeBatch(runtime: types.Runtime, graph: *const types.Graph, node: *co
             try session.execute(try std.fmt.allocPrint(a, "drop {s} {s}", .{ drop, target }));
         }
         try session.execute(try std.fmt.allocPrint(a, "create table {s} as ({s})", .{ target, compiled }));
-        try session.commit();
+        if (policy.manage_transaction) try session.commit();
         return;
     }
     if (std.mem.eql(u8, graph.adapter_type, "duckdb") and strategyMacro(graph, node) != null and !(graph.adapter_require_batched_execution_for_custom_microbatch_strategy orelse graph.require_batched_execution_for_custom_microbatch_strategy)) return error.UnsupportedIncrementalStrategy;
@@ -189,16 +217,15 @@ pub fn executeBatch(runtime: types.Runtime, graph: *const types.Graph, node: *co
     } else {
         native_config.strategy = "delete+insert";
         const sql = try incremental.renderUpdateSql(a, target, stage, source_columns, target_columns, native_config, false);
-        // Its native incremental helper includes stage cleanup and COMMIT. The
-        // microbatch owner commits exactly once after strategy SQL succeeds.
+        // The materialization wrapper owns the transaction and resource hooks.
         const body = std.mem.trimEnd(u8, sql, " \t\r\n");
         if (!std.mem.endsWith(u8, body, "commit;")) return error.InvalidMicrobatchSql;
         try session.execute(body[0 .. body.len - "commit;".len]);
-        try session.commit();
+        if (policy.manage_transaction) try session.commit();
         return;
     }
     try session.execute(try std.fmt.allocPrint(a, "drop table {s}", .{stage}));
-    try session.commit();
+    if (policy.manage_transaction) try session.commit();
 }
 
 fn strategyMacro(graph: *const types.Graph, node: *const types.Node) ?[]const u8 {

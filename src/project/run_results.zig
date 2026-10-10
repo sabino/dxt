@@ -474,7 +474,19 @@ fn writeBatchTimestamp(writer: *Io.Writer, timestamp: i96) !void {
     var storage: [128]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
     const label = try @import("workflow_intervals.zig").formatTimestamp(fixed.allocator(), @intCast(@divFloor(timestamp, std.time.ns_per_s)));
-    try writer.print("\"{s}T{s}.{d:0>6}Z\"", .{ label[0..10], label[11..19], @as(u64, @intCast(@divFloor(@mod(timestamp, std.time.ns_per_s), std.time.ns_per_us))) });
+    const microseconds: u64 = @intCast(@divFloor(@mod(timestamp, std.time.ns_per_s), std.time.ns_per_us));
+    try writer.print("\"{s}T{s}", .{ label[0..10], label[11..19] });
+    if (microseconds != 0) try writer.print(".{d:0>6}", .{microseconds});
+    try writer.writeAll("+00:00\"");
+}
+
+test "microbatch intervals use Core UTC isoformat with optional microseconds" {
+    var out: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeBatchTimestamp(&out.writer, 0);
+    try out.writer.writeByte('|');
+    try writeBatchTimestamp(&out.writer, -std.time.ns_per_s + 123456 * std.time.ns_per_us);
+    try std.testing.expectEqualStrings("\"1970-01-01T00:00:00+00:00\"|\"1969-12-31T23:59:59.123456+00:00\"", out.written());
 }
 
 fn writeBatchIntervals(writer: *Io.Writer, batches: []const types.SampleWindow) !void {
