@@ -1,5 +1,14 @@
 //! DuckDBPyType equality and dictionary keys use its canonical SQL label.
 const std = @import("std");
+pub fn notImplemented(a: std.mem.Allocator) !@import("expression.zig").Value {
+    return .{ .object = try a.dupe(@import("expression.zig").Entry, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = "NotImplemented" } },
+        .{ .key = "__dxt_repr", .value = .{ .string = "NotImplemented" } },
+        .{ .key = "__dxt_not_implemented", .value = .{ .callable = "__dxt_not_implemented" } },
+    }) };
+}
 const Value = @import("expression.zig").Value;
 pub fn name(value: Value) ?[]const u8 {
     const marker = value.attribute("__dxt_duck_type");
