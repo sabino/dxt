@@ -93,6 +93,7 @@ fn create(a: Allocator, receiver: Value, type_name: []const u8, name: []const u8
         .{ .key = "__dxt_builtin_receiver", .value = receiver },
         .{ .key = "__dxt_builtin_receiver_identity", .value = try expression.integerValue(a, identity) },
         .{ .key = "__dxt_builtin_registered_identity", .value = .{ .boolean = host != null and host.?.receiver_identity != null } },
+        .{ .key = "__dxt_builtin_portable_identity", .value = .{ .boolean = false } },
     }) };
 }
 
@@ -116,6 +117,12 @@ fn sameReceiver(left: Value, right: Value) bool {
     };
 }
 
+fn trustedIdentity(value: Value) bool {
+    const registered = value.attribute("__dxt_builtin_registered_identity");
+    const portable = value.attribute("__dxt_builtin_portable_identity");
+    return (registered == .boolean and registered.boolean) or (portable == .boolean and portable.boolean);
+}
+
 pub fn equal(left: Value, right: Value) bool {
     if (!isBound(left) or !isBound(right)) return false;
     if (left.object.ptr == right.object.ptr) return true;
@@ -124,7 +131,7 @@ pub fn equal(left: Value, right: Value) bool {
     return expression.equalValues(left.attribute("__dxt_builtin_owner"), right.attribute("__dxt_builtin_owner")) and
         expression.equalValues(left.attribute("__dxt_builtin_name"), right.attribute("__dxt_builtin_name")) and
         (sameReceiver(left.attribute("__dxt_builtin_receiver"), right.attribute("__dxt_builtin_receiver")) or
-            (left.attribute("__dxt_builtin_registered_identity").truthy() and right.attribute("__dxt_builtin_registered_identity").truthy() and
+            (trustedIdentity(left) and trustedIdentity(right) and
                 expression.equalValues(left.attribute("__dxt_builtin_receiver_identity"), right.attribute("__dxt_builtin_receiver_identity"))));
 }
 
