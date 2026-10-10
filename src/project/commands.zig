@@ -494,36 +494,48 @@ pub const OperationHost = struct {
             names[column_index] = .{ .string = try allocator.dupe(u8, column.name) };
             const cells = try expression.allocateValues(allocator, output.rows.len);
             for (output.rows, 0..) |row, row_index| cells[row_index] = try cellValue(allocator, column.kind, row[column_index]);
-            columns[column_index] = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "name", .value = names[column_index] }, .{ .key = "values", .value = try self.callback(.{ .list = cells }) } }) };
+            columns[column_index] = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "name", .value = names[column_index] }, .{ .key = "values", .value = try self.callback(.{ .tuple = cells }) } }) };
         }
         for (output.rows, rows, data) |row, *target, *raw_target| {
             const cells = try expression.allocateValues(allocator, output.columns.len);
-            const entries = try expression.allocateEntries(allocator, output.columns.len + 3);
-            for (row, output.columns, cells, entries[0..output.columns.len]) |cell, column, *value, *entry| {
-                value.* = try cellValue(allocator, column.kind, cell);
-                entry.* = .{ .key = try allocator.dupe(u8, column.name), .value = value.* };
-            }
-            entries[output.columns.len] = .{ .key = "__dxt_iterable", .value = .{ .list = cells } };
-            entries[output.columns.len + 1] = .{ .key = "keys", .value = try self.callback(.{ .list = names }) };
-            entries[output.columns.len + 2] = .{ .key = "values", .value = try self.callback(.{ .list = cells }) };
-            target.* = .{ .object = entries };
+            for (row, output.columns, cells) |cell, column, *value| value.* = try cellValue(allocator, column.kind, cell);
+            target.* = try self.mappedSequence(names, cells);
             raw_target.* = .{ .list = cells };
         }
-        const column_entries = try expression.allocateEntries(allocator, output.columns.len + 3);
-        for (output.columns, columns, column_entries[0..output.columns.len]) |column, value, *entry| entry.* = .{ .key = try allocator.dupe(u8, column.name), .value = value };
-        column_entries[output.columns.len] = .{ .key = "__dxt_iterable", .value = .{ .list = columns } };
-        column_entries[output.columns.len + 1] = .{ .key = "keys", .value = try self.callback(.{ .list = names }) };
-        column_entries[output.columns.len + 2] = .{ .key = "values", .value = try self.callback(.{ .list = columns }) };
+        const column_values = try self.mappedSequence(names, columns);
         const method = try std.fmt.allocPrint(allocator, "dxt.print_table.{d}", .{self.stored.items.len});
         try self.stored.append(self.runtime.allocator, .{ .name = method, .value = .{ .list = data } });
         return .{ .object = try allocator.dupe(expression.Entry, &.{
             .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
             .{ .key = "__dxt_data", .value = .{ .list = data } },
             .{ .key = "rows", .value = .{ .list = rows } },
-            .{ .key = "columns", .value = .{ .object = column_entries } },
+            .{ .key = "columns", .value = column_values },
             .{ .key = "column_names", .value = .{ .list = names } },
             .{ .key = "print_table", .value = .{ .callable = method } },
         }) };
+    }
+
+    /// Agate MappedSequence methods expose named values, never host metadata.
+    /// Its attribute methods take precedence over a column with the same name;
+    /// string subscripts still resolve that authored column.
+    fn mappedSequence(self: *OperationHost, names: []const expression.Value, values: []const expression.Value) !expression.Value {
+        if (names.len != values.len) return error.InvalidJinjaArguments;
+        const allocator = self.values.allocator();
+        const named = try expression.allocateEntries(allocator, names.len);
+        const pairs = try expression.allocateValues(allocator, names.len);
+        for (names, values, named, pairs) |name, value, *entry, *pair| {
+            if (name != .string) return error.InvalidJinjaArguments;
+            entry.* = .{ .key = name.string, .value = value };
+            pair.* = .{ .tuple = try allocator.dupe(expression.Value, &.{ name, value }) };
+        }
+        const entries = try expression.allocateEntries(allocator, names.len + 5);
+        entries[0] = .{ .key = "__dxt_iterable", .value = .{ .list = values } };
+        entries[1] = .{ .key = "__dxt_string_index", .value = .{ .object = named } };
+        entries[2] = .{ .key = "keys", .value = try self.callback(.{ .tuple = names }) };
+        entries[3] = .{ .key = "values", .value = try self.callback(.{ .tuple = values }) };
+        entries[4] = .{ .key = "items", .value = try self.callback(.{ .tuple = pairs }) };
+        @memcpy(entries[5..], named);
+        return .{ .object = entries };
     }
 
     fn callback(self: *OperationHost, value: expression.Value) !expression.Value {
@@ -536,9 +548,9 @@ pub const OperationHost = struct {
         const allocator = self.values.allocator();
         const empty: expression.Value = .{ .list = try expression.allocateValues(allocator, 0) };
         return .{ .object = try allocator.dupe(expression.Entry, &.{
-            .{ .key = "__dxt_iterable", .value = empty },                                                                                          .{ .key = "__dxt_data", .value = empty },
-            .{ .key = "rows", .value = empty },                                                                                                    .{ .key = "column_names", .value = empty },
-            .{ .key = "columns", .value = .{ .object = try allocator.dupe(expression.Entry, &.{.{ .key = "__dxt_iterable", .value = empty }}) } },
+            .{ .key = "__dxt_iterable", .value = empty },                        .{ .key = "__dxt_data", .value = empty },
+            .{ .key = "rows", .value = empty },                                  .{ .key = "column_names", .value = empty },
+            .{ .key = "columns", .value = try self.mappedSequence(&.{}, &.{}) },
         }) };
     }
 };
@@ -887,4 +899,26 @@ test "operation host preserves typed debug info and authored print events" {
     try std.testing.expect(events.items[1].is_print);
     try std.testing.expectEqualStrings("info", events.items[2].level);
     try std.testing.expectEqual(@as(usize, 0), output.written().len);
+}
+
+test "query named sequences expose tuple methods without internal metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    var context = try OperationHost.initLazy(.{ .allocator = allocator, .io = std.testing.io }, &graph, ":memory:", &output.writer);
+    defer context.deinit();
+    const value = try context.mappedSequence(&.{ .{ .string = "items" }, .{ .string = "id" } }, &.{ .{ .integer = "2" }, .{ .integer = "1" } });
+    const host = context.host();
+    const items = try host.call(host.context, expression.callableName(value.attribute("items")).?, &.{}, allocator);
+    try std.testing.expect(items == .tuple);
+    try std.testing.expectEqual(@as(usize, 2), items.tuple.len);
+    try std.testing.expectEqualStrings("items", items.tuple[0].tuple[0].string);
+    try std.testing.expectEqualStrings("2", (try expression.indexValue(allocator, value, .{ .string = "items" })).integer);
+    try std.testing.expectEqualStrings("1", (try expression.indexValue(allocator, value, .{ .integer = "-1" })).integer);
+    const keys = try host.call(host.context, expression.callableName(value.attribute("keys")).?, &.{}, allocator);
+    try std.testing.expectEqualStrings("('items', 'id')", try keys.text(allocator));
 }
