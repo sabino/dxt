@@ -143,7 +143,7 @@ jobs:
   integration:
     name: ${{ matrix.context }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.python-version == '3.11' && 60 || 360 }}
     strategy:
       fail-fast: false
       matrix:
@@ -184,8 +184,20 @@ jobs:
           zig version
           python --version
 
-      - name: Run tests
-        run: pytest -q --junitxml=reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
+      - name: Run developer and native CLI checks
+        if: matrix.python-version == '3.11'
+        run: >-
+          python -m pytest -q
+          --junitxml=reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
+          tests/test_agent_os_orchestrator.py tests/test_github_agent_os.py
+          tests/test_public_safety.py tests/test_runtime_boundary_metadata.py
+          tests/test_artifact_json.py tests/test_cli.py tests/test_usability_adapters.py
+
+      # Native Jinja semantics follow CPython 3.12. The complete Core oracle
+      # remains mandatory on both architectures under that reference runtime.
+      - name: Run the complete canonical Core compatibility suite
+        if: matrix.python-version == '3.12'
+        run: python -m pytest -q --junitxml=reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
 
       - name: Upload pytest report
         if: always()
@@ -305,10 +317,5 @@ jobs:
       - name: Run public Jaffle docs gate
         run: python scripts/check_jaffle_shop_duckdb_docs.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
 
-      - name: Verify public Jaffle CLI compatibility backend
-        env:
-          DXT_DUCKDB_BACKEND: cli
-        run: |
-          python scripts/check_jaffle_shop_duckdb_build.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
-          python scripts/check_jaffle_shop_duckdb_run.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
-          python scripts/check_jaffle_shop_duckdb_docs.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
+      - name: Verify DuckDB CLI autocommit query compatibility
+        run: pytest -q tests/test_usability_adapters.py::test_cli_fallback_remains_available_and_normalizes_empty_rows

@@ -33,6 +33,35 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 
 ### Full Usability Implementation Campaign
 
+The current CI repair checkpoint has all 263 historical CLI tests passing with
+zero skips after Core-grounded expectation migrations and the profileless audit
+relation fix. The published candidate passes the native/safety job and all six
+public Jaffle gates. Its obsolete full-command DuckDB CLI fallback step is being
+replaced by the actual retained autocommit query contract; held-session commands
+require the native library. Vendored upstream whitespace remains byte-preserved
+through narrowly scoped Git attributes. Public dbt-utils now executes every
+command under both engines on PostgreSQL; the strict artifact comparison exposed
+missing test columns and runtime model macro ordering, whose certified native
+fixes are integrated for a fresh unchanged-project rerun on both adapters.
+
+Canonical full Core compatibility uses CPython 3.12 on Linux x86_64 and ARM.
+The Python 3.11 job covers developer/native CLI checks rather than asserting a
+different Python runtime's expression semantics. The expanded full oracle suite
+needs a longer bounded CI timeout. No test skips count as parity evidence.
+
+Current shared-file ownership is sequenced by reviewed cherry-picks: the root
+owns mapping-proxy recognition and tuple JSON companions; the filter worker
+owns numeric identity and consuming comparisons; the expression worker owns
+datetime providers and class protocols; the compiler worker owns literal pools,
+model provenance, macro-error dependencies and deprecation effects; the test
+worker owns context nulls and compiled-path provenance; the oracle worker owns
+temporal format specifications and final public docs. A separate adapter worker
+owns QueryResult allocator lifetime. Certified focused gates include 110
+datetime, 181 pytz, 96 strptime, 204 itertools, 44 temporal-format and 18
+macro-error comparisons. New class, identity, null/provenance and allocator
+closures and the complete final candidate gates remain pending; this checkpoint
+does not establish full replacement or merge readiness.
+
 PR #219 is merged. The user has authorized completing the replacement roadmap,
 including its proposed features, from fresh main on `feat/full-usability`.
 The previous snapshot slice's stop boundary is historical and does not constrain
