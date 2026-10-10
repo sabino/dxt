@@ -90,6 +90,12 @@ POSITIVE = [
     pytest.param('{% for value in [d.date(2024,1,1),d.datetime(2024,1,1),d.datetime(2024,1,1,tzinfo=modules.pytz.utc)] %}{% set t=value.timetuple() %}{{ t.n_fields }}|{{ t.n_sequence_fields }}|{{ t.n_unnamed_fields }}|{{ t.tm_zone }}|{{ t.tm_gmtoff }};{% endfor %}', id='struct_time_all_public_constants'),
     pytest.param('{% for zone in [modules.pytz.utc,modules.pytz.FixedOffset(60),d.datetime.fromisoformat("2024-01-01T00:00:00+01:00").tzinfo] %}{% set value=d.datetime(2024,1,1,tzinfo=zone) %}{{ value.astimezone(zone) is sameas(value) }}|{% endfor %}', id='astimezone_same_zone_variants'),
     pytest.param('{% for stamp in [-86400.0000001,-86399.9999999,-0.0000001,0.0000001,86399.9999999,86400.0000001] %}{{ d.date.fromtimestamp(stamp) }}|{% endfor %}', id='date_timestamp_fractional_boundaries'),
+    pytest.param("{% set key=d.date.fromordinal %}{% set mapping={key:'first',d.date.fromordinal:'replacement'} %}{{ mapping|length }}|{{ mapping[key] }}|{{ mapping[d.date(2024,1,1).fromordinal] }}|{{ d.datetime.fromordinal in mapping }}|{{ key == d.date.fromordinal }}", id='classmethod_key_repeat_lookup'),
+    pytest.param("{% for value,other,name in [(d.date(2024,1,1),d.date(2024,1,1),'isoformat'),(d.datetime(2024,1,1),d.datetime(2024,1,1),'isoformat'),(d.time(1),d.time(1),'isoformat'),(d.timedelta(seconds=1),d.timedelta(seconds=1),'total_seconds'),(d.tzinfo(),d.tzinfo(),'utcoffset')] %}{% set key=value[name] %}{% set mapping={key:'first',value[name]:'replacement',other[name]:'other'} %}{{ mapping|length }}|{{ mapping[key] }}|{{ mapping[value[name]] }}|{{ key == value[name] }}|{{ key == other[name] }}|{{ other[name] in {key:1} }};{% endfor %}", id='instance_method_key_repeat_and_distinct_receiver'),
+    pytest.param("{% set value=d.datetime(2024,1,1) %}{% set alias=value.isoformat %}{{ alias is sameas(alias) }}|{{ value.isoformat is sameas(value.isoformat) }}|{{ alias == value.isoformat }}|{{ alias() }}|{{ alias.__dxt_native_bound_method is undefined }}", id='bound_method_alias_and_private_marker'),
+    pytest.param("{% set zone=d.tzinfo() %}{% set alias=zone.utcoffset %}{{ zone.utcoffset is sameas(zone.utcoffset) }}|{{ alias == zone.utcoffset }}|{{ alias is sameas(alias) }}|{{ modules.re.fullmatch('<built-in method utcoffset of datetime.tzinfo object at 0x[0-9a-f]+>',alias|string) is not none }}", id='tzinfo_bound_method_wrapper'),
+    pytest.param("{% for value in [d.date(2024,1,1),d.datetime(2024,1,1),d.time(1),d.timedelta(seconds=1)] %}{% set name='total_seconds' if value is sameas(value) and value.days is defined else 'isoformat' %}{{ value[name] in {value[name]:1} }}|{{ [value[name],value[name]]|unique|list|length }};{% endfor %}", id='bound_method_unique_and_membership'),
+
 ]
 
 
@@ -112,6 +118,15 @@ NEGATIVE = [
     pytest.param('{{ d.date.isoformat(d.time()) }}', id='date_descriptor_time_receiver'),
     pytest.param('{{ d.time.isoformat(d.date(2024,1,1)) }}', id='time_descriptor_date_receiver'),
     pytest.param('{{ d.timedelta.total_seconds(d.datetime(2024,1,1)) }}', id='duration_descriptor_datetime_receiver'),
+    pytest.param('{{ tojson({d.date.fromordinal:1}) }}', id='bound_method_key_json_helper'),
+    pytest.param('{{ {d.date.fromordinal:1}|tojson }}', id='bound_method_key_json_filter'),
+    pytest.param('{{ tojson(d.date.fromordinal) }}', id='bound_method_json_helper'),
+    pytest.param('{{ d.date.fromordinal|tojson }}', id='bound_method_json_filter'),
+    pytest.param('{{ (d.datetime(2024,1,1,tzinfo=d.tzinfo()),)==(d.datetime(2024,1,1),) }}', id='nested_abstract_tuple_equality'),
+    pytest.param('{{ [d.datetime(2024,1,1,tzinfo=d.tzinfo())]!=[d.datetime(2024,1,1)] }}', id='nested_abstract_list_inequality'),
+    pytest.param("{{ {'v':d.datetime(2024,1,1,tzinfo=d.tzinfo())}=={'v':d.datetime(2024,1,1)} }}", id='nested_abstract_map_equality'),
+    pytest.param('{{ (d.datetime(2024,1,1,tzinfo=d.tzinfo()),)<(d.datetime(2024,1,1),) }}', id='nested_abstract_tuple_order'),
+
 ]
 
 
