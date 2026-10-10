@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) void {
         .strip = optimize != .Debug,
         .link_libc = true,
     });
+    const runtime_options = b.addOptions();
+    runtime_options.addOption([]const u8, "parse_code_fingerprint", runtimeSourceFingerprint(b));
+    mod.addOptions("runtime_options", runtime_options);
     mod.addAnonymousImport("docs_ui", .{ .root_source_file = b.path("vendor/dbt-docs/embed.zig") });
     mod.addAnonymousImport("dbt_includes", .{ .root_source_file = b.path("vendor/dbt-includes/embed.zig") });
     mod.addAnonymousImport("unicode_names", .{ .root_source_file = b.path("vendor/unicode/names.zig") });
@@ -109,4 +112,46 @@ pub fn build(b: *std.Build) void {
     });
     const oracle_install = b.addInstallArtifact(yaml_oracle, .{});
     b.step("yaml-oracle", "Build the developer YAML conformance oracle").dependOn(&oracle_install.step);
+}
+
+/// A cache written by another build must never retain graph values produced
+/// by changed native helpers or vendored data. Hash relative names and bytes
+/// at build time, so new modules participate automatically without embedding
+/// the full implementation in the installed binary.
+fn runtimeSourceFingerprint(b: *std.Build) []const u8 {
+    var files: std.ArrayList([]const u8) = .empty;
+    files.append(b.allocator, "build.zig") catch @panic("cannot allocate native source fingerprint");
+    files.append(b.allocator, "build.zig.zon") catch @panic("cannot allocate native package fingerprint");
+    for ([_][]const u8{ "src", "vendor" }) |root| {
+        var directory = std.Io.Dir.cwd().openDir(b.graph.io, b.pathFromRoot(root), .{ .iterate = true }) catch @panic("cannot open native source directory");
+        defer directory.close(b.graph.io);
+        var walker = directory.walk(b.allocator) catch @panic("cannot allocate native source walker");
+        defer walker.deinit();
+        while (walker.next(b.graph.io) catch @panic("cannot walk native sources")) |entry| {
+            if (entry.kind != .file) continue;
+            files.append(b.allocator, b.pathJoin(&.{ root, entry.path })) catch @panic("cannot allocate native source path");
+        }
+    }
+    std.mem.sort([]const u8, files.items, {}, struct {
+        fn less(_: void, left: []const u8, right: []const u8) bool {
+            return std.mem.lessThan(u8, left, right);
+        }
+    }.less);
+    var digest: std.crypto.hash.sha2.Sha256 = .init(.{});
+    fingerprintPart(&digest, @import("builtin").zig_version_string);
+    for (files.items) |path| {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(b.graph.io, b.pathFromRoot(path), b.allocator, .limited(256 * 1024 * 1024)) catch @panic("cannot read native source input");
+        fingerprintPart(&digest, path);
+        fingerprintPart(&digest, bytes);
+        b.allocator.free(bytes);
+    }
+    const encoded = std.fmt.bytesToHex(digest.finalResult(), .lower);
+    return b.allocator.dupe(u8, &encoded) catch @panic("cannot allocate native source digest");
+}
+
+fn fingerprintPart(digest: *std.crypto.hash.sha2.Sha256, bytes: []const u8) void {
+    var size: [8]u8 = undefined;
+    std.mem.writeInt(u64, &size, bytes.len, .little);
+    digest.update(&size);
+    digest.update(bytes);
 }

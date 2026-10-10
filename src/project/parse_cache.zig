@@ -48,19 +48,11 @@ pub fn prepare(runtime: types.Runtime, options: types.Options, graph: *const typ
     }
     @import("util.zig").sortStrings(files.items);
     var digest: std.crypto.hash.sha2.Sha256 = .init(.{});
-    // Compiler/schema changes invalidate development caches as well as releases.
-    inline for (.{ schema, @embedFile("types.zig"), @embedFile("loader.zig"), @embedFile("compiler.zig"), @embedFile("expression.zig"), @embedFile("parse.zig"), @embedFile("jinja.zig"), @embedFile("config.zig"), @embedFile("properties.zig"), @embedFile("generic_test_config.zig"), @embedFile("doc_context.zig"), @embedFile("doc_blocks.zig"), @embedFile("macro_properties.zig"), @embedFile("canonical_manifest_config.zig"), @embedFile("resource_config.zig"), @embedFile("group_access.zig"), @embedFile("snapshot_yaml.zig"), @embedFile("model_versions.zig"), @embedFile("unit_yaml.zig"), @embedFile("unit_metadata.zig"), @embedFile("semantic.zig"), @embedFile("bundled_macros.zig"), @embedFile("../project.zig"), @embedFile("parse_cache.zig"), @embedFile("python_model.zig"), @embedFile("parse_cache_codec.zig"), @embedFile("yaml.zig"), @embedFile("profile.zig"), @embedFile("config_render.zig"), @embedFile("config_value.zig"), @embedFile("project_config.zig"), @embedFile("project_flags.zig"), @embedFile("source_properties.zig"), @embedFile("snapshot.zig"), @embedFile("unit_config.zig"), @embedFile("unit_versions.zig") }) |source| hashPart(&digest, source);
-    inline for (.{ @embedFile("base_context.zig"), @embedFile("set_context.zig") }) |source| hashPart(&digest, source);
-    hashPart(&digest, @embedFile("json_context_load.zig"));
-    hashPart(&digest, @embedFile("filter_arguments.zig"));
-    inline for (.{ @embedFile("yaml_context.zig"), @embedFile("yaml_dump.zig"), @embedFile("yaml_values.zig"), @embedFile("yaml_bytes_codec.zig"), @embedFile("timestamp_context.zig") }) |source| hashPart(&digest, source);
-    for (@import("dbt_includes").files) |file| {
-        hashPart(&digest, file.path);
-        hashPart(&digest, file.text);
-    }
+    // The build fingerprint covers every native source and vendored input,
+    // including newly added helper modules and timezone/Unicode tables.
+    hashPart(&digest, schema);
+    hashPart(&digest, @import("runtime_options").parse_code_fingerprint);
     hashPart(&digest, options.project_dir);
-    hashPart(&digest, @embedFile("naming.zig"));
-    hashPart(&digest, @embedFile("context_values.zig"));
     hashPart(&digest, try std.Io.Dir.cwd().realPathFileAlloc(runtime.io, options.project_dir, a));
     hashPart(&digest, try std.json.Stringify.valueAlloc(a, project.rendered_project, .{}));
     hashPart(&digest, try std.json.Stringify.valueAlloc(a, graph.target_context, .{}));
