@@ -919,17 +919,17 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
         while (i < span.len and isIdentChar(span[i])) i += 1;
         const ident = span[start..i];
         const call = (readJinjaCall(span, ident, i) catch break) orelse continue;
-        if (call.package_name == null and std.mem.eql(u8, call.name, "return")) {
-            try scanMacroSpanForKnownMacroCalls(allocator, span[call.open + 1 .. call.close], graph, current_macro_id, macro_depends_on);
-            i = call.close + 1;
-            continue;
-        }
-        const macro_id = if (call.package_name) |package_name| blk: {
+        const preceding = std.mem.trimEnd(u8, span[0..start], " \t\r\n");
+        // Jinja filters are Filter nodes, not macro Call nodes. Their argument
+        // expressions can still contain macro calls.
+        const is_filter = preceding.len != 0 and preceding[preceding.len - 1] == '|';
+        const macro_id = if (is_filter or (call.package_name == null and std.mem.eql(u8, call.name, "return")))
+            null
+        else if (call.package_name) |package_name| blk: {
             if (std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "dispatch")) {
                 const args = span[call.open + 1 .. call.close];
                 const dispatch_args = parseAdapterDispatchArgs(allocator, args) catch {
-                    i = call.close + 1;
-                    continue;
+                    break :blk null;
                 };
                 defer deinitAdapterDispatchArgs(allocator, dispatch_args);
                 const dispatch_prefixes = dispatchPrefixesForAdapter(graph.adapter_type);
@@ -941,14 +941,35 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
             break :blk resolved;
         } else findMacroIdForUnqualifiedMacroDependency(graph, current_package, call.name);
         if (macro_id) |resolved_macro_id| {
-            if (std.mem.eql(u8, resolved_macro_id, current_macro_id)) {
-                i = call.close + 1;
-                continue;
-            }
-            try appendUnique(allocator, macro_depends_on, resolved_macro_id);
+            if (!std.mem.eql(u8, resolved_macro_id, current_macro_id)) try appendUnique(allocator, macro_depends_on, resolved_macro_id);
         }
+        // Core traverses Call nodes in preorder: the outer callee precedes
+        // calls nested in positional and keyword arguments.
+        try scanMacroSpanForKnownMacroCalls(allocator, span[call.open + 1 .. call.close], graph, current_macro_id, macro_depends_on);
         i = call.close + 1;
     }
+}
+
+test "macro dependency scanner visits nested arguments but excludes filters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "root" };
+    defer graph.deinit();
+    for ([_][]const u8{ "probe", "outer", "inner", "length", "default" }) |name| try graph.macros.append(a, .{
+        .package_name = "root",
+        .name = name,
+        .unique_id = try std.fmt.allocPrint(a, "macro.root.{s}", .{name}),
+        .path = "probe.sql",
+        .original_file_path = "macros/probe.sql",
+        .macro_sql = "",
+    });
+    var dependencies: std.ArrayList([]const u8) = .empty;
+    defer dependencies.deinit(a);
+    try scanMacroSqlForKnownMacroCalls(a, "{% macro probe() %}{{ outer(inner(), extra=inner()) }}{{ [] | length() }}{{ '' | default(inner()) }}{% endmacro %}", &graph, "macro.root.probe", &dependencies);
+    try std.testing.expectEqual(@as(usize, 2), dependencies.items.len);
+    try std.testing.expectEqualStrings("macro.root.outer", dependencies.items[0]);
+    try std.testing.expectEqualStrings("macro.root.inner", dependencies.items[1]);
 }
 
 pub fn dispatchPrefixesForAdapter(adapter_type: []const u8) DispatchPrefixes {
