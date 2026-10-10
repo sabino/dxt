@@ -48,13 +48,15 @@ pub fn callWithHost(a: std.mem.Allocator, name: []const u8, value: Value, args: 
         const iterator = prepared orelse try sequence.iter(a, value);
         var output: std.ArrayList(u8) = .empty;
         var count: usize = 0;
+        var first_text: []const u8 = "";
         while (try sequence.next(a, iterator, host)) |item| {
             const text = try expression.textWithHost(a, try attributes.get(a, item, path, .none, host), host);
+            if (count == 0) first_text = text;
             if (count != 0) try output.appendSlice(a, separator);
             try output.appendSlice(a, text);
             count += 1;
         }
-        return Value{ .string = try output.toOwnedSlice(a) };
+        return Value{ .string = if (count == 1) first_text else try output.toOwnedSlice(a) };
     }
     return null;
 }

@@ -55,12 +55,14 @@ pub const Value = union(enum) {
     }
 
     pub fn text(self: Value, allocator: std.mem.Allocator) anyerror![]const u8 {
+        if (floatProtocol(self)) |number| return numbers.floatText(allocator, number);
+        if (complexProtocol(self)) |number| return complex_numbers.text(allocator, number);
         return switch (self) {
             .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined => "",
             .callable => error.JinjaTypeError,
-            .none => "None",
+            .none => try allocator.dupe(u8, "None"),
             .boolean => |v| if (v) "True" else "False",
-            .integer => |v| v,
+            .integer => |v| try allocator.dupe(u8, v),
             .number => |v| try numbers.floatText(allocator, v),
             .complex => |v| try complex_numbers.text(allocator, v),
             .string => |v| v,
@@ -267,43 +269,70 @@ pub fn integerValue(allocator: std.mem.Allocator, number: anytype) !Value {
     return .{ .integer = try std.fmt.allocPrint(allocator, "{d}", .{number}) };
 }
 
-// Python dictionary lookup preserves a NaN object's identity even though NaN
-// compares unequal to itself. Retain that identity across arena-owned clones.
+// Runtime numeric objects retain identity independently of value equality,
+// including across arena-owned clones and dictionary NaN lookups.
 var next_float_identity: std.atomic.Value(u64) = .init(0);
 pub fn floatValue(allocator: std.mem.Allocator, number: f64) !Value {
-    if (!std.math.isNan(number)) return .{ .number = number };
-    const entries = try allocateEntries(allocator, 4);
+    const entries = try allocateEntries(allocator, 5);
     entries[0] = .{ .key = "__dxt_float", .value = .{ .number = number } };
     entries[1] = .{ .key = "__dxt_float_identity", .value = .{ .string = try std.fmt.allocPrint(allocator, "{d}", .{next_float_identity.fetchAdd(1, .monotonic)}) } };
     entries[2] = .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } };
-    entries[3] = .{ .key = "__dxt_rendered", .value = .{ .string = "nan" } };
+    entries[3] = .{ .key = "__dxt_rendered", .value = .{ .string = try numbers.floatText(allocator, number) } };
+    entries[4] = .{ .key = "__dxt_native_numeric", .value = .{ .callable = "__dxt_native_numeric" } };
     return .{ .object = entries };
 }
 
 pub fn floatProtocol(value: Value) ?f64 {
     if (value == .number) return value.number;
-    if (value == .object) for (value.object) |entry| {
+    if (nativeNumeric(value)) for (value.object) |entry| {
         if (entry.typed_key == null and std.mem.eql(u8, entry.key, "__dxt_float") and entry.value == .number) return entry.value.number;
     };
     return null;
 }
 
 pub fn complexValue(allocator: std.mem.Allocator, number: complex_numbers.Complex) !Value {
-    if (!std.math.isNan(number.real) and !std.math.isNan(number.imaginary)) return .{ .complex = number };
-    const entries = try allocateEntries(allocator, 4);
+    const entries = try allocateEntries(allocator, 5);
     entries[0] = .{ .key = "__dxt_complex", .value = .{ .complex = number } };
     entries[1] = .{ .key = "__dxt_complex_identity", .value = .{ .string = try std.fmt.allocPrint(allocator, "{d}", .{next_float_identity.fetchAdd(1, .monotonic)}) } };
     entries[2] = .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } };
     entries[3] = .{ .key = "__dxt_rendered", .value = .{ .string = try complex_numbers.text(allocator, number) } };
+    entries[4] = .{ .key = "__dxt_native_numeric", .value = .{ .callable = "__dxt_native_numeric" } };
     return .{ .object = entries };
 }
 
 pub fn complexProtocol(value: Value) ?complex_numbers.Complex {
     if (value == .complex) return value.complex;
-    if (value == .object) for (value.object) |entry| {
+    if (nativeNumeric(value)) for (value.object) |entry| {
         if (entry.typed_key == null and std.mem.eql(u8, entry.key, "__dxt_complex") and entry.value == .complex) return entry.value.complex;
     };
     return null;
+}
+fn nativeNumeric(value: Value) bool {
+    if (value != .object) return false;
+    for (value.object) |entry| if (std.mem.eql(u8, entry.key, "__dxt_native_numeric")) return entry.value == .callable and std.mem.eql(u8, entry.value.callable, "__dxt_native_numeric");
+    return false;
+}
+pub fn promoteNumericValue(a: std.mem.Allocator, value: Value) !Value {
+    return switch (value) {
+        .number => |number| floatValue(a, number),
+        .complex => |number| complexValue(a, number),
+        else => value,
+    };
+}
+fn numericSame(left: Value, right: Value) ?bool {
+    inline for (.{ "__dxt_float_identity", "__dxt_complex_identity" }) |marker| {
+        const identity = if (nativeNumeric(left)) left.attribute(marker) else Value.undefined;
+        const other = if (nativeNumeric(right)) right.attribute(marker) else Value.undefined;
+        if (identity == .string or other == .string) return identity == .string and other == .string and std.mem.eql(u8, identity.string, other.string);
+    }
+    return null;
+}
+fn defaultFloat(a: std.mem.Allocator) !Value {
+    const value = try floatValue(a, 0);
+    for (@constCast(value.object)) |*entry| if (std.mem.eql(u8, entry.key, "__dxt_float_identity")) {
+        entry.value = .{ .string = "jinja.float.default" };
+    };
+    return value;
 }
 
 test "dictionary literals preserve first equal key and tuple lookup" {
@@ -328,6 +357,41 @@ test "NaN scalar equality and container identity follow separate Python rules" {
     try std.testing.expect(equalValues(.{ .tuple = &.{nan} }, .{ .tuple = &.{nan} }));
     try std.testing.expect(!equalValues(.{ .list = &.{nan} }, .{ .list = &.{other} }));
     try std.testing.expectEqualStrings("nan", try nan.text(a));
+}
+
+test "runtime numeric identities survive aliases without merging equal values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const float = try floatValue(a, 1);
+    try std.testing.expect(try testValue("sameas", float, &.{.{ .value = float }}));
+    try std.testing.expect(!try testValue("sameas", float, &.{.{ .value = try floatValue(a, 1) }}));
+    try std.testing.expect(equalValues(float, try floatValue(a, 1)));
+    const complex = try complexValue(a, .{ .real = 1, .imaginary = 2 });
+    try std.testing.expect(try testValue("sameas", complex, &.{.{ .value = complex }}));
+    try std.testing.expect(!try testValue("sameas", complex, &.{.{ .value = try complexValue(a, .{ .real = 1, .imaginary = 2 }) }}));
+    const fake = try evaluate(a, "{'__dxt_native_numeric':'__dxt_native_numeric','__dxt_float':1.0}", null);
+    try std.testing.expect(floatProtocol(fake) == null);
+    try std.testing.expect((try checkedAttribute(float, "__dxt_float")) == .undefined);
+    const one = try integerValue(a, 1000);
+    try std.testing.expect(try testValue("sameas", one, &.{.{ .value = one }}));
+    try std.testing.expect(!try testValue("sameas", one, &.{.{ .value = try integerValue(a, 1000) }}));
+    try std.testing.expect(try testValue("sameas", try integerValue(a, 256), &.{.{ .value = try integerValue(a, 256) }}));
+    const fallback = try filter(a, "float", .{ .string = "bad" }, &.{});
+    try std.testing.expect(try testValue("sameas", fallback, &.{.{ .value = try filter(a, "float", .{ .string = "bad" }, &.{}) }}));
+}
+
+test "immutable string and tuple operations retain only genuine aliases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const string = Value{ .string = try a.dupe(u8, "abc") };
+    for ([_]Value{ try apply(a, "+", string, .{ .string = "" }), try apply(a, "*", string, .{ .integer = "1" }), try sliceValue(a, string, null, null, null), try filter(a, "trim", string, &.{}), try filter(a, "join", .{ .list = &.{string} }, &.{}) }) |alias|
+        try std.testing.expect(try testValue("sameas", string, &.{.{ .value = alias }}));
+    try std.testing.expect(!try testValue("sameas", string, &.{.{ .value = try filter(a, "lower", string, &.{}) }}));
+    const tuple = Value{ .tuple = try a.dupe(Value, &.{.{ .integer = "1000" }}) };
+    for ([_]Value{ try apply(a, "+", tuple, .{ .tuple = &.{} }), try apply(a, "*", tuple, .{ .integer = "1" }), try sliceValue(a, tuple, null, null, null) }) |alias|
+        try std.testing.expect(try testValue("sameas", tuple, &.{.{ .value = alias }}));
 }
 
 test "temporal membership validates nested values after exact aliases" {
@@ -361,6 +425,7 @@ pub fn checkedAttribute(value: Value, name: []const u8) !Value {
     if (@import("datetime_protocol.zig").kind(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (sequences.kind(value) != null) return .undefined;
     if (tupleProtocol(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
+    if (nativeNumeric(value) and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (value == .capture_undefined) {
         if (std.mem.eql(u8, name, "name") or std.mem.eql(u8, name, "hint") or std.mem.eql(u8, name, "unsafe_callable") or std.mem.eql(u8, name, "alters_data")) return value.attribute(name);
         const captured = value.capture_undefined;
@@ -391,7 +456,7 @@ pub fn attributeWithHost(a: std.mem.Allocator, value: Value, name: []const u8, h
         const current = host orelse return error.UnsupportedJinjaCall;
         return current.call(current.context, getter.callable, &.{.{ .value = .{ .string = name } }}, a);
     }
-    const direct = try checkedAttribute(value, name);
+    const direct = try promoteNumericValue(a, try checkedAttribute(value, name));
     if (direct != .undefined) return try @import("datetime_bound_method.zig").attribute(a, value, name, direct);
     const datetime = @import("modules_datetime.zig");
     if (datetime.instanceClass(value)) |kind| if (datetime.inheritedAttributeName(kind, name)) {
@@ -671,7 +736,7 @@ const Parser = struct {
                     if (isUndefined(value)) return error.UndefinedJinjaValue;
                     const function = callableName(value) orelse return error.JinjaTypeError;
                     const host = self.host orelse return error.UnsupportedJinjaCall;
-                    value = try host.call(host.context, function, args, self.allocator);
+                    value = try promoteNumericValue(self.allocator, try host.call(host.context, function, args, self.allocator));
                 }
             } else if (self.take("[")) {
                 const start: ?Value = if (self.take(":")) null else try self.binary(0);
@@ -700,7 +765,7 @@ const Parser = struct {
                 } else if (self.active) {
                     value = try attributeWithHost(self.allocator, value, attribute, self.host);
                     if (value == .undefined) value = try self.missing(attribute);
-                    if (value == .number and std.math.isNan(value.number)) value = try floatValue(self.allocator, value.number);
+                    value = try promoteNumericValue(self.allocator, value);
                 }
             } else if (with_filters and self.take("is")) {
                 const negate = self.take("not");
@@ -750,7 +815,7 @@ const Parser = struct {
             while (self.index < self.input.len) {
                 const ch = self.input[self.index];
                 self.index += 1;
-                if (ch == c) return .{ .string = try out.toOwnedSlice(self.allocator) };
+                if (ch == c) return .{ .string = @import("expression_identity.zig").cachedString(try out.toOwnedSlice(self.allocator)) };
                 if (ch == '\\') {
                     if (self.index >= self.input.len) return error.InvalidJinjaExpression;
                     const escaped = self.input[self.index];
@@ -876,7 +941,7 @@ const Parser = struct {
             }
             if (callee == .capture_undefined) return try callUndefined(callee);
             if (callee == .ordinary_undefined) return error.UndefinedJinjaValue;
-            return try host.call(host.context, path, args, self.allocator);
+            return promoteNumericValue(self.allocator, try host.call(host.context, path, args, self.allocator));
         }
         if (!self.active) return .none;
         const resolved = if (self.host) |host| try host.resolve(host.context, path, self.allocator) else .undefined;
@@ -892,7 +957,7 @@ const Parser = struct {
             return receiver;
         }
         if (resolved == .undefined) return try self.missing(path);
-        return if (resolved == .number and std.math.isNan(resolved.number)) try floatValue(self.allocator, resolved.number) else resolved;
+        return promoteNumericValue(self.allocator, resolved);
     }
 
     fn method(self: *Parser, receiver: Value, method_name: []const u8, args: []const Argument) !Value {
@@ -906,7 +971,7 @@ const Parser = struct {
         const bound = try attributeWithHost(self.allocator, receiver, method_name, self.host);
         if (callableName(bound)) |function| {
             const host = self.host orelse return error.UnsupportedJinjaCall;
-            return try host.call(host.context, function, args, self.allocator);
+            return promoteNumericValue(self.allocator, try host.call(host.context, function, args, self.allocator));
         }
         if (try pureMethod(self.allocator, receiver, method_name, args, self.host)) |value| return value;
         if (mappingSource(receiver) != null or sequences.kind(receiver) != null) return if (self.capturing()) try callUndefined(try captureUndefined(self.allocator, method_name)) else error.UndefinedJinjaValue;
@@ -914,7 +979,7 @@ const Parser = struct {
         const arguments_with_receiver = try self.allocator.alloc(Argument, args.len + 1);
         arguments_with_receiver[0] = .{ .value = receiver };
         @memcpy(arguments_with_receiver[1..], args);
-        return try host.call(host.context, try std.fmt.allocPrint(self.allocator, "__dxt_value.{s}", .{method_name}), arguments_with_receiver, self.allocator);
+        return promoteNumericValue(self.allocator, try host.call(host.context, try std.fmt.allocPrint(self.allocator, "__dxt_value.{s}", .{method_name}), arguments_with_receiver, self.allocator));
     }
 
     fn capturing(self: *const Parser) bool {
@@ -1001,7 +1066,7 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
     if (receiver.attribute("__dxt_noniterable").truthy()) return null;
     const positional_only = if (receiver == .object) isMethod(name_, &.{ "get", "keys", "values", "items", "copy" }) else if (receiver == .list or receiver == .tuple) isMethod(name_, &.{ "copy", "count", "index" }) else if (receiver == .string) isMethod(name_, &.{ "lower", "upper", "casefold", "startswith", "endswith", "find", "rfind", "count", "index", "rindex", "strip", "lstrip", "rstrip", "join", "replace" }) else false;
     if (positional_only) for (args) |arg| if (arg.name != null) return error.InvalidJinjaArguments;
-    if (receiver == .object) {
+    if (receiver == .object and floatProtocol(receiver) == null and complexProtocol(receiver) == null) {
         if (std.mem.eql(u8, name_, "get")) {
             if (args.len < 1 or args.len > 2) return error.InvalidJinjaArguments;
             return if (try mappingEntry(receiver, args[0].value)) |entry| entry.value else if (args.len == 2) args[1].value else .none;
@@ -1119,11 +1184,12 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
                 if (index < start) byte_start += character.string.len;
                 if (index < stop) byte_stop += character.string.len;
             }
-            return .{ .string = text_[byte_start..byte_stop] };
+            return .{ .string = try @import("expression_identity.zig").substring(allocator, text_, text_[byte_start..byte_stop]) };
         }
         if (std.mem.eql(u8, name_, "join")) {
             if (args.len != 1) return error.InvalidJinjaArguments;
             const values = try iterableValuesWithHost(allocator, args[0].value, host);
+            if (values.len == 1 and values[0] == .string) return values[0];
             var output: std.ArrayList(u8) = .empty;
             for (values, 0..) |value, index| {
                 if (value != .string) return error.JinjaTypeError;
@@ -1154,22 +1220,22 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
             var position: usize = if (backwards) text_.len else 0;
             if (separator == .none) {
                 const fields = try unicode.splitWhitespace(allocator, text_, maximum, backwards);
-                for (fields) |field| try values.append(allocator, .{ .string = field });
+                for (fields) |field| try values.append(allocator, .{ .string = try @import("expression_identity.zig").substring(allocator, text_, field) });
                 return .{ .list = try ownedValues(allocator, &values) };
             } else {
                 while (maximum < 0 or count < maximum) {
                     if (backwards) {
                         const found = std.mem.lastIndexOf(u8, text_[0..position], separator.string) orelse break;
-                        try values.append(allocator, .{ .string = text_[found + separator.string.len .. position] });
+                        try values.append(allocator, .{ .string = try @import("expression_identity.zig").substring(allocator, text_, text_[found + separator.string.len .. position]) });
                         position = found;
                     } else {
                         const found = std.mem.indexOfPos(u8, text_, position, separator.string) orelse break;
-                        try values.append(allocator, .{ .string = text_[position..found] });
+                        try values.append(allocator, .{ .string = try @import("expression_identity.zig").substring(allocator, text_, text_[position..found]) });
                         position = found + separator.string.len;
                     }
                     count += 1;
                 }
-                try values.append(allocator, .{ .string = if (backwards) text_[0..position] else text_[position..] });
+                try values.append(allocator, .{ .string = try @import("expression_identity.zig").substring(allocator, text_, if (backwards) text_[0..position] else text_[position..]) });
             }
             if (backwards) std.mem.reverse(Value, values.items);
             return .{ .list = try ownedValues(allocator, &values) };
@@ -1181,6 +1247,7 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
             var position: usize = 0;
             var count: i64 = 0;
             const needle = args[0].value.string;
+            if (maximum == 0 or std.mem.eql(u8, needle, args[1].value.string) or (needle.len != 0 and std.mem.indexOf(u8, text_, needle) == null)) return receiver;
             if (needle.len == 0) {
                 if (maximum != 0) {
                     try output.appendSlice(allocator, args[1].value.string);
@@ -1203,7 +1270,7 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
                 }
                 try output.appendSlice(allocator, text_[position..]);
             }
-            return .{ .string = try output.toOwnedSlice(allocator) };
+            return .{ .string = @import("expression_identity.zig").cachedString(try output.toOwnedSlice(allocator)) };
         }
     }
     return null;
@@ -1354,9 +1421,7 @@ fn equalMemberCheckedDepth(left: Value, right: Value, depth: usize) anyerror!boo
         .tuple => |values| if (values.ptr == right.tuple.ptr and values.len == right.tuple.len) return true,
         else => {},
     };
-    const identity = left.attribute("__dxt_immutable_identity");
-    const other_identity = right.attribute("__dxt_immutable_identity");
-    if (identity == .callable and other_identity == .callable and std.mem.eql(u8, identity.callable, other_identity.callable)) return true;
+    if (@import("expression_identity.zig").immutableSame(left, right)) |same| if (same) return true;
     try temporal.validateComparison(left, right);
     if (tupleProtocol(left)) |members| {
         const other = tupleProtocol(right) orelse return false;
@@ -1557,6 +1622,10 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     }
     if (std.mem.eql(u8, op, "in")) return .{ .boolean = try contains(allocator, b, a) };
     if (std.mem.eql(u8, op, "not in")) return .{ .boolean = !(try contains(allocator, b, a)) };
+    if (std.mem.eql(u8, op, "+") and a == .string and b == .string) {
+        if (a.string.len == 0) return b;
+        if (b.string.len == 0) return a;
+    }
     if (std.mem.eql(u8, op, "~") or (std.mem.eql(u8, op, "+") and a == .string and b == .string)) return .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ try a.text(allocator), try b.text(allocator) }) };
     if (try sets.apply(allocator, op, a, b)) |value| return value;
     if (try yaml_values.apply(allocator, op, a, b)) |value| return value;
@@ -1569,7 +1638,11 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
         return try complexValue(allocator, if (std.mem.eql(u8, op, "+")) complex_numbers.add(x, y) else if (std.mem.eql(u8, op, "-")) complex_numbers.subtract(x, y) else if (std.mem.eql(u8, op, "*")) complex_numbers.multiply(x, y) else if (std.mem.eql(u8, op, "/")) try complex_numbers.divide(x, y) else if (std.mem.eql(u8, op, "**")) try complex_numbers.power(x, y) else return error.JinjaTypeError);
     }
     if (std.mem.eql(u8, op, "+") and a == .list and b == .list) return .{ .list = try std.mem.concat(allocator, Value, &.{ a.list, b.list }) };
-    if (std.mem.eql(u8, op, "+") and a == .tuple and b == .tuple) return .{ .tuple = try std.mem.concat(allocator, Value, &.{ a.tuple, b.tuple }) };
+    if (std.mem.eql(u8, op, "+") and a == .tuple and b == .tuple) {
+        if (a.tuple.len == 0) return b;
+        if (b.tuple.len == 0) return a;
+        return .{ .tuple = try std.mem.concat(allocator, Value, &.{ a.tuple, b.tuple }) };
+    }
     if (std.mem.eql(u8, op, "*")) {
         const container: Value = if (a == .string or a == .list or a == .tuple) a else b;
         const repetitions = if (a == .string or a == .list or a == .tuple) b else a;
@@ -1578,10 +1651,14 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
             const size = if (container == .string) container.string.len else sequence(container).?.len;
             if (size != 0 and count > 10000000 / size) return error.JinjaIterationLimitExceeded;
             if (container == .string) {
+                if (count == 1 or size == 0) return container;
+                if (count == 0) return .{ .string = "" };
                 const result = try allocator.alloc(u8, count * size);
                 for (0..count) |i| @memcpy(result[i * size ..][0..size], container.string);
                 return .{ .string = result };
             }
+            if (container == .tuple and count == 1) return container;
+            if (container == .tuple and count == 0) return .{ .tuple = &.{} };
             const result = try allocateValues(allocator, count * size);
             for (0..count) |i| @memcpy(result[i * size ..][0..size], sequence(container).?);
             return if (container == .tuple) .{ .tuple = result } else .{ .list = result };
@@ -1596,7 +1673,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     }
     if (integerText(a)) |x| {
         if (integerText(b)) |y| {
-            if (std.mem.eql(u8, op, "/")) return .{ .number = try numbers.divide(allocator, x, y) };
+            if (std.mem.eql(u8, op, "/")) return floatValue(allocator, try numbers.divide(allocator, x, y));
             if (!std.mem.eql(u8, op, "**") or y[0] != '-') return .{ .integer = try numbers.apply(allocator, op, x, y) };
         }
     }
@@ -1622,6 +1699,7 @@ pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value
     if (value == .capture_undefined) return value;
     if (isUndefined(value)) return error.UndefinedJinjaValue;
     if (sets.isSet(value)) return .undefined;
+    if (nativeNumeric(value)) return if (key == .string) promoteNumericValue(allocator, try checkedAttribute(value, key.string)) else .undefined;
     if (value == .object and tupleProtocol(value) != null and key == .string) return checkedAttribute(value, key.string);
     if (value == .object) {
         const names = value.attribute("__dxt_string_index");
@@ -1683,13 +1761,14 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
     if (stop != null and last < 0) last += length;
     first = std.math.clamp(first, if (stride > 0) @as(i64, 0) else -1, if (stride > 0) length else length - 1);
     last = std.math.clamp(last, if (stride > 0) @as(i64, 0) else -1, if (stride > 0) length else length - 1);
+    if (stride == 1 and first == 0 and last == length and (value == .string or value == .tuple)) return value;
     var result: std.ArrayList(Value) = .empty;
     var i = first;
     while (if (stride > 0) i < last else i > last) : (i += stride) try result.append(allocator, values[@intCast(i)]);
     if (value == .string) {
         var text_result: std.ArrayList(u8) = .empty;
         for (result.items) |v| try text_result.appendSlice(allocator, v.string);
-        return .{ .string = try text_result.toOwnedSlice(allocator) };
+        return .{ .string = @import("expression_identity.zig").cachedString(try text_result.toOwnedSlice(allocator)) };
     }
     const values_result = try ownedValues(allocator, &result);
     if (value.attribute("__dxt_binary") == .string) return yaml_values.fromMembers(allocator, values_result);
@@ -1716,7 +1795,7 @@ pub fn iterableValuesWithHost(allocator: std.mem.Allocator, value: Value, host: 
         while (index < value.string.len) {
             const size = std.unicode.utf8ByteSequenceLength(value.string[index]) catch return error.JinjaTypeError;
             if (index + size > value.string.len) return error.JinjaTypeError;
-            try result.append(allocator, .{ .string = value.string[index .. index + size] });
+            try result.append(allocator, .{ .string = @import("expression_identity.zig").cachedString(try allocator.dupe(u8, value.string[index .. index + size])) });
             index += size;
         }
         return try result.toOwnedSlice(allocator);
@@ -1783,7 +1862,10 @@ pub fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
         if (value == .capture_undefined and other == .capture_undefined) return value.capture_undefined.identity == other.capture_undefined.identity;
         if (value == .ordinary_undefined and other == .ordinary_undefined) return value.ordinary_undefined.identity == other.ordinary_undefined.identity;
         if (isUndefined(value) or isUndefined(other)) return false;
+        if (@import("expression_identity.zig").immutableSame(value, other)) |same| return same;
         if (immutableIdentity(value) != null or immutableIdentity(other) != null) return immutableSame(value, other);
+        if (numericSame(value, other)) |same| return same;
+        if (@import("expression_identity.zig").scalarSame(value, other)) |same| return same;
         if (floatProtocol(value)) |number| if (std.math.isNan(number)) return mapping_keys.keyEqual(value, other);
         if (complexProtocol(value)) |number| if (std.math.isNan(number.real) or std.math.isNan(number.imaginary)) return mapping_keys.keyEqual(value, other);
         if (std.meta.activeTag(value) != std.meta.activeTag(other)) return false;
@@ -2066,7 +2148,7 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
             if (floatProtocol(value)) |number| return .{ .integer = try numbers.floatToInteger(allocator, number) };
             return fallback;
         }
-        const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{"default"}, &.{.{ .number = 0.0 }}, 0);
+        const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{"default"}, &.{try defaultFloat(allocator)}, 0);
         const fallback = bound[0];
         if (value == .string) return try floatValue(allocator, std.fmt.parseFloat(f64, try unicode.strip(value.string, null, true, true)) catch return fallback);
         if (floatProtocol(value) != null) return value;
@@ -2079,7 +2161,8 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
     if (std.mem.eql(u8, name, "trim")) {
         const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{"chars"}, &.{.none}, 0);
         if (bound[0] != .string and bound[0] != .none) return error.JinjaTypeError;
-        return .{ .string = try unicode.strip(try textWithHost(allocator, value, host), if (bound[0] == .string) bound[0].string else null, true, true) };
+        const original = try textWithHost(allocator, value, host);
+        return .{ .string = try @import("expression_identity.zig").substring(allocator, original, try unicode.strip(original, if (bound[0] == .string) bound[0].string else null, true, true)) };
     }
     if (std.mem.eql(u8, name, "replace")) {
         const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{ "old", "new", "count" }, &.{ .undefined, .undefined, .none }, 2);
@@ -2177,7 +2260,7 @@ test "power follows Core Jinja precedence, associativity and lazy evaluation" {
     try std.testing.expectEqualStrings("64", (try evaluate(a, "2 ** 3 ** 2", null)).integer);
     try std.testing.expectEqualStrings("4", (try evaluate(a, "-2 ** 2", null)).integer);
     try std.testing.expectEqualStrings("24", (try evaluate(a, "3 * 2 ** 3", null)).integer);
-    try std.testing.expectEqual(@as(f64, 0.5), (try evaluate(a, "2 ** -1", null)).number);
+    try std.testing.expectEqual(@as(f64, 0.5), try numericFloat(try evaluate(a, "2 ** -1", null)));
     try std.testing.expect(!(try evaluate(a, "false and 0 ** -1", null)).truthy());
     try std.testing.expectError(error.JinjaDivisionByZero, evaluate(a, "0 ** -1", null));
 }

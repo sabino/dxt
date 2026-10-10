@@ -77,6 +77,11 @@ pub fn globallyInterned(value: Value) bool {
     for (value.string) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_') return false;
     return true;
 }
+/// These builtin strings share the compiler's interned constant namespace.
+pub fn globalString(value: Value) Value {
+    if (value != .string) return value;
+    return .{ .string = @import("expression_identity.zig").builtinBooleanText(@import("expression_identity.zig").cachedString(value.string)) };
+}
 
 test "constant probes reject every runtime name and call" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

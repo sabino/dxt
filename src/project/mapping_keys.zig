@@ -117,6 +117,8 @@ pub fn keyEqual(left: Value, right: Value) bool {
         }
     }
     if (left == .object or right == .object) {
+        if (expression.floatProtocol(left) != null or expression.floatProtocol(right) != null)
+            return expression.equalValues(left, right);
         if (expression.complexProtocol(left) != null or expression.complexProtocol(right) != null)
             return expression.equalValues(left, right);
         if (expression.integerProtocol(left) != null or expression.integerProtocol(right) != null)
