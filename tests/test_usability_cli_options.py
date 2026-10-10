@@ -176,7 +176,9 @@ def test_native_log_filters_file_format_rotation_and_quiet_errors(tmp_path, duck
     (root / "models/a.sql").write_text("select from invalid syntax")
     result = invoke("dxt", ["--quiet", "--log-level-file", "error", "--log-path", log_dir, "run", "--project-dir", root], root, environment(duckdb_environment), ok=False)
     assert result.returncode == 1 and "error:" in result.stderr
-    assert result.stdout == ""
+    assert "Runtime Error" in result.stdout
+    assert "Parser Error: SELECT clause without selection list" in result.stdout
+    assert "Parser Error: SELECT clause without selection list" in (log_dir / "dbt.log").read_text()
 
 
 @pytest.mark.parametrize("flags,expected_code", [
