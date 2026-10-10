@@ -788,6 +788,12 @@ fn diagnosticCaptureProof(allocator: std.mem.Allocator) !void {
     for (published[prefix.len..]) |byte| try std.testing.expectEqual(@as(u8, '*'), byte);
     try std.testing.expect(std.unicode.utf8ValidateSlice(published));
     for (0..5000) |index| try std.testing.expectEqualStrings(secret, message[prefix.len + index * secret.len ..][0..secret.len]);
+    try environment.put("DBT_ENV_SECRET_LONG_ENGINE_ERROR", message[prefix.len..]);
+    connection.captureError(&message);
+    // The actual complete declared error can exceed the raw cap by itself.
+    // Keep useful native category text without retaining any cut secret bytes.
+    try std.testing.expectEqual(@as(u32, 32), connection.last_error_type);
+    try std.testing.expectEqualStrings(prefix, connection.last_error orelse return error.OutOfMemory);
     connection.captureError(null);
     try std.testing.expect(connection.last_error == null);
     try std.testing.expectEqual(@as(u32, 0), connection.last_error_type);

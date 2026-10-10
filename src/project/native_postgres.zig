@@ -338,6 +338,9 @@ fn diagnosticCaptureProof(allocator: std.mem.Allocator) !void {
     for (published) |byte| try std.testing.expectEqual(@as(u8, '*'), byte);
     try std.testing.expect(std.unicode.utf8ValidateSlice(published));
     for (0..5000) |index| try std.testing.expectEqualStrings(secret, message[index * secret.len ..][0..secret.len]);
+    try environment.put("DBT_ENV_SECRET_LONG_ENGINE_ERROR", &message);
+    connection.captureError(&message);
+    try std.testing.expectEqualStrings("", connection.last_error orelse return error.OutOfMemory);
     connection.clearError();
     try std.testing.expect(connection.last_error == null);
 }
