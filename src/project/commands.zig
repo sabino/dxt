@@ -157,6 +157,7 @@ pub const OperationHost = struct {
     written_paths: std.StringHashMapUnmanaged(?[]const u8) = .empty,
     adapter_state: @import("adapter_context.zig").State = .{},
     last_response: expression.Value = .none,
+    duckdb_cursor: ?usize = null,
     warned: std.ArrayList([]const u8) = .empty,
 
     /// Construct the context without connecting. Offline compilation remains
@@ -363,6 +364,72 @@ pub const OperationHost = struct {
             } else try @import("concurrent_runner.zig").emitLogMessages(self.runtime, self.stdout, if (self.current_node) |node| node.unique_id else "operation", 0, &.{.{ .message = message.string, .level = "warn", .is_adapter_warning = true }});
             return .{ .string = "" };
         }
+        if (std.mem.eql(u8, name, "load_agate_table")) {
+            if (args.len != 0) return error.InvalidJinjaArguments;
+            return self.seedTable(try @import("seed_table.zig").load(self.values.allocator(), self.current_node orelse return error.LoadAgateTableRequiresSeed));
+        }
+        if (std.mem.eql(u8, name, "dxt.seed.unkeyed_items")) return error.JinjaTypeError;
+        if (std.mem.eql(u8, name, "adapter.add_query")) {
+            const a = self.values.allocator();
+            const arguments = try @import("filter_arguments.zig").bind(a, args, &.{ "sql", "auto_begin", "bindings", "abridge_sql_log" }, &.{ .undefined, .{ .boolean = true }, .none, .{ .boolean = false } }, 1);
+            const sql = arguments[0];
+            if (sql != .string) return error.InvalidJinjaArguments;
+            const authored = arguments[2];
+            if (arguments[1].truthy() and !self.transaction_open) try self.begin();
+            var bound: ?[]adapter.Parameter = null;
+            if (authored != .none) {
+                const members = try expression.iterableValuesWithHost(a, authored, self.host());
+                bound = try a.alloc(adapter.Parameter, members.len);
+                for (members, bound.?) |member, *parameter| parameter.* = try @import("seed_table.zig").parameter(member);
+            }
+            const table = try self.queryBound(sql.string, bound);
+            return .{ .tuple = try a.dupe(expression.Value, &.{ self.last_response, try self.queryCursor(table) }) };
+        }
+        if (std.mem.eql(u8, name, "adapter.convert_type")) {
+            const table = argument(args, "agate_table", 0) orelse return error.InvalidJinjaArguments;
+            const index = argument(args, "col_idx", 1) orelse return error.InvalidJinjaArguments;
+            const number = try expression.integerIndex(index);
+            if (args.len != 2 or number < 0) return error.InvalidJinjaArguments;
+            return .{ .string = try @import("seed_table.zig").sqlType(table, @intCast(number)) };
+        }
+        if (std.mem.eql(u8, name, "adapter.quote_seed_column")) {
+            const column = argument(args, "column", 0) orelse return error.InvalidJinjaArguments;
+            const quote = argument(args, "quote_config", 1) orelse return error.InvalidJinjaArguments;
+            if (args.len != 2 or column != .string or (quote != .boolean and quote != .none)) return error.InvalidJinjaArguments;
+            return .{ .string = if (quote == .boolean and !quote.boolean) column.string else try adapter.quoteIdentifier(self.values.allocator(), column.string) };
+        }
+        if (std.mem.eql(u8, self.graph.adapter_type, "duckdb")) {
+            if (std.mem.eql(u8, name, "adapter.get_binding_char")) {
+                if (args.len != 0) return error.InvalidJinjaArguments;
+                return .{ .string = "?" };
+            }
+            if (std.mem.eql(u8, name, "adapter.get_seed_file_path")) {
+                const model = argument(args, "model", 0) orelse return error.InvalidJinjaArguments;
+                const root = model.attribute("root_path");
+                const path = model.attribute("original_file_path");
+                if (args.len != 1 or root != .string or path != .string) return error.InvalidJinjaArguments;
+                return .{ .string = try std.fs.path.join(self.values.allocator(), &.{ root.string, path.string }) };
+            }
+            if (std.mem.eql(u8, name, "adapter.convert_datetimes_to_strs")) {
+                const table = argument(args, "table", 0) orelse return error.InvalidJinjaArguments;
+                if (args.len != 1 or !@import("seed_table.zig").isTable(table)) return error.InvalidAgateTable;
+                const a = self.values.allocator();
+                const names = expression.sequence(try @import("dbt_context.zig").cloneValue(a, table.attribute("column_names"))) orelse return error.InvalidAgateTable;
+                const kinds = try a.dupe(expression.Value, expression.sequence(table.attribute("__dxt_seed_kinds")) orelse return error.InvalidAgateTable);
+                const previous = expression.sequence(table.attribute("__dxt_data")) orelse return error.InvalidAgateTable;
+                const rows = try a.alloc([]const expression.Value, previous.len);
+                for (previous, rows) |row, *cells| cells.* = expression.sequence(try @import("dbt_context.zig").cloneValue(a, row)) orelse return error.InvalidAgateTable;
+                for (kinds, 0..) |*kind, index| if (kind.* == .string and std.mem.eql(u8, kind.string, "timestamp")) {
+                    for (rows) |row| if (row[index] != .none) {
+                        const rendered = try a.dupe(u8, try row[index].text(a));
+                        @constCast(row)[index] = .{ .string = rendered };
+                    };
+                    kind.* = .{ .string = "text" };
+                };
+                for (kinds) |*kind| kind.* = try @import("dbt_context.zig").cloneValue(a, kind.*);
+                return self.seedTable(.{ .names = names, .rows = rows, .kinds = kinds, .original_abspath = try a.dupe(u8, table.attribute("original_abspath").string) });
+            }
+        }
         var adapter_args = args;
         if (std.mem.eql(u8, name, "adapter.get_relation") and self.graph.profile_name == null and std.mem.eql(u8, self.graph.adapter_type, "duckdb")) {
             const database = argument(args, "database", 0);
@@ -411,6 +478,27 @@ pub const OperationHost = struct {
                 try self.stdout.writeAll("}}\n");
             }
             return .{ .string = "" };
+        }
+        if (std.mem.startsWith(u8, name, "dxt.cursor.")) {
+            var pieces = std.mem.splitScalar(u8, name[11..], '.');
+            const index = std.fmt.parseUnsigned(usize, pieces.next() orelse return error.InvalidJinjaArguments, 10) catch return error.InvalidJinjaArguments;
+            const method = pieces.next() orelse return error.InvalidJinjaArguments;
+            if (index >= self.stored.items.len) return error.InvalidJinjaArguments;
+            const state = self.stored.items[index].value;
+            const rows = expression.sequence(state.attribute("rows")) orelse return error.InvalidJinjaArguments;
+            const start: usize = @intCast(try expression.integerIndex(state.attribute("position")));
+            var count: usize = rows.len - start;
+            if (std.mem.eql(u8, method, "fetchone")) {
+                if (args.len != 0) return error.InvalidJinjaArguments;
+                count = @min(count, 1);
+            } else if (std.mem.eql(u8, method, "fetchmany")) {
+                if (args.len > 1) return error.InvalidJinjaArguments;
+                const size = try expression.integerIndex(argument(args, "size", 0) orelse expression.Value{ .integer = "1" });
+                count = if (size < 0) (if (std.mem.eql(u8, self.graph.adapter_type, "postgres")) count else 0) else @min(count, @as(usize, @intCast(size)));
+            } else if (!std.mem.eql(u8, method, "fetchall") or args.len != 0) return error.InvalidJinjaArguments;
+            @constCast(state.object)[1].value = try expression.integerValue(self.values.allocator(), start + count);
+            if (std.mem.eql(u8, method, "fetchone")) return if (count == 0) expression.Value.none else rows[start];
+            return .{ .list = try self.values.allocator().dupe(expression.Value, rows[start .. start + count]) };
         }
         if (std.mem.startsWith(u8, name, "dxt.values.")) {
             if (args.len != 0) return error.InvalidJinjaArguments;
@@ -527,9 +615,13 @@ pub const OperationHost = struct {
     }
 
     fn query(self: *OperationHost, sql: []const u8, _: std.mem.Allocator) !expression.Value {
+        return self.queryBound(sql, null);
+    }
+
+    fn queryBound(self: *OperationHost, sql: []const u8, bindings: ?[]const adapter.Parameter) !expression.Value {
         try self.ensureSession();
         const allocator = self.values.allocator();
-        var output = if (self.currentSession()) |session| try session.query(sql) else try adapter.queryForGraph(self.runtime, self.graph, self.db_path, sql);
+        var output = if (bindings) |parameters| try (self.currentSession() orelse return error.NativeAdapterSessionRequired).queryParameters(sql, parameters) else if (self.currentSession()) |session| try session.query(sql) else try adapter.queryForGraph(self.runtime, self.graph, self.db_path, sql);
         defer output.deinit(self.runtime.allocator);
         const trimmed = std.mem.trim(u8, sql, " \t\r\n;");
         const message = if (output.command_tag) |tag| try allocator.dupe(u8, tag) else "OK";
@@ -552,7 +644,10 @@ pub const OperationHost = struct {
         if (std.ascii.eqlIgnoreCase(trimmed, "begin") or std.ascii.eqlIgnoreCase(trimmed, "begin transaction")) self.transaction_open = true;
         if (std.ascii.eqlIgnoreCase(trimmed, "commit") or std.ascii.eqlIgnoreCase(trimmed, "rollback")) self.transaction_open = false;
         // Native query results distinguish empty SELECTs from statements.
-        if (output.columns.len == 0) return .none;
+        if (output.columns.len == 0) {
+            if (self.duckdb_cursor != null) _ = try self.queryCursor(.none);
+            return .none;
+        }
         const rows = try expression.allocateValues(allocator, output.rows.len);
         const data = try expression.allocateValues(allocator, output.rows.len);
         const columns = try expression.allocateValues(allocator, output.columns.len);
@@ -577,7 +672,7 @@ pub const OperationHost = struct {
         const column_values = try self.mappedSequence(names, columns);
         const method = try std.fmt.allocPrint(allocator, "dxt.print_table.{d}", .{self.stored.items.len});
         try self.stored.append(self.runtime.allocator, .{ .name = method, .value = .{ .list = data } });
-        return .{ .object = try allocator.dupe(expression.Entry, &.{
+        const table: expression.Value = .{ .object = try allocator.dupe(expression.Entry, &.{
             .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
             .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
             .{ .key = "__dxt_data", .value = .{ .list = data } },
@@ -585,6 +680,76 @@ pub const OperationHost = struct {
             .{ .key = "columns", .value = column_values },
             .{ .key = "column_names", .value = .{ .list = names } },
             .{ .key = "print_table", .value = .{ .callable = method } },
+        }) };
+        if (self.duckdb_cursor != null) _ = try self.queryCursor(table);
+        return table;
+    }
+
+    fn queryCursor(self: *OperationHost, table: expression.Value) !expression.Value {
+        const a = self.values.allocator();
+        const values = if (table == .none) &.{} else expression.sequence(table.attribute("__dxt_data")) orelse return error.InvalidAgateTable;
+        const rows = try expression.allocateValues(a, values.len);
+        for (values, rows) |value, *row| row.* = .{ .tuple = expression.sequence(value) orelse return error.InvalidAgateTable };
+        const index = self.duckdb_cursor orelse self.stored.items.len;
+        if (self.duckdb_cursor) |_| {
+            @constCast(self.stored.items[index].value.object)[0].value = .{ .list = rows };
+            @constCast(self.stored.items[index].value.object)[1].value = .{ .integer = "0" };
+        } else {
+            try self.stored.append(self.runtime.allocator, .{ .name = "query-cursor", .value = .{ .object = try a.dupe(expression.Entry, &.{ .{ .key = "rows", .value = .{ .list = rows } }, .{ .key = "position", .value = .{ .integer = "0" } }, .{ .key = "cursor", .value = .none } }) } });
+            if (std.mem.eql(u8, self.graph.adapter_type, "duckdb")) self.duckdb_cursor = index;
+        }
+        var entries: std.ArrayList(expression.Entry) = .empty;
+        try entries.appendSlice(a, &.{ .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } }, .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } }, .{ .key = "rowcount", .value = if (std.mem.eql(u8, self.graph.adapter_type, "duckdb")) .{ .integer = "-1" } else self.last_response.attribute("rows_affected") } });
+        const names = if (table == .none) &.{} else expression.sequence(table.attribute("column_names")) orelse return error.InvalidAgateTable;
+        const description = try expression.allocateValues(a, names.len);
+        for (names, description) |name, *field| field.* = .{ .tuple = try a.dupe(expression.Value, &.{ name, .none, .none, .none, .none, .none, .none }) };
+        try entries.append(a, .{ .key = "description", .value = if (table == .none) .none else .{ .tuple = description } });
+        for ([_][]const u8{ "fetchall", "fetchone", "fetchmany" }) |method| try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "dxt.cursor.{d}.{s}", .{ index, method }) } });
+        const current = self.stored.items[index].value.attribute("cursor");
+        if (current == .object) {
+            for (@constCast(current.object)) |*field| for (entries.items) |replacement| if (std.mem.eql(u8, field.key, replacement.key)) {
+                field.value = replacement.value;
+                break;
+            };
+            return current;
+        }
+        const cursor: expression.Value = .{ .object = try entries.toOwnedSlice(a) };
+        @constCast(self.stored.items[index].value.object)[2].value = cursor;
+        return cursor;
+    }
+
+    fn seedTable(self: *OperationHost, document: @import("seed_table.zig").Data) !expression.Value {
+        const a = self.values.allocator();
+        const rows = try expression.allocateValues(a, document.rows.len);
+        const data = try expression.allocateValues(a, document.rows.len);
+        const columns = try expression.allocateValues(a, document.names.len);
+        const types_ = try expression.allocateValues(a, document.names.len);
+        for (document.rows, rows, data) |cells, *row, *raw| {
+            row.* = try self.mappedSequence(document.names, cells);
+            raw.* = .{ .tuple = cells };
+        }
+        for (document.names, document.kinds, columns, types_, 0..) |name, kind, *column, *type_, index| {
+            const cells = try expression.allocateValues(a, document.rows.len);
+            for (document.rows, cells) |row, *cell| cell.* = row[index];
+            type_.* = .{ .object = try a.dupe(expression.Entry, &.{ .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } }, .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } }, .{ .key = "__dxt_rendered", .value = .{ .string = kind.string } } }) };
+            column.* = .{ .object = try a.dupe(expression.Entry, &.{ .{ .key = "name", .value = name }, .{ .key = "data_type", .value = type_.* }, .{ .key = "values", .value = try self.callback(.{ .tuple = cells }) } }) };
+        }
+        return .{ .object = try a.dupe(expression.Entry, &.{
+            .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+            .{ .key = "__dxt_seed_table", .value = .{ .callable = "__dxt_seed_table" } },
+            .{ .key = "__dxt_seed_kinds", .value = .{ .list = document.kinds } },
+            .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
+            .{ .key = "__dxt_data", .value = .{ .tuple = data } },
+            .{ .key = "rows", .value = .{ .object = try a.dupe(expression.Entry, &.{
+                .{ .key = "__dxt_iterable", .value = .{ .list = rows } },
+                .{ .key = "keys", .value = try self.callback(.none) },
+                .{ .key = "values", .value = try self.callback(.{ .tuple = rows }) },
+                .{ .key = "items", .value = .{ .callable = "dxt.seed.unkeyed_items" } },
+            }) } },
+            .{ .key = "columns", .value = try self.mappedSequence(document.names, columns) },
+            .{ .key = "column_names", .value = .{ .tuple = document.names } },
+            .{ .key = "column_types", .value = .{ .tuple = types_ } },
+            .{ .key = "original_abspath", .value = .{ .string = document.original_abspath } },
         }) };
     }
 
@@ -682,6 +847,36 @@ test "database floating NaNs preserve identity as dictionary keys" {
     const dictionary: expression.Value = .{ .object = entries.items };
     try std.testing.expectEqualStrings("same cell", (try expression.mappingGet(dictionary, first)).string);
     try std.testing.expect((try expression.mappingGet(dictionary, second)) == .undefined);
+}
+
+test "converted seed timestamps own their bytes after the caller frame ends" {
+    const a = std.testing.allocator;
+    var graph = types.Graph{ .allocator = a, .project_name = "demo", .adapter_type = "duckdb" };
+    defer graph.deinit();
+    var output: std.Io.Writer.Allocating = .init(a);
+    defer output.deinit();
+    var host = try OperationHost.initLazy(.{ .allocator = a, .io = std.testing.io }, &graph, ":memory:", &output.writer);
+    defer host.deinit();
+    var frame = std.heap.ArenaAllocator.init(a);
+    const node: types.Node = .{
+        .package_name = "demo",
+        .unique_id = "seed.demo.input",
+        .name = "input",
+        .resource_type = "seed",
+        .path = "input.csv",
+        .original_file_path = "seeds/input.csv",
+        .project_root = "project",
+        .raw_code = "day,stamp\n2024-02-29,2024-02-29T12:34:56.123456\n,\n",
+    };
+    const table = try host.seedTable(try @import("seed_table.zig").load(frame.allocator(), &node));
+    const converted = try OperationHost.call(&host, "adapter.convert_datetimes_to_strs", &.{.{ .value = table }}, a);
+    frame.deinit();
+    const rows = expression.sequence(converted.attribute("__dxt_data")).?;
+    const first = expression.sequence(rows[0]).?;
+    try std.testing.expectEqualStrings("2024-02-29 12:34:56.123456", first[1].string);
+    try std.testing.expectEqual(@as(i32, 19782), (try @import("seed_table.zig").parameter(first[0])).date);
+    try std.testing.expect((expression.sequence(rows[1]).?)[1] == .none);
+    try std.testing.expectEqualStrings("day", expression.sequence(converted.attribute("column_names")).?[0].string);
 }
 
 pub fn parseArgs(allocator: std.mem.Allocator, text: []const u8) !std.json.Value {

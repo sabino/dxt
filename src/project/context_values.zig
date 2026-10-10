@@ -117,6 +117,12 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         fields[result.object.len] = .{ .key = "index", .value = try expression.integerValue(allocator, index) };
         result = .{ .object = fields };
     }
+    if (std.mem.eql(u8, node.resource_type, "seed")) if (node.project_root) |path| {
+        const fields = try allocator.alloc(expression.Entry, result.object.len + 1);
+        @memcpy(fields[0..result.object.len], result.object);
+        fields[result.object.len] = .{ .key = "root_path", .value = .{ .string = path } };
+        result = .{ .object = fields };
+    };
     if (node.compiled_code) |sql| {
         const fields = try allocator.alloc(expression.Entry, result.object.len + 3);
         @memcpy(fields[0..result.object.len], result.object);

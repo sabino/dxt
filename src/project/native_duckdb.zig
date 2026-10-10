@@ -1,5 +1,6 @@
 const std = @import("std");
 const result = @import("adapter_result.zig");
+const parameters = @import("query_parameters.zig");
 const profile_config = @import("duckdb_profile.zig");
 const config_values = @import("config_value.zig");
 pub const QueryResult = result.QueryResult;
@@ -12,6 +13,13 @@ const CResult = extern struct {
     error_message: Handle = null,
     internal_data: Handle = null,
 };
+
+const HugeInt = extern struct { lower: u64, upper: i64 };
+const Decimal = extern struct { width: u8, scale: u8, value: HugeInt };
+const Date = extern struct { days: i32 };
+const Time = extern struct { micros: i64 };
+const Timestamp = extern struct { micros: i64 };
+const CString = extern struct { data: ?[*]u8, size: u64 };
 
 const Api = struct {
     duckdb_open_ext: *const fn ([*:0]const u8, *Handle, Handle, *?[*:0]u8) callconv(.c) c_uint,
@@ -26,6 +34,21 @@ const Api = struct {
     duckdb_destroy_extracted: *const fn (*Handle) callconv(.c) void,
     duckdb_prepare_extracted_statement: *const fn (Handle, Handle, u64, *Handle) callconv(.c) c_uint,
     duckdb_prepared_statement_type: *const fn (Handle) callconv(.c) c_uint,
+    duckdb_nparams: *const fn (Handle) callconv(.c) u64,
+    duckdb_bind_null: *const fn (Handle, u64) callconv(.c) c_uint,
+    duckdb_bind_boolean: *const fn (Handle, u64, bool) callconv(.c) c_uint,
+    duckdb_bind_int32: *const fn (Handle, u64, i32) callconv(.c) c_uint,
+    duckdb_bind_int64: *const fn (Handle, u64, i64) callconv(.c) c_uint,
+    duckdb_bind_hugeint: *const fn (Handle, u64, HugeInt) callconv(.c) c_uint,
+    duckdb_bind_decimal: *const fn (Handle, u64, Decimal) callconv(.c) c_uint,
+    duckdb_bind_double: *const fn (Handle, u64, f64) callconv(.c) c_uint,
+    duckdb_bind_varchar_length: *const fn (Handle, u64, [*]const u8, u64) callconv(.c) c_uint,
+    duckdb_bind_blob: *const fn (Handle, u64, ?*const anyopaque, u64) callconv(.c) c_uint,
+    duckdb_bind_date: *const fn (Handle, u64, Date) callconv(.c) c_uint,
+    duckdb_bind_time: *const fn (Handle, u64, Time) callconv(.c) c_uint,
+    duckdb_bind_timestamp: *const fn (Handle, u64, Timestamp) callconv(.c) c_uint,
+    duckdb_bind_timestamp_tz: *const fn (Handle, u64, Timestamp) callconv(.c) c_uint,
+    duckdb_value_string: *const fn (*CResult, u64, u64) callconv(.c) CString,
     duckdb_prepare_error: *const fn (Handle) callconv(.c) ?[*:0]const u8,
     duckdb_destroy_prepare: *const fn (*Handle) callconv(.c) void,
     duckdb_execute_prepared: *const fn (Handle, *CResult) callconv(.c) c_uint,
@@ -400,9 +423,17 @@ pub const Connection = struct {
     }
 
     pub fn query(self: *Connection, sql: []const u8) !QueryResult {
+        return self.queryBound(sql, null);
+    }
+
+    pub fn queryParameters(self: *Connection, sql: []const u8, bindings: []const parameters.Parameter) !QueryResult {
+        return self.queryBound(sql, bindings);
+    }
+
+    fn queryBound(self: *Connection, sql: []const u8, bindings: ?[]const parameters.Parameter) !QueryResult {
         const count = profile_config.attempts(self.retry_profile, false);
         for (0..count) |attempt| {
-            return self.queryOnce(sql) catch |err| {
+            return self.queryOnce(sql, bindings) catch |err| {
                 if (err != error.DuckDbExecutionFailed or !profile_config.queryRetries(self.retry_profile) or !profile_config.retryable(self.retry_profile, exceptionName(self.last_error_type))) return err;
                 if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
                 try self.pool.pauseRetry(attempt, self.cancellation_token);
@@ -413,7 +444,7 @@ pub const Connection = struct {
         return error.DuckDbExecutionFailed;
     }
 
-    fn queryOnce(self: *Connection, sql: []const u8) !QueryResult {
+    fn queryOnce(self: *Connection, sql: []const u8, bindings: ?[]const parameters.Parameter) !QueryResult {
         if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
         self.clearError();
         const cache_change = if (self.cache_context) |*context| context.before(sql) else null;
@@ -429,12 +460,16 @@ pub const Connection = struct {
                 if (rollback_result) |*owned| owned.deinit(self.allocator);
             }
         }
-        const output = try self.queryStatements(sql, self.readonly);
+        const output = try self.queryStatementsBound(sql, self.readonly, bindings);
         cache_success = true;
         return output;
     }
 
     fn queryStatements(self: *Connection, sql: []const u8, readonly: bool) !QueryResult {
+        return self.queryStatementsBound(sql, readonly, null);
+    }
+
+    fn queryStatementsBound(self: *Connection, sql: []const u8, readonly: bool, bindings: ?[]const parameters.Parameter) !QueryResult {
         if (std.mem.indexOfScalar(u8, sql, 0) != null) return error.InvalidSqlText;
         const sql_z = try self.allocator.dupeZ(u8, sql);
         defer self.allocator.free(sql_z);
@@ -454,6 +489,15 @@ pub const Connection = struct {
             if (self.api.duckdb_prepare_extracted_statement(self.handle, extracted, index, &prepared) != 0) {
                 self.captureError(self.api.duckdb_prepare_error(prepared));
                 return error.DuckDbExecutionFailed;
+            }
+            if (bindings) |values| {
+                const expected = self.api.duckdb_nparams(prepared);
+                if (index + 1 != count) {
+                    if (expected != 0) return error.QueryParametersRequireLastStatement;
+                } else {
+                    if (expected != values.len) return error.QueryParameterCountMismatch;
+                    for (values, 1..) |value, slot| try self.bind(prepared, slot, value);
+                }
             }
             const statement_type = self.api.duckdb_prepared_statement_type(prepared);
             if (self.binding_readonly and (statement_type == 10 or statement_type == 25 or statement_type == 26)) return error.NativeDuckDbReadOnlyConnection;
@@ -479,6 +523,35 @@ pub const Connection = struct {
             }
         }
         return output;
+    }
+
+    fn bind(self: *Connection, statement: Handle, slot: u64, value: parameters.Parameter) !void {
+        const status = switch (value) {
+            .none => self.api.duckdb_bind_null(statement, slot),
+            .boolean => |v| self.api.duckdb_bind_boolean(statement, slot, v),
+            .integer => |v| blk: {
+                if (std.fmt.parseInt(i32, v, 10)) |integer| break :blk self.api.duckdb_bind_int32(statement, slot, integer) else |_| {}
+                if (std.fmt.parseInt(i64, v, 10)) |integer| break :blk self.api.duckdb_bind_int64(statement, slot, integer) else |_| {}
+                if (std.fmt.parseInt(i128, v, 10)) |integer| break :blk self.api.duckdb_bind_hugeint(statement, slot, hugeInt(integer)) else |_| {}
+                break :blk self.api.duckdb_bind_double(statement, slot, std.fmt.parseFloat(f64, v) catch return error.InvalidQueryParameter);
+            },
+            .decimal => |v| blk: {
+                const parsed = try parameters.decimal(self.allocator, v);
+                if (parsed) |d| break :blk self.api.duckdb_bind_decimal(statement, slot, .{ .width = d.width, .scale = d.scale, .value = hugeInt(d.coefficient) });
+                break :blk self.api.duckdb_bind_double(statement, slot, std.fmt.parseFloat(f64, v) catch return error.InvalidQueryParameter);
+            },
+            .floating => |v| self.api.duckdb_bind_double(statement, slot, v),
+            .text => |v| self.api.duckdb_bind_varchar_length(statement, slot, v.ptr, v.len),
+            .binary => |v| self.api.duckdb_bind_blob(statement, slot, v.ptr, v.len),
+            .date => |v| self.api.duckdb_bind_date(statement, slot, .{ .days = v }),
+            .time => |v| self.api.duckdb_bind_time(statement, slot, .{ .micros = v }),
+            .timestamp => |v| self.api.duckdb_bind_timestamp(statement, slot, .{ .micros = v }),
+            .timestamp_tz => |v| self.api.duckdb_bind_timestamp_tz(statement, slot, .{ .micros = v }),
+        };
+        if (status != 0) {
+            self.captureError(self.api.duckdb_prepare_error(statement));
+            return error.DuckDbExecutionFailed;
+        }
     }
 
     pub fn execute(self: *Connection, sql: []const u8) !void {
@@ -547,9 +620,9 @@ pub const Connection = struct {
             for (row.*, 0..) |*cell, c| {
                 if (self.api.duckdb_value_is_null(raw, c, r)) continue;
                 if (output.columns[c].native_type == 31) continue;
-                const value = self.api.duckdb_value_varchar(raw, c, r) orelse return error.DuckDbExecutionFailed;
-                defer self.api.duckdb_free(value);
-                cell.* = try self.allocator.dupe(u8, std.mem.span(value));
+                const value = self.api.duckdb_value_string(raw, c, r);
+                defer self.api.duckdb_free(value.data);
+                cell.* = try self.allocator.dupe(u8, if (value.data) |data| data[0..value.size] else "");
             }
         }
         // The deprecated scalar C accessor cannot stringify TIMESTAMP_TZ.
@@ -580,6 +653,10 @@ pub const Connection = struct {
         return output;
     }
 };
+
+fn hugeInt(value: i128) HugeInt {
+    return .{ .lower = @truncate(@as(u128, @bitCast(value))), .upper = @intCast(value >> 64) };
+}
 
 pub const capabilities: result.Capabilities = .{ .savepoints = false, .catalogs = true, .merge = true, .replace_table = true, .materialized_views = false };
 

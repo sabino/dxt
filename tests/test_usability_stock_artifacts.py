@@ -106,16 +106,13 @@ def test_seed_run_file_is_written_after_load_and_retained_after_later_hook_error
         nodes = [resource(project, 'data', 'seed') for project in pair.projects]
         assert [node['build_path'] for node in nodes] == ['target/run/configuration_fixture/seeds/data.csv'] * 2
         statements = [runtime_sql(project, node) for project, node in zip(pair.projects, nodes)]
-        assert 'insert into' in statements[0].lower()
-        # The native statement contains the literals actually loaded. The
-        # pinned DuckDB adapter uses COPY, and PostgreSQL uses bound INSERTs.
-        # Keep these execution representations visible in the oracle.
+        canonical = [normalized(project, sql.replace(str(project), 'PROJECT')) for project, sql in zip(pair.projects, statements)]
+        assert canonical[0] == canonical[1]
         if adapter == 'duckdb':
-            assert 'COPY ' in statements[1]
-            assert str(pair.projects[1] / 'seeds/data.csv') in statements[1]
+            assert all('COPY ' in sql for sql in statements)
+            assert all(str(project / 'seeds/data.csv') in sql for project, sql in zip(pair.projects, statements))
         else:
-            assert 'insert into' in statements[1].lower()
-            assert '%s' in statements[1] and '%s' not in statements[0]
+            assert all('insert into' in sql.lower() and '%s' in sql for sql in statements)
         assert rows(pair, request, adapter, 'select id from {schema}.data order by id') == [[(1,), (2,)]] * 2
     pair.append_project("      +post-hook: 'select * from missing_seed_hook'\n")
     pair.write('seeds/data.csv', 'id\n3\n4\n')

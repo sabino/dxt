@@ -1,5 +1,6 @@
 const std = @import("std");
 const result = @import("adapter_result.zig");
+const parameters = @import("query_parameters.zig");
 pub const QueryResult = result.QueryResult;
 const Handle = ?*anyopaque;
 const NoticeProcessor = *const fn (Handle, [*:0]const u8) callconv(.c) void;
@@ -9,6 +10,8 @@ const Api = struct {
     PQsetNoticeProcessor: *const fn (Handle, NoticeProcessor, Handle) callconv(.c) NoticeProcessor,
     PQfinish: *const fn (Handle) callconv(.c) void,
     PQsendQuery: *const fn (Handle, [*:0]const u8) callconv(.c) c_int,
+    PQsendQueryParams: *const fn (Handle, [*:0]const u8, c_int, ?[*]const u32, ?[*]const ?[*:0]const u8, ?[*]const c_int, ?[*]const c_int, c_int) callconv(.c) c_int,
+    PQescapeLiteral: *const fn (Handle, [*]const u8, usize) callconv(.c) ?[*:0]u8,
     PQgetResult: *const fn (Handle) callconv(.c) Handle,
     PQputCopyEnd: *const fn (Handle, [*:0]const u8) callconv(.c) c_int,
     PQgetCopyData: *const fn (Handle, *?[*]u8, c_int) callconv(.c) c_int,
@@ -82,6 +85,73 @@ pub const Connection = struct {
         const sql_z = try self.allocator.dupeZ(u8, sql);
         defer self.allocator.free(sql_z);
         if (self.api.PQsendQuery(self.handle, sql_z) == 0) return error.PostgresExecutionFailed;
+        return self.drainResults();
+    }
+
+    pub fn queryParameters(self: *Connection, sql: []const u8, bindings: []const parameters.Parameter) !QueryResult {
+        if (self.cancellation_token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
+        self.clearError();
+        const cache_change = if (self.cache_context) |*context| context.before(sql) else null;
+        defer if (cache_change) |change| if (self.cache_context) |*context| context.afterTransaction(change, self.api.PQtransactionStatus(self.handle) != 0);
+        if (std.mem.indexOfScalar(u8, sql, 0) != null) return error.InvalidSqlText;
+        // psycopg2 adapts values client-side and accepts multi-statement SQL
+        // and batches beyond libpq's 16-bit extended-protocol parameter limit.
+        if (bindings.len > 65535 or parameters.needsClientAdaptation(sql)) return self.queryAdapted(sql, bindings);
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        const translated = try parameters.postgresSql(a, sql, bindings.len);
+        const sql_z = try a.dupeZ(u8, translated);
+        const values = try a.alloc(?[*:0]const u8, bindings.len);
+        const types = try a.alloc(u32, bindings.len);
+        for (bindings, values, types) |binding, *value, *type_id| {
+            value.* = if (try binding.postgresText(a)) |text| text.ptr else null;
+            type_id.* = binding.postgresType();
+        }
+        if (self.api.PQsendQueryParams(self.handle, sql_z, @intCast(bindings.len), types.ptr, values.ptr, null, null, 0) == 0) return error.PostgresExecutionFailed;
+        return self.drainResults();
+    }
+
+    fn queryAdapted(self: *Connection, sql: []const u8, bindings: []const parameters.Parameter) !QueryResult {
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        const literals = try a.alloc([]const u8, bindings.len);
+        for (bindings, literals) |binding, *literal| {
+            if (binding == .none) {
+                literal.* = "NULL";
+                continue;
+            }
+            const text = (try binding.postgresText(a)).?;
+            switch (binding) {
+                .boolean, .integer => literal.* = text,
+                .decimal => {
+                    _ = try parameters.decimal(a, text);
+                    literal.* = text;
+                },
+                .floating => |value| {
+                    literal.* = if (std.math.isFinite(value)) text else if (std.math.isNan(value)) "'NaN'::float8" else if (value > 0) "'Infinity'::float8" else "'-Infinity'::float8";
+                },
+                else => {
+                    const quoted = self.api.PQescapeLiteral(self.handle, text.ptr, text.len) orelse return error.InvalidQueryParameter;
+                    defer self.api.PQfreemem(quoted);
+                    const cast = switch (binding) {
+                        .binary => "::bytea",
+                        .date => "::date",
+                        .time => "::time",
+                        .timestamp => "::timestamp",
+                        .timestamp_tz => "::timestamptz",
+                        else => "",
+                    };
+                    literal.* = try std.fmt.allocPrint(a, "{s}{s}", .{ std.mem.span(quoted), cast });
+                },
+            }
+        }
+        const adapted = try parameters.postgresAdaptedSql(a, sql, literals);
+        return self.query(adapted);
+    }
+
+    fn drainResults(self: *Connection) !QueryResult {
         var output: QueryResult = .{ .owner_allocator = self.allocator };
         errdefer output.deinit(self.allocator);
         var failed: ?anyerror = null;

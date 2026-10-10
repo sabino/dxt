@@ -6,7 +6,7 @@ const types = @import("types.zig");
 const compiler = @import("compiler.zig");
 const adapter = @import("adapter_result.zig");
 const values = @import("config_value.zig");
-const freshness = @import("source_freshness.zig");
+const dates = @import("seed_datetime.zig");
 
 pub const Document = struct {
     arena: std.heap.ArenaAllocator,
@@ -225,7 +225,8 @@ pub fn infer(a: std.mem.Allocator, rows: []const []const []const u8, column: usi
     var numeric = true;
     var fractional = false;
     var date = true;
-    var timestamp = true;
+    var standard_timestamp = true;
+    var iso_timestamp = true;
     var boolean = true;
     for (rows) |row| {
         const value = std.mem.trim(u8, row[column], " \t\r\n");
@@ -243,32 +244,28 @@ pub fn infer(a: std.mem.Allocator, rows: []const []const []const u8, column: usi
             if (err == error.OutOfMemory) return err;
             numeric = false;
         }
-        if (!isIsoDate(value)) date = false;
-        if (value.len <= 10) timestamp = false else _ = freshness.parseFreshnessTimestamp(value) catch blk: {
-            timestamp = false;
-            break :blk 0;
+        if (date) _ = dates.date(a, value) catch |err| blk: {
+            if (err == error.OutOfMemory) return err;
+            date = false;
+            break :blk dates.Parsed{ .civil_ns = 0 };
+        };
+        if (standard_timestamp) _ = dates.standard(a, value) catch |err| blk: {
+            if (err == error.OutOfMemory) return err;
+            standard_timestamp = false;
+            break :blk dates.Parsed{ .civil_ns = 0 };
+        };
+        if (iso_timestamp) _ = dates.iso(a, value) catch |err| blk: {
+            if (err == error.OutOfMemory) return err;
+            iso_timestamp = false;
+            break :blk dates.Parsed{ .civil_ns = 0 };
         };
         if (!std.ascii.eqlIgnoreCase(value, "true") and !std.ascii.eqlIgnoreCase(value, "false")) boolean = false;
     }
     if (numeric) return if (fractional) .number else .integer;
     if (date) return .date;
-    if (timestamp) return .timestamp;
+    if (standard_timestamp or iso_timestamp) return .timestamp;
     if (boolean) return .boolean;
     return .text;
-}
-
-fn isIsoDate(text: []const u8) bool {
-    if (text.len != 10 or text[4] != '-' or text[7] != '-') return false;
-    const year = std.fmt.parseInt(u16, text[0..4], 10) catch return false;
-    const month = std.fmt.parseInt(u8, text[5..7], 10) catch return false;
-    const day = std.fmt.parseInt(u8, text[8..10], 10) catch return false;
-    const days: u8 = switch (month) {
-        2 => if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) 29 else 28,
-        4, 6, 9, 11 => 30,
-        1, 3, 5, 7, 8, 10, 12 => 31,
-        else => return false,
-    };
-    return year != 0 and day > 0 and day <= days;
 }
 
 pub fn number(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
@@ -314,6 +311,18 @@ pub fn number(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
 
 test "seed number inference owns successful and rejected numeric buffers" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, numberAllocationFailures, .{});
+}
+
+test "seed datetime candidates apply consistently to an entire column" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(Kind.timestamp, try infer(a, &.{ &.{"2024-02-29 12:34:56"}, &.{""} }, 0));
+    try std.testing.expectEqual(Kind.timestamp, try infer(a, &.{ &.{"2024-02-29T12:34:56.123456"}, &.{""} }, 0));
+    try std.testing.expectEqual(Kind.text, try infer(a, &.{ &.{"2024-02-29 12:34:56.123456"}, &.{""} }, 0));
+    try std.testing.expectEqual(Kind.text, try infer(a, &.{ &.{"2024-02-29 12:34:56"}, &.{"2024-02-29T12:34:56"} }, 0));
+    try std.testing.expectEqual(Kind.date, try infer(a, &.{ &.{"2024-2-9"}, &.{"2024-02-29"} }, 0));
+    try std.testing.expectEqual(Kind.text, try infer(a, &.{&.{"2023-02-29"}}, 0));
 }
 
 fn numberAllocationFailures(a: std.mem.Allocator) !void {

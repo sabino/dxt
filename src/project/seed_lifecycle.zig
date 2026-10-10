@@ -4,7 +4,8 @@ const std = @import("std");
 const types = @import("types.zig");
 const adapter = @import("adapter.zig");
 const compiler = @import("compiler.zig");
-const csv = @import("seed_csv.zig");
+const expression = @import("expression.zig");
+const commands = @import("commands.zig");
 const values = @import("config_value.zig");
 
 pub fn execute(runtime: types.Runtime, graph: *const types.Graph, path: []const u8, node: *const types.Node) !void {
@@ -25,8 +26,6 @@ pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, path
     const identifier = compiler.relationIdentifierForNode(node);
     const quoted_schema = try adapter.quoteIdentifier(a, schema);
     defer a.free(quoted_schema);
-    const relation = try compiler.relationNameForNode(a, graph, node);
-    defer a.free(relation);
     const schema_lit = try adapter.quoteLiteral(a, schema);
     defer a.free(schema_lit);
     const identifier_lit = try adapter.quoteLiteral(a, identifier);
@@ -41,24 +40,40 @@ pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, path
     if (values.get(node.effective_config, "full_refresh")) |flag| if (flag == .bool) {
         full_refresh = flag.bool;
     };
-    const create = old_kind == null or full_refresh;
-    const sql = if (create) try csv.renderSql(a, graph, node) else try csv.renderInsertSql(a, graph, node);
-    defer a.free(sql);
     if (policy.manage_transaction) try session.begin();
     errdefer if (policy.manage_transaction) session.rollback() catch {};
-    if (old_kind != null) {
-        const reset = try std.fmt.allocPrint(a, "{s} {s}{s}", .{ if (full_refresh) "drop table" else if (std.mem.eql(u8, graph.adapter_type, "postgres")) "truncate table" else "delete from", relation, if (full_refresh and std.mem.eql(u8, graph.adapter_type, "postgres")) " cascade" else "" });
-        defer a.free(reset);
-        try session.execute(reset);
+    var held_runtime = runtime;
+    held_runtime.adapter_session = session;
+    var runtime_graph = graph.*;
+    var output: std.Io.Writer.Allocating = .init(a);
+    defer output.deinit();
+    var local_host: ?commands.OperationHost = null;
+    defer if (local_host) |*host| host.deinit();
+    if (runtime_graph.execution_hooks == null) {
+        local_host = try commands.OperationHost.init(held_runtime, &runtime_graph, path, &output.writer);
+        local_host.?.transaction_open = policy.manage_transaction;
+        runtime_graph.execution_hooks = local_host.?.host();
     }
-    try session.execute(sql);
-    if (policy.main_result != null) {
-        const delimiter: std.json.Value = values.get(node.effective_config, "delimiter") orelse .{ .string = "," };
-        if (delimiter != .string) return error.InvalidSeedDelimiter;
-        var document = try csv.parseWithDelimiter(a, node.raw_code, delimiter.string);
-        defer document.deinit();
-        try @import("materialization_result.zig").captureSeed(a, policy.main_result, full_refresh, document.rows.len);
-    }
-    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, sql);
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    const temporary = scratch.allocator();
+    const create_schema = try std.fmt.allocPrint(temporary, "create schema if not exists {s}", .{quoted_schema});
+    try session.execute(create_schema);
+    const model = try @import("context_values.zig").model(temporary, &runtime_graph, node);
+    const table = try compiler.renderMacroForNode(temporary, &runtime_graph, node, "load_agate_table", &.{});
+    const create_sql = if (old_kind == null)
+        try compiler.renderMacroForNode(temporary, &runtime_graph, node, "create_csv_table", &.{ .{ .name = "model", .value = model }, .{ .name = "agate_table", .value = table } })
+    else blk: {
+        var old = try @import("dbt_context.zig").relationFromValue(temporary, try compiler.relationValueForNode(temporary, &runtime_graph, node, false));
+        old.relation_type = "table";
+        break :blk try compiler.renderMacroForNode(temporary, &runtime_graph, node, "reset_csv_table", &.{ .{ .name = "model", .value = model }, .{ .name = "full_refresh", .value = .{ .boolean = full_refresh } }, .{ .name = "old_relation", .value = try @import("dbt_context.zig").relationValue(temporary, old) }, .{ .name = "agate_table", .value = table } });
+    };
+    const insert_sql = try compiler.renderMacroForNode(temporary, &runtime_graph, node, "load_csv_rows", &.{ .{ .name = "model", .value = model }, .{ .name = "agate_table", .value = table } });
+    const sql = try compiler.renderMacroForNode(temporary, &runtime_graph, node, "get_csv_sql", &.{ .{ .name = "create_or_truncate_sql", .value = create_sql }, .{ .name = "insert_sql", .value = insert_sql } });
+    if (sql != .string) return error.InvalidSeedSql;
+    const rows = expression.sequence(table.attribute("rows")) orelse return error.InvalidAgateTable;
+    try @import("materialization_result.zig").captureSeed(a, policy.main_result, full_refresh, rows.len);
+    // Core noop_statement('main') writes only after the actual load succeeds.
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, sql.string);
     if (policy.manage_transaction) try session.commit();
 }

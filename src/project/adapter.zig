@@ -5,6 +5,7 @@ pub const DuckDBPool = @import("native_duckdb.zig").Pool;
 pub const DuckDBConnection = @import("native_duckdb.zig").Connection;
 pub const PostgresConnection = @import("native_postgres.zig").Connection;
 pub const QueryResult = results.QueryResult;
+pub const Parameter = @import("query_parameters.zig").Parameter;
 pub const RelationCache = @import("relation_cache.zig").Cache;
 pub const warmRelationsCache = @import("relation_cache.zig").warmSession;
 pub const Column = results.Column;
@@ -40,6 +41,11 @@ pub const Session = union(enum) {
     pub fn query(self: *Session, sql: []const u8) !QueryResult {
         return switch (self.*) {
             inline else => |*connection| try connection.query(sql),
+        };
+    }
+    pub fn queryParameters(self: *Session, sql: []const u8, bindings: []const Parameter) !QueryResult {
+        return switch (self.*) {
+            inline else => |*connection| try connection.queryParameters(sql, bindings),
         };
     }
     pub fn execute(self: *Session, sql: []const u8) !void {
