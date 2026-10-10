@@ -76,6 +76,23 @@ pub const Publication = struct {
         return true;
     }
 
+    fn certifyCompletedBatch(self: *Publication, a: std.mem.Allocator, value: Value) !void {
+        const kind = @import("expression_sequence.zig").kind(value) orelse return;
+        if (!std.mem.eql(u8, kind, "filter_batch")) return;
+        const done = value.attribute("__dxt_filter_done");
+        if (done != .boolean or !done.boolean) return;
+        // pull() never writes a completed batch again. Only its frozen lists
+        // qualify, never the descriptor or any live capacity buffer. The
+        // published prefix still invalidates the entire cache if mutated.
+        inline for (.{ "__dxt_filter_buffer", "__dxt_filter_buffer_storage" }) |field| {
+            const storage = value.attribute(field);
+            if (storage == .list) {
+                const key = Key.from(storage).?;
+                if (!self.copied_containers.contains(key)) _ = try self.certifyCopiedContainer(a, storage, key);
+            }
+        }
+    }
+
     pub fn replace(self: *Publication, a: std.mem.Allocator, value: *Value, original: Value, replacement: Value, depth: usize) anyerror!void {
         var ancestry: [129]Key = undefined;
         return self.replacePath(a, value, original, replacement, depth, &ancestry, 0);
@@ -116,6 +133,7 @@ pub const Publication = struct {
             }
             if (depth <= 96 and self.readonly.contains(key)) return;
         }
+        if (!self.disabled) try self.certifyCompletedBatch(a, value.*);
         if (!self.disabled and depth == 0 and try self.certifyCopiedContainer(a, value.*, key)) return;
         if (self.visited.get(key)) |previous_depth| {
             // A previously checked deeper path covers this one's depth limit.
@@ -294,13 +312,18 @@ test "published immutable chunks invalidate before mutation and never seal later
     const replacement = Value{ .list = try a.dupe(Value, &.{.{ .integer = "7" }}) };
     publication.begin(original);
     try publication.replace(a, &table, original, replacement, 0);
-    const batches = try @import("expression_filter_iterator.zig").batch(a, .{ .list = try a.dupe(Value, &.{ row, .none, original }) }, &.{.{ .value = .{ .integer = "1" } }});
+    const batches = try @import("expression_filter_iterator.zig").batch(a, .{ .list = try a.dupe(Value, &.{ row, row, original }) }, &.{.{ .value = .{ .integer = "1" } }});
     var first = (try @import("expression_sequence.zig").next(a, batches, null)).?;
     publication.begin(original);
     try publication.replace(a, &first, original, replacement, 0);
     try std.testing.expectEqual(@as(usize, 1), publication.sealed_containers);
-    _ = try @import("expression_sequence.zig").next(a, batches, null);
     var retained = batches;
+    publication.begin(original);
+    try publication.replace(a, &retained, original, original, 0);
+    // Its active storage currently contains a certified row and spare None
+    // cells, but future pulls can overwrite those cells with mutable aliases.
+    try std.testing.expect(!publication.copied_containers.contains(Key.from(batches.attribute("__dxt_filter_buffer_storage")).?));
+    _ = try @import("expression_sequence.zig").next(a, batches, null);
     publication.begin(original);
     try publication.replace(a, &retained, original, replacement, 0);
     try std.testing.expectEqual(@as(usize, 1), batches.attribute("__dxt_filter_buffer").list[0].list.len);

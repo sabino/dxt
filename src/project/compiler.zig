@@ -1526,7 +1526,10 @@ test "ten thousand seven-column CSV extensions certify native table backing once
     // Retain the genuine loader's copied chunk and growing row history too.
     // A table-only benchmark misses quadratic scans of these loop roots.
     const rows = native_expr.sequence(table.attribute("rows")).?;
-    const chunk = native_expr.Value{ .list = try values.dupe(native_expr.Value, rows) };
+    const batches = try @import("expression_filter_iterator.zig").batch(values, table.attribute("rows"), &.{.{ .value = .{ .integer = "10000" } }});
+    const chunk = (try @import("expression_sequence.zig").next(values, batches, context.host())).?;
+    try std.testing.expect(batches.attribute("__dxt_filter_done").boolean);
+    try std.testing.expectEqual(@as(usize, 16384), batches.attribute("__dxt_filter_buffer_storage").list.len);
     const frame = try values.create(LoopFrame);
     frame.* = .{
         .state = .{ .iterator = try @import("expression_sequence.zig").iter(values, chunk) },
@@ -1541,6 +1544,12 @@ test "ten thousand seven-column CSV extensions certify native table backing once
         .binding_visibility = context.binding_visibility,
         .constant_function = node.unique_id,
     };
+    const batch_frame = try values.create(LoopFrame);
+    batch_frame.* = frame.*;
+    batch_frame.iterable = batches;
+    batch_frame.state = .{ .iterator = batches };
+    try batch_frame.state.items.append(values, chunk);
+    try context.loop_states.append(values, batch_frame);
     try context.loop_states.append(values, frame);
     for (table.attribute("__dxt_data").tuple, rows) |row, mapped| {
         try frame.state.items.append(values, mapped);
@@ -1558,7 +1567,7 @@ test "ten thousand seven-column CSV extensions certify native table backing once
     // including duplicate exports. They cannot grow per receiver mutation.
     try std.testing.expect(context.alias_publication.certificate_visits < 2000000);
     try std.testing.expect(context.alias_publication.alias_visits < 1000000);
-    try std.testing.expectEqual(@as(usize, 2), context.alias_publication.sealed_containers);
+    try std.testing.expectEqual(@as(usize, 3), context.alias_publication.sealed_containers);
     try std.testing.expectEqual(@as(usize, 10000), frame.immutable_items);
     const temporal_node = Node{ .package_name = "demo", .unique_id = "seed.demo.temporal", .name = "temporal", .resource_type = "seed", .path = "temporal.csv", .original_file_path = "seeds/temporal.csv", .project_root = "project", .raw_code = "day,stamp\n2024-02-29,2024-02-29 12:34:56\n" };
     _ = operation_host.set_node.?(operation_host.context, &temporal_node);
