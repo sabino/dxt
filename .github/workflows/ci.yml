@@ -22,7 +22,6 @@ jobs:
       AUDIT_ARM_JOB: "114229930898"
       AUDIT_ARM_ARTIFACT: "11676079670"
       AUDIT_WORKFLOW_HEAD: ${{ github.sha }}
-      CI_REPORT_AUDIT_DIR: ${{ runner.temp }}/dxt-c81-arm-report-diagnostic
     steps:
       - name: Checkout the exact original candidate
         uses: actions/checkout@v4
@@ -36,6 +35,8 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = "$AUDIT_SOURCE_TREE"
           git diff --quiet --exit-code
           git diff --cached --quiet --exit-code
+          CI_REPORT_AUDIT_DIR="$RUNNER_TEMP/dxt-c81-arm-report-diagnostic"
+          echo "CI_REPORT_AUDIT_DIR=$CI_REPORT_AUDIT_DIR" >> "$GITHUB_ENV"
           mkdir -p "$CI_REPORT_AUDIT_DIR"
 
       - name: Verify the sealed failed ARM job and original artifact provenance
