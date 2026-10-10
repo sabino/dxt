@@ -108,8 +108,11 @@ the expression worker owns compiler alias publication and immutable CSV backing
 certificates, including the unchanged wide-seed scaling gate; the oracle worker
 owns typed native result transport, original cursor/Agate separation and parameter
 execution; the source worker owns exact Decimal/Range and narrowly grounded
-DuckDB type/PostgreSQL Column expression/mapping hooks; the cache worker owns
-the isolated Column value helper and actual Core cursor descriptor witnesses.
+DuckDB type/PostgreSQL Column expression/mapping hooks, followed by the finite
+cursor UUID equality/key protocol if actual Core confirms the review gap;
+the oracle worker owns query-cursor constructor wiring for those helpers.
+The cache worker owns the isolated Column value helper, native bytea cast/order
+API closure and actual Core cursor descriptor witnesses.
 The source worker's 62 Decimal comparisons pass on both the first and corrected
 typed CLIs. Its independent transport review found cursor
 consumption, eager Agate serialization and duplicate-name mismatches; the oracle
