@@ -2442,7 +2442,6 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
         const reverse = bound[0].truthy();
         var failure: ?anyerror = null;
         const Context = struct {
-            descending: bool,
             allocator: std.mem.Allocator,
             failure: *?anyerror,
             fn less(context: @This(), a: Item, b: Item) bool {
@@ -2450,10 +2449,14 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
                     if (err != error.UnorderedJinjaNumber) context.failure.* = err;
                     return false;
                 };
-                return if (context.descending) order == .gt else order == .lt;
+                return order == .lt;
             }
         };
-        std.sort.block(Item, items.items, Context{ .descending = reverse, .allocator = allocator, .failure = &failure }, Context.less);
+        // Python reverses the input and final output around its ascending
+        // adaptive sort, retaining stable ties and unordered float behavior.
+        if (reverse) std.mem.reverse(Item, items.items);
+        try @import("dictsort_sort.zig").sort(Item, allocator, items.items, Context{ .allocator = allocator, .failure = &failure }, Context.less);
+        if (reverse) std.mem.reverse(Item, items.items);
         if (failure) |err| return err;
         const result = try allocateValues(allocator, items.items.len);
         for (items.items, result) |item, *v| v.* = item.value;
@@ -2607,6 +2610,43 @@ test "sequences order lexicographically and extrema retain the first tied row" {
     try std.testing.expectEqualStrings("[(0, 0)]", try (try evaluate(a, "[[(0,0),(1,none),(1,2)]|min]", null)).text(a));
     try std.testing.expectError(error.JinjaTypeError, evaluate(a, "[(0,0),(1,none),(1,2)]|sort", null));
     try std.testing.expectError(error.JinjaTypeError, evaluate(a, "[] < ()", null));
+}
+
+test "sort preserves Core unordered float order and stable reverse attribute ties" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("[2, nan, 1, 3]", try (try evaluate(a, "[2,'nan'|float,1,3]|sort", null)).text(a));
+    try std.testing.expectEqualStrings("[nan, 3, 2, 1]", try (try evaluate(a, "[2,'nan'|float,1,3]|sort(reverse=true)", null)).text(a));
+    const tied = "[{'group':'b','rank':1,'id':'first'},{'group':'B','rank':1,'id':'second'},{'group':'a','rank':2,'id':'third'}]|sort(attribute='group,rank',reverse=true)|map(attribute='id')|list";
+    try std.testing.expectEqualStrings("['first', 'second', 'third']", try (try evaluate(a, tied, null)).text(a));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "[1,'a']|sort(reverse=true)", null));
+}
+
+fn sortAllocationProof(backing: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const member: Value = .{ .list = try a.dupe(Value, &.{.{ .integer = "7" }}) };
+    const rows = try a.alloc(Value, 80);
+    for (rows, 0..) |*row, index| row.* = .{ .tuple = try a.dupe(Value, &.{ try integerValue(a, (index * 37) % rows.len), member }) };
+    const result = try filterValue(a, "sort", .{ .list = rows }, &.{.{ .name = "attribute", .value = .{ .integer = "0" } }}, null);
+    try std.testing.expect(result == .list and result.list.len == rows.len);
+    for (result.list, 0..) |row, index| {
+        try std.testing.expect(row == .tuple);
+        try std.testing.expectEqual(@as(i64, @intCast(index)), try integerIndex(row.tuple[0]));
+        try std.testing.expect(row.tuple[1].list.ptr == member.list.ptr);
+        var original = false;
+        for (rows) |candidate| if (candidate.tuple.ptr == row.tuple.ptr) {
+            original = true;
+            break;
+        };
+        try std.testing.expect(original);
+    }
+}
+
+test "sort retains original typed payloads and propagates allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, sortAllocationProof, .{});
 }
 
 // Jinja's parse_pow loop is deliberately left associative and binds below
