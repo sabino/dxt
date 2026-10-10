@@ -163,9 +163,14 @@ Package transports can require `git`, `curl` and `tar`.
   oracle uses the canonical runtime; the 3.11 job runs developer/CLI checks.
 - `source_status:pass/warn/error` are dxt extensions. Core parity uses its
   `source_status:fresher` comparison.
-- Durable compilation-error results extend Core behavior where Core exits
-  before writing results. Their successful artifact shape and retry
-  interoperability are tested separately.
+- Compile/docs compilation failures return exit code 2 and preserve earlier
+  results and catalog artifacts, as Core does. Set
+  `DXT_DURABLE_COMPILE_ERRORS=true` to publish durable compilation-error
+  results for failed resources. This native extension retains exit code 2;
+  preflight failures still preserve earlier artifacts. Its complete artifact
+  schemas and retry interoperability are tested separately, including actual
+  Core retry of unchanged native results. The native option is absent from
+  recorded Core command arguments.
 - Docs results omit default-false `static` and `empty_catalog` argument keys.
   Core 1.10.5 records them but cannot retry its own default docs artifact:
   it generates unsupported `--no-static` and `--no-empty-catalog` options.
