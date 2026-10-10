@@ -3707,6 +3707,16 @@ models:
     )
 
 
+def assert_duckdb_seed_integer_copy_error(message: str) -> None:
+    # Pinned dbt-duckdb loads seeds with COPY. Keep its failing record,
+    # authored column type and CSV sniffer diagnosis in the contract.
+    assert "Conversion Error: CSV Error on Line: 2" in message
+    assert "Original Line: not_an_int,Ada" in message
+    assert 'Error when converting column "customer_id". Could not convert string "not_an_int" to \'INTEGER\'' in message
+    assert "Column customer_id is being converted as type INTEGER" in message
+    assert "Column at position: 0 Set type: INTEGER Sniffed type: VARCHAR" in message
+
+
 def write_build_test_failure_downstream_project(project: Path) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -4381,7 +4391,7 @@ def test_build_continues_independent_seed_model_test_after_seed_failure(tmp_path
 
     results_by_id = {item["unique_id"]: item for item in run_results["results"]}
     assert results_by_id["seed.build_seed_failure_continue.aa_bad_seed"]["status"] == "error"
-    assert "Conversion Error: Could not convert string 'not_an_int' to INT32" in results_by_id["seed.build_seed_failure_continue.aa_bad_seed"]["message"]
+    assert_duckdb_seed_integer_copy_error(results_by_id["seed.build_seed_failure_continue.aa_bad_seed"]["message"])
     assert results_by_id["model.build_seed_failure_continue.ab_bad_child"]["status"] == "skipped"
     assert results_by_id["model.build_seed_failure_continue.ab_bad_child"]["message"] is None
     assert results_by_id["seed.build_seed_failure_continue.zz_independent_seed"]["status"] == "success"
@@ -5975,7 +5985,7 @@ seeds:
         "test.build_seed_model_tests.unique_customers_customer_id.c5af1ff4b1",
     ]
     assert [item["status"] for item in run_results["results"]] == ["error", "skipped", "skipped", "skipped"]
-    assert "Conversion Error: Could not convert string 'not_an_int' to INT32" in run_results["results"][0]["message"]
+    assert_duckdb_seed_integer_copy_error(run_results["results"][0]["message"])
     assert [item["message"] for item in run_results["results"][1:]] == [None, None, None]
     assert all(item["compiled"] is False for item in run_results["results"][1:])
     assert all(item["compiled_code"] is None for item in run_results["results"][1:])
@@ -7852,9 +7862,9 @@ def test_parse_macro_namespace_search_order(tmp_path: Path):
     assert manifest["nodes"]["model.util_pkg.pkg_local"]["depends_on"]["macros"] == [package_same]
     assert manifest["nodes"]["model.util_pkg.pkg_root_fallback"]["depends_on"]["macros"] == [root_only]
     assert manifest["macros"][package_wrap]["depends_on"]["macros"] == [
+        package_same,
         root_only,
         other_shared,
-        package_same,
     ]
     assert str(project) not in manifest_path.read_text()
 
@@ -7896,8 +7906,8 @@ def test_parse_static_adapter_dispatch_dependencies(tmp_path: Path):
         package_render
     ]
     assert manifest["macros"][package_wrap]["depends_on"]["macros"] == [
-        root_package_value,
         package_render,
+        root_package_value,
     ]
     assert str(project) not in manifest_path.read_text()
 
