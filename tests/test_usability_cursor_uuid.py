@@ -58,3 +58,12 @@ def test_cursor_uuid_rejects_incompatible_returned_value_operations(tmp_path, co
     query = "select cast('" + FIRST + "' as uuid)"
     pair.write('models/marts/rendered.sql', model("{% set u=adapter.add_query(" + repr(query) + ",auto_begin=false)[1].fetchone()[0] %}select '{{ " + expression + " }}' as value"))
     pair.invoke('compile', success=False)
+
+
+def test_cursor_uuid_safety_descriptor_is_the_shared_unknown_enum(tmp_path, configuration_oracle, request):
+    pair = setup_pair(tmp_path, configuration_oracle, request, 'duckdb')
+    query = "select cast('" + FIRST + "' as uuid),cast('" + OTHER + "' as uuid)"
+    body = "{% set row=adapter.add_query(" + repr(query) + ",auto_begin=false)[1].fetchone() %}{% set first=row[0].is_safe %}{% set second=row[1].is_safe %}{% set keys={first:'one',second:'two'} %}"
+    body += "select '{{ first|string ~ ':' ~ [first,first.name,first.value,first is sameas second,first==second,keys|length,keys[second],first==none,first==first.name,first is mapping,first is iterable]|string }}' as value"
+    pair.write('models/marts/rendered.sql', model(body))
+    render(pair, "SafeUUID.unknown:[<SafeUUID.unknown: None>, 'unknown', None, True, True, 1, 'two', False, False, False, False]")

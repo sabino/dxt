@@ -5,6 +5,23 @@ const binary = @import("yaml_values.zig");
 const Value = expr.Value;
 const Allocator = std.mem.Allocator;
 
+pub fn isSafety(input: Value) bool {
+    const marker = input.attribute("__dxt_uuid_safety");
+    return marker == .callable and std.mem.eql(u8, marker.callable, "__dxt_uuid_safety");
+}
+
+fn safety(a: Allocator) !Value {
+    return .{ .object = try a.dupe(expr.Entry, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_uuid_safety", .value = .{ .callable = "__dxt_uuid_safety" } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = "SafeUUID.unknown" } },
+        .{ .key = "__dxt_repr", .value = .{ .string = "<SafeUUID.unknown: None>" } },
+        .{ .key = "name", .value = .{ .string = "unknown" } },
+        .{ .key = "value", .value = .none },
+    }) };
+}
+
 pub fn hex(input: Value) ?[]const u8 {
     const marker = input.attribute("__dxt_uuid");
     if (marker != .callable or !std.mem.eql(u8, marker.callable, "__dxt_uuid")) return null;
@@ -15,6 +32,7 @@ pub fn hex(input: Value) ?[]const u8 {
 }
 
 pub fn equal(left: Value, right: Value) ?bool {
+    if (isSafety(left) or isSafety(right)) return isSafety(left) and isSafety(right);
     const lhs = hex(left);
     const rhs = hex(right);
     if (lhs == null and rhs == null) return null;
@@ -87,6 +105,7 @@ pub fn value(a: Allocator, text: []const u8) !Value {
         .{ .key = "clock_seq", .value = try expr.integerValue(a, clock_seq) },
         .{ .key = "variant", .value = .{ .string = variant } },
         .{ .key = "version", .value = version },
+        .{ .key = "is_safe", .value = try safety(a) },
     }) };
 }
 
@@ -105,6 +124,12 @@ test "cursor UUID fields remain exact and independently fetched values compare b
     try std.testing.expectEqualStrings("130742845922168750", first.attribute("time").integer);
     try std.testing.expectEqualStrings("10085", first.attribute("clock_seq").integer);
     try std.testing.expectEqualStrings("1", first.attribute("version").integer);
+    const safe = first.attribute("is_safe");
+    try std.testing.expect(isSafety(safe));
+    try std.testing.expect(equal(safe, same.attribute("is_safe")).?);
+    try std.testing.expectEqualStrings("SafeUUID.unknown", try safe.text(a));
+    try std.testing.expect(safe.attribute("value") == .none);
+    try std.testing.expect(!equal(safe, .none).?);
     try std.testing.expectEqualStrings("specified in RFC 4122", first.attribute("variant").string);
     try std.testing.expectEqualStrings("f81d4fae-7dec-11d0-a765-00a0c91e6bf6", try first.text(a));
     try std.testing.expectEqual(@as(usize, 6), first.attribute("fields").tuple.len);

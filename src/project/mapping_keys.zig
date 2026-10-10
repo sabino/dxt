@@ -34,7 +34,7 @@ pub fn hashable(candidate: Value) anyerror!void {
 
 fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
-    if (@import("query_uuid.zig").hex(candidate) != null) return;
+    if (@import("query_uuid.zig").hex(candidate) != null or @import("query_uuid.zig").isSafety(candidate)) return;
     if (expression.isNotImplemented(candidate)) return;
     if (@import("query_memoryview.zig").state(candidate) != null or @import("query_memoryview.zig").chunkIdentity(candidate) != null) return;
     if (@import("query_column.zig").items(candidate) != null) return error.JinjaTypeError;

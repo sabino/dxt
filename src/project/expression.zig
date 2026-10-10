@@ -2157,6 +2157,7 @@ pub fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "sameas")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
         const other = args[0].value;
+        if (@import("query_uuid.zig").isSafety(value) or @import("query_uuid.zig").isSafety(other)) return @import("query_uuid.zig").isSafety(value) and @import("query_uuid.zig").isSafety(other);
         if (isNotImplemented(value) or isNotImplemented(other)) return isNotImplemented(value) and isNotImplemented(other);
         if (@import("query_memoryview.zig").chunkIdentity(value)) |identity| {
             const other_identity = @import("query_memoryview.zig").chunkIdentity(other) orelse return false;
@@ -3003,6 +3004,9 @@ test "genuine cursor UUID equality and dictionary keys exclude integers and text
     const same = try uuids.value(a, "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
     try std.testing.expect(equalValues(first, same));
     try std.testing.expect(!try testValue("sameas", first, &.{.{ .value = same }}));
+    try std.testing.expect(try testValue("sameas", first.attribute("is_safe"), &.{.{ .value = same.attribute("is_safe") }}));
+    try hashableKey(first.attribute("is_safe"));
+    try std.testing.expect(mapping_keys.keyEqual(first.attribute("is_safe"), same.attribute("is_safe")));
     try std.testing.expect(!equalValues(first, first.attribute("int")));
     try std.testing.expect(!equalValues(first, first.attribute("__dxt_rendered")));
     try hashableKey(first);
