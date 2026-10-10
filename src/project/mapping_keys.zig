@@ -34,6 +34,7 @@ pub fn hashable(candidate: Value) anyerror!void {
 
 fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (@import("query_uuid.zig").hex(candidate) != null) return;
     if (expression.isNotImplemented(candidate)) return;
     if (@import("query_memoryview.zig").state(candidate) != null or @import("query_memoryview.zig").chunkIdentity(candidate) != null) return;
     if (@import("query_column.zig").items(candidate) != null) return error.JinjaTypeError;
@@ -82,6 +83,7 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
 }
 
 pub fn keyEqual(left: Value, right: Value) bool {
+    if (@import("query_uuid.zig").equal(left, right)) |matched| return matched;
     if (expression.isNotImplemented(left) or expression.isNotImplemented(right)) return expression.isNotImplemented(left) and expression.isNotImplemented(right);
     if (@import("query_memoryview.zig").state(left) != null or @import("query_memoryview.zig").state(right) != null or @import("query_memoryview.zig").chunkIdentity(left) != null or @import("query_memoryview.zig").chunkIdentity(right) != null) return expression.equalValues(left, right);
     if (@import("query_type.zig").keyEqual(left, right)) |equal| return equal;

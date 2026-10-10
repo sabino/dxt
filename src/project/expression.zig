@@ -1573,6 +1573,7 @@ pub fn valueOrder(allocator: std.mem.Allocator, left: Value, right: Value) !std.
 }
 fn valueOrderDepth(allocator: std.mem.Allocator, left: Value, right: Value, depth: usize) anyerror!std.math.Order {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (try @import("query_uuid.zig").order(left, right)) |matched| return matched;
     if (try @import("query_column.zig").order(allocator, left, right)) |matched| return matched;
     if (decimals.state(left) != null or decimals.state(right) != null) return decimals.order(allocator, left, right);
     if (temporal.hashable(left) or temporal.hashable(right)) return temporal.order(left, right);
@@ -1658,6 +1659,7 @@ fn immutableEqual(left: Value, right: Value) bool {
     return immutableSame(left, right);
 }
 pub fn equalValues(a: Value, b: Value) bool {
+    if (@import("query_uuid.zig").equal(a, b)) |matched| return matched;
     if (isNotImplemented(a) or isNotImplemented(b)) return isNotImplemented(a) and isNotImplemented(b);
     if (@import("query_memoryview.zig").equal(a, b)) |matched| return matched;
     if (@import("query_memoryview.zig").chunkIdentity(a)) |identity| {
@@ -2990,4 +2992,29 @@ test "PostgreSQL buffer views preserve slice format and chunk identity" {
     try std.testing.expect(equalValues(empty, empty_bytes));
     try std.testing.expect(equalValues(empty, empty_unsigned));
     try std.testing.expect(@import("mapping_keys.zig").keyEqual(empty, empty_bytes));
+}
+
+test "genuine cursor UUID equality and dictionary keys exclude integers and text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const uuids = @import("query_uuid.zig");
+    const first = try uuids.value(a, "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+    const same = try uuids.value(a, "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+    try std.testing.expect(equalValues(first, same));
+    try std.testing.expect(!try testValue("sameas", first, &.{.{ .value = same }}));
+    try std.testing.expect(!equalValues(first, first.attribute("int")));
+    try std.testing.expect(!equalValues(first, first.attribute("__dxt_rendered")));
+    try hashableKey(first);
+    const mapping: Value = .{ .object = try a.dupe(Entry, &.{try mapping_keys.create(first, .{ .integer = "7" })}) };
+    try std.testing.expectEqualStrings("7", (try mappingGet(mapping, same)).integer);
+    try std.testing.expect((try mappingGet(mapping, first.attribute("int"))) == .undefined);
+    try std.testing.expect((try mappingGet(mapping, first.attribute("__dxt_rendered"))) == .undefined);
+    try std.testing.expectError(error.JinjaTypeError, valueOrder(a, first, .{ .integer = "0" }));
+    try std.testing.expectError(error.JinjaTypeError, lengthWithHost(a, first, null));
+    try std.testing.expect(!isIterable(first));
+    try std.testing.expect(!try testValue("number", first, &.{}));
+    try std.testing.expect(!try testValue("mapping", first, &.{}));
+    const zero = try uuids.value(a, "00000000-0000-0000-0000-000000000000");
+    try std.testing.expect(zero.truthy());
 }
