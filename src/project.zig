@@ -1489,6 +1489,8 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
         const compilation_started = execution_clock.now(runtime.io);
         compileConcurrentNode(runtime, &graph, &node, db_path, &compilation_dependencies) catch |err| {
             var row = resource.result("error");
+            row.macro_dependencies = try compilation_dependencies.toOwnedSlice(runtime.allocator);
+            row.owns_macro_dependencies = true;
             row.message = try runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource compilation failed");
             row.compile_started_at = compilation_started;
             row.compile_completed_at = execution_clock.now(runtime.io);

@@ -1,4 +1,5 @@
 """Runtime-only direct macro calls retain Core's evaluation order in artifacts."""
+import json
 import pytest
 
 from test_cli import build_dxt
@@ -44,3 +45,17 @@ def test_deferred_loop_filter_keeps_creation_scope_inside_macro(tmp_path, config
     pair.write('models/marts/rendered.sql', "{% set cutoff=3 %}select '{% for value in [1,2,3] if value<cutoff %}{{ value }}:{{ loop_meta(loop) }};{% endfor %}' as value")
     actual, expected = pair.invoke('compile')
     assert actual['nodes']['model.configuration_fixture.rendered']['compiled_code'] == expected['nodes']['model.configuration_fixture.rendered']['compiled_code']
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('command', ['compile', 'run', 'build'])
+def test_macro_calls_reached_before_runtime_error_remain_in_manifest(tmp_path, configuration_oracle, request, adapter, command):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, adapter)
+    pair.write('macros/order.sql', MACROS + "{% macro z_bad() %}{{ missing_global.child }}{% endmacro %}")
+    pair.write('models/marts/rendered.sql', 'select {{ z_bad() if execute else 1 }} as id')
+    pair.invoke(command, success=False)
+    actual, expected = [json.loads((project / 'target/manifest.json').read_text()) for project in pair.projects]
+    # CompileTask leaves its previously written parse manifest after failure;
+    # executable runners publish the reached call in their final manifest.
+    assert actual['nodes']['model.configuration_fixture.rendered']['depends_on']['macros'] == expected['nodes']['model.configuration_fixture.rendered']['depends_on']['macros'] == ([] if command == 'compile' else ['macro.configuration_fixture.z_bad'])
