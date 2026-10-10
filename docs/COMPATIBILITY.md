@@ -176,7 +176,9 @@ performance remain acceptance gates.
 
 Actual Linux x86_64 and ARM full compatibility/install jobs are configured in
 [CI](../.github/workflows/ci.yml) and [release](../.github/workflows/release.yml).
-Remote ARM results remain pending; cross-compilation is not a substitute for
+Actual extracted native installation passes on Linux x86_64 and ARM at the
+published checkpoint. Final complete canonical compatibility results remain
+pending; cross-compilation is not a substitute for
 running the full suite on that architecture. Existing skipped historical
 fixtures do not count as parity evidence.
 
