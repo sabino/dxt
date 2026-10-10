@@ -6,6 +6,13 @@ const Allocator = std.mem.Allocator;
 
 const Key = struct { tag: std.meta.Tag(Value), pointer: usize, length: usize };
 
+fn cachedCharacter(text: []const u8) bool {
+    if (text.len == 0) return true;
+    if (text.len > 2 or (std.unicode.utf8ByteSequenceLength(text[0]) catch return false) != text.len) return false;
+    if ((std.unicode.utf8Decode(text) catch return false) > 255) return false;
+    return @import("expression_identity.zig").cachedString(text).ptr == text.ptr;
+}
+
 pub fn clone(a: Allocator, value: Value, host: ?expression.Host) anyerror!Value {
     var graph: Graph = .{ .allocator = a, .host = host };
     defer graph.memo.deinit(a);
@@ -33,7 +40,7 @@ const Graph = struct {
         switch (value) {
             .string, .integer, .callable => |text| {
                 const canonical = @import("expression_identity.zig").cachedString(text);
-                const copied = if (value == .string and canonical.ptr == text.ptr) canonical else try a.dupe(u8, text);
+                const copied = if (value == .string and cachedCharacter(text)) canonical else try a.dupe(u8, text);
                 const result: Value = switch (value) {
                     .string => .{ .string = copied },
                     .integer => .{ .integer = copied },
@@ -94,11 +101,14 @@ test "owned clone preserves saved receiver aliases after the source arena closes
     var destination = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer destination.deinit();
     const a = destination.allocator();
+    var source_string: usize = 0;
     const copied = blk: {
         var source = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer source.deinit();
         const b = source.allocator();
-        const xs = Value{ .list = try expression.allocateValues(b, 0) };
+        const payload = try b.dupe(u8, "PAYLOAD FROM A CLOSED SOURCE ARENA");
+        source_string = @intFromPtr(payload.ptr);
+        const xs = Value{ .list = try b.dupe(Value, &.{.{ .string = payload }}) };
         const methods = @import("builtin_bound_method.zig");
         const first = (try methods.lookup(b, xs, "append")).?;
         const fresh = (try methods.lookup(b, xs, "append")).?;
@@ -113,6 +123,8 @@ test "owned clone preserves saved receiver aliases after the source arena closes
     const receiver = copied.attribute("receiver");
     const first = copied.attribute("method");
     const fresh = copied.attribute("fresh");
+    try std.testing.expect(@intFromPtr(receiver.list[0].string.ptr) != source_string);
+    try std.testing.expectEqualStrings("PAYLOAD FROM A CLOSED SOURCE ARENA", receiver.list[0].string);
     try std.testing.expect(receiver.list.ptr == first.attribute("__dxt_builtin_receiver").list.ptr);
     try std.testing.expect(receiver.list.ptr == fresh.attribute("__dxt_builtin_receiver").list.ptr);
     try std.testing.expect(first.object.ptr != fresh.object.ptr);
