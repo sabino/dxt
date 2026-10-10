@@ -215,7 +215,7 @@ fn openSessionUncached(runtime: Runtime, graph: *const Graph, db_path: []const u
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
         const conninfo = graph.connection_info orelse return error.MissingPostgresConnection;
         const library = if (runtime.environment) |environment| environment.get("DXT_POSTGRES_LIBRARY") else null;
-        return .{ .postgres = try PostgresConnection.open(runtime.allocator, conninfo, library) };
+        return .{ .postgres = try PostgresConnection.openWithEnvironment(runtime.allocator, conninfo, library, runtime.environment) };
     }
     return error.UnsupportedAdapterExecution;
 }

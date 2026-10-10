@@ -48,9 +48,14 @@ pub const Connection = struct {
     cancellation: Handle,
     last_error: ?[]const u8 = null,
     last_error_position: ?usize = null,
+    environment: ?*const std.process.Environ.Map = null,
 
-    /// conninfo stays in memory; server diagnostic text is never published.
+    /// conninfo and raw server diagnostics stay in memory.
     pub fn open(allocator: std.mem.Allocator, conninfo: []const u8, library_path: ?[]const u8) !Connection {
+        return openWithEnvironment(allocator, conninfo, library_path, null);
+    }
+
+    pub fn openWithEnvironment(allocator: std.mem.Allocator, conninfo: []const u8, library_path: ?[]const u8, environment: ?*const std.process.Environ.Map) !Connection {
         if (std.mem.indexOfScalar(u8, conninfo, 0) != null) return error.InvalidPostgresConnection;
         var library = std.DynLib.open(library_path orelse "libpq.so.5") catch return error.NativePostgresLibraryNotFound;
         errdefer library.close();
@@ -66,7 +71,7 @@ pub const Connection = struct {
         if (api.PQstatus(handle) != 0) return error.PostgresConnectionFailed;
         _ = api.PQsetNoticeProcessor(handle, ignoreNotice, null);
         const cancellation = api.PQgetCancel(handle) orelse return error.PostgresCancellationFailed;
-        return .{ .allocator = allocator, .library = library, .api = api, .handle = handle, .cancellation = cancellation };
+        return .{ .allocator = allocator, .library = library, .api = api, .handle = handle, .cancellation = cancellation, .environment = environment };
     }
 
     pub fn deinit(self: *Connection) void {
@@ -188,10 +193,7 @@ pub const Connection = struct {
                     if (self.api.PQputCopyEnd(self.handle, "COPY streaming requires a dedicated adapter operation") != 1) return error.PostgresExecutionFailed;
                 },
                 else => {
-                    if (self.last_error == null) if (self.api.PQresultErrorField(raw, 'M')) |message| {
-                        const raw_message = std.mem.span(message);
-                        self.last_error = self.allocator.dupe(u8, raw_message[0..@min(raw_message.len, 64 * 1024)]) catch null;
-                    };
+                    if (self.last_error == null) if (self.api.PQresultErrorField(raw, 'M')) |message| self.captureError(std.mem.span(message));
                     if (self.api.PQresultErrorField(raw, 'P')) |position| self.last_error_position = std.fmt.parseUnsigned(usize, std.mem.span(position), 10) catch null;
                     const state = self.api.PQresultErrorField(raw, 'C');
                     if (failed == null) failed = classifySqlState(if (state) |code| std.mem.span(code) else null);
@@ -206,6 +208,13 @@ pub const Connection = struct {
         if (self.last_error) |message| self.allocator.free(message);
         self.last_error = null;
         self.last_error_position = null;
+    }
+
+    fn captureError(self: *Connection, message: []const u8) void {
+        self.clearError();
+        var bounded: [64 * 1024]u8 = undefined;
+        const used = @import("secret_projection.zig").writeBounded(&bounded, self.environment, &.{message});
+        self.last_error = self.allocator.dupe(u8, bounded[0..used]) catch null;
     }
 
     pub fn execute(self: *Connection, sql: []const u8) !void {
@@ -303,4 +312,32 @@ test "SQLSTATE retry classification requires a known server rejection" {
     try std.testing.expectEqual(error.AdapterQueryCancelled, classifySqlState("57014"));
     try std.testing.expectEqual(error.PostgresExecutionFailed, classifySqlState("08006"));
     try std.testing.expectEqual(error.PostgresExecutionFailed, classifySqlState(null));
+}
+
+test "PostgreSQL raw diagnostic capture retains complete secrets for publication safely under OOM" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, diagnosticCaptureProof, .{});
+}
+
+fn diagnosticCaptureProof(allocator: std.mem.Allocator) !void {
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    const secret = "private_engine_error";
+    try environment.put("DBT_ENV_SECRET_ENGINE", secret);
+    // This capture seam needs neither libpq nor a database connection.
+    var connection: Connection = .{ .allocator = allocator, .library = undefined, .api = undefined, .handle = null, .cancellation = null, .environment = &environment };
+    defer connection.clearError();
+    var message: [100000]u8 = undefined;
+    for (0..5000) |index| @memcpy(message[index * secret.len ..][0..secret.len], secret);
+    connection.captureError(&message);
+    const raw = connection.last_error orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@as(usize, 65520), raw.len);
+    try std.testing.expectEqualStrings(message[0..65520], raw);
+    const published = try @import("secret_projection.zig").text(allocator, &environment, raw);
+    defer allocator.free(published);
+    try std.testing.expectEqual(@as(usize, 16380), published.len);
+    for (published) |byte| try std.testing.expectEqual(@as(u8, '*'), byte);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(published));
+    for (0..5000) |index| try std.testing.expectEqualStrings(secret, message[index * secret.len ..][0..secret.len]);
+    connection.clearError();
+    try std.testing.expect(connection.last_error == null);
 }

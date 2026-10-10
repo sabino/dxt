@@ -396,8 +396,8 @@ pub const Connection = struct {
     disable_transactions: bool = false,
     retry_profile: std.json.Value = .null,
     last_error_type: u32 = 0,
-    // Raw SQL diagnostics are memory-only. Public formatters must redact
-    // connection paths and secret values before publishing their projection.
+    // Raw SQL diagnostics remain bounded and memory-only. Retain declared
+    // secret values atomically for the existing publication projector.
     last_error: ?[]const u8 = null,
     cancellation_token: ?*const std.atomic.Value(bool) = null,
 
@@ -621,7 +621,9 @@ pub const Connection = struct {
         if (message) |text| {
             const value = std.mem.span(text);
             self.last_error_type = messageErrorType(value);
-            self.last_error = self.allocator.dupe(u8, value[0..@min(value.len, 64 * 1024)]) catch null;
+            var bounded: [64 * 1024]u8 = undefined;
+            const used = @import("secret_projection.zig").writeBounded(&bounded, self.pool.environment, &.{value});
+            self.last_error = self.allocator.dupe(u8, bounded[0..used]) catch null;
         }
     }
 
@@ -752,4 +754,41 @@ fn duckdbKind(type_id: u32) result.Kind {
         17, 27 => .text,
         else => .other,
     };
+}
+
+test "DuckDB raw diagnostic capture bounds complete secrets before publication and remains safe under OOM" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, diagnosticCaptureProof, .{});
+}
+
+fn diagnosticCaptureProof(allocator: std.mem.Allocator) !void {
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    const secret = "private_engine_error";
+    try environment.put("DBT_ENV_SECRET_ENGINE", secret);
+    var pool = Pool.init(std.testing.allocator, std.testing.io, &environment);
+    defer pool.deinit();
+    // Capture uses no driver calls; no native library is needed for this seam.
+    var connection: Connection = .{ .api = undefined, .handle = null, .allocator = allocator, .readonly = false, .pool = &pool, .database = undefined, .memory = true };
+    defer connection.clearError();
+    const prefix = "Invalid Input Error: ";
+    var message: [prefix.len + 100000:0]u8 = undefined;
+    @memcpy(message[0..prefix.len], prefix);
+    for (0..5000) |index| @memcpy(message[prefix.len + index * secret.len ..][0..secret.len], secret);
+    message[message.len] = 0;
+    connection.captureError(&message);
+    try std.testing.expectEqual(@as(u32, 32), connection.last_error_type);
+    const raw = connection.last_error orelse return error.OutOfMemory;
+    const safe_length = prefix.len + (65536 - prefix.len) / secret.len * secret.len;
+    try std.testing.expectEqual(@as(usize, safe_length), raw.len);
+    try std.testing.expectEqualStrings(message[0..safe_length], raw);
+    const published = try @import("secret_projection.zig").text(allocator, &environment, raw);
+    defer allocator.free(published);
+    try std.testing.expectEqual(@as(usize, prefix.len + (safe_length - prefix.len) / secret.len * 5), published.len);
+    try std.testing.expect(std.mem.startsWith(u8, published, prefix));
+    for (published[prefix.len..]) |byte| try std.testing.expectEqual(@as(u8, '*'), byte);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(published));
+    for (0..5000) |index| try std.testing.expectEqualStrings(secret, message[prefix.len + index * secret.len ..][0..secret.len]);
+    connection.captureError(null);
+    try std.testing.expect(connection.last_error == null);
+    try std.testing.expectEqual(@as(u32, 0), connection.last_error_type);
 }

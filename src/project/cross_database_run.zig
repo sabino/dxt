@@ -382,7 +382,7 @@ pub fn open(runtime: Runtime, root: []const u8, connection: cross.Connection) !a
         return .{ .duckdb = (try runtime.duckdb_pool.?.acquire(path, false)) orelse return error.NativeDuckDbLibraryNotFound };
     }
     const library = if (runtime.environment) |env| env.get("DXT_POSTGRES_LIBRARY") else null;
-    return .{ .postgres = try adapter.PostgresConnection.open(runtime.allocator, connection.identity.connection_info orelse return error.MissingPostgresConnection, library) };
+    return .{ .postgres = try adapter.PostgresConnection.openWithEnvironment(runtime.allocator, connection.identity.connection_info orelse return error.MissingPostgresConnection, library, runtime.environment) };
 }
 
 pub fn configure(runtime: Runtime, session: *adapter.Session, budget: cross.Budget, spill: []const u8) !void {

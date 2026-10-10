@@ -5,6 +5,87 @@ const Allocator = std.mem.Allocator;
 const Environment = std.process.Environ.Map;
 const mask = "*****";
 
+/// Retain bounded raw diagnostics for the existing publication projector.
+/// Parts form one byte stream; complete declared secrets and UTF-8 codepoints
+/// are copied atomically. Stop before a secret that cannot fit in full, so the
+/// later complete-value projector never receives a prefix created by this cap.
+/// Invalid ordinary UTF-8 ends the useful prefix. Inputs must not alias output.
+pub fn writeBounded(output: []u8, environment: ?*const Environment, parts: []const []const u8) usize {
+    var input: Parts = .{ .items = parts };
+    var used: usize = 0;
+    while (used < output.len) {
+        var matched: []const u8 = "";
+        if (environment) |env| {
+            var entries = env.iterator();
+            while (entries.next()) |entry| {
+                const value = entry.value_ptr.*;
+                if (value.len > matched.len and std.mem.startsWith(u8, entry.key_ptr.*, "DBT_ENV_SECRET_") and
+                    std.mem.trim(u8, value, " \t\r\n\x0b\x0c").len != 0 and input.startsWith(value)) matched = value;
+            }
+        }
+        if (matched.len != 0) {
+            if (output.len - used < matched.len or !std.unicode.utf8ValidateSlice(matched)) break;
+            @memcpy(output[used..][0..matched.len], matched);
+            used += matched.len;
+            input.skip(matched.len);
+            continue;
+        }
+        var next = input;
+        var codepoint: [4]u8 = undefined;
+        codepoint[0] = next.byte() orelse break;
+        const length = std.unicode.utf8ByteSequenceLength(codepoint[0]) catch break;
+        for (codepoint[1..length]) |*byte| byte.* = next.byte() orelse return used;
+        if (!std.unicode.utf8ValidateSlice(codepoint[0..length]) or output.len - used < length) break;
+        @memcpy(output[used..][0..length], codepoint[0..length]);
+        used += length;
+        input = next;
+    }
+    return used;
+}
+
+const Parts = struct {
+    items: []const []const u8,
+    index: usize = 0,
+    offset: usize = 0,
+
+    fn normalize(self: *Parts) void {
+        while (self.index < self.items.len and self.offset == self.items[self.index].len) {
+            self.index += 1;
+            self.offset = 0;
+        }
+    }
+    fn byte(self: *Parts) ?u8 {
+        self.normalize();
+        if (self.index == self.items.len) return null;
+        const value = self.items[self.index][self.offset];
+        self.offset += 1;
+        return value;
+    }
+    fn startsWith(self: Parts, value: []const u8) bool {
+        var cursor = self;
+        var consumed: usize = 0;
+        while (consumed < value.len) {
+            cursor.normalize();
+            if (cursor.index == cursor.items.len) return false;
+            const part = cursor.items[cursor.index][cursor.offset..];
+            const count = @min(part.len, value.len - consumed);
+            if (!std.mem.eql(u8, part[0..count], value[consumed..][0..count])) return false;
+            cursor.offset += count;
+            consumed += count;
+        }
+        return true;
+    }
+    fn skip(self: *Parts, length: usize) void {
+        var remaining = length;
+        while (remaining != 0) {
+            self.normalize();
+            const count = @min(self.items[self.index].len - self.offset, remaining);
+            self.offset += count;
+            remaining -= count;
+        }
+    }
+};
+
 pub fn text(allocator: Allocator, environment: ?*const Environment, input: []const u8) ![]const u8 {
     var secrets = try values(allocator, environment);
     defer secrets.deinit(allocator);
@@ -205,4 +286,107 @@ fn projectionAllocationProof(allocator: Allocator) !void {
     const empty = try text(allocator, null, "");
     defer allocator.free(empty);
     try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+test "bounded raw capture keeps complete longest secrets across part and output boundaries" {
+    var environment = Environment.init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("DBT_ENV_SECRET_SHORT", "abc");
+    try environment.put("DBT_ENV_SECRET_LONG", "abcdef");
+    try environment.put("DBT_ENV_SECRET_EMPTY", "");
+    try environment.put("DBT_ENV_SECRET_BLANK", " \t\n");
+    try environment.put("ORDINARY_VALUE", "visible");
+    var output: [32]u8 = @splat(0xaa);
+    const parts: []const []const u8 = &.{ "pre abc", "", "d", "ef post" };
+    var used = writeBounded(&output, &environment, parts);
+    try std.testing.expectEqualStrings("pre abcdef post", output[0..used]);
+    try std.testing.expectEqual(@as(u8, 0xaa), output[used]);
+    try std.testing.expectEqualStrings("pre abc", parts[0]);
+    used = writeBounded(output[0..8], &environment, parts);
+    try std.testing.expectEqualStrings("pre ", output[0..used]);
+    used = writeBounded(output[0..9], &environment, parts);
+    try std.testing.expectEqualStrings("pre ", output[0..used]);
+    used = writeBounded(output[0..10], &environment, parts);
+    try std.testing.expectEqualStrings("pre abcdef", output[0..used]);
+    used = writeBounded(output[0..3], &environment, &.{ "ab", "cde", "fx" });
+    try std.testing.expectEqual(@as(usize, 0), used);
+    used = writeBounded(&output, &environment, &.{ "ab", "cde", "fx" });
+    try std.testing.expectEqualStrings("abcdefx", output[0..used]);
+    used = writeBounded(&output, &environment, &.{"visible \t\n abcde"});
+    try std.testing.expectEqualStrings("visible \t\n abcde", output[0..used]);
+    used = writeBounded(output[0..4], &environment, &.{"visible"});
+    try std.testing.expectEqualStrings("visi", output[0..used]);
+    used = writeBounded(output[0..1], &environment, &.{" \t\n"});
+    try std.testing.expectEqualStrings(" ", output[0..used]);
+    try environment.put("DBT_ENV_SECRET_STARS", "*");
+    used = writeBounded(&output, &environment, &.{ "*", "" });
+    try std.testing.expectEqualStrings("*", output[0..used]);
+    const published = try text(std.testing.allocator, &environment, output[0..used]);
+    defer std.testing.allocator.free(published);
+    try std.testing.expectEqualStrings("*****", published);
+    try environment.put("DBT_ENV_SECRET_SPACED", " abc ");
+    used = writeBounded(&output, &environment, &.{ "x ", "ab", "c y" });
+    try std.testing.expectEqualStrings("x abc y", output[0..used]);
+    used = writeBounded(output[0..4], &environment, &.{ "x ", "ab", "c y" });
+    try std.testing.expectEqualStrings("x", output[0..used]);
+}
+
+test "bounded raw capture leaves ordinary incomplete prefixes and valid UTF-8 prefixes intact" {
+    var environment = Environment.init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("DBT_ENV_SECRET_ENGINE", "private_engine_error");
+    var output: [32]u8 = undefined;
+    var used = writeBounded(&output, &environment, &.{ "private_", "engine" });
+    try std.testing.expectEqualStrings("private_engine", output[0..used]);
+    used = writeBounded(output[0..7], &environment, &.{ "private_", "engine" });
+    try std.testing.expectEqualStrings("private", output[0..used]);
+    used = writeBounded(output[0..7], &environment, &.{ "private_", "engine_error" });
+    try std.testing.expectEqual(@as(usize, 0), used);
+    for (2..4) |capacity| {
+        used = writeBounded(output[0..capacity], null, &.{ "a\xe9", "\x9b", "\xaa b" });
+        try std.testing.expectEqualStrings("a", output[0..used]);
+    }
+    used = writeBounded(output[0..4], null, &.{ "a\xe9", "\x9b", "\xaa b" });
+    try std.testing.expectEqualStrings("a雪", output[0..used]);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(output[0..used]));
+    used = writeBounded(output[0..3], null, &.{ "\xf0\x9f", "\x98\x80" });
+    try std.testing.expectEqual(@as(usize, 0), used);
+    used = writeBounded(output[0..4], null, &.{ "\xf0\x9f", "\x98\x80" });
+    try std.testing.expectEqualStrings("😀", output[0..used]);
+    used = writeBounded(&output, null, &.{ "ok\xff", "tail" });
+    try std.testing.expectEqualStrings("ok", output[0..used]);
+    used = writeBounded(&output, null, &.{ "ok\xe9", "\x9b" });
+    try std.testing.expectEqualStrings("ok", output[0..used]);
+    try environment.put("DBT_ENV_SECRET_MULTILINE", "雪\nsecret");
+    used = writeBounded(&output, &environment, &.{ "\xe9", "\x9b\xaa\ns", "ecret" });
+    try std.testing.expectEqualStrings("雪\nsecret", output[0..used]);
+    try environment.put("DBT_ENV_SECRET_INVALID", "\xff");
+    used = writeBounded(&output, &environment, &.{ "\xff", "ok" });
+    try std.testing.expectEqual(@as(usize, 0), used);
+    try std.testing.expectEqual(@as(usize, 0), writeBounded(&.{}, &environment, &.{"secret"}));
+    try std.testing.expectEqual(@as(usize, 0), writeBounded(&output, null, &.{}));
+    try std.testing.expectEqual(@as(usize, 0), writeBounded(&output, null, &.{ "", "" }));
+}
+
+test "bounded raw capture leaves no cut secret prefix in a 95000 byte error at the 64 KiB limit" {
+    var environment = Environment.init(std.testing.allocator);
+    defer environment.deinit();
+    const secret = "private_engine_error";
+    try environment.put("DBT_ENV_SECRET_ENGINE", secret);
+    var input: [95000]u8 = undefined;
+    for (0..4750) |index| @memcpy(input[index * secret.len ..][0..secret.len], secret);
+    var output: [65536]u8 = @splat(0xaa);
+    const used = writeBounded(&output, &environment, &.{ input[0..65536], input[65536..] });
+    try std.testing.expectEqual(@as(usize, 65520), used);
+    try std.testing.expectEqualStrings(input[0..used], output[0..used]);
+    const published = try text(std.testing.allocator, &environment, output[0..used]);
+    defer std.testing.allocator.free(published);
+    try std.testing.expectEqual(@as(usize, 16380), published.len);
+    for (published) |byte| try std.testing.expectEqual(@as(u8, '*'), byte);
+    try std.testing.expectEqual(@as(u8, 0xaa), output[used]);
+    for (0..4750) |index| try std.testing.expectEqualStrings(secret, input[index * secret.len ..][0..secret.len]);
+    // A complete declared value can itself be larger than the raw bound.
+    try environment.put("DBT_ENV_SECRET_FULL", &input);
+    const full_used = writeBounded(output[0..5], &environment, &.{ input[0..7], "", input[7..] });
+    try std.testing.expectEqual(@as(usize, 0), full_used);
 }
