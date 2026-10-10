@@ -33,17 +33,23 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 
 ### Full Usability Implementation Campaign
 
-The latest combined unchanged public PostgreSQL dbt-utils candidate passes all seven
-commands, complete artifact schemas, resource/config/dependency identities,
-every compiled SQL resource, catalog columns and every typed relation row.
-The developer gate fixes realtime only inside its isolated fixture process
-tree so volatile views are compared at the same instant; monotonic clocks
-remain real and deliberately different rows still fail. No authored source,
-SQL or comparison value is rewritten. Jaffle and native/safety jobs are green
-on the published checkpoint, along with native archive installation on Linux
-x86_64 and ARM. The complete canonical compatibility jobs remain in progress.
+The integrated typed cursor/range candidate passes 776 native tests and 463
+strict Core comparisons. Final unchanged PostgreSQL dbt-utils and Jaffle
+acceptance exposed one shared consumer regression: stock test materializations
+still require list column names after Agate correctly publishes a tuple.
+The supervisor owns the bounded test-result consumer correction; independent
+workers audit related consumers before the complete canonical run and repeat
+both unchanged public-project ladders on the corrected frozen CLI. Earlier
+passing public/release receipts remain historical evidence, not certification
+of this candidate. Native release installation, performance and both actual
+architecture CI runs remain mandatory.
 
-The latest published checkpoint passes all three reported Actions jobs: the
+Two independent consumer audits find no further production list-only mismatch.
+The empty-table constructor also publishes tuple column names, matching the
+pinned Core empty Agate witness; fetched and seed tables already do so. Existing
+real build/test/public-project checks validate these bounded integration fixes.
+
+An earlier published checkpoint passes all three reported Actions jobs: the
 unchanged public PostgreSQL package, all six public Jaffle commands and the
 native Zig/safety checks. Exact cold/warm performance, snapshots and extracted
 installation on both architectures also pass. The developer-only clock fixture
@@ -161,7 +167,9 @@ the CLI build, 36 strict returned-range comparisons and 62 Decimal comparisons
 pass on its immutable candidate. Independent review confirms arena lifetime,
 genuine class recognition and stock numeric/temporal inference; every integrated
 native source byte matches that candidate. The combined 365 query/UUID/seed/alias
-rerun remains active on the same CLI. Fresh main is unchanged and the branch is
+rerun passes in 636.68 seconds on the same CLI, bringing the complete focused
+certificate to 463 comparisons with zero failures, errors or skips. Fresh main
+is unchanged and the branch is
 rebased before final validation. The final unfiltered canonical collection has
 5,622 cases; its real driver/browser fixtures, zero-skip report and clean shared
 CLI/native-test build remain mandatory. The supervisor owns this whole-tree

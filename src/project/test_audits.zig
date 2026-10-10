@@ -158,12 +158,18 @@ pub fn executeNodeWithArtifacts(runtime: types.Runtime, graph: *const types.Grap
     const rows = main.attribute("data");
     if (rows != .list or rows.list.len != 1 or rows.list[0] != .list or rows.list[0].list.len != 3) return error.InvalidTestResult;
     const row = rows.list[0].list;
-    const names = main.attribute("table").attribute("column_names");
-    if (names != .list or names.list.len != 3) return error.InvalidTestResult;
+    const column_names = main.attribute("table").attribute("column_names");
+    // Agate exposes column_names as a tuple; retained custom tables may use a list.
+    const names = switch (column_names) {
+        .tuple => column_names.tuple,
+        .list => column_names.list,
+        else => return error.InvalidTestResult,
+    };
+    if (names.len != 3) return error.InvalidTestResult;
     var failures: ?usize = null;
     var warn: ?usize = null;
     var err: ?usize = null;
-    for (names.list, 0..) |name, index| {
+    for (names, 0..) |name, index| {
         if (name != .string) return error.InvalidTestResult;
         if (std.ascii.eqlIgnoreCase(name.string, "failures")) failures = index;
         if (std.ascii.eqlIgnoreCase(name.string, "should_warn")) warn = index;

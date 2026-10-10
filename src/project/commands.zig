@@ -852,7 +852,7 @@ pub const OperationHost = struct {
             .{ .key = "__dxt_iterable", .value = empty },
             .{ .key = "__dxt_data", .value = empty },
             .{ .key = "rows", .value = empty },
-            .{ .key = "column_names", .value = empty },
+            .{ .key = "column_names", .value = .{ .tuple = &.{} } },
             .{ .key = "columns", .value = try self.mappedSequence(&.{}, &.{}) },
         }) };
     }
