@@ -487,6 +487,7 @@ pub const ResolvedIdentity = struct {
 };
 
 pub const Node = struct {
+    build_path: ?[]const u8 = null,
     resolved_identity: ?ResolvedIdentity = null,
     hook_index: ?usize = null,
     hook_checksum: ?[32]u8 = null,
@@ -961,6 +962,7 @@ pub fn deinitDispatchConfigs(allocator: std.mem.Allocator, configs: *std.ArrayLi
 }
 
 pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
+    if (node.build_path) |path| allocator.free(path);
     if (node.resolved_identity) |*identity| identity.deinit(allocator);
     config_value.deinit(allocator, &node.version);
     config_value.deinit(allocator, &node.latest_version);

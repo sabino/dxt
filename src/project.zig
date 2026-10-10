@@ -1371,6 +1371,7 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
     for (summary.rows) |row| {
         if (row.node) |original| {
             const node = @constCast(original);
+            try @import("project/resource_artifacts.zig").publish(runtime.allocator, node, row.build_path);
             for (row.macro_dependencies) |id| try util.appendUnique(runtime.allocator, &node.macro_depends_on, id);
             if (row.compiled_code) |sql| {
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
@@ -1853,7 +1854,10 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
         try executed.append(runtime.allocator, row);
         return std.mem.eql(u8, row.status, "success");
     }
-    const execution = @import("project/materialization_runtime.zig").executeReturning(runtime, db_path, graph, node);
+    var build_path: ?[]const u8 = null;
+    const previous_rows = executed.items.len;
+    defer transferResourceBuildPath(runtime.allocator, executed, previous_rows, build_path);
+    const execution = @import("project/materialization_runtime.zig").executeReturningWithArtifacts(runtime, db_path, graph, node, &build_path);
     const response = execution catch |err| switch (err) {
         error.ModelContractMismatch, error.ContractColumnTypeMissing => {
             const message = if (@import("project/compile_diagnostics.zig").message(err)) |text| try runtime.allocator.dupe(u8, text) else try std.fmt.allocPrint(runtime.allocator, "Model contract failed: {s}", .{@errorName(err)});
@@ -1877,7 +1881,10 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
 
 fn executeSeedAppendingResult(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node, executed: *std.ArrayList(run_results.NodeResult)) !bool {
     _ = project_dir;
-    const response = @import("project/materialization_runtime.zig").executeReturning(runtime, db_path, graph, node) catch |err| switch (err) {
+    var build_path: ?[]const u8 = null;
+    const previous_rows = executed.items.len;
+    defer transferResourceBuildPath(runtime.allocator, executed, previous_rows, build_path);
+    const response = @import("project/materialization_runtime.zig").executeReturningWithArtifacts(runtime, db_path, graph, node, &build_path) catch |err| switch (err) {
         error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.CannotSeedView => {
             try appendExecutionErrorResult(runtime.allocator, executed, node);
             return false;
@@ -1890,6 +1897,16 @@ fn executeSeedAppendingResult(runtime: Runtime, db_path: []const u8, project_dir
     };
     try executed.append(runtime.allocator, if (response) |result| result.row(node) else .{ .node = node });
     return true;
+}
+
+fn transferResourceBuildPath(allocator: std.mem.Allocator, rows: *std.ArrayList(run_results.NodeResult), previous_rows: usize, path: ?[]const u8) void {
+    const owned = path orelse return;
+    if (rows.items.len > previous_rows) {
+        const row = &rows.items[rows.items.len - 1];
+        if (row.owns_build_path) if (row.build_path) |old| allocator.free(old);
+        row.build_path = owned;
+        row.owns_build_path = true;
+    } else allocator.free(owned);
 }
 
 fn appendMaterializationErrorResult(allocator: std.mem.Allocator, executed: *std.ArrayList(run_results.NodeResult), node: *const Node, err: anyerror) !void {

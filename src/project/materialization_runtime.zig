@@ -12,6 +12,7 @@ pub const BodyExecutor = struct {
     context: *anyopaque,
     execute: *const fn (*anyopaque, types.Runtime, *const types.Graph, *const types.Node, []const u8, duckdb.ExecutionPolicy) anyerror!void,
     materialized: ?[]const u8 = null,
+    build_path: ?*?[]const u8 = null,
 };
 
 pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node) !void {
@@ -19,10 +20,14 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
 }
 
 pub fn executeReturning(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node) !?@import("materialization_result.zig").Result {
-    if (try @import("custom_materialization.zig").custom(graph, node)) |macro| return try @import("custom_materialization.zig").execute(runtime, db_path, graph, node, macro);
+    return executeReturningWithArtifacts(runtime, db_path, graph, node, null);
+}
+
+pub fn executeReturningWithArtifacts(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node, build_path: ?*?[]const u8) !?@import("materialization_result.zig").Result {
+    if (try @import("custom_materialization.zig").custom(graph, node)) |macro| return try @import("custom_materialization.zig").executeWithArtifacts(runtime, db_path, graph, node, macro, build_path);
     var response: ?@import("materialization_result.zig").Result = null;
     errdefer if (response) |result| result.deinit(runtime.allocator);
-    try executeWithBody(runtime, db_path, graph, node, .{ .context = &response, .execute = stockBody });
+    try executeWithBody(runtime, db_path, graph, node, .{ .context = &response, .execute = stockBody, .build_path = build_path });
     return response;
 }
 
@@ -39,6 +44,7 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
     defer output.deinit();
     var host = try commands.OperationHost.init(held_runtime, &runtime_graph, db_path, &output.writer);
     defer host.deinit();
+    errdefer @import("resource_artifacts.zig").capture(runtime.allocator, body.build_path, host.written_path) catch {};
     var journal = @import("materialization_journal.zig").Journal.init(runtime.allocator, runtime.io);
     defer journal.deinit();
     errdefer switch (held_runtime.adapter_session.?.*) {
@@ -63,8 +69,9 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
     }
     try runHooks(allocator, &runtime_graph, node, config, "pre-hook", false);
     if (body.materialized == null and try @import("postgres_materialization.zig").skipsInnerLifecycle(held_runtime, &runtime_graph, node, existing_type)) {
-        try body.execute(body.context, held_runtime, &runtime_graph, node, db_path, .{ .manage_transaction = false, .file_effects = &journal });
+        try body.execute(body.context, held_runtime, &runtime_graph, node, db_path, .{ .manage_transaction = false, .file_effects = &journal, .artifact_writer = .{ .context = &host, .write = writeStockMain } });
         try runHooks(allocator, &runtime_graph, node, config, "post-hook", false);
+        try @import("resource_artifacts.zig").capture(runtime.allocator, body.build_path, host.written_path);
         return;
     }
     try host.begin();
@@ -72,7 +79,7 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
     errdefer |err| if (host.lastError()) |message| @import("compile_diagnostics.zig").captureError(node.original_file_path, node.name, message, err);
     try runHooks(allocator, &runtime_graph, node, config, "pre-hook", true);
     if (@import("contracts.zig").enforced(node)) _ = try compiler.renderMacroForNode(allocator, &runtime_graph, node, "get_assert_columns_equivalent", &.{.{ .name = "sql", .value = .{ .string = duckdb.trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution) } }});
-    try body.execute(body.context, held_runtime, &runtime_graph, node, db_path, .{ .manage_transaction = false, .file_effects = &journal });
+    try body.execute(body.context, held_runtime, &runtime_graph, node, db_path, .{ .manage_transaction = false, .file_effects = &journal, .artifact_writer = .{ .context = &host, .write = writeStockMain } });
     const post_hooks_first = std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, materialized, "table");
     if (post_hooks_first) try runHooks(allocator, &runtime_graph, node, config, "post-hook", true);
     try applyRelationConfig(allocator, &runtime_graph, node, config, target, existing, materialized);
@@ -81,6 +88,7 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
     try host.commit();
     try journal.finalize();
     try runHooks(allocator, &runtime_graph, node, config, "post-hook", false);
+    try @import("resource_artifacts.zig").capture(runtime.allocator, body.build_path, host.written_path);
 }
 
 fn applyRelationConfig(allocator: std.mem.Allocator, graph: *const types.Graph, node: *const types.Node, config: std.json.Value, target: @import("dbt_context.zig").RelationDef, existing: @import("expression.zig").Value, materialized: []const u8) !void {
@@ -111,4 +119,12 @@ fn stockBody(raw: *anyopaque, runtime: types.Runtime, graph: *const types.Graph,
     if (std.mem.eql(u8, node.resource_type, "seed")) return duckdb.executeSeedWithPolicy(runtime, db_path, graph.command_options.project_dir, graph, node, observed);
     if (std.mem.eql(u8, node.resource_type, "snapshot")) return @import("snapshot_runner.zig").executeWithPolicy(runtime, db_path, graph, node, observed);
     return duckdb.executeModelWithPolicy(runtime, db_path, graph, node, observed);
+}
+
+fn writeStockMain(raw: *anyopaque, node: *const types.Node, sql: []const u8) anyerror!void {
+    const host: *commands.OperationHost = @ptrCast(@alignCast(raw));
+    const hooks = host.host();
+    const previous = hooks.set_node.?(hooks.context, node);
+    defer _ = hooks.set_node.?(hooks.context, previous);
+    _ = try hooks.call(hooks.context, "write", &.{.{ .name = "payload", .value = .{ .string = sql } }}, host.runtime.allocator);
 }

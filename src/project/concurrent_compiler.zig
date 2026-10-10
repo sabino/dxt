@@ -53,6 +53,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
     var transferred: usize = 0;
     defer for (summary.rows[transferred..]) |row| freeResult(runtime.allocator, row);
     for (summary.rows, 0..) |row, index| {
+        if (row.node) |node| try @import("resource_artifacts.zig").publish(runtime.allocator, @constCast(node), row.build_path);
         if (row.test_node) |node| try @import("test_provenance.zig").publishBuildPath(runtime.allocator, @constCast(node), row.build_path);
         if (row.singular_test_node) |node| try @import("test_provenance.zig").publishBuildPath(runtime.allocator, @constCast(node), row.build_path);
         if (row.node) |original| for (row.macro_dependencies) |id| try @import("util.zig").appendUnique(runtime.allocator, &@constCast(original).macro_depends_on, id);

@@ -80,6 +80,10 @@ pub fn supports(graph: *const types.Graph, node: *const types.Node) !bool {
 }
 
 pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node, macro: *const types.MacroDef) !Result {
+    return executeWithArtifacts(runtime, db_path, graph, node, macro, null);
+}
+
+pub fn executeWithArtifacts(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node, macro: *const types.MacroDef, build_path: ?*?[]const u8) !Result {
     if (!corePackage(macro.package_name) and !std.mem.eql(u8, macro.package_name, graph.project_name) and !explicitOverrides(graph)) {
         for (graph.macros.items) |*builtin| if (candidate(graph, node, builtin)) |found| {
             if (found.locality == 1) {
@@ -100,6 +104,7 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
     defer output.deinit();
     var host = try commands.OperationHost.init(held_runtime, &runtime_graph, db_path, &output.writer);
     defer host.deinit();
+    errdefer @import("resource_artifacts.zig").capture(runtime.allocator, build_path, host.written_path) catch {};
     host.log_events = graph.log_collector;
     runtime_graph.execution_hooks = host.host();
     // Preserve an actual server error before host teardown rolls back the
@@ -129,6 +134,7 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
         @import("compile_diagnostics.zig").captureError(node.original_file_path, node.name, "main is not being called during running model", error.MissingMaterializationMain);
         return error.MissingMaterializationMain;
     };
+    try @import("resource_artifacts.zig").capture(runtime.allocator, build_path, host.written_path);
     return try @import("materialization_result.zig").fromValue(runtime.allocator, main.attribute("response"));
 }
 
