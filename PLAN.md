@@ -33,6 +33,27 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 
 ### Full Usability Implementation Campaign
 
+The final unfiltered 5,626-case candidate run was intentionally interrupted
+after its first failure was grounded: a fixture rendered a dictionary created
+from a salted Python set, whose iteration order changes with PYTHONHASHSEED.
+The source worker owns only the deterministic fixture correction and retains
+both original Core orders. Using the standard dictsort filter then exposed a
+confirmed missing native filter. The expression worker owns a focused filter
+helper, one dispatcher branch, native allocation/ordering tests and a disjoint
+actual Core fixture module; it reuses existing argument binding, genuine items
+dispatch, Unicode lower and value ordering. The supervisor owns integration and
+will restart the entire unfiltered canonical suite after focused certification.
+No test selection, assertion or schema check is weakened. The interrupted run
+and its failure remain recoverable and cannot count as final acceptance.
+
+The preceding candidate passes both unchanged public-project ladders and the
+original autocommit check. Its actual x86_64 and ARM native/install CI jobs,
+all 776 native tests, 326 Python 3.11 cases, snapshots and performance pass.
+Its independent ReleaseSafe archive is deterministic, both extracted adapters
+work with PATH empty, the unchanged 70,000-binding seed passes and every
+250-model cold/warm comparison meets its budget. These receipts remain scoped
+to that candidate; the dictsort integration requires final recertification.
+
 The integrated typed cursor/range candidate passes 776 native tests and 463
 strict Core comparisons. Final unchanged PostgreSQL dbt-utils and Jaffle
 acceptance exposed one shared consumer regression: stock test materializations
