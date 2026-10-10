@@ -661,6 +661,13 @@ def test_metric_cross_database_query_uses_reviewed_native_plan(cross_metric_proj
 def test_metric_cross_database_failures_are_bounded_and_leave_no_stages(cross_metric_project, flags, diagnostic):
     from test_usability_commands import query
     project, configuration, server = cross_metric_project
+    if diagnostic == 'CrossDatabaseRowBudgetExceeded':
+        import psycopg2
+        # Keep the declared estimate below the limit, but move six actual source
+        # rows. Destination-local result rows do not consume a movement budget.
+        with psycopg2.connect(server.get_uri()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("insert into analytics.customers values(4,'CA','private'),(5,'AU','private'),(6,'NZ','private')")
     result = run_dxt(project, 'metric', 'query', '--metrics', 'revenue', '--group-by', 'customer__country', *flags)
     assert result.returncode != 0, result.stderr
     assert diagnostic in result.stderr, result.stderr
