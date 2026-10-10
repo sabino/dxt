@@ -61,6 +61,17 @@ fresh unfiltered collection contains 5,760 tests. Product-source edits are now
 held while the worker certifies all 134 actual Core filter comparisons and the
 corrected base-context and quiet-log fixtures on its frozen native CLI.
 
+All 782 native tests, 134 actual Core filter pairs and three original fixture
+checks pass. Both unchanged public ladders and eight shorter Actions jobs pass
+on that candidate. A bounded two-case follow-up then confirms the existing
+standard sort filter shares the same ascending/reverse unordered-float bug.
+The complete 5,760-case run is intentionally stopped with its partial evidence
+retained. The expression worker owns only standard sort routing to the already
+certified adaptive helper, original reverse/tie behavior and disjoint regression
+fixtures; the supervisor owns integration and restarts the whole suite. The
+earlier native/public/install receipts remain candidate-specific. No other
+provider or feature family is broadened by this correction.
+
 The preceding candidate passes both unchanged public-project ladders and the
 original autocommit check. Its actual x86_64 and ARM native/install CI jobs,
 all 776 native tests, 326 Python 3.11 cases, snapshots and performance pass.
