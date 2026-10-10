@@ -5,6 +5,8 @@ const dates = @import("timestamp_context.zig");
 const calendar = @import("workflow_intervals.zig");
 const local_time = @import("native_local_time.zig");
 const timezone_context = @import("timezone_context.zig");
+const iso_parser = @import("datetime_parse.zig");
+const times = @import("datetime_time.zig");
 const operations = @import("datetime_operations.zig");
 const Value = expr.Value;
 const Argument = expr.Argument;
@@ -28,7 +30,7 @@ fn classValue(a: Allocator, kind: []const u8) !Value {
     });
     if (std.mem.eql(u8, kind, "date") or std.mem.eql(u8, kind, "datetime")) {
         const date_only = std.mem.eql(u8, kind, "date");
-        for ([_][]const u8{ "today", "fromtimestamp", "fromordinal", "fromisoformat" }) |method| try entries.append(a, .{ .key = method, .value = try function(a, kind, method) });
+        for ([_][]const u8{ "today", "fromtimestamp", "fromordinal", "fromisoformat", "fromisocalendar" }) |method| try entries.append(a, .{ .key = method, .value = try function(a, kind, method) });
         if (!date_only) for ([_][]const u8{ "now", "utcnow", "utcfromtimestamp", "strptime", "combine" }) |method| try entries.append(a, .{ .key = method, .value = try function(a, kind, method) });
         const first = @as(i96, try calendar.parseTimestamp("0001-01-01")) * std.time.ns_per_s;
         const last = @as(i96, try calendar.parseTimestamp("9999-12-31")) * std.time.ns_per_s + if (date_only) @as(i96, 0) else std.time.ns_per_day - std.time.ns_per_us;
@@ -40,8 +42,8 @@ fn classValue(a: Allocator, kind: []const u8) !Value {
     } else if (std.mem.eql(u8, kind, "time")) {
         try entries.append(a, .{ .key = "fromisoformat", .value = try function(a, kind, "fromisoformat") });
         try entries.appendSlice(a, &.{
-            .{ .key = "min", .value = try timeValue(a, 0, null, 0) },
-            .{ .key = "max", .value = try timeValue(a, std.time.us_per_day - 1, null, 0) },
+            .{ .key = "min", .value = try times.value(a, 0, null, 0) },
+            .{ .key = "max", .value = try times.value(a, std.time.us_per_day - 1, null, 0) },
             .{ .key = "resolution", .value = try durationValue(a, 1) },
         });
     } else if (std.mem.eql(u8, kind, "timedelta")) try entries.appendSlice(a, &.{
@@ -141,7 +143,7 @@ fn fromComponents(a: Allocator, kind: []const u8, args: []const Argument) !Value
         ns += @as(i96, try component(values[3], 0, 23)) * std.time.ns_per_hour + @as(i96, try component(values[4], 0, 59)) * std.time.ns_per_min + @as(i96, try component(values[5], 0, 59)) * std.time.ns_per_s + @as(i96, try component(values[6], 0, 999999)) * std.time.ns_per_us;
         _ = try component(values[8], 0, 1);
     }
-    if (time_only) return timeValue(a, @intCast(@divFloor(ns, std.time.ns_per_us)), try timezoneOffset(values[7]), @intCast(try expr.integerIndex(values[8])));
+    if (time_only) return times.value(a, @intCast(@divFloor(ns, std.time.ns_per_us)), if (values[7] == .none) null else values[7], @intCast(try expr.integerIndex(values[8])));
     return dates.datetimeValueWithOffsetUs(a, ns, date_only, if (date_only) null else try timezoneOffsetUs(values[7]), if (date_only or values[7] == .none) null else values[7], if (date_only) 0 else @intCast(try expr.integerIndex(values[8])));
 }
 
@@ -196,38 +198,13 @@ pub fn durationValue(a: Allocator, micros: i96) !Value {
         .{ .key = "total_seconds", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_duration_total:{d}", .{micros}) } },
     });
 }
-fn timeValue(a: Allocator, micros: i64, offset: ?i32, fold: u1) !Value {
-    var text: std.Io.Writer.Allocating = .init(a);
-    try text.writer.print("{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(@divFloor(micros, std.time.us_per_hour))), @as(u64, @intCast(@divFloor(@mod(micros, std.time.us_per_hour), std.time.us_per_min))), @as(u64, @intCast(@divFloor(@mod(micros, std.time.us_per_min), std.time.us_per_s))) });
-    if (@mod(micros, std.time.us_per_s) != 0) try text.writer.print(".{d:0>6}", .{@as(u64, @intCast(@mod(micros, std.time.us_per_s)))});
-    if (offset) |zone| try text.writer.print("{c}{d:0>2}:{d:0>2}", .{ @as(u8, if (zone < 0) '-' else '+'), @abs(zone) / 60, @abs(zone) % 60 });
-    return object(a, &.{
-        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
-        .{ .key = "__dxt_time", .value = try expr.integerValue(a, micros) },
-        .{ .key = "__dxt_rendered", .value = .{ .string = try text.toOwnedSlice() } },
-        .{ .key = "hour", .value = try expr.integerValue(a, @divFloor(micros, std.time.us_per_hour)) },
-        .{ .key = "minute", .value = try expr.integerValue(a, @divFloor(@mod(micros, std.time.us_per_hour), std.time.us_per_min)) },
-        .{ .key = "second", .value = try expr.integerValue(a, @divFloor(@mod(micros, std.time.us_per_min), std.time.us_per_s)) },
-        .{ .key = "microsecond", .value = try expr.integerValue(a, @mod(micros, std.time.us_per_s)) },
-        .{ .key = "tzinfo", .value = if (offset) |zone| try expr.integerValue(a, zone) else .none },
-        .{ .key = "fold", .value = try expr.integerValue(a, fold) },
-        .{ .key = "isoformat", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_time_iso:{d}:{s}", .{ micros, if (offset) |zone| try std.fmt.allocPrint(a, "{d}", .{zone}) else "naive" }) } },
-    });
-}
 pub fn call(a: Allocator, name: []const u8, args: []const Argument, options: Options) !?Value {
     if (std.mem.startsWith(u8, name, "__dxt_duration_total:")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         const micros = try std.fmt.parseInt(i96, name[21..], 10);
         return .{ .number = @as(f64, @floatFromInt(micros)) / std.time.us_per_s };
     }
-    if (std.mem.startsWith(u8, name, "__dxt_time_iso:")) {
-        var parts = std.mem.splitScalar(u8, name[15..], ':');
-        const micros = try std.fmt.parseInt(i64, parts.next().?, 10);
-        const zone = parts.next().?;
-        const time = try timeValue(a, micros, if (std.mem.eql(u8, zone, "naive")) null else try std.fmt.parseInt(i32, zone, 10), 0);
-        if (args.len != 0) return error.InvalidJinjaArguments;
-        return time.attribute("__dxt_rendered");
-    }
+    if (try times.call(a, name, args)) |result| return result;
     const prefix = "__dxt_datetime_class:";
     var kind: []const u8 = undefined;
     var method: []const u8 = undefined;
@@ -251,11 +228,33 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, options: Opt
     if (std.mem.eql(u8, method, "fromtimestamp") or std.mem.eql(u8, method, "utcfromtimestamp")) {
         var values = [_]Value{ .undefined, .none };
         const utc = std.mem.eql(u8, method, "utcfromtimestamp");
+        if (date_only or utc) for (args) |arg| {
+            if (arg.name != null) return error.InvalidJinjaArguments;
+        };
         try bind(args, if (date_only or utc) &.{"timestamp"} else &.{ "timestamp", "tz" }, 1, if (date_only or utc) values[0..1] else &values, if (date_only or utc) values[0..1] else &values);
         const seconds = try expr.numericFloat(values[0]);
         if (!std.math.isFinite(seconds) or @abs(seconds) > 4e11) return error.JinjaNumericOverflow;
         const ns = @as(i96, @intFromFloat(@round(seconds * std.time.us_per_s))) * std.time.ns_per_us;
         return try fromInstant(a, ns, date_only, values[1], utc);
+    }
+    if (std.mem.eql(u8, method, "fromisoformat")) {
+        if (args.len != 1 or args[0].name != null) return error.InvalidJinjaArguments;
+        if (args[0].value != .string) return error.JinjaTypeError;
+        const parsed = if (std.mem.eql(u8, kind, "time")) try iso_parser.time(args[0].value.string) else try iso_parser.iso(a, args[0].value.string, date_only);
+        const zone: ?Value = if (parsed.offset_us) |offset| try timezone_context.builtinValue(a, offset, null) else null;
+        if (std.mem.eql(u8, kind, "time")) return try times.value(a, @intCast(@divFloor(parsed.civil_ns, std.time.ns_per_us)), zone, 0);
+        return try dates.datetimeValueWithOffsetUs(a, parsed.civil_ns, date_only, parsed.offset_us, zone, 0);
+    }
+    if (std.mem.eql(u8, method, "fromisocalendar")) {
+        const bound = try @import("filter_arguments.zig").bind(a, args, &.{ "year", "week", "day" }, &.{ .undefined, .undefined, .undefined }, 3);
+        return try dates.datetimeValue(a, try iso_parser.isoCalendar(a, try expr.integerIndex(bound[0]), try expr.integerIndex(bound[1]), try expr.integerIndex(bound[2])), date_only, null);
+    }
+    if (std.mem.eql(u8, method, "combine")) {
+        const bound = try @import("filter_arguments.zig").bind(a, args, &.{ "date", "time", "tzinfo" }, &.{ .undefined, .undefined, .undefined }, 2);
+        const day = dates.state(bound[0]) orelse return error.JinjaTypeError;
+        const clock = times.state(bound[1]) orelse return error.JinjaTypeError;
+        const zone: ?Value = if (bound[2] == .undefined) clock.timezone else if (bound[2] == .none) null else bound[2];
+        return try dates.datetimeValueWithOffsetUs(a, @divFloor(day.civil_ns, std.time.ns_per_day) * std.time.ns_per_day + @as(i96, clock.micros) * std.time.ns_per_us, false, if (zone) |actual| try timezoneOffsetUs(actual) else null, zone, clock.fold);
     }
     if (std.mem.eql(u8, method, "fromordinal")) {
         if (args.len != 1 or args[0].name != null) return error.InvalidJinjaArguments;
@@ -314,4 +313,34 @@ test "native timedeltas retain exact integer range rounding and datetime arithme
     try std.testing.expect(!(try call(a, "modules.datetime.timedelta", &.{}, .{})).?.truthy());
     try std.testing.expectError(error.JinjaNumericOverflow, expr.evaluate(a, "modules.datetime.timedelta.max+modules.datetime.timedelta.resolution", host));
     try std.testing.expectError(error.JinjaDivisionByZero, expr.evaluate(a, "modules.datetime.timedelta(seconds=1)/0", host));
+}
+
+test "native ISO constructors and full time methods preserve zones and exact offsets" {
+    const Fixture = struct {
+        fn resolve(_: *anyopaque, name: []const u8, a: Allocator) !Value {
+            return (try @import("modules_context.zig").resolve(a, name)) orelse .undefined;
+        }
+        fn call(context: *anyopaque, name: []const u8, args: []const Argument, a: Allocator) !Value {
+            return (try @import("modules_context.zig").call(a, name, args, .{ .host = .{ .context = context, .resolve = @This().resolve, .call = @This().call } })) orelse (try dates.call(a, name, args)) orelse error.UnsupportedJinjaCall;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture: u8 = 0;
+    const host = expr.Host{ .context = &fixture, .resolve = Fixture.resolve, .call = Fixture.call };
+    const cases = [_][2][]const u8{
+        .{ "modules.datetime.date.fromisoformat('2024W011')", "2024-01-01" },
+        .{ "modules.datetime.datetime.fromisoformat('20240229🐍120405,123456789+05:30:45.678901')", "2024-02-29 12:04:05.123456+05:30:45.678901" },
+        .{ "modules.datetime.datetime.fromisocalendar(2020,53,7)", "2021-01-03 00:00:00" },
+        .{ "modules.datetime.time.fromisoformat('T120405.123456+00:99').isoformat(timespec='milliseconds')", "12:04:05.123+01:39" },
+        .{ "modules.datetime.time(1,2,3,4,tzinfo=modules.pytz.utc,fold=1).replace(hour=4).strftime('%H:%M:%S.%f %z %Z')", "04:02:03.000004 +0000 UTC" },
+        .{ "modules.datetime.time(1,tzinfo=modules.pytz.timezone('America/New_York')).utcoffset()", "None" },
+        .{ "modules.datetime.time(1,tzinfo=modules.pytz.utc).tzinfo is sameas modules.pytz.utc", "True" },
+        .{ "modules.datetime.time(1,tzinfo=modules.pytz.FixedOffset(60)) == modules.datetime.time(0,tzinfo=modules.pytz.utc)", "True" },
+        .{ "modules.datetime.datetime.combine(modules.datetime.date(2024,2,29),modules.datetime.time(1,2,3,tzinfo=modules.pytz.utc,fold=1))", "2024-02-29 01:02:03+00:00" },
+    };
+    for (cases) |case| try std.testing.expectEqualStrings(case[1], try (try expr.evaluate(a, case[0], host)).text(a));
+    try std.testing.expectError(error.InvalidDatetime, expr.evaluate(a, "modules.datetime.date.fromisoformat('2023-W53')", host));
+    try std.testing.expectError(error.InvalidJinjaArguments, expr.evaluate(a, "modules.datetime.date.fromtimestamp(timestamp=0)", host));
 }
