@@ -2095,6 +2095,7 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
     var transferred = false;
     errdefer if (!transferred) {
         runtime.allocator.free(execution.compiled_code);
+        if (execution.build_path) |path| runtime.allocator.free(path);
         runtime.allocator.free(execution.macro_dependencies);
         if (execution.adapter_response) |response| response.deinit(runtime.allocator);
         if (execution.execution_message) |detail| runtime.allocator.free(detail);
@@ -2112,6 +2113,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
                 .message = message,
                 .compiled_code = execution.compiled_code,
                 .owns_compiled_code = true,
+                .build_path = execution.build_path,
+                .owns_build_path = execution.build_path != null,
                 .compiled_ctes = execution.compiled_ctes,
                 .owns_compiled_ctes = execution.compiled_ctes.len != 0,
                 .macro_dependencies = execution.macro_dependencies,
@@ -2129,6 +2132,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
                 .message = message,
                 .compiled_code = execution.compiled_code,
                 .owns_compiled_code = true,
+                .build_path = execution.build_path,
+                .owns_build_path = execution.build_path != null,
                 .compiled_ctes = execution.compiled_ctes,
                 .owns_compiled_ctes = execution.compiled_ctes.len != 0,
                 .macro_dependencies = execution.macro_dependencies,
@@ -2167,6 +2172,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .failures = execution.failures,
             .compiled_code = execution.compiled_code,
             .owns_compiled_code = true,
+            .build_path = execution.build_path,
+            .owns_build_path = execution.build_path != null,
             .compiled_ctes = execution.compiled_ctes,
             .owns_compiled_ctes = execution.compiled_ctes.len != 0,
             .macro_dependencies = execution.macro_dependencies,
@@ -2185,6 +2192,8 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .failures = execution.failures,
             .compiled_code = execution.compiled_code,
             .owns_compiled_code = true,
+            .build_path = execution.build_path,
+            .owns_build_path = execution.build_path != null,
             .compiled_ctes = execution.compiled_ctes,
             .owns_compiled_ctes = execution.compiled_ctes.len != 0,
             .macro_dependencies = execution.macro_dependencies,
@@ -2224,6 +2233,7 @@ fn publishTestCompilationFields(runtime: Runtime, node: anytype, row: run_result
     if (node.compiled_code) |old| runtime.allocator.free(old);
     node.compiled_code = code;
     node.compiled = true;
+    try @import("project/test_provenance.zig").publishBuildPath(runtime.allocator, node, row.build_path);
     for (node.extra_ctes.items) |cte| runtime.allocator.free(cte.sql);
     node.extra_ctes.clearRetainingCapacity();
     try compiler.appendCteCopies(runtime.allocator, &node.extra_ctes, row.compiled_ctes);
@@ -2493,6 +2503,7 @@ fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.N
         if (result.owns_compiled_code) {
             if (result.compiled_code) |compiled_code| allocator.free(compiled_code);
         }
+        if (result.owns_build_path) if (result.build_path) |path| allocator.free(path);
         if (result.owns_relation_name) {
             if (result.relation_name) |relation_name| allocator.free(relation_name);
         }

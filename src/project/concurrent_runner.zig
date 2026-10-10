@@ -399,6 +399,8 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
     output.owns_preview = false;
     output.owns_adapter_response = false;
     output.owns_compiled_code = false;
+    output.build_path = null;
+    output.owns_build_path = false;
     output.owns_relation_name = false;
     output.compiled_ctes = &.{};
     output.owns_compiled_ctes = false;
@@ -451,6 +453,10 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
         output.compiled_code = try allocator.dupe(u8, value);
         output.owns_compiled_code = true;
     };
+    if (source.build_path) |value| {
+        output.build_path = try allocator.dupe(u8, value);
+        output.owns_build_path = true;
+    }
     if (source.owns_relation_name) if (source.relation_name) |value| {
         output.relation_name = try allocator.dupe(u8, value);
         output.owns_relation_name = true;
@@ -485,6 +491,7 @@ fn freeResult(allocator: std.mem.Allocator, output: results.NodeResult) void {
     if (output.owns_macro_dependencies) allocator.free(output.macro_dependencies);
     if (output.message) |value| allocator.free(value);
     if (output.owns_compiled_code) if (output.compiled_code) |value| allocator.free(value);
+    if (output.owns_build_path) if (output.build_path) |path| allocator.free(path);
     if (output.owns_relation_name) if (output.relation_name) |value| allocator.free(value);
     if (output.owns_log_output) if (output.log_output) |value| allocator.free(value);
     if (output.owns_log_events) {

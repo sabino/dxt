@@ -22,6 +22,7 @@ const UnitTestDef = types.UnitTestDef;
 const DuckDbObjectKind = enum { table, view };
 
 pub const GenericTestExecutionResult = struct {
+    build_path: ?[]const u8 = null,
     compiled_code: []const u8,
     compiled_ctes: []const types.ExtraCte = &.{},
     macro_dependencies: []const []const u8 = &.{},
@@ -182,7 +183,9 @@ fn executeCompiledDataTest(runtime: Runtime, db_path: []const u8, graph: *const 
     var dependencies: std.ArrayList([]const u8) = .empty;
     errdefer dependencies.deinit(runtime.allocator);
     var execution_error: ?anyerror = null;
-    const result: ?test_audits.Result = test_audits.executeNode(runtime, graph, db_path, config, node, &dependencies) catch |err| blk: {
+    var build_path: ?[]const u8 = null;
+    errdefer if (build_path) |path| runtime.allocator.free(path);
+    const result: ?test_audits.Result = test_audits.executeNodeWithArtifacts(runtime, graph, db_path, config, node, &dependencies, &build_path) catch |err| blk: {
         if (err == error.OutOfMemory) return err;
         execution_error = err;
         break :blk null;
@@ -202,6 +205,7 @@ fn executeCompiledDataTest(runtime: Runtime, db_path: []const u8, graph: *const 
         .compiled_code = compiled.compiled_code,
         .compiled_ctes = ctes,
         .macro_dependencies = try dependencies.toOwnedSlice(runtime.allocator),
+        .build_path = build_path,
         .execution_message = message,
         .adapter_response = if (result) |value| value.adapter_response else null,
         .execution_error = execution_error != null,

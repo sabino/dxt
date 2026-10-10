@@ -53,6 +53,8 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
     var transferred: usize = 0;
     defer for (summary.rows[transferred..]) |row| freeResult(runtime.allocator, row);
     for (summary.rows, 0..) |row, index| {
+        if (row.test_node) |node| try @import("test_provenance.zig").publishBuildPath(runtime.allocator, @constCast(node), row.build_path);
+        if (row.singular_test_node) |node| try @import("test_provenance.zig").publishBuildPath(runtime.allocator, @constCast(node), row.build_path);
         if (row.compiled_code) |sql| {
             const package, const path = if (row.node) |node| .{ node.package_name, if (std.mem.eql(u8, node.resource_type, "analysis") or std.mem.eql(u8, node.resource_type, "sql_operation")) node.path else node.original_file_path } else if (row.test_node) |node| .{ node.package_name, node.path } else if (row.singular_test_node) |node| .{ node.package_name, node.original_file_path } else unreachable;
             const artifact = if (row.test_node) |node| try @import("artifact_paths.zig").relative(runtime.allocator, node.path, node.original_file_path) else if (row.node != null and row.node.?.hook_index != null) try std.fs.path.join(runtime.allocator, &.{ path, row.node.?.path }) else if (row.node != null and std.mem.eql(u8, row.node.?.resource_type, "sql_operation")) try std.fs.path.join(runtime.allocator, &.{ row.node.?.original_file_path, path }) else if (row.node != null and row.node.?.snapshot_yaml_definition) try std.fmt.allocPrint(runtime.allocator, "{s}/{s}.sql", .{ path, row.node.?.name }) else path;
@@ -164,6 +166,10 @@ fn compileResource(runtime: types.Runtime, graph_readonly: *const types.Graph, r
         row.compiled_override = false;
         row.message = if (@import("compile_diagnostics.zig").message(err)) |message| try runtime.allocator.dupe(u8, message) else try std.fmt.allocPrint(runtime.allocator, "Compilation failed: {s}", .{@errorName(err)});
     };
+    if (host.written_path) |path| {
+        row.build_path = try runtime.allocator.dupe(u8, path);
+        row.owns_build_path = true;
+    }
     row.compile_started_at = started;
     row.compile_completed_at = clock.now(runtime.io);
     if (std.mem.eql(u8, graph.command_options.which, "show") and std.mem.eql(u8, row.status, "success")) {
@@ -224,6 +230,7 @@ fn freeResult(allocator: std.mem.Allocator, row: results.NodeResult) void {
         response.deinit(allocator);
     };
     if (row.owns_compiled_code) if (row.compiled_code) |sql| allocator.free(sql);
+    if (row.owns_build_path) if (row.build_path) |path| allocator.free(path);
     if (row.owns_relation_name) if (row.relation_name) |relation| allocator.free(relation);
     if (row.message) |message| allocator.free(message);
     if (row.owns_log_output) if (row.log_output) |messages| allocator.free(messages);

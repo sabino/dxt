@@ -151,8 +151,97 @@ def test_core_inherited_test_metadata_and_parse_cache_creation_time(tmp_path, re
     assert observations['dxt'] == observations['core']
 
 
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('generic', [False, True])
+@pytest.mark.parametrize('warehouse_error', [False, True])
+def test_core_test_write_publishes_real_path_after_success_or_warehouse_error(tmp_path, request, duckdb_environment, adapter, generic, warehouse_error):
+    from pathlib import Path
+    from test_usability_artifacts import contracts
+    from test_usability_sql_operations import events
+    observations = {}
+    for engine in ['dxt', 'core']:
+        root, _ = fixture(tmp_path, engine, adapter, request, store=True, generic=generic, override_limit=False)
+        metadata_policy(root, generic)
+        env = environment(duckdb_environment)
+        command(engine, root, env, 'run')
+        query = 'select missing_runtime_column as failures, false as should_warn, false as should_error' if warehouse_error else 'select 0 as failures, false as should_warn, false as should_error'
+        (root / 'macros/test_materialization.sql').write_text('''{% materialization test, default %}
+{% set before = model.copy() %}
+{% set filename = write(sql) %}
+{% set after = model.copy() %}
+{{ log('PROVENANCE:' ~ tojson({'before': before, 'after': after, 'written': filename}), info=True) }}
+{% call statement('main', fetch_result=True) %}''' + query + '''{% endcall %}
+{% endmaterialization %}
+''')
+        target = root / ('output' if warehouse_error else 'target')
+        flags = ['--target-path', target] if warehouse_error else []
+        result = command(engine, root, env, 'test', flags, quiet=False, ok=not warehouse_error)
+        assert result.returncode == (1 if warehouse_error else 0), result.stdout + result.stderr
+        node = read_test_node(root, target)
+        contracts.assert_artifact(target / 'run_results.json')
+        row, = json.loads((target / 'run_results.json').read_text())['results']
+        assert row['status'] == ('error' if warehouse_error else 'pass')
+        assert row['failures'] == (None if warehouse_error else 0)
+        assert node['compiled'] is row['compiled'] is True
+        assert node['compiled_code'] == row['compiled_code']
+        assert node['build_path'] is not None
+        written = Path(node['build_path'])
+        if not written.is_absolute():
+            written = root / written
+        # Core's stock statement('main') performs the final write of executed SQL.
+        assert written.read_text() == query
+        logical = 'models/schema.yml/bad_rows_input_.sql' if generic else 'tests/check.sql'
+        assert str(written) == str(target / 'run/preview' / logical)
+        message, = [event['data']['msg'][len('PROVENANCE:'):] for event in events(result, 'JinjaLogInfo')
+                    if event['data']['msg'].startswith('PROVENANCE:')]
+        runtime = json.loads(message)
+        assert runtime['written'] == ''
+        for phase in ['before', 'after']:
+            context = runtime[phase]
+            assert context['created_at'] == node['created_at']
+            assert 'build_path' not in context
+            expected_context = {field: node[field] for field in INHERITED if node[field] is not None}
+            expected_context['contract'] = {key: value for key, value in node['contract'].items() if value is not None}
+            expected_context['docs'] = {key: value for key, value in node['docs'].items() if value is not None}
+            assert {field: context[field] for field in expected_context} == expected_context
+            assert context['compiled'] is True and context['compiled_code'] == node['compiled_code']
+            assert context.get('file_key_name') == node.get('file_key_name')
+        observations[engine] = ({field: node[field] for field in INHERITED},
+                                node['build_path'].replace(str(root), '<project>'),
+                                node['depends_on']['macros'], row['status'], row['failures'], runtime['written'])
+    assert observations['dxt'] == observations['core']
 
 
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('generic', [False, True])
+def test_core_compile_test_write_records_path_without_executing_test(tmp_path, request, duckdb_environment, adapter, generic):
+    from pathlib import Path
+    from test_usability_artifacts import contracts
+    observations = {}
+    for engine in ['dxt', 'core']:
+        root, schema = fixture(tmp_path, engine, adapter, request, store=True, generic=generic, override_limit=False)
+        env = environment(duckdb_environment)
+        if generic:
+            path = root / 'macros/bad_rows.sql'
+            path.write_text("{% test bad_rows(model) %}{% if execute %}{% do write('actual compile payload') %}{% endif %}select * from {{ model }}{% endtest %}")
+        else:
+            path = root / 'tests/check.sql'
+            path.write_text("{% if execute %}{% do write('actual compile payload') %}{% endif %}" + path.read_text())
+        command(engine, root, env, 'compile', ['--no-populate-cache'])
+        node = read_test_node(root)
+        artifact = json.loads((root / 'target/run_results.json').read_text())
+        contracts.assert_artifact(root / 'target/run_results.json')
+        row, = [row for row in artifact['results'] if row['unique_id'] == node['unique_id']]
+        assert row['status'] == 'success' and row['failures'] is None
+        assert node['build_path'] is not None
+        written = Path(node['build_path'])
+        if not written.is_absolute():
+            written = root / written
+        assert written.read_text() == 'actual compile payload'
+        assert node['compiled_code'] == row['compiled_code']
+        observations[engine] = (node['build_path'], node['depends_on']['macros'], row['compiled_code'].replace(schema, 'target_schema'))
+    # Default target paths in the artifact are logical, relative project paths.
+    assert observations['dxt'] == observations['core']
 
 
 @pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])

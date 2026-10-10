@@ -129,6 +129,12 @@ pub fn executeWithIdentity(runtime: types.Runtime, graph: *const types.Graph, db
 /// the held connection. Schema preparation and published relation identity
 /// still follow authored config/CLI, independently of helper overrides.
 pub fn executeNode(runtime: types.Runtime, graph: *const types.Graph, db_path: []const u8, config: types.GenericTestConfig, node: *const types.Node, dependencies: *std.ArrayList([]const u8)) !Result {
+    return executeNodeWithArtifacts(runtime, graph, db_path, config, node, dependencies, null);
+}
+
+/// A completed write survives a later warehouse error, like Core's runner.
+/// The caller owns the published path; worker threads never mutate graph nodes.
+pub fn executeNodeWithArtifacts(runtime: types.Runtime, graph: *const types.Graph, db_path: []const u8, config: types.GenericTestConfig, node: *const types.Node, dependencies: *std.ArrayList([]const u8), build_path: ?*?[]const u8) !Result {
     const materialization = try @import("custom_materialization.zig").selected(graph, node) orelse
         return executeWithIdentity(runtime, graph, db_path, config, node.config_alias orelse node.name, node.package_name, node.compiled_code orelse return error.UnsupportedTestSelection, node.resolved_identity);
     var runtime_graph = graph.*;
@@ -143,7 +149,11 @@ pub fn executeNode(runtime: types.Runtime, graph: *const types.Graph, db_path: [
     defer scratch.deinit();
     const a = scratch.allocator();
     // TestRunner ignores the materialization return value and consumes main.
-    _ = try compiler.renderMaterializationForNode(a, &runtime_graph, node, materialization, runtime.allocator, dependencies);
+    const rendered = compiler.renderMaterializationForNode(a, &runtime_graph, node, materialization, runtime.allocator, dependencies);
+    if (build_path) |output_path| if (host.written_path) |path| {
+        output_path.* = try runtime.allocator.dupe(u8, path);
+    };
+    _ = try rendered;
     const main = host.result("main") orelse return error.InvalidTestResult;
     const rows = main.attribute("data");
     if (rows != .list or rows.list.len != 1 or rows.list[0] != .list or rows.list[0].list.len != 3) return error.InvalidTestResult;

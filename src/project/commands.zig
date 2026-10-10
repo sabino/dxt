@@ -128,6 +128,7 @@ pub const OperationHost = struct {
 
     transaction_open: bool = false,
     current_node: ?*const types.Node = null,
+    written_path: ?[]const u8 = null,
     adapter_state: @import("adapter_context.zig").State = .{},
     last_response: expression.Value = .none,
     warned: std.ArrayList([]const u8) = .empty,
@@ -286,6 +287,7 @@ pub const OperationHost = struct {
             const path = try std.fs.path.join(a, &.{ base, "run", node.package_name, relative });
             if (std.fs.path.dirname(path)) |parent| try std.Io.Dir.cwd().createDirPath(self.runtime.io, parent);
             try std.Io.Dir.cwd().writeFile(self.runtime.io, .{ .sub_path = path, .data = payload.string });
+            self.written_path = try std.fs.path.join(a, &.{ target_path, "run", node.package_name, relative });
             return .{ .string = "" };
         }
         if (std.mem.eql(u8, name, "exceptions.warn")) {
