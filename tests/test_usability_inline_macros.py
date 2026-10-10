@@ -18,7 +18,8 @@ CASES = [
     "{% macro local() %}[{{ caller('value') }}]{% endmacro %}select '{% call(x) dbt_macro__local() %}{{ x|upper }}{% endcall %}' as value",
     "{% set values=[] %}{% macro local(x) %}{% do values.append(x) %}{{ values|join(',') }}{% endmacro %}select '{{ dbt_macro__local(1) }}|{{ dbt_macro__local(2) }}|{{ values|join(',') }}' as value",
     "{% macro mutate(xs) %}{% do xs.append(1) %}{% endmacro %}{% macro local() %}{% set xs=[] %}{% do dbt_macro__mutate(xs) %}{{ xs|join(',') }}{% endmacro %}select '{{ dbt_macro__local() }}' as value",
-    "{% macro first(x=1000) %}{{ x is sameas 1000 }}:{{ dbt_macro__second(x) }}{% endmacro %}{% macro second(x=1000) %}{{ x is sameas 1000 }}{% endmacro %}select '{{ dbt_macro__first() }}' as value",
+    "{% set outer=1000 %}{% macro first(x=1000) %}{{ x is sameas 1000 }}:{{ dbt_macro__second(x) }}:{{ x is sameas outer }}:{% call(y=1000) dbt_macro__invoke() %}{{ y is sameas outer }}{% endcall %}{% endmacro %}{% macro second(x=1000) %}{{ x is sameas 1000 }}{% endmacro %}{% macro invoke() %}{{ caller() }}{% endmacro %}select '{{ dbt_macro__first() }}' as value",
+    "{% set fs=[] %}{% for x in ['inner'] %}{% macro local() %}{{ x }}{% endmacro %}{% do fs.append(dbt_macro__local) %}{% endfor %}{% set x='outer' %}select '{{ fs[0]() }}' as value",
 ]
 
 
@@ -66,3 +67,13 @@ def test_authored_typed_macro_binds_names_without_changing_artifact_metadata(tmp
     actual, expected = pair.invoke('compile')
     assert actual['nodes']['model.configuration_fixture.rendered']['compiled_code'] == expected['nodes']['model.configuration_fixture.rendered']['compiled_code']
     assert actual['macros']['macro.configuration_fixture.helper']['arguments'] == expected['macros']['macro.configuration_fixture.helper']['arguments']
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_nested_repeated_callers_preserve_suspended_mutable_aliases(tmp_path, configuration_oracle, request, adapter):
+    pair = setup_pair(tmp_path, configuration_oracle, request, adapter)
+    pair.write('macros/probe.sql', "{% macro probe() %}{{ caller(1) }}{{ caller(2) }}{% endmacro %}")
+    pair.write('models/marts/rendered.sql', "{% set xs=[] %}{% set alias=xs %}select '{% call(a) probe() %}{% call(b) probe() %}{% do xs.append(a*10+b) %}{% endcall %}{% endcall %}{{ xs|join(',') }}:{{ alias|join(',') }}' as rendered")
+    actual, expected = [manifest['nodes']['model.configuration_fixture.rendered'] for manifest in pair.invoke('compile')]
+    assert actual['compiled_code'] == expected['compiled_code']
+    assert actual['depends_on'] == expected['depends_on']

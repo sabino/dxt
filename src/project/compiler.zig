@@ -239,10 +239,23 @@ const CompileContext = struct {
             }
             if (!updated) {
                 const bindings = try self.value_arena.allocator().alloc(ValueBinding, macro.bindings.len + 1);
-                @memcpy(bindings[0..macro.bindings.len], macro.bindings);
-                bindings[macro.bindings.len] = .{ .name = name, .value = value, .scope_depth = self.scope_depth };
+                // A later outer assignment cannot shadow a captured inner cell.
+                var insert: usize = 0;
+                while (insert < macro.bindings.len and macro.bindings[insert].scope_depth <= self.scope_depth) insert += 1;
+                @memcpy(bindings[0..insert], macro.bindings[0..insert]);
+                bindings[insert] = .{ .name = name, .value = value, .scope_depth = self.scope_depth };
+                @memcpy(bindings[insert + 1 ..], macro.bindings[insert..]);
                 macro.bindings = bindings;
             }
+        }
+    }
+
+    fn clearInlineControlScope(self: *CompileContext, scope_depth: usize) void {
+        for (self.caller_blocks.items) |macro| {
+            if (!macro.inline_macro or macro.lexical_frame != self.lexical_frame) continue;
+            for (macro.bindings) |*binding| if (binding.scope_depth == scope_depth) {
+                binding.value = .missing;
+            };
         }
     }
 
@@ -1138,7 +1151,9 @@ fn renderRange(context: *CompileContext, authored: []const u8, start: usize, aut
                     .macro_package = context.current_macro_package,
                     .capture_undefined = context.capturesUndefined(),
                     .binding_visibility = context.binding_visibility,
-                    .constant_function = try std.fmt.allocPrint(arena, "{s}:inline:{d}", .{ context.constant_function orelse context.node.unique_id, block.start }),
+                    // Python compiles the template and its nested functions
+                    // together, sharing immutable constants across them.
+                    .constant_function = context.constant_function orelse context.node.unique_id,
                     .inline_macro = true,
                     .lexical_frame = context.lexical_frame,
                 };
@@ -1197,7 +1212,7 @@ fn renderRange(context: *CompileContext, authored: []const u8, start: usize, aut
                     .macro_package = context.current_macro_package,
                     .capture_undefined = context.capturesUndefined(),
                     .binding_visibility = context.binding_visibility,
-                    .constant_function = try std.fmt.allocPrint(arena, "{s}:caller:{d}", .{ context.constant_function orelse context.node.unique_id, block.start }),
+                    .constant_function = context.constant_function orelse context.node.unique_id,
                 };
                 const caller_name = try std.fmt.allocPrint(arena, "__dxt_caller:{d}", .{context.caller_blocks.items.len});
                 try context.caller_blocks.append(arena, caller);
@@ -1212,7 +1227,10 @@ fn renderRange(context: *CompileContext, authored: []const u8, start: usize, aut
             if (std.mem.eql(u8, span, "with") or std.mem.startsWith(u8, span, "with ")) {
                 const block = try findCaptureBlock(sql, close + 2, end_index, "with", "endwith");
                 context.pushScope();
-                defer context.popScope();
+                defer {
+                    context.clearInlineControlScope(context.scope_depth);
+                    context.popScope();
+                }
                 const arena = context.value_arena.allocator();
                 const args = try native_expr.evaluateArguments(arena, std.mem.trim(u8, span[4..], " \t"), context.host());
                 for (args) |arg| try assignValue(context, arg.name orelse return error.InvalidJinjaArguments, arg.value);
@@ -1224,6 +1242,8 @@ fn renderRange(context: *CompileContext, authored: []const u8, start: usize, aut
             if (isEndIfStatement(span) or isElseStatement(span) or isElifStatement(span)) return error.UnsupportedJinja;
             if (isForStatement(span)) {
                 const block = try parseForBlock(sql, afterTag(sql, close + 2, end_index), span);
+                const control_scope = context.scope_depth + 1;
+                defer context.clearInlineControlScope(control_scope);
                 const iterable = try context.evaluate(block.list_name);
                 const arena = context.value_arena.allocator();
                 const frame = try arena.create(LoopFrame);
@@ -2547,7 +2567,8 @@ test "inline macros retain MacroFuzz names and lexical binding cells" {
         .{ .template = "{% macro local(x) %}{% if x>0 %}{{x}}{{dbt_macro__local(x-1)}}{% endif %}{% endmacro %}{{dbt_macro__local(3)}}", .expected = "321" },
         .{ .template = "{% set values=[] %}{% macro local(x) %}{% do values.append(x) %}{{values|join(',')}}{% endmacro %}{{dbt_macro__local(1)}}|{{dbt_macro__local(2)}}|{{values|join(',')}}", .expected = "1|1,2|1,2" },
         .{ .template = "{% macro mutate(xs) %}{% do xs.append(1) %}{% endmacro %}{% macro local() %}{% set xs=[] %}{% do dbt_macro__mutate(xs) %}{{xs|join(',')}}{% endmacro %}{{dbt_macro__local()}}", .expected = "1" },
-        .{ .template = "{% macro first(x=1000) %}{{x is sameas 1000}}:{{dbt_macro__second(x)}}{% endmacro %}{% macro second(x=1000) %}{{x is sameas 1000}}{% endmacro %}{{dbt_macro__first()}}", .expected = "True:False" },
+        .{ .template = "{% set outer=1000 %}{% macro first(x=1000) %}{{x is sameas 1000}}:{{dbt_macro__second(x)}}:{{x is sameas outer}}:{% call(y=1000) dbt_macro__invoke() %}{{y is sameas outer}}{% endcall %}{% endmacro %}{% macro second(x=1000) %}{{x is sameas 1000}}{% endmacro %}{% macro invoke() %}{{caller()}}{% endmacro %}{{dbt_macro__first()}}", .expected = "True:True:True:True" },
+        .{ .template = "{% set fs=[] %}{% for x in ['inner'] %}{% macro local() %}{{x}}{% endmacro %}{% do fs.append(dbt_macro__local) %}{% endfor %}{% set x='outer' %}{{fs[0]()}}", .expected = "missing" },
     };
     for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
