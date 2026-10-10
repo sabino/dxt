@@ -901,6 +901,8 @@ test "workflow physical versions replace resolved identities for models seeds an
     defer temporary.cleanup();
     var graph: types.Graph = .{ .allocator = a, .project_name = "demo", .target_schema = "analytics", .database_path = "warehouse.duckdb" };
     defer graph.deinit();
+    // Graph teardown frees every resolved identity component, even when the
+    // backing allocator is an arena. The fixture must own those strings.
     try graph.nodes.append(a, .{
         .resource_type = "seed",
         .package_name = "demo",
@@ -909,7 +911,11 @@ test "workflow physical versions replace resolved identities for models seeds an
         .path = "raw.csv",
         .original_file_path = "seeds/raw.csv",
         .raw_code = "id\n1\n2\n",
-        .resolved_identity = .{ .database = "generated_catalog", .schema = "generated_schema", .identifier = "generated_raw" },
+        .resolved_identity = .{
+            .database = try a.dupe(u8, "generated_catalog"),
+            .schema = try a.dupe(u8, "generated_schema"),
+            .identifier = try a.dupe(u8, "generated_raw"),
+        },
     });
     try graph.nodes.append(a, .{
         .package_name = "demo",
@@ -918,7 +924,11 @@ test "workflow physical versions replace resolved identities for models seeds an
         .path = "orders.sql",
         .original_file_path = "models/orders.sql",
         .raw_code = "select '{{ this }}' as physical_relation, * from {{ ref('raw') }}",
-        .resolved_identity = .{ .database = "generated_catalog", .schema = "generated_schema", .identifier = "generated_orders" },
+        .resolved_identity = .{
+            .database = try a.dupe(u8, "generated_catalog"),
+            .schema = try a.dupe(u8, "generated_schema"),
+            .identifier = try a.dupe(u8, "generated_orders"),
+        },
     });
     try graph.nodes.items[1].depends_on.append(a, "seed.demo.raw");
     var context: Context = .{
