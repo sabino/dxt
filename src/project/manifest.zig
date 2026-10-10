@@ -1282,6 +1282,7 @@ pub fn testContextNode(allocator: std.mem.Allocator, graph: *const Graph, runtim
         var node = original;
         node.compiled = runtime_node.compiled;
         node.compiled_code = runtime_node.compiled_code;
+        node.compiled_path = runtime_node.compiled_path;
         node.extra_ctes = runtime_node.extra_ctes;
         try writeGenericTestNode(allocator, &output.writer, graph, node);
         break;
@@ -1290,6 +1291,7 @@ pub fn testContextNode(allocator: std.mem.Allocator, graph: *const Graph, runtim
         var node = original;
         node.compiled = runtime_node.compiled;
         node.compiled_code = runtime_node.compiled_code;
+        node.compiled_path = runtime_node.compiled_path;
         node.extra_ctes = runtime_node.extra_ctes;
         try writeSingularTestNode(allocator, &output.writer, graph, node);
         break;

@@ -91,6 +91,36 @@ fn pluralResource(kind: []const u8) []const u8 {
     return "models";
 }
 
+/// ParsedNode writes beneath the configured target prefix. Absolute overrides
+/// remain absolute; default and relative prefixes stay relative in artifacts.
+pub fn compiledPath(a: std.mem.Allocator, graph: *const types.Graph, node: anytype) ![]const u8 {
+    const relative = try @import("artifact_paths.zig").relative(a, node.path, node.original_file_path);
+    defer a.free(relative);
+    return std.fs.path.join(a, &.{ targetPrefix(graph), "compiled", node.package_name, relative });
+}
+
+fn targetPrefix(graph: *const types.Graph) []const u8 {
+    if (graph.command_options.target_path) |path| return path;
+    for (graph.semantic_project_configs.items) |config| {
+        if (std.mem.eql(u8, config.package_name, graph.project_name)) if (values.get(config.rendered, "target-path")) |path| {
+            if (path == .string) return path.string;
+        };
+    }
+    return "target";
+}
+
+/// The canonical compiled SQL file exists before a test materialization starts.
+/// Return its logical path for the worker's runtime resource context.
+pub fn writeCompiled(runtime: types.Runtime, graph: *const types.Graph, node: anytype, sql: []const u8) ![]const u8 {
+    const logical = try compiledPath(runtime.allocator, graph, node);
+    errdefer runtime.allocator.free(logical);
+    const physical = if (std.fs.path.isAbsolute(logical)) logical else try std.fs.path.join(runtime.allocator, &.{ graph.command_options.project_dir, logical });
+    defer if (physical.ptr != logical.ptr) runtime.allocator.free(physical);
+    if (std.fs.path.dirname(physical)) |parent| try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = physical, .data = sql });
+    return logical;
+}
+
 pub fn publishBuildPath(a: std.mem.Allocator, node: anytype, path: ?[]const u8) !void {
     const value = path orelse return;
     const copy = try a.dupe(u8, value);
@@ -135,4 +165,26 @@ test "generic file keys follow the attached YAML resource including model versio
     const result = (try fileKeyName(a, &graph, &node)).?;
     defer a.free(result);
     try std.testing.expectEqualStrings("sources.external", result);
+}
+
+test "compiled test paths retain project and CLI target prefixes" {
+    const a = std.testing.allocator;
+    var graph: types.Graph = .{ .allocator = a, .project_name = "demo" };
+    defer graph.deinit();
+    const node = types.SingularTestNode{ .package_name = "demo", .unique_id = "test.demo.check", .name = "check", .alias = "check", .path = "check.sql", .original_file_path = "tests/check.sql", .raw_code = "select 1" };
+    const default = try compiledPath(a, &graph, &node);
+    defer a.free(default);
+    try std.testing.expectEqualStrings("target/compiled/demo/tests/check.sql", default);
+    var rendered = try std.json.parseFromSlice(std.json.Value, a, "{\"target-path\":\"project-output\"}", .{});
+    defer rendered.deinit();
+    try graph.semantic_project_configs.append(a, .{ .package_name = try a.dupe(u8, "demo"), .raw = .null, .rendered = try values.clone(a, rendered.value) });
+    const configured = try compiledPath(a, &graph, &node);
+    defer a.free(configured);
+    try std.testing.expectEqualStrings("project-output/compiled/demo/tests/check.sql", configured);
+    for ([_][]const u8{ "relative-output", "/absolute-output" }, [_][]const u8{ "relative-output/compiled/demo/tests/check.sql", "/absolute-output/compiled/demo/tests/check.sql" }) |prefix, expected| {
+        graph.command_options.target_path = prefix;
+        const override = try compiledPath(a, &graph, &node);
+        defer a.free(override);
+        try std.testing.expectEqualStrings(expected, override);
+    }
 }

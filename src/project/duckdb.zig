@@ -180,12 +180,15 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
 }
 
 fn executeCompiledDataTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const types.Node, config: types.GenericTestConfig, compiled: *compiler.CompiledModel, compilation_started: i96, compilation_completed: i96) !GenericTestExecutionResult {
+    var runtime_node = node.*;
+    runtime_node.compiled_path = try @import("test_provenance.zig").writeCompiled(runtime, graph, node, compiled.compiled_code);
+    defer runtime.allocator.free(runtime_node.compiled_path.?);
     var dependencies: std.ArrayList([]const u8) = .empty;
     errdefer dependencies.deinit(runtime.allocator);
     var execution_error: ?anyerror = null;
     var build_path: ?[]const u8 = null;
     errdefer if (build_path) |path| runtime.allocator.free(path);
-    const result: ?test_audits.Result = test_audits.executeNodeWithArtifacts(runtime, graph, db_path, config, node, &dependencies, &build_path) catch |err| blk: {
+    const result: ?test_audits.Result = test_audits.executeNodeWithArtifacts(runtime, graph, db_path, config, &runtime_node, &dependencies, &build_path) catch |err| blk: {
         if (err == error.OutOfMemory) return err;
         execution_error = err;
         break :blk null;

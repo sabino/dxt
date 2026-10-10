@@ -61,6 +61,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
             const artifact = if (row.test_node) |node| try @import("artifact_paths.zig").relative(runtime.allocator, node.path, node.original_file_path) else if (row.node != null and row.node.?.hook_index != null) try std.fs.path.join(runtime.allocator, &.{ path, row.node.?.path }) else if (row.node != null and std.mem.eql(u8, row.node.?.resource_type, "sql_operation")) try std.fs.path.join(runtime.allocator, &.{ row.node.?.original_file_path, path }) else if (row.node != null and row.node.?.snapshot_yaml_definition) try std.fmt.allocPrint(runtime.allocator, "{s}/{s}.sql", .{ path, row.node.?.name }) else path;
             defer if (row.test_node != null or (row.node != null and (row.node.?.hook_index != null or row.node.?.snapshot_yaml_definition or std.mem.eql(u8, row.node.?.resource_type, "sql_operation")))) runtime.allocator.free(artifact);
             const compiled_path = try std.fs.path.join(runtime.allocator, &.{ counts.compiled_base, package, artifact });
+            defer if (row.node == null) runtime.allocator.free(compiled_path);
             if (std.fs.path.dirname(compiled_path)) |parent| try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
             try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = row.compiled_artifact_code orelse sql });
             if (row.node) |original| {
@@ -76,7 +77,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 const node = @constCast(original);
                 node.compiled = true;
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
-                node.compiled_path = compiled_path;
+                node.compiled_path = try @import("test_provenance.zig").compiledPath(runtime.allocator, graph, node);
                 try compiler.recordGenericCompilationDependency(runtime.allocator, graph, node);
                 try compiler.appendCteCopies(runtime.allocator, &node.extra_ctes, row.compiled_ctes);
                 counts.tests += 1;
@@ -84,7 +85,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 const node = @constCast(original);
                 node.compiled = true;
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
-                node.compiled_path = compiled_path;
+                node.compiled_path = try @import("test_provenance.zig").compiledPath(runtime.allocator, graph, node);
                 try compiler.appendCteCopies(runtime.allocator, &node.extra_ctes, row.compiled_ctes);
                 counts.tests += 1;
             }

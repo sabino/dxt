@@ -357,3 +357,54 @@ def test_core_invalid_test_contract_types_and_unknown_fields_fail_before_artifac
         result = command(engine, root, environment(duckdb_environment), 'parse', ok=False)
         assert result.returncode == 2, result.stdout + result.stderr
         assert not (root / 'target/manifest.json').exists()
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('generic', [False, True])
+@pytest.mark.parametrize('mode', ['default', 'relative', 'absolute'])
+def test_core_test_compiled_path_retains_target_prefix_and_exists_before_materialization(tmp_path, request, duckdb_environment, adapter, generic, mode):
+    from pathlib import Path
+    from test_usability_artifacts import contracts
+    from test_usability_sql_operations import events
+    observations = {}
+    for engine in ['dxt', 'core']:
+        root, schema = fixture(tmp_path, engine, adapter, request, store=False, generic=generic, override_limit=False)
+        env = environment(duckdb_environment)
+        command(engine, root, env, 'run')
+        target = root / ('target' if mode == 'default' else 'relative-output' if mode == 'relative' else 'absolute-output')
+        prefix = 'target' if mode == 'default' else 'relative-output' if mode == 'relative' else str(target)
+        flags = [] if mode == 'default' else ['--target-path', prefix]
+        resource = 'models/schema.yml/bad_rows_input_.sql' if generic else 'tests/check.sql'
+        expected = prefix + '/compiled/preview/' + resource
+        physical = root / expected if not Path(expected).is_absolute() else Path(expected)
+        command(engine, root, env, 'compile', [*flags, '--no-populate-cache'])
+        compiled = read_test_node(root, target)
+        assert compiled['compiled_path'] == expected
+        assert compiled['compiled_code'] == physical.read_text()
+        contracts.assert_artifact(target / 'run_results.json')
+        # Remove the previous file so the materialization must see a fresh write.
+        physical.unlink()
+        assert not physical.exists()
+        query = ("select content from read_text('" + str(physical) + "')" if adapter == 'duckdb'
+                 else "select pg_read_file('" + str(physical) + "') as content")
+        (root / 'macros/test_materialization.sql').write_text('''{% materialization test, default %}
+{% set contents = run_query(''' + json.dumps(query) + ''') %}
+{% if contents.columns[0].values()[0] != model.compiled_code %}
+{{ exceptions.raise_compiler_error('compiled file did not match before materialization') }}
+{% endif %}
+{{ log('COMPILED_PATH:' ~ tojson({'path':model.compiled_path, 'contents':contents.columns[0].values()[0]}), info=True) }}
+{% call statement('main', fetch_result=True) %}select 0 as failures, false as should_warn, false as should_error{% endcall %}
+{% endmaterialization %}
+''')
+        result = command(engine, root, env, 'test', flags, quiet=False)
+        node = read_test_node(root, target)
+        contracts.assert_artifact(target / 'run_results.json')
+        row, = json.loads((target / 'run_results.json').read_text())['results']
+        assert row['status'] == 'pass' and row['failures'] == 0
+        trace, = [json.loads(event['data']['msg'][len('COMPILED_PATH:'):]) for event in events(result, 'JinjaLogInfo')
+                  if event['data']['msg'].startswith('COMPILED_PATH:')]
+        assert trace['path'] == node['compiled_path'] == expected
+        assert trace['contents'] == node['compiled_code'] == row['compiled_code'] == physical.read_text()
+        observations[engine] = (trace['path'].replace(str(root), '<project>'),
+                                trace['contents'].replace(schema, '<target_schema>'), row['status'], row['failures'])
+    assert observations['dxt'] == observations['core']

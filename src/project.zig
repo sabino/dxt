@@ -2227,17 +2227,17 @@ fn publishDataTestCompilation(runtime: Runtime, graph: *const Graph, row: run_re
     const sql = row.compiled_code orelse return;
     if (row.test_node) |original| {
         const node = @constCast(original);
-        try publishTestCompilationFields(runtime, node, row, sql, target_dir);
+        try publishTestCompilationFields(runtime, graph, node, row, sql, target_dir);
         try compiler.recordGenericCompilationDependency(runtime.allocator, graph, node);
         for (row.macro_dependencies) |id| try util.appendUnique(runtime.allocator, &node.macro_depends_on, id);
     } else if (row.singular_test_node) |original| {
         const node = @constCast(original);
-        try publishTestCompilationFields(runtime, node, row, sql, target_dir);
+        try publishTestCompilationFields(runtime, graph, node, row, sql, target_dir);
         for (row.macro_dependencies) |id| try util.appendUnique(runtime.allocator, &node.macro_depends_on, id);
     }
 }
 
-fn publishTestCompilationFields(runtime: Runtime, node: anytype, row: run_results.NodeResult, sql: []const u8, target_dir: []const u8) !void {
+fn publishTestCompilationFields(runtime: Runtime, graph: *const Graph, node: anytype, row: run_results.NodeResult, sql: []const u8, target_dir: []const u8) !void {
     const code = try runtime.allocator.dupe(u8, sql);
     if (node.compiled_code) |old| runtime.allocator.free(old);
     node.compiled_code = code;
@@ -2249,8 +2249,10 @@ fn publishTestCompilationFields(runtime: Runtime, node: anytype, row: run_result
     const resource_path = try @import("project/artifact_paths.zig").relative(runtime.allocator, node.path, node.original_file_path);
     defer runtime.allocator.free(resource_path);
     const path = try pathJoin(runtime.allocator, &.{ target_dir, "compiled", node.package_name, resource_path });
+    defer runtime.allocator.free(path);
+    const logical_path = try @import("project/test_provenance.zig").compiledPath(runtime.allocator, graph, node);
     if (node.compiled_path) |old| runtime.allocator.free(old);
-    node.compiled_path = path;
+    node.compiled_path = logical_path;
     if (std.fs.path.dirname(path)) |parent| try Io.Dir.cwd().createDirPath(runtime.io, parent);
     try Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = path, .data = sql });
 }
@@ -2787,11 +2789,7 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
                 owned.deinit(runtime.allocator);
             };
             const compiled_code = compiled.compiled_code;
-            const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, test_node.package_name, test_node.path });
-            if (std.fs.path.dirname(compiled_path)) |parent| {
-                try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
-            }
-            try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = compiled_code });
+            const compiled_path = try @import("project/test_provenance.zig").writeCompiled(runtime, graph, test_node, compiled_code);
             test_node.compiled = true;
             test_node.compiled_code = compiled_code;
             test_node.compiled_path = util.normalizeForDisplay(compiled_path);
@@ -2816,11 +2814,7 @@ fn compileSelectedModelsWithResults(runtime: Runtime, graph: *Graph, selected: [
                 owned.deinit(runtime.allocator);
             };
             const compiled_code = compiled.compiled_code;
-            const compiled_path = try pathJoin(runtime.allocator, &.{ compiled_base, test_node.package_name, test_node.original_file_path });
-            if (std.fs.path.dirname(compiled_path)) |parent| {
-                try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
-            }
-            try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = compiled_code });
+            const compiled_path = try @import("project/test_provenance.zig").writeCompiled(runtime, graph, test_node, compiled_code);
             test_node.compiled = true;
             test_node.compiled_code = compiled_code;
             test_node.compiled_path = util.normalizeForDisplay(compiled_path);
