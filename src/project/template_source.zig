@@ -11,6 +11,14 @@ pub fn hasRenderCharacters(source: []const u8) bool {
     return false;
 }
 
+/// The default Jinja lexer removes one final physical newline before parsing.
+/// Apply this only to a complete template, never to a nested render range.
+pub fn renderEnd(source: []const u8) usize {
+    if (std.mem.endsWith(u8, source, "\r\n")) return source.len - 2;
+    if (std.mem.endsWith(u8, source, "\n") or std.mem.endsWith(u8, source, "\r")) return source.len - 1;
+    return source.len;
+}
+
 pub fn normalize(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, source, '\r') == null) return source;
     var length = source.len;
@@ -72,6 +80,17 @@ test "Core plain-string fast path recognizes opening and closing delimiters" {
     try std.testing.expect(!hasRenderCharacters("100% # comment { }"));
     inline for (.{ "{{", "{%", "{#", "#}", "%}", "}}" }) |marker| {
         try std.testing.expect(hasRenderCharacters(marker));
+    }
+}
+
+test "whole templates remove exactly one final physical newline" {
+    inline for (.{ "a\n", "a\r\n", "a\r" }) |source| {
+        try std.testing.expectEqualStrings("a", source[0..renderEnd(source)]);
+    }
+    try std.testing.expectEqualStrings("a\r\n", "a\r\n\r\n"[0..renderEnd("a\r\n\r\n")]);
+    try std.testing.expectEqualStrings("a\n", "a\n\n"[0..renderEnd("a\n\n")]);
+    inline for (.{ "", "a", "a\\r", "a\u{2028}", "a\x0b" }) |source| {
+        try std.testing.expectEqual(source.len, renderEnd(source));
     }
 }
 

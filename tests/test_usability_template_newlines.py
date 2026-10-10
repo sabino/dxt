@@ -95,3 +95,65 @@ def test_plain_model_sql_bypasses_jinja_normalization(tmp_path, core_runner, new
         node = manifest['nodes']['model.commands.plain']
         assert node['compiled_code'] == node['raw_code'] == authored
         assert node['checksum']['checksum'] == hashlib.sha256(authored.encode()).hexdigest()
+
+
+@pytest.mark.parametrize('newline', ['\n', '\r\n', '\r'])
+def test_plain_docs_bypass_lexer_and_rendered_docs_preserve_returned_data(tmp_path, core_runner, newline):
+    project = tmp_path / 'project'
+    authored = (
+        '{% docs plain %}a' + newline + 'b{% enddocs %}' + newline
+        + '{% docs templated %}{# force lexer #}c' + newline + 'd{% enddocs %}' + newline
+        + "{% docs returned %}{{ 'e\\rf' }}{% enddocs %}"
+    ).encode()
+    write_project(project, {
+        'models/newlines.sql': 'select 1 as value',
+        'models/schema.yml': "version: 2\nmodels:\n  - name: newlines\n    description: \"{{ doc('plain') }}|{{ doc('templated') }}|{{ doc('returned') }}\"\n",
+    })
+    docs_path = project / 'models/newlines.md'
+    docs_path.write_bytes(authored)
+    common = ['--project-dir', str(project), '--profiles-dir', str(project), '--no-partial-parse']
+    reference = core_runner.invoke(['compile', *common, '--target-path', 'core-target', '--quiet'])
+    assert reference.success, reference.exception
+    expected = json.loads((project / 'core-target/manifest.json').read_text())
+    contents = {'plain': 'a' + newline + 'b', 'templated': 'c\nd', 'returned': 'e\rf'}
+    for name, text in contents.items():
+        assert expected['docs']['doc.commands.' + name]['block_contents'] == text
+    expected_node = expected['nodes']['model.commands.newlines']
+    assert expected_node['description'] == '|'.join(contents.values())
+    assert expected_node['compiled_code'] == 'select 1 as value'
+    result = subprocess.run([DXT, 'compile', *common, '--target-path', 'native-target'], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual = json.loads((project / 'native-target/manifest.json').read_text())
+    for name, text in contents.items():
+        assert actual['docs']['doc.commands.' + name]['block_contents'] == text
+    actual_node = actual['nodes']['model.commands.newlines']
+    assert actual_node['description'] == expected_node['description']
+    assert actual_node['compiled_code'] == expected_node['compiled_code']
+    assert docs_path.read_bytes() == authored
+
+
+@pytest.mark.parametrize('newline', ['\n', '\r\n', '\r'])
+def test_render_drops_one_final_source_newline_and_keeps_returned_newlines(tmp_path, core_runner, newline):
+    project = tmp_path / 'project'
+    inputs = [
+        'a' + newline,
+        'a{# force lexer #}' + newline,
+        'a{# force lexer #}' + newline + newline,
+        "{{ '\\r' }}" + newline,
+        'a{# force lexer #}' + newline + '\u2028',
+    ]
+    expression = '[' + ', '.join('render(' + json.dumps(text, ensure_ascii=False) + ')' for text in inputs) + ']'
+    authored = "select '{{ " + expression + "|tojson }}' as value"
+    write_project(project, {'models/rendered.sql': authored})
+    common = ['--project-dir', str(project), '--profiles-dir', str(project), '--no-partial-parse']
+    reference = core_runner.invoke(['compile', *common, '--target-path', 'core-target', '--quiet'])
+    assert reference.success, reference.exception
+    expected = json.loads((project / 'core-target/manifest.json').read_text())['nodes']['model.commands.rendered']
+    code = "select '" + json.dumps(['a' + newline, 'a', 'a\n', '\r', 'a\n\u2028']) + "' as value"
+    assert expected['compiled_code'] == code
+    result = subprocess.run([DXT, 'compile', *common, '--target-path', 'native-target'], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual = json.loads((project / 'native-target/manifest.json').read_text())['nodes']['model.commands.rendered']
+    assert actual['compiled_code'] == code
+    assert actual['raw_code'] == expected['raw_code'] == authored
+    assert actual['checksum'] == expected['checksum'] == {'name': 'sha256', 'checksum': hashlib.sha256(authored.encode()).hexdigest()}

@@ -327,7 +327,7 @@ pub fn renderTextForNode(allocator: std.mem.Allocator, graph: *const Graph, node
     defer context.deinit();
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try renderRange(&context, text, 0, text.len, &out);
+    try renderRange(&context, text, 0, template_source.renderEnd(text), &out);
     return try out.toOwnedSlice(allocator);
 }
 
@@ -340,7 +340,7 @@ pub fn renderDocumentationBlock(allocator: std.mem.Allocator, graph: *const Grap
 }
 
 fn renderDocumentationContext(allocator: std.mem.Allocator, graph: *const Graph, package: []const u8, unique_id: []const u8, path: []const u8, text: []const u8, block: bool) ![]const u8 {
-    if (!block and !template_source.hasRenderCharacters(text)) return allocator.dupe(u8, text);
+    if (!template_source.hasRenderCharacters(text)) return allocator.dupe(u8, text);
     var node = Node{ .package_name = package, .unique_id = unique_id, .name = unique_id, .path = path, .original_file_path = path, .raw_code = text };
     defer types.deinitNode(allocator, &node);
     var context = CompileContext.init(allocator, graph, &node);
@@ -350,7 +350,7 @@ fn renderDocumentationContext(allocator: std.mem.Allocator, graph: *const Graph,
     context.parse_node = &node;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try renderRange(&context, text, 0, text.len, &out);
+    try renderRange(&context, text, 0, template_source.renderEnd(text), &out);
     return try out.toOwnedSlice(allocator);
 }
 
@@ -405,7 +405,7 @@ pub fn scanDependencies(allocator: std.mem.Allocator, sql: []const u8, node: *No
     context.parse_node = node;
     var rendered: std.ArrayList(u8) = .empty;
     defer rendered.deinit(allocator);
-    try renderRange(&context, sql, 0, sql.len, &rendered);
+    try renderRange(&context, sql, 0, template_source.renderEnd(sql), &rendered);
 }
 
 fn requiresNativeRendering(sql: []const u8) bool {
@@ -569,7 +569,7 @@ fn genericArgumentValue(context: *CompileContext, argument: std.json.Value) anye
     }
     var rendered: std.ArrayList(u8) = .empty;
     defer rendered.deinit(context.allocator);
-    try renderRange(context, argument.string, 0, argument.string.len, &rendered);
+    try renderRange(context, argument.string, 0, template_source.renderEnd(argument.string), &rendered);
     return .{ .string = try allocator.dupe(u8, rendered.items) };
 }
 
@@ -800,7 +800,7 @@ fn compileSingularTestBody(allocator: std.mem.Allocator, graph: *const Graph, te
     errdefer out.deinit(allocator);
 
     if (template_source.hasRenderCharacters(test_node.raw_code)) {
-        try renderRange(&context, test_node.raw_code, 0, test_node.raw_code.len, &out);
+        try renderRange(&context, test_node.raw_code, 0, template_source.renderEnd(test_node.raw_code), &out);
     } else try out.appendSlice(allocator, test_node.raw_code);
     return try out.toOwnedSlice(allocator);
 }
@@ -1783,7 +1783,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
             defer context.var_render_depth -= 1;
             var rendered: std.ArrayList(u8) = .empty;
             defer rendered.deinit(context.allocator);
-            try renderRange(context, value.string, 0, value.string.len, &rendered);
+            try renderRange(context, value.string, 0, template_source.renderEnd(value.string), &rendered);
             return .{ .string = try allocator.dupe(u8, rendered.items) };
         }
         if (args.len == 2) return args[1].value;
@@ -1818,7 +1818,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         if (!template_source.hasRenderCharacters(args[0].value.string)) return args[0].value;
         var rendered: std.ArrayList(u8) = .empty;
         defer rendered.deinit(context.allocator);
-        try renderRange(context, args[0].value.string, 0, args[0].value.string.len, &rendered);
+        try renderRange(context, args[0].value.string, 0, template_source.renderEnd(args[0].value.string), &rendered);
         return .{ .string = try allocator.dupe(u8, rendered.items) };
     }
     if (std.mem.eql(u8, name, "tojson")) {
@@ -2311,6 +2311,23 @@ test "plain Core rendering bypasses template newline normalization" {
     const node = Node{ .package_name = "demo", .unique_id = "model.demo.value", .name = "value", .path = "value.sql", .original_file_path = "models/value.sql", .raw_code = sql };
     try std.testing.expectEqualStrings(sql, try compileModel(a, &graph, &node));
     try std.testing.expectEqualStrings(sql, try renderTextForNode(a, &graph, &node, sql));
+    try std.testing.expectEqualStrings(sql, try renderDocumentation(a, &graph, "demo", "doc.demo.plain", "plain.md", sql));
+    try std.testing.expectEqualStrings(sql, try renderDocumentationBlock(a, &graph, "demo", "doc.demo.plain", "plain.md", sql));
+}
+
+test "top-level template rendering drops one source newline but retains returned newlines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const graph = Graph{ .allocator = a, .project_name = "demo" };
+    const node = Node{ .package_name = "demo", .unique_id = "model.demo.value", .name = "value", .path = "value.sql", .original_file_path = "models/value.sql", .raw_code = "" };
+    for ([_][]const u8{ "\n", "\r\n", "\r" }) |newline| {
+        const sql = try std.fmt.allocPrint(a, "{{{{ 'a\\r\\n' }}}}{s}{s}", .{ newline, newline });
+        try std.testing.expectEqualStrings("a\r\n\n", try renderTextForNode(a, &graph, &node, sql));
+        try std.testing.expectEqualStrings("a\r\n\n", try renderDocumentation(a, &graph, "demo", "doc.demo.value", "value.md", sql));
+        const test_node = SingularTestNode{ .package_name = "demo", .unique_id = "test.demo.value", .name = "value", .alias = "value", .path = "value.sql", .original_file_path = "tests/value.sql", .raw_code = sql };
+        try std.testing.expectEqualStrings("a\r\n\n", try compileSingularTest(a, &graph, &test_node));
+    }
 }
 
 test "static inline config normalizes physical strings before parsing" {
