@@ -1601,6 +1601,7 @@ fn flagsValue(allocator: std.mem.Allocator, graph: *const Graph) !native_expr.Va
         };
         if (!present) try entries.append(allocator, default);
     }
+    try entries.append(allocator, .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } });
     return .{ .object = try entries.toOwnedSlice(allocator) };
 }
 
@@ -1615,10 +1616,11 @@ fn upsertConfigArgument(allocator: std.mem.Allocator, values: *std.ArrayList(nat
 }
 
 fn configProxy(allocator: std.mem.Allocator, context: *CompileContext) !native_expr.Value {
-    const methods = try native_expr.allocateEntries(allocator, 4);
+    const methods = try native_expr.allocateEntries(allocator, 5);
     inline for (.{ "get", "require", "persist_relation_docs", "persist_column_docs" }, 0..) |name, index| {
         methods[index] = .{ .key = name, .value = .{ .callable = "config." ++ name } };
     }
+    methods[4] = .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } };
     _ = context;
     return .{ .object = methods };
 }
