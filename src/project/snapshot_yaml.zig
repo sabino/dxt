@@ -122,13 +122,9 @@ fn applyMetadata(graph: *types.Graph, node: *types.Node, properties: Value) !voi
         if (docs.object.get("show")) |value| node.docs.show = if (value == .bool) value.bool else return error.UnsupportedSnapshotYaml;
         if (docs.object.get("node_color")) |value| node.docs.node_color = if (value == .null) null else try stringValue(value);
     }
-    const meta = properties.object.get("meta") orelse if (config == .object) config.object.get("meta") orelse .null else .null;
-    if (meta == .object) {
-        var merged = if (node.snapshot_meta_json) |old| old.object else std.json.ObjectMap{};
-        var entries = meta.object.iterator();
-        while (entries.next()) |entry| try merged.put(graph.allocator, entry.key_ptr.*, entry.value_ptr.*);
-        node.snapshot_meta_json = .{ .object = merged };
-    }
+    // finalize rebuilds the owned configuration and projects snapshot metadata
+    // from it. Mutating the previous borrowed meta map here would make that
+    // rebuild free nested values belonging to the YAML patch.
     if (properties.object.get("columns")) |columns| {
         if (columns != .array) return error.UnsupportedSnapshotYaml;
         for (columns.array.items) |column| {
@@ -182,6 +178,61 @@ test "snapshot YAML block scalar folding chomping blank lines and literal commen
     const entry = value.array.items[0].object;
     try std.testing.expectEqualStrings("first line second line\nnext paragraph", entry.get("description").?.string);
     try std.testing.expectEqualStrings("# preserved comment\n\nfinal line\n\n", entry.get("literal").?.string);
+}
+
+test "snapshot YAML nested metadata survives repeated finalization and cache roundtrips" {
+    // The patch and configuration use a freeing allocator: an arena would
+    // conceal their overlapping ownership when the old config is rebuilt.
+    const allocator = std.testing.allocator;
+    var graph = types.Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    var parsed = (try section(allocator,
+        \\snapshots:
+        \\  - name: history
+        \\    config:
+        \\      strategy: timestamp
+        \\      unique_key: id
+        \\      updated_at: ts
+        \\      meta: {owner: analytics, nested: {level: 2, labels: [customer, history]}}
+    )).?;
+    defer config_value.deinit(allocator, &parsed);
+    try graph.snapshot_properties.append(allocator, .{ .package_name = "demo", .name = "history", .path = "snapshots/definitions.yml", .config_args = "", .properties = try config_value.clone(allocator, parsed.array.items[0]) });
+    // SnapshotPatch properties normally share the invocation arena; this test
+    // releases their independent allocation explicitly.
+    defer config_value.deinit(allocator, &graph.snapshot_properties.items[0].properties);
+    try graph.nodes.append(allocator, .{ .resource_type = "snapshot", .package_name = "demo", .unique_id = "snapshot.demo.history", .name = "history", .path = "history.sql", .original_file_path = "snapshots/definitions.yml", .raw_code = "select 1", .materialized = "snapshot", .snapshot_config = .{}, .property_config = try config_value.clone(allocator, parsed.array.items[0].object.get("config").?) });
+    // The loader applies model properties before snapshot finalization.
+    try resource_config.rebuild(allocator, &graph.nodes.items[0]);
+    for (0..3) |_| {
+        try finalize(.{ .allocator = allocator, .io = std.testing.io }, &graph);
+        const patch_meta = graph.snapshot_properties.items[0].properties.object.get("config").?.object.get("meta").?;
+        const patch_nested = patch_meta.object.get("nested").?;
+        try std.testing.expectEqual(@as(i64, 2), patch_nested.object.get("level").?.integer);
+        try std.testing.expectEqualStrings("customer", patch_nested.object.get("labels").?.array.items[0].string);
+        try std.testing.expectEqualStrings("history", patch_nested.object.get("labels").?.array.items[1].string);
+
+        var encoded = try @import("parse_cache_codec.zig").encodeGraph(allocator, &graph);
+        defer config_value.deinit(allocator, &encoded);
+        const bytes = try std.json.Stringify.valueAlloc(allocator, encoded, .{});
+        defer allocator.free(bytes);
+        // The decoder owns all graph strings; its arena is separate from the
+        // freeing allocator exercising the original patch/config lifetime.
+        var cache_arena = std.heap.ArenaAllocator.init(allocator);
+        defer cache_arena.deinit();
+        const cached = try std.json.parseFromSliceLeaky(Value, cache_arena.allocator(), bytes, .{});
+        var restored = types.Graph{ .allocator = cache_arena.allocator(), .project_name = "demo" };
+        defer restored.deinit();
+        try @import("parse_cache_codec.zig").decodeGraph(cache_arena.allocator(), &restored, cached);
+        const restored_meta = restored.nodes.items[0].snapshot_meta_json.?;
+        const restored_patch = restored.snapshot_properties.items[0].properties.object.get("config").?.object.get("meta").?;
+        inline for (.{ restored_meta, restored_patch }) |meta| {
+            try std.testing.expectEqualStrings("analytics", meta.object.get("owner").?.string);
+            const nested = meta.object.get("nested").?;
+            try std.testing.expectEqual(@as(i64, 2), nested.object.get("level").?.integer);
+            try std.testing.expectEqual(@as(usize, 2), nested.object.get("labels").?.array.items.len);
+            try std.testing.expectEqualStrings("history", nested.object.get("labels").?.array.items[1].string);
+        }
+    }
 }
 
 pub fn rejectRelationCollisions(graph: *const types.Graph) !void {
