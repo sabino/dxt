@@ -1835,77 +1835,48 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
     if (std.mem.eql(u8, name, "unique")) return generators.unique(allocator, value, args);
     if (std.mem.eql(u8, name, "batch")) return generators.batch(allocator, value, args);
     if (std.mem.eql(u8, name, "slice")) return generators.slice(allocator, value, args);
-    if (std.mem.eql(u8, name, "sort") or std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
+    if (try @import("expression_aggregate_filters.zig").callWithHost(allocator, name, value, args, host)) |result| return result;
+    if (std.mem.eql(u8, name, "sort")) {
+        const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{ "reverse", "case_sensitive", "attribute" }, &.{ .{ .boolean = false }, .{ .boolean = false }, .none }, 0);
+        const case_sensitive = bound[1].truthy();
+        const attribute = bound[2];
+        const attributes = @import("filter_attributes.zig");
+        var paths: std.ArrayList([]const Value) = .empty;
+        if (attribute == .string) {
+            var parts = std.mem.splitScalar(u8, attribute.string, ',');
+            while (parts.next()) |part| try paths.append(allocator, try attributes.parts(allocator, .{ .string = part }));
+        } else try paths.append(allocator, try attributes.parts(allocator, attribute));
         const values = try iterableValuesWithHost(allocator, value, host);
-        const sorted = std.mem.eql(u8, name, "sort");
-        const bound = if (sorted)
-            try @import("filter_arguments.zig").bind(allocator, args, &.{ "reverse", "case_sensitive", "attribute" }, &.{ .{ .boolean = false }, .{ .boolean = false }, .none }, 0)
-        else
-            try @import("filter_arguments.zig").bind(allocator, args, &.{ "case_sensitive", "attribute" }, &.{ .{ .boolean = false }, .none }, 0);
-        const case_sensitive = bound[if (sorted) 1 else 0].truthy();
-        const attribute = bound[if (sorted) 2 else 1];
         const Item = struct { value: Value, key: Value };
         var items: std.ArrayList(Item) = .empty;
         for (values) |v| {
-            var key = if (sorted) blk: {
-                var fields: std.ArrayList(Value) = .empty;
-                if (attribute == .string) {
-                    var parts = std.mem.splitScalar(u8, attribute.string, ',');
-                    while (parts.next()) |part| {
-                        var field = try attributeValueWithHost(allocator, v, .{ .string = part }, host);
-                        if (!case_sensitive and field == .string) field = .{ .string = try unicode.convert(allocator, field.string, .lower) };
-                        try fields.append(allocator, field);
-                    }
-                } else {
-                    var field = try attributeValueWithHost(allocator, v, attribute, host);
-                    if (!case_sensitive and field == .string) field = .{ .string = try unicode.convert(allocator, field.string, .lower) };
-                    try fields.append(allocator, field);
-                }
-                break :blk Value{ .list = try fields.toOwnedSlice(allocator) };
-            } else try attributeValueWithHost(allocator, v, attribute, host);
-            if (!sorted and !case_sensitive and key == .string) key = .{ .string = try unicode.convert(allocator, key.string, .lower) };
-            try items.append(allocator, .{ .value = v, .key = key });
-        }
-        if (std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
-            if (items.items.len == 0) return .undefined;
-            var best = items.items[0];
-            for (items.items[1..]) |item| {
-                const order = valueOrder(allocator, item.key, best.key) catch |err| {
-                    if (err == error.UnorderedJinjaNumber) continue;
-                    return err;
-                };
-                if (order == (if (std.mem.eql(u8, name, "min")) std.math.Order.lt else std.math.Order.gt)) best = item;
+            var fields: std.ArrayList(Value) = .empty;
+            for (paths.items) |path| {
+                var field = try attributes.get(allocator, v, path, .none, host);
+                if (!case_sensitive and field == .string) field = .{ .string = try unicode.convert(allocator, field.string, .lower) };
+                try fields.append(allocator, field);
             }
-            return best.value;
+            try items.append(allocator, .{ .value = v, .key = .{ .list = try fields.toOwnedSlice(allocator) } });
         }
-        if (sorted) {
-            const reverse = bound[0].truthy();
-            var failure: ?anyerror = null;
-            const Context = struct {
-                descending: bool,
-                allocator: std.mem.Allocator,
-                failure: *?anyerror,
-                fn less(context: @This(), a: Item, b: Item) bool {
-                    const order = valueOrder(context.allocator, a.key, b.key) catch |err| {
-                        if (err != error.UnorderedJinjaNumber) context.failure.* = err;
-                        return false;
-                    };
-                    return if (context.descending) order == .gt else order == .lt;
-                }
-            };
-            std.sort.block(Item, items.items, Context{ .descending = reverse, .allocator = allocator, .failure = &failure }, Context.less);
-            if (failure) |err| return err;
-        }
+        const reverse = bound[0].truthy();
+        var failure: ?anyerror = null;
+        const Context = struct {
+            descending: bool,
+            allocator: std.mem.Allocator,
+            failure: *?anyerror,
+            fn less(context: @This(), a: Item, b: Item) bool {
+                const order = valueOrder(context.allocator, a.key, b.key) catch |err| {
+                    if (err != error.UnorderedJinjaNumber) context.failure.* = err;
+                    return false;
+                };
+                return if (context.descending) order == .gt else order == .lt;
+            }
+        };
+        std.sort.block(Item, items.items, Context{ .descending = reverse, .allocator = allocator, .failure = &failure }, Context.less);
+        if (failure) |err| return err;
         const result = try allocateValues(allocator, items.items.len);
         for (items.items, result) |item, *v| v.* = item.value;
         return .{ .list = result };
-    }
-    if (std.mem.eql(u8, name, "sum")) {
-        const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{ "attribute", "start" }, &.{ .none, .{ .integer = "0" } }, 0);
-        var result = bound[1];
-        const attribute = bound[0];
-        for (try iterableValuesWithHost(allocator, value, host)) |v| result = try apply(allocator, "+", result, try attributeValueWithHost(allocator, v, attribute, host));
-        return result;
     }
     if (std.mem.eql(u8, name, "reverse")) {
         if (value == .string) return sliceValue(allocator, value, null, null, .{ .integer = "-1" });
@@ -1977,17 +1948,6 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
             .{ .value = if (bound[2] == .none) .{ .integer = "-1" } else bound[2] },
         };
         return (try pureMethod(allocator, text, "replace", &method_args, host)) orelse error.UnsupportedJinjaFilter;
-    }
-    if (std.mem.eql(u8, name, "join")) {
-        const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{ "d", "attribute" }, &.{ .{ .string = "" }, .none }, 0);
-        const separator = try bound[0].text(allocator);
-        const attribute = bound[1];
-        var out: std.ArrayList(u8) = .empty;
-        for (try iterableValuesWithHost(allocator, value, host), 0..) |v, i| {
-            if (i != 0) try out.appendSlice(allocator, separator);
-            try out.appendSlice(allocator, try (try attributeValueWithHost(allocator, v, attribute, host)).text(allocator));
-        }
-        return .{ .string = try out.toOwnedSlice(allocator) };
     }
     if (std.mem.eql(u8, name, "first") or std.mem.eql(u8, name, "last")) {
         if (args.len != 0) return error.InvalidJinjaArguments;

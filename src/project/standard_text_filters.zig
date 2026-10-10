@@ -52,15 +52,34 @@ fn urlencode(a: std.mem.Allocator, value: Value, host: ?expression.Host) ![]cons
             count += 1;
         }
     } else {
-        for (try expression.iterableValuesWithHost(a, value, host)) |item| {
-            const pair = try expression.iterableValuesWithHost(a, item, host);
-            if (pair.len != 2) return error.JinjaValueError;
+        const sequence = @import("expression_sequence.zig");
+        const iterator = try sequence.iter(a, value);
+        while (try sequence.next(a, iterator, host)) |item| {
+            // Tuple unpacking reads only enough to distinguish two from three.
+            const pair = try sequence.iter(a, item);
+            const key = (try sequence.next(a, pair, host)) orelse return error.JinjaValueError;
+            const member = (try sequence.next(a, pair, host)) orelse return error.JinjaValueError;
+            if (try sequence.next(a, pair, host) != null) return error.JinjaValueError;
             if (count != 0) try out.writer.writeByte('&');
-            try out.writer.print("{s}={s}", .{ try quote(a, pair[0], true), try quote(a, pair[1], true) });
+            try out.writer.print("{s}={s}", .{ try quote(a, key, true), try quote(a, member, true) });
             count += 1;
         }
     }
     return out.toOwnedSlice();
+}
+
+test "URL pairs stop pulling at unpack failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sequence = @import("expression_sequence.zig");
+    const outer = try sequence.iterator(a, &.{ .{ .integer = "1" }, .{ .integer = "2" } });
+    try std.testing.expectError(error.JinjaTypeError, call(a, "urlencode", outer, &.{}));
+    try std.testing.expectEqualStrings("1", outer.attribute("__dxt_sequence_cursor").integer);
+    const inner = try sequence.iterator(a, &.{ .{ .integer = "1" }, .{ .integer = "2" }, .{ .integer = "3" }, .{ .integer = "4" } });
+    const nested = try sequence.iterator(a, &.{inner});
+    try std.testing.expectError(error.JinjaValueError, call(a, "urlencode", nested, &.{}));
+    try std.testing.expectEqualStrings("3", inner.attribute("__dxt_sequence_cursor").integer);
 }
 
 const Chunk = struct { text: []const u8, length: usize };
