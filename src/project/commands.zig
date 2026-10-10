@@ -311,7 +311,21 @@ pub const OperationHost = struct {
             } else try @import("concurrent_runner.zig").emitLogMessages(self.runtime, self.stdout, if (self.current_node) |node| node.unique_id else "operation", 0, &.{.{ .message = message.string, .level = "warn", .is_adapter_warning = true }});
             return .{ .string = "" };
         }
-        if (try @import("adapter_context.zig").call(self.values.allocator(), self.graph, &self.adapter_state, .{ .context = self, .render = renderAdapterMacro }, name, args)) |value| return value;
+        var adapter_args = args;
+        if (std.mem.eql(u8, name, "adapter.get_relation") and self.graph.profile_name == null and std.mem.eql(u8, self.graph.adapter_type, "duckdb")) {
+            const database = argument(args, "database", 0);
+            if (database == null or database.? == .none or database.? == .undefined) {
+                // The profileless DuckDB extension still has a concrete held
+                // database. Core's catalog macro needs that identity to find
+                // an existing relation before replacing a stored test audit.
+                var current = try self.queryResult("select current_database()");
+                defer current.deinit(self.runtime.allocator);
+                const name_value = current.firstScalar() orelse return error.InvalidAdapterIntrospection;
+                const value: expression.Value = .{ .string = try self.values.allocator().dupe(u8, name_value) };
+                adapter_args = try defaultRelationDatabase(self.values.allocator(), args, value);
+            }
+        }
+        if (try @import("adapter_context.zig").call(self.values.allocator(), self.graph, &self.adapter_state, .{ .context = self, .render = renderAdapterMacro }, name, adapter_args)) |value| return value;
         if (std.mem.eql(u8, name, "adapter.get_column_schema_from_query")) {
             const sql = argument(args, "sql", 0) orelse return error.InvalidJinjaArguments;
             if (sql != .string) return error.InvalidJinjaArguments;
@@ -554,6 +568,20 @@ pub const OperationHost = struct {
         }) };
     }
 };
+
+fn defaultRelationDatabase(allocator: std.mem.Allocator, args: []const expression.Argument, database: expression.Value) ![]const expression.Argument {
+    for (args, 0..) |item, index| {
+        if ((item.name != null and std.mem.eql(u8, item.name.?, "database")) or (index == 0 and item.name == null)) {
+            const replacement = try allocator.dupe(expression.Argument, args);
+            replacement[index].value = database;
+            return replacement;
+        }
+    }
+    const replacement = try allocator.alloc(expression.Argument, args.len + 1);
+    @memcpy(replacement[0..args.len], args);
+    replacement[args.len] = .{ .name = "database", .value = database };
+    return replacement;
+}
 
 fn argument(args: []const expression.Argument, name: []const u8, position: usize) ?expression.Value {
     var index: usize = 0;
