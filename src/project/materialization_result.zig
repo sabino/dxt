@@ -11,8 +11,7 @@ pub const Result = struct {
 
     pub fn deinit(self: Result, allocator: std.mem.Allocator) void {
         allocator.free(self.message);
-        if (self.response.message) |text| allocator.free(text);
-        if (self.response.code) |text| allocator.free(text);
+        self.response.deinit(allocator);
     }
 
     /// Transfers ownership to the durable/concurrent run result.
@@ -36,7 +35,12 @@ pub fn fromValue(allocator: std.mem.Allocator, value: expression.Value) !Result 
             result.response.code = try allocator.dupe(u8, code.string);
         }
         const count = value.attribute("rows_affected");
-        if (count != .none and count != .undefined) result.response.rows_affected = try expression.integerIndex(count);
+        if (count != .none and count != .undefined) {
+            if (count == .integer or expression.integerProtocol(count) != null) {
+                result.response.rows_affected = expression.integerIndex(count) catch null;
+                if (result.response.rows_affected == null) result.response.rows_affected_value = try @import("config_value.zig").fromExpression(allocator, count);
+            } else result.response.rows_affected_value = try @import("config_value.zig").fromExpression(allocator, count);
+        }
     }
     return result;
 }
@@ -99,4 +103,33 @@ test "main response uses the PostgreSQL command tag and DuckDB OK contract" {
     defer duck.deinit(allocator);
     try std.testing.expectEqualStrings("OK", duck.message);
     try std.testing.expect(duck.response.code == null and duck.response.rows_affected == null);
+}
+
+pub fn captureSkip(allocator: std.mem.Allocator, destination: ?*?Result, relation: []const u8) !void {
+    if (destination) |output| {
+        var result = Result{ .message = try std.fmt.allocPrint(allocator, "skip {s}", .{relation}), .response = .{} };
+        errdefer result.deinit(allocator);
+        result.response.message = try allocator.dupe(u8, result.message);
+        result.response.code = try allocator.dupe(u8, "skip");
+        result.response.rows_affected_value = .{ .string = try allocator.dupe(u8, "-1") };
+        if (output.*) |previous| previous.deinit(allocator);
+        output.* = result;
+    }
+}
+
+test "authored main responses retain raw row count types and ownership" {
+    const a = std.testing.allocator;
+    const value = expression.Value{ .object = &.{
+        .{ .key = "__dxt_adapter_response", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = "skip relation" } },
+        .{ .key = "_message", .value = .{ .string = "skip relation" } },
+        .{ .key = "code", .value = .{ .string = "skip" } },
+        .{ .key = "rows_affected", .value = .{ .string = "-1" } },
+    } };
+    const result = try fromValue(a, value);
+    defer result.deinit(a);
+    const cloned = try result.response.clone(a);
+    defer cloned.deinit(a);
+    try std.testing.expectEqualStrings("-1", cloned.rows_affected_value.string);
+    try std.testing.expect(result.response.rows_affected_value.string.ptr != cloned.rows_affected_value.string.ptr);
 }

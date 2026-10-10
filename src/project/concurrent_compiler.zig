@@ -221,8 +221,7 @@ fn freeResult(allocator: std.mem.Allocator, row: results.NodeResult) void {
     if (row.owns_compiled_artifact_code) if (row.compiled_artifact_code) |sql| allocator.free(sql);
     if (row.owns_preview) if (row.preview) |preview| allocator.free(preview);
     if (row.owns_adapter_response) if (row.adapter_response) |response| {
-        if (response.message) |message| allocator.free(message);
-        if (response.code) |code| allocator.free(code);
+        response.deinit(allocator);
     };
     if (row.owns_compiled_code) if (row.compiled_code) |sql| allocator.free(sql);
     if (row.owns_relation_name) if (row.relation_name) |relation| allocator.free(relation);

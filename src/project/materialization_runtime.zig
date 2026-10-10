@@ -62,6 +62,11 @@ pub fn executeWithBody(runtime: types.Runtime, db_path: []const u8, graph: *cons
         existing = try @import("dbt_context.zig").relationValue(allocator, definition);
     }
     try runHooks(allocator, &runtime_graph, node, config, "pre-hook", false);
+    if (body.materialized == null and try @import("postgres_materialization.zig").skipsInnerLifecycle(held_runtime, &runtime_graph, node, existing_type)) {
+        try body.execute(body.context, held_runtime, &runtime_graph, node, db_path, .{ .manage_transaction = false, .file_effects = &journal });
+        try runHooks(allocator, &runtime_graph, node, config, "post-hook", false);
+        return;
+    }
     try host.begin();
     errdefer host.rollback() catch {};
     errdefer |err| if (host.lastError()) |message| @import("compile_diagnostics.zig").captureError(node.original_file_path, node.name, message, err);

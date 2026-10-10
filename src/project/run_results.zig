@@ -17,6 +17,7 @@ pub const LogMessage = struct {
     level: []const u8,
     is_print: bool = false,
     is_adapter_warning: bool = false,
+    is_jinja_warning: bool = false,
 };
 
 pub const NodeResult = struct {
@@ -72,6 +73,23 @@ pub const AdapterResponse = struct {
     message: ?[]const u8 = null,
     code: ?[]const u8 = null,
     rows_affected: ?i64 = null,
+    rows_affected_value: std.json.Value = .null,
+
+    pub fn deinit(self: AdapterResponse, allocator: std.mem.Allocator) void {
+        if (self.message) |text| allocator.free(text);
+        if (self.code) |text| allocator.free(text);
+        var value = self.rows_affected_value;
+        @import("config_value.zig").deinit(allocator, &value);
+    }
+
+    pub fn clone(self: AdapterResponse, allocator: std.mem.Allocator) !AdapterResponse {
+        var output = AdapterResponse{ .include_nulls = self.include_nulls, .include_query_id = self.include_query_id, .rows_affected = self.rows_affected };
+        errdefer output.deinit(allocator);
+        if (self.message) |text| output.message = try allocator.dupe(u8, text);
+        if (self.code) |text| output.code = try allocator.dupe(u8, text);
+        output.rows_affected_value = try @import("config_value.zig").clone(allocator, self.rows_affected_value);
+        return output;
+    }
 };
 
 pub const ResultStatusRow = struct {
@@ -365,7 +383,12 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
             try writer.writeAll("\"code\": null");
             fields += 1;
         }
-        if (response.rows_affected) |count| {
+        if (response.rows_affected_value != .null) {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.writeAll("\"rows_affected\": ");
+            try std.json.Stringify.value(response.rows_affected_value, .{}, writer);
+            fields += 1;
+        } else if (response.rows_affected) |count| {
             if (fields != 0) try writer.writeAll(", ");
             try writer.print("\"rows_affected\": {d}", .{count});
             fields += 1;

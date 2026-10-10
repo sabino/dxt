@@ -1550,6 +1550,13 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         context.returned = args[0].value;
         return .{ .string = "" };
     }
+    if (context.parse_node != null and std.mem.eql(u8, name, "exceptions.warn")) {
+        if (args.len != 1 or args[0].value != .string or (args[0].name != null and !std.mem.eql(u8, args[0].name.?, "msg"))) return error.InvalidJinjaArguments;
+        if (context.graph.warning_registry) |registry| if (registry.runtime) |runtime| {
+            try @import("jinja_warning.zig").emit(runtime, context.node, args[0].value.string, null, runtime.event_writer);
+        };
+        return .{ .string = "" };
+    }
     if (std.mem.eql(u8, name, "exceptions.raise_compiler_error")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
         @import("compile_diagnostics.zig").capture(context.node.original_file_path, context.node.name, try args[0].value.text(allocator));

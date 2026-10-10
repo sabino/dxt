@@ -68,3 +68,62 @@ def test_stock_failure_preserves_actual_server_diagnostic_and_prior_data(tmp_pat
         assert 'missing_metadata_relation' in output[0]['message']
         assert output[0]['adapter_response'] == {}
     assert rows(pair, request, adapter, 'select id from {schema}.rendered') == [[(1,)], [(1,)]]
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_contract_main_response_keeps_insert_or_adapter_tag(tmp_path, configuration_oracle, request, adapter):
+    pair = setup_pair(tmp_path, configuration_oracle, request, adapter)
+    pair.write('models/properties.yml', "version: 2\nmodels:\n  - name: rendered\n    config: {contract: {enforced: true}}\n    columns:\n      - {name: id, data_type: integer, constraints: [{type: not_null}]}\n")
+    pair.write('models/marts/rendered.sql', "{{ config(materialized='table', post_hook='select 999') }}select 1::integer as id union all select 2")
+    pair.invoke('run')
+    assert results(pair)[0] == results(pair)[1]
+
+
+def test_postgres_materialized_view_index_commands_are_main_metadata(tmp_path, configuration_oracle, request):
+    pair = setup_pair(tmp_path, configuration_oracle, request, 'postgres')
+    for indexes in ["[{ 'columns': ['id'] }]", "[{ 'columns': ['value'] }]", "[]"]:
+        pair.write('models/marts/rendered.sql', "{{ config(materialized='materialized_view', indexes=" + indexes + ", post_hook='select 999') }}select 1 as id, 2 as value")
+        pair.invoke('run')
+        assert results(pair)[0] == results(pair)[1]
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('count,expected', [("'-1'", '-1'), ('2.5', 2.5), ('true', True), ('123456789012345678901234567890', 123456789012345678901234567890)])
+def test_authored_response_retains_core_row_count_value_types(tmp_path, configuration_oracle, request, adapter, count, expected):
+    from test_usability_custom_materializations import materialization
+    pair = setup_pair(tmp_path, configuration_oracle, request, adapter)
+    pair.write('models/marts/rendered.sql', "{{ config(materialized='native_custom') }}select 900")
+    pair.write('macros/materialization.sql', materialization(extra="{% call noop_statement('main', message='typed response', code='AUTHORED', rows_affected=" + count + ") %}select 'metadata only'{% endcall %}"))
+    pair.invoke('run')
+    actual, reference = results(pair)
+    assert actual == reference
+    assert actual[0]['adapter_response']['rows_affected'] == expected
+    assert type(actual[0]['adapter_response']['rows_affected']) is type(expected)
+
+
+def test_postgres_materialized_view_continue_retains_skip_response_and_data(tmp_path, configuration_oracle, request):
+    import yaml
+    pair = setup_pair(tmp_path, configuration_oracle, request, 'postgres')
+    pair.write('models/marts/rendered.sql', "{{ config(materialized='materialized_view', indexes=[{'columns':['id']}]) }}select 1 as id, 2 as value")
+    pair.invoke('run')
+    pair.write('models/marts/rendered.sql', "{{ config(materialized='materialized_view', indexes=[{'columns':['value']}], on_configuration_change='continue', post_hook='select 999') }}select 3 as id, 4 as value")
+    pair.invoke('run')
+    actual, reference = results(pair)
+    schemas = [yaml.safe_load((project / 'profiles.yml').read_text())['configuration_fixture']['outputs']['dev']['schema'] for project in pair.projects]
+    assert json.dumps(actual).replace(schemas[0], schemas[1]) == json.dumps(reference)
+    assert actual[0]['adapter_response']['rows_affected'] == '-1'
+    assert actual[0]['adapter_response']['code'] == 'skip'
+    assert rows(pair, request, 'postgres', 'select id,value from {schema}.rendered') == [[(1,2)], [(1,2)]]
+    pair.invoke('run', ['--warn-error'], success=False)
+    assert [row[0]['status'] for row in results(pair)] == ['error', 'error']
+    assert rows(pair, request, 'postgres', 'select id,value from {schema}.rendered') == [[(1,2)], [(1,2)]]
+
+
+def test_postgres_materialized_view_continue_skips_inner_hooks_and_retains_outer_hooks(tmp_path, configuration_oracle, request):
+    pair = setup_pair(tmp_path, configuration_oracle, request, 'postgres')
+    pair.write('models/marts/rendered.sql', "{{ config(materialized='materialized_view', indexes=[{'columns':['id']}], pre_hook={'sql':'create table {{ target.schema }}.events (label varchar)', 'transaction':false}) }}select 1 as id, 2 as value")
+    pair.invoke('run')
+    pair.write('models/marts/rendered.sql', "{{ config(materialized='materialized_view', indexes=[{'columns':['value']}], on_configuration_change='continue', pre_hook=\"insert into {{ target.schema }}.events values ('inner-pre')\", post_hook=[\"insert into {{ target.schema }}.events values ('inner-post')\", {'sql':\"insert into {{ target.schema }}.events values ('outer-post')\", 'transaction':false}]) }}select 3 as id, 4 as value")
+    pair.invoke('run')
+    assert rows(pair, request, 'postgres', 'select label from {schema}.events') == [[('outer-post',)], [('outer-post',)]]
+    assert rows(pair, request, 'postgres', 'select id,value from {schema}.rendered') == [[(1,2)], [(1,2)]]

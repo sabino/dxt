@@ -288,6 +288,12 @@ pub const OperationHost = struct {
             try std.Io.Dir.cwd().writeFile(self.runtime.io, .{ .sub_path = path, .data = payload.string });
             return .{ .string = "" };
         }
+        if (std.mem.eql(u8, name, "exceptions.warn")) {
+            const message = argument(args, "msg", 0) orelse return error.InvalidJinjaArguments;
+            if (args.len != 1 or message != .string) return error.InvalidJinjaArguments;
+            try @import("jinja_warning.zig").emit(self.runtime, self.current_node, message.string, self.log_events, self.stdout);
+            return .{ .string = "" };
+        }
         if (std.mem.eql(u8, name, "adapter.warn_once")) {
             if (!std.mem.eql(u8, self.graph.adapter_type, "duckdb")) return error.UnresolvedMacro;
             const message = argument(args, "msg", 0) orelse return error.InvalidJinjaArguments;

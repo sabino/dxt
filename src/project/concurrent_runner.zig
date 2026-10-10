@@ -419,11 +419,8 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
         output.owns_preview = true;
     }
     if (source.adapter_response) |response| if (source.owns_adapter_response) {
-        output.adapter_response = .{ .include_nulls = response.include_nulls, .include_query_id = response.include_query_id };
+        output.adapter_response = try response.clone(allocator);
         output.owns_adapter_response = true;
-        if (response.message) |message| output.adapter_response.?.message = try allocator.dupe(u8, message);
-        if (response.code) |code| output.adapter_response.?.code = try allocator.dupe(u8, code);
-        output.adapter_response.?.rows_affected = response.rows_affected;
     };
     if (source.batch_results) |batches| {
         output.batch_results = .{};
@@ -444,6 +441,7 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
             entry.level = original.level;
             entry.is_print = original.is_print;
             entry.is_adapter_warning = original.is_adapter_warning;
+            entry.is_jinja_warning = original.is_jinja_warning;
             entry.message = try allocator.dupe(u8, original.message);
         }
     }
@@ -471,8 +469,7 @@ fn freeResult(allocator: std.mem.Allocator, output: results.NodeResult) void {
     if (output.owns_compiled_artifact_code) if (output.compiled_artifact_code) |sql| allocator.free(sql);
     if (output.owns_preview) if (output.preview) |preview| allocator.free(preview);
     if (output.owns_adapter_response) if (output.adapter_response) |response| {
-        if (response.message) |message| allocator.free(message);
-        if (response.code) |code| allocator.free(code);
+        response.deinit(allocator);
     };
     if (output.owns_batch_results) if (output.batch_results) |batches| batches.deinit(allocator);
     if (output.owns_compiled_ctes) {
@@ -502,8 +499,8 @@ pub fn emitLogMessages(runtime: types.Runtime, writer: *std.Io.Writer, id: []con
             try std.json.Stringify.value(entry.message, .{}, writer);
         }
         try writer.writeAll("},\"info\":{\"name\":");
-        try std.json.Stringify.value(if (entry.is_adapter_warning) "AdapterEventWarning" else if (entry.is_print) "PrintEvent" else if (std.mem.eql(u8, entry.level, "debug")) "JinjaLogDebug" else "JinjaLogInfo", .{}, writer);
-        if (entry.is_adapter_warning) {
+        try std.json.Stringify.value(if (entry.is_adapter_warning) "AdapterEventWarning" else if (entry.is_jinja_warning) "JinjaLogWarning" else if (entry.is_print) "PrintEvent" else if (std.mem.eql(u8, entry.level, "debug")) "JinjaLogDebug" else "JinjaLogInfo", .{}, writer);
+        if (entry.is_adapter_warning or entry.is_jinja_warning) {
             try writer.writeAll(",\"msg\":");
             try std.json.Stringify.value(displayed, .{}, writer);
         }

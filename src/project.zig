@@ -2442,8 +2442,7 @@ fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.N
         if (result.owns_compiled_artifact_code) if (result.compiled_artifact_code) |sql| allocator.free(sql);
         if (result.owns_preview) if (result.preview) |preview| allocator.free(preview);
         if (result.owns_adapter_response) if (result.adapter_response) |response| {
-            if (response.message) |message| allocator.free(message);
-            if (response.code) |code| allocator.free(code);
+            response.deinit(allocator);
         };
         if (result.owns_log_output) if (result.log_output) |messages| allocator.free(messages);
         if (result.owns_log_events) {

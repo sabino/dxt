@@ -40,14 +40,19 @@ pub fn executeReturningWithPolicy(runtime: types.Runtime, graph: *const types.Gr
     };
     if (policy.manage_transaction) try session.begin();
     errdefer if (policy.manage_transaction) session.rollback() catch {};
-    var result = try executeInTransaction(runtime.allocator, session, graph, node, sql);
+    if (policy.main_result) |output| {
+        if (output.*) |previous| previous.deinit(runtime.allocator);
+        output.* = null;
+    }
+    var result = try executeInTransaction(runtime, session, graph, node, sql, policy.main_result);
     errdefer result.deinit(runtime.allocator);
-    try @import("materialization_result.zig").captureQuery(runtime.allocator, policy.main_result, result);
+    if (policy.main_result == null or policy.main_result.?.* == null) try @import("materialization_result.zig").captureQuery(runtime.allocator, policy.main_result, result);
     if (policy.manage_transaction) try session.commit();
     return result;
 }
 
-fn executeInTransaction(allocator: std.mem.Allocator, session: *adapter.Session, graph: *const types.Graph, node: *const types.Node, sql: []const u8) !adapter.QueryResult {
+fn executeInTransaction(runtime: types.Runtime, session: *adapter.Session, graph: *const types.Graph, node: *const types.Node, sql: []const u8, main_result: ?*?@import("materialization_result.zig").Result) !adapter.QueryResult {
+    const allocator = runtime.allocator;
     if (compiler.relationDatabaseForNode(graph, node)) |database| {
         var current = try session.query("select current_database()");
         defer current.deinit(allocator);
@@ -69,7 +74,7 @@ fn executeInTransaction(allocator: std.mem.Allocator, session: *adapter.Session,
     const indexes = if (std.mem.eql(u8, node.materialized, "view")) try allocator.alloc(Index, 0) else try parseIndexes(allocator, node);
     defer allocator.free(indexes);
     if (std.mem.eql(u8, node.materialized, "materialized_view") and existing != null and std.mem.eql(u8, existing.?, "materialized_view") and !@import("incremental_config.zig").fullRefresh(graph, node)) {
-        return updateMaterializedView(allocator, session, schema, identifier, target, indexes, node);
+        return updateMaterializedView(runtime, session, graph, schema, identifier, target, indexes, node, main_result);
     }
     const intermediate_id = try suffixedIdentifier(allocator, identifier, "__dbt_tmp");
     defer allocator.free(intermediate_id);
@@ -85,7 +90,13 @@ fn executeInTransaction(allocator: std.mem.Allocator, session: *adapter.Session,
     defer allocator.free(creation);
     var result = try session.query(creation);
     errdefer result.deinit(allocator);
-    if (!std.mem.eql(u8, node.materialized, "view")) for (indexes) |index| try createIndex(allocator, session, intermediate, index);
+    if (!std.mem.eql(u8, node.materialized, "view")) for (indexes) |index| {
+        if (std.mem.eql(u8, node.materialized, "materialized_view")) {
+            const index_response = try createIndexReturning(allocator, session, intermediate, index);
+            result.deinit(allocator);
+            result = index_response;
+        } else try createIndex(allocator, session, intermediate, index);
+    };
     if (existing) |kind| try rename(allocator, session, kind, target, backup_id);
     try rename(allocator, session, node.materialized, intermediate, identifier);
     if (existing) |kind| try drop(allocator, session, kind, backup);
@@ -167,6 +178,11 @@ pub fn createConfiguredIndexes(allocator: std.mem.Allocator, session: *adapter.S
 }
 
 fn createIndex(allocator: std.mem.Allocator, session: *adapter.Session, relation: []const u8, index: Index) !void {
+    var response = try createIndexReturning(allocator, session, relation, index);
+    defer response.deinit(allocator);
+}
+
+fn createIndexReturning(allocator: std.mem.Allocator, session: *adapter.Session, relation: []const u8, index: Index) !adapter.QueryResult {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     // PostgreSQL generates a collision-free name. Core's names also vary per
@@ -177,10 +193,23 @@ fn createIndex(allocator: std.mem.Allocator, session: *adapter.Session, relation
         try out.writer.writeAll(column.string);
     }
     try out.writer.writeAll(")");
-    try session.execute(out.written());
+    return session.query(out.written());
 }
 
-fn updateMaterializedView(allocator: std.mem.Allocator, session: *adapter.Session, schema: []const u8, identifier: []const u8, target: []const u8, desired: []const Index, node: *const types.Node) !adapter.QueryResult {
+const IndexDifference = struct {
+    actual: adapter.QueryResult,
+    matches: []bool,
+    keep: []bool,
+    changed: bool,
+
+    fn deinit(self: *IndexDifference, allocator: std.mem.Allocator) void {
+        self.actual.deinit(allocator);
+        allocator.free(self.matches);
+        allocator.free(self.keep);
+    }
+};
+
+fn inspectIndexes(allocator: std.mem.Allocator, session: *adapter.Session, schema: []const u8, identifier: []const u8, desired: []const Index) !IndexDifference {
     const schema_literal = try adapter.quoteLiteral(allocator, schema);
     defer allocator.free(schema_literal);
     const name_literal = try adapter.quoteLiteral(allocator, identifier);
@@ -188,12 +217,12 @@ fn updateMaterializedView(allocator: std.mem.Allocator, session: *adapter.Sessio
     const inspection = try std.fmt.allocPrint(allocator, "select i.relname,m.amname,ix.indisunique,array_to_json(array_agg(a.attname order by a.attname))::text from pg_index ix join pg_class i on i.oid=ix.indexrelid join pg_am m on m.oid=i.relam join pg_class t on t.oid=ix.indrelid join pg_namespace n on n.oid=t.relnamespace join pg_attribute a on a.attrelid=t.oid and a.attnum=any(ix.indkey) where t.relname={s} and n.nspname={s} group by 1,2,3 order by 1", .{ name_literal, schema_literal });
     defer allocator.free(inspection);
     var actual = try session.query(inspection);
-    defer actual.deinit(allocator);
+    errdefer actual.deinit(allocator);
     const matches = try allocator.alloc(bool, desired.len);
-    defer allocator.free(matches);
+    errdefer allocator.free(matches);
     @memset(matches, false);
     const keep = try allocator.alloc(bool, actual.rows.len);
-    defer allocator.free(keep);
+    errdefer allocator.free(keep);
     @memset(keep, false);
     for (actual.rows, 0..) |row, i| {
         if (row.len != 4) return error.InvalidAdapterIntrospection;
@@ -213,7 +242,33 @@ fn updateMaterializedView(allocator: std.mem.Allocator, session: *adapter.Sessio
     for (keep) |matched| if (!matched) {
         changed = true;
     };
-    if (!changed) {
+    return .{ .actual = actual, .matches = matches, .keep = keep, .changed = changed };
+}
+
+/// Core determines a no-op before entering the transactional hook lifecycle.
+pub fn skipsInnerLifecycle(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, existing_kind: ?[]const u8) !bool {
+    if (!std.mem.eql(u8, graph.adapter_type, "postgres") or !std.mem.eql(u8, node.materialized, "materialized_view") or @import("incremental_config.zig").fullRefresh(graph, node)) return false;
+    if (existing_kind == null or !std.mem.eql(u8, existing_kind.?, "materialized_view")) return false;
+    const policy = config_value.get(node.effective_config, "on_configuration_change") orelse return false;
+    if (policy != .string or !std.mem.eql(u8, policy.string, "continue")) return false;
+    const session = runtime.adapter_session orelse return error.NativeAdapterSessionRequired;
+    const schema = try compiler.relationSchemaForNode(runtime.allocator, graph, node);
+    defer runtime.allocator.free(schema);
+    const indexes = try parseIndexes(runtime.allocator, node);
+    defer runtime.allocator.free(indexes);
+    var difference = try inspectIndexes(runtime.allocator, session, schema, compiler.relationIdentifierForNode(node), indexes);
+    defer difference.deinit(runtime.allocator);
+    return difference.changed;
+}
+
+fn updateMaterializedView(runtime: types.Runtime, session: *adapter.Session, graph: *const types.Graph, schema: []const u8, identifier: []const u8, target: []const u8, desired: []const Index, node: *const types.Node, main_result: ?*?@import("materialization_result.zig").Result) !adapter.QueryResult {
+    const allocator = runtime.allocator;
+    var difference = try inspectIndexes(allocator, session, schema, identifier, desired);
+    defer difference.deinit(allocator);
+    const actual = difference.actual;
+    const matches = difference.matches;
+    const keep = difference.keep;
+    if (!difference.changed) {
         const refresh = try std.fmt.allocPrint(allocator, "refresh materialized view {s}", .{target});
         defer allocator.free(refresh);
         return session.query(refresh);
@@ -221,19 +276,36 @@ fn updateMaterializedView(allocator: std.mem.Allocator, session: *adapter.Sessio
     const policy_value: std.json.Value = config_value.get(node.effective_config, "on_configuration_change") orelse .{ .string = "apply" };
     if (policy_value != .string) return error.InvalidPostgresMaterializationConfig;
     const policy = policy_value.string;
-    if (std.mem.eql(u8, policy, "continue")) return .{};
+    if (std.mem.eql(u8, policy, "continue")) {
+        var scratch = std.heap.ArenaAllocator.init(allocator);
+        defer scratch.deinit();
+        const rendered_target = try (try compiler.relationValueForNode(scratch.allocator(), graph, node, false)).text(scratch.allocator());
+        const message = try std.fmt.allocPrint(allocator, "Configuration changes were identified and `on_configuration_change` was set to `continue` for `{s}`", .{rendered_target});
+        defer allocator.free(message);
+        try @import("jinja_warning.zig").emit(runtime, node, message, graph.log_collector, runtime.event_writer);
+        try @import("materialization_result.zig").captureSkip(allocator, main_result, rendered_target);
+        return .{};
+    }
     if (std.mem.eql(u8, policy, "fail")) return error.PostgresMaterializedViewConfigurationChanged;
     if (!std.mem.eql(u8, policy, "apply")) return error.InvalidPostgresMaterializationConfig;
+    var response: ?adapter.QueryResult = null;
+    errdefer if (response) |*previous| previous.deinit(allocator);
     for (actual.rows, keep) |row, matched| if (!matched) {
         const name = try qualified(allocator, schema, row[0] orelse return error.InvalidAdapterIntrospection);
         defer allocator.free(name);
         const deletion = try std.fmt.allocPrint(allocator, "drop index if exists {s}", .{name});
         defer allocator.free(deletion);
-        try session.execute(deletion);
+        const deletion_response = try session.query(deletion);
+        if (response) |*previous| previous.deinit(allocator);
+        response = deletion_response;
     };
-    for (desired, matches) |index, matched| if (!matched) try createIndex(allocator, session, target, index);
+    for (desired, matches) |index, matched| if (!matched) {
+        const index_response = try createIndexReturning(allocator, session, target, index);
+        if (response) |*previous| previous.deinit(allocator);
+        response = index_response;
+    };
     // Core's index-only configuration update does not refresh the data.
-    return .{};
+    return response orelse error.InvalidPostgresMaterializationConfig;
 }
 fn sameColumns(desired: []const std.json.Value, actual: []const []const u8) bool {
     if (desired.len != actual.len) return false;
