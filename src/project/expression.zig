@@ -323,6 +323,24 @@ test "NaN scalar equality and container identity follow separate Python rules" {
     try std.testing.expectEqualStrings("nan", try nan.text(a));
 }
 
+test "temporal membership validates nested values after exact aliases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const modules = @import("modules_datetime.zig");
+    const zone = try @import("datetime_tzinfo.zig").value(a);
+    const abstract = (try modules.call(a, "modules.datetime.datetime", &.{ .{ .value = .{ .integer = "2024" } }, .{ .value = .{ .integer = "1" } }, .{ .value = .{ .integer = "1" } }, .{ .name = "tzinfo", .value = zone } }, .{})).?;
+    const naive = (try modules.call(a, "modules.datetime.datetime", &.{ .{ .value = .{ .integer = "2024" } }, .{ .value = .{ .integer = "1" } }, .{ .value = .{ .integer = "1" } } }, .{})).?;
+    try std.testing.expect(try containsWithHost(a, .{ .list = &.{abstract} }, abstract, null));
+    try std.testing.expect(try equalMemberChecked(.{ .tuple = &.{abstract} }, .{ .tuple = &.{abstract} }));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, containsWithHost(a, .{ .list = &.{naive} }, abstract, null));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, equalMemberChecked(.{ .tuple = &.{abstract} }, .{ .tuple = &.{naive} }));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, equalMemberChecked(.{ .object = &.{.{ .key = "x", .value = abstract }} }, .{ .object = &.{.{ .key = "x", .value = naive }} }));
+    const iterator = try sequences.iterator(a, &.{ naive, abstract });
+    try std.testing.expectError(error.AbstractTimeZoneMethod, containsWithHost(a, iterator, abstract, null));
+    try std.testing.expectEqualStrings("1", iterator.attribute("__dxt_sequence_cursor").integer);
+}
+
 pub fn checkedAttribute(value: Value, name: []const u8) !Value {
     if (sequences.kind(value) != null) return .undefined;
     if (tupleProtocol(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
@@ -973,7 +991,7 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
         if (std.mem.eql(u8, name_, "count")) {
             if (args.len != 1) return error.InvalidJinjaArguments;
             var count: usize = 0;
-            for (receiver_values) |value| if (equalMember(value, args[0].value)) {
+            for (receiver_values) |value| if (try equalMemberChecked(value, args[0].value)) {
                 count += 1;
             };
             return try integerValue(allocator, count);
@@ -987,7 +1005,7 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
             if (stop < 0) stop += length;
             start = std.math.clamp(start, 0, length);
             stop = std.math.clamp(stop, 0, length);
-            for (receiver_values[@intCast(start)..@intCast(@max(start, stop))], @as(usize, @intCast(start))..) |value, index| if (equalMember(value, args[0].value)) return try integerValue(allocator, index);
+            for (receiver_values[@intCast(start)..@intCast(@max(start, stop))], @as(usize, @intCast(start))..) |value, index| if (try equalMemberChecked(value, args[0].value)) return try integerValue(allocator, index);
             return error.JinjaValueNotFound;
         }
     }
@@ -1284,6 +1302,46 @@ fn equalMember(a: Value, b: Value) bool {
     if (complexProtocol(a)) |number| if ((std.math.isNan(number.real) or std.math.isNan(number.imaginary)) and mapping_keys.keyEqual(a, b)) return true;
     return equalValues(a, b);
 }
+/// Container comparison first preserves an exact alias, then propagates
+/// errors from member equality (including nested datetime comparisons).
+pub fn equalMemberChecked(left: Value, right: Value) anyerror!bool {
+    return equalMemberCheckedDepth(left, right, 0);
+}
+fn equalMemberCheckedDepth(left: Value, right: Value, depth: usize) anyerror!bool {
+    if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (std.meta.activeTag(left) == std.meta.activeTag(right)) switch (left) {
+        .object => |entries| if (entries.ptr == right.object.ptr) return true,
+        .list => |values| if (values.ptr == right.list.ptr and values.len == right.list.len) return true,
+        .tuple => |values| if (values.ptr == right.tuple.ptr and values.len == right.tuple.len) return true,
+        else => {},
+    };
+    const identity = left.attribute("__dxt_immutable_identity");
+    const other_identity = right.attribute("__dxt_immutable_identity");
+    if (identity == .callable and other_identity == .callable and std.mem.eql(u8, identity.callable, other_identity.callable)) return true;
+    try temporal.validateComparison(left, right);
+    if (tupleProtocol(left)) |members| {
+        const other = tupleProtocol(right) orelse return false;
+        if (members.len != other.len) return false;
+        for (members, other) |a, b| if (!try equalMemberCheckedDepth(a, b, depth + 1)) return false;
+        return true;
+    }
+    if (left == .list) {
+        if (right != .list or left.list.len != right.list.len) return false;
+        for (left.list, right.list) |a, b| if (!try equalMemberCheckedDepth(a, b, depth + 1)) return false;
+        return true;
+    }
+    if (left == .object and right == .object and left.attribute("__dxt_rendered") == .undefined and right.attribute("__dxt_rendered") == .undefined and sequences.kind(left) == null and sequences.kind(right) == null and !sets.isSet(left) and !sets.isSet(right)) {
+        const lhs = mappingSource(left) orelse left;
+        const rhs = mappingSource(right) orelse right;
+        if (lhs.object.len != rhs.object.len) return false;
+        for (lhs.object) |entry| {
+            const other = (try mappingEntry(right, entryKey(entry))) orelse return false;
+            if (!try equalMemberCheckedDepth(entry.value, other.value, depth + 1)) return false;
+        }
+        return true;
+    }
+    return equalMember(left, right);
+}
 fn immutableIdentity(value: Value) ?[]const u8 {
     for ([_][]const u8{ "__dxt_timezone_identity", "__dxt_class_identity" }) |marker| {
         const identity = value.attribute(marker);
@@ -1421,12 +1479,12 @@ fn contains(allocator: std.mem.Allocator, container: Value, item: Value) anyerro
 }
 pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Value, host: ?Host) anyerror!bool {
     if (sequences.isIterator(container)) {
-        while (try sequences.next(allocator, container, host)) |row| if (equalMember(row, item)) return true;
+        while (try sequences.next(allocator, container, host)) |row| if (try equalMemberChecked(row, item)) return true;
         return false;
     }
     if (isUndefined(container)) return false;
     if (tupleProtocol(container)) |items| {
-        for (items) |member| if (equalMember(member, item)) return true;
+        for (items) |member| if (try equalMemberChecked(member, item)) return true;
         return false;
     }
     if (mappingSource(container)) |source| return if (item == .string) (try mapping_keys.entry(source, item)) != null else false;
@@ -1434,13 +1492,13 @@ pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Va
     if (sets.isSet(container)) return try sets.contains(container, item);
     if (container.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError;
     if (sequences.kind(container) != null) {
-        for (try iterableValuesWithHost(allocator, container, host)) |value| if (equalMember(value, item)) return true;
+        for (try iterableValuesWithHost(allocator, container, host)) |value| if (try equalMemberChecked(value, item)) return true;
         return false;
     }
     return switch (container) {
         .string => |s| if (item == .string) std.mem.indexOf(u8, s, item.string) != null else error.JinjaTypeError,
         .list, .tuple => |values| blk: {
-            for (values) |v| if (equalMember(v, item)) break :blk true;
+            for (values) |v| if (try equalMemberChecked(v, item)) break :blk true;
             break :blk false;
         },
         .object => (try mappingEntry(container, item)) != null,
