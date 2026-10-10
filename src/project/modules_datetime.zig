@@ -141,7 +141,7 @@ fn fromComponents(a: Allocator, kind: []const u8, args: []const Argument) !Value
     return dates.datetimeValue(a, ns, date_only, if (date_only) null else try timezoneOffset(values[7]));
 }
 
-fn durationValue(a: Allocator, micros: i96) !Value {
+pub fn durationValue(a: Allocator, micros: i96) !Value {
     const days = @divFloor(micros, std.time.us_per_day);
     const remainder = @mod(micros, std.time.us_per_day);
     const seconds = @divFloor(remainder, std.time.us_per_s);

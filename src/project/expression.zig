@@ -288,6 +288,16 @@ pub fn checkedAttribute(value: Value, name: []const u8) !Value {
     return value.attribute(name);
 }
 
+/// Typed providers may defer a public attribute until it is actually used.
+pub fn attributeWithHost(a: std.mem.Allocator, value: Value, name: []const u8, host: ?Host) !Value {
+    const getter = value.attribute("__dxt_getattr");
+    if (getter == .callable) {
+        const current = host orelse return error.UnsupportedJinjaCall;
+        return current.call(current.context, getter.callable, &.{.{ .value = .{ .string = name } }}, a);
+    }
+    return checkedAttribute(value, name);
+}
+
 fn undefinedUnsafeAttribute(name: []const u8, capture: bool) bool {
     if (std.mem.eql(u8, name, "__dict__")) return capture;
     inline for (.{ "__class__", "__dict__", "__slots__", "__repr__", "__str__", "__bool__", "__len__", "__iter__", "__aiter__", "__call__", "__getitem__", "__getattr__", "__getattribute__", "__setattr__", "__delattr__", "__dir__", "__eq__", "__ne__", "__hash__", "__reduce__", "__reduce_ex__", "__init__", "__init_subclass__", "__new__", "__subclasshook__", "__doc__", "__module__", "__add__", "__radd__", "__sub__", "__rsub__", "__mul__", "__rmul__", "__div__", "__rdiv__", "__truediv__", "__rtruediv__", "__floordiv__", "__rfloordiv__", "__mod__", "__rmod__", "__pos__", "__neg__", "__lt__", "__le__", "__gt__", "__ge__", "__int__", "__float__", "__complex__", "__pow__", "__rpow__" }) |attribute| if (std.mem.eql(u8, name, attribute)) return true;
@@ -559,7 +569,7 @@ const Parser = struct {
                 } else {
                     try self.expect("]");
                     if (self.active) {
-                        value = try indexValue(self.allocator, value, start.?);
+                        value = try indexValueWithHost(self.allocator, value, start.?, self.host);
                         if (value == .undefined) value = try self.missing(if (start.? == .string) start.?.string else null);
                     }
                 }
@@ -569,7 +579,7 @@ const Parser = struct {
                     const args = try self.arguments();
                     if (self.active) value = try self.method(value, attribute, args);
                 } else if (self.active) {
-                    value = try checkedAttribute(value, attribute);
+                    value = try attributeWithHost(self.allocator, value, attribute, self.host);
                     if (value == .undefined) value = try self.missing(attribute);
                     if (value == .number and std.math.isNan(value.number)) value = try floatValue(self.allocator, value.number);
                 }
@@ -735,7 +745,7 @@ const Parser = struct {
             const args = try self.arguments();
             if (!self.active) return .none;
             if (!(self.host != null and std.mem.eql(u8, path, "zip"))) {
-                if (try builtin(self.allocator, path, args)) |value| return value;
+                if (try builtin(self.allocator, path, args, self.host)) |value| return value;
             }
             const host = self.host orelse return error.UnsupportedJinjaCall;
             const callee = try host.resolve(host.context, path, self.allocator);
@@ -755,7 +765,7 @@ const Parser = struct {
             var receiver: Value = if (self.host) |host| try host.resolve(host.context, root_name, self.allocator) else .undefined;
             if (receiver == .undefined) receiver = try self.missing(root_name);
             while (parts.next()) |attribute| {
-                receiver = try checkedAttribute(receiver, attribute);
+                receiver = try attributeWithHost(self.allocator, receiver, attribute, self.host);
                 if (receiver == .undefined) receiver = try self.missing(attribute);
             }
             return receiver;
@@ -771,12 +781,12 @@ const Parser = struct {
             return error.JinjaTypeError;
         }
         if (isUndefined(receiver)) return error.UndefinedJinjaValue;
-        const bound = receiver.attribute(method_name);
+        const bound = try attributeWithHost(self.allocator, receiver, method_name, self.host);
         if (callableName(bound)) |function| {
             const host = self.host orelse return error.UnsupportedJinjaCall;
             return try host.call(host.context, function, args, self.allocator);
         }
-        if (try pureMethod(self.allocator, receiver, method_name, args)) |value| return value;
+        if (try pureMethod(self.allocator, receiver, method_name, args, self.host)) |value| return value;
         const host = self.host orelse return error.UnsupportedJinjaCall;
         const arguments_with_receiver = try self.allocator.alloc(Argument, args.len + 1);
         arguments_with_receiver[0] = .{ .value = receiver };
@@ -814,7 +824,7 @@ const Parser = struct {
                 const expanded = try self.binary(0);
                 if (saw_keyword) return error.InvalidJinjaArguments;
                 if (self.active) {
-                    const items = try iterableValues(self.allocator, expanded);
+                    const items = try iterableValuesWithHost(self.allocator, expanded, self.host);
                     for (items) |value| try args.append(self.allocator, .{ .value = value });
                 }
             } else {
@@ -857,7 +867,7 @@ fn ownedEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry)) ![
     return try entries.toOwnedSlice(allocator);
 }
 
-fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument) !?Value {
+fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument, host: ?Host) !?Value {
     if (sets.isSet(receiver)) return (try sets.call(allocator, receiver, name_, args)) orelse error.UndefinedJinjaValue;
     if (complexProtocol(receiver)) |number| if (std.mem.eql(u8, name_, "conjugate")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
@@ -987,7 +997,7 @@ fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, 
         }
         if (std.mem.eql(u8, name_, "join")) {
             if (args.len != 1) return error.InvalidJinjaArguments;
-            const values = try iterableValues(allocator, args[0].value);
+            const values = try iterableValuesWithHost(allocator, args[0].value, host);
             var output: std.ArrayList(u8) = .empty;
             for (values, 0..) |value, index| {
                 if (value != .string) return error.JinjaTypeError;
@@ -1257,6 +1267,9 @@ pub fn equalValues(a: Value, b: Value) bool {
         },
     };
 }
+pub fn addValues(allocator: std.mem.Allocator, left: Value, right: Value) !Value {
+    return apply(allocator, "+", left, right);
+}
 fn contains(allocator: std.mem.Allocator, container: Value, item: Value) !bool {
     if (isUndefined(container)) return false;
     if (container.attribute("__dxt_binary") == .string) return yaml_values.contains(container, item);
@@ -1379,6 +1392,10 @@ pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value
         else => unreachable,
     };
 }
+pub fn indexValueWithHost(allocator: std.mem.Allocator, value: Value, key: Value, host: ?Host) !Value {
+    if (key == .string and value.attribute("__dxt_getattr") == .callable) return attributeWithHost(allocator, value, key.string, host);
+    return indexValue(allocator, value, key);
+}
 
 fn integer(value: Value) !i64 {
     return integerIndex(value);
@@ -1412,8 +1429,11 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
 }
 
 pub fn iterableValues(allocator: std.mem.Allocator, value: Value) anyerror![]const Value {
+    return iterableValuesWithHost(allocator, value, null);
+}
+pub fn iterableValuesWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) anyerror![]const Value {
     if (value.attribute("__dxt_noniterable") == .boolean and value.attribute("__dxt_noniterable").boolean) return error.JinjaTypeError;
-    if (try sequences.items(allocator, value)) |items| return items;
+    if (try sequences.itemsWithHost(allocator, value, host)) |items| return items;
     if (sequence(value)) |items| return items;
     if (isUndefined(value)) return &.{};
     if (value == .object) {
@@ -1547,7 +1567,7 @@ fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     }
     return error.UnsupportedJinjaTest;
 }
-fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argument) !?Value {
+fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argument, host: ?Host) !?Value {
     if (std.mem.eql(u8, name, "zip")) {
         const inputs = try allocateValues(allocator, args.len);
         for (args, inputs) |arg, *input| {
@@ -1586,8 +1606,8 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
                 if (arg.value == .object and !arg.value.attribute("__dxt_noniterable").truthy() and sequences.kind(arg.value) == null and !sets.isSet(arg.value)) {
                     for (arg.value.object) |entry| try mappingPut(allocator, &entries, entryKey(entry), entry.value);
                 } else {
-                    for (try iterableValues(allocator, arg.value)) |item| {
-                        const pair = try iterableValues(allocator, item);
+                    for (try iterableValuesWithHost(allocator, arg.value, host)) |item| {
+                        const pair = try iterableValuesWithHost(allocator, item, host);
                         if (pair.len != 2) return error.InvalidJinjaArguments;
                         try mappingPut(allocator, &entries, pair[0], pair[1]);
                     }
@@ -2153,4 +2173,30 @@ test "immutable YAML scalars use native bytes and timestamp expression protocols
     try std.testing.expectError(error.JinjaValueError, evaluate(a, "256 in bytes", host));
     try std.testing.expectError(error.JinjaTypeError, evaluate(a, "utc < naive", host));
     try std.testing.expectError(error.JinjaTypeError, evaluate(a, "date < naive", host));
+}
+
+test "typed lazy attributes dispatch through the consuming host and preserve indexed aliases" {
+    const Fixture = struct {
+        calls: usize = 0,
+        value: Value,
+        fn resolve(context: *anyopaque, name: []const u8, _: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return if (std.mem.eql(u8, name, "deferred")) self.value else .undefined;
+        }
+        fn call(context: *anyopaque, name: []const u8, args: []const Argument, a: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, name, "__dxt_loop_attribute:fixture") or args.len != 1 or args[0].value != .string) return error.UnsupportedJinjaCall;
+            self.calls += 1;
+            return if (std.mem.eql(u8, args[0].value.string, "length")) try integerValue(a, 3) else .undefined;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var context = Fixture{ .value = .{ .object = &.{.{ .key = "__dxt_getattr", .value = .{ .callable = "__dxt_loop_attribute:fixture" } }} } };
+    const host = Host{ .context = &context, .resolve = Fixture.resolve, .call = Fixture.call };
+    try std.testing.expectEqualStrings("3", (try evaluate(a, "[deferred][0].length", host)).integer);
+    try std.testing.expectEqualStrings("3", (try evaluate(a, "deferred['length']", host)).integer);
+    try std.testing.expectEqual(@as(usize, 2), context.calls);
+    try std.testing.expectEqualStrings("9007199254740994", (try addValues(a, .{ .integer = "9007199254740993" }, .{ .integer = "1" })).integer);
 }
