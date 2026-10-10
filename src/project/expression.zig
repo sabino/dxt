@@ -55,6 +55,7 @@ pub const Value = union(enum) {
     }
 
     pub fn text(self: Value, allocator: std.mem.Allocator) anyerror![]const u8 {
+        if (@import("builtin_bound_method.zig").isBound(self)) return @import("builtin_bound_method.zig").render(allocator, self);
         if (floatProtocol(self)) |number| return numbers.floatText(allocator, number);
         if (complexProtocol(self)) |number| return complex_numbers.text(allocator, number);
         return switch (self) {
@@ -424,6 +425,8 @@ test "temporal membership validates nested values after exact aliases" {
 }
 
 pub fn checkedAttribute(value: Value, name: []const u8) !Value {
+    if (@import("builtin_bound_method.zig").isBound(value)) return .undefined;
+    if (@import("builtin_bound_method.zig").isContextObject(value) and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (@import("datetime_bound_method.zig").isBound(value) and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (@import("datetime_protocol.zig").kind(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (sequences.kind(value) != null) return .undefined;
@@ -519,6 +522,26 @@ pub fn callableName(value: Value) ?[]const u8 {
     if (value == .callable) return value.callable;
     const marker = value.attribute("__dxt_callable");
     return if (marker == .callable) marker.callable else null;
+}
+
+/// Invoke a retained callable using the current render frame. Native method
+/// descriptors carry their receiver, never a borrowed Host pointer.
+pub fn callValue(a: std.mem.Allocator, value: Value, args: []const Argument, host: ?Host) anyerror!Value {
+    if (value == .capture_undefined) return callUndefined(value);
+    if (isUndefined(value)) return error.UndefinedJinjaValue;
+    if (@import("builtin_bound_method.zig").isBound(value)) return @import("builtin_bound_method.zig").call(a, value, args, host);
+    const function = callableName(value) orelse return error.JinjaTypeError;
+    const current = host orelse return error.UnsupportedJinjaCall;
+    return promoteNumericValue(a, try current.call(current.context, function, args, a));
+}
+
+pub fn callBuiltinMethod(a: std.mem.Allocator, receiver: Value, name: []const u8, args: []const Argument, host: ?Host) anyerror!Value {
+    if (try pureMethod(a, receiver, name, args, host)) |value| return value;
+    const current = host orelse return error.UnsupportedJinjaCall;
+    const with_receiver = try a.alloc(Argument, args.len + 1);
+    with_receiver[0] = .{ .value = receiver };
+    @memcpy(with_receiver[1..], args);
+    return promoteNumericValue(a, try current.call(current.context, try std.fmt.allocPrint(a, "__dxt_value.{s}", .{name}), with_receiver, a));
 }
 
 pub fn evaluate(allocator: std.mem.Allocator, input: []const u8, host: ?Host) !Value {
@@ -1005,7 +1028,7 @@ const Parser = struct {
             if (self.take("**")) {
                 const expanded = try self.binary(0);
                 if (self.active) {
-                    if (expanded != .object) return error.InvalidJinjaArguments;
+                    if (expanded != .object or @import("builtin_bound_method.zig").isBound(expanded)) return error.InvalidJinjaArguments;
                     for (expanded.object) |entry| {
                         const key = entryKey(entry);
                         if (key != .string) return error.InvalidJinjaArguments;
@@ -1431,6 +1454,8 @@ fn equalMemberCheckedDepth(left: Value, right: Value, depth: usize) anyerror!boo
         else => {},
     };
     if (@import("expression_identity.zig").immutableSame(left, right)) |same| if (same) return true;
+    const builtin_methods = @import("builtin_bound_method.zig");
+    if (builtin_methods.isBound(left) or builtin_methods.isBound(right)) return builtin_methods.equal(left, right);
     try temporal.validateComparison(left, right);
     if (tupleProtocol(left)) |members| {
         const other = tupleProtocol(right) orelse return false;
@@ -1474,6 +1499,8 @@ fn immutableEqual(left: Value, right: Value) bool {
     return immutableSame(left, right);
 }
 pub fn equalValues(a: Value, b: Value) bool {
+    const builtin_methods = @import("builtin_bound_method.zig");
+    if (builtin_methods.isBound(a) or builtin_methods.isBound(b)) return builtin_methods.equal(a, b);
     const bound_methods = @import("datetime_bound_method.zig");
     if (bound_methods.isBound(a) or bound_methods.isBound(b)) return bound_methods.equal(a, b);
     if (tupleProtocol(a)) |items| {
@@ -1705,6 +1732,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     return try floatValue(allocator, if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else return error.InvalidJinjaExpression);
 }
 pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
+    if (@import("builtin_bound_method.zig").isBound(value)) return .undefined;
     if (sequences.kind(value) != null) return .undefined;
     if (value == .capture_undefined) return value;
     if (isUndefined(value)) return error.UndefinedJinjaValue;

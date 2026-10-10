@@ -34,6 +34,7 @@ pub fn hashable(candidate: Value) anyerror!void {
 
 fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (@import("builtin_bound_method.zig").isBound(candidate)) return;
     if (@import("datetime_bound_method.zig").isBound(candidate)) return;
     if (@import("datetime_operations.zig").offsetError(candidate)) return error.AbstractTimeZoneMethod;
     if (@import("native_tuple.zig").items(candidate)) |items| {
@@ -70,6 +71,8 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
 }
 
 pub fn keyEqual(left: Value, right: Value) bool {
+    const builtin_methods = @import("builtin_bound_method.zig");
+    if (builtin_methods.isBound(left) or builtin_methods.isBound(right)) return builtin_methods.equal(left, right);
     const methods = @import("datetime_bound_method.zig");
     if (methods.isBound(left) or methods.isBound(right)) return methods.equal(left, right);
     if (@import("native_tuple.zig").items(left)) |a| {

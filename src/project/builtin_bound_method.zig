@@ -1,0 +1,175 @@
+//! Saved builtin methods retain their receiver without retaining a render Host.
+const std = @import("std");
+const expression = @import("expression.zig");
+const Value = expression.Value;
+const Argument = expression.Argument;
+const Allocator = std.mem.Allocator;
+const marker = "__dxt_native_builtin_method";
+
+pub fn isBound(value: Value) bool {
+    const tag = value.attribute(marker);
+    return tag == .callable and std.mem.eql(u8, tag.callable, marker);
+}
+
+pub fn isContextObject(value: Value) bool {
+    const tag = value.attribute("__dxt_context_object");
+    return tag == .callable and std.mem.eql(u8, tag.callable, "__dxt_context_object");
+}
+
+pub fn isMapping(value: Value) bool {
+    if (value != .object or isContextObject(value) or isBound(value)) return false;
+    if (@import("expression_sequence.zig").kind(value) != null or expression.sequence(value) != null) return false;
+    if (@import("set_context.zig").isSet(value) or (expression.floatProtocol(value) != null or expression.complexProtocol(value) != null or expression.integerProtocol(value) != null)) return false;
+    if (@import("datetime_protocol.zig").kind(value) != null or @import("timezone_context.zig").isTimezone(value)) return false;
+    if (value.attribute("__dxt_noniterable").truthy() or value.attribute("__dxt_getattr") == .callable) return false;
+    if (value.attribute("__dxt_relation") == .string or value.attribute("__dxt_column") == .string) return false;
+    return true;
+}
+
+fn owner(value: Value) ?[]const u8 {
+    if (value == .string) return "str";
+    if (value == .list) return "list";
+    if (expression.tupleProtocol(value) != null) return "tuple";
+    if (@import("set_context.zig").isSet(value)) return "set";
+    if (expression.complexProtocol(value) != null) return "complex";
+    if (isMapping(value)) return "dict";
+    return null;
+}
+
+fn hasName(name: []const u8, names: []const []const u8) bool {
+    for (names) |candidate| if (std.mem.eql(u8, name, candidate)) return true;
+    return false;
+}
+
+/// Only methods already implemented by native expression/container providers
+/// are exposed here. Lookup itself never executes or consumes the receiver.
+pub fn lookup(a: Allocator, receiver: Value, name: []const u8) !?Value {
+    const type_name = owner(receiver) orelse return null;
+    const supported = if (std.mem.eql(u8, type_name, "str"))
+        hasName(name, &.{ "lower", "upper", "casefold", "startswith", "endswith", "find", "rfind", "count", "index", "rindex", "strip", "lstrip", "rstrip", "join", "split", "rsplit", "replace", "format", "format_map" })
+    else if (std.mem.eql(u8, type_name, "dict"))
+        hasName(name, &.{ "get", "keys", "values", "items", "copy", "update", "clear", "pop", "setdefault", "popitem" })
+    else if (std.mem.eql(u8, type_name, "list"))
+        hasName(name, &.{ "copy", "count", "index", "append", "extend", "clear", "pop" })
+    else if (std.mem.eql(u8, type_name, "tuple"))
+        hasName(name, &.{ "count", "index" })
+    else if (std.mem.eql(u8, type_name, "set"))
+        hasName(name, &.{ "copy", "clear", "add", "discard", "remove", "pop", "update", "union", "intersection", "difference", "symmetric_difference", "intersection_update", "difference_update", "symmetric_difference_update", "isdisjoint", "issubset", "issuperset" })
+    else
+        std.mem.eql(u8, name, "conjugate");
+    return if (supported) try create(a, receiver, type_name, name) else null;
+}
+
+fn wrappedFormat(value: Value) bool {
+    const kind = value.attribute("__dxt_builtin_owner");
+    const name = value.attribute("__dxt_builtin_name");
+    return kind == .string and std.mem.eql(u8, kind.string, "str") and name == .string and (std.mem.eql(u8, name.string, "format") or std.mem.eql(u8, name.string, "format_map"));
+}
+
+fn create(a: Allocator, receiver: Value, type_name: []const u8, name: []const u8) !Value {
+    return .{ .object = try a.dupe(expression.Entry, &.{
+        .{ .key = marker, .value = .{ .callable = marker } },
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_callable", .value = .{ .callable = "__dxt_builtin_bound_call" } },
+        .{ .key = "__dxt_builtin_owner", .value = .{ .string = type_name } },
+        .{ .key = "__dxt_builtin_name", .value = .{ .string = name } },
+        .{ .key = "__dxt_builtin_receiver", .value = receiver },
+    }) };
+}
+
+pub fn render(a: Allocator, value: Value) ![]const u8 {
+    if (!isBound(value)) return error.JinjaTypeError;
+    const receiver = value.attribute("__dxt_builtin_receiver");
+    const name = value.attribute("__dxt_builtin_name").string;
+    const type_name = value.attribute("__dxt_builtin_owner").string;
+    if (wrappedFormat(value)) return std.fmt.allocPrint(a, "<function str.{s} at 0x{x}>", .{ name, @intFromPtr(value.object.ptr) });
+    const pointer: usize = switch (receiver) {
+        .object => @intFromPtr(receiver.object.ptr),
+        .list => @intFromPtr(receiver.list.ptr),
+        .tuple => @intFromPtr(receiver.tuple.ptr),
+        .string => @intFromPtr(receiver.string.ptr),
+        else => @intFromPtr(value.object.ptr),
+    };
+    return std.fmt.allocPrint(a, "<built-in method {s} of {s} object at 0x{x}>", .{ name, type_name, pointer });
+}
+
+fn sameReceiver(left: Value, right: Value) bool {
+    if (std.meta.activeTag(left) != std.meta.activeTag(right)) return false;
+    return switch (left) {
+        .object => left.object.ptr == right.object.ptr,
+        .list => left.list.ptr == right.list.ptr,
+        .tuple => (left.tuple.len == 0 and right.tuple.len == 0) or left.tuple.ptr == right.tuple.ptr,
+        .string => (left.string.len == 0 and right.string.len == 0) or (left.string.ptr == right.string.ptr and left.string.len == right.string.len),
+        else => false,
+    };
+}
+
+pub fn equal(left: Value, right: Value) bool {
+    if (!isBound(left) or !isBound(right)) return false;
+    if (left.object.ptr == right.object.ptr) return true;
+    // SandboxedEnvironment.wrap_str_format creates fresh Python functions.
+    if (wrappedFormat(left) or wrappedFormat(right)) return false;
+    return expression.equalValues(left.attribute("__dxt_builtin_owner"), right.attribute("__dxt_builtin_owner")) and
+        expression.equalValues(left.attribute("__dxt_builtin_name"), right.attribute("__dxt_builtin_name")) and
+        sameReceiver(left.attribute("__dxt_builtin_receiver"), right.attribute("__dxt_builtin_receiver"));
+}
+
+pub fn call(a: Allocator, value: Value, args: []const Argument, host: ?expression.Host) anyerror!Value {
+    if (!isBound(value)) return error.JinjaTypeError;
+    return expression.callBuiltinMethod(a, value.attribute("__dxt_builtin_receiver"), value.attribute("__dxt_builtin_name").string, args, host);
+}
+
+test "saved builtin methods have receiver equality and fresh lookup identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const receiver = Value{ .string = try a.dupe(u8, "hello world") };
+    const other = Value{ .string = try a.dupe(u8, "hello world") };
+    const first = (try lookup(a, receiver, "upper")).?;
+    const repeated = (try lookup(a, receiver, "upper")).?;
+    try std.testing.expect(equal(first, repeated));
+    try std.testing.expect(!equal(first, (try lookup(a, other, "upper")).?));
+    try std.testing.expect(first.object.ptr != repeated.object.ptr);
+    try std.testing.expectEqualStrings("HELLO WORLD", (try call(a, first, &.{}, null)).string);
+    try std.testing.expect(std.mem.startsWith(u8, try render(a, first), "<built-in method upper of str object at 0x"));
+    const format = (try lookup(a, receiver, "format")).?;
+    try std.testing.expect(equal(format, format));
+    try std.testing.expect(!equal(format, (try lookup(a, receiver, "format")).?));
+    try std.testing.expect(std.mem.startsWith(u8, try render(a, format), "<function str.format at 0x"));
+    const authored = Value{ .object = &.{.{ .key = marker, .value = .{ .string = marker } }} };
+    try std.testing.expect(!isBound(authored));
+}
+
+test "method keys retain receiver equality without exposing serialization or keyword fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const receiver = Value{ .object = try expression.allocateEntries(a, 0) };
+    const first = (try lookup(a, receiver, "get")).?;
+    const repeated = (try lookup(a, receiver, "get")).?;
+    const distinct = (try lookup(a, .{ .object = try expression.allocateEntries(a, 0) }, "get")).?;
+    var entries: std.ArrayList(expression.Entry) = .empty;
+    try expression.mappingPut(a, &entries, first, .{ .integer = "1" });
+    try expression.mappingPut(a, &entries, repeated, .{ .integer = "2" });
+    try expression.mappingPut(a, &entries, distinct, .{ .integer = "3" });
+    const mapping = Value{ .object = entries.items };
+    try std.testing.expectEqual(@as(usize, 2), entries.items.len);
+    try std.testing.expectEqualStrings("2", (try expression.mappingGet(mapping, first)).integer);
+    try std.testing.expect(try expression.equalMemberChecked(first, repeated));
+    try std.testing.expect((try expression.checkedAttribute(first, marker)) == .undefined);
+    try std.testing.expect((try expression.indexValue(a, first, .{ .string = marker })) == .undefined);
+    try std.testing.expectError(error.JinjaTypeError, @import("context_json.zig").stringify(a, first));
+    try std.testing.expectError(error.JinjaTypeError, @import("expression_json.zig").render(a, first, null));
+
+    const TestHost = struct {
+        fn resolve(raw: *anyopaque, name: []const u8, _: Allocator) !Value {
+            return if (std.mem.eql(u8, name, "method")) @as(*Value, @ptrCast(@alignCast(raw))).* else .undefined;
+        }
+        fn call(_: *anyopaque, _: []const u8, _: []const Argument, _: Allocator) !Value {
+            return error.UnexpectedMethodInvocation;
+        }
+    };
+    var stored = first;
+    const host: expression.Host = .{ .context = &stored, .resolve = TestHost.resolve, .call = TestHost.call };
+    try std.testing.expectError(error.InvalidJinjaArguments, expression.evaluate(a, "sink(**method)", host));
+}
