@@ -166,6 +166,13 @@ Package transports can require `git`, `curl` and `tar`.
 - Durable compilation-error results extend Core behavior where Core exits
   before writing results. Their successful artifact shape and retry
   interoperability are tested separately.
+- Docs results omit default-false `static` and `empty_catalog` argument keys.
+  Core 1.10.5 records them but cannot retry its own default docs artifact:
+  it generates unsupported `--no-static` and `--no-empty-catalog` options.
+  Omitting those keys preserves their false defaults and lets Core replay
+  native results. Enabled flags remain present, and the dual `compile` flag
+  retains both boolean values. The original static and added default docs
+  failure fixtures pass the unchanged native artifact to actual Core retry.
 - Stock DuckDB microbatch is a dxt extension; the pinned dbt-duckdb fixture
   uses a custom strategy for the comparable Core batch orchestration.
 - Bounded own-time metric offsets cover a documented MetricFlow assertion
