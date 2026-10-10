@@ -85,14 +85,16 @@ this boundary's privacy. The oracle worker owns the deprecation fixture's
 serial Core policy baseline while native concurrent deduplication remains
 strictly tested; the supervisor owns nullable incremental normalization.
 The source worker delegates diagnostic capture to a separate editing worktree:
-the bounded secret projector, native driver public buffers, session diagnostic
-accessor, compile diagnostic thread scope and necessary publication/open-site
-plumbing. Keep raw capped errors available to internal classification and SQL
-analysis. Project complete borrowed diagnostics before the public size cap,
-preserve UTF-8 boundaries and longest declared-value matches, and never fall
-back to a raw prefix after allocation failure. Scope compile environments per
-thread with cleanup; preserve authored SQL and successful metadata. This worker
-does not edit the concurrently owned data-test facade or stored-audit file.
+the bounded capture helper, native drivers, compile diagnostic thread scope and
+necessary environment/open-site plumbing. Inspect complete borrowed diagnostics
+before the raw size cap. Copy whole UTF-8 units and complete declared values;
+if a complete secret match would cross the cap, stop before that match. Existing
+publication then masks the retained values without reprocessing inserted masks.
+Keep raw capped errors available to internal classification and SQL analysis,
+and never publish an unsafe raw fallback after allocation failure. Scope compile
+environments per thread with cleanup; preserve authored SQL and successful
+metadata. This worker does not edit the concurrently owned data-test facade or
+stored-audit file.
 
 The metric movement failure fixture now deliberately keeps its declared source
 estimate below the row limit while making actual source rows exceed it. Actual
