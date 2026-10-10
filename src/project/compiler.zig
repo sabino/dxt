@@ -93,6 +93,7 @@ const CompileContext = struct {
     binding_visibility: BindingVisibility = .{},
     returned: ?native_expr.Value = null,
     parse_node: ?*Node = null,
+    generic_namespace: ?*const @import("generic_test_namespace.zig").Namespace = null,
     runtime_macro_dependencies: ?*std.ArrayList([]const u8) = null,
     runtime_dependency_allocator: std.mem.Allocator = undefined,
     dependency_depth: usize = 0,
@@ -129,6 +130,12 @@ const CompileContext = struct {
         // ProviderContext builds one namespace for the resource package. A
         // callee's package governs vars/dispatch, not unqualified macro lookup.
         return self.node.package_name;
+    }
+
+    fn macroId(self: *const CompileContext, name: []const u8) ?[]const u8 {
+        if (self.generic_namespace) |namespace| return namespace.find(name);
+        if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| return resolve.findMacroIdByPackageAndName(self.graph, name[0..dot], name[dot + 1 ..]);
+        return resolve.findMacroIdForUnqualifiedNamespaceCall(self.graph, self.namespacePackage(), name);
     }
 
     fn deinit(self: *CompileContext) void {
@@ -426,9 +433,14 @@ fn requiresNativeRendering(sql: []const u8) bool {
 /// Generic schema tests bind typed arguments before rendering with execute=false.
 /// Config calls and dependencies are recorded on the caller-owned test probe.
 pub fn scanMacroDependencies(allocator: std.mem.Allocator, graph: *const Graph, node: *Node, macro_name: []const u8, arguments: []const native_expr.Argument) !void {
+    return scanMacroDependenciesInNamespace(allocator, graph, node, macro_name, arguments, null);
+}
+
+pub fn scanMacroDependenciesInNamespace(allocator: std.mem.Allocator, graph: *const Graph, node: *Node, macro_name: []const u8, arguments: []const native_expr.Argument, namespace: ?*const @import("generic_test_namespace.zig").Namespace) !void {
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
     context.parse_node = node;
+    context.generic_namespace = namespace;
     _ = try callExpressionValue(&context, macro_name, arguments, context.value_arena.allocator());
 }
 
@@ -511,9 +523,14 @@ pub fn renderGenericArgumentValue(allocator: std.mem.Allocator, graph: *const Gr
 }
 
 pub fn parseGenericArgumentValue(allocator: std.mem.Allocator, graph: *const Graph, node: *Node, argument: std.json.Value) !native_expr.Value {
+    return parseGenericArgumentValueInNamespace(allocator, graph, node, argument, null);
+}
+
+pub fn parseGenericArgumentValueInNamespace(allocator: std.mem.Allocator, graph: *const Graph, node: *Node, argument: std.json.Value, namespace: ?*const @import("generic_test_namespace.zig").Namespace) !native_expr.Value {
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
     context.parse_node = node;
+    context.generic_namespace = namespace;
     return try dbt_context.cloneValue(allocator, try genericArgumentValue(&context, argument));
 }
 
@@ -1524,10 +1541,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         if (std.mem.eql(u8, path, "index")) return .conditional_undefined;
     }
     if (context.documentation) return if (std.mem.indexOfScalar(u8, path, '.') == null) .conditional_undefined else error.UndefinedJinjaValue;
-    const macro_id = if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot|
-        resolve.findMacroIdByPackageAndName(context.graph, path[0..dot], path[dot + 1 ..])
-    else
-        resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.namespacePackage(), path);
+    const macro_id = context.macroId(path);
     if (macro_id) |unique_id| if (findMacroByUniqueId(context.graph, unique_id)) |macro| return .{ .callable = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ macro.package_name, macro.name }) };
     return .undefined;
 }
@@ -1836,10 +1850,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return try relationValueForSource(allocator, context.graph, context.node, source);
     }
     if (context.documentation) return error.UnresolvedMacro;
-    var macro_id: ?[]const u8 = null;
-    if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
-        macro_id = resolve.findMacroIdByPackageAndName(context.graph, name[0..dot], name[dot + 1 ..]);
-    } else macro_id = resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.namespacePackage(), name);
+    const macro_id = context.macroId(name);
     if (macro_id == null) {
         if (context.graph.execution_hooks) |hooks| {
             if (std.mem.eql(u8, name, "statement")) {
@@ -4851,6 +4862,29 @@ test "typed generic parse rendering captures macro configs and dependencies" {
     try std.testing.expectEqualStrings("parent", probe.refs.items[0].name);
     try std.testing.expectEqualStrings("macro", @import("config_value.zig").get(probe.inline_config, "tags").?.array.items[0].string);
     try std.testing.expectEqualStrings("macro.demo.test_positive", probe.macro_depends_on.items[0]);
+}
+
+test "generic parse context hides unrelated package macros and uses closure overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "root" };
+    defer graph.deinit();
+    try graph.macros.append(a, .{ .unique_id = "macro.root.test_check", .package_name = "root", .name = "test_check", .path = "check.sql", .original_file_path = "macros/check.sql", .macro_sql = "{% test check() %}{{ config(meta={'body':'root'}) }}{% endtest %}" });
+    try graph.macros.append(a, .{ .unique_id = "macro.alpha.test_check", .package_name = "alpha", .name = "test_check", .path = "check.sql", .original_file_path = "macros/check.sql", .macro_sql = "{% test check() %}{{ config(meta={'body':'alpha'}) }}{% endtest %}" });
+    try graph.macros.append(a, .{ .unique_id = "macro.hidden.fail", .package_name = "hidden", .name = "fail", .path = "fail.sql", .original_file_path = "macros/fail.sql", .macro_sql = "{% macro fail() %}{{ exceptions.raise_compiler_error('visible') }}{% endmacro %}" });
+    try graph.macros.items[0].macro_depends_on.append(a, "macro.alpha.test_check");
+    const namespace = try @import("generic_test_namespace.zig").Namespace.init(a, &graph, &.{"macro.root.test_check"});
+    defer namespace.deinit(a);
+    var probe = Node{ .resource_type = "test", .package_name = "root", .unique_id = "test.root.check", .name = "check", .path = "check.sql", .original_file_path = "schema.yml", .raw_code = "" };
+    defer types.deinitNode(a, &probe);
+    _ = try parseGenericArgumentValueInNamespace(a, &graph, &probe, .{ .string = "{{ hidden.fail() }}" }, &namespace);
+    try std.testing.expectEqual(@as(usize, 0), probe.macro_depends_on.items.len);
+    try scanMacroDependenciesInNamespace(a, &graph, &probe, "test_check", &.{}, &namespace);
+    const values = @import("config_value.zig");
+    try std.testing.expectEqualStrings("alpha", values.get(values.get(probe.inline_config, "meta").?, "body").?.string);
+    try std.testing.expectEqualStrings("macro.alpha.test_check", probe.macro_depends_on.items[0]);
+    try std.testing.expectError(error.JinjaCompilerError, parseGenericArgumentValue(a, &graph, &probe, .{ .string = "{{ hidden.fail() }}" }));
 }
 
 test "compiler calls aliases of typed regex class objects" {

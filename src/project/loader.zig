@@ -166,6 +166,7 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     try loadProjectMacros(runtime, options.project_dir, config.name, config.macro_paths.items, config.test_paths.items, true, callbacks, &graph);
     try loadGenericTestMacros(runtime, options.project_dir, config.name, config.test_paths.items, &graph);
     try loadInstalledPackageMacros(runtime, options.project_dir, callbacks, &graph);
+    for (graph.macros.items, 0..) |*macro, index| macro.namespace_order = index;
     try loadInstalledPackageResources(runtime, options.project_dir, callbacks, &graph);
     try @import("doc_blocks.zig").load(runtime, options.project_dir, &config, &graph);
 

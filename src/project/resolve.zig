@@ -109,6 +109,15 @@ pub fn findMacroIdForUnqualifiedMacroDependency(graph: *const Graph, package_nam
     return null;
 }
 
+/// Test argument helpers use MacroResolver's global namespace, without a
+/// resource-local package taking precedence over the root project.
+pub fn findMacroIdForGlobalMacroDependency(graph: *const Graph, name: []const u8) ?[]const u8 {
+    if (findProjectMacroIdByName(graph, name)) |id| return id;
+    if (findNonInternalPackageMacroIdByName(graph, "", name)) |id| return id;
+    if (findMacroIdByPackageAndName(graph, adapterPackage(graph), name)) |id| return id;
+    return findMacroIdByPackageAndName(graph, "dbt", name);
+}
+
 pub fn findMacroIdForAdapterDispatch(graph: *const Graph, current_package: []const u8, macro_name: []const u8, macro_namespace: ?[]const u8, adapter_prefixes: []const []const u8) ?[]const u8 {
     if (std.mem.indexOfScalar(u8, macro_name, '.') != null) return null;
 
@@ -544,14 +553,20 @@ fn findProjectMacroIdByName(graph: *const Graph, name: []const u8) ?[]const u8 {
 }
 
 fn findNonInternalPackageMacroIdByName(graph: *const Graph, current_package: []const u8, name: []const u8) ?[]const u8 {
-    for (graph.macros.items) |macro| {
+    var selected: ?[]const u8 = null;
+    var selected_order: usize = 0;
+    for (graph.macros.items, 0..) |macro, index| {
         if (!std.mem.eql(u8, macro.name, name)) continue;
         if (std.mem.eql(u8, macro.package_name, current_package)) continue;
         if (std.mem.eql(u8, macro.package_name, graph.project_name)) continue;
         if (std.mem.eql(u8, macro.package_name, "dbt") or std.mem.eql(u8, macro.package_name, "dbt_duckdb") or std.mem.eql(u8, macro.package_name, "dbt_postgres")) continue;
-        return macro.unique_id;
+        const order = macro.namespace_order orelse index;
+        if (selected == null or order >= selected_order) {
+            selected = macro.unique_id;
+            selected_order = order;
+        }
     }
-    return null;
+    return selected;
 }
 
 fn findDispatchConfig(graph: *const Graph, macro_namespace: []const u8) ?*const types.DispatchConfig {
@@ -726,6 +741,25 @@ test "unqualified macro dependency lookup falls back to other packages before db
     try std.testing.expectEqualStrings("macro.other_pkg.package_only", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "package_only").?);
     try std.testing.expectEqualStrings("macro.other_pkg.internal_shadow", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "internal_shadow").?);
     try std.testing.expectEqualStrings("macro.dbt.internal_only", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "internal_only").?);
+}
+
+test "static and global resolver use discovered package order after canonical sorting" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "root" };
+    defer graph.deinit();
+    try appendMacro(&graph, "zeta", "choose");
+    try appendMacro(&graph, "alpha", "choose");
+    try appendMacro(&graph, "dbt", "choose");
+    for (graph.macros.items, 0..) |*macro, index| macro.namespace_order = index;
+    sortMacros(graph.macros.items);
+    try std.testing.expectEqualStrings("macro.alpha.choose", findMacroIdForGlobalMacroDependency(&graph, "choose").?);
+    try std.testing.expectEqualStrings("macro.alpha.choose", findMacroIdForUnqualifiedMacroDependency(&graph, "root", "choose").?);
+    try std.testing.expectEqualStrings("macro.zeta.choose", findMacroIdForUnqualifiedMacroDependency(&graph, "zeta", "choose").?);
+    // Runtime namespace lookup is deliberately independent of static fallback.
+    try std.testing.expectEqualStrings("macro.dbt.choose", findMacroIdForUnqualifiedNamespaceCall(&graph, "root", "choose").?);
+    try appendMacro(&graph, "root", "choose");
+    try std.testing.expectEqualStrings("macro.root.choose", findMacroIdForGlobalMacroDependency(&graph, "choose").?);
 }
 
 test "adapter dispatch lookup follows prefixes and package search order" {

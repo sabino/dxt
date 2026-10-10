@@ -144,6 +144,19 @@ fn parseMacro(a: std.mem.Allocator, graph: *const types.Graph, node: *types.Gene
         try values.overlay(a, unrendered, node.builder_config);
         return;
     }
+    // The model argument helper is seeded from the global resolver, including
+    // root or dependency overrides. Only macros in the seeded DFS closure are
+    // exposed while rendering arguments and the schema-test body.
+    if (@import("resolve.zig").findMacroIdForGlobalMacroDependency(graph, "get_where_subquery")) |helper| {
+        var replaced = false;
+        for (node.macro_depends_on.items) |*id| if (equal(id.*, "macro.dbt.get_where_subquery")) {
+            id.* = helper;
+            replaced = true;
+        };
+        if (!replaced) try @import("util.zig").appendUnique(a, &node.macro_depends_on, helper);
+    }
+    const namespace = try @import("generic_test_namespace.zig").Namespace.init(a, graph, node.macro_depends_on.items);
+    defer namespace.deinit(a);
     var probe = types.Node{ .resource_type = "test", .materialized = "test", .package_name = node.package_name, .name = node.name, .unique_id = node.unique_id, .path = node.path, .original_file_path = node.original_file_path, .raw_code = node.raw_code, .effective_config = try values.clone(a, config.*) };
     defer types.deinitNode(a, &probe);
     try merge(a, &probe.effective_config, node.builder_config);
@@ -152,7 +165,7 @@ fn parseMacro(a: std.mem.Allocator, graph: *const types.Graph, node: *types.Gene
     defer args.deinit(a);
     if (node.arguments == .object) for (node.arguments.object.keys(), node.arguments.object.values()) |key, value| {
         if (equal(key, "column_name") or equal(key, "model")) continue;
-        try args.append(a, .{ .name = key, .value = try @import("compiler.zig").parseGenericArgumentValue(a, graph, &probe, value) });
+        try args.append(a, .{ .name = key, .value = try @import("compiler.zig").parseGenericArgumentValueInNamespace(a, graph, &probe, value, &namespace) });
     };
     if (node.argument_column_name orelse node.column_name) |column| try args.append(a, .{ .name = "column_name", .value = .{ .string = column } });
     const model_kwarg = if (node.unattached_model_kwarg) |kwarg| try a.dupe(u8, kwarg) else if (node.attached_node) |attached| model: {
@@ -163,24 +176,16 @@ fn parseMacro(a: std.mem.Allocator, graph: *const types.Graph, node: *types.Gene
         break :source try std.fmt.allocPrint(a, "{{{{ get_where_subquery(source('{s}', '{s}')) }}}}", .{ parent.source_name, parent.table_name });
     };
     defer a.free(model_kwarg);
-    try args.append(a, .{ .name = "model", .value = try @import("compiler.zig").parseGenericArgumentValue(a, graph, &probe, .{ .string = model_kwarg }) });
+    try args.append(a, .{ .name = "model", .value = try @import("compiler.zig").parseGenericArgumentValueInNamespace(a, graph, &probe, .{ .string = model_kwarg }, &namespace) });
     // TestMacroNamespace exposes only seeded macros and their dependencies.
     // A namespaced call outside that set is capture-undefined at parse time;
     // its arguments still collect refs, but its body/config is not executed.
-    const macro_name = if (node.macro_depends_on.items.len != 0 and std.mem.startsWith(u8, node.macro_depends_on.items[0], "macro."))
-        try a.dupe(u8, node.macro_depends_on.items[0]["macro.".len..])
-    else if (node.test_namespace) |namespace|
-        try std.fmt.allocPrint(a, "{s}.test_{s}", .{ namespace, node.test_name })
+    const macro_name = if (node.test_namespace) |package|
+        try std.fmt.allocPrint(a, "{s}.test_{s}", .{ package, node.test_name })
     else
         try std.fmt.allocPrint(a, "test_{s}", .{node.test_name});
     defer a.free(macro_name);
-    if (node.test_namespace) |namespace| {
-        const requested = try std.fmt.allocPrint(a, "macro.{s}.test_{s}", .{ namespace, node.test_name });
-        defer a.free(requested);
-        if (try namespaceContains(a, graph, node.macro_depends_on.items, requested)) {
-            try @import("compiler.zig").scanMacroDependencies(a, graph, &probe, requested["macro.".len..], args.items);
-        }
-    } else try @import("compiler.zig").scanMacroDependencies(a, graph, &probe, macro_name, args.items);
+    try @import("compiler.zig").scanMacroDependenciesInNamespace(a, graph, &probe, macro_name, args.items, &namespace);
     // Core seeds its config-call dictionary with the builder, invokes the
     // macro, then renders the trailing builder config call again. Append and
     // update policies apply within that dictionary before project merging.
@@ -202,28 +207,6 @@ fn parseMacro(a: std.mem.Allocator, graph: *const types.Graph, node: *types.Gene
         };
         if (!found) try node.macro_depends_on.append(a, dependency);
     }
-}
-fn namespaceContains(a: std.mem.Allocator, graph: *const types.Graph, seeds: []const []const u8, requested: []const u8) !bool {
-    var pending: std.ArrayList([]const u8) = .empty;
-    defer pending.deinit(a);
-    try pending.appendSlice(a, seeds);
-    var i: usize = 0;
-    while (i < pending.items.len) : (i += 1) {
-        const id = pending.items[i];
-        if (equal(id, requested)) return true;
-        for (graph.macros.items) |macro| if (equal(macro.unique_id, id)) {
-            for (macro.macro_depends_on.items) |dependency| {
-                var seen = false;
-                for (pending.items) |prior| if (equal(prior, dependency)) {
-                    seen = true;
-                    break;
-                };
-                if (!seen) try pending.append(a, dependency);
-            }
-            break;
-        };
-    }
-    return false;
 }
 fn projectConfig(a: std.mem.Allocator, graph: *const types.Graph, node: *const types.GenericTestNode, package: []const u8, config: *Json, unrendered: *Json) !void {
     for (graph.semantic_project_configs.items) |project| if (equal(project.package_name, package)) {
@@ -404,8 +387,12 @@ test "generic parse namespace follows seeded transitive macros and terminates cy
     }
     try graph.macros.items[0].macro_depends_on.append(a, "macro.dependency.test_check");
     try graph.macros.items[1].macro_depends_on.append(a, "macro.root.test_check");
-    try std.testing.expect(try namespaceContains(a, &graph, &.{"macro.root.test_check"}, "macro.dependency.test_check"));
-    try std.testing.expect(!try namespaceContains(a, &graph, &.{"macro.root.test_check"}, "macro.other.test_check"));
+    const namespace = try @import("generic_test_namespace.zig").Namespace.init(a, &graph, &.{"macro.root.test_check"});
+    defer namespace.deinit(a);
+    try std.testing.expectEqualStrings("macro.dependency.test_check", namespace.find("test_check").?);
+    try std.testing.expectEqualStrings("macro.root.test_check", namespace.find("root.test_check").?);
+    try std.testing.expectEqualStrings("macro.dependency.test_check", namespace.find("dependency.test_check").?);
+    try std.testing.expect(namespace.find("other.test_check") == null);
 }
 
 test "generic config extraction separates identity arguments and rejects truthy duplicate legacy keys" {

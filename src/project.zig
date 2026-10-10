@@ -4863,7 +4863,6 @@ fn appendColumnClone(graph: *Graph, package_name: []const u8, columns: *std.Arra
 fn resolveMacroDependencies(graph: *Graph) !void {
     for (graph.macros.items) |*macro| {
         try project_jinja.scanMacroSqlForKnownMacroCalls(graph.allocator, macro.macro_sql, graph, macro.unique_id, &macro.macro_depends_on);
-        sortStrings(macro.macro_depends_on.items);
     }
 }
 

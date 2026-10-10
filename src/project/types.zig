@@ -388,6 +388,9 @@ pub const MacroDef = struct {
     path: []const u8,
     original_file_path: []const u8,
     macro_sql: []const u8,
+    // Core resolver precedence follows discovered package insertion order,
+    // independently of the canonical order used to publish macro artifacts.
+    namespace_order: ?usize = null,
     patch_path: ?[]const u8 = null,
     description: []const u8 = "",
     meta: std.ArrayList(MetaEntry) = .empty,
