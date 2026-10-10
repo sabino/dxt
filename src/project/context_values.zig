@@ -302,7 +302,7 @@ test "runtime RefArgs omit dataclass nulls while raw refs and arbitrary kwargs r
     try std.testing.expect(refs[0].attribute("package") == .undefined);
     try std.testing.expect(refs[0].attribute("version") == .undefined);
     try std.testing.expectEqualStrings("dependency", refs[1].attribute("package").string);
-    try std.testing.expectEqual(@as(i64, 2), refs[1].attribute("version").integer);
+    try std.testing.expectEqualStrings("2", refs[1].attribute("version").integer);
     try std.testing.expect(context.attribute("meta").attribute("package") == .none);
     const payload = context.attribute("test_metadata").attribute("kwargs").attribute("payload");
     try std.testing.expect(payload.attribute("package") == .none);
