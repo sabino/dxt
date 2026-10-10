@@ -408,3 +408,47 @@ def test_core_test_compiled_path_retains_target_prefix_and_exists_before_materia
         observations[engine] = (trace['path'].replace(str(root), '<project>'),
                                 trace['contents'].replace(schema, '<target_schema>'), row['status'], row['failures'])
     assert observations['dxt'] == observations['core']
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('generic', [False, True])
+@pytest.mark.parametrize('which', ['compile', 'test'])
+def test_core_completed_test_write_and_later_compilation_error_follow_command_artifact_policy(tmp_path, request, duckdb_environment, adapter, generic, which):
+    from test_usability_artifacts import contracts
+    observations = {}
+    for engine in ['dxt', 'core']:
+        root, _ = fixture(tmp_path, engine, adapter, request, store=False, generic=generic, override_limit=False)
+        env = environment(duckdb_environment)
+        command(engine, root, env, 'run')
+        previous_results = (root / 'target/run_results.json').read_bytes()
+        prefix = "{% if execute %}{% do write('completed write before compile failure') %}{{ exceptions.raise_compiler_error('late test compile failure') }}{% endif %}"
+        if generic:
+            (root / 'macros/bad_rows.sql').write_text('{% test bad_rows(model) %}' + prefix + 'select * from {{ model }}{% endtest %}')
+        else:
+            path = root / 'tests/check.sql'
+            path.write_text(prefix + path.read_text())
+        result = command(engine, root, env, which, ['--no-populate-cache'] if which == 'compile' else [], ok=False)
+        assert result.returncode == (2 if which == 'compile' else 1), result.stdout + result.stderr
+        if which == 'compile':
+            assert 'late test compile failure' in result.stdout + result.stderr
+        node = read_test_node(root)
+        expected = 'target/run/preview/' + ('models/schema.yml/bad_rows_input_.sql' if generic else 'tests/check.sql')
+        assert (root / expected).read_text() == 'completed write before compile failure'
+        assert node['build_path'] == (expected if which == 'test' else None)
+        assert not any(key in node for key in ['compiled', 'compiled_code'])
+        assert node['compiled_path'] is None
+        contracts.assert_artifact(root / 'target/run_results.json')
+        rows = json.loads((root / 'target/run_results.json').read_text())['results']
+        if which == 'compile':
+            assert (root / 'target/run_results.json').read_bytes() == previous_results
+            assert not any(row['unique_id'] == node['unique_id'] for row in rows)
+            outcome = None
+        else:
+            row, = rows
+            assert row['unique_id'] == node['unique_id']
+            assert 'late test compile failure' in row['message']
+            outcome = {key: row[key] for key in ['status', 'compiled', 'compiled_code', 'failures', 'relation_name', 'adapter_response']}
+            assert outcome == {'status': 'error', 'compiled': False, 'compiled_code': None,
+                               'failures': None, 'relation_name': None, 'adapter_response': {}}
+        observations[engine] = (result.returncode, node['build_path'], node['depends_on'], outcome)
+    assert observations['dxt'] == observations['core']

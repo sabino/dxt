@@ -1540,6 +1540,12 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
         break :blk GenericTestExecutionSummary{ .failed_tests = 1 };
     };
     var row = rows.items[0];
+    // A completed compile-time write survives a later test compilation error.
+    // A materialization's later write, if present, already owns its path.
+    if (resource != .unit and row.build_path == null) if (host.written_path) |path| {
+        row.build_path = try runtime.allocator.dupe(u8, path);
+        row.owns_build_path = true;
+    };
     try captureResourceLogs(runtime.allocator, &row, output.written(), &log_events);
     return row;
 }
@@ -2224,7 +2230,21 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
 }
 
 fn publishDataTestCompilation(runtime: Runtime, graph: *const Graph, row: run_results.NodeResult, target_dir: []const u8) !void {
-    const sql = row.compiled_code orelse return;
+    const sql = row.compiled_code orelse {
+        if (row.test_node) |original| {
+            const node = @constCast(original);
+            try @import("project/test_provenance.zig").publishBuildPath(runtime.allocator, node, row.build_path);
+            // The model kwarg was rendered before an authored macro raised.
+            // Skipped/uncompiled selections never invoke that helper.
+            if (row.compiled_override == false) try compiler.recordGenericCompilationDependency(runtime.allocator, graph, node);
+            for (row.macro_dependencies) |id| try util.appendUnique(runtime.allocator, &node.macro_depends_on, id);
+        } else if (row.singular_test_node) |original| {
+            const node = @constCast(original);
+            try @import("project/test_provenance.zig").publishBuildPath(runtime.allocator, node, row.build_path);
+            for (row.macro_dependencies) |id| try util.appendUnique(runtime.allocator, &node.macro_depends_on, id);
+        }
+        return;
+    };
     if (row.test_node) |original| {
         const node = @constCast(original);
         try publishTestCompilationFields(runtime, graph, node, row, sql, target_dir);

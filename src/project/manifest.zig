@@ -1336,6 +1336,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try writer.writeAll(",\"group\":");
     try writeNullableString(writer, @import("group_access.zig").genericGroup(graph, &test_node));
     try @import("test_provenance.zig").writeInherited(writer, test_node.config_values, test_node.created_at, test_node.build_path);
+    if (!test_node.compiled) try writer.writeAll(",\"compiled_path\":null");
     try writer.writeAll(",\"file_key_name\":");
     const file_key = try @import("test_provenance.zig").fileKeyName(allocator, graph, &test_node);
     defer if (file_key) |key| allocator.free(key);
@@ -1462,6 +1463,7 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     defer @import("config_value.zig").deinit(allocator, &canonical_config);
     try std.json.Stringify.value(canonical_config, .{}, writer);
     try @import("test_provenance.zig").writeInherited(writer, canonical_config, test_node.created_at, test_node.build_path);
+    if (!test_node.compiled) try writer.writeAll(",\"compiled_path\":null");
     try writer.writeAll(",\"meta\":");
     try std.json.Stringify.value(@import("config_value.zig").get(canonical_config, "meta") orelse @as(std.json.Value, .{ .object = .empty }), .{}, writer);
     try writer.writeAll(",\"group\":");
