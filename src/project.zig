@@ -365,12 +365,13 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     }
     const compile_result = compileWithHost(runtime, options, &graph, selected, target_dir, &compile_rows, stderr) catch |err| {
         if (err == error.OutOfMemory) return err;
-        if (compile_error_policy.publish(options, err, compile_rows.items)) {
+        const fail_fast = compile_error_policy.failFast(options, err, compile_rows.items);
+        if (compile_error_policy.publish(options, err, compile_rows.items) or fail_fast) {
             _ = try writeManifest(runtime, &graph, target_dir);
             try writeRunResults(runtime, target_dir, compile_rows.items);
         }
         try reportCompilationFailure(runtime, compile_rows.items, err, stderr);
-        return error.SqlOperationFailure;
+        return if (fail_fast) error.ExecutionFailure else error.SqlOperationFailure;
     };
 
     _ = try writeManifest(runtime, &graph, target_dir);

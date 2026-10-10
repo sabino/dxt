@@ -10,6 +10,39 @@ pub fn publish(options: types.Options, err: anyerror, rows: []const results.Node
     return false;
 }
 
+pub fn failFast(options: types.Options, err: anyerror, rows: []const results.NodeResult) bool {
+    if (!options.fail_fast or err != error.ExecutionFailure) return false;
+    for (rows) |row| if (std.mem.eql(u8, row.status, "error")) return true;
+    return false;
+}
+
+test "compile fail-fast retains completed resource errors without enabling ordinary durable publication" {
+    const rows = [_]results.NodeResult{
+        .{ .status = "error", .message = "authored compilation failure", .compiled_override = false },
+        .{ .status = "skipped" },
+    };
+    const options: types.Options = .{ .fail_fast = true };
+    try std.testing.expect(failFast(options, error.ExecutionFailure, &rows));
+    try std.testing.expect(!publish(options, error.ExecutionFailure, &rows));
+    try std.testing.expect(!failFast(.{}, error.ExecutionFailure, &rows));
+    try std.testing.expect(!failFast(.{ .durable_compile_errors = true }, error.ExecutionFailure, &rows));
+    const both: types.Options = .{ .fail_fast = true, .durable_compile_errors = true };
+    try std.testing.expect(failFast(both, error.ExecutionFailure, &rows));
+    try std.testing.expect(publish(both, error.ExecutionFailure, &rows));
+}
+
+test "compile fail-fast does not reinterpret preflight infrastructure or incomplete attempts" {
+    const rows = [_]results.NodeResult{.{ .status = "error" }};
+    const options: types.Options = .{ .fail_fast = true };
+    try std.testing.expect(!failFast(options, error.InvalidSelector, &rows));
+    try std.testing.expect(!failFast(options, error.NativeDuckDbLibraryNotFound, &rows));
+    try std.testing.expect(!failFast(options, error.PostgresConnectionFailed, &rows));
+    try std.testing.expect(!failFast(options, error.OutOfMemory, &rows));
+    try std.testing.expect(!failFast(options, error.ExecutionFailure, &.{}));
+    try std.testing.expect(!failFast(options, error.ExecutionFailure, &.{.{ .status = "success" }}));
+    try std.testing.expect(!failFast(options, error.ExecutionFailure, &.{.{ .status = "skipped" }}));
+}
+
 test "durable publication distinguishes resource errors from preflight and infrastructure failures" {
     const completed = [_]results.NodeResult{
         .{ .status = "success", .compiled_code = "select 1" },
