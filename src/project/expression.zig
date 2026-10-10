@@ -377,7 +377,15 @@ pub fn attributeWithHost(a: std.mem.Allocator, value: Value, name: []const u8, h
         const current = host orelse return error.UnsupportedJinjaCall;
         return current.call(current.context, getter.callable, &.{.{ .value = .{ .string = name } }}, a);
     }
-    return checkedAttribute(value, name);
+    const direct = try checkedAttribute(value, name);
+    if (direct != .undefined) return direct;
+    const datetime = @import("modules_datetime.zig");
+    if (datetime.instanceClass(value)) |kind| if (datetime.inheritedAttributeName(kind, name)) {
+        const path = try std.fmt.allocPrint(a, "modules.datetime.{s}.{s}", .{ kind, name });
+        if (host) |current| return current.resolve(current.context, try std.fmt.allocPrint(a, "__dxt_{s}", .{path}), a);
+        return (try datetime.resolve(a, path)) orelse .undefined;
+    };
+    return direct;
 }
 
 fn undefinedUnsafeAttribute(name: []const u8, capture: bool) bool {

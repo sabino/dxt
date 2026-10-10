@@ -11,6 +11,25 @@ pub const Options = struct {
     dst_us: ?i64 = null,
 };
 
+/// Python substitutes only exact %z, %:z and %Z directives before libc.
+/// Escaped and modified directives do not request a timezone method.
+pub const ZoneRequirements = struct { offset: bool = false, name: bool = false };
+pub fn zoneRequirements(format: []const u8) ZoneRequirements {
+    var result: ZoneRequirements = .{};
+    var i: usize = 0;
+    while (i < format.len) : (i += 1) {
+        if (format[i] != '%' or i + 1 >= format.len) continue;
+        i += 1;
+        if (format[i] == 'z') result.offset = true;
+        if (format[i] == 'Z') result.name = true;
+        if (format[i] == ':' and i + 1 < format.len and format[i + 1] == 'z') {
+            result.offset = true;
+            i += 1;
+        }
+    }
+    return result;
+}
+
 fn writeOffset(w: *std.Io.Writer, offset_us: i64, colon: bool) !void {
     const total = @abs(offset_us);
     const seconds = total / std.time.us_per_s;

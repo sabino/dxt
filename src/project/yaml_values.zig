@@ -40,7 +40,9 @@ pub fn order(lhs: Value, rhs: Value) !std.math.Order {
     }
     const left = timestamp(lhs) orelse return error.JinjaTypeError;
     const right = timestamp(rhs) orelse return error.JinjaTypeError;
-    if (left.date != right.date or (left.offset == null) != (right.offset == null)) return error.JinjaTypeError;
+    if (left.date != right.date) return error.JinjaTypeError;
+    try temporal.validateComparison(lhs, rhs);
+    if ((left.offset == null) != (right.offset == null)) return error.JinjaTypeError;
     const lhs_instant = left.ns - @as(i96, left.offset orelse 0) * std.time.ns_per_us;
     const rhs_instant = right.ns - @as(i96, right.offset orelse 0) * std.time.ns_per_us;
     return std.math.order(lhs_instant, rhs_instant);

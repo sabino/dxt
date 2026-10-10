@@ -42,10 +42,13 @@ pub fn timeTuple(a: Allocator, civil_ns: i96, dst: i64) !Value {
     }
     try text.writer.writeByte(')');
     const original = try namedTuple(a, items, &names, try text.toOwnedSlice());
-    const entries = try expr.allocateEntries(a, original.object.len + 2);
+    const entries = try expr.allocateEntries(a, original.object.len + 5);
     @memcpy(entries[0..original.object.len], original.object);
     entries[original.object.len] = .{ .key = "tm_zone", .value = .none };
     entries[original.object.len + 1] = .{ .key = "tm_gmtoff", .value = .none };
+    entries[original.object.len + 2] = .{ .key = "n_fields", .value = try expr.integerValue(a, 11) };
+    entries[original.object.len + 3] = .{ .key = "n_sequence_fields", .value = try expr.integerValue(a, 9) };
+    entries[original.object.len + 4] = .{ .key = "n_unnamed_fields", .value = try expr.integerValue(a, 0) };
     return .{ .object = entries };
 }
 pub fn ctime(a: Allocator, civil_ns: i96) ![]const u8 {

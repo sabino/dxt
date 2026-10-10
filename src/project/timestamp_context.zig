@@ -263,7 +263,7 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) anye
     if (std.mem.eql(u8, method, "date")) return try datetimeValue(a, @divFloor(ns, std.time.ns_per_day) * std.time.ns_per_day, true, null);
     if (std.mem.eql(u8, method, "timestamp") and !date_only) {
         const utc_ns = if (offset_us) |offset| ns - @as(i96, offset) * std.time.ns_per_us else try local_time.timestamp(a, ns, fold);
-        const seconds = if (offset_us != null) @as(f64, @floatFromInt(@divFloor(utc_ns, std.time.ns_per_us))) / std.time.us_per_s else @as(f64, @floatFromInt(@divFloor(utc_ns, std.time.ns_per_s))) + @as(f64, @floatFromInt(@mod(utc_ns, std.time.ns_per_s))) / std.time.ns_per_s;
+        const seconds = if (offset_us != null) try @import("expression_number.zig").divide(a, try std.fmt.allocPrint(a, "{d}", .{@divFloor(utc_ns, std.time.ns_per_us)}), "1000000") else @as(f64, @floatFromInt(@divFloor(utc_ns, std.time.ns_per_s))) + @as(f64, @floatFromInt(@mod(utc_ns, std.time.ns_per_s))) / std.time.ns_per_s;
         return .{ .number = seconds };
     }
     if (std.mem.eql(u8, method, "utcoffset")) return if (offset_us) |offset| try timezones.durationValue(a, offset) else .none;
@@ -331,5 +331,7 @@ test "native UTC datetime values retain microseconds and Python ISO/format behav
     const folded = (try call(a, dt.attribute("replace").callable, &.{.{ .name = "fold", .value = .{ .boolean = true } }})).?;
     try std.testing.expectEqual(@as(u1, 1), state(folded).?.fold);
     try std.testing.expectError(error.JinjaTypeError, call(a, dt.attribute("replace").callable, &.{.{ .name = "fold", .value = .{ .number = 1.0 } }}));
+    const ancient = try datetimeValue(a, -62135596800 * @as(i96, std.time.ns_per_s) + 4 * std.time.ns_per_us, false, 0);
+    try std.testing.expectEqual(@as(f64, -62135596799.99999), (try call(a, ancient.attribute("timestamp").callable, &.{})).?.number);
     try std.testing.expectEqual(@as(i64, 3), try expression.integerIndex((try call(a, dt.attribute("weekday").callable, &.{})).?));
 }

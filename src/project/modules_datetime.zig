@@ -21,6 +21,39 @@ fn object(a: Allocator, entries: []const expr.Entry) !Value {
 fn function(a: Allocator, kind: []const u8, method: []const u8) !Value {
     return .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime_class:{s}:{s}", .{ kind, method }) };
 }
+const date_methods = [_][]const u8{ "ctime", "isoformat", "isocalendar", "isoweekday", "replace", "strftime", "timetuple", "toordinal", "weekday" };
+const datetime_methods = date_methods ++ [_][]const u8{ "astimezone", "date", "dst", "time", "timestamp", "timetz", "tzname", "utcoffset", "utctimetuple" };
+const time_methods = [_][]const u8{ "dst", "isoformat", "replace", "strftime", "tzname", "utcoffset" };
+fn instanceMethods(kind: []const u8) []const []const u8 {
+    if (std.mem.eql(u8, kind, "date")) return &date_methods;
+    if (std.mem.eql(u8, kind, "datetime")) return &datetime_methods;
+    if (std.mem.eql(u8, kind, "time")) return &time_methods;
+    if (std.mem.eql(u8, kind, "timedelta")) return &.{"total_seconds"};
+    if (std.mem.eql(u8, kind, "tzinfo")) return &.{ "utcoffset", "dst", "tzname", "fromutc" };
+    return &.{};
+}
+pub fn instanceClass(value: Value) ?[]const u8 {
+    if (dates.state(value)) |state| return if (state.date_only) "date" else "datetime";
+    if (times.state(value) != null) return "time";
+    if (operations.duration(value) != null) return "timedelta";
+    if (timezone_context.isTimezone(value)) return "tzinfo";
+    return null;
+}
+pub fn inheritedAttributeName(kind: []const u8, name: []const u8) bool {
+    if (!std.mem.eql(u8, kind, "tzinfo")) for ([_][]const u8{ "min", "max", "resolution" }) |member| if (std.mem.eql(u8, name, member)) return true;
+    if (std.mem.eql(u8, kind, "date") or std.mem.eql(u8, kind, "datetime")) {
+        for ([_][]const u8{ "today", "fromtimestamp", "fromordinal", "fromisoformat", "fromisocalendar" }) |member| if (std.mem.eql(u8, name, member)) return true;
+        if (std.mem.eql(u8, kind, "datetime")) for ([_][]const u8{ "now", "utcnow", "utcfromtimestamp", "strptime", "combine" }) |member| if (std.mem.eql(u8, name, member)) return true;
+    }
+    return std.mem.eql(u8, kind, "time") and std.mem.eql(u8, name, "fromisoformat");
+}
+fn descriptor(a: Allocator, kind: []const u8, member: []const u8) !Value {
+    return object(a, &.{
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_class_identity", .value = .{ .string = try std.fmt.allocPrint(a, "datetime.{s}.{s}.descriptor", .{ kind, member }) } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<attribute '{s}' of 'datetime.{s}' objects>", .{ member, kind }) } },
+    });
+}
 fn classValue(a: Allocator, kind: []const u8) !Value {
     var entries: std.ArrayList(expr.Entry) = .empty;
     try entries.appendSlice(a, &.{
@@ -29,6 +62,9 @@ fn classValue(a: Allocator, kind: []const u8) !Value {
         .{ .key = "__dxt_callable", .value = try function(a, kind, "new") },
         .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<class 'datetime.{s}'>", .{kind}) } },
     });
+    for (instanceMethods(kind)) |method| try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime_unbound:{s}:{s}", .{ kind, method }) } });
+    const members: []const []const u8 = if (std.mem.eql(u8, kind, "date")) &.{ "year", "month", "day" } else if (std.mem.eql(u8, kind, "datetime")) &.{ "year", "month", "day", "hour", "minute", "second", "microsecond", "tzinfo", "fold" } else if (std.mem.eql(u8, kind, "time")) &.{ "hour", "minute", "second", "microsecond", "tzinfo", "fold" } else if (std.mem.eql(u8, kind, "timedelta")) &.{ "days", "seconds", "microseconds" } else &.{};
+    for (members) |member| try entries.append(a, .{ .key = member, .value = try descriptor(a, kind, member) });
     if (std.mem.eql(u8, kind, "date") or std.mem.eql(u8, kind, "datetime")) {
         const date_only = std.mem.eql(u8, kind, "date");
         for ([_][]const u8{ "today", "fromtimestamp", "fromordinal", "fromisoformat", "fromisocalendar" }) |method| try entries.append(a, .{ .key = method, .value = try function(a, kind, method) });
@@ -198,10 +234,33 @@ pub fn durationValue(a: Allocator, micros: i96) !Value {
     });
 }
 pub fn call(a: Allocator, name: []const u8, args: []const Argument, options: Options) !?Value {
+    const unbound_prefix = "__dxt_datetime_unbound:";
+    if (std.mem.startsWith(u8, name, unbound_prefix)) {
+        var parts = std.mem.splitScalar(u8, name[unbound_prefix.len..], ':');
+        const kind = parts.next() orelse return error.JinjaTypeError;
+        const method = parts.next() orelse return error.JinjaTypeError;
+        if (args.len == 0 or args[0].name != null) return error.InvalidJinjaArguments;
+        var receiver = args[0].value;
+        const actual_kind = instanceClass(receiver) orelse return error.JinjaTypeError;
+        if (!std.mem.eql(u8, kind, actual_kind) and !(std.mem.eql(u8, kind, "date") and std.mem.eql(u8, actual_kind, "datetime"))) return error.JinjaTypeError;
+        if (std.mem.eql(u8, kind, "tzinfo")) return try abstract_zone.unbound(a, receiver, method, args[1..]);
+        if (std.mem.eql(u8, kind, "date") and std.mem.eql(u8, actual_kind, "datetime") and !std.mem.eql(u8, method, "strftime")) {
+            const state = dates.state(receiver).?;
+            receiver = try dates.datetimeValue(a, @divFloor(state.civil_ns, std.time.ns_per_day) * std.time.ns_per_day, !std.mem.eql(u8, method, "replace"), null);
+            if (std.mem.eql(u8, method, "replace")) for (args[1..], 0..) |arg, position| {
+                if (arg.name) |key| {
+                    if (!std.mem.eql(u8, key, "year") and !std.mem.eql(u8, key, "month") and !std.mem.eql(u8, key, "day")) return error.InvalidJinjaArguments;
+                } else if (position >= 3) return error.InvalidJinjaArguments;
+            };
+        }
+        const bound = expr.callableName(receiver.attribute(method)) orelse return error.JinjaTypeError;
+        if (try dates.call(a, bound, args[1..])) |value| return value;
+        return call(a, bound, args[1..], options);
+    }
     if (std.mem.startsWith(u8, name, "__dxt_duration_total:")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         const micros = try std.fmt.parseInt(i96, name[21..], 10);
-        return .{ .number = @as(f64, @floatFromInt(micros)) / std.time.us_per_s };
+        return .{ .number = try @import("expression_number.zig").divide(a, try std.fmt.allocPrint(a, "{d}", .{micros}), "1000000") };
     }
     if (try times.call(a, name, args)) |result| return result;
     if (try abstract_zone.call(a, name, args)) |result| return result;
@@ -234,6 +293,9 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, options: Opt
         try bind(args, if (date_only or utc) &.{"timestamp"} else &.{ "timestamp", "tz" }, 1, if (date_only or utc) values[0..1] else &values, if (date_only or utc) values[0..1] else &values);
         const seconds = try expr.numericFloat(values[0]);
         if (!std.math.isFinite(seconds) or @abs(seconds) > 4e11) return error.JinjaNumericOverflow;
+        // A date uses the containing whole second; datetime's rounded
+        // microseconds must not carry its date into the following day.
+        if (date_only) return try fromInstant(a, @as(i96, @intFromFloat(@floor(seconds))) * std.time.ns_per_s, true, .none, false);
         // CPython splits seconds before rounding the fractional microseconds;
         // multiplying the whole timestamp would lose fractional precision.
         const integral = @trunc(seconds);
@@ -286,14 +348,65 @@ test "native datetime module constructors preserve civil values and fixed clock"
     const dt = (try call(a, "modules.datetime.datetime", &.{ .{ .value = .{ .integer = "2024" } }, .{ .value = .{ .integer = "2" } }, .{ .value = .{ .integer = "29" } }, .{ .value = .{ .integer = "13" } } }, .{})).?;
     try std.testing.expectEqualStrings("2024-02-29 13:00:00", try dt.text(a));
     try std.testing.expectEqualStrings("1969-12-31 23:59:59.750000", try (try call(a, "modules.datetime.datetime.fromtimestamp", &.{.{ .value = .{ .number = -0.25 } }}, .{})).?.text(a));
+    try std.testing.expectEqualStrings("1969-12-31", try (try call(a, "modules.datetime.date.fromtimestamp", &.{.{ .value = .{ .number = -0.0000001 } }}, .{})).?.text(a));
+    try std.testing.expectEqualStrings("1970-01-01", try (try call(a, "modules.datetime.date.fromtimestamp", &.{.{ .value = .{ .number = 86399.9999999 } }}, .{})).?.text(a));
     try std.testing.expectEqualStrings("2024-02-29", try (try call(a, "modules.datetime.date.fromordinal", &.{.{ .value = .{ .integer = "738945" } }}, .{})).?.text(a));
     try std.testing.expectEqualStrings("1970-01-01 00:00:00.123456", try (try call(a, "modules.datetime.datetime.utcnow", &.{}, .{ .now_ns = 123456000 })).?.text(a));
+    const huge_duration = try durationValue(a, 999999999 * @as(i96, std.time.us_per_day));
+    try std.testing.expectEqual(@as(f64, 86399999913600.0), (try call(a, huge_duration.attribute("total_seconds").callable, &.{}, .{})).?.number);
     for ([_]f64{ 0.0000005, 0.0000015, -0.0000005, -0.0000015, 1.0000005, 1.0000015 }, [_][]const u8{ "1970-01-01 00:00:00", "1970-01-01 00:00:00.000002", "1970-01-01 00:00:00", "1969-12-31 23:59:59.999998", "1970-01-01 00:00:01.000001", "1970-01-01 00:00:01.000001" }) |instant, expected| try std.testing.expectEqualStrings(expected, try (try call(a, "modules.datetime.datetime.utcfromtimestamp", &.{.{ .value = .{ .number = instant } }}, .{})).?.text(a));
     try std.testing.expectEqualStrings("13:04:05.600007", try (try call(a, "modules.datetime.time", &.{ .{ .value = .{ .integer = "13" } }, .{ .value = .{ .integer = "4" } }, .{ .value = .{ .integer = "5" } }, .{ .value = .{ .integer = "600007" } } }, .{})).?.text(a));
     try std.testing.expectEqualStrings("0:00:00.000002", try (try call(a, "modules.datetime.timedelta", &.{.{ .name = "microseconds", .value = .{ .number = 1.5 } }}, .{})).?.text(a));
     try std.testing.expectError(error.JinjaTypeError, call(a, "modules.datetime.date", &.{ .{ .value = .{ .number = 2024 } }, .{ .value = .{ .integer = "1" } }, .{ .value = .{ .integer = "1" } } }, .{}));
     try std.testing.expect(expr.callableName((try resolve(a, "modules.datetime.datetime")).?) != null);
     try std.testing.expect((try resolve(a, "modules.datetime.timezone")).? == .undefined);
+}
+
+test "native datetime descriptors preserve inherited and base class semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ns = @as(i96, try calendar.parseTimestamp("2024-01-01 12:34:56")) * std.time.ns_per_s;
+    const moment = try dates.datetimeValue(a, ns, false, 0);
+    const dt_class = (try resolve(a, "modules.datetime.datetime")).?;
+    try std.testing.expect(dt_class.attribute("year") != .undefined);
+    try std.testing.expectEqualStrings("<attribute 'year' of 'datetime.datetime' objects>", try dt_class.attribute("year").text(a));
+    try std.testing.expectEqualStrings("2024-01-01T12:34:56+00:00", (try call(a, dt_class.attribute("isoformat").callable, &.{.{ .value = moment }}, .{})).?.string);
+    try std.testing.expectEqualStrings("2024-01-01", (try call(a, "__dxt_datetime_unbound:date:isoformat", &.{.{ .value = moment }}, .{})).?.string);
+    try std.testing.expectEqualStrings("Mon Jan  1 00:00:00 2024", (try call(a, "__dxt_datetime_unbound:date:ctime", &.{.{ .value = moment }}, .{})).?.string);
+    const tuple = (try call(a, "__dxt_datetime_unbound:date:timetuple", &.{.{ .value = moment }}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 0), try expr.integerIndex(tuple.attribute("tm_hour")));
+    const replaced = (try call(a, "__dxt_datetime_unbound:date:replace", &.{ .{ .value = moment }, .{ .name = "year", .value = .{ .integer = "2023" } } }, .{})).?;
+    try std.testing.expect(!dates.state(replaced).?.date_only);
+    try std.testing.expectEqualStrings("2023-01-01 00:00:00", try replaced.text(a));
+    try std.testing.expectError(error.InvalidJinjaArguments, call(a, "__dxt_datetime_unbound:date:replace", &.{ .{ .value = moment }, .{ .name = "hour", .value = .{ .integer = "1" } } }, .{}));
+    try std.testing.expectError(error.JinjaTypeError, call(a, "__dxt_datetime_unbound:datetime:isoformat", &.{.{ .value = try dates.datetimeValue(a, ns, true, null) }}, .{}));
+    const first = try expr.attributeWithHost(a, moment, "fromordinal", null);
+    try std.testing.expectEqualStrings("0001-01-01 00:00:00", try (try call(a, first.callable, &.{.{ .value = .{ .integer = "1" } }}, .{})).?.text(a));
+}
+
+test "inherited datetime extrema use intrinsic render cache despite authored modules shadow" {
+    const Fixture = struct {
+        cache: @import("modules_context.zig").Cache = .{},
+        fn resolve(context: *anyopaque, path: []const u8, a: Allocator) anyerror!Value {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (std.mem.startsWith(u8, path, "__dxt_modules.")) return (try @import("modules_context.zig").resolveCached(a, path[6..], &self.cache)).?;
+            return .undefined;
+        }
+        fn invoke(_: *anyopaque, _: []const u8, _: []const Argument, _: Allocator) anyerror!Value {
+            return error.UnsupportedJinjaCall;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture: Fixture = .{};
+    const host: expr.Host = .{ .context = &fixture, .resolve = Fixture.resolve, .call = Fixture.invoke };
+    const moment = try dates.datetimeValue(a, 0, false, null);
+    const first = try expr.attributeWithHost(a, moment, "min", host);
+    const next = (try @import("modules_context.zig").resolveCached(a, "modules.datetime.datetime.min", &fixture.cache)).?;
+    try std.testing.expectEqual(first.object.ptr, next.object.ptr);
+    try std.testing.expect((try expr.attributeWithHost(a, moment, "not_an_attribute", host)) == .undefined);
 }
 
 test "native timedeltas retain exact integer range rounding and datetime arithmetic" {

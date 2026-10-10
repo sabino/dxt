@@ -43,3 +43,25 @@ pub fn call(a: Allocator, name: []const u8, args: []const expression.Argument) a
     }
     return error.AbstractTimeZoneMethod;
 }
+
+pub fn unbound(a: Allocator, receiver: Value, method: []const u8, args: []const expression.Argument) anyerror!Value {
+    if (args.len != 1 or args[0].name != null) return error.InvalidJinjaArguments;
+    if (!std.mem.eql(u8, method, "fromutc")) return error.AbstractTimeZoneMethod;
+    const state = dates.state(args[0].value) orelse return error.JinjaTypeError;
+    if (state.date_only) return error.JinjaTypeError;
+    const zone = state.timezone orelse return error.InvalidFromUtcTimezone;
+    const identity = receiver.attribute("__dxt_timezone_identity");
+    const original = zone.attribute("__dxt_timezone_identity");
+    if (identity != .string or original != .string or !std.mem.eql(u8, identity.string, original.string)) return error.InvalidFromUtcTimezone;
+    const zones = @import("timezone_context.zig");
+    const operations = @import("datetime_operations.zig");
+    const offset = operations.duration((try zones.call(a, expression.callableName(receiver.attribute("utcoffset")).?, args)).?) orelse return error.InvalidFromUtcTimezone;
+    var dst = operations.duration((try zones.call(a, expression.callableName(receiver.attribute("dst")).?, args)).?) orelse return error.InvalidFromUtcTimezone;
+    var current = args[0].value;
+    const delta = offset - dst;
+    if (delta != 0) {
+        current = (try operations.apply(a, "+", current, try @import("modules_datetime.zig").durationValue(a, delta))).?;
+        dst = operations.duration((try zones.call(a, expression.callableName(receiver.attribute("dst")).?, &.{.{ .value = current }})).?) orelse return error.InvalidFromUtcTimezone;
+    }
+    return (try operations.apply(a, "+", current, try @import("modules_datetime.zig").durationValue(a, dst))).?;
+}

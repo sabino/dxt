@@ -115,10 +115,21 @@ pub fn call(a: Allocator, name: []const u8, args: []const expr.Argument) anyerro
     if (std.mem.eql(u8, method, "strftime")) {
         const bound = try bind(a, args, &.{"format"}, &.{.undefined}, 1);
         if (bound[0] != .string) return error.JinjaTypeError;
-        const abbreviation = try zoneCall(a, timezone, "tzname");
-        const dst = try zoneCall(a, timezone, "dst");
-        return .{ .string = try strftime.render(a, -2208988800 * @as(i96, std.time.ns_per_s) + @as(i96, micros) * std.time.ns_per_us, bound[0].string, .{ .offset_us = try effectiveOffset(a, timezone), .abbreviation = if (abbreviation == .string) abbreviation.string else null, .dst_us = if (dst == .none) null else @intCast(@import("datetime_operations.zig").duration(dst) orelse return error.JinjaTypeError) }) };
+        const requirements = strftime.zoneRequirements(bound[0].string);
+        const abbreviation = if (requirements.name) try zoneCall(a, timezone, "tzname") else .none;
+        return .{ .string = try strftime.render(a, -2208988800 * @as(i96, std.time.ns_per_s) + @as(i96, micros) * std.time.ns_per_us, bound[0].string, .{ .offset_us = if (requirements.offset) try effectiveOffset(a, timezone) else null, .abbreviation = if (abbreviation == .string) abbreviation.string else null }) };
     }
     if (args.len != 0) return error.InvalidJinjaArguments;
     return try zoneCall(a, timezone, method);
+}
+
+test "time strftime requests abstract timezone only for exact zone substitutions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const clock = try value(a, 4500000000, try abstract_zone.value(a), 0);
+    const function = clock.attribute("strftime").callable;
+    try std.testing.expectEqualStrings("01 000000 %z ", (try call(a, function, &.{.{ .value = .{ .string = "%H %f %%z %_z" } }})).?.string);
+    try std.testing.expectError(error.AbstractTimeZoneMethod, call(a, function, &.{.{ .value = .{ .string = "%z" } }}));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, call(a, function, &.{.{ .value = .{ .string = "%Z" } }}));
 }

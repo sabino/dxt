@@ -187,4 +187,6 @@ test "abstract timezone subtraction only bypasses offset calls for identical zon
     try std.testing.expectError(error.AbstractTimeZoneMethod, apply(a, "-", first, distinct));
     try std.testing.expectError(error.AbstractTimeZoneMethod, apply(a, "-", first, naive));
     try std.testing.expectError(error.AbstractTimeZoneMethod, apply(a, "-", naive, first));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, @import("yaml_values.zig").order(naive, first));
+    try std.testing.expectEqual(std.math.Order.lt, try @import("yaml_values.zig").order(first, same));
 }
