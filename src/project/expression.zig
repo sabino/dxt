@@ -1330,6 +1330,7 @@ pub fn textWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) any
     if (text_depth == 128) return error.JinjaExpressionDepthExceeded;
     text_depth += 1;
     defer text_depth -= 1;
+    if (try sequences.textWithHost(allocator, value, host)) |sequence_text| return sequence_text;
     const rendered = value.attribute("__dxt_repr");
     if (rendered == .callable) {
         const active = host orelse return error.UnsupportedJinjaCall;

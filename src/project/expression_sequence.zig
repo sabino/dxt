@@ -168,10 +168,40 @@ fn nextZip(a: std.mem.Allocator, value: Value, host: ?expression.Host) anyerror!
 }
 
 pub fn text(a: std.mem.Allocator, value: Value) !?[]const u8 {
+    return textWithHost(a, value, null);
+}
+
+pub fn textWithHost(a: std.mem.Allocator, value: Value, host: ?expression.Host) anyerror!?[]const u8 {
     const name = kind(value) orelse return null;
-    if (isIterator(value)) return error.JinjaTypeError;
+    if (std.mem.startsWith(u8, name, "itertools_")) return @import("itertools_context.zig").renderWithHost(a, value, host);
+    if (isIterator(value)) {
+        var label: []const u8 = "zip";
+        if (std.mem.eql(u8, name, "iterator")) {
+            const source = value.attribute("__dxt_sequence_source");
+            label = switch (source) {
+                .list => "list_iterator",
+                .tuple => "tuple_iterator",
+                .string => "str_iterator",
+                .object => blk: {
+                    if (@import("set_context.zig").isSet(source)) break :blk "set_iterator";
+                    if (source.attribute("__dxt_binary") == .string) break :blk "bytes_iterator";
+                    const view_kind = kind(source);
+                    if (view_kind) |view_name| {
+                        if (std.mem.eql(u8, view_name, "values")) break :blk "dict_valueiterator";
+                        if (std.mem.eql(u8, view_name, "items")) break :blk "dict_itemiterator";
+                    }
+                    break :blk "dict_keyiterator";
+                },
+                else => "tuple_iterator",
+            };
+        } else if (std.mem.startsWith(u8, name, "filter_")) {
+            const function = if (std.mem.eql(u8, name, "filter_map")) "sync_do_map" else if (std.mem.eql(u8, name, "filter_unique")) "sync_do_unique" else if (std.mem.eql(u8, name, "filter_batch")) "do_batch" else if (std.mem.eql(u8, name, "filter_slice")) "sync_do_slice" else "select_or_reject";
+            return try std.fmt.allocPrint(a, "<generator object {s} at 0x{x}>", .{ function, @intFromPtr(value.object.ptr) });
+        }
+        return try std.fmt.allocPrint(a, "<{s} object at 0x{x}>", .{ label, @intFromPtr(value.object.ptr) });
+    }
     const values = try viewItems(a, value, name);
-    return try std.fmt.allocPrint(a, "dict_{s}({s})", .{ name, try (Value{ .list = values }).text(a) });
+    return try std.fmt.allocPrint(a, "dict_{s}({s})", .{ name, try expression.textWithHost(a, .{ .list = values }, host) });
 }
 
 pub fn length(value: Value) !?usize {
@@ -218,4 +248,19 @@ test "pulling reusable text allocates one cursor without rebuilding all characte
         count += 1;
     }
     try std.testing.expectEqual(input.len, count);
+}
+
+test "iterator rendering retains state and public representation shape" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input = try iter(a, .{ .tuple = &.{.{ .integer = "7" }} });
+    const rendered = (try textWithHost(a, input, null)).?;
+    try std.testing.expect(std.mem.startsWith(u8, rendered, "<tuple_iterator object at 0x"));
+    try std.testing.expectEqualStrings("7", (try next(a, input, null)).?.integer);
+    try std.testing.expectEqualStrings(rendered, (try textWithHost(a, input, null)).?);
+    const count = (try @import("itertools_context.zig").call(a, "__dxt_itertools:count", &.{.{ .value = .{ .integer = "3" } }}, null)).?;
+    try std.testing.expectEqualStrings("count(3)", try expression.textWithHost(a, count, null));
+    _ = try next(a, count, null);
+    try std.testing.expectEqualStrings("count(4)", try expression.textWithHost(a, count, null));
 }
