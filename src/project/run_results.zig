@@ -4,6 +4,7 @@ const project_fs = @import("fs.zig");
 const json = @import("json.zig");
 const yaml = @import("yaml.zig");
 const types = @import("types.zig");
+const secrets = @import("secret_projection.zig");
 
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
@@ -182,11 +183,11 @@ pub fn renderRunResults(allocator: std.mem.Allocator, results: []const NodeResul
 }
 
 pub fn renderRunResultsForRuntime(runtime: Runtime, results: []const NodeResult) ![]const u8 {
-    return renderRunResultsWithContext(runtime.allocator, results, runtime.invocation_options, runtime.invocation);
+    return renderRunResultsWithEnvironment(runtime.allocator, results, runtime.invocation_options, runtime.invocation, runtime.environment);
 }
 
 pub fn renderEmptyRunResultsForRuntime(runtime: Runtime) ![]const u8 {
-    return renderRunResultsWithElapsed(runtime.allocator, &.{}, runtime.invocation_options, runtime.invocation, 0);
+    return renderRunResultsWithElapsed(runtime.allocator, &.{}, runtime.invocation_options, runtime.invocation, 0, runtime.environment);
 }
 
 pub fn renderRunResultsWithInvocation(allocator: std.mem.Allocator, results: []const NodeResult, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
@@ -198,10 +199,14 @@ pub fn renderRunResultsWithArgs(allocator: std.mem.Allocator, results: []const N
 }
 
 fn renderRunResultsWithContext(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
-    return renderRunResultsWithElapsed(allocator, results, options, metadata, if (metadata) |value| value.elapsed() else 0);
+    return renderRunResultsWithEnvironment(allocator, results, options, metadata, null);
 }
 
-fn renderRunResultsWithElapsed(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options, metadata: ?*const @import("invocation.zig").Metadata, elapsed: f64) ![]const u8 {
+fn renderRunResultsWithEnvironment(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options, metadata: ?*const @import("invocation.zig").Metadata, environment: ?*const std.process.Environ.Map) ![]const u8 {
+    return renderRunResultsWithElapsed(allocator, results, options, metadata, if (metadata) |value| value.elapsed() else 0, environment);
+}
+
+fn renderRunResultsWithElapsed(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options, metadata: ?*const @import("invocation.zig").Metadata, elapsed: f64, environment: ?*const std.process.Environ.Map) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
@@ -212,7 +217,7 @@ fn renderRunResultsWithElapsed(allocator: std.mem.Allocator, results: []const No
     try writer.writeAll("  \"results\": [");
     for (results, 0..) |result, index| {
         if (index != 0) try writer.writeAll(",");
-        try writeResult(writer, result);
+        try writeResult(writer, allocator, environment, result);
     }
     try writer.print("\n  ],\n  \"elapsed_time\": {d},\n  \"args\": ", .{elapsed});
     try writeArgs(writer, allocator, options);
@@ -387,7 +392,7 @@ test "docs replay arguments omit false one-way flags and retain enabled and dual
     }
 }
 
-fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
+fn writeResult(writer: *Io.Writer, allocator: std.mem.Allocator, environment: ?*const std.process.Environ.Map, result: NodeResult) !void {
     try writer.writeAll("\n    {\"status\": ");
     try json.string(writer, result.status);
     try writer.writeAll(", \"timing\": [");
@@ -441,7 +446,11 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     }
     try writer.writeAll("}, \"message\": ");
     if (result.message) |message| {
-        try json.string(writer, message);
+        // Error messages are public diagnostics. Other statuses may carry an
+        // authored main-response message that Core retains in its artifact.
+        const projected = if (std.mem.eql(u8, result.status, "error")) try secrets.text(allocator, environment, message) else null;
+        defer if (projected) |value| allocator.free(value);
+        try json.string(writer, projected orelse message);
     } else {
         try writer.writeAll("null");
     }
@@ -502,6 +511,44 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
         try writer.writeAll("}");
     }
     try writer.writeAll("}");
+}
+
+test "runtime results mask public messages while preserving authored SQL and custom responses" {
+    const allocator = std.testing.allocator;
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("DBT_ENV_SECRET_VALUE", "PRIVATE_VALUE");
+    const runtime = Runtime{ .allocator = allocator, .io = std.Io.Threaded.global_single_threaded.io(), .environment = &environment };
+    const rows = [_]NodeResult{
+        .{ .operation_id = "operation.demo.secret", .status = "error", .message = "PRIVATE_VALUE useful diagnostic", .compiled_code = "select 'PRIVATE_VALUE'", .adapter_response = .{ .message = "authored PRIVATE_VALUE" } },
+        .{ .operation_id = "operation.demo.normal", .status = "error", .message = "ordinary diagnostic" },
+        .{ .operation_id = "operation.demo.empty", .message = null },
+    };
+    const rendered = try renderRunResultsForRuntime(runtime, &rows);
+    defer allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+    const results = parsed.value.object.get("results").?.array.items;
+    try std.testing.expectEqualStrings("***** useful diagnostic", results[0].object.get("message").?.string);
+    try std.testing.expectEqualStrings("select 'PRIVATE_VALUE'", results[0].object.get("compiled_code").?.string);
+    try std.testing.expectEqualStrings("authored PRIVATE_VALUE", results[0].object.get("adapter_response").?.object.get("_message").?.string);
+    try std.testing.expectEqualStrings("ordinary diagnostic", results[1].object.get("message").?.string);
+    try std.testing.expect(results[2].object.get("message").? == .null);
+    for ([_][]const u8{ "success", "fail", "warn", "skipped" }) |status| {
+        const authored_rows = [_]NodeResult{.{ .operation_id = "operation.demo.authored", .status = status, .message = "authored PRIVATE_VALUE", .adapter_response = .{ .message = "authored PRIVATE_VALUE" } }};
+        const authored = try renderRunResultsForRuntime(runtime, &authored_rows);
+        defer allocator.free(authored);
+        var authored_parsed = try std.json.parseFromSlice(std.json.Value, allocator, authored, .{});
+        defer authored_parsed.deinit();
+        const result = authored_parsed.value.object.get("results").?.array.items[0].object;
+        try std.testing.expectEqualStrings("authored PRIVATE_VALUE", result.get("message").?.string);
+        try std.testing.expectEqualStrings("authored PRIVATE_VALUE", result.get("adapter_response").?.object.get("_message").?.string);
+    }
+    const internal = try renderRunResults(allocator, &rows);
+    defer allocator.free(internal);
+    var internal_parsed = try std.json.parseFromSlice(std.json.Value, allocator, internal, .{});
+    defer internal_parsed.deinit();
+    try std.testing.expectEqualStrings("PRIVATE_VALUE useful diagnostic", internal_parsed.value.object.get("results").?.array.items[0].object.get("message").?.string);
 }
 
 fn writeBatchTimestamp(writer: *Io.Writer, timestamp: i96) !void {
