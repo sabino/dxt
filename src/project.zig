@@ -4216,6 +4216,7 @@ fn materializeGenericTests(graph: *Graph) !void {
             .patch_path = property.patch_path,
             .version = property.version,
             .raw_code = "",
+            .columns = property.columns,
         };
         if (property.version != .null) {
             const version = try @import("project/config_value.zig").scalarText(graph.allocator, property.version);
@@ -4538,6 +4539,7 @@ test "unmatched YAML targets retain generic declarations without fabricating gra
     defer graph.deinit();
     var property = types.ModelProperty{ .package_name = "demo", .resource_type = "seed", .name = "absent", .patch_path = "models/schema.yml" };
     var column = ColumnDef{ .name = "id" };
+    try column.tags.append(a, "yaml_column");
     try column.tests.append(a, .{ .name = "not_null" });
     try property.columns.append(a, column);
     try graph.model_properties.append(a, property);
@@ -4549,6 +4551,7 @@ test "unmatched YAML targets retain generic declarations without fabricating gra
     try std.testing.expectEqualStrings("seeds.absent", declared.unattached_file_key_name.?);
     try std.testing.expectEqualStrings("{{ get_where_subquery(ref('absent')) }}", declared.unattached_model_kwarg.?);
     try std.testing.expectEqualStrings("absent", declared.refs.items[0].name);
+    try std.testing.expectEqualStrings("yaml_column", declared.tags.items[0]);
 }
 
 test "materializeGenericTests activates root project model column custom generic tests" {

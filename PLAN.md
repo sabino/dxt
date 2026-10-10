@@ -36,8 +36,8 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 The current CI repair checkpoint has all 263 historical CLI tests passing with
 zero skips after Core-grounded expectation migrations and the profileless audit
 relation fix. The published candidate passes the native/safety job and all six
-public Jaffle gates. Its obsolete full-command DuckDB CLI fallback step is being
-replaced by the actual retained autocommit query contract; held-session commands
+public Jaffle gates, the retained autocommit query contract and both native
+installation targets on Linux x86_64 and ARM. Held-session commands
 require the native library. Vendored upstream whitespace remains byte-preserved
 through narrowly scoped Git attributes. Public dbt-utils now executes every
 command under both engines on PostgreSQL; the strict artifact comparison exposed
@@ -67,7 +67,12 @@ Core seeds generic-test macro dependencies with its unqualified resolver even
 when raw code calls a package namespace, and it retains tests declared on an
 unmatched YAML target as non-executable manifest nodes after missing-reference
 resolution. The root owns this generic parse/artifact closure and its both-adapter
-oracles; the compiler worker separately owns reached singular runtime calls.
+oracles, including column tags and transitive parse-time macro visibility.
+Static macro dependencies now resolve before schema-test configuration. The
+compiler worker separately owns reached singular and generic runtime calls,
+including selection of the explicitly authored package macro during execution.
+The focused parser/config regressions pass; the combined public package rerun
+still awaits the runtime collector integration.
 Project source files and strict gate comparisons remain unchanged.
 
 PR #219 is merged. The user has authorized completing the replacement roadmap,

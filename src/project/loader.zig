@@ -279,6 +279,10 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     }
     try snapshot_yaml.finalize(runtime, &graph);
     try @import("contracts.zig").finalize(runtime, &graph);
+    // Generic TestMacroNamespace includes seeded macros' static dependencies
+    // before rendering schema-test bodies and their config calls.
+    try rejectDuplicateMacros(&graph);
+    try callbacks.resolve_macro_dependencies(&graph);
     try callbacks.materialize_generic_tests(&graph);
     try @import("generic_test_config.zig").finalize(runtime, &graph);
     try @import("test_provenance.zig").initialize(runtime, &graph);
@@ -296,8 +300,6 @@ pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) 
     try rejectDuplicateSingularTests(&graph);
     try rejectDuplicateExposures(&graph);
     try rejectDuplicateUnitTests(&graph);
-    try rejectDuplicateMacros(&graph);
-    try callbacks.resolve_macro_dependencies(&graph);
     for (graph.nodes.items) |*node| if (node.enabled and microbatch.enabled(node)) {
         try microbatch.normalizeConfig(runtime.allocator, node);
     };
