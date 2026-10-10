@@ -401,7 +401,9 @@ fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, callbac
         error.FileNotFound => return,
         else => return err,
     };
-    sortStrings(package_dirs.items);
+    // Core preserves installed-directory discovery order. Its global macro
+    // namespace lets later packages win collisions, so sorting these paths
+    // changes generic-test bodies and argument-helper visibility.
 
     for (package_dirs.items) |package_dir| {
         var package_config = project_config.loadProjectConfigWithContext(runtime, package_dir, graph.vars.items, graph.target_context) catch |err| switch (err) {
