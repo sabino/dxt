@@ -67,10 +67,10 @@ pub fn keyEqual(left: Value, right: Value) bool {
     const yaml_values = @import("yaml_values.zig");
     if (yaml_values.isHashable(left) or yaml_values.isHashable(right))
         return yaml_values.keyEqual(left, right);
-    const left_builtin = left.attribute("__dxt_timezone_builtin").truthy();
-    const right_builtin = right.attribute("__dxt_timezone_builtin").truthy();
-    if (left_builtin or right_builtin)
-        return left_builtin and right_builtin and expression.equalValues(
+    const builtin_left = left.attribute("__dxt_timezone_builtin").truthy();
+    const builtin_right = right.attribute("__dxt_timezone_builtin").truthy();
+    if (builtin_left or builtin_right)
+        return builtin_left and builtin_right and expression.equalValues(
             left.attribute("__dxt_timezone_offset_us"),
             right.attribute("__dxt_timezone_offset_us"),
         );
