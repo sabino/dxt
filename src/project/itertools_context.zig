@@ -80,6 +80,9 @@ fn bind(a: Allocator, args: []const Argument, parameters: []const []const u8, re
     for (values[0..required]) |value| if (value == null) return error.InvalidJinjaArguments;
     return values;
 }
+fn unitStep(step: Value) bool {
+    return (step == .integer and std.mem.eql(u8, step.integer, "1")) or (step == .boolean and step.boolean) or if (expression.integerProtocol(step)) |number| std.mem.eql(u8, number, "1") else false;
+}
 fn numeric(value: Value) bool {
     return value == .boolean or value == .integer or value == .number or value == .complex or expression.integerProtocol(value) != null or expression.floatProtocol(value) != null or expression.complexProtocol(value) != null;
 }
@@ -127,8 +130,7 @@ pub fn call(a: Allocator, authored_name: []const u8, args: []const Argument, hos
         if (!numeric(start) or !numeric(step)) return error.JinjaTypeError;
         // CPython's unit-integer-step path starts with a plain integer even
         // when the authored start is bool or an integer subclass such as Flag.
-        const unit_step = (step == .integer and std.mem.eql(u8, step.integer, "1")) or (step == .boolean and step.boolean) or if (expression.integerProtocol(step)) |number| std.mem.eql(u8, number, "1") else false;
-        if (unit_step) {
+        if (unitStep(step)) {
             if (start == .boolean) {
                 const digits = if (start.boolean) "1" else "0";
                 start = .{ .integer = digits };
@@ -191,7 +193,7 @@ pub fn call(a: Allocator, authored_name: []const u8, args: []const Argument, hos
         const source = try sequence.iter(a, args[0].value);
         const already_tee = std.mem.eql(u8, sequence.kind(source) orelse "", "itertools_tee");
         const shared = if (already_tee) source.attribute("shared") else try object(a, &.{ .{ .key = "source", .value = source }, .{ .key = "buffer", .value = .{ .list = &.{} } }, .{ .key = "length", .value = .{ .integer = "0" } }, .{ .key = "done", .value = .{ .boolean = false } } });
-        for (branches, 0..) |*branch, i| branch.* = if (already_tee and i == 0) source else try descriptor(a, "tee", &.{ .{ .key = "shared", .value = shared }, .{ .key = "cursor", .value = if (already_tee) source.attribute("cursor") else .{ .integer = "0" } } });
+        for (branches) |*branch| branch.* = try descriptor(a, "tee", &.{ .{ .key = "shared", .value = shared }, .{ .key = "cursor", .value = if (already_tee) source.attribute("cursor") else .{ .integer = "0" } } });
         return .{ .tuple = branches };
     }
     if (std.mem.eql(u8, name, "zip_longest") or std.mem.eql(u8, name, "product")) {
@@ -427,6 +429,30 @@ pub fn pull(a: Allocator, value: Value, host: ?Host) anyerror!?Value {
     return error.UnsupportedJinjaCall;
 }
 
+/// Representation is independent of consumption; callbacks use the active
+/// caller only when a repeated value itself exposes deferred metadata.
+pub fn render(a: Allocator, value: Value) anyerror!?[]const u8 {
+    return renderWithHost(a, value, null);
+}
+pub fn renderWithHost(a: Allocator, value: Value, host: ?Host) anyerror!?[]const u8 {
+    const marker = sequence.kind(value) orelse return null;
+    if (!std.mem.startsWith(u8, marker, "itertools_")) return null;
+    const name = marker["itertools_".len..];
+    if (std.mem.eql(u8, name, "count")) {
+        const step = value.attribute("step");
+        const current = if (value.attribute("started").truthy()) try expression.addValues(a, value.attribute("current"), step) else value.attribute("current");
+        const text = try expression.reprWithHost(a, current, host);
+        if (unitStep(step)) return try std.fmt.allocPrint(a, "count({s})", .{text});
+        return try std.fmt.allocPrint(a, "count({s}, {s})", .{ text, try expression.reprWithHost(a, step, host) });
+    }
+    if (std.mem.eql(u8, name, "repeat")) {
+        const text = try expression.reprWithHost(a, value.attribute("value"), host);
+        const remaining = try integer(value, "remaining");
+        return if (remaining < 0) try std.fmt.allocPrint(a, "repeat({s})", .{text}) else try std.fmt.allocPrint(a, "repeat({s}, {d})", .{ text, remaining });
+    }
+    return try std.fmt.allocPrint(a, "<itertools.{s} object at 0x{x}>", .{ if (std.mem.eql(u8, name, "tee")) "_tee" else name, @intFromPtr(value.object.ptr) });
+}
+
 const TestHost = struct {
     fn resolveValue(_: *anyopaque, path: []const u8, a: Allocator) !Value {
         if (std.mem.eql(u8, path, "modules")) return try object(a, &.{.{ .key = "itertools", .value = (try resolve(a, "modules.itertools")).? }});
@@ -481,10 +507,11 @@ test "native tee aliases and nested branches share source position without advan
     try std.testing.expectEqualStrings("2", (try sequence.next(a, branches[0], null)).?.integer);
     try std.testing.expectEqualStrings("1", (try sequence.next(a, branches[1], null)).?.integer);
     const nested = (try call(a, "modules.itertools.tee", &.{.{ .value = branches[1] }}, null)).?.tuple;
-    try std.testing.expect(nested[0].object.ptr == branches[1].object.ptr);
+    try std.testing.expect(nested[0].object.ptr != branches[1].object.ptr);
     try std.testing.expectEqualStrings("2", (try sequence.next(a, nested[1], null)).?.integer);
     try std.testing.expectEqualStrings("3", (try sequence.next(a, branches[0], null)).?.integer);
     try std.testing.expectEqualStrings("2", (try sequence.next(a, nested[0], null)).?.integer);
+    try std.testing.expectEqualStrings("2", (try sequence.next(a, branches[1], null)).?.integer);
 }
 
 test "native islice drains skipped positions and defers starmap callback errors" {
@@ -514,4 +541,22 @@ test "native tee and cycle growth retains the values shared by iterator aliases"
     try std.testing.expect((try sequence.next(a, branches[1], null)) == null);
     const cycle = (try call(a, "modules.itertools.cycle", &.{.{ .value = .{ .list = items } }}, null)).?;
     for (0..120) |i| try std.testing.expect(items[i % items.len].object.ptr == (try sequence.next(a, cycle, null)).?.object.ptr);
+}
+
+test "native count and repeat representations reflect next state without consuming it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const count = (try call(a, "modules.itertools.count", &.{ .{ .value = .{ .integer = "1" } }, .{ .value = .{ .number = 1.0 } } }, null)).?;
+    try std.testing.expectEqualStrings("count(1, 1.0)", (try render(a, count)).?);
+    try std.testing.expectEqualStrings("1", (try sequence.next(a, count, null)).?.integer);
+    try std.testing.expectEqualStrings("count(2.0, 1.0)", (try render(a, count)).?);
+    try std.testing.expectEqualStrings("count(2.0, 1.0)", (try render(a, count)).?);
+    try std.testing.expectEqual(@as(f64, 2), try expression.numericFloat((try sequence.next(a, count, null)).?));
+    const repeat = (try call(a, "modules.itertools.repeat", &.{ .{ .value = .{ .string = "x" } }, .{ .value = .{ .integer = "2" } } }, null)).?;
+    try std.testing.expectEqualStrings("repeat('x', 2)", (try render(a, repeat)).?);
+    _ = try sequence.next(a, repeat, null);
+    try std.testing.expectEqualStrings("repeat('x', 1)", (try render(a, repeat)).?);
+    _ = try sequence.next(a, repeat, null);
+    try std.testing.expectEqualStrings("repeat('x', 0)", (try render(a, repeat)).?);
 }
