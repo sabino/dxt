@@ -36,6 +36,12 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
     if (@import("builtin_bound_method.zig").isBound(candidate)) return;
     if (@import("datetime_bound_method.zig").isBound(candidate)) return;
+    if (@import("decimal_value.zig").state(candidate) != null) return;
+    if (@import("range_value.zig").isRange(candidate)) {
+        try checkHashable(candidate.attribute("lower"), depth + 1);
+        try checkHashable(candidate.attribute("upper"), depth + 1);
+        return;
+    }
     if (@import("datetime_operations.zig").offsetError(candidate)) return error.AbstractTimeZoneMethod;
     if (@import("native_tuple.zig").items(candidate)) |items| {
         for (items) |item| try checkHashable(item, depth + 1);
@@ -72,6 +78,8 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
 }
 
 pub fn keyEqual(left: Value, right: Value) bool {
+    if (@import("range_value.zig").isRange(left) or @import("range_value.zig").isRange(right)) return @import("range_value.zig").equal(left, right);
+    if (@import("decimal_value.zig").state(left) != null or @import("decimal_value.zig").state(right) != null) return expression.equalValues(left, right);
     const builtin_methods = @import("builtin_bound_method.zig");
     if (builtin_methods.isBound(left) or builtin_methods.isBound(right)) return builtin_methods.equal(left, right);
     const methods = @import("datetime_bound_method.zig");

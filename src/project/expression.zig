@@ -7,6 +7,8 @@ const mapping_keys = @import("mapping_keys.zig");
 const sets = @import("set_context.zig");
 const yaml_values = @import("yaml_values.zig");
 const temporal = @import("datetime_operations.zig");
+const decimals = @import("decimal_value.zig");
+const ranges = @import("range_value.zig");
 
 pub fn lengthWithHost(a: std.mem.Allocator, value: Value, host: ?Host) anyerror!Value {
     return @import("expression_dynamic.zig").length(a, value, host);
@@ -36,6 +38,8 @@ pub const Value = union(enum) {
     callable: []const u8,
 
     pub fn truthy(self: Value) bool {
+        if (decimals.truthy(self)) |result| return result;
+        if (ranges.truthy(self)) |result| return result;
         if (temporal.duration(self)) |micros| return micros != 0;
         if (floatProtocol(self)) |number| return number != 0;
         if (complexProtocol(self)) |number| return number.real != 0 or number.imaginary != 0;
@@ -527,6 +531,7 @@ pub fn integerIndex(value: Value) !i64 {
 
 pub fn numericFloat(value: Value) !f64 {
     if (isUndefined(value)) return error.UndefinedJinjaValue;
+    if (decimals.state(value)) |text| return std.fmt.parseFloat(f64, text) catch return error.JinjaTypeError;
     if (floatProtocol(value)) |number| return number;
     if (integerProtocol(value)) |number| return numericFloat(.{ .integer = number });
     return switch (value) {
@@ -539,6 +544,69 @@ pub fn numericFloat(value: Value) !f64 {
         .boolean => |number| if (number) 1 else 0,
         else => error.JinjaTypeError,
     };
+}
+
+test "cursor Decimal expressions retain exact coefficients and numeric interoperability" {
+    const Fixture = struct {
+        d: Value,
+        e: Value,
+        tenth: Value,
+        zero: Value,
+        large: Value,
+        fn resolve(raw: *anyopaque, path: []const u8, _: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            inline for (.{ "d", "e", "tenth", "zero", "large" }) |field| if (std.mem.eql(u8, path, field)) return @field(self, field);
+            return .undefined;
+        }
+        fn call(_: *anyopaque, _: []const u8, _: []const Argument, _: std.mem.Allocator) !Value {
+            return error.UnexpectedDecimalHostCall;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture = Fixture{
+        .d = try decimals.value(a, "0.123456789012345678901234567890"),
+        .e = try decimals.value(a, "1.25"),
+        .tenth = try decimals.value(a, "0.1"),
+        .zero = try decimals.value(a, "0.0000000"),
+        .large = try decimals.value(a, "123456789012345678901234567890"),
+    };
+    const host = Host{ .context = &fixture, .resolve = Fixture.resolve, .call = Fixture.call };
+    try std.testing.expectEqualStrings("0.123456789012345678901234567890", try fixture.d.text(a));
+    try std.testing.expectEqualStrings("1.123456789012345678901234568", try (try evaluate(a, "d+1", host)).text(a));
+    try std.testing.expectEqualStrings("0.1234567890123456789012345679", try (try evaluate(a, "+d", host)).text(a));
+    try std.testing.expectEqualStrings("18", try (try evaluate(a, "large%99", host)).text(a));
+    try std.testing.expectEqualStrings("123456789012345678901234567890", (try evaluate(a, "large|int", host)).integer);
+    try std.testing.expect((try evaluate(a, "e==1.25 and tenth<0.1 and tenth!=0.1 and zero<tenth", host)).boolean);
+    try std.testing.expect((try evaluate(a, "d is number and d is not float and d is not integer", host)).boolean);
+    try std.testing.expect(!fixture.zero.truthy());
+    try std.testing.expectEqualStrings("value", (try evaluate(a, "{e:'value'}[1.25]", host)).string);
+    try std.testing.expectEqualStrings("0.1", try (try evaluate(a, "d.quantize(tenth)", host)).text(a));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "d+0.1", host));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "1.0*d", host));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "d+((-1)**0.5)", host));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "d|tojson", host));
+    const ordinary = Value{ .object = &.{.{ .key = "__dxt_decimal", .value = .{ .string = "__dxt_decimal" } }} };
+    try std.testing.expect(decimals.state(ordinary) == null);
+    try std.testing.expect(!(try testValue("number", ordinary, &.{})));
+}
+
+test "cursor ranges preserve bounded membership and numeric bound equality" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bounded = try ranges.value(a, "NumericRange", try decimals.value(a, "1.25"), .{ .integer = "3" }, .{ '[', ')' }, false);
+    const equivalent = try ranges.value(a, "NumericRange", try floatValue(a, 1.25), .{ .integer = "3" }, .{ '[', ')' }, false);
+    try std.testing.expect(bounded.truthy());
+    try std.testing.expect(equalValues(bounded, equivalent));
+    try std.testing.expect(try containsWithHost(a, bounded, try floatValue(a, 1.25), null));
+    try std.testing.expect(!try containsWithHost(a, bounded, .{ .integer = "3" }, null));
+    try mapping_keys.hashable(bounded);
+    try std.testing.expect(mapping_keys.keyEqual(bounded, equivalent));
+    const empty = try ranges.value(a, "NumericRange", .none, .none, .{ '[', ')' }, true);
+    try std.testing.expect(!empty.truthy());
+    try std.testing.expect(!try containsWithHost(a, empty, .{ .integer = "2" }, null));
 }
 
 pub fn repr(value: Value, allocator: std.mem.Allocator) ![]const u8 {
@@ -566,6 +634,7 @@ pub fn callValue(a: std.mem.Allocator, value: Value, args: []const Argument, hos
     if (isUndefined(value)) return error.UndefinedJinjaValue;
     if (@import("builtin_bound_method.zig").isBound(value)) return @import("builtin_bound_method.zig").call(a, value, args, host);
     const function = callableName(value) orelse return error.JinjaTypeError;
+    if (try decimals.call(a, function, args)) |result| return result;
     const current = host orelse return error.UnsupportedJinjaCall;
     return promoteNumericValue(a, try current.call(current.context, function, args, a));
 }
@@ -768,6 +837,7 @@ const Parser = struct {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
             if (try temporal.unary(self.allocator, "-", operand)) |result| break :blk result;
+            if (decimals.state(operand) != null) break :blk try decimals.unary(self.allocator, "-", operand);
             if (complexProtocol(operand)) |number| break :blk try complexValue(self.allocator, .{ .real = -number.real, .imaginary = -number.imaginary });
             if (integerText(operand)) |number| break :blk .{ .integer = try numbers.negate(self.allocator, number) };
             break :blk try floatValue(self.allocator, -(try numeric(operand)));
@@ -776,6 +846,7 @@ const Parser = struct {
             if (!self.active) break :blk .none;
             if (isUndefined(operand)) return error.UndefinedJinjaValue;
             if (try temporal.unary(self.allocator, "+", operand)) |result| break :blk result;
+            if (decimals.state(operand) != null) break :blk try decimals.unary(self.allocator, "+", operand);
             if (operand == .boolean) break :blk try integerValue(self.allocator, @as(u8, @intFromBool(operand.boolean)));
             if (integerProtocol(operand)) |number| break :blk .{ .integer = number };
             if (operand != .integer and floatProtocol(operand) == null and complexProtocol(operand) == null) return error.JinjaTypeError;
@@ -1444,6 +1515,7 @@ pub fn valueOrder(allocator: std.mem.Allocator, left: Value, right: Value) !std.
 }
 fn valueOrderDepth(allocator: std.mem.Allocator, left: Value, right: Value, depth: usize) anyerror!std.math.Order {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (decimals.state(left) != null or decimals.state(right) != null) return decimals.order(allocator, left, right);
     if (temporal.hashable(left) or temporal.hashable(right)) return temporal.order(left, right);
     if (yaml_values.isHashable(left) or yaml_values.isHashable(right)) return yaml_values.order(left, right);
     if (left == .list or tupleProtocol(left) != null or right == .list or tupleProtocol(right) != null) {
@@ -1526,6 +1598,15 @@ fn immutableEqual(left: Value, right: Value) bool {
     return immutableSame(left, right);
 }
 pub fn equalValues(a: Value, b: Value) bool {
+    if (ranges.isRange(a) or ranges.isRange(b)) return ranges.equal(a, b);
+    if (decimals.state(a) != null or decimals.state(b) != null) {
+        const other = if (decimals.state(a) != null) b else a;
+        if (complexProtocol(other)) |number| {
+            if (number.imaginary != 0) return false;
+            return decimals.equal(if (decimals.state(a) != null) a else b, .{ .number = number.real });
+        }
+        return decimals.equal(a, b);
+    }
     const builtin_methods = @import("builtin_bound_method.zig");
     if (builtin_methods.isBound(a) or builtin_methods.isBound(b)) return builtin_methods.equal(a, b);
     const bound_methods = @import("datetime_bound_method.zig");
@@ -1648,6 +1729,7 @@ fn contains(allocator: std.mem.Allocator, container: Value, item: Value) anyerro
     return containsWithHost(allocator, container, item, null);
 }
 pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Value, host: ?Host) anyerror!bool {
+    if (ranges.isRange(container)) return ranges.contains(allocator, container, item);
     if (@import("regex_context.zig").isFlagClass(container)) return @import("regex_context.zig").enumContains(allocator, item);
     if (sequences.isIterator(container)) {
         while (try sequences.next(allocator, container, host)) |row| if (try equalMemberChecked(row, item)) return true;
@@ -1695,6 +1777,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     if (try sets.apply(allocator, op, a, b)) |value| return value;
     if (try yaml_values.apply(allocator, op, a, b)) |value| return value;
     if (try temporal.apply(allocator, op, a, b)) |value| return value;
+    if ((decimals.state(a) != null or decimals.state(b) != null) and !comparisonOperator(op)) return decimals.apply(allocator, op, a, b);
     const complex_a = complexProtocol(a);
     const complex_b = complexProtocol(b);
     if (complex_a != null or complex_b != null) {
@@ -1979,7 +2062,7 @@ pub fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "undefined")) return isUndefined(value);
     if (std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "None")) return value == .none;
     if (std.mem.eql(u8, name, "string")) return value == .string;
-    if (std.mem.eql(u8, name, "number")) return integerText(value) != null or floatProtocol(value) != null or complexProtocol(value) != null;
+    if (std.mem.eql(u8, name, "number")) return integerText(value) != null or floatProtocol(value) != null or complexProtocol(value) != null or decimals.state(value) != null;
     if (std.mem.eql(u8, name, "integer")) return value == .integer or integerProtocol(value) != null;
     if (std.mem.eql(u8, name, "float")) return floatProtocol(value) != null;
     if (std.mem.eql(u8, name, "boolean")) return value == .boolean;
@@ -2030,11 +2113,22 @@ pub fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
         return try contains(std.heap.page_allocator, args[0].value, value);
     }
     if (std.mem.eql(u8, name, "odd") or std.mem.eql(u8, name, "even")) {
+        if (decimals.state(value) != null) {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            const remainder = try decimals.apply(arena.allocator(), "%", value, .{ .integer = "2" });
+            return decimals.equal(remainder, .{ .integer = if (std.mem.eql(u8, name, "odd")) "1" else "0" });
+        }
         const odd = if (integerText(value)) |number| (number[number.len - 1] - '0') % 2 != 0 else @mod(try numeric(value), 2) != 0;
         return if (std.mem.eql(u8, name, "odd")) odd else !odd;
     }
     if (std.mem.eql(u8, name, "divisibleby")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
+        if (decimals.state(value) != null or decimals.state(args[0].value) != null) {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            return decimals.equal(try decimals.apply(arena.allocator(), "%", value, args[0].value), .{ .integer = "0" });
+        }
         if (integerText(value)) |number| if (integerText(args[0].value)) |divisor| {
             const remainder = try numbers.apply(std.heap.page_allocator, "%", number, divisor);
             defer std.heap.page_allocator.free(remainder);
@@ -2115,6 +2209,7 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
     if (std.mem.eql(u8, name, "abs")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
         if (try temporal.unary(allocator, "abs", value)) |result| return result;
+        if (decimals.state(value) != null) return decimals.unary(allocator, "abs", value);
         if (integerText(value)) |integer_text| return .{ .integer = if (integer_text[0] == '-') try numbers.negate(allocator, integer_text) else integer_text };
         if (complexProtocol(value)) |complex| {
             const magnitude = std.math.hypot(complex.real, complex.imaginary);
@@ -2270,6 +2365,7 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
         if (std.mem.eql(u8, name, "int")) {
             const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{ "default", "base" }, &.{ .{ .integer = "0" }, .{ .integer = "10" } }, 0);
             const fallback = bound[0];
+            if (decimals.state(value) != null) return .{ .integer = decimals.integer(allocator, value) catch return fallback };
             if (integerText(value)) |number| return .{ .integer = number };
             if (value == .string) {
                 const text = try unicode.strip(value.string, null, true, true);
