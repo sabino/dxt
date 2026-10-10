@@ -1739,8 +1739,28 @@ pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value
 pub fn indexValueWithHost(allocator: std.mem.Allocator, value: Value, key: Value, host: ?Host) !Value {
     if (key == .string and @import("datetime_bound_method.zig").isBound(value)) return attributeWithHost(allocator, value, key.string, host);
     if (key == .string and @import("datetime_protocol.zig").kind(value) != null) return attributeWithHost(allocator, value, key.string, host);
+    if (key == .string and @import("timezone_context.zig").isTimezone(value)) return attributeWithHost(allocator, value, key.string, host);
+    const constructor = value.attribute("__dxt_callable");
+    if (key == .string and constructor == .callable and std.mem.startsWith(u8, constructor.callable, "__dxt_datetime_class:") and std.mem.endsWith(u8, constructor.callable, ":new")) return attributeWithHost(allocator, value, key.string, host);
     if (key == .string and value.attribute("__dxt_getattr") == .callable) return attributeWithHost(allocator, value, key.string, host);
     return indexValue(allocator, value, key);
+}
+
+test "string indexing binds native class and timezone methods" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const date = (try @import("modules_datetime.zig").resolve(a, "modules.datetime.date")).?;
+    const zone = try @import("timezone_context.zig").timezoneValue(a, "UTC", null);
+    const abstract = try @import("datetime_tzinfo.zig").value(a);
+    for ([_]Value{ date, zone, abstract }, [_][]const u8{ "fromordinal", "localize", "utcoffset" }) |receiver, name| {
+        const first = try indexValueWithHost(a, receiver, .{ .string = name }, null);
+        const second = try indexValueWithHost(a, receiver, .{ .string = name }, null);
+        try std.testing.expect(@import("datetime_bound_method.zig").isBound(first));
+        try std.testing.expect(equalValues(first, second));
+        try std.testing.expect(first.object.ptr != second.object.ptr);
+        try std.testing.expect((try first.text(a)).len > 0);
+    }
 }
 
 fn integer(value: Value) !i64 {
