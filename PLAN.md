@@ -45,15 +45,32 @@ x86_64/ARM CI. Exact candidate identities, counts and outcomes are recorded in
 [PR #221](https://github.com/sabino/dxt/pull/221) and
 [issue #220](https://github.com/sabino/dxt/issues/220).
 
-The corrected source passes all 796 native tests and all 95 affected focused
-checks. The complete unfiltered 5,819-case run retains its original build and
-database fixtures on that source. Final documentation clarifies the existing
-compile-error opt-in at every summary; it changes no runtime, test or tooling
-inputs. Candidate-specific public, release and platform results remain tracked
-in the PR and issue until acceptance is complete.
+The compile-policy candidate `000eb74` passes all 796 native tests and all 95
+affected focused checks. Its interrupted complete-suite run is negative
+evidence, not final acceptance. Subsequent namespace corrections require fresh
+candidate-specific native, focused, full, public, release and platform results,
+tracked in the PR and issue until acceptance is complete.
 
 The following triage notes describe the earlier known-failing candidates and
 the bounded corrections; they do not establish final acceptance.
+
+The original 5,819-case run on `000eb74` was stopped normally after 2,622
+passes and eleven failures, with zero errors or skips. Four failures expose
+installed-package macro discovery order: Core preserves directory enumeration
+order while the native loader sorted it, changing the visible generic-test
+body and `get_where_subquery` helper. Preserve Core's discovery order without
+changing resource or artifact sorting. Two further namespace failures expose
+a filesystem-dependent assumption in the hidden-body fixture; ground its
+unchanged inputs with actual Core CLI, then make the hidden namespace explicit
+with a root seed while retaining the original positive and negative assertions.
+The other five failures are PostgreSQL schema collisions caused by the
+supervisor's failed-only temporary-directory retention: successful paths are
+reused while module database fixtures retain relations. Restore pytest's
+default all-directory retention; do not change hook/grants product behavior or
+weaken their assertions. The interrupted JUnit's unnamed sentinel is not a
+test or pass. Preserve failed scratch, complete fixture shutdown and the exact
+1608-file terminal source hold. Certify the bounded namespace correction,
+then restart every full/public/release acceptance gate on the new candidate.
 
 The fresh 5,819-case run on `0fd4457` exposes three base CLI compile/docs
 exit-code regressions. Actual pinned Core CLI witnesses return 2 for these
