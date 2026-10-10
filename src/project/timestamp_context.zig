@@ -237,7 +237,11 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) anye
             replaced_zone = if (zone == .none) null else zone;
             replaced_offset = if (zone == .none or abstract_zone.isAbstract(zone)) null else signedInteger(i64, zone.attribute("__dxt_timezone_offset_us")) orelse return error.JinjaTypeError;
         }
-        const replacement_fold = if (named(args, "fold", 8)) |value_| signedInteger(u1, value_) orelse return error.InvalidDatetime else fold;
+        const replacement_fold: u1 = if (named(args, "fold", 8)) |value_| blk: {
+            const replacement = try expression.integerIndex(value_);
+            if (replacement < 0 or replacement > 1) return error.InvalidDatetime;
+            break :blk @intCast(replacement);
+        } else fold;
         return try datetimeValueWithOffsetUs(a, timestamp + @as(i96, @intCast(fields[6])) * std.time.ns_per_us, date_only, replaced_offset, replaced_zone, replacement_fold);
     }
     if (std.mem.eql(u8, method, "astimezone")) {
@@ -324,5 +328,8 @@ test "native UTC datetime values retain microseconds and Python ISO/format behav
     try std.testing.expectEqualStrings("2024-02-29", try date.text(a));
     const replaced = (try call(a, dt.attribute("replace").callable, &.{ .{ .name = "hour", .value = .{ .integer = "0" } }, .{ .name = "microsecond", .value = .{ .integer = "0" } } })).?;
     try std.testing.expectEqualStrings("2024-02-29 00:17:18+00:00", try replaced.text(a));
+    const folded = (try call(a, dt.attribute("replace").callable, &.{.{ .name = "fold", .value = .{ .boolean = true } }})).?;
+    try std.testing.expectEqual(@as(u1, 1), state(folded).?.fold);
+    try std.testing.expectError(error.JinjaTypeError, call(a, dt.attribute("replace").callable, &.{.{ .name = "fold", .value = .{ .number = 1.0 } }}));
     try std.testing.expectEqual(@as(i64, 3), try expression.integerIndex((try call(a, dt.attribute("weekday").callable, &.{})).?));
 }

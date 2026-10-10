@@ -112,7 +112,6 @@ fn timezoneOffset(value: Value) !?i32 {
 }
 fn fromComponents(a: Allocator, kind: []const u8, args: []const Argument) !Value {
     if (std.mem.eql(u8, kind, "tzinfo")) {
-        if (args.len != 0) return error.InvalidJinjaArguments;
         return abstract_zone.value(a);
     }
     if (std.mem.eql(u8, kind, "timedelta")) {
@@ -283,6 +282,7 @@ test "native datetime module constructors preserve civil values and fixed clock"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    try std.testing.expect(abstract_zone.isAbstract((try call(a, "modules.datetime.tzinfo", &.{ .{ .value = .{ .integer = "1" } }, .{ .name = "extra", .value = .none } }, .{})).?));
     const dt = (try call(a, "modules.datetime.datetime", &.{ .{ .value = .{ .integer = "2024" } }, .{ .value = .{ .integer = "2" } }, .{ .value = .{ .integer = "29" } }, .{ .value = .{ .integer = "13" } } }, .{})).?;
     try std.testing.expectEqualStrings("2024-02-29 13:00:00", try dt.text(a));
     try std.testing.expectEqualStrings("1969-12-31 23:59:59.750000", try (try call(a, "modules.datetime.datetime.fromtimestamp", &.{.{ .value = .{ .number = -0.25 } }}, .{})).?.text(a));

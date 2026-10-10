@@ -137,7 +137,9 @@ pub fn apply(a: Allocator, op: []const u8, left: Value, right: Value) anyerror!?
         if (lhs != null and rhs != null) return try datetime.durationValue(a, lhs.? - rhs.?);
         if (rhs != null and dates.state(left) != null) return try shifted(a, left, if (dates.state(left).?.date_only) -@divFloor(rhs.?, std.time.us_per_day) * std.time.us_per_day else -rhs.?);
         if (dates.state(left)) |first| if (dates.state(right)) |second| {
-            if (first.date_only != second.date_only or (first.offset_us == null) != (second.offset_us == null)) return error.JinjaTypeError;
+            if (first.date_only != second.date_only) return error.JinjaTypeError;
+            try validateComparison(left, right);
+            if ((first.offset_us == null) != (second.offset_us == null)) return error.JinjaTypeError;
             const same = sameZone(first.timezone, second.timezone);
             const first_ns = first.civil_ns - if (same) @as(i96, 0) else @as(i96, first.offset_us orelse 0) * std.time.ns_per_us;
             const second_ns = second.civil_ns - if (same) @as(i96, 0) else @as(i96, second.offset_us orelse 0) * std.time.ns_per_us;
@@ -169,4 +171,20 @@ pub fn apply(a: Allocator, op: []const u8, left: Value, right: Value) anyerror!?
         return error.JinjaTypeError;
     }
     return null;
+}
+
+test "abstract timezone subtraction only bypasses offset calls for identical zones" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const zone = try @import("datetime_tzinfo.zig").value(a);
+    const other = try @import("datetime_tzinfo.zig").value(a);
+    const first = try dates.datetimeValueWithOffsetUs(a, 0, false, null, zone, 0);
+    const same = try dates.datetimeValueWithOffsetUs(a, std.time.ns_per_day, false, null, zone, 0);
+    const distinct = try dates.datetimeValueWithOffsetUs(a, 0, false, null, other, 0);
+    const naive = try dates.datetimeValue(a, 0, false, null);
+    try std.testing.expectEqual(@as(i96, std.time.us_per_day), duration((try apply(a, "-", same, first)).?).?);
+    try std.testing.expectError(error.AbstractTimeZoneMethod, apply(a, "-", first, distinct));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, apply(a, "-", first, naive));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, apply(a, "-", naive, first));
 }
