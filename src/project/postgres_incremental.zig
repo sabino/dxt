@@ -36,6 +36,8 @@ pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, node
         var main = try session.query(creation);
         defer main.deinit(runtime.allocator);
         try @import("materialization_result.zig").captureQuery(runtime.allocator, policy.main_result, main);
+        const relation = try @import("dbt_context.zig").renderRelation(a, definition);
+        try materialization.createConfiguredIndexes(runtime.allocator, session, node, relation);
     } else if (std.mem.eql(u8, kind.?, "view") or config.fullRefresh(graph, node)) {
         var table = node.*;
         table.materialized = "table";
