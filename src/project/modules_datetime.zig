@@ -3,6 +3,8 @@ const std = @import("std");
 const expr = @import("expression.zig");
 const dates = @import("timestamp_context.zig");
 const calendar = @import("workflow_intervals.zig");
+const local_time = @import("native_local_time.zig");
+const timezone_context = @import("timezone_context.zig");
 const Value = expr.Value;
 const Argument = expr.Argument;
 const Allocator = std.mem.Allocator;
@@ -19,6 +21,7 @@ fn classValue(a: Allocator, kind: []const u8) !Value {
     var entries: std.ArrayList(expr.Entry) = .empty;
     try entries.appendSlice(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_class_identity", .value = .{ .string = try std.fmt.allocPrint(a, "datetime.{s}", .{kind}) } },
         .{ .key = "__dxt_callable", .value = try function(a, kind, "new") },
         .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<class 'datetime.{s}'>", .{kind}) } },
     });
@@ -89,6 +92,12 @@ fn component(value: Value, min: i64, max: i64) !i64 {
     if (number < min or number > max) return error.InvalidDatetime;
     return number;
 }
+fn timezoneOffsetUs(value: Value) !?i64 {
+    if (value == .none) return null;
+    const exact = value.attribute("__dxt_timezone_offset_us");
+    if (exact == .integer) return try expr.integerIndex(exact);
+    return if (try timezoneOffset(value)) |minutes| @as(i64, minutes) * std.time.us_per_min else null;
+}
 fn timezoneOffset(value: Value) !?i32 {
     if (value == .none) return null;
     const offset = value.attribute("__dxt_timezone_offset");
@@ -138,7 +147,25 @@ fn fromComponents(a: Allocator, kind: []const u8, args: []const Argument) !Value
         _ = try component(values[8], 0, 1);
     }
     if (time_only) return timeValue(a, @intCast(@divFloor(ns, std.time.ns_per_us)), try timezoneOffset(values[7]), @intCast(try expr.integerIndex(values[8])));
-    return dates.datetimeValue(a, ns, date_only, if (date_only) null else try timezoneOffset(values[7]));
+    return dates.datetimeValueWithOffsetUs(a, ns, date_only, if (date_only) null else try timezoneOffsetUs(values[7]), if (date_only or values[7] == .none) null else values[7], if (date_only) 0 else @intCast(try expr.integerIndex(values[8])));
+}
+
+pub fn localCivil(a: Allocator, utc_ns: i96) !i96 {
+    return local_time.civil(a, utc_ns);
+}
+pub fn localTimestamp(a: Allocator, civil_ns: i96, fold: u1) !i96 {
+    return local_time.timestamp(a, civil_ns, fold);
+}
+fn fromInstant(a: Allocator, utc_ns: i96, date_only: bool, zone: Value, utc: bool) anyerror!Value {
+    if (zone != .none) {
+        const current = try timezone_context.atUtc(a, zone, @intCast(@divFloor(utc_ns, std.time.ns_per_s)));
+        const offset = try timezoneOffsetUs(current);
+        return dates.datetimeValueWithOffsetUs(a, utc_ns + @as(i96, offset orelse 0) * std.time.ns_per_us, false, offset, current, 0);
+    }
+    var civil_ns = if (utc) utc_ns else try localCivil(a, utc_ns);
+    const fold: u1 = if (utc or date_only) 0 else try local_time.foldAt(a, utc_ns);
+    if (date_only) civil_ns = @divFloor(civil_ns, std.time.ns_per_day) * std.time.ns_per_day;
+    return dates.datetimeValueWithOffsetUs(a, civil_ns, date_only, null, null, fold);
 }
 
 pub fn durationValue(a: Allocator, micros: i96) !Value {
@@ -209,21 +236,17 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, options: Opt
     if (std.mem.eql(u8, method, "now") or std.mem.eql(u8, method, "utcnow") or std.mem.eql(u8, method, "today")) {
         var values = [_]Value{.none};
         if (std.mem.eql(u8, method, "now")) try bind(args, &.{"tz"}, 0, &.{.none}, &values) else if (args.len != 0) return error.InvalidJinjaArguments;
-        const offset = try timezoneOffset(values[0]);
-        var ns = options.now_ns orelse std.Io.Clock.real.now(options.io orelse std.Io.Threaded.global_single_threaded.io()).nanoseconds;
-        ns = @divFloor(ns, std.time.ns_per_us) * std.time.ns_per_us + @as(i96, offset orelse 0) * std.time.ns_per_min;
-        if (date_only) ns = @divFloor(ns, std.time.ns_per_day) * std.time.ns_per_day;
-        return try dates.datetimeValue(a, ns, date_only, offset);
+        const ns = @divFloor(options.now_ns orelse std.Io.Clock.real.now(options.io orelse std.Io.Threaded.global_single_threaded.io()).nanoseconds, std.time.ns_per_us) * std.time.ns_per_us;
+        return try fromInstant(a, ns, date_only, values[0], std.mem.eql(u8, method, "utcnow"));
     }
     if (std.mem.eql(u8, method, "fromtimestamp") or std.mem.eql(u8, method, "utcfromtimestamp")) {
         var values = [_]Value{ .undefined, .none };
-        try bind(args, if (date_only) &.{"timestamp"} else &.{ "timestamp", "tz" }, 1, if (date_only) values[0..1] else &values, if (date_only) values[0..1] else &values);
+        const utc = std.mem.eql(u8, method, "utcfromtimestamp");
+        try bind(args, if (date_only or utc) &.{"timestamp"} else &.{ "timestamp", "tz" }, 1, if (date_only or utc) values[0..1] else &values, if (date_only or utc) values[0..1] else &values);
         const seconds = try expr.numericFloat(values[0]);
         if (!std.math.isFinite(seconds) or @abs(seconds) > 4e11) return error.JinjaNumericOverflow;
-        const offset = if (date_only) null else try timezoneOffset(values[1]);
-        var ns: i96 = @as(i96, @intFromFloat(@round(seconds * std.time.us_per_s))) * std.time.ns_per_us + @as(i96, offset orelse 0) * std.time.ns_per_min;
-        if (date_only) ns = @divFloor(ns, std.time.ns_per_day) * std.time.ns_per_day;
-        return try dates.datetimeValue(a, ns, date_only, offset);
+        const ns = @as(i96, @intFromFloat(@round(seconds * std.time.us_per_s))) * std.time.ns_per_us;
+        return try fromInstant(a, ns, date_only, values[1], utc);
     }
     if (std.mem.eql(u8, method, "fromordinal")) {
         if (args.len != 1 or args[0].name != null) return error.InvalidJinjaArguments;
@@ -241,7 +264,7 @@ test "native datetime module constructors preserve civil values and fixed clock"
     try std.testing.expectEqualStrings("2024-02-29 13:00:00", try dt.text(a));
     try std.testing.expectEqualStrings("1969-12-31 23:59:59.750000", try (try call(a, "modules.datetime.datetime.fromtimestamp", &.{.{ .value = .{ .number = -0.25 } }}, .{})).?.text(a));
     try std.testing.expectEqualStrings("2024-02-29", try (try call(a, "modules.datetime.date.fromordinal", &.{.{ .value = .{ .integer = "738945" } }}, .{})).?.text(a));
-    try std.testing.expectEqualStrings("1970-01-01 00:00:00.123456", try (try call(a, "modules.datetime.datetime.now", &.{}, .{ .now_ns = 123456000 })).?.text(a));
+    try std.testing.expectEqualStrings("1970-01-01 00:00:00.123456", try (try call(a, "modules.datetime.datetime.utcnow", &.{}, .{ .now_ns = 123456000 })).?.text(a));
     try std.testing.expectEqualStrings("13:04:05.600007", try (try call(a, "modules.datetime.time", &.{ .{ .value = .{ .integer = "13" } }, .{ .value = .{ .integer = "4" } }, .{ .value = .{ .integer = "5" } }, .{ .value = .{ .integer = "600007" } } }, .{})).?.text(a));
     try std.testing.expectEqualStrings("0:00:00.000002", try (try call(a, "modules.datetime.timedelta", &.{.{ .name = "microseconds", .value = .{ .number = 1.5 } }}, .{})).?.text(a));
     try std.testing.expectError(error.JinjaTypeError, call(a, "modules.datetime.date", &.{ .{ .value = .{ .number = 2024 } }, .{ .value = .{ .integer = "1" } }, .{ .value = .{ .integer = "1" } } }, .{}));
