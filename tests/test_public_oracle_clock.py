@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -19,6 +20,21 @@ def environment():
     value.pop('DXT_PUBLIC_ORACLE_CLOCK_ACTIVE', None)
     value['PYTHONPATH'] = str(SCRIPTS) + os.pathsep + value.get('PYTHONPATH', '')
     return value
+
+
+def test_public_clock_builds_with_fortified_runner_headers_and_rejects_invalid_epoch(tmp_path):
+    compiler = shutil.which(os.environ.get('CC', 'cc'))
+    assert compiler is not None
+    library = tmp_path / 'fortified-clock.so'
+    subprocess.run([compiler, '-std=c11', '-shared', '-fPIC', '-O2', '-Wall',
+                    '-Wextra', '-Werror', '-D_FORTIFY_SOURCE=3',
+                    SCRIPTS / 'oracle_clock.c', '-ldl', '-o', library], check=True)
+    value = environment()
+    value.update(LD_PRELOAD=str(library), DXT_ORACLE_EPOCH_SECONDS='invalid')
+    result = subprocess.run([sys.executable, '-c', 'import time; time.time()'],
+                            env=value, text=True, capture_output=True, timeout=15)
+    assert result.returncode == 125
+    assert result.stderr == 'invalid developer oracle wall clock\n'
 
 
 def test_public_clock_reexec_preserves_arguments_status_and_real_monotonic_time(tmp_path):

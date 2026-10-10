@@ -43,6 +43,14 @@ SQL or comparison value is rewritten. Jaffle and native/safety jobs are green
 on the published checkpoint, along with native archive installation on Linux
 x86_64 and ARM. The complete canonical compatibility jobs remain in progress.
 
+The new published checkpoint passes native/safety, exact cold/warm performance,
+snapshots and extracted installation on both architectures. Its public package
+job stops before execution because fortified runner headers reject an ignored
+diagnostic write result in the developer-only clock fixture. The supervisor
+owns this bounded C fixture repair and a regression using fortified headers;
+the strict local PostgreSQL comparison remains valid, while the fresh runner
+package result is still a required gate.
+
 The combined callable/ownership candidate passes 704 native tests and 70
 developer acceptance checks. The Relation Mapping closure is integrated after
 48 actual Core comparisons; earlier callable certificates include 18
@@ -59,6 +67,10 @@ transaction cleanup are integrated after 72 actual Core cases for bundled
 DuckDB COPY and native PostgreSQL bindings. The oracle worker owns the combined
 seed rerun, including the new Column cases and unchanged 70,000-binding seed;
 the corrected complete seed certificate is still running.
+The unchanged wide seed also exposes repeated alias traversal of the full
+Agate/loop graph. The expression worker owns a bounded performance diagnosis
+and any reviewed ownership-preserving repair; the running unchanged fixture
+remains intact and no reduced test shape can replace its completion evidence.
 The oracle worker also owns native result transport, embedded-NUL/composite
 parameters and the authored cursor contract, with the cache worker owning a
 separate PostgreSQL typed-cell/description module. The release worker's ELF

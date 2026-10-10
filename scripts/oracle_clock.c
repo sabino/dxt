@@ -16,7 +16,14 @@ static int fixed_epoch(time_t *epoch) {
     if (errno != 0 || end == text || *end != '\0' || value < 0 ||
         (long long)(time_t)value != value) {
         static const char message[] = "invalid developer oracle wall clock\n";
-        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+        size_t offset = 0;
+        while (offset < sizeof(message) - 1) {
+            ssize_t count = write(STDERR_FILENO, message + offset,
+                                  sizeof(message) - 1 - offset);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) break;
+            offset += (size_t)count;
+        }
         _exit(125);
     }
     *epoch = (time_t)value;
