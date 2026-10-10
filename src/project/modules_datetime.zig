@@ -50,6 +50,7 @@ pub fn inheritedAttributeName(kind: []const u8, name: []const u8) bool {
 fn descriptor(a: Allocator, kind: []const u8, member: []const u8) !Value {
     const owner = if (std.mem.eql(u8, kind, "datetime") and (std.mem.eql(u8, member, "year") or std.mem.eql(u8, member, "month") or std.mem.eql(u8, member, "day"))) "date" else kind;
     return object(a, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_class_identity", .value = .{ .string = try std.fmt.allocPrint(a, "datetime.{s}.{s}.descriptor", .{ owner, member }) } },
         .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<{s} '{s}' of 'datetime.{s}' objects>", .{ if (std.mem.eql(u8, kind, "timedelta")) @as([]const u8, "member") else "attribute", member, owner }) } },
@@ -57,6 +58,7 @@ fn descriptor(a: Allocator, kind: []const u8, member: []const u8) !Value {
 }
 fn methodDescriptor(a: Allocator, owner: []const u8, method: []const u8) !Value {
     return object(a, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_class_identity", .value = .{ .string = try std.fmt.allocPrint(a, "datetime.{s}.{s}.method_descriptor", .{ owner, method }) } },
         .{ .key = "__dxt_callable", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime_unbound:{s}:{s}", .{ owner, method }) } },
@@ -66,6 +68,7 @@ fn methodDescriptor(a: Allocator, owner: []const u8, method: []const u8) !Value 
 fn classValue(a: Allocator, kind: []const u8) !Value {
     var entries: std.ArrayList(expr.Entry) = .empty;
     try entries.appendSlice(a, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_class_identity", .value = .{ .string = try std.fmt.allocPrint(a, "datetime.{s}", .{kind}) } },
         .{ .key = "__dxt_callable", .value = try function(a, kind, "new") },
@@ -240,6 +243,7 @@ pub fn durationValue(a: Allocator, micros: i96) !Value {
     return object(a, &.{
         .{ .key = "__dxt_temporal_value", .value = @import("datetime_protocol.zig").marker(.timedelta) },
         .{ .key = "__dxt_immutable_identity", .value = try @import("datetime_protocol.zig").instanceIdentity(a, .timedelta) },
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_duration", .value = try expr.integerValue(a, micros) },
         .{ .key = "__dxt_repr", .value = .{ .string = try durationRepr(a, days, seconds, fraction) } },

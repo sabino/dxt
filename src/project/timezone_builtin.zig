@@ -53,6 +53,7 @@ fn object(a: Allocator, state: State) !Value {
     const encoded = try std.fmt.allocPrint(a, "builtin:{d}:{d}:{s}", .{ state.offset_us, state.identity, state.name });
     var entries: std.ArrayList(expr.Entry) = .empty;
     try entries.appendSlice(a, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_rendered", .value = .{ .string = state.name } },
         .{ .key = "__dxt_repr", .value = .{ .string = try representation(a, state) } },

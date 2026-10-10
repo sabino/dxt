@@ -245,6 +245,9 @@ pub const Host = struct {
     // Logical paths borrow the execution host; match the resource to avoid
     // attributing a nested compilation's write to its caller.
     get_written_path: ?*const fn (*anyopaque, []const u8) ?[]const u8 = null,
+    // A render-owned registry preserves a mutable receiver's identity when
+    // its native backing slice is replaced. Methods retain only this ID.
+    receiver_identity: ?*const fn (*anyopaque, Value) anyerror!usize = null,
     capture_undefined: bool = false,
     // Compiled template hosts retain immutable constants per generated
     // function. Probes forbid runtime names and calls before executing them.
@@ -427,6 +430,7 @@ test "temporal membership validates nested values after exact aliases" {
 pub fn checkedAttribute(value: Value, name: []const u8) !Value {
     if (@import("builtin_bound_method.zig").isBound(value)) return .undefined;
     if (@import("builtin_bound_method.zig").isContextObject(value) and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
+    if (sets.isSet(value) and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (@import("datetime_bound_method.zig").isBound(value) and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (@import("datetime_protocol.zig").kind(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (sequences.kind(value) != null) return .undefined;
@@ -1028,8 +1032,8 @@ const Parser = struct {
             if (self.take("**")) {
                 const expanded = try self.binary(0);
                 if (self.active) {
-                    if (expanded != .object or @import("builtin_bound_method.zig").isBound(expanded)) return error.InvalidJinjaArguments;
-                    for (expanded.object) |entry| {
+                    if (!@import("builtin_bound_method.zig").isMapping(expanded)) return error.InvalidJinjaArguments;
+                    for ((mappingSource(expanded) orelse expanded).object) |entry| {
                         const key = entryKey(entry);
                         if (key != .string) return error.InvalidJinjaArguments;
                         for (args.items) |arg| if (arg.name) |argument_name| {
@@ -1733,6 +1737,8 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
 }
 pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
     if (@import("builtin_bound_method.zig").isBound(value)) return .undefined;
+    if (sets.isSet(value)) return .undefined;
+    if (@import("builtin_bound_method.zig").isContextObject(value) and key == .string and std.mem.startsWith(u8, key.string, "__dxt_")) return .undefined;
     if (sequences.kind(value) != null) return .undefined;
     if (value == .capture_undefined) return value;
     if (isUndefined(value)) return error.UndefinedJinjaValue;

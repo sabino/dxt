@@ -19,6 +19,7 @@ pub fn fromIdentity(a: Allocator, identity: []const u8) !Value {
     const text = try std.fmt.allocPrint(a, "<datetime.tzinfo object at 0x{x}>", .{token});
     var entries: std.ArrayList(expression.Entry) = .empty;
     try entries.appendSlice(a, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_timezone_identity", .value = .{ .string = identity } },
         .{ .key = "__dxt_rendered", .value = .{ .string = text } },

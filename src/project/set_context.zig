@@ -7,8 +7,8 @@ const Value = expression.Value;
 const Argument = expression.Argument;
 
 pub fn isSet(value: Value) bool {
-    const marker = value.attribute("__dxt_set");
-    return marker == .boolean and marker.boolean;
+    const marker = value.attribute("__dxt_native_set");
+    return marker == .callable and std.mem.eql(u8, marker.callable, "__dxt_native_set");
 }
 
 pub fn items(value: Value) ?[]const Value {
@@ -33,11 +33,12 @@ pub fn construct(a: std.mem.Allocator, iterable: Value) !Value {
 pub fn fromMembers(a: std.mem.Allocator, members: []const Value) !Value {
     var unique: std.ArrayList(Value) = .empty;
     for (members) |member| try append(a, &unique, member);
-    const entries = try expression.allocateEntries(a, 2);
+    const entries = try expression.allocateEntries(a, 3);
     entries[0] = .{ .key = "__dxt_set", .value = .{ .boolean = true } };
     const owned = try expression.allocateValues(a, unique.items.len);
     @memcpy(owned, unique.items);
     entries[1] = .{ .key = "__dxt_iterable", .value = .{ .list = owned } };
+    entries[2] = .{ .key = "__dxt_native_set", .value = .{ .callable = "__dxt_native_set" } };
     return .{ .object = entries };
 }
 

@@ -157,6 +157,7 @@ fn countries(a: Allocator, kind: []const u8) !Value {
 fn classValue(a: Allocator, name: []const u8) !Value {
     const module = if (std.mem.eql(u8, name, "BaseTzInfo")) "tzinfo" else "exceptions";
     return object(a, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_class_identity", .value = .{ .string = try std.fmt.allocPrint(a, "pytz.{s}.{s}", .{ module, name }) } },
         .{ .key = "__dxt_callable", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_pytz_class:{s}", .{name}) } },
@@ -207,6 +208,7 @@ fn timezoneObject(a: Allocator, id: Identity) !Value {
     const representation = if (utc) "<UTC>" else if (fixed) zone_name else if (base) display else if (!zoneAt(@intCast(id.zone)).dynamic) try std.fmt.allocPrint(a, "<StaticTzInfo '{s}'>", .{zone_name}) else try std.fmt.allocPrint(a, "<DstTzInfo '{s}' {s}{s}{s} {s}>", .{ zone_name, id.abbreviation, if (id.offset_us >= 0) @as([]const u8, "+") else "", try durationText(a, id.offset_us), if (id.dst_us == 0) @as([]const u8, "STD") else "DST" });
     var entries: std.ArrayList(expr.Entry) = .empty;
     try entries.appendSlice(a, &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_rendered", .value = .{ .string = display } },
         .{ .key = "__dxt_string_error", .value = .{ .boolean = base } },
@@ -256,6 +258,7 @@ pub fn durationValue(a: Allocator, micros: i64) !Value {
     return object(a, &.{
         .{ .key = "__dxt_temporal_value", .value = @import("datetime_protocol.zig").marker(.timedelta) },
         .{ .key = "__dxt_immutable_identity", .value = try @import("datetime_protocol.zig").instanceIdentity(a, .timedelta) },
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_duration", .value = try expr.integerValue(a, micros) },
         .{ .key = "__dxt_rendered", .value = .{ .string = try durationText(a, micros) } },
@@ -430,6 +433,7 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument) anyerror!?Va
         }
         const message = if (values.len == 0) "" else if (values.len > 1) try expr.repr(.{ .tuple = values }, a) else if (std.mem.eql(u8, kind, "UnknownTimeZoneError")) try expr.repr(values[0], a) else try values[0].text(a);
         return try object(a, &.{
+            .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
             .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
             .{ .key = "__dxt_rendered", .value = .{ .string = message } },
             .{ .key = "__dxt_repr", .value = .{ .string = try std.fmt.allocPrint(a, "{s}({s})", .{ kind, if (values.len == 0) @as([]const u8, "") else if (values.len == 1) try expr.repr(values[0], a) else (try expr.repr(.{ .tuple = values }, a))[1 .. (try expr.repr(.{ .tuple = values }, a)).len - 1] }) } },
