@@ -48,7 +48,7 @@ fn zoneName(a: std.mem.Allocator, offset: i32) ![]const u8 {
     return out.toOwnedSlice();
 }
 
-fn datetimeValue(a: std.mem.Allocator, epoch_ns: i96, date_only: bool, utc_offset: ?i32) !Value {
+pub fn datetimeValue(a: std.mem.Allocator, epoch_ns: i96, date_only: bool, utc_offset: ?i32) !Value {
     const label = try calendar.formatTimestamp(a, @intCast(@divFloor(epoch_ns, std.time.ns_per_s)));
     const micros: u64 = @intCast(@divFloor(@mod(epoch_ns, std.time.ns_per_s), std.time.ns_per_us));
     const rendered = if (date_only) try a.dupe(u8, label[0..10]) else try isoformat(a, epoch_ns, " ", "auto", utc_offset);
