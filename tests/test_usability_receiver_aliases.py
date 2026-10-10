@@ -23,15 +23,20 @@ def test_saved_receivers_keep_identity_calls_and_suspended_aliases(tmp_path, con
 
 
 @pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
-def test_generic_where_provider_copy_preserves_saved_receiver_graph(tmp_path, configuration_oracle, request, adapter):
+@pytest.mark.parametrize('scenario, setup, method, body, expected', [
+    ('empty', "{% set xs=[] %}", 'append', "{% do model.method(7) %}select '{{ model.receiver|join(',') }}:{{ (model.method==model.fresh)|string }}' as state where false", "select '7:True' as state where false"),
+    ('owned_string', "{% set xs=['payload'|upper] %}", 'append', "{% do model.method(7) %}select '{{ model.receiver|join(',') }}:{{ (model.method==model.fresh)|string }}' as state where false", "select 'PAYLOAD,7:True' as state where false"),
+    ('temporary', "{% set xs=[] %}", 'append', "{% set compared=model.pop('method')==append_and_get(model.receiver) %}{% set keys={model.fresh:11} %}select '{{ compared }}:{{ model.receiver|join(',') }}:{{ keys.get(model.receiver.append) }}:{{ model.fresh==[].append }}' as state where false", "select 'True:7:11:False' as state where false"),
+    ('cycle', "{% set xs={'x':1} %}{% do xs.update({xs.get:11}) %}", 'get', "{% set ys=[] %}{% do ys.append(1) %}select '{{ model.receiver.get('x') }}:{{ model.method==model.fresh }}:{{ ys|join(',') }}' as state where false", "select '1:True:1' as state where false"),
+])
+def test_generic_where_provider_copy_preserves_saved_receiver_graph(tmp_path, configuration_oracle, request, adapter, scenario, setup, method, body, expected):
     pair = setup_pair(tmp_path, configuration_oracle, request, adapter)
     pair.write('models/marts/rendered.sql', 'select 1 as id')
     pair.write('models/properties.yml', "version: 2\nmodels:\n  - name: rendered\n    data_tests: [bound_bridge]\n")
-    pair.write('macros/bridge.sql', """{% macro get_where_subquery(relation) %}{% set xs=[] %}{{ return({'receiver':xs,'method':xs.append,'fresh':xs.append}) }}{% endmacro %}
-{% test bound_bridge(model) %}{% do model.method(7) %}select '{{ model.receiver|join(',') }}:{{ (model.method==model.fresh)|string }}' as state where false{% endtest %}""")
+    pair.write('macros/bridge.sql', "{% macro get_where_subquery(relation) %}" + setup + "{{ return({'receiver':xs,'method':xs." + method + ",'fresh':xs." + method + "}) }}{% endmacro %}\n{% macro append_and_get(xs) %}{% do xs.append(7) %}{{ return(xs.append) }}{% endmacro %}\n{% test bound_bridge(model) %}" + body + "{% endtest %}")
     actual, reference = pair.invoke('compile')
     actual_test = next(node for node in actual['nodes'].values() if node['resource_type'] == 'test' and node['name'].startswith('bound_bridge'))
     reference_test = reference['nodes'][actual_test['unique_id']]
-    assert reference_test['compiled_code'] == "select '7:True' as state where false"
+    assert reference_test['compiled_code'] == expected
     assert actual_test['compiled_code'] == reference_test['compiled_code']
     assert actual_test['depends_on'] == reference_test['depends_on']

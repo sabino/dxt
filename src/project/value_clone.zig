@@ -88,6 +88,7 @@ const Graph = struct {
                     for (copied) |*entry| {
                         if (std.mem.eql(u8, entry.key, "__dxt_builtin_receiver_identity")) entry.value = try expression.integerValue(a, receiver_key.pointer);
                         if (std.mem.eql(u8, entry.key, "__dxt_builtin_registered_identity")) entry.value = .{ .boolean = false };
+                        if (std.mem.eql(u8, entry.key, "__dxt_builtin_portable_identity")) entry.value = .{ .boolean = true };
                     }
                 }
                 return result;
@@ -112,11 +113,13 @@ test "owned clone preserves saved receiver aliases after the source arena closes
         const methods = @import("builtin_bound_method.zig");
         const first = (try methods.lookup(b, xs, "append")).?;
         const fresh = (try methods.lookup(b, xs, "append")).?;
+        const distinct = (try methods.lookup(b, .{ .list = try b.dupe(Value, xs.list) }, "append")).?;
         const original = Value{ .object = try b.dupe(expression.Entry, &.{
             .{ .key = "receiver", .value = xs },
             .{ .key = "method", .value = first },
             .{ .key = "fresh", .value = fresh },
             .{ .key = "key", .typed_key = first, .value = xs },
+            .{ .key = "distinct", .value = distinct },
         }) };
         break :blk try clone(a, original, null);
     };
@@ -129,8 +132,10 @@ test "owned clone preserves saved receiver aliases after the source arena closes
     try std.testing.expect(receiver.list.ptr == fresh.attribute("__dxt_builtin_receiver").list.ptr);
     try std.testing.expect(first.object.ptr != fresh.object.ptr);
     try std.testing.expect(@import("builtin_bound_method.zig").equal(first, fresh));
+    try std.testing.expect(!@import("builtin_bound_method.zig").equal(first, copied.attribute("distinct")));
     try std.testing.expect(copied.object[3].typed_key.?.object.ptr == first.object.ptr);
     try std.testing.expect(!first.attribute("__dxt_builtin_registered_identity").boolean);
+    try std.testing.expect(first.attribute("__dxt_builtin_portable_identity").boolean);
     try std.testing.expectEqualStrings("append", first.attribute("__dxt_builtin_name").string);
 }
 
