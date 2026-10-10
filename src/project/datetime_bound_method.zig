@@ -22,14 +22,18 @@ pub fn attribute(a: Allocator, receiver: Value, name: []const u8, direct: Value)
     const class_id = receiver.attribute("__dxt_class_identity");
     const class_method = class_id == .string and std.mem.startsWith(u8, direct.callable, "__dxt_datetime_class:") and !std.mem.endsWith(u8, direct.callable, ":new");
     const kind = protocol.kind(receiver);
-    const builtin_timezone = receiver.attribute("__dxt_timezone_builtin").truthy();
-    const abstract_timezone = @import("datetime_tzinfo.zig").isAbstract(receiver);
-    if (!class_method and kind == null and !builtin_timezone and !abstract_timezone) return direct;
+    const genuine_timezone = @import("timezone_context.zig").isTimezone(receiver);
+    const builtin_timezone = genuine_timezone and receiver.attribute("__dxt_timezone_builtin").truthy();
+    const abstract_timezone = genuine_timezone and @import("datetime_tzinfo.zig").isAbstract(receiver);
+    const pytz_class = receiver.attribute("__dxt_timezone_method_class");
+    const pytz_method = genuine_timezone and pytz_class == .string and std.mem.startsWith(u8, direct.callable, "__dxt_pytz_method:");
+    if (!class_method and kind == null and !builtin_timezone and !abstract_timezone and !pytz_method) return direct;
     const kind_name = if (kind) |temporal_kind| @tagName(temporal_kind) else if (builtin_timezone) "timezone" else "tzinfo";
     const receiver_identity = receiver.attribute("__dxt_immutable_identity");
     const timezone_identity = receiver.attribute("__dxt_timezone_identity");
     const self = if (class_method) class_id.string else if (receiver_identity == .callable) receiver_identity.callable else if (timezone_identity == .string) timezone_identity.string else try std.fmt.allocPrint(a, "datetime.{s}.instance:{x}", .{ kind_name, @intFromPtr(receiver.object.ptr) });
-    const rendered = if (class_method) try std.fmt.allocPrint(a, "<built-in method {s} of type object at 0x{x}>", .{ name, @intFromPtr(receiver.object.ptr) }) else try std.fmt.allocPrint(a, "<built-in method {s} of datetime.{s} object at 0x{x}>", .{ name, kind_name, @intFromPtr(receiver.object.ptr) });
+    const pytz_builtin = pytz_method and (std.mem.eql(u8, pytz_class.string, "BaseTzInfo") or (std.mem.eql(u8, pytz_class.string, "_FixedOffset") and std.mem.eql(u8, name, "fromutc")));
+    const rendered = if (class_method) try std.fmt.allocPrint(a, "<built-in method {s} of type object at 0x{x}>", .{ name, @intFromPtr(receiver.object.ptr) }) else if (pytz_builtin) try std.fmt.allocPrint(a, "<built-in method {s} of {s} object at 0x{x}>", .{ name, pytz_class.string, @intFromPtr(receiver.object.ptr) }) else if (pytz_method) try std.fmt.allocPrint(a, "<bound method {s}.{s} of {s}>", .{ pytz_class.string, name, try expression.repr(receiver, a) }) else try std.fmt.allocPrint(a, "<built-in method {s} of datetime.{s} object at 0x{x}>", .{ name, kind_name, @intFromPtr(receiver.object.ptr) });
     return .{ .object = try a.dupe(expression.Entry, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_native_bound_method", .value = .{ .callable = "__dxt_native_bound_method" } },
@@ -75,4 +79,25 @@ test "cloning immutable receivers preserves method-key identity" {
         try std.testing.expect(equal(first, clone_method));
         try std.testing.expect(first.object.ptr != clone_method.object.ptr);
     }
+}
+
+test "pytz Python methods use fresh wrappers with stable receiver equality" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const zones = @import("timezone_context.zig");
+    const zone = try zones.timezoneValue(a, "UTC", null);
+    const first = try attribute(a, zone, "localize", zone.attribute("localize"));
+    const repeated = try attribute(a, zone, "localize", zone.attribute("localize"));
+    try std.testing.expect(equal(first, repeated));
+    try std.testing.expect(first.object.ptr != repeated.object.ptr);
+    try std.testing.expectEqualStrings("<bound method UTC.localize of <UTC>>", try first.text(a));
+    const date = (try @import("modules_datetime.zig").resolve(a, "modules.datetime.date")).?;
+    const datetime = (try @import("modules_datetime.zig").resolve(a, "modules.datetime.datetime")).?;
+    try std.testing.expect(expression.equalValues(date.attribute("strftime"), datetime.attribute("strftime")));
+    try std.testing.expect(!expression.equalValues(date.attribute("isoformat"), datetime.attribute("isoformat")));
+    const holder = Value{ .object = &.{ .{ .key = "__dxt_timezone_builtin", .value = .{ .boolean = true } }, .{ .key = "method", .value = date.attribute("isoformat") } } };
+    const descriptor_alias = try expression.attributeWithHost(a, holder, "method", null);
+    try std.testing.expect(expression.equalValues(descriptor_alias, date.attribute("isoformat")));
+    try std.testing.expectEqualStrings("<method 'isoformat' of 'datetime.date' objects>", try descriptor_alias.text(a));
 }

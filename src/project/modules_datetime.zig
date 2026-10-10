@@ -55,6 +55,14 @@ fn descriptor(a: Allocator, kind: []const u8, member: []const u8) !Value {
         .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<{s} '{s}' of 'datetime.{s}' objects>", .{ if (std.mem.eql(u8, kind, "timedelta")) @as([]const u8, "member") else "attribute", member, owner }) } },
     });
 }
+fn methodDescriptor(a: Allocator, owner: []const u8, method: []const u8) !Value {
+    return object(a, &.{
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_class_identity", .value = .{ .string = try std.fmt.allocPrint(a, "datetime.{s}.{s}.method_descriptor", .{ owner, method }) } },
+        .{ .key = "__dxt_callable", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime_unbound:{s}:{s}", .{ owner, method }) } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<method '{s}' of 'datetime.{s}' objects>", .{ method, owner }) } },
+    });
+}
 fn classValue(a: Allocator, kind: []const u8) !Value {
     var entries: std.ArrayList(expr.Entry) = .empty;
     try entries.appendSlice(a, &.{
@@ -63,7 +71,13 @@ fn classValue(a: Allocator, kind: []const u8) !Value {
         .{ .key = "__dxt_callable", .value = try function(a, kind, "new") },
         .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<class 'datetime.{s}'>", .{kind}) } },
     });
-    for (instanceMethods(kind)) |method| try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime_unbound:{s}:{s}", .{ kind, method }) } });
+    for (instanceMethods(kind)) |method| {
+        var owner = kind;
+        if (std.mem.eql(u8, kind, "datetime")) for ([_][]const u8{ "strftime", "toordinal", "weekday", "isoweekday", "isocalendar" }) |inherited| {
+            if (std.mem.eql(u8, method, inherited)) owner = "date";
+        };
+        try entries.append(a, .{ .key = method, .value = try methodDescriptor(a, owner, method) });
+    }
     const members: []const []const u8 = if (std.mem.eql(u8, kind, "date")) &.{ "year", "month", "day" } else if (std.mem.eql(u8, kind, "datetime")) &.{ "year", "month", "day", "hour", "minute", "second", "microsecond", "tzinfo", "fold" } else if (std.mem.eql(u8, kind, "time")) &.{ "hour", "minute", "second", "microsecond", "tzinfo", "fold" } else if (std.mem.eql(u8, kind, "timedelta")) &.{ "days", "seconds", "microseconds" } else &.{};
     for (members) |member| try entries.append(a, .{ .key = member, .value = try descriptor(a, kind, member) });
     if (std.mem.eql(u8, kind, "date") or std.mem.eql(u8, kind, "datetime")) {
@@ -374,7 +388,8 @@ test "native datetime descriptors preserve inherited and base class semantics" {
     const dt_class = (try resolve(a, "modules.datetime.datetime")).?;
     try std.testing.expect(dt_class.attribute("year") != .undefined);
     try std.testing.expectEqualStrings("<attribute 'year' of 'datetime.date' objects>", try dt_class.attribute("year").text(a));
-    try std.testing.expectEqualStrings("2024-01-01T12:34:56+00:00", (try call(a, dt_class.attribute("isoformat").callable, &.{.{ .value = moment }}, .{})).?.string);
+    try std.testing.expectEqualStrings("<method 'isoformat' of 'datetime.datetime' objects>", try dt_class.attribute("isoformat").text(a));
+    try std.testing.expectEqualStrings("2024-01-01T12:34:56+00:00", (try call(a, expr.callableName(dt_class.attribute("isoformat")).?, &.{.{ .value = moment }}, .{})).?.string);
     try std.testing.expectEqualStrings("2024-01-01", (try call(a, "__dxt_datetime_unbound:date:isoformat", &.{.{ .value = moment }}, .{})).?.string);
     try std.testing.expectEqualStrings("Mon Jan  1 00:00:00 2024", (try call(a, "__dxt_datetime_unbound:date:ctime", &.{.{ .value = moment }}, .{})).?.string);
     const tuple = (try call(a, "__dxt_datetime_unbound:date:timetuple", &.{.{ .value = moment }}, .{})).?;

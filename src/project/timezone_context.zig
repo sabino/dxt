@@ -217,6 +217,7 @@ fn timezoneObject(a: Allocator, id: Identity) !Value {
         .{ .key = "__dxt_timezone_name", .value = .{ .string = zone_name } },
         .{ .key = "__dxt_timezone_abbreviation", .value = if (fixed or base) .none else .{ .string = id.abbreviation } },
         .{ .key = "__dxt_timezone_identity", .value = .{ .string = info } },
+        .{ .key = "__dxt_timezone_method_class", .value = .{ .string = if (utc) "UTC" else if (fixed) "_FixedOffset" else if (base) "BaseTzInfo" else if (zoneAt(@intCast(id.zone)).dynamic) "DstTzInfo" else "StaticTzInfo" } },
         .{ .key = "zone", .value = if (fixed or base) .none else .{ .string = zone_name } },
     });
     for ([_][]const u8{ "localize", "normalize", "utcoffset", "dst", "tzname", "fromutc" }) |method| {
