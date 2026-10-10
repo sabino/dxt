@@ -48,6 +48,22 @@ x86_64/ARM CI. Exact candidate identities, counts and outcomes are recorded in
 The following triage notes describe the earlier known-failing candidates and
 the bounded corrections; they do not establish final acceptance.
 
+The fresh 5,819-case run on `0fd4457` exposes three base CLI compile/docs
+exit-code regressions. Actual pinned Core CLI witnesses return 2 for these
+missing-variable/macro failures; the new durable-result catches return 1.
+The original exit-code assertions remain intact. A read-only audit also
+identifies later preflight and previous-artifact preservation contracts at
+the same catches. The expression worker grounds all original and synthetic
+failure cases with actual Core CLI commands before changing product behavior.
+The source worker reviews the distinction between preflight failure and
+per-resource durable error publication. The supervisor owns planning and
+integration; no blanket assertion conversion is permitted. Preserve Core
+default command behavior, completed database effects, diagnostic messages,
+existing artifact policies and the separately documented durable-error/retry
+extension. The current original full-suite checkout stays frozen while a
+bounded correction is prepared and certified in isolated worktrees. All
+result counts and final acceptance must identify their actual candidate.
+
 The earlier unfiltered 5,808-case run on the published sorting candidate
 exposed eight failures across initialization, a colored-output expectation and
 durable compile/docs error artifacts. It continued without
