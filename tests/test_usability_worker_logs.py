@@ -76,7 +76,7 @@ def test_macro_messages_before_compiler_error_remain_in_durable_logs(tmp_path,co
     project=tmp_path/'failure'
     write_project(project,{'bad':"{% if execute %}{% do log('before error marker') %}{{ missing_compile_macro() }}{% endif %}select 17 as id"})
     result=invoke(project,command,'--quiet','--log-format-file','json')
-    assert result.returncode==1,result.stderr
+    assert result.returncode==(2 if command=='compile' else 1),result.stderr
     assert 'before error marker' not in result.stdout+result.stderr
     events=[json.loads(line) for line in (project/'logs'/'dbt.log').read_text().splitlines()]
     assert any(event['info']['name']=='JinjaLogDebug' and event['info']['level']=='debug' and event['data']['msg']=='before error marker' for event in events)

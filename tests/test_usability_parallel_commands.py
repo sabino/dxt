@@ -61,17 +61,18 @@ def test_offline_compile_with_threads_does_not_open_database(tmp_path):
     write_project(project,{'one':'select 1 as id','two':'select 2 as id'})
     environment=dict(os.environ,DXT_DUCKDB_BACKEND='cli',PATH='/nonexistent')
     environment.pop('DXT_DUCKDB_LIBRARY',None)
-    result,artifact=invoke(project,'compile','--threads','2',env=environment)
+    result,artifact=invoke(project,'compile','--threads','2','--no-populate-cache',env=environment)
     assert result.returncode==0,result.stderr
     assert len(artifact['results'])==2
     assert not (project/'target'/'dxt.duckdb').exists()
 
 
-def test_compile_failure_records_error_and_continues_independent_model(tmp_path):
+def test_compile_failure_records_error_and_continues_independent_model(tmp_path,monkeypatch):
     project=tmp_path/'failure'
     write_project(project,{'bad':'{% if execute %}{{ missing_compile_macro() }}{% endif %} select 1 as id','independent':'select 17 as id'})
+    monkeypatch.setenv('DXT_DURABLE_COMPILE_ERRORS','true')
     result,artifact=invoke(project,'compile','--threads','2')
-    assert result.returncode==1,result.stderr
+    assert result.returncode==2,result.stderr
     statuses={r['unique_id']:r['status'] for r in artifact['results']}
     assert statuses=={'model.scheduler_demo.bad':'error','model.scheduler_demo.independent':'success'}
     bad=next(r for r in artifact['results'] if r['status']=='error')
@@ -96,7 +97,7 @@ def test_profile_memory_shares_seed_model_test_state_and_isolates_unit_fixtures(
     environment=dict(os.environ,DXT_DUCKDB_BACKEND='cli')
     result,_=invoke(project,'run',env=environment)
     assert result.returncode==2
-    assert 'native DuckDB library' in result.stderr
+    assert 'this DuckDB operation requires a native session; set DXT_DUCKDB_LIBRARY to a compatible libduckdb library and DXT_DUCKDB_BACKEND=native' in result.stderr
     assert not (project/':memory:').exists()
 
 
