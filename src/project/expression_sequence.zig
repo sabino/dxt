@@ -75,15 +75,52 @@ pub fn next(a: std.mem.Allocator, value: Value, host: ?expression.Host) anyerror
     return error.UnsupportedJinjaIterator;
 }
 
+fn cursorAdvance(a: std.mem.Allocator, value: Value, position: usize) !void {
+    for (@constCast(value.object)) |*entry| if (std.mem.eql(u8, entry.key, "__dxt_sequence_cursor")) {
+        entry.value = try expression.integerValue(a, position);
+        return;
+    };
+    return error.InvalidJinjaIterator;
+}
 fn nextIterator(a: std.mem.Allocator, value: Value, host: ?expression.Host) !?Value {
     const source = value.attribute("__dxt_sequence_source");
-    const members = try expression.iterableValuesWithHost(a, source, host);
     const index: usize = @intCast(try expression.integerIndex(value.attribute("__dxt_sequence_cursor")));
+    if (source == .string) {
+        if (index >= source.string.len) return null;
+        const size = std.unicode.utf8ByteSequenceLength(source.string[index]) catch return error.JinjaTypeError;
+        if (index + size > source.string.len) return error.JinjaTypeError;
+        _ = std.unicode.utf8Decode(source.string[index .. index + size]) catch return error.JinjaTypeError;
+        try cursorAdvance(a, value, index + size);
+        return .{ .string = source.string[index .. index + size] };
+    }
+    if (expression.sequence(source)) |members| {
+        if (index >= members.len) return null;
+        try cursorAdvance(a, value, index + 1);
+        return members[index];
+    }
+    if (source == .object) {
+        var mapping = expression.mappingSource(source) orelse source;
+        const view_name = kind(source);
+        if (view_name != null) mapping = source.attribute("__dxt_sequence_source");
+        if (mapping != .object) return error.JinjaTypeError;
+        mapping = expression.mappingSource(mapping) orelse mapping;
+        if (index >= mapping.object.len) return null;
+        const entry = mapping.object[index];
+        try cursorAdvance(a, value, index + 1);
+        if (view_name) |name| {
+            if (std.mem.eql(u8, name, "values")) return entry.value;
+            if (std.mem.eql(u8, name, "items")) {
+                const pair = try expression.allocateValues(a, 2);
+                pair[0] = expression.entryKey(entry);
+                pair[1] = entry.value;
+                return .{ .tuple = pair };
+            }
+        }
+        return expression.entryKey(entry);
+    }
+    const members = try expression.iterableValuesWithHost(a, source, host);
     if (index >= members.len) return null;
-    for (@constCast(value.object)) |*entry| if (std.mem.eql(u8, entry.key, "__dxt_sequence_cursor")) {
-        entry.value = try expression.integerValue(a, index + 1);
-        break;
-    };
+    try cursorAdvance(a, value, index + 1);
     return members[index];
 }
 
@@ -167,4 +204,18 @@ test "native pull iterators share cursors and zip consumes only one row" {
     try std.testing.expectEqualStrings("a", (try next(a, characters, null)).?.string);
     try std.testing.expectEqualStrings("\u{1f600}", (try next(a, characters, null)).?.string);
     try std.testing.expectError(error.JinjaTypeError, iter(a, .none));
+}
+
+test "pulling reusable text allocates one cursor without rebuilding all characters" {
+    var storage: [32768]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const a = fixed.allocator();
+    const input: [4096]u8 = @splat('x');
+    const source = try iter(a, .{ .string = &input });
+    var count: usize = 0;
+    while (try next(a, source, null)) |item| {
+        try std.testing.expectEqualStrings("x", item.string);
+        count += 1;
+    }
+    try std.testing.expectEqual(input.len, count);
 }

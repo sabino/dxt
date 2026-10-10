@@ -782,12 +782,12 @@ const Parser = struct {
             }
             const host = self.host orelse return error.UnsupportedJinjaCall;
             const callee = try host.resolve(host.context, path, self.allocator);
-            if (callee == .capture_undefined) return try callUndefined(callee);
-            if (callee == .ordinary_undefined) return error.UndefinedJinjaValue;
             if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| {
                 const receiver = try host.resolve(host.context, path[0..dot], self.allocator);
                 if (receiver == .capture_undefined or receiver == .object or receiver == .list or receiver == .tuple or receiver == .string or receiver == .complex) return try self.method(receiver, path[dot + 1 ..], args);
             }
+            if (callee == .capture_undefined) return try callUndefined(callee);
+            if (callee == .ordinary_undefined) return error.UndefinedJinjaValue;
             return try host.call(host.context, path, args, self.allocator);
         }
         if (!self.active) return .none;
@@ -2289,9 +2289,11 @@ test "typed lazy attributes dispatch through the consuming host and preserve ind
 test "pytz mapping proxies preserve Unicode lookup and public views" {
     const Fixture = struct {
         countries: Value,
-        fn resolve(context: *anyopaque, name: []const u8, _: std.mem.Allocator) !Value {
+        capturing: bool = false,
+        fn resolve(context: *anyopaque, name: []const u8, a: std.mem.Allocator) !Value {
             const self: *@This() = @ptrCast(@alignCast(context));
-            return if (std.mem.eql(u8, name, "countries")) self.countries else .undefined;
+            if (std.mem.eql(u8, name, "countries")) return self.countries;
+            return if (self.capturing) try captureUndefined(a, name) else .undefined;
         }
         fn call(_: *anyopaque, _: []const u8, _: []const Argument, _: std.mem.Allocator) !Value {
             return error.UnsupportedJinjaCall;
@@ -2310,6 +2312,11 @@ test "pytz mapping proxies preserve Unicode lookup and public views" {
     try std.testing.expectEqualStrings("249", (try evaluate(a, "countries.keys()|list|length", host)).integer);
     try std.testing.expectError(error.InvalidCountryCode, evaluate(a, "countries[1]", host));
     try std.testing.expectError(error.UndefinedJinjaValue, evaluate(a, "countries.copy()", host));
+    context.capturing = true;
+    var parse_host = host;
+    parse_host.capture_undefined = true;
+    try std.testing.expectError(error.InvalidCountryCode, evaluate(a, "countries.get(1)", parse_host));
+    try std.testing.expect((try evaluate(a, "countries.copy()", parse_host)) == .capture_undefined);
 }
 
 test "immutable timezone and class equality preserve cached identity" {
