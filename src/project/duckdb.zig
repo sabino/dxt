@@ -150,8 +150,11 @@ pub fn executeSeedWithPolicy(runtime: Runtime, db_path: []const u8, project_dir:
 
 pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const GenericTestNode) !GenericTestExecutionResult {
     const compilation_started = clock.now(runtime.io);
-    var compiled = try compiler.compileGenericTestWithInjectedCtes(runtime.allocator, graph, test_node);
-    errdefer compiled.deinit(runtime.allocator);
+    var dependencies: std.ArrayList([]const u8) = .empty;
+    defer dependencies.deinit(runtime.allocator);
+    var compiled = try compiler.compileGenericTestWithDependencies(runtime.allocator, graph, test_node, &dependencies);
+    var owns_compilation = true;
+    errdefer if (owns_compilation) compiled.deinit(runtime.allocator);
     const compiled_sql = compiled.compiled_code;
     const compilation_completed = clock.now(runtime.io);
     var config = try @import("canonical_manifest_config.zig").testConfig(runtime.allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values);
@@ -176,7 +179,11 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
     node.compiled_code = compiled_sql;
     node.compiled = true;
     node.extra_ctes = compiled.extra_ctes;
-    return executeCompiledDataTest(runtime, db_path, graph, &node, test_node.config, &compiled, compilation_started, compilation_completed);
+    var execution = try executeCompiledDataTest(runtime, db_path, graph, &node, test_node.config, &compiled, compilation_started, compilation_completed);
+    owns_compilation = false;
+    errdefer deinitDataTestExecutionResult(runtime.allocator, execution);
+    try mergeDataTestDependencies(runtime.allocator, &execution, &dependencies);
+    return execution;
 }
 
 fn executeCompiledDataTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const types.Node, config: types.GenericTestConfig, compiled: *compiler.CompiledModel, compilation_started: i96, compilation_completed: i96) !GenericTestExecutionResult {
@@ -252,21 +259,27 @@ pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const 
     node.extra_ctes = compiled.extra_ctes;
     var execution = try executeCompiledDataTest(runtime, db_path, graph, &node, test_node.config, &compiled, compilation_started, compilation_completed);
     owns_compilation = false;
-    errdefer {
-        runtime.allocator.free(execution.compiled_code);
-        for (execution.compiled_ctes) |cte| runtime.allocator.free(cte.sql);
-        runtime.allocator.free(execution.compiled_ctes);
-        runtime.allocator.free(execution.macro_dependencies);
-        if (execution.build_path) |path| runtime.allocator.free(path);
-        if (execution.execution_message) |message| runtime.allocator.free(message);
-        if (execution.adapter_response) |response| response.deinit(runtime.allocator);
-        if (execution.relation_name) |relation| runtime.allocator.free(relation);
-    }
-    for (execution.macro_dependencies) |id| try @import("util.zig").appendUnique(runtime.allocator, &dependencies, id);
-    runtime.allocator.free(execution.macro_dependencies);
-    execution.macro_dependencies = &.{};
-    execution.macro_dependencies = try dependencies.toOwnedSlice(runtime.allocator);
+    errdefer deinitDataTestExecutionResult(runtime.allocator, execution);
+    try mergeDataTestDependencies(runtime.allocator, &execution, &dependencies);
     return execution;
+}
+
+fn mergeDataTestDependencies(allocator: std.mem.Allocator, execution: *GenericTestExecutionResult, dependencies: *std.ArrayList([]const u8)) !void {
+    for (execution.macro_dependencies) |id| try @import("util.zig").appendUnique(allocator, dependencies, id);
+    allocator.free(execution.macro_dependencies);
+    execution.macro_dependencies = &.{};
+    execution.macro_dependencies = try dependencies.toOwnedSlice(allocator);
+}
+
+fn deinitDataTestExecutionResult(allocator: std.mem.Allocator, execution: GenericTestExecutionResult) void {
+    allocator.free(execution.compiled_code);
+    for (execution.compiled_ctes) |cte| allocator.free(cte.sql);
+    allocator.free(execution.compiled_ctes);
+    allocator.free(execution.macro_dependencies);
+    if (execution.build_path) |path| allocator.free(path);
+    if (execution.execution_message) |message| allocator.free(message);
+    if (execution.adapter_response) |response| response.deinit(allocator);
+    if (execution.relation_name) |relation| allocator.free(relation);
 }
 
 pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !void {

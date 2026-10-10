@@ -778,7 +778,11 @@ pub fn compileGenericTest(allocator: std.mem.Allocator, graph: *const Graph, tes
 }
 
 pub fn compileGenericTestWithInjectedCtes(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) !CompiledModel {
-    const body = try compileGenericTestBody(allocator, graph, test_node);
+    return compileGenericTestWithDependencies(allocator, graph, test_node, null);
+}
+
+pub fn compileGenericTestWithDependencies(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode, dependencies: ?*std.ArrayList([]const u8)) !CompiledModel {
+    const body = try compileGenericTestBody(allocator, graph, test_node, dependencies);
     return try injectTestDependencies(allocator, graph, test_node.depends_on, body);
 }
 
@@ -869,14 +873,14 @@ test "generic and singular test compilation injects ephemeral dependency SQL" {
     try std.testing.expectEqualStrings("with __dbt__cte__custom as (\nselect 1 as id\n) select * from __dbt__cte__custom where id is null", singular_compiled.compiled_code);
 }
 
-fn compileGenericTestBody(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode) ![]const u8 {
-    if (findCustomGenericTestMacro(graph, test_node) != null) return try compileCustomGenericTest(allocator, graph, test_node, genericTestNodeColumnName(test_node));
+fn compileGenericTestBody(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode, dependencies: ?*std.ArrayList([]const u8)) ![]const u8 {
+    if (findCustomGenericTestMacro(graph, test_node) != null) return try compileCustomGenericTest(allocator, graph, test_node, genericTestNodeColumnName(test_node), dependencies);
     const is_not_null = std.mem.eql(u8, test_node.test_name, "not_null");
     const is_unique = std.mem.eql(u8, test_node.test_name, "unique");
     const is_accepted_values = std.mem.eql(u8, test_node.test_name, "accepted_values");
     const is_relationships = std.mem.eql(u8, test_node.test_name, "relationships");
     if (!is_not_null and !is_unique and !is_accepted_values and !is_relationships) {
-        return try compileCustomGenericTest(allocator, graph, test_node, genericTestNodeColumnName(test_node));
+        return try compileCustomGenericTest(allocator, graph, test_node, genericTestNodeColumnName(test_node), dependencies);
     }
     const column_name = genericTestNodeColumnName(test_node) orelse return error.UnsupportedTestExecution;
     if (is_accepted_values and test_node.accepted_values.items.len == 0) return error.UnsupportedTestExecution;
@@ -927,7 +931,7 @@ fn compileGenericTestBody(allocator: std.mem.Allocator, graph: *const Graph, tes
     return try applyGenericTestLimit(allocator, sql, test_node.config.limit);
 }
 
-fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode, column_name: ?[]const u8) ![]const u8 {
+fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, test_node: *const GenericTestNode, column_name: ?[]const u8, dependencies: ?*std.ArrayList([]const u8)) ![]const u8 {
     const macro = findCustomGenericTestMacro(graph, test_node) orelse return error.UnsupportedTestExecution;
     const relation_name = try genericTestRelationName(allocator, graph, test_node);
     defer allocator.free(relation_name);
@@ -937,6 +941,8 @@ fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, t
     const node = Node{ .depends_on = test_node.depends_on, .resolved_identity = test_node.resolved_identity, .resource_type = "test", .package_name = test_node.package_name, .unique_id = test_node.unique_id, .name = test_node.name, .path = test_node.path, .original_file_path = test_node.original_file_path, .raw_code = test_node.raw_code, .materialized = "test", .effective_config = canonical_config, .test_config = test_node.config, .enabled = test_node.enabled };
     var context = CompileContext.init(allocator, graph, &node);
     defer context.deinit();
+    context.runtime_macro_dependencies = dependencies;
+    context.runtime_dependency_allocator = allocator;
     const arena = context.value_arena.allocator();
     const model_value = try genericTestModelValueForNode(arena, graph, test_node, relation_name);
     var args: std.ArrayList(native_expr.Argument) = .empty;
@@ -950,6 +956,7 @@ fn compileCustomGenericTest(allocator: std.mem.Allocator, graph: *const Graph, t
     }
     try args.append(arena, .{ .name = "model", .value = model_value });
     if (column_name) |column| try args.append(arena, .{ .name = "column_name", .value = .{ .string = column } });
+    try context.recordMacroDependency(macro.unique_id);
     const result = try renderMacroValue(&context, macro, args.items);
     // Core keeps the macro body unchanged in compiled_code. Its test
     // materialization applies the configured limit to execution/storage SQL.
@@ -2600,9 +2607,16 @@ fn findEndMacroTag(sql: []const u8, start: usize) ?usize {
 }
 
 fn findCustomGenericTestMacro(graph: *const Graph, test_node: *const GenericTestNode) ?*const MacroDef {
-    for (test_node.macro_depends_on.items) |macro_id| {
-        const macro = findMacroByUniqueId(graph, macro_id) orelse continue;
-        if (std.mem.startsWith(u8, macro.name, "test_") and macro.macro_sql.len != 0) return macro;
+    // Parser namespace seeds can deliberately reference an unqualified macro
+    // even when the authored call selects a different package at runtime.
+    // Resolve the test metadata call through the actual provider namespace.
+    for (graph.macros.items) |macro| {
+        if (!std.mem.startsWith(u8, macro.name, "test_") or !std.mem.eql(u8, macro.name[5..], test_node.test_name)) continue;
+        const id = if (test_node.test_namespace) |namespace|
+            resolve.findMacroIdByPackageAndName(graph, namespace, macro.name)
+        else
+            resolve.findMacroIdForUnqualifiedNamespaceCall(graph, test_node.package_name, macro.name);
+        if (id) |macro_id| return findMacroByUniqueId(graph, macro_id);
     }
     return null;
 }
@@ -3600,8 +3614,13 @@ test "compileGenericTest renders root project custom generic test body" {
     try graph.tests.items[0].depends_on.append(allocator, "model.demo.orders");
     try graph.tests.items[0].macro_depends_on.append(allocator, "macro.demo.test_positive_amount");
 
-    const compiled = try compileGenericTest(allocator, &graph, &graph.tests.items[0]);
-    defer allocator.free(compiled);
+    var reached: std.ArrayList([]const u8) = .empty;
+    defer reached.deinit(allocator);
+    var compiled_model = try compileGenericTestWithDependencies(allocator, &graph, &graph.tests.items[0], &reached);
+    defer compiled_model.deinit(allocator);
+    const compiled = compiled_model.compiled_code;
+    try std.testing.expectEqual(@as(usize, 1), reached.items.len);
+    try std.testing.expectEqualStrings("macro.demo.test_positive_amount", reached.items[0]);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "select amount") != null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "from \"main\".\"orders\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, compiled, "where amount < 0") != null);

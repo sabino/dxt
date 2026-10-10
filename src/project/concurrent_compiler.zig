@@ -75,6 +75,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 if (std.mem.eql(u8, node.resource_type, "analysis")) counts.analyses += 1 else if (std.mem.eql(u8, node.resource_type, "snapshot")) counts.snapshots += 1 else if (node.hook_index == null and !std.mem.eql(u8, node.materialized, "ephemeral")) counts.models += 1;
             } else if (row.test_node) |original| {
                 const node = @constCast(original);
+                for (row.macro_dependencies) |id| try @import("util.zig").appendUnique(runtime.allocator, &node.macro_depends_on, id);
                 node.compiled = true;
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
                 node.compiled_path = try @import("test_provenance.zig").compiledPath(runtime.allocator, graph, node);
@@ -215,7 +216,11 @@ fn render(runtime: types.Runtime, graph: *const types.Graph, resource: runner.Re
             }
         },
         .generic => |node| {
-            const compiled = try compiler.compileGenericTestWithInjectedCtes(runtime.allocator, graph, node);
+            var dependencies: std.ArrayList([]const u8) = .empty;
+            defer dependencies.deinit(runtime.allocator);
+            const compiled = try compiler.compileGenericTestWithDependencies(runtime.allocator, graph, node, &dependencies);
+            row.macro_dependencies = try dependencies.toOwnedSlice(runtime.allocator);
+            row.owns_macro_dependencies = true;
             row.compiled_code = compiled.compiled_code;
             row.owns_compiled_code = true;
             row.compiled_ctes = compiled.extra_ctes.items;
