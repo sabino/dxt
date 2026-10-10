@@ -8,8 +8,9 @@ Both measurements include process startup; Core can use its partial parse cache
 on the warm invocation.
 
 The harness validates complete Manifest v12 and RunResults v6 artifacts and
-compares every model's compiled SQL, normalizing whitespace only. Timings cannot
-pass when the engines produce different SQL or omit models. The native median
+compares every model's exact compiled SQL after each cold and warm command.
+Cold artifacts are checked before a warm command can replace them. Timings cannot
+pass when either phase produces different SQL or omits models. The native median
 must stay below three seconds and below Core's median for both phases. CI runs
 the gate on a ReleaseSafe build and uploads its measured JSON report.
 
