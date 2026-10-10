@@ -53,12 +53,12 @@ pub fn order(a: A, lhs: Value, rhs: Value) !std.math.Order {
     if (state(lhs)) |text| if (nan(text)) return error.DecimalInvalidOperation;
     if (state(rhs)) |text| if (nan(text)) return error.DecimalInvalidOperation;
     const left_inf = if (state(lhs)) |text| std.mem.indexOf(u8, text, "Infinity") != null else if (expr.floatProtocol(lhs)) |n| std.math.isInf(n) else false;
-    const right_inf = if (state(rhs)) |text| std.mem.indexOf(u8, text, "Infinity") != null else if (expr.floatProtocol(rhs)) |n| std.math.isInf(n) else false;
-    if (left_inf or right_inf) {
+    const rhs_inf = if (state(rhs)) |text| std.mem.indexOf(u8, text, "Infinity") != null else if (expr.floatProtocol(rhs)) |n| std.math.isInf(n) else false;
+    if (left_inf or rhs_inf) {
         const left_negative = if (state(lhs)) |text| text[0] == '-' else if (expr.floatProtocol(lhs)) |n| std.math.signbit(n) else false;
-        const right_negative = if (state(rhs)) |text| text[0] == '-' else if (expr.floatProtocol(rhs)) |n| std.math.signbit(n) else false;
-        if (left_inf and right_inf) return std.math.order(@as(i8, if (left_negative) -1 else 1), @as(i8, if (right_negative) -1 else 1));
-        return if (left_inf) (if (left_negative) .lt else .gt) else (if (right_negative) .gt else .lt);
+        const rhs_negative = if (state(rhs)) |text| text[0] == '-' else if (expr.floatProtocol(rhs)) |n| std.math.signbit(n) else false;
+        if (left_inf and rhs_inf) return std.math.order(@as(i8, if (left_negative) -1 else 1), @as(i8, if (rhs_negative) -1 else 1));
+        return if (left_inf) (if (left_negative) .lt else .gt) else (if (rhs_negative) .gt else .lt);
     }
     return decimal.order(a, try operand(a, lhs, true), try operand(a, rhs, true));
 }
