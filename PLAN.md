@@ -226,6 +226,34 @@ All 75 mandatory selector comparisons now pass against Core, including the
 complete source/table and legacy/config tag inheritance matrix. Full combined gates and platform CI
 remain required before marking this PR ready to merge.
 
+The published draft's first CI run exposed three blockers. The supervisor owns
+their closure: replace the public Jaffle harness's historical null invocation
+expectation with pinned Core UUID/version/timestamp and complete resource checks;
+preserve upstream C/header whitespace through scoped Git attributes; and discover
+generic test macros below each configured test path in both root and dependency
+projects. The unchanged dbt-utils PostgreSQL project fails because its authored
+tests/generic definition is absent from the graph, not because the gate needs
+filtering. Native discovery and both-adapter Core execution regressions precede
+the unchanged project's full command ladder.
+
+Generic-directory discovery now passes eight mandatory Core comparisons for
+root/package definitions, default/custom test paths and DuckDB/PostgreSQL
+execution. The unchanged public PostgreSQL project passes parse, seed and run;
+compile exposes eager map(None) behavior and an Agate column/mapping update
+callback, owned by the filter and compiler workers respectively. Keep the
+complete public command ladder blocked until those behaviors and all artifact,
+SQL and row comparisons pass. The test-context worker additionally owns missing
+inherited context fields and lifecycle provenance, with both-adapter Core probes.
+
+The integrated lazy loop/cache/options/provider checkpoint passes all 45 cases.
+Authored test-helper execution has 52 distinct passing Core comparisons across
+DuckDB/PostgreSQL, including four retained audit regressions, and the helper
+candidate passes all six unchanged public Jaffle command gates. Those focused
+certificates do not replace the final combined suite. The first published CI
+candidate also passes actual Linux x86_64 and ARM native installation, both
+adapters from extracted archives with PATH empty, the snapshot oracle and the
+performance job; all required checks must pass again on the final candidate.
+
 After its scheduling commit, the scheduler worker owns the focused native
 DuckDB/Postgres adapter contract in a second isolated worktree. Shared backend
 integration follows test-error, incremental and snapshot commits. Threaded
