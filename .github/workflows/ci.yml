@@ -176,11 +176,13 @@ jobs:
           # Retain complete diagnostic identities next to the unchanged downloaded XML.
           (directory / 'diagnostic-case-ids.json').write_text(json.dumps(diagnostic_cases, indent=2) + '\n')
           encode = lambda value: json.dumps(value, ensure_ascii=True, sort_keys=True) + '\n'
-          lines = [encode(summary)]
+          summary_line = encode(summary)
+          print(summary_line, end='')
+          lines = []
           for start in range(0, len(diagnostic_cases), 10):
               lines.append(encode({'kind': 'DIAGNOSTIC CASE IDS', 'start': start,
                                    'cases': diagnostic_cases[start:start + 10]}))
-          used = sum(len(line.encode()) for line in lines)
+          used = len(summary_line.encode()) + sum(len(line.encode()) for line in lines)
           if used > 102400:
               raise SystemExit('Complete diagnostic identities exceed the 100 KiB log budget; original report and complete ID file retained')
           secrets = sorted((value for name, value in os.environ.items()
