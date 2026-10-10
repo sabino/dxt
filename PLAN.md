@@ -176,7 +176,8 @@ rerun passes in 636.68 seconds on the same CLI, bringing the complete focused
 certificate to 463 comparisons with zero failures, errors or skips. Fresh main
 is unchanged and the branch is
 rebased before final validation. The final unfiltered canonical collection has
-5,622 cases; its real driver/browser fixtures, zero-skip report and clean shared
+5,626 cases including the four Agate result-shape comparisons; its real
+driver/browser fixtures, zero-skip report and clean shared
 CLI/native-test build remain mandatory. The supervisor owns this whole-tree
 run, the expression worker owns final unchanged public-project comparisons and
 the release worker owns genuine ReleaseSafe packaging/installation/performance.
