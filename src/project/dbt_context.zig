@@ -299,6 +299,10 @@ pub fn relationValue(allocator: std.mem.Allocator, definition: RelationDef) !Val
         .key = method,
         .value = .{ .callable = try std.fmt.allocPrint(allocator, "__dxt_relation:{s}:{s}", .{ method, serialized }) },
     });
+    if (!definition.information_schema_relation and std.mem.eql(u8, definition.adapter_type, "postgres")) try entries.append(allocator, .{
+        .key = "relation_max_name_length",
+        .value = .{ .callable = try std.fmt.allocPrint(allocator, "__dxt_relation:relation_max_name_length:{s}", .{serialized}) },
+    });
     return .{ .object = try entries.toOwnedSlice(allocator) };
 }
 
@@ -360,6 +364,7 @@ fn refreshImplicitSql(allocator: std.mem.Allocator, original: RelationDef, chang
 }
 
 pub fn call(allocator: std.mem.Allocator, adapter_type: []const u8, name: []const u8, args: []const Argument) !?Value {
+    if (try @import("postgres_index_context.zig").call(allocator, adapter_type, name, args)) |value| return value;
     if (try @import("regex_context.zig").call(allocator, name, args, null)) |value| return value;
     if (try @import("timestamp_context.zig").call(allocator, name, args)) |value| return value;
     if (try callColumn(allocator, adapter_type, name, args)) |value| return value;
@@ -381,7 +386,10 @@ pub fn call(allocator: std.mem.Allocator, adapter_type: []const u8, name: []cons
     const method = name[prefix.len..boundary];
     const original = (try std.json.parseFromSlice(RelationDef, allocator, name[boundary + 1 ..], .{})).value;
     var definition = original;
-    if (std.mem.eql(u8, method, "get")) {
+    if (std.mem.eql(u8, method, "relation_max_name_length")) {
+        if (args.len != 0 or !std.mem.eql(u8, definition.adapter_type, "postgres") or definition.information_schema_relation) return error.InvalidJinjaArguments;
+        return try expression.integerValue(allocator, 63);
+    } else if (std.mem.eql(u8, method, "get")) {
         const key = named(args, "key", 0);
         if (key != .string or args.len > 2) return error.InvalidJinjaArguments;
         if (std.mem.eql(u8, key.string, "metadata")) return .{ .object = try allocator.dupe(expression.Entry, &.{.{ .key = "type", .value = .{ .string = if (definition.information_schema_relation) "InformationSchema" else if (std.mem.eql(u8, definition.adapter_type, "postgres")) "PostgresRelation" else "DuckDBRelation" } }}) };
@@ -469,6 +477,19 @@ test "typed relations retain methods across immutable transformations" {
     try std.testing.expectEqualStrings("(select * from \"main\".\"events\" where false limit 0)", try changed.text(allocator));
     try std.testing.expectEqualStrings("events", changed.attribute("identifier").string);
     try std.testing.expectEqualStrings("<DuckDBRelation \"warehouse\".\"main\".\"events\">", try expression.repr(relation, allocator));
+}
+
+test "Postgres relations expose the adapter name limit with Core arity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const postgres = try relationValue(a, .{ .adapter_type = "postgres", .identifier = "m" });
+    const method = postgres.attribute("relation_max_name_length").callable;
+    const maximum = (try call(a, "postgres", method, &.{})).?;
+    try std.testing.expectEqual(@as(i64, 63), try expression.integerIndex(maximum));
+    try std.testing.expectError(error.InvalidJinjaArguments, call(a, "postgres", method, &.{.{ .value = .none }}));
+    const duckdb = try relationValue(a, .{ .identifier = "m" });
+    try std.testing.expect(duckdb.attribute("relation_max_name_length") == .undefined);
 }
 
 test "macro value cloning preserves tuple keys and NaN key identity" {

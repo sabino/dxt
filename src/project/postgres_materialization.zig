@@ -45,14 +45,14 @@ pub fn executeReturningWithPolicy(runtime: types.Runtime, graph: *const types.Gr
         if (output.*) |previous| previous.deinit(runtime.allocator);
         output.* = null;
     }
-    var result = try executeInTransaction(runtime, session, graph, node, sql, policy.main_result);
+    var result = try executeInTransaction(runtime, session, graph, node, sql, policy);
     errdefer result.deinit(runtime.allocator);
     if (policy.main_result == null or policy.main_result.?.* == null) try @import("materialization_result.zig").captureQuery(runtime.allocator, policy.main_result, result);
     if (policy.manage_transaction) try session.commit();
     return result;
 }
 
-fn executeInTransaction(runtime: types.Runtime, session: *adapter.Session, graph: *const types.Graph, node: *const types.Node, sql: []const u8, main_result: ?*?@import("materialization_result.zig").Result) !adapter.QueryResult {
+fn executeInTransaction(runtime: types.Runtime, session: *adapter.Session, graph: *const types.Graph, node: *const types.Node, sql: []const u8, policy: ExecutionPolicy) !adapter.QueryResult {
     const allocator = runtime.allocator;
     if (compiler.relationDatabaseForNode(graph, node)) |database| {
         var current = try session.query("select current_database()");
@@ -75,7 +75,7 @@ fn executeInTransaction(runtime: types.Runtime, session: *adapter.Session, graph
     const indexes = if (std.mem.eql(u8, node.materialized, "view")) try allocator.alloc(Index, 0) else try parseIndexes(allocator, node);
     defer allocator.free(indexes);
     if (std.mem.eql(u8, node.materialized, "materialized_view") and existing != null and std.mem.eql(u8, existing.?, "materialized_view") and !@import("incremental_config.zig").fullRefresh(graph, node)) {
-        return updateMaterializedView(runtime, session, graph, schema, identifier, target, indexes, node, main_result);
+        return updateMaterializedView(runtime, session, graph, schema, identifier, target, indexes, node, policy);
     }
     const intermediate_id = try suffixedIdentifier(allocator, identifier, "__dbt_tmp");
     defer allocator.free(intermediate_id);
@@ -87,17 +87,23 @@ fn executeInTransaction(runtime: types.Runtime, session: *adapter.Session, graph
     defer allocator.free(backup);
     try dropIfExists(allocator, session, schema, intermediate_id, intermediate);
     try dropIfExists(allocator, session, schema, backup_id, backup);
-    const creation = if (@import("contracts.zig").enforced(node)) try @import("contracts.zig").renderCreation(allocator, graph, node, intermediate, sql, node.materialized) else try renderCreate(allocator, node, intermediate, sql);
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    var definition = try @import("dbt_context.zig").relationFromValue(scratch.allocator(), try compiler.relationValueForNode(scratch.allocator(), graph, node, false));
+    if (std.mem.eql(u8, node.materialized, "materialized_view")) {
+        definition.relation_type = "materialized_view";
+        const main = try @import("stock_sql.zig").materializedView(scratch.allocator(), graph, node, definition, existing, sql);
+        try @import("stock_artifacts.zig").write(policy.artifact_writer, node, main);
+        return session.query(main);
+    }
+    definition.identifier = intermediate_id;
+    definition.relation_type = node.materialized;
+    const creation = try allocator.dupe(u8, try @import("stock_sql.zig").create(scratch.allocator(), graph, node, definition, sql, false));
     defer allocator.free(creation);
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, creation);
     var result = try session.query(creation);
     errdefer result.deinit(allocator);
-    if (!std.mem.eql(u8, node.materialized, "view")) for (indexes) |index| {
-        if (std.mem.eql(u8, node.materialized, "materialized_view")) {
-            const index_response = try createIndexReturning(allocator, session, intermediate, index);
-            result.deinit(allocator);
-            result = index_response;
-        } else try createIndex(allocator, session, intermediate, index);
-    };
+    if (std.mem.eql(u8, node.materialized, "table")) for (indexes) |index| try createIndex(allocator, session, intermediate, index);
     if (existing) |kind| try rename(allocator, session, kind, target, backup_id);
     try rename(allocator, session, node.materialized, intermediate, identifier);
     if (existing) |kind| try drop(allocator, session, kind, backup);
@@ -156,17 +162,12 @@ fn parseIndexes(allocator: std.mem.Allocator, node: *const types.Node) ![]Index 
     errdefer allocator.free(indexes);
     for (raw.array.items, indexes) |value, *index| {
         const columns = config_value.get(value, "columns") orelse return error.InvalidPostgresMaterializationConfig;
-        if (columns != .array or columns.array.items.len == 0) return error.InvalidPostgresMaterializationConfig;
-        for (columns.array.items) |column| if (column != .string or column.string.len == 0) return error.InvalidPostgresMaterializationConfig;
+        if (columns != .array) return error.InvalidPostgresMaterializationConfig;
+        for (columns.array.items) |column| if (column != .string) return error.InvalidPostgresMaterializationConfig;
         const unique: std.json.Value = config_value.get(value, "unique") orelse .{ .bool = false };
         const method = config_value.get(value, "type") orelse .null;
         if (unique != .bool or (method != .null and method != .string)) return error.InvalidPostgresMaterializationConfig;
         const method_name = if (method == .string) method.string else "btree";
-        var allowed = false;
-        for ([_][]const u8{ "btree", "hash", "gist", "spgist", "gin", "brin" }) |candidate| if (std.mem.eql(u8, method_name, candidate)) {
-            allowed = true;
-        };
-        if (!allowed) return error.InvalidPostgresMaterializationConfig;
         index.* = .{ .columns = columns.array.items, .unique = unique.bool, .method = method_name };
     }
     return indexes;
@@ -184,6 +185,12 @@ fn createIndex(allocator: std.mem.Allocator, session: *adapter.Session, relation
 }
 
 fn createIndexReturning(allocator: std.mem.Allocator, session: *adapter.Session, relation: []const u8, index: Index) !adapter.QueryResult {
+    const sql = try renderIndexSql(allocator, relation, index);
+    defer allocator.free(sql);
+    return session.query(sql);
+}
+
+fn renderIndexSql(allocator: std.mem.Allocator, relation: []const u8, index: Index) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     // PostgreSQL generates a collision-free name. Core's names also vary per
@@ -194,7 +201,7 @@ fn createIndexReturning(allocator: std.mem.Allocator, session: *adapter.Session,
         try out.writer.writeAll(column.string);
     }
     try out.writer.writeAll(")");
-    return session.query(out.written());
+    return out.toOwnedSlice();
 }
 
 const IndexDifference = struct {
@@ -262,51 +269,63 @@ pub fn skipsInnerLifecycle(runtime: types.Runtime, graph: *const types.Graph, no
     return difference.changed;
 }
 
-fn updateMaterializedView(runtime: types.Runtime, session: *adapter.Session, graph: *const types.Graph, schema: []const u8, identifier: []const u8, target: []const u8, desired: []const Index, node: *const types.Node, main_result: ?*?@import("materialization_result.zig").Result) !adapter.QueryResult {
+fn updateMaterializedView(runtime: types.Runtime, session: *adapter.Session, graph: *const types.Graph, schema: []const u8, identifier: []const u8, target: []const u8, desired: []const Index, node: *const types.Node, execution_policy: ExecutionPolicy) !adapter.QueryResult {
     const allocator = runtime.allocator;
     var difference = try inspectIndexes(allocator, session, schema, identifier, desired);
     defer difference.deinit(allocator);
     const actual = difference.actual;
     const matches = difference.matches;
     const keep = difference.keep;
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var definition = try @import("dbt_context.zig").relationFromValue(a, try compiler.relationValueForNode(a, graph, node, false));
+    definition.relation_type = "materialized_view";
     if (!difference.changed) {
-        const refresh = try std.fmt.allocPrint(allocator, "refresh materialized view {s}", .{target});
-        defer allocator.free(refresh);
+        const refresh = try @import("stock_sql.zig").refreshMaterializedView(a, graph, node, definition);
+        try @import("stock_artifacts.zig").write(execution_policy.artifact_writer, node, refresh);
         return session.query(refresh);
     }
     const policy_value: std.json.Value = config_value.get(node.effective_config, "on_configuration_change") orelse .{ .string = "apply" };
     if (policy_value != .string) return error.InvalidPostgresMaterializationConfig;
     const policy = policy_value.string;
     if (std.mem.eql(u8, policy, "continue")) {
-        var scratch = std.heap.ArenaAllocator.init(allocator);
-        defer scratch.deinit();
-        const rendered_target = try (try compiler.relationValueForNode(scratch.allocator(), graph, node, false)).text(scratch.allocator());
+        const rendered_target = try (try compiler.relationValueForNode(a, graph, node, false)).text(a);
         const message = try std.fmt.allocPrint(allocator, "Configuration changes were identified and `on_configuration_change` was set to `continue` for `{s}`", .{rendered_target});
         defer allocator.free(message);
         try @import("jinja_warning.zig").emit(runtime, node, message, graph.log_collector, runtime.event_writer);
-        try @import("materialization_result.zig").captureSkip(allocator, main_result, rendered_target);
+        try @import("materialization_result.zig").captureSkip(allocator, execution_policy.main_result, rendered_target);
         return .{};
     }
     if (std.mem.eql(u8, policy, "fail")) return error.PostgresMaterializedViewConfigurationChanged;
     if (!std.mem.eql(u8, policy, "apply")) return error.InvalidPostgresMaterializationConfig;
-    var response: ?adapter.QueryResult = null;
-    errdefer if (response) |*previous| previous.deinit(allocator);
+    const expression = @import("expression.zig");
+    var changes: std.ArrayList(expression.Value) = .empty;
     for (actual.rows, keep) |row, matched| if (!matched) {
-        const name = try qualified(allocator, schema, row[0] orelse return error.InvalidAdapterIntrospection);
-        defer allocator.free(name);
-        const deletion = try std.fmt.allocPrint(allocator, "drop index if exists {s}", .{name});
-        defer allocator.free(deletion);
-        const deletion_response = try session.query(deletion);
-        if (response) |*previous| previous.deinit(allocator);
-        response = deletion_response;
+        try changes.append(a, .{ .object = try a.dupe(expression.Entry, &.{
+            .{ .key = "action", .value = .{ .string = "drop" } },
+            .{ .key = "context", .value = .{ .object = try a.dupe(expression.Entry, &.{.{ .key = "name", .value = .{ .string = row[0] orelse return error.InvalidAdapterIntrospection } }}) } },
+        }) });
     };
     for (desired, matches) |index, matched| if (!matched) {
-        const index_response = try createIndexReturning(allocator, session, target, index);
-        if (response) |*previous| previous.deinit(allocator);
-        response = index_response;
+        const columns = try a.alloc(expression.Value, index.columns.len);
+        for (index.columns, columns) |column, *value| value.* = .{ .string = column.string };
+        const config: expression.Value = .{ .object = try a.dupe(expression.Entry, &.{
+            .{ .key = "columns", .value = .{ .list = columns } },
+            .{ .key = "unique", .value = .{ .boolean = index.unique } },
+            .{ .key = "type", .value = if (std.mem.eql(u8, index.method, "btree")) .none else .{ .string = index.method } },
+        }) };
+        try changes.append(a, .{ .object = try a.dupe(expression.Entry, &.{
+            .{ .key = "action", .value = .{ .string = "create" } },
+            .{ .key = "context", .value = .{ .object = try a.dupe(expression.Entry, &.{.{ .key = "as_node_config", .value = config }}) } },
+        }) });
     };
     // Core's index-only configuration update does not refresh the data.
-    return response orelse error.InvalidPostgresMaterializationConfig;
+    if (changes.items.len == 0) return error.InvalidPostgresMaterializationConfig;
+    const main = try @import("stock_sql.zig").alterMaterializedView(a, graph, node, definition, .{ .list = changes.items });
+    try @import("stock_artifacts.zig").write(execution_policy.artifact_writer, node, main);
+    _ = target;
+    return session.query(main);
 }
 fn sameColumns(desired: []const std.json.Value, actual: []const []const u8) bool {
     if (desired.len != actual.len) return false;
@@ -355,7 +374,7 @@ test "PostgreSQL indexes validate typed configuration and compare as sets" {
     try std.testing.expect(indexes[0].unique);
     try std.testing.expectEqualStrings("hash", indexes[0].method);
     try std.testing.expect(sameColumns(indexes[0].columns, &.{ "a", "b" }));
-    const invalid = try std.json.parseFromSlice(std.json.Value, allocator, "{\"indexes\":[{\"columns\":[]}]}", .{});
+    const invalid = try std.json.parseFromSlice(std.json.Value, allocator, "{\"indexes\":[{\"columns\":[1]}]}", .{});
     defer invalid.deinit();
     node.effective_config = invalid.value;
     try std.testing.expectError(error.InvalidPostgresMaterializationConfig, parseIndexes(allocator, &node));

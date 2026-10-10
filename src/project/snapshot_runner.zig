@@ -41,11 +41,22 @@ pub fn executeWithPolicy(runtime: Runtime, db_path: []const u8, graph: *const Gr
     defer deinitColumns(allocator, &source_columns);
     var target_columns = try targetColumns(runtime, db_path, graph, node);
     defer deinitColumns(allocator, &target_columns);
-    const sql = try renderExecutionSqlWithPolicy(allocator, graph, node, source_columns.items, target_columns.items, policy.manage_transaction, policy.manage_transaction);
-    defer allocator.free(sql);
-    // Source staging, schema changes, validity updates and new records share one transaction.
-    try duckdb.executeSql(runtime, db_path, sql);
+    var plan = try renderPlan(allocator, graph, node, source_columns.items, target_columns.items);
+    defer plan.deinit(allocator);
+    var owned: ?adapter.Session = null;
+    defer if (owned) |*session| session.deinit();
+    const session = runtime.adapter_session orelse blk: {
+        owned = try adapter.openSession(runtime, graph, db_path);
+        break :blk &owned.?;
+    };
+    if (policy.manage_transaction) try session.begin();
+    errdefer if (policy.manage_transaction) session.rollback() catch {};
+    try session.execute(plan.preparation);
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, plan.main);
+    try session.execute(plan.main);
     try @import("materialization_result.zig").captureQuery(allocator, policy.main_result, .{});
+    try session.execute(plan.cleanup);
+    if (policy.manage_transaction) try session.commit();
 }
 
 fn executePostgres(runtime: Runtime, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
@@ -102,12 +113,14 @@ fn executePostgres(runtime: Runtime, graph: *const Graph, node: *const Node, pol
         defer allocator.free(expansion);
         if (expansion.len != 0) try session.execute(expansion);
     }
-    const sql = try renderExecutionSqlWithCleanup(allocator, graph, node, source_columns.items, target_columns.items, false, false, false);
-    defer allocator.free(sql);
-    var main = try session.query(sql);
+    var plan = try renderPlan(allocator, graph, node, source_columns.items, target_columns.items);
+    defer plan.deinit(allocator);
+    try session.execute(plan.preparation);
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, plan.main);
+    var main = try session.query(plan.main);
     defer main.deinit(allocator);
     try @import("materialization_result.zig").captureQuery(allocator, policy.main_result, main);
-    try session.execute(if (target_columns.items.len == 0) "drop table __dxt_snapshot_source" else if (std.mem.eql(u8, hardDeletes(node.snapshot_config.?), "ignore")) "drop table __dxt_snapshot_changes; drop table __dxt_snapshot_target; drop table __dxt_snapshot_source" else "drop table __dxt_snapshot_changes; drop table __dxt_snapshot_target; drop table __dxt_snapshot_source; drop table __dxt_snapshot_deletes");
+    try session.execute(plan.cleanup);
     if (kind == null) {
         const relation = try compiler.relationNameForNode(allocator, graph, node);
         defer allocator.free(relation);
@@ -267,10 +280,10 @@ pub fn renderExecutionSql(allocator: std.mem.Allocator, graph: *const Graph, nod
 }
 
 pub fn renderExecutionSqlWithPolicy(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, source_columns: []const Column, target_columns: []const Column, begin_transaction: bool, commit_transaction: bool) ![]const u8 {
-    return renderExecutionSqlWithCleanup(allocator, graph, node, source_columns, target_columns, begin_transaction, commit_transaction, true);
+    return renderExecutionSqlWithCleanup(allocator, graph, node, source_columns, target_columns, begin_transaction, commit_transaction, true, null, null);
 }
 
-fn renderExecutionSqlWithCleanup(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, source_columns: []const Column, target_columns: []const Column, begin_transaction: bool, commit_transaction: bool, cleanup: bool) ![]const u8 {
+fn renderExecutionSqlWithCleanup(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, source_columns: []const Column, target_columns: []const Column, begin_transaction: bool, commit_transaction: bool, cleanup: bool, main_start: ?*usize, main_end: ?*usize) ![]const u8 {
     const config = node.snapshot_config.?;
     const names = config.meta_columns;
     const scd_id = try compiler.quoteIdentifier(allocator, names.dbt_scd_id);
@@ -304,6 +317,7 @@ fn renderExecutionSqlWithCleanup(allocator: std.mem.Allocator, graph: *const Gra
     try writeHash(writer, config, updated_at);
     try writer.print(" as __dxt_snapshot_scd_id from (\n{s}\n) q;\ncreate schema if not exists {s};\n", .{ trimQuery(node.compiled_code.?), namespace });
     if (target_columns.len == 0) {
+        if (main_start) |start| start.* = out.written().len;
         const unlogged = @import("config_value.zig").get(node.effective_config, "unlogged") orelse .null;
         if (std.mem.eql(u8, graph.adapter_type, "postgres") and unlogged != .null and unlogged != .bool) return error.InvalidPostgresMaterializationConfig;
         try writer.print("create {s}table {s} as select ", .{ if (std.mem.eql(u8, graph.adapter_type, "postgres") and unlogged == .bool and unlogged.bool) "unlogged " else "", relation });
@@ -311,6 +325,7 @@ fn renderExecutionSqlWithCleanup(allocator: std.mem.Allocator, graph: *const Gra
         try writer.print(", __dxt_snapshot_scd_id as {s}, __dxt_snapshot_updated_at as {s}, __dxt_snapshot_updated_at as {s}, coalesce(nullif(__dxt_snapshot_updated_at,__dxt_snapshot_updated_at), {s}) as {s}", .{ scd_id, updated, valid_from, current, valid_to });
         if (new_record) try writer.print(", 'False' as {s}", .{deleted});
         try writer.writeAll(" from __dxt_snapshot_source s;\n");
+        if (main_end) |end| end.* = out.written().len;
         if (cleanup) try writer.writeAll("drop table __dxt_snapshot_source;\n");
         if (commit_transaction) try writer.writeAll("commit;\n");
         return out.toOwnedSlice();
@@ -332,6 +347,7 @@ fn renderExecutionSqlWithCleanup(allocator: std.mem.Allocator, graph: *const Gra
     try writer.writeAll(" where t.__dxt_snapshot_key_0 is null or (");
     try writeChanged(writer, allocator, config, source_columns, target_columns, valid_from, deleted);
     try writer.writeAll(");\n");
+    if (main_start) |start| start.* = out.written().len;
     try writer.print("update {s} as d set {s} = c.__dxt_snapshot_updated_at from __dxt_snapshot_changes c where d.{s} = c.__dxt_snapshot_old_id and (d.{s} is null", .{ relation, valid_to, scd_id, valid_to });
     if (config.dbt_valid_to_current != null) try writer.print(" or d.{s} = ({s})", .{ valid_to, current });
     try writer.writeAll(");\n");
@@ -361,12 +377,30 @@ fn renderExecutionSqlWithCleanup(allocator: std.mem.Allocator, graph: *const Gra
         try writer.print(", md5(coalesce(cast(t.{s} as varchar),'') || '|' || cast(current_timestamp::timestamp as varchar)), current_timestamp::timestamp, current_timestamp::timestamp, t.{s}, 'True' from __dxt_snapshot_deletes t", .{ scd_id, valid_to });
     }
     try writer.writeAll(";\n");
+    if (main_end) |end| end.* = out.written().len;
     if (cleanup) {
         try writer.writeAll("drop table __dxt_snapshot_changes;\ndrop table __dxt_snapshot_target;\ndrop table __dxt_snapshot_source;\n");
         if (!std.mem.eql(u8, hardDeletes(config), "ignore")) try writer.writeAll("drop table __dxt_snapshot_deletes;\n");
     }
     if (commit_transaction) try writer.writeAll("commit;\n");
     return out.toOwnedSlice();
+}
+
+const ExecutionPlan = struct {
+    sql: []const u8,
+    preparation: []const u8,
+    main: []const u8,
+    cleanup: []const u8,
+    fn deinit(self: *ExecutionPlan, allocator: std.mem.Allocator) void {
+        allocator.free(self.sql);
+    }
+};
+
+fn renderPlan(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, source_columns: []const Column, target_columns: []const Column) !ExecutionPlan {
+    var start: usize = 0;
+    var end: usize = 0;
+    const sql = try renderExecutionSqlWithCleanup(allocator, graph, node, source_columns, target_columns, false, false, true, &start, &end);
+    return .{ .sql = sql, .preparation = sql[0..start], .main = sql[start..end], .cleanup = sql[end..] };
 }
 
 fn writeSourceColumns(writer: *std.Io.Writer, allocator: std.mem.Allocator, columns: []const Column, alias: []const u8) !void {

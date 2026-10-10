@@ -98,8 +98,6 @@ fn executeModelBody(runtime: Runtime, db_path: []const u8, graph: *const Graph, 
             else => err,
         };
     }
-    const sql = try renderModelSql(runtime.allocator, graph, node);
-    defer runtime.allocator.free(sql);
     var owned: ?adapter.Session = null;
     defer if (owned) |*session| session.deinit();
     if (runtime.adapter_session == null) if (runtime.duckdb_pool) |pool| {
@@ -108,20 +106,10 @@ fn executeModelBody(runtime: Runtime, db_path: []const u8, graph: *const Graph, 
     };
     const held: ?*adapter.Session = runtime.adapter_session orelse if (owned) |*session| session else null;
     if (held) |session| {
-        if (policy.manage_transaction) try session.begin();
-        errdefer if (policy.manage_transaction) session.rollback() catch {};
-        var held_runtime = runtime;
-        held_runtime.adapter_session = session;
-        try dropConflictingMaterialization(held_runtime, db_path, graph, node);
-        if (@import("contracts.zig").enforced(node)) {
-            const drop_sql = try renderDropSql(runtime.allocator, graph, node, if (std.mem.eql(u8, node.materialized, "table")) .table else .view);
-            defer runtime.allocator.free(drop_sql);
-            try session.execute(drop_sql);
-        }
-        try session.execute(sql);
-        if (policy.manage_transaction) try session.commit();
-        return;
+        return @import("duckdb_stock_materialization.zig").execute(runtime, graph, node, session, policy);
     }
+    const sql = try renderModelSql(runtime.allocator, graph, node);
+    defer runtime.allocator.free(sql);
     // The CLI fallback also performs switches in one transaction. A failed
     // batch closes the connection, rolling back both the DROP and replacement.
     const drop_kind: DuckDbObjectKind = if (std.mem.eql(u8, node.materialized, "table")) .view else .table;
@@ -130,6 +118,7 @@ fn executeModelBody(runtime: Runtime, db_path: []const u8, graph: *const Graph, 
     defer runtime.allocator.free(drop_sql);
     const batch = try std.fmt.allocPrint(runtime.allocator, "{s}{s}{s}{s}", .{ if (policy.manage_transaction) "begin transaction;\n" else "", drop_sql, sql, if (policy.manage_transaction) "commit;" else "" });
     defer runtime.allocator.free(batch);
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, sql);
     try executeSql(runtime, db_path, batch);
 }
 
@@ -146,6 +135,7 @@ pub fn executeSeedWithPolicy(runtime: Runtime, db_path: []const u8, project_dir:
     defer runtime.allocator.free(sql);
 
     try executeSql(runtime, db_path, sql);
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, sql);
 }
 
 pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const GenericTestNode) !GenericTestExecutionResult {

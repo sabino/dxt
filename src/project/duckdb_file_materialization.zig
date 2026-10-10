@@ -34,10 +34,12 @@ pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.
     if (std.mem.eql(u8, node.materialized, "table_function")) {
         const parameters = try renderParameters(a, node);
         const sql = @import("duckdb.zig").trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution);
-        try session.execute(try std.fmt.allocPrint(a, "create or replace function {s}({s}) as table (\n{s}\n)", .{ relation, parameters, sql }));
+        const creation = try std.fmt.allocPrint(a, "create or replace function {s}({s}) as table (\n{s}\n)", .{ relation, parameters, sql });
+        try @import("stock_artifacts.zig").write(policy.artifact_writer, node, creation);
+        try session.execute(creation);
     } else if (std.mem.eql(u8, node.materialized, "external")) {
         if (!policy.manage_transaction and policy.file_effects == null) return error.ExternalJournalRequired;
-        try executeExternal(a, runtime, session, graph, node, schema, relation, journal);
+        try executeExternal(a, runtime, session, graph, node, schema, relation, journal, policy);
     } else return error.UnsupportedModelMaterialization;
     if (policy.manage_transaction) {
         try journal.publish();
@@ -88,7 +90,7 @@ fn extensionFormat(a: std.mem.Allocator, location: []const u8) ![]const u8 {
     return if (extension.len > 1) try std.ascii.allocLowerString(a, extension[1..]) else "";
 }
 
-fn executeExternal(a: std.mem.Allocator, runtime: types.Runtime, session: *adapter.Session, graph: *const types.Graph, node: *const types.Node, schema: []const u8, relation: []const u8, journal: *journal_module.Journal) !void {
+fn executeExternal(a: std.mem.Allocator, runtime: types.Runtime, session: *adapter.Session, graph: *const types.Graph, node: *const types.Node, schema: []const u8, relation: []const u8, journal: *journal_module.Journal, policy: ExecutionPolicy) !void {
     for ([_][]const u8{ "plugin", "glue_register" }) |key| if (values.get(node.effective_config, key)) |plugin| if (plugin != .null and !(plugin == .bool and !plugin.bool)) return error.UnsupportedExternalRegistration;
     const format_config = values.get(node.effective_config, "format") orelse .null;
     if (format_config != .null and (format_config != .string or !allowedFormat(format_config.string))) return error.InvalidExternalFormat;
@@ -139,9 +141,17 @@ fn executeExternal(a: std.mem.Allocator, runtime: types.Runtime, session: *adapt
     if (empty) {
         const nulls = try a.alloc([]const u8, columns.columns.len);
         @memset(nulls, "NULL");
-        try session.execute(try std.fmt.allocPrint(a, "insert into {s} values({s})", .{ stage, try std.mem.join(a, ",", nulls) }));
+        const main = try std.fmt.allocPrint(a, "insert into {s} values({s})", .{ stage, try std.mem.join(a, ",", nulls) });
+        try @import("stock_artifacts.zig").write(policy.artifact_writer, node, main);
+        try session.execute(main);
+    } else {
+        // Core's external materializer has an empty main statement for
+        // nonempty input before its separately named write_to_file statement.
+        try @import("stock_artifacts.zig").write(policy.artifact_writer, node, "");
+        try session.execute("");
     }
-    try session.execute(try std.fmt.allocPrint(a, "copy {s} to {s} ({s})", .{ stage, try adapter.quoteLiteral(a, staged_path), write_options }));
+    const copy_sql = try std.fmt.allocPrint(a, "copy {s} to {s} ({s})", .{ stage, try adapter.quoteLiteral(a, staged_path), write_options });
+    try session.execute(copy_sql);
     // CREATE VIEW binds the output schema immediately. Publish reversibly first,
     // so first builds and schema changes bind the newly written file.
     try journal.publish();
@@ -168,7 +178,9 @@ fn executeExternal(a: std.mem.Allocator, runtime: types.Runtime, session: *adapt
     }
     const existing = try session.relationTypeInDatabase(a, compiler.relationDatabaseForNode(graph, node), schema, compiler.relationIdentifierForNode(node));
     if (existing) |kind| if (!std.mem.eql(u8, kind, "view")) try session.execute(try std.fmt.allocPrint(a, "drop table {s}", .{relation}));
-    try session.execute(try std.fmt.allocPrint(a, "create or replace view {s} as (select * from read_{s}({s}{s}){s})", .{ relation, format, try adapter.quoteLiteral(a, read_location), read_arguments, filter.items }));
+    const view_sql = try std.fmt.allocPrint(a, "create or replace view {s} as (select * from read_{s}({s}{s}){s})", .{ relation, format, try adapter.quoteLiteral(a, read_location), read_arguments, filter.items });
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, view_sql);
+    try session.execute(view_sql);
     try session.execute(try std.fmt.allocPrint(a, "drop table {s}", .{stage}));
 }
 

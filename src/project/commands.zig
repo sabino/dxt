@@ -319,7 +319,12 @@ pub const OperationHost = struct {
                 };
             };
             const base = if (std.fs.path.isAbsolute(target_path)) target_path else try std.fs.path.join(a, &.{ self.graph.command_options.project_dir, target_path });
-            const relative = if (std.mem.eql(u8, node.resource_type, "test")) try @import("artifact_paths.zig").relative(a, node.path, node.original_file_path) else if (node.snapshot_yaml_definition) try std.fmt.allocPrint(a, "{s}/{s}.sql", .{ node.original_file_path, node.name }) else node.original_file_path;
+            var relative = if (std.mem.eql(u8, node.resource_type, "test")) try @import("artifact_paths.zig").relative(a, node.path, node.original_file_path) else if (node.snapshot_yaml_definition) try std.fmt.allocPrint(a, "{s}/{s}.sql", .{ node.original_file_path, node.name }) else node.original_file_path;
+            if (std.mem.eql(u8, node.resource_type, "model") and node.runtime_batch != null and std.mem.eql(u8, node.incremental.strategy orelse "", "microbatch")) {
+                const batch_config = try @import("microbatch.zig").configuration(node);
+                const suffix = try @import("microbatch.zig").batchLabel(a, node.runtime_batch.?.start, batch_config.batch_size);
+                relative = try @import("stock_artifacts.zig").splitPath(a, relative, suffix);
+            }
             const path = try std.fs.path.join(a, &.{ base, "run", node.package_name, relative });
             const logical = try std.fs.path.join(a, &.{ target_path, "run", node.package_name, relative });
             const owned_id = try a.dupe(u8, node.unique_id);

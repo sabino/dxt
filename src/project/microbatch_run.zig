@@ -98,6 +98,7 @@ pub fn execute(runtime: types.Runtime, graph: *const types.Graph, node: *const t
         };
         batch_node.compiled_code = compiled.compiled_code;
         batch_node.compiled = true;
+        try @import("stock_artifacts.zig").writeCompiledBatch(batch_runtime, &batch_graph, &batch_node, compiled.compiled_code);
         deinitCtes(runtime.allocator, &compiled_ctes);
         compiled_ctes = .empty;
         for (compiled.extra_ctes.items) |cte| try compiled_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
@@ -173,7 +174,8 @@ fn batchBody(raw: *anyopaque, runtime: types.Runtime, graph: *const types.Graph,
     return executeBatchWithPolicy(runtime, graph, node, runtime.adapter_session orelse return error.MissingMaterializationSession, observed);
 }
 
-fn executeMain(runtime: types.Runtime, session: *adapter.Session, sql: []const u8, policy: @import("duckdb.zig").ExecutionPolicy) !void {
+fn executeMain(runtime: types.Runtime, session: *adapter.Session, node: *const types.Node, sql: []const u8, policy: @import("duckdb.zig").ExecutionPolicy) !void {
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, sql);
     var query = try session.query(sql);
     defer query.deinit(switch (session.*) {
         inline else => |connection| connection.allocator,
@@ -187,6 +189,14 @@ pub fn executeBatch(runtime: types.Runtime, graph: *const types.Graph, node: *co
 
 pub fn executeBatchWithPolicy(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, session: *adapter.Session, policy: @import("duckdb.zig").ExecutionPolicy) !void {
     const a = runtime.allocator;
+    if (node.runtime_is_incremental and std.mem.eql(u8, graph.adapter_type, "duckdb") and strategyMacro(graph, node) != null and !(graph.adapter_require_batched_execution_for_custom_microbatch_strategy orelse graph.require_batched_execution_for_custom_microbatch_strategy)) return error.UnsupportedIncrementalStrategy;
+    if (!node.runtime_is_incremental or strategyMacro(graph, node) != null or std.mem.eql(u8, graph.adapter_type, "postgres")) {
+        var held = runtime;
+        held.adapter_session = session;
+        const path = try @import("duckdb.zig").databasePath(a, graph.command_options.project_dir, graph);
+        defer a.free(path);
+        return @import("duckdb.zig").executeModelWithPolicy(held, path, graph, node, policy);
+    }
     const schema = try compiler.relationSchemaForNode(a, graph, node);
     const quoted_schema = try compiler.quoteIdentifier(a, schema);
     const target = try compiler.relationNameForNode(a, graph, node);
@@ -200,7 +210,7 @@ pub fn executeBatchWithPolicy(runtime: types.Runtime, graph: *const types.Graph,
             const drop = if (std.mem.eql(u8, value, "view")) "view" else if (std.mem.eql(u8, value, "materialized_view")) "materialized view" else "table";
             try session.execute(try std.fmt.allocPrint(a, "drop {s} {s}", .{ drop, target }));
         }
-        try executeMain(runtime, session, try std.fmt.allocPrint(a, "create table {s} as ({s})", .{ target, compiled }), policy);
+        try executeMain(runtime, session, node, try std.fmt.allocPrint(a, "create table {s} as ({s})", .{ target, compiled }), policy);
         if (policy.manage_transaction) try session.commit();
         return;
     }
@@ -227,21 +237,21 @@ pub fn executeBatchWithPolicy(runtime: types.Runtime, graph: *const types.Graph,
             .{ .key = "dest_columns", .value = .{ .list = dest } },
         }) };
         const rendered = try compiler.renderMacroForNode(a, graph, node, macro_name, &.{.{ .name = "arg_dict", .value = arg_dict }});
-        try executeMain(runtime, session, try rendered.text(a), policy);
+        try executeMain(runtime, session, node, try rendered.text(a), policy);
     } else if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
         const key = node.incremental.unique_key orelse return error.MicrobatchRequiresUniqueKey;
         switch (key) {
             .string => |name| if (name.len == 0) return error.MicrobatchRequiresUniqueKey,
             .list => |keys| if (keys.items.len == 0) return error.MicrobatchRequiresUniqueKey,
         }
-        try executeMain(runtime, session, try @import("postgres_incremental.zig").renderMergeSql(a, graph, node, target, stage, destination), policy);
+        try executeMain(runtime, session, node, try @import("postgres_incremental.zig").renderMergeSql(a, graph, node, target, stage, destination), policy);
     } else {
         native_config.strategy = "delete+insert";
         const sql = try incremental.renderUpdateSql(a, target, stage, source_columns, target_columns, native_config, false);
         // The materialization wrapper owns the transaction and resource hooks.
         const body = std.mem.trimEnd(u8, sql, " \t\r\n");
         if (!std.mem.endsWith(u8, body, "commit;")) return error.InvalidMicrobatchSql;
-        try executeMain(runtime, session, body[0 .. body.len - "commit;".len], policy);
+        try executeMain(runtime, session, node, body[0 .. body.len - "commit;".len], policy);
         if (policy.manage_transaction) try session.commit();
         return;
     }

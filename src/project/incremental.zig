@@ -97,29 +97,7 @@ pub fn renderUpdateSqlWithPolicy(allocator: std.mem.Allocator, target: []const u
     errdefer out.deinit();
     const writer = &out.writer;
     if (begin_transaction) try writer.writeAll("begin transaction;\n");
-    if (std.mem.eql(u8, policy, "append_new_columns") or std.mem.eql(u8, policy, "sync_all_columns")) {
-        for (source_columns) |column| {
-            const name = try compiler.quoteIdentifier(allocator, column.column_name);
-            defer allocator.free(name);
-            if (findColumn(target_columns, column.column_name) == null) try writer.print("alter table {s} add column {s} {s};\n", .{ target, name, column.data_type });
-        }
-        if (std.mem.eql(u8, policy, "sync_all_columns")) {
-            for (target_columns) |column| {
-                if (findColumn(source_columns, column.column_name) != null) continue;
-                const name = try compiler.quoteIdentifier(allocator, column.column_name);
-                defer allocator.free(name);
-                try writer.print("alter table {s} drop column {s};\n", .{ target, name });
-            }
-            // Native ALTER TYPE avoids Core's copy/update/drop transaction conflict.
-            for (source_columns) |column| {
-                const existing = findColumn(target_columns, column.column_name) orelse continue;
-                if (std.mem.eql(u8, existing.data_type, column.data_type)) continue;
-                const name = try compiler.quoteIdentifier(allocator, column.column_name);
-                defer allocator.free(name);
-                try writer.print("alter table {s} alter column {s} type {s};\n", .{ target, name, column.data_type });
-            }
-        }
-    }
+    try writeSchemaChanges(allocator, writer, target, source_columns, target_columns, model_config);
     const strategy = model_config.strategy orelse "default";
     if (!std.mem.eql(u8, strategy, "append")) {
         if (model_config.unique_key) |key| switch (key) {
@@ -153,6 +131,34 @@ pub fn renderUpdateSqlWithPolicy(allocator: std.mem.Allocator, target: []const u
     return try out.toOwnedSlice();
 }
 
+fn writeSchemaChanges(allocator: std.mem.Allocator, writer: *std.Io.Writer, target: []const u8, source_columns: []const Column, target_columns: []const Column, model_config: types.IncrementalConfig) !void {
+    const policy = config.schemaPolicy(model_config);
+    if (std.mem.eql(u8, policy, "fail") and schemaChanged(source_columns, target_columns)) return error.IncrementalSchemaMismatch;
+    if (std.mem.eql(u8, policy, "append_new_columns") or std.mem.eql(u8, policy, "sync_all_columns")) {
+        for (source_columns) |column| {
+            const name = try compiler.quoteIdentifier(allocator, column.column_name);
+            defer allocator.free(name);
+            if (findColumn(target_columns, column.column_name) == null) try writer.print("alter table {s} add column {s} {s};\n", .{ target, name, column.data_type });
+        }
+        if (std.mem.eql(u8, policy, "sync_all_columns")) {
+            for (target_columns) |column| {
+                if (findColumn(source_columns, column.column_name) != null) continue;
+                const name = try compiler.quoteIdentifier(allocator, column.column_name);
+                defer allocator.free(name);
+                try writer.print("alter table {s} drop column {s};\n", .{ target, name });
+            }
+            // Native ALTER TYPE avoids Core's copy/update/drop transaction conflict.
+            for (source_columns) |column| {
+                const existing = findColumn(target_columns, column.column_name) orelse continue;
+                if (std.mem.eql(u8, existing.data_type, column.data_type)) continue;
+                const name = try compiler.quoteIdentifier(allocator, column.column_name);
+                defer allocator.free(name);
+                try writer.print("alter table {s} alter column {s} type {s};\n", .{ target, name, column.data_type });
+            }
+        }
+    }
+}
+
 pub fn execute(runtime: types.Runtime, db_path: []const u8, graph: *const types.Graph, node: *const types.Node) !void {
     return executeWithPolicy(runtime, db_path, graph, node, .{});
 }
@@ -173,6 +179,22 @@ pub fn executeWithPolicy(runtime: types.Runtime, db_path: []const u8, graph: *co
     defer runtime.allocator.free(target);
     const compiled = std.mem.trimEnd(u8, node.compiled_code orelse return error.UnsupportedModelExecution, " \t\r\n;");
     if (existing == .missing or existing == .view or config.fullRefresh(graph, node)) {
+        if (runtime.adapter_session) |session| {
+            if (existing != .missing) return @import("duckdb_stock_materialization.zig").execute(runtime, graph, node, session, policy);
+            var scratch = std.heap.ArenaAllocator.init(runtime.allocator);
+            defer scratch.deinit();
+            const a = scratch.allocator();
+            var definition = try @import("dbt_context.zig").relationFromValue(a, try compiler.relationValueForNode(a, graph, node, false));
+            definition.relation_type = "table";
+            const creation = try @import("stock_sql.zig").create(a, graph, node, definition, compiled, false);
+            if (policy.manage_transaction) try session.begin();
+            errdefer if (policy.manage_transaction) session.rollback() catch {};
+            try session.execute(try std.fmt.allocPrint(a, "create schema if not exists {s}", .{schema_quoted}));
+            try @import("stock_artifacts.zig").write(policy.artifact_writer, node, creation);
+            try session.execute(creation);
+            if (policy.manage_transaction) try session.commit();
+            return;
+        }
         if (@import("contracts.zig").enforced(node)) {
             const creation = try @import("contracts.zig").renderCreation(runtime.allocator, graph, node, target, compiled, "table");
             defer runtime.allocator.free(creation);
@@ -186,12 +208,16 @@ pub fn executeWithPolicy(runtime: types.Runtime, db_path: []const u8, graph: *co
         defer runtime.allocator.free(sql);
         return try executeSql(runtime, db_path, sql);
     }
-    var digest: [16]u8 = undefined;
-    std.crypto.hash.Md5.hash(node.unique_id, &digest, .{});
-    const stage_identifier = try std.fmt.allocPrint(runtime.allocator, "__dxt_incremental_{x}", .{&digest});
-    defer runtime.allocator.free(stage_identifier);
-    const stage = try compiler.quoteIdentifier(runtime.allocator, stage_identifier);
-    defer runtime.allocator.free(stage);
+    var stage_arena = std.heap.ArenaAllocator.init(runtime.allocator);
+    defer stage_arena.deinit();
+    const stage_allocator = stage_arena.allocator();
+    var target_definition = try @import("dbt_context.zig").relationFromValue(stage_allocator, try compiler.relationValueForNode(stage_allocator, graph, node, false));
+    target_definition.relation_type = "table";
+    const stage_value = try compiler.renderMacroForNode(stage_allocator, graph, node, "make_temp_relation", &.{.{ .value = try @import("dbt_context.zig").relationValue(stage_allocator, target_definition) }});
+    var stage_definition = try @import("dbt_context.zig").relationFromValue(stage_allocator, stage_value);
+    stage_definition.relation_type = "table";
+    const stage_identifier = stage_definition.identifier.?;
+    const stage = try @import("dbt_context.zig").renderRelation(stage_allocator, stage_definition);
     const stage_literal = try quoteString(runtime.allocator, stage_identifier);
     defer runtime.allocator.free(stage_literal);
     const schema_literal = try quoteString(runtime.allocator, schema);
@@ -199,7 +225,7 @@ pub fn executeWithPolicy(runtime: types.Runtime, db_path: []const u8, graph: *co
     const target_literal = try quoteString(runtime.allocator, compiler.relationIdentifierForNode(node));
     defer runtime.allocator.free(target_literal);
     if (runtime.adapter_session) |session| switch (session.*) {
-        .duckdb => |*connection| return try executeNativeUpdate(runtime, connection, target, stage, compiled, stage_literal, schema_literal, target_literal, node.incremental, policy),
+        .duckdb => |*connection| return try executeNativeUpdate(runtime, connection, target, stage, compiled, stage_literal, schema_literal, target_literal, graph, node, stage_definition, policy),
         else => {},
     };
     var temporary_pool = adapter.DuckDBPool.init(runtime.allocator, runtime.io, runtime.environment);
@@ -208,7 +234,7 @@ pub fn executeWithPolicy(runtime: types.Runtime, db_path: []const u8, graph: *co
     if (try pool.acquireWithProfile(db_path, false, graph.duckdb_credentials)) |native| {
         var connection = native;
         defer connection.deinit();
-        return try executeNativeUpdate(runtime, &connection, target, stage, compiled, stage_literal, schema_literal, target_literal, node.incremental, policy);
+        return try executeNativeUpdate(runtime, &connection, target, stage, compiled, stage_literal, schema_literal, target_literal, graph, node, stage_definition, policy);
     }
     // A single persistent native-owned CLI connection holds the transaction
     // across staging, schema inspection, schema changes and the data update.
@@ -257,11 +283,13 @@ pub fn executeWithPolicy(runtime: types.Runtime, db_path: []const u8, graph: *co
     return error.DuckDbExecutionFailed;
 }
 
-fn executeNativeUpdate(runtime: types.Runtime, connection: *adapter.DuckDBConnection, target: []const u8, stage: []const u8, compiled: []const u8, stage_literal: []const u8, schema_literal: []const u8, target_literal: []const u8, model_config: types.IncrementalConfig, policy: @import("postgres_materialization.zig").ExecutionPolicy) !void {
+fn executeNativeUpdate(runtime: types.Runtime, connection: *adapter.DuckDBConnection, target: []const u8, stage: []const u8, compiled: []const u8, stage_literal: []const u8, schema_literal: []const u8, target_literal: []const u8, graph: *const types.Graph, node: *const types.Node, stage_definition: @import("dbt_context.zig").RelationDef, policy: @import("postgres_materialization.zig").ExecutionPolicy) !void {
     if (policy.manage_transaction) try connection.begin();
     errdefer if (policy.manage_transaction) connection.rollback() catch {};
-    const stage_sql = try std.fmt.allocPrint(runtime.allocator, "create temporary table {s} as (\n{s}\n)", .{ stage, compiled });
-    defer runtime.allocator.free(stage_sql);
+    var scratch = std.heap.ArenaAllocator.init(runtime.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const stage_sql = try @import("stock_sql.zig").create(a, graph, node, stage_definition, compiled, true);
     try connection.execute(stage_sql);
     const source_sql = try std.fmt.allocPrint(runtime.allocator, "select column_name, data_type from information_schema.columns where table_catalog='temp' and table_name={s} order by ordinal_position", .{stage_literal});
     defer runtime.allocator.free(source_sql);
@@ -279,12 +307,17 @@ fn executeNativeUpdate(runtime: types.Runtime, connection: *adapter.DuckDBConnec
     defer source_columns.deinit();
     const target_columns = try std.json.parseFromSlice([]Column, runtime.allocator, target_json, .{});
     defer target_columns.deinit();
-    const sql = renderUpdateSqlWithPolicy(runtime.allocator, target, stage, source_columns.value, target_columns.value, model_config, false, policy.manage_transaction) catch |err| switch (err) {
-        error.IncrementalSchemaMismatch => return error.DuckDbExecutionFailed,
-        else => return err,
-    };
-    defer runtime.allocator.free(sql);
+    var schema_sql: std.Io.Writer.Allocating = .init(a);
+    try writeSchemaChanges(a, &schema_sql.writer, target, source_columns.value, target_columns.value, node.incremental);
+    if (schema_sql.written().len != 0) try connection.execute(schema_sql.written());
+    var definition = try @import("dbt_context.zig").relationFromValue(a, try compiler.relationValueForNode(a, graph, node, false));
+    definition.relation_type = "table";
+    const dest = if (std.mem.eql(u8, config.schemaPolicy(node.incremental), "ignore")) target_columns.value else source_columns.value;
+    const sql = try @import("stock_sql.zig").incremental(a, graph, node, definition, stage_definition, dest);
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, sql);
     try connection.execute(sql);
+    try connection.execute(try std.fmt.allocPrint(a, "drop table {s}", .{stage}));
+    if (policy.manage_transaction) try connection.commit();
 }
 
 test "incremental update policies and composite keys preserve target changes in a transaction" {

@@ -24,7 +24,19 @@ pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, node
     defer runtime.allocator.free(schema);
     const kind = try session.relationTypeInDatabase(runtime.allocator, compiler.relationDatabaseForNode(graph, node), schema, compiler.relationIdentifierForNode(node));
     defer if (kind) |value| runtime.allocator.free(value);
-    if (kind == null or std.mem.eql(u8, kind.?, "view") or config.fullRefresh(graph, node)) {
+    if (kind == null) {
+        var scratch = std.heap.ArenaAllocator.init(runtime.allocator);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        var definition = try @import("dbt_context.zig").relationFromValue(a, try compiler.relationValueForNode(a, graph, node, false));
+        definition.relation_type = "table";
+        const creation = try @import("stock_sql.zig").create(a, graph, node, definition, trimmedSql(node), false);
+        try session.execute(try std.fmt.allocPrint(a, "create schema if not exists {s}", .{try adapter.quoteIdentifier(a, schema)}));
+        try @import("stock_artifacts.zig").write(policy.artifact_writer, node, creation);
+        var main = try session.query(creation);
+        defer main.deinit(runtime.allocator);
+        try @import("materialization_result.zig").captureQuery(runtime.allocator, policy.main_result, main);
+    } else if (std.mem.eql(u8, kind.?, "view") or config.fullRefresh(graph, node)) {
         var table = node.*;
         table.materialized = "table";
         var held_runtime = runtime;
@@ -47,16 +59,17 @@ fn update(allocator: std.mem.Allocator, session: *adapter.Session, graph: *const
     if ((std.mem.eql(u8, strategy, "merge") or std.mem.eql(u8, strategy, "microbatch")) and !session.capabilities().merge) return error.PostgresExecutionFailed;
     const target = try compiler.relationNameForNode(allocator, graph, node);
     defer allocator.free(target);
-    var digest: [16]u8 = undefined;
-    std.crypto.hash.Md5.hash(node.unique_id, &digest, .{});
-    const stage_id = try std.fmt.allocPrint(allocator, "__dxt_incremental_{x}", .{&digest});
-    defer allocator.free(stage_id);
-    const stage = try adapter.quoteIdentifier(allocator, stage_id);
-    defer allocator.free(stage);
-    const header_value = values.get(node.effective_config, "sql_header") orelse .null;
-    const header = if (header_value == .null) "" else if (header_value == .string) header_value.string else return error.InvalidPostgresMaterializationConfig;
-    const creation = try std.fmt.allocPrint(allocator, "{s}\ncreate temporary table {s} on commit drop as (\n{s}\n)", .{ header, stage, trimmedSql(node) });
-    defer allocator.free(creation);
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var target_definition = try @import("dbt_context.zig").relationFromValue(a, try compiler.relationValueForNode(a, graph, node, false));
+    target_definition.relation_type = "table";
+    const stage_value = try compiler.renderMacroForNode(a, graph, node, "make_temp_relation", &.{.{ .value = try @import("dbt_context.zig").relationValue(a, target_definition) }});
+    var stage_definition = try @import("dbt_context.zig").relationFromValue(a, stage_value);
+    stage_definition.relation_type = "table";
+    const stage_id = stage_definition.identifier.?;
+    const stage = try @import("dbt_context.zig").renderRelation(a, stage_definition);
+    const creation = try @import("stock_sql.zig").create(a, graph, node, stage_definition, trimmedSql(node), true);
     try session.execute(creation);
     var temp_schema_result = try session.query("select nspname from pg_namespace where oid=pg_my_temp_schema()");
     defer temp_schema_result.deinit(allocator);
@@ -83,8 +96,8 @@ fn update(allocator: std.mem.Allocator, session: *adapter.Session, graph: *const
     defer allocator.free(schema_sql);
     if (schema_sql.len != 0) try session.execute(schema_sql);
     const dest = if (std.mem.eql(u8, config.schemaPolicy(node.incremental), "ignore")) expanded_columns else source_columns;
-    const mutation = if (std.mem.eql(u8, strategy, "merge") or std.mem.eql(u8, strategy, "microbatch")) try renderMergeSql(allocator, graph, node, target, stage, dest) else try renderInsertSql(allocator, node, target, stage, dest);
-    defer allocator.free(mutation);
+    const mutation = try @import("stock_sql.zig").incremental(a, graph, node, target_definition, stage_definition, dest);
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, mutation);
     var main = try session.query(mutation);
     defer main.deinit(allocator);
     try @import("materialization_result.zig").captureQuery(allocator, policy.main_result, main);

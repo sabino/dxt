@@ -59,5 +59,6 @@ pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, path
         defer document.deinit();
         try @import("materialization_result.zig").captureSeed(a, policy.main_result, full_refresh, document.rows.len);
     }
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, sql);
     if (policy.manage_transaction) try session.commit();
 }
