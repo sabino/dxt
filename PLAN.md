@@ -49,10 +49,12 @@ native Zig/safety checks. Exact cold/warm performance, snapshots and extracted
 installation on both architectures also pass. The developer-only clock fixture
 handles interrupted and partial diagnostic writes under fortified runner
 headers; five regressions, including both actual database engines, pass.
-The broader Python 3.11 developer job exposes four historical expectations:
+The broader Python 3.11 developer job exposed four historical expectations:
 two pre-COPY seed diagnostics and two alphabetically ordered macro arrays.
-The cache worker owns their actual Core witnesses and bounded test corrections;
-product semantics and the strict public comparison must remain intact.
+Fresh Core CLI witnesses confirm the exact CSV diagnostic fields and authored
+macro dependency order. All four bounded corrections are integrated and pass
+on the unchanged verified product candidate; fresh Actions remains required.
+Product semantics and the strict public comparison remain intact.
 The full Python 3.12 compatibility jobs are still running on both architectures.
 
 The combined callable/ownership candidate passes 704 native tests and 70
@@ -68,9 +70,13 @@ candidate-specific and do not establish merge readiness.
 
 The primary seed implementation, genuine sequence markers and borrowed
 transaction cleanup are integrated with actual Core fixtures for bundled
-DuckDB COPY and native PostgreSQL bindings. The oracle worker owns the complete
-63-case primary seed rerun, including the new Column cases and unchanged
-70,000-binding seed; the corrected complete seed certificate is still running.
+DuckDB COPY and native PostgreSQL bindings. The first CSV certification repair
+passes all 63 primary seed cases, including the new Column cases and unchanged
+10,000-row, 70,000-binding PostgreSQL workload. It also passes 707 native tests
+and all 14 new alias/provider boundary comparisons. Its wide-seed execution
+still takes 321 seconds against Core's 8.5 seconds, so practical scaling remains
+open. The expression worker owns a separately reviewed append-only loop-prefix
+and copied-row certificate follow-up with pre-mutation invalidation.
 The unchanged wide seed also exposes repeated alias traversal of the full
 Agate/loop graph. The expression worker owns a bounded performance diagnosis
 and any reviewed ownership-preserving repair; the running unchanged fixture
@@ -91,6 +97,20 @@ exists, and native driver/browser fixtures remain mandatory. This removes
 redundant compilation without reducing test selection or oracle assertions.
 An actual clean-build check across two existing modules passes, with a receipt
 showing one completed build/test helper invocation and one cache reuse.
+
+Active final closure ownership is disjoint and sequenced by reviewed commits:
+the expression worker owns compiler alias publication and immutable CSV backing
+certificates, including the unchanged wide-seed scaling gate; the oracle worker
+owns typed native result transport, original cursor/Agate separation and parameter
+execution; the source worker owns exact Decimal/Range and narrowly grounded
+DuckDB type/PostgreSQL Column expression/mapping hooks; the cache worker owns
+the isolated Column value helper and actual Core cursor descriptor witnesses.
+The source worker's 62 Decimal comparisons pass on both the first and corrected
+typed CLIs. Its independent transport review found cursor
+consumption, eager Agate serialization and duplicate-name mismatches; the oracle
+worker owns their corrections. The supervisor owns final integration, docs and
+publication. The release worker preserves completed ignored proof data through
+verified lossless archives to make room for the complete final suite.
 
 An earlier CI repair checkpoint had all 263 historical CLI tests passing with
 zero skips after Core-grounded expectation migrations and the profileless audit
