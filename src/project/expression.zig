@@ -1624,7 +1624,7 @@ fn immutableEqual(left: Value, right: Value) bool {
     return immutableSame(left, right);
 }
 pub fn equalValues(a: Value, b: Value) bool {
-    if (@import("query_type.zig").equal(a, b)) |equal| return equal;
+    if (@import("query_type.zig").equal(a, b)) |matched| return matched;
     if (ranges.isRange(a) or ranges.isRange(b)) return ranges.equal(a, b);
     if (decimals.state(a) != null or decimals.state(b) != null) {
         const other = if (decimals.state(a) != null) b else a;
