@@ -1,5 +1,6 @@
 const std = @import("std");
 test {
+    _ = @import("project/datetime_strptime.zig");
     _ = @import("project/modules_context.zig");
     _ = @import("project/timezone_context.zig");
 }
