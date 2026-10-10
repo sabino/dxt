@@ -167,6 +167,24 @@ def test_seed_load_context_uses_real_project_path_rows_and_overrides(tmp_path,co
     assert rows(pair,request,adapter,'select code,amount from {schema}.input')==[[('001',10.25)]]*2
 
 
+@pytest.mark.parametrize('adapter',['duckdb','postgres'])
+def test_seed_column_retains_agate_sequence_traits_and_typed_cells(tmp_path,configuration_oracle,request,adapter):
+    pair=setup_pair(tmp_path,configuration_oracle,request,adapter)
+    pair.write('seeds/input.csv','id,amount\n1,10.25\n2,\n')
+    pair.append_project('seeds:\n  configuration_fixture:\n    input:\n      +fast: false\n')
+    pair.write('macros/column.sql',"""{% macro load_csv_rows(model,agate_table) %}
+{% set column=agate_table.columns['amount'] %}
+{% if column is mapping or column is not sequence or column is not iterable or column|length != 2 or column.name != 'amount' %}{{ exceptions.raise_compiler_error('column traits') }}{% endif %}
+{% if column[0] != 10.25 or column[1] is not none or column.values() != (10.25,none) %}{{ exceptions.raise_compiler_error('typed column cells') }}{% endif %}
+{% set seen=[] %}{% for value in column %}{% do seen.append(value) %}{% endfor %}
+{% if seen != [10.25,none] %}{{ exceptions.raise_compiler_error('column iteration') }}{% endif %}
+{{ return(adapter.dispatch('load_csv_rows','dbt')(model,agate_table)) }}
+{% endmacro %}""")
+    pair.invoke('seed')
+    assert_seed_artifacts(pair)
+    assert rows(pair,request,adapter,'select id,amount from {schema}.input order by id')==[[(1,10.25),(2,None)]]*2
+
+
 
 @pytest.mark.parametrize('adapter',['duckdb','postgres'])
 def test_seed_decimal_binding_preserves_more_than_float_precision(tmp_path,configuration_oracle,request,adapter):

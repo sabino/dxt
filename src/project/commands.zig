@@ -743,7 +743,13 @@ pub const OperationHost = struct {
             const cells = try expression.allocateValues(a, document.rows.len);
             for (document.rows, cells) |row, *cell| cell.* = row[index];
             type_.* = .{ .object = try a.dupe(expression.Entry, &.{ .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } }, .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } }, .{ .key = "__dxt_rendered", .value = .{ .string = kind.string } } }) };
-            column.* = .{ .object = try a.dupe(expression.Entry, &.{ .{ .key = "name", .value = name }, .{ .key = "data_type", .value = type_.* }, .{ .key = "values", .value = try self.callback(.{ .tuple = cells }) } }) };
+            column.* = .{ .object = try a.dupe(expression.Entry, &.{
+                .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+                .{ .key = "__dxt_iterable", .value = .{ .list = cells } },
+                .{ .key = "name", .value = name },
+                .{ .key = "data_type", .value = type_.* },
+                .{ .key = "values", .value = try self.callback(.{ .tuple = cells }) },
+            }) };
         }
         return .{ .object = try a.dupe(expression.Entry, &.{
             .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
@@ -894,6 +900,9 @@ test "converted seed timestamps own their bytes after the caller frame ends" {
     try std.testing.expectEqualStrings("__dxt_context_object", row.attribute("__dxt_context_object").callable);
     try std.testing.expectEqualStrings("__dxt_context_object", converted.attribute("rows").attribute("__dxt_context_object").callable);
     try std.testing.expectEqualStrings("2024-02-29 12:34:56.123456", expression.sequence(row).?[1].string);
+    const columns = expression.sequence(converted.attribute("columns")).?;
+    try std.testing.expectEqualStrings("__dxt_context_object", columns[1].attribute("__dxt_context_object").callable);
+    try std.testing.expectEqualStrings("2024-02-29 12:34:56.123456", expression.sequence(columns[1]).?[0].string);
 }
 
 pub fn parseArgs(allocator: std.mem.Allocator, text: []const u8) !std.json.Value {
