@@ -133,7 +133,7 @@ test "portable method IDs do not merge immutable string views" {
     const a = arena.allocator();
     const text = try a.dupe(u8, "abcdef");
     const full = (try lookup(a, .{ .string = text }, "upper")).?;
-    for (full.object) |*entry| {
+    for (@constCast(full.object)) |*entry| {
         if (std.mem.eql(u8, entry.key, "__dxt_builtin_portable_identity")) entry.value = .{ .boolean = true };
     }
     const TestHost = struct {
