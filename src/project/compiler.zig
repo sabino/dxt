@@ -75,6 +75,8 @@ const StaticComparison = struct {
     operator_start: usize,
 };
 
+const BindingVisibility = struct { bindings: usize = 0, vars: usize = 0, lists: usize = 0 };
+
 const CompileContext = struct {
     allocator: std.mem.Allocator,
     graph: *const Graph,
@@ -88,6 +90,7 @@ const CompileContext = struct {
     value_arena: std.heap.ArenaAllocator,
     modules_cache: @import("modules_context.zig").Cache = .{},
     bindings: std.ArrayList(ValueBinding) = .empty,
+    binding_visibility: BindingVisibility = .{},
     returned: ?native_expr.Value = null,
     parse_node: ?*Node = null,
     runtime_macro_dependencies: ?*std.ArrayList([]const u8) = null,
@@ -156,7 +159,7 @@ const CompileContext = struct {
 
     fn getList(self: *const CompileContext, name: []const u8) ?[]const []const u8 {
         var index = self.lists.items.len;
-        while (index > 0) {
+        while (index > self.binding_visibility.lists) {
             index -= 1;
             const list = &self.lists.items[index];
             if (std.mem.eql(u8, list.name, name)) return list.values.items;
@@ -188,7 +191,7 @@ const CompileContext = struct {
 
     fn getVar(self: *const CompileContext, name: []const u8) ?[]const u8 {
         var index = self.vars.items.len;
-        while (index > 0) {
+        while (index > self.binding_visibility.vars) {
             index -= 1;
             const variable = self.vars.items[index];
             if (std.mem.eql(u8, variable.name, name)) return variable.value;
@@ -1059,6 +1062,7 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                     .scope_depth = context.scope_depth,
                     .macro_package = context.current_macro_package,
                     .capture_undefined = context.capturesUndefined(),
+                    .binding_visibility = context.binding_visibility,
                 };
                 const caller_name = try std.fmt.allocPrint(arena, "__dxt_caller:{d}", .{context.caller_blocks.items.len});
                 try context.caller_blocks.append(arena, caller);
@@ -1398,7 +1402,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     var parts = std.mem.splitScalar(u8, path, '.');
     const name = parts.next() orelse return .undefined;
     var index = context.bindings.items.len;
-    while (index > 0) {
+    while (index > context.binding_visibility.bindings) {
         index -= 1;
         const binding = context.bindings.items[index];
         if (std.mem.eql(u8, binding.name, name)) {
@@ -1569,7 +1573,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     const root_end = std.mem.indexOfScalar(u8, name, '.') orelse name.len;
     var binding_index = context.bindings.items.len;
-    while (binding_index != 0) {
+    while (binding_index > context.binding_visibility.bindings) {
         binding_index -= 1;
         if (!std.mem.eql(u8, context.bindings.items[binding_index].name, name[0..root_end])) continue;
         const bound = try resolveExpressionValue(context, name, allocator);
@@ -1884,6 +1888,7 @@ const CallerBlock = struct {
     scope_depth: usize,
     macro_package: ?[]const u8,
     capture_undefined: bool,
+    binding_visibility: BindingVisibility,
 };
 
 fn macroParameters(allocator: std.mem.Allocator, declaration: []const u8) ![]const MacroParameter {
@@ -2056,6 +2061,7 @@ fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args:
     const previous_return = context.returned;
     const previous_loop_depth = context.loop_depth;
     const previous_capture = context.capture_undefined_override;
+    const previous_visibility = context.binding_visibility;
     context.bindings = .empty;
     context.vars = .empty;
     context.lists = .empty;
@@ -2064,6 +2070,7 @@ fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args:
     context.returned = null;
     context.loop_depth = 0;
     context.capture_undefined_override = caller.capture_undefined;
+    context.binding_visibility = caller.binding_visibility;
     context.macro_render_depth += 1;
     defer {
         context.bindings.deinit(context.allocator);
@@ -2077,6 +2084,7 @@ fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args:
         context.returned = context.returned orelse previous_return;
         context.loop_depth = previous_loop_depth;
         context.capture_undefined_override = previous_capture;
+        context.binding_visibility = previous_visibility;
         context.macro_render_depth -= 1;
     }
     try context.bindings.appendSlice(context.allocator, caller.bindings);
@@ -2124,6 +2132,11 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     // including when invoked by a model's capture-mode parser.
     context.capture_undefined_override = false;
     const binding_start = context.bindings.items.len;
+    const previous_visibility = context.binding_visibility;
+    // MacroGenerator compiles a separate template: caller-local names do not
+    // become macro globals. Retain backing entries so argument mutations can
+    // still update every shared alias, including suspended caller frames.
+    context.binding_visibility = .{ .bindings = binding_start, .vars = context.vars.items.len, .lists = context.lists.items.len };
     context.returned = null;
     context.current_macro_package = macro.package_name;
     context.macro_render_depth += 1;
@@ -2136,6 +2149,7 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
         context.returned = previous_return;
         context.loop_depth = previous_loop_depth;
         context.capture_undefined_override = previous_capture;
+        context.binding_visibility = previous_visibility;
     }
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(context.allocator);
@@ -4850,4 +4864,15 @@ test "module singleton exports retain identity across native macro frames" {
     try @import("parse.zig").parseMacrosFromText(a, "{% macro same_module(value) %}{{ value is sameas modules.pytz.country_timezones }}{% endmacro %}", "module.sql", "fixture", &graph);
     const node = Node{ .unique_id = "model.fixture.identity", .package_name = "fixture", .name = "identity", .path = "identity.sql", .original_file_path = "models/identity.sql", .raw_code = "{% set countries = modules.pytz.country_timezones %}{{ countries is sameas modules.pytz.country_timezones }}|{{ same_module(countries) }}|{{ modules.datetime.datetime.max is sameas modules.datetime.datetime.max }}" };
     try std.testing.expectEqualStrings("True|True|True", try compileModel(a, &graph, &node));
+}
+
+test "ordinary macro globals ignore caller local provider shadows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "fixture" };
+    defer graph.deinit();
+    try @import("parse.zig").parseMacrosFromText(a, "{% macro same_countries() %}{{ return(modules.pytz.country_timezones) }}{% endmacro %}{% macro nested(value) %}{{ return(value) }}{% endmacro %}", "module.sql", "fixture", &graph);
+    const node = Node{ .unique_id = "model.fixture.shadow", .package_name = "fixture", .name = "shadow", .path = "shadow.sql", .original_file_path = "models/shadow.sql", .raw_code = "{% set original=modules %}{% set modules={'value':'shadow'} %}{{ modules.value }}|{{ original.pytz.country_timezones is sameas same_countries() }}|{{ nested(modules.value) }}" };
+    try std.testing.expectEqualStrings("shadow|True|shadow", try compileModel(a, &graph, &node));
 }
