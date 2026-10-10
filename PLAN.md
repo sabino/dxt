@@ -90,6 +90,15 @@ fresh combined native build and every focused case remain mandatory. The
 older whole run's additional external-reader diagnostic failure is being
 grounded read-only by the oracle worker before any correction is authorized.
 
+The same docs replay review identifies a bounded existing omission: native
+retry restores static and compile settings but drops enabled empty-catalog.
+The expression worker owns only that argument-restoration assignment in the
+command module and an enabled-empty-catalog case in its existing actual Core
+failure/retry fixture. Preserve the prior compile/default/static cases and
+their SQL, timings and complete-schema assertions; verify both engines replay
+the unchanged artifact and retain the enabled flag and empty catalog. The
+writer's omission of false one-way keys remains unchanged.
+
 Actual Core and native external-reader witnesses confirm the plain authored
 invalid-boolean literal is part of the database diagnostic. Native rollback
 retains the original file bytes, relation rows and absence of staging files;
