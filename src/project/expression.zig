@@ -1918,7 +1918,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     return try floatValue(allocator, if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else return error.InvalidJinjaExpression);
 }
 pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
-    if (@import("query_type.zig").name(value) != null) return if (key == .string) error.QueryTypeChildNotFound else try @import("query_type.zig").notImplemented(allocator);
+    if (@import("query_type.zig").name(value) != null) return if (key == .string) try @import("query_type.zig").child(value, key.string) else try @import("query_type.zig").notImplemented(allocator);
     if (@import("query_memoryview.zig").chunkIdentity(value) != null) return .undefined;
     if (@import("builtin_bound_method.zig").isBound(value)) return .undefined;
     if (sets.isSet(value)) return .undefined;
