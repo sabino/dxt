@@ -104,6 +104,7 @@ const CompileContext = struct {
     documentation_block: bool = false,
     caller_blocks: std.ArrayList(*CallerBlock) = .empty,
     loop_states: std.ArrayList(*LoopFrame) = .empty,
+    loop_filter_bindings: std.ArrayList([]ValueBinding) = .empty,
 
     const ValueBinding = struct {
         name: []const u8,
@@ -1065,7 +1066,7 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                 @memcpy(arguments[0..args.len], args);
                 arguments[args.len] = .{ .name = "caller", .value = .{ .callable = caller_name } };
                 const value = try callExpressionValue(context, std.mem.trim(u8, expression[0..call.open], " \t"), arguments, arena);
-                if (value != .none) try out.appendSlice(context.allocator, try value.text(arena));
+                if (value != .none) try out.appendSlice(context.allocator, try native_expr.textWithHost(arena, value, context.host()));
                 index = afterTag(sql, block.close, end_index);
                 continue;
             }
@@ -1089,6 +1090,7 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                 const frame = try arena.create(LoopFrame);
                 frame.* = .{
                     .state = .{ .iterator = try @import("expression_sequence.zig").iter(arena, iterable) },
+                    .iterable = iterable,
                     .block = block,
                     .bindings = try arena.dupe(CompileContext.ValueBinding, context.bindings.items),
                     .vars = try arena.dupe(StaticVar, context.vars.items),
@@ -1097,7 +1099,6 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                     .macro_package = context.current_macro_package,
                     .capture_undefined = context.capturesUndefined(),
                 };
-                if (block.filter_expression == null and !@import("expression_sequence.zig").isIterator(iterable)) frame.state.known_length = (try native_expr.iterableValuesWithHost(arena, iterable, context.host())).len;
                 const loop_id = context.loop_states.items.len;
                 try context.loop_states.append(arena, frame);
                 const loop_value = try @import("loop_context.zig").value(arena, loop_id);
@@ -1180,6 +1181,7 @@ fn afterTag(sql: []const u8, end: usize, limit: usize) usize {
 
 const LoopFrame = struct {
     state: @import("loop_context.zig").State,
+    iterable: native_expr.Value,
     block: ForBlock,
     bindings: []CompileContext.ValueBinding,
     vars: []StaticVar,
@@ -1210,6 +1212,8 @@ fn loopFilter(context: *CompileContext, frame: *LoopFrame, value: native_expr.Va
     const previous_scope = context.scope_depth;
     const previous_package = context.current_macro_package;
     const previous_capture = context.capture_undefined_override;
+    try context.loop_filter_bindings.append(context.value_arena.allocator(), previous_bindings.items);
+    defer _ = context.loop_filter_bindings.pop();
     context.bindings = .empty;
     context.vars = .empty;
     context.lists = .empty;
@@ -1233,7 +1237,7 @@ fn loopFilter(context: *CompileContext, frame: *LoopFrame, value: native_expr.Va
     context.pushScope();
     defer context.popScope();
     try assignValue(context, frame.block.variable_name, value);
-    return (try context.evaluate(filter)).truthy();
+    return native_expr.truthyWithHost(context.value_arena.allocator(), try context.evaluate(filter), context.host());
 }
 
 fn loopCall(context: *CompileContext, name: []const u8, args: []const native_expr.Argument, a: std.mem.Allocator) anyerror!native_expr.Value {
@@ -1241,17 +1245,50 @@ fn loopCall(context: *CompileContext, name: []const u8, args: []const native_exp
     const id = std.fmt.parseUnsigned(usize, name[colon + 1 ..], 10) catch return error.InvalidJinjaArguments;
     if (id >= context.loop_states.items.len) return error.InvalidJinjaArguments;
     const frame = context.loop_states.items[id];
+    if (std.mem.startsWith(u8, name, "__dxt_loop_repr:")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        try loopLength(context, frame);
+        return .{ .string = try std.fmt.allocPrint(a, "<LoopContext {d}/{d}>", .{ frame.state.index + 1, frame.state.known_length.? }) };
+    }
+    if (std.mem.startsWith(u8, name, "__dxt_loop_length:")) {
+        if (args.len != 0) return error.InvalidJinjaArguments;
+        try loopLength(context, frame);
+        return native_expr.integerValue(a, frame.state.known_length.?);
+    }
     if (std.mem.startsWith(u8, name, "__dxt_loop_attribute:")) {
         if (args.len != 1 or args[0].name != null or args[0].value != .string) return error.InvalidJinjaArguments;
         const attribute = args[0].value.string;
         if (std.mem.eql(u8, attribute, "last") or std.mem.eql(u8, attribute, "nextitem")) _ = try loopItem(context, frame, frame.state.index + 1);
         if (frame.state.known_length == null and (std.mem.eql(u8, attribute, "length") or std.mem.eql(u8, attribute, "revindex") or std.mem.eql(u8, attribute, "revindex0"))) {
-            while (try loopItem(context, frame, frame.state.items.items.len)) |_| {}
-            frame.state.known_length = frame.state.items.items.len;
+            try loopLength(context, frame);
         }
         return @import("loop_context.zig").attribute(a, &frame.state, id, attribute);
     }
     return @import("loop_context.zig").method(a, &frame.state, name[11..colon], args);
+}
+
+fn loopLength(context: *CompileContext, frame: *LoopFrame) anyerror!void {
+    if (frame.state.known_length != null) return;
+    if (frame.block.filter_expression == null and !@import("expression_sequence.zig").isIterator(frame.iterable)) {
+        frame.state.known_length = (try native_expr.iterableValuesWithHost(context.value_arena.allocator(), frame.iterable, context.host())).len;
+    } else {
+        while (try loopItem(context, frame, frame.state.items.items.len)) |_| {}
+        frame.state.known_length = frame.state.items.items.len;
+    }
+}
+
+fn replaceContextAliases(context: *CompileContext, original: native_expr.Value, replacement: native_expr.Value) !void {
+    const aliases = @import("container_methods.zig");
+    for (context.bindings.items) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
+    for (context.loop_filter_bindings.items) |bindings| for (bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
+    for (context.caller_blocks.items) |caller| for (caller.bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
+    for (context.loop_states.items) |frame| {
+        for (frame.bindings) |*binding| try aliases.replaceAliases(&binding.value, original, replacement, 0);
+        try aliases.replaceAliases(&frame.iterable, original, replacement, 0);
+        try aliases.replaceAliases(&frame.state.iterator, original, replacement, 0);
+        for (frame.state.items.items) |*item| try aliases.replaceAliases(item, original, replacement, 0);
+        if (frame.state.last_changed) |*previous| try aliases.replaceAliases(previous, original, replacement, 0);
+    }
 }
 
 fn validateSkippedLoopBody(context: *CompileContext, sql: []const u8, block: ForBlock) anyerror!void {
@@ -1346,7 +1383,7 @@ fn renderExpression(context: *CompileContext, span: []const u8) ![]const u8 {
     if (!context.documentation and std.mem.startsWith(u8, span, "adapter.dispatch")) return try renderAdapterDispatchExpression(context, span);
     const value = try context.evaluate(span);
     if (context.returned != null) return try context.allocator.dupe(u8, "");
-    const rendered = value.text(context.value_arena.allocator()) catch |err| {
+    const rendered = native_expr.textWithHost(context.value_arena.allocator(), value, context.host()) catch |err| {
         if (@import("compile_diagnostics.zig").message(err) == null) {
             const detail = try std.fmt.allocPrint(context.value_arena.allocator(), "{s} rendering expression: {s}", .{ @errorName(err), span });
             @import("compile_diagnostics.zig").captureError(context.node.original_file_path, context.node.name, detail, err);
@@ -1516,6 +1553,7 @@ fn configProxy(allocator: std.mem.Allocator, context: *CompileContext) !native_e
 
 fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
+    if (std.mem.startsWith(u8, name, "__dxt_value.") and args.len != 0 and @import("expression_sequence.zig").kind(args[0].value) != null) return error.UndefinedJinjaValue;
     if (std.mem.startsWith(u8, name, "__dxt_loop_")) return loopCall(context, name, args, allocator);
     if (std.mem.startsWith(u8, name, "__dxt_caller:")) {
         const index = std.fmt.parseUnsigned(usize, name[13..], 10) catch return error.InvalidJinjaArguments;
@@ -1524,7 +1562,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     }
     if (context.documentation_block) {
         if (try @import("container_methods.zig").call(allocator, name, args)) |mutation| {
-            if (mutation.original) |original| for (context.bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original, mutation.replacement.?, 0);
+            if (mutation.original) |original| try replaceContextAliases(context, original, mutation.replacement.?);
             return mutation.result;
         }
         return error.UnresolvedMacro;
@@ -1548,7 +1586,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     if (try @import("base_context.zig").call(allocator, name, args)) |value| return value;
     if (try @import("bundled_macros.zig").callColumn(allocator, name, args)) |value| return value;
     if (try @import("container_methods.zig").call(allocator, name, args)) |mutation| {
-        if (mutation.original) |original| for (context.bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original, mutation.replacement.?, 0);
+        if (mutation.original) |original| try replaceContextAliases(context, original, mutation.replacement.?);
         return mutation.result;
     }
     if (try @import("modules_context.zig").call(allocator, name, args, .{ .host = context.host() })) |value| return value;
@@ -2906,7 +2944,7 @@ fn parseIfBlock(context: *CompileContext, sql: []const u8, body_start: usize, sp
 
 fn parseStaticIfCondition(context: *CompileContext, span: []const u8) !bool {
     const keyword_len: usize = if (isIfStatement(span)) 2 else if (isElifStatement(span)) 4 else return error.UnsupportedJinja;
-    return (try context.evaluate(controlExpression(span[keyword_len..]))).truthy();
+    return native_expr.truthyWithHost(context.value_arena.allocator(), try context.evaluate(controlExpression(span[keyword_len..])), context.host());
 }
 
 fn controlExpression(raw: []const u8) []const u8 {
@@ -4245,6 +4283,9 @@ test "compileModel consumes generators incrementally with deferred loop metadata
         .{ .template = "{% set stream=zip([1,2,3],[4,5,6]) %}{% for x in stream %}{{ loop.last }}{% break %}{% endfor %}|{{ stream|list }}", .expected = "False|[(3, 6)]" },
         .{ .template = "{% set stream=zip([1,2],[3,4]) %}{% for x in stream %}{{ loop.index }}/{{ loop.length }}:{{ loop.last }};{% endfor %}|{{ stream|list }}", .expected = "1/2:False;2/2:True;|[]" },
         .{ .template = "{% set cutoff=3 %}{% for x in [1,2,3] if x<cutoff %}{% set cutoff=0 %}{{ x }}:{{ loop.last }};{% endfor %}", .expected = "1:False;2:True;" },
+        .{ .template = "{% set stream=zip([1,2,3],[4,5,6]) %}{% for x in stream %}{{ loop }}{% break %}{% endfor %}|{{ stream|list }}", .expected = "<LoopContext 1/3>|[]" },
+        .{ .template = "{% set stream=zip([1,2,3],[4,5,6]) %}{% for x in stream %}{% if loop %}yes{% endif %}{% break %}{% endfor %}|{{ stream|list }}", .expected = "yes|[]" },
+        .{ .template = "{% set seen=[] %}{% for x in [1,2,3] if seen.append(x) or x<3 %}{{ x }}:{{ loop.last }};{% endfor %}|{{ seen }}", .expected = "1:False;2:True;|[1, 2, 3]" },
     };
     for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

@@ -24,6 +24,13 @@ POSITIVE = [
     "{% set stream=zip((1,2,3),(4,5,6)) %}select '{% for x in stream %}{{ x }}{% break %}{% endfor %}|{{ stream|list }}' as value",
     "select '{% for x,y in zip((1,2),(3,4)) %}{{ x+y }}{% if loop.first %}{% continue %}{% endif %}done{% endfor %}' as value",
     "select '{% for x in [1,2] %}{% set outer=loop %}{% for y in [3,4] %}{{ outer.index }}:{{ loop.index }}:{{ loop.last }};{% endfor %}{% endfor %}' as value",
+    "{% set stream=zip((1,2,3),(4,5,6)) %}select '{% for x in stream %}{{ loop }}{% break %}{% endfor %}|{{ stream|list }}' as value",
+    "select '{% for x in zip([1,2],[3,4]) %}{{ [loop] }}|{{ {'row':loop} }}|{{ loop|string }}|{{ 'row='~loop }};{% endfor %}' as value",
+    "{% set seen=[] %}select '{% for x in [1,2,3] if seen.append(x) or x<3 %}{{ x }}:{{ loop.last }};{% endfor %}|{{ seen }}' as value",
+    "{% set values=[1,2] %}select '{% for x in values %}{% if x==1 %}{% do values.append(3) %}{% endif %}{{ x }}:{{ loop.length }}:{{ loop.last }};{% endfor %}|{{ values }}' as value",
+    "{% set values=[1,2] %}select '{% for x in values %}{{ loop.length }}{% if x==1 %}{% do values.append(3) %}{% endif %}:{{ x }}:{{ loop.length }};{% endfor %}' as value",
+    "{% set values=[1,2] %}select '{% for x in values %}{% do values.clear() %}{{ loop.length }}:{{ loop.revindex }}:{{ loop.revindex0 }};{% endfor %}' as value",
+    "{% set stream=zip([1,2,3],[4,5,6]) %}select '{% for x in stream %}{% if loop %}yes{% endif %}{% break %}{% endfor %}|{{ stream|list }}' as value",
 ]
 
 
@@ -56,3 +63,13 @@ def test_requested_loop_metadata_and_invalid_methods_raise_like_core(tmp_path, c
     pair.write("macros/first.sql", MACROS)
     pair.write("models/marts/rendered.sql", template)
     pair.invoke(success=False)
+
+
+@pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
+def test_iterator_aliases_across_macro_returns_share_the_consumed_state(tmp_path, request, configuration_oracle, adapter):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, adapter)
+    pair.write("macros/first.sql", MACROS + "{% macro echo(stream) %}{{ return(stream) }}{% endmacro %}")
+    pair.write("models/marts/rendered.sql", "{% set stream=zip([1,2,3],[4,5,6]) %}{% set returned=echo(stream) %}select '{{ returned is sameas stream }}|{{ first(returned) }}|{{ stream|list }}' as value")
+    actual, expected = pair.invoke()
+    assert actual["nodes"]["model.configuration_fixture.rendered"]["compiled_code"] == expected["nodes"]["model.configuration_fixture.rendered"]["compiled_code"]

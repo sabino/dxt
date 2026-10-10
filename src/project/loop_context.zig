@@ -12,9 +12,11 @@ pub const State = struct {
 };
 
 pub fn value(a: std.mem.Allocator, id: usize) !expression.Value {
-    const entries = try expression.allocateEntries(a, 2);
+    const entries = try expression.allocateEntries(a, 4);
     entries[0] = .{ .key = "__dxt_getattr", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_loop_attribute:{d}", .{id}) } };
     entries[1] = .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } };
+    entries[2] = .{ .key = "__dxt_repr", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_loop_repr:{d}", .{id}) } };
+    entries[3] = .{ .key = "__dxt_len", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_loop_length:{d}", .{id}) } };
     return .{ .object = entries };
 }
 
@@ -25,8 +27,8 @@ pub fn attribute(a: std.mem.Allocator, state: *State, id: usize, name: []const u
     if (std.mem.eql(u8, name, "first")) return .{ .boolean = state.index == 0 };
     if (std.mem.eql(u8, name, "last")) return .{ .boolean = state.ended and state.items.items.len == state.index + 1 };
     if (std.mem.eql(u8, name, "length")) return expression.integerValue(a, state.known_length orelse state.items.items.len);
-    if (std.mem.eql(u8, name, "revindex")) return expression.integerValue(a, (state.known_length orelse state.items.items.len) - state.index);
-    if (std.mem.eql(u8, name, "revindex0")) return expression.integerValue(a, (state.known_length orelse state.items.items.len) - state.index - 1);
+    if (std.mem.eql(u8, name, "revindex")) return expression.integerValue(a, @as(i64, @intCast(state.known_length orelse state.items.items.len)) - @as(i64, @intCast(state.index)));
+    if (std.mem.eql(u8, name, "revindex0")) return expression.integerValue(a, @as(i64, @intCast(state.known_length orelse state.items.items.len)) - @as(i64, @intCast(state.index)) - 1);
     if (std.mem.eql(u8, name, "depth")) return expression.integerValue(a, 1);
     if (std.mem.eql(u8, name, "depth0")) return expression.integerValue(a, 0);
     if (std.mem.eql(u8, name, "previtem") or std.mem.eql(u8, name, "nextitem")) {
