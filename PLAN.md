@@ -45,6 +45,34 @@ x86_64/ARM CI. Exact candidate identities, counts and outcomes are recorded in
 [PR #221](https://github.com/sabino/dxt/pull/221) and
 [issue #220](https://github.com/sabino/dxt/issues/220).
 
+The complete ARM64 report for `c81a20b` contains all 5,819 expected unique
+identities: 5,759 passed, 60 failed, zero errors and zero skips. A separate
+same-repository diagnostic verifies the sealed original report and its source;
+its successful extraction is negative evidence, never compatibility acceptance.
+The original x86_64 suite continues unchanged to its terminal report. Preserve
+both reports before publishing a corrected candidate.
+
+Bounded failure triage has disjoint ownership: the workflow worker owns physical
+version identities in `workflow.zig`; the snapshot worker owns the two modern
+YAML snapshot allocator panics; the source worker grounds runtime diagnostic,
+stored-audit and PostgreSQL rollback failures; the oracle worker grounds parallel
+compile, native-session and executed test-helper behavior; the readiness worker
+grounds documentation fallback order and invalid-cache equivalence. The
+supervisor owns nullable incremental configuration, deprecation environment
+policy, metric movement budgets, planning and integration. Read-only original
+fixture and actual pinned Core controls precede each bounded correction. Keep
+the original cases, artifact/row/rollback/privacy assertions and full-suite
+identities; correct stale expectations only when observed Core or the documented
+native extension contract establishes their replacement. Coordinate shared
+source files before edits. A new combined candidate requires fresh native,
+affected focused, complete platform, public-project and release acceptance.
+The oracle worker exclusively owns the compile facade catch while closing
+Core's fail-fast exception: completed fail-fast compilation errors publish
+results and exit 1; ordinary compilation errors exit 2, with durable publication
+only through the documented native opt-in. Keep docs catches and preflight,
+infrastructure, out-of-memory and earlier-artifact policies unchanged. Integrate
+this bounded facade commit before any subsequent worker edits that shared file.
+
 The compile-policy candidate `000eb74` passes all 796 native tests and all 95
 affected focused checks. Its interrupted complete-suite run is negative
 evidence, not final acceptance. Subsequent namespace corrections require fresh
