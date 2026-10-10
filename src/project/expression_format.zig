@@ -382,10 +382,19 @@ fn formatValue(a: std.mem.Allocator, value: Value, specification: []const u8) ![
     if (value == .integer) return try integerFormat(a, value.integer, try parseSpec(specification));
     if (value == .boolean) return try integerFormat(a, if (value.boolean) "1" else "0", try parseSpec(specification));
     if (value == .object) {
-        const method = value.attribute("strftime");
-        if (method == .callable and std.mem.startsWith(u8, method.callable, "__dxt_datetime:")) {
-            const result = (try @import("timestamp_context.zig").call(a, method.callable, &.{.{ .value = .{ .string = specification } }})) orelse return error.JinjaTypeError;
-            return try result.text(a);
+        // Temporal state selects __format__; possessing a bound strftime
+        // method alone does not give a dictionary datetime's protocol.
+        const method_value = value.attribute("strftime");
+        if (method_value == .callable) {
+            const method = method_value.callable;
+            const args = &[_]Argument{.{ .value = .{ .string = specification } }};
+            const result = if (@import("timestamp_context.zig").state(value) != null and std.mem.startsWith(u8, method, "__dxt_datetime:"))
+                try @import("timestamp_context.zig").call(a, method, args)
+            else if (@import("datetime_time.zig").state(value) != null and std.mem.startsWith(u8, method, "__dxt_time:"))
+                try @import("datetime_time.zig").call(a, method, args)
+            else
+                null;
+            if (result) |formatted| return try formatted.text(a);
         }
     }
     if (value != .string) return error.JinjaTypeError;
@@ -537,6 +546,20 @@ test "str.format_map retains typed lookups and performs lazy mapping validation"
     try std.testing.expectError(error.JinjaKeyError, renderMap(a, "{missing}", args));
     try std.testing.expectEqualStrings("literal {}", try renderMap(a, "literal {{}}", &.{.{ .value = .none }}));
     try std.testing.expectError(error.InvalidJinjaArguments, renderMap(a, "literal", &.{}));
+}
+
+test "str.format uses native date datetime and time protocols without promoting dictionaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const timestamp = @import("timestamp_context.zig");
+    const date = try timestamp.fromYaml(a, "2024-02-29");
+    const datetime = try timestamp.fromYaml(a, "2024-02-29T12:34:56.123456Z");
+    const time = try @import("datetime_time.zig").value(a, 45296123456, null, 0);
+    try std.testing.expectEqualStrings("2024-02-29 12:34:56.123456 +0000", try render(a, "{:%Y-%m-%d} {:%H:%M:%S.%f %z}", &.{ .{ .value = date }, .{ .value = datetime } }));
+    try std.testing.expectEqualStrings("1900-01-01 12:34:56.123456", try renderMap(a, "{t:%Y-%m-%d %H:%M:%S.%f}", &.{.{ .value = .{ .object = &.{.{ .key = "t", .value = time }} } }}));
+    const forged: Value = .{ .object = &.{.{ .key = "strftime", .value = datetime.attribute("strftime") }} };
+    try std.testing.expectError(error.JinjaTypeError, render(a, "{:%Y}", &.{.{ .value = forged }}));
 }
 
 fn checkFormatAllocations(a: std.mem.Allocator) !void {
