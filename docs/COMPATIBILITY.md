@@ -191,6 +191,11 @@ Package transports can require `git`, `curl` and `tar`.
 
 ## Validation Status
 
+Candidate-specific test counts, remaining blockers and final CI outcomes are
+recorded in [PR #221](https://github.com/sabino/dxt/pull/221) and
+[issue #220](https://github.com/sabino/dxt/issues/220). Historical focused
+passes cannot certify a subsequent product change.
+
 Focused feature gates exercise real native adapters and pinned Core/MetricFlow
 outputs, with negative cases and complete applicable schemas. All six unchanged
 public Jaffle CLI steps and the historical CLI regression gate have passed on

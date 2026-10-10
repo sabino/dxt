@@ -15,6 +15,13 @@ and certification.
 differences. [PLAN.md](../PLAN.md) remains the active integration/sequencing
 contract.
 
+There are **12 functional implementation tracks**: eight Core tracks and the
+four proposed tracks below. The ninth Core row is release acceptance. This is
+a track count, not a count of individually certified features. Current
+candidate counts and final gate outcomes are recorded in
+[PR #221](https://github.com/sabino/dxt/pull/221) and
+[issue #220](https://github.com/sabino/dxt/issues/220).
+
 ## Versioned Acceptance Contract
 
 The declared comparison targets are dbt Core **1.10.5**, dbt-duckdb **1.9.6**,

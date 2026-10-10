@@ -33,9 +33,24 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 
 ### Full Usability Implementation Campaign
 
-The fresh unfiltered 5,808-case run on the published sorting candidate has
+The initial release contract is SQL execution on DuckDB and PostgreSQL.
+Eight functional Core tracks and four proposed feature tracks have native
+implementations and focused evidence; release acceptance is a separate track.
+The current combined candidate includes reviewed compile/docs durability,
+Core retry interoperability, declared-secret diagnostic publication and
+authored catalog hook/dispatch corrections. A fresh native/CLI build and all
+focused checks precede publication, followed by the complete unfiltered suite,
+unchanged public projects, release/install/performance checks and actual
+x86_64/ARM CI. Exact candidate identities, counts and outcomes are recorded in
+[PR #221](https://github.com/sabino/dxt/pull/221) and
+[issue #220](https://github.com/sabino/dxt/issues/220).
+
+The following triage notes describe the earlier known-failing candidates and
+the bounded corrections; they do not establish final acceptance.
+
+The earlier unfiltered 5,808-case run on the published sorting candidate
 exposed eight failures across initialization, a colored-output expectation and
-durable compile/docs error artifacts. The original whole run continues without
+durable compile/docs error artifacts. It continued without
 source changes to collect integrated evidence; its failed scratch and reports
 are retained and cannot count as acceptance. Read-only triage is disjoint:
 the oracle worker grounds generated DuckDB profile paths and invalid-init
@@ -148,12 +163,14 @@ disjoint commits, then certifies every focused case. The earlier 792-test native
 pass and 5,818-case collection are partial evidence for their recorded source;
 they cannot certify this subsequent resolver correction.
 
-The older known-failing 5,808-case run is intentionally interrupted with SIGINT
-after preserving its current progress, failures and source/binary receipts.
+The older known-failing 5,808-case run was intentionally interrupted with SIGINT
+after preserving 2,063 passes, ten known failures and its source/binary receipts.
 It cannot reach acceptance, and continued fixture growth threatens the space
-needed for corrected clean builds. Allow its normal finalizers and JUnit
-publication to close before changing that checkout. This is partial negative
-evidence only. All corrections still require a fresh complete unfiltered run,
+needed for corrected clean builds. The wrapper returned 130 without normal
+pytest finalization or JUnit publication. Its child processes were verified
+closed and the owned orphan database stopped before changing that checkout;
+the interruption and closure receipts remain retained. This is partial
+negative evidence only. All corrections still require a fresh complete unfiltered run,
 original build fixtures, both actual CI architectures and final public/release
 gates. Closed database scratch may be retired only by exact approved scope with
 two independently verified complete physical restores and durable recovery
