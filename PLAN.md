@@ -112,7 +112,12 @@ DuckDB type/PostgreSQL Column expression/mapping hooks, followed by the finite
 cursor UUID equality/key protocol if actual Core confirms the review gap;
 the oracle worker owns query-cursor constructor wiring for those helpers.
 The cache worker owns the isolated Column value helper, native bytea cast/order
-API closure and actual Core cursor descriptor witnesses.
+and release API closure and actual Core cursor descriptor witnesses. After the
+bytea helper lands, the source worker owns its narrow expression call/slice
+hooks and compiler local-callable routing immediately before callable-name
+resolution; these hunks are separate from the expression worker's alias
+publication and seed-performance changes. Constructor wiring stays with the
+oracle worker.
 The source worker's 62 Decimal comparisons pass on both the first and corrected
 typed CLIs. Its independent transport review found cursor
 consumption, eager Agate serialization and duplicate-name mismatches; the oracle
