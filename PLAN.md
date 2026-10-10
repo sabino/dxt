@@ -54,8 +54,13 @@ with actual Core container/metadata evidence; the command test file remains
 owned by the oracle worker to prevent overlapping edits. Any correction
 must retain the original database effects, diagnostics, retry and full-schema
 assertions. The supervisor records planning in a separate worktree during the
-original run, integrates only reviewed bounded corrections after its closure,
-then restarts the complete unfiltered suite and applicable final gates.
+original run and integrates reviewed bounded corrections in that separate
+checkout. After focused certification, it can push the draft branch and start
+corrected actual-platform CI while the original local checkout remains frozen
+on its failing candidate. Once that original run closes, the local checkout
+receives the reviewed corrections and restarts the complete unfiltered suite
+and applicable final gates. Reports always identify their actual candidate;
+the older full run cannot certify the corrected branch.
 
 The final unfiltered 5,626-case candidate run was intentionally interrupted
 after its first failure was grounded: a fixture rendered a dictionary created
