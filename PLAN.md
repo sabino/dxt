@@ -85,16 +85,35 @@ writer; seed nodes now omit the forbidden field. The combined native class and
 artifact integration passes 647 tests. A final unchanged-package rerun is
 still required before calling the public package gate repaired.
 
+The next unchanged public PostgreSQL rerun passes command execution, complete
+artifact schemas, resource/config/dependency identities and build outcomes. Its
+remaining strict compiled-SQL difference is a physical CRLF macro in dbt-utils:
+Jinja normalizes template source newlines before lexing. The filter worker owns
+that rendering-source correction and its both-adapter oracle; authored bytes,
+checksums and the strict public comparison must remain intact.
+
+The integrated limited generic-test namespace has 50 mandatory Core cases and
+preserves authored discovery and dependency traversal order. Per-function
+literal pools and RegexFlag class identity are integrated with their focused
+certificates. Stock execution now writes its actual dispatched main SQL at the
+execution boundary, with 86 focused materialization/contract cases. Test
+materialization write paths have 60 mandatory both-adapter Core cases and use
+their resource's own completed-write record. Actual DuckDB COPY and PostgreSQL
+bound seed loading remain open. Native snapshot main SQL deliberately records
+the SQL actually executed; optimized execution must retain Core-compatible
+rows, types, lifecycle, paths and artifact schemas, rather than publish a second
+unexecuted SQL reconstruction.
+
 The filter worker's harness-only Core lifecycle closure reproduces and resets
 both upstream module-global deprecation registries for each in-process oracle
 invocation. Fresh CLI comparisons and current-command strict-warning failures
 remain required. This prevents an unrelated earlier warning or failed command
 from contaminating the complete suite; it changes no product runtime behavior.
 
-The next shared compiler sequence is the resource artifact writer and model
-provenance, test compilation writes, console error events, the expression/class
-protocol chain, then the limited generic-test parse namespace and inline macro
-closures, followed by the literal/primitive identity pools. The dedicated
+The remaining shared compiler sequence is rendering-source newline normalization,
+inline macro closures and saved callable container methods. Resource provenance,
+test compilation writes, console errors, expression/class protocols, the limited
+generic-test namespace and literal/primitive identity pools are integrated. The dedicated
 namespace worker owns discovery-order resolver hooks and the limited parse
 namespace, including recursive overwrite order and argument rendering; runtime
 provider lookup remains separate. Every slice needs actual Core comparisons.
