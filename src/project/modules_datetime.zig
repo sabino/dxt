@@ -103,7 +103,7 @@ pub fn resolve(a: Allocator, path: []const u8) !?Value {
     const kind = parts.next().?;
     for (exports) |name| if (std.mem.eql(u8, name, kind)) {
         var value = try classValue(a, kind);
-        while (parts.next()) |attribute| value = try expr.checkedAttribute(value, attribute);
+        while (parts.next()) |attribute| value = try @import("datetime_bound_method.zig").attribute(a, value, attribute, try expr.checkedAttribute(value, attribute));
         return value;
     };
     return .undefined;
@@ -384,7 +384,7 @@ test "native datetime descriptors preserve inherited and base class semantics" {
     try std.testing.expectError(error.InvalidJinjaArguments, call(a, "__dxt_datetime_unbound:date:replace", &.{ .{ .value = moment }, .{ .name = "hour", .value = .{ .integer = "1" } } }, .{}));
     try std.testing.expectError(error.JinjaTypeError, call(a, "__dxt_datetime_unbound:datetime:isoformat", &.{.{ .value = try dates.datetimeValue(a, ns, true, null) }}, .{}));
     const first = try expr.attributeWithHost(a, moment, "fromordinal", null);
-    try std.testing.expectEqualStrings("0001-01-01 00:00:00", try (try call(a, first.callable, &.{.{ .value = .{ .integer = "1" } }}, .{})).?.text(a));
+    try std.testing.expectEqualStrings("0001-01-01 00:00:00", try (try call(a, expr.callableName(first).?, &.{.{ .value = .{ .integer = "1" } }}, .{})).?.text(a));
 }
 
 test "inherited datetime extrema use intrinsic render cache despite authored modules shadow" {

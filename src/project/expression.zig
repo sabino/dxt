@@ -339,12 +339,21 @@ test "temporal membership validates nested values after exact aliases" {
     try std.testing.expectError(error.AbstractTimeZoneMethod, containsWithHost(a, .{ .list = &.{naive} }, abstract, null));
     try std.testing.expectError(error.AbstractTimeZoneMethod, equalMemberChecked(.{ .tuple = &.{abstract} }, .{ .tuple = &.{naive} }));
     try std.testing.expectError(error.AbstractTimeZoneMethod, equalMemberChecked(.{ .object = &.{.{ .key = "x", .value = abstract }} }, .{ .object = &.{.{ .key = "x", .value = naive }} }));
+    const abstract_tuple = Value{ .tuple = &.{abstract} };
+    const naive_tuple = Value{ .tuple = &.{naive} };
+    try std.testing.expect((try apply(a, "==", abstract_tuple, abstract_tuple)).boolean);
+    try std.testing.expectError(error.AbstractTimeZoneMethod, apply(a, "==", abstract_tuple, naive_tuple));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, apply(a, "!=", abstract_tuple, naive_tuple));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, valueOrder(a, abstract_tuple, naive_tuple));
+    const nan = try floatValue(a, std.math.nan(f64));
+    try std.testing.expect(!(try apply(a, "==", nan, nan)).boolean);
     const iterator = try sequences.iterator(a, &.{ naive, abstract });
     try std.testing.expectError(error.AbstractTimeZoneMethod, containsWithHost(a, iterator, abstract, null));
     try std.testing.expectEqualStrings("1", iterator.attribute("__dxt_sequence_cursor").integer);
 }
 
 pub fn checkedAttribute(value: Value, name: []const u8) !Value {
+    if (@import("datetime_bound_method.zig").isBound(value) and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (@import("datetime_protocol.zig").kind(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (sequences.kind(value) != null) return .undefined;
     if (tupleProtocol(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
@@ -379,7 +388,7 @@ pub fn attributeWithHost(a: std.mem.Allocator, value: Value, name: []const u8, h
         return current.call(current.context, getter.callable, &.{.{ .value = .{ .string = name } }}, a);
     }
     const direct = try checkedAttribute(value, name);
-    if (direct != .undefined) return direct;
+    if (direct != .undefined) return try @import("datetime_bound_method.zig").attribute(a, value, name, direct);
     const datetime = @import("modules_datetime.zig");
     if (datetime.instanceClass(value)) |kind| if (datetime.inheritedAttributeName(kind, name)) {
         const path = try std.fmt.allocPrint(a, "modules.datetime.{s}.{s}", .{ kind, name });
@@ -1298,7 +1307,7 @@ fn valueOrderDepth(allocator: std.mem.Allocator, left: Value, right: Value, dept
         const lhs = (if (left == .list) left.list else tupleProtocol(left)) orelse return error.JinjaTypeError;
         const rhs = (if (right == .list) right.list else tupleProtocol(right)) orelse return error.JinjaTypeError;
         for (lhs[0..@min(lhs.len, rhs.len)], rhs[0..@min(lhs.len, rhs.len)]) |x, y| {
-            if (equalMember(x, y)) continue;
+            if (try equalMemberChecked(x, y)) continue;
             return valueOrderDepth(allocator, x, y, depth + 1);
         }
         return std.math.order(lhs.len, rhs.len);
@@ -1373,6 +1382,8 @@ fn immutableEqual(left: Value, right: Value) bool {
     return immutableSame(left, right);
 }
 pub fn equalValues(a: Value, b: Value) bool {
+    const bound_methods = @import("datetime_bound_method.zig");
+    if (bound_methods.isBound(a) or bound_methods.isBound(b)) return bound_methods.equal(a, b);
     if (tupleProtocol(a)) |items| {
         const other = tupleProtocol(b) orelse return false;
         if (items.len != other.len) return false;
@@ -1521,8 +1532,11 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     if (a == .object) if (tupleProtocol(a)) |items| return apply(allocator, op, .{ .tuple = items }, b);
     if (b == .object) if (tupleProtocol(b)) |items| return apply(allocator, op, a, .{ .tuple = items });
     if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) try temporal.validateComparison(a, b);
-    if (std.mem.eql(u8, op, "==")) return .{ .boolean = equal(a, b) };
-    if (std.mem.eql(u8, op, "!=")) return .{ .boolean = !equal(a, b) };
+    if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) {
+        const collection = a == .list or a == .tuple or (a == .object and a.attribute("__dxt_rendered") == .undefined and sequences.kind(a) == null and !sets.isSet(a));
+        const matches = if (collection) try equalMemberChecked(a, b) else equal(a, b);
+        return .{ .boolean = if (std.mem.eql(u8, op, "==")) matches else !matches };
+    }
     if (std.mem.eql(u8, op, "in")) return .{ .boolean = try contains(allocator, b, a) };
     if (std.mem.eql(u8, op, "not in")) return .{ .boolean = !(try contains(allocator, b, a)) };
     if (std.mem.eql(u8, op, "~") or (std.mem.eql(u8, op, "+") and a == .string and b == .string)) return .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ try a.text(allocator), try b.text(allocator) }) };
@@ -1627,6 +1641,7 @@ pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value
     };
 }
 pub fn indexValueWithHost(allocator: std.mem.Allocator, value: Value, key: Value, host: ?Host) !Value {
+    if (key == .string and @import("datetime_bound_method.zig").isBound(value)) return attributeWithHost(allocator, value, key.string, host);
     if (key == .string and @import("datetime_protocol.zig").kind(value) != null) return attributeWithHost(allocator, value, key.string, host);
     if (key == .string and value.attribute("__dxt_getattr") == .callable) return attributeWithHost(allocator, value, key.string, host);
     return indexValue(allocator, value, key);

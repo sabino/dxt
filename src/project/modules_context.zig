@@ -13,7 +13,7 @@ pub fn resolveCached(a: std.mem.Allocator, path: []const u8, cache: *Cache) !?ex
     var value = cache.value.?;
     if (path.len == "modules".len) return value;
     var parts = std.mem.splitScalar(u8, path["modules.".len..], '.');
-    while (parts.next()) |part| value = try expression.checkedAttribute(value, part);
+    while (parts.next()) |part| value = try @import("datetime_bound_method.zig").attribute(a, value, part, try expression.checkedAttribute(value, part));
     return value;
 }
 pub const CallOptions = struct { host: ?expression.Host = null, io: ?std.Io = null, now_ns: ?i96 = null };

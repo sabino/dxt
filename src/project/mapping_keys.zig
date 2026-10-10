@@ -34,6 +34,7 @@ pub fn hashable(candidate: Value) anyerror!void {
 
 fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (@import("datetime_bound_method.zig").isBound(candidate)) return;
     if (@import("datetime_operations.zig").offsetError(candidate)) return error.AbstractTimeZoneMethod;
     if (@import("native_tuple.zig").items(candidate)) |items| {
         for (items) |item| try checkHashable(item, depth + 1);
@@ -69,6 +70,8 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
 }
 
 pub fn keyEqual(left: Value, right: Value) bool {
+    const methods = @import("datetime_bound_method.zig");
+    if (methods.isBound(left) or methods.isBound(right)) return methods.equal(left, right);
     if (@import("native_tuple.zig").items(left)) |a| {
         const b = @import("native_tuple.zig").items(right) orelse return false;
         if (a.len != b.len) return false;
@@ -216,6 +219,35 @@ test "dictionary numeric and tuple keys preserve Python equality" {
         .{ .tuple = &.{ .{ .integer = "0" }, .{ .string = "a" } } },
     ));
     try std.testing.expect(!keyEqual(.{ .integer = "9007199254740993" }, .{ .number = 9007199254740992.0 }));
+}
+
+test "builtin temporal method keys compare intrinsic function and receiver" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const methods = @import("datetime_bound_method.zig");
+    const dates = @import("timestamp_context.zig");
+    const module = @import("modules_datetime.zig");
+    const date_class = (try module.resolve(a, "modules.datetime.date")).?;
+    const raw_class_method = date_class.attribute("fromordinal");
+    const first = try methods.attribute(a, date_class, "fromordinal", raw_class_method);
+    const repeated = try methods.attribute(a, date_class, "fromordinal", raw_class_method);
+    const keyed = try create(first, .{ .string = "first" });
+    try std.testing.expect(matches(keyed, repeated));
+    try std.testing.expect(matches(keyed, first));
+    const other_class = (try module.resolve(a, "modules.datetime.datetime")).?;
+    const other = try methods.attribute(a, other_class, "fromordinal", other_class.attribute("fromordinal"));
+    try std.testing.expect(!matches(keyed, other));
+    const value = try dates.fromYaml(a, "2024-01-01");
+    const same_value = try dates.fromYaml(a, "2024-01-01");
+    const instance = try methods.attribute(a, value, "isoformat", value.attribute("isoformat"));
+    const repeat_instance = try methods.attribute(a, value, "isoformat", value.attribute("isoformat"));
+    const different_instance = try methods.attribute(a, same_value, "isoformat", same_value.attribute("isoformat"));
+    const instance_key = try create(instance, .none);
+    try std.testing.expect(matches(instance_key, repeat_instance));
+    try std.testing.expect(!matches(instance_key, different_instance));
+    try std.testing.expectError(error.JinjaTypeError, jsonKey(a, first));
+    try std.testing.expectError(error.JinjaTypeError, hashable(.{ .object = &.{.{ .key = "__dxt_native_bound_method", .value = .{ .string = "__dxt_native_bound_method" } }} }));
 }
 
 test "dictionary keys reject mutable containers, including nested tuples" {
