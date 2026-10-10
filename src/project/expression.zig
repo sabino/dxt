@@ -243,6 +243,10 @@ pub const Host = struct {
     // attributing a nested compilation's write to its caller.
     get_written_path: ?*const fn (*anyopaque, []const u8) ?[]const u8 = null,
     capture_undefined: bool = false,
+    // Compiled template hosts retain immutable constants per generated
+    // function. Probes forbid runtime names and calls before executing them.
+    constant: ?*const fn (*anyopaque, Value, std.mem.Allocator) anyerror!Value = null,
+    static_only: bool = false,
 };
 
 /// Named tuples use an internal callable marker, never authored string metadata.
@@ -502,6 +506,14 @@ const Parser = struct {
     active: bool = true,
     host: ?Host,
 
+    fn fold(self: *Parser, start: usize, value: Value) anyerror!Value {
+        if (!self.active) return value;
+        const host = self.host orelse return value;
+        const callback = host.constant orelse return value;
+        const constant = (try @import("expression_constants.zig").probe(self.allocator, self.input[start..self.index])) orelse return value;
+        return callback(host.context, constant, self.allocator);
+    }
+
     fn space(self: *Parser) void {
         while (self.index < self.input.len and std.ascii.isWhitespace(self.input[self.index])) self.index += 1;
     }
@@ -529,6 +541,7 @@ const Parser = struct {
     }
 
     fn binary(self: *Parser, minimum: u8) anyerror!Value {
+        const start = self.index;
         // A conditional has lower precedence than every binary operator. Locate
         // its complete argument/list/group expression before evaluating either
         // branch, so inactive branches never call the database or a macro.
@@ -538,7 +551,7 @@ const Parser = struct {
             if (topLevelKeyword(input, "if") != null) {
                 const value = if (self.active) try evaluate(self.allocator, input, self.host) else Value.none;
                 self.index = finish;
-                return value;
+                return self.fold(start, value);
             }
         }
         self.depth += 1;
@@ -604,7 +617,7 @@ const Parser = struct {
                 lhs = try applyWithHost(self.allocator, operator, lhs, rhs, self.host);
             }
         }
-        return lhs;
+        return self.fold(start, lhs);
     }
 
     fn readOperator(self: *Parser) ?[]const u8 {
@@ -622,7 +635,8 @@ const Parser = struct {
     }
 
     fn unaryFiltered(self: *Parser, with_filters: bool) anyerror!Value {
-        if (self.take("not")) return .{ .boolean = !try truthyWithHost(self.allocator, try self.binary(3), self.host) };
+        const start = self.index;
+        if (self.take("not")) return self.fold(start, .{ .boolean = !try truthyWithHost(self.allocator, try self.binary(3), self.host) });
         const value: Value = if (self.take("-")) blk: {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
@@ -640,15 +654,16 @@ const Parser = struct {
             if (operand != .integer and floatProtocol(operand) == null and complexProtocol(operand) == null) return error.JinjaTypeError;
             break :blk operand;
         } else try self.atom();
-        return self.postfix(value, with_filters);
+        return self.postfix(value, with_filters, start);
     }
 
-    fn postfix(self: *Parser, primary: Value, with_filters: bool) anyerror!Value {
+    fn postfix(self: *Parser, primary: Value, with_filters: bool, node_start: usize) anyerror!Value {
         var value = primary;
         while (true) {
             if (self.take("(")) {
                 const args = try self.arguments();
                 if (self.active) {
+                    if (self.host != null and self.host.?.static_only) return error.NotStaticJinjaExpression;
                     if (value == .capture_undefined) {
                         value = try callUndefined(value);
                         continue;
@@ -704,7 +719,7 @@ const Parser = struct {
                 }
             } else break;
         }
-        return value;
+        return self.fold(node_start, value);
     }
 
     fn testArguments(self: *Parser) anyerror![]const Argument {
@@ -720,7 +735,8 @@ const Parser = struct {
             if (std.mem.eql(u8, token, "is")) return error.InvalidJinjaExpression;
         } else if (!std.ascii.isDigit(next) and next != '\'' and next != '"' and next != '[' and next != '{') return &.{};
         const arguments_ = try self.allocator.alloc(Argument, 1);
-        arguments_[0] = .{ .value = try self.postfix(try self.atom(), false) };
+        const argument_start = self.index;
+        arguments_[0] = .{ .value = try self.postfix(try self.atom(), false, argument_start) };
         return arguments_;
     }
 
@@ -837,6 +853,7 @@ const Parser = struct {
         if (std.mem.eql(u8, first, "true") or std.mem.eql(u8, first, "True")) return .{ .boolean = true };
         if (std.mem.eql(u8, first, "false") or std.mem.eql(u8, first, "False")) return .{ .boolean = false };
         if (std.mem.eql(u8, first, "none") or std.mem.eql(u8, first, "None")) return .none;
+        if (self.active and self.host != null and self.host.?.static_only) return error.NotStaticJinjaExpression;
         // Resolve complete namespace paths through the host before applying
         // object attributes, so dbt package macros and target/this coexist.
         var path_end = self.index;
@@ -879,6 +896,7 @@ const Parser = struct {
     }
 
     fn method(self: *Parser, receiver: Value, method_name: []const u8, args: []const Argument) !Value {
+        if (self.host != null and self.host.?.static_only) return error.NotStaticJinjaExpression;
         if (receiver == .capture_undefined) {
             const bound = try checkedAttribute(receiver, method_name);
             if (bound == .capture_undefined) return try callUndefined(bound);
