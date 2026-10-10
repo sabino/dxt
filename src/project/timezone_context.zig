@@ -350,7 +350,7 @@ fn methodCall(a: Allocator, encoded: []const u8, args: []const Argument) anyerro
     const actual_identity = if (temporal.timezone) |zone| zone.attribute("__dxt_timezone_identity") else .undefined;
     const same_timezone = actual_identity == .string and std.mem.eql(u8, own_identity, actual_identity.string);
     if (localize or (accessor and !same_timezone)) {
-        if (temporal.offset_us != null) return error.AlreadyAwareDatetime;
+        if (temporal.timezone != null) return error.AlreadyAwareDatetime;
         const info = if (dynamic) try localizeInfo(zoneAt(@intCast(id.zone)).name, @intCast(@divFloor(temporal.civil_ns, std.time.ns_per_s)), is_dst) else Info{ .offset_seconds = @intCast(@divTrunc(id.offset_us, std.time.us_per_s)), .dst_seconds = 0, .abbreviation = id.abbreviation };
         const zone = if (dynamic) try timezoneValue(a, zoneAt(@intCast(id.zone)).name, info) else receiver;
         if (accessor) {
@@ -372,13 +372,13 @@ fn methodCall(a: Allocator, encoded: []const u8, args: []const Argument) anyerro
         return try dates.attachTimezone(a, utc_ns + @as(i96, offset) * std.time.ns_per_us, zone);
     }
     if (fromutc) {
-        if (temporal.offset_us != null and !same_timezone) {
+        if (temporal.timezone != null and !same_timezone) {
             // DstTzInfo accepts any instance from the same zone's tzinfo cache.
             if (!dynamic or temporal.timezone == null) return error.InvalidFromUtcTimezone;
-            const supplied = try parseIdentity(actual_identity.string);
+            const supplied = parseIdentity(actual_identity.string) catch return error.InvalidFromUtcTimezone;
             if (supplied.zone != id.zone) return error.InvalidFromUtcTimezone;
         }
-        if (id.zone == -1 and temporal.offset_us == null) return error.InvalidFromUtcTimezone;
+        if (id.zone == -1 and temporal.timezone == null) return error.InvalidFromUtcTimezone;
         const zone = try atUtc(a, receiver, @intCast(@divFloor(temporal.civil_ns, std.time.ns_per_s)));
         const offset = try expr.integerIndex(zone.attribute("__dxt_timezone_offset_us"));
         return try dates.attachTimezone(a, temporal.civil_ns + @as(i96, offset) * std.time.ns_per_us, zone);
@@ -529,4 +529,10 @@ test "native pytz localization normalization and exact datetime timezone metadat
     try std.testing.expectEqualStrings("0:05:30", try fixed_offset.text(a));
     try std.testing.expectError(error.AlreadyAwareDatetime, call(a, eastern.attribute("localize").callable, &.{.{ .value = localized }}));
     try std.testing.expectError(error.NaiveDatetime, call(a, eastern.attribute("normalize").callable, &.{.{ .value = naive }}));
+    const abstract = try dates.datetimeValueWithOffsetUs(a, 0, false, null, try @import("datetime_tzinfo.zig").value(a), 0);
+    try std.testing.expectError(error.AlreadyAwareDatetime, call(a, eastern.attribute("localize").callable, &.{.{ .value = abstract }}));
+    try std.testing.expectError(error.AlreadyAwareDatetime, call(a, eastern.attribute("utcoffset").callable, &.{.{ .value = abstract }}));
+    try std.testing.expectError(error.InvalidFromUtcTimezone, call(a, eastern.attribute("fromutc").callable, &.{.{ .value = abstract }}));
+    const utc = try timezoneValue(a, "UTC", null);
+    try std.testing.expectError(error.InvalidFromUtcTimezone, call(a, utc.attribute("fromutc").callable, &.{.{ .value = abstract }}));
 }

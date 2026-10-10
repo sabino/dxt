@@ -108,7 +108,10 @@ fn parseTime(text_: []const u8, allow_prefix: bool) !Parsed {
     return .{ .civil_ns = @as(i96, try clock(body, false)) * std.time.ns_per_us, .offset_us = offset };
 }
 pub fn iso(a: Allocator, text: []const u8, date_only: bool) !Parsed {
-    const date = try parseDate(a, text);
+    const boundary = if (date_only) text.len else try datetimeBoundary(text);
+    if (boundary > text.len) return error.InvalidDatetime;
+    const date = try parseDate(a, text[0..boundary]);
+    if (date.consumed != boundary) return error.InvalidDatetime;
     if (date.consumed == text.len) return .{ .civil_ns = @as(i96, date.days) * std.time.ns_per_day };
     if (date_only) return error.InvalidDatetime;
     const separator = std.unicode.utf8ByteSequenceLength(text[date.consumed]) catch return error.InvalidDatetime;
@@ -117,6 +120,26 @@ pub fn iso(a: Allocator, text: []const u8, date_only: bool) !Parsed {
     var result = try parseTime(text[date.consumed + separator ..], false);
     result.civil_ns += @as(i96, date.days) * std.time.ns_per_day;
     return result;
+}
+
+// CPython resolves ambiguous week-date separators before parsing the date.
+// A numeric separator must not be mistaken for a weekday or a clock digit.
+fn datetimeBoundary(text: []const u8) !usize {
+    if (text.len < 7) return error.InvalidDatetime;
+    if (text.len == 7) return 7;
+    if (text[4] == '-') {
+        if (text[5] != 'W') return 10;
+        if (text.len > 8 and text[8] == '-') {
+            if (text.len == 9) return error.InvalidDatetime;
+            return if (text.len > 10 and std.ascii.isDigit(text[10])) 8 else 10;
+        }
+        return 8;
+    }
+    if (text[4] != 'W') return 8;
+    var at: usize = 7;
+    while (at < text.len and std.ascii.isDigit(text[at])) : (at += 1) {}
+    if (at < 9) return at;
+    return if (at % 2 == 0) 7 else 8;
 }
 
 test "native ISO parser preserves basic week dates and exact subminute offsets" {
@@ -130,4 +153,7 @@ test "native ISO parser preserves basic week dates and exact subminute offsets" 
     try std.testing.expectError(error.InvalidDatetime, iso(a, "2023-W53-1", true));
     try std.testing.expectError(error.InvalidDatetime, iso(a, "2023-02-29", true));
     try std.testing.expectError(error.InvalidDatetime, iso(a, "2024-01-01TT12", false));
+    for ([_][]const u8{ "2024-W01-12:30", "2024W01112:30", "2024W01012:30" }) |text| try std.testing.expectEqual((try iso(a, "2024-01-01T12:30", false)).civil_ns, (try iso(a, text, false)).civil_ns);
+    try std.testing.expectError(error.InvalidDatetime, iso(a, "2024-W01-", false));
+    try std.testing.expectError(error.InvalidDatetime, iso(a, "2024W010", true));
 }
