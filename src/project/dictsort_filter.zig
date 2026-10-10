@@ -16,8 +16,10 @@ pub fn apply(a: std.mem.Allocator, value: Value, args: []const expression.Argume
 
     // Invoke the real items method rather than treating every object carrier
     // as a dictionary. Providers retain their public methods and restrictions.
-    const method = try expression.attributeWithHost(a, value, "items", host);
-    const iterable = try expression.callValue(a, method, &.{}, host);
+    const iterable = if (@import("builtin_bound_method.zig").isMapping(value) and !@import("builtin_bound_method.zig").isRelationMapping(value))
+        try expression.callBuiltinMethod(a, value, "items", &.{}, host)
+    else
+        try expression.callValue(a, try expression.attributeWithHost(a, value, "items", host), &.{}, host);
     const reverse = try expression.truthyWithHost(a, bound[2], host);
     const pairs = try expression.iterableValuesWithHost(a, iterable, host);
     const Item = struct { pair: Value, key: Value };
@@ -43,30 +45,7 @@ pub fn apply(a: std.mem.Allocator, value: Value, args: []const expression.Argume
     // Python reverses the input and final output so ties retain their original
     // order. This also preserves its false comparisons for unordered floats.
     if (reverse) std.mem.reverse(Item, items);
-    if (items.len < 64) {
-        // Python's short sort keeps an already ascending natural run intact,
-        // then inserts remaining keys after equal ones. A sorting network can
-        // reorder a NaN-separated run even though all adjacent tests are false.
-        var run: usize = @min(2, items.len);
-        if (items.len >= 2) {
-            const descending = Context.less(context, items[1], items[0]);
-            while (run < items.len) : (run += 1) {
-                if (Context.less(context, items[run], items[run - 1]) != descending) break;
-            }
-            if (descending) std.mem.reverse(Item, items[0..run]);
-        }
-        for (run..items.len) |at| {
-            const item = items[at];
-            var left: usize = 0;
-            var right = at;
-            while (left < right) {
-                const middle = left + (right - left) / 2;
-                if (Context.less(context, item, items[middle])) right = middle else left = middle + 1;
-            }
-            std.mem.copyBackwards(Item, items[left + 1 .. at + 1], items[left..at]);
-            items[left] = item;
-        }
-    } else std.sort.block(Item, items, context, Context.less);
+    try @import("dictsort_sort.zig").sort(Item, a, items, context, Context.less);
     if (reverse) std.mem.reverse(Item, items);
     if (failure) |err| return err;
     const result = try a.alloc(Value, items.len);
@@ -95,6 +74,10 @@ test "dictsort uses builtin items and rejects closed provider metadata and inval
     defer arena.deinit();
     const a = arena.allocator();
     try std.testing.expectEqualStrings("[('__dxt_context_object', 'ordinary'), ('items', 3)]", try (try expression.evaluate(a, "{'items':3,'__dxt_context_object':'ordinary'}|dictsort", null)).text(a));
+    const countries = (try @import("timezone_context.zig").resolve(a, "modules.pytz.country_names")).?;
+    const country_pairs = try apply(a, countries, &.{}, null);
+    try std.testing.expectEqual(@as(usize, 249), country_pairs.list.len);
+    try std.testing.expectEqualStrings("AD", country_pairs.list[0].tuple[0].string);
     try std.testing.expectError(error.UndefinedJinjaValue, apply(a, .{ .object = &.{
         .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "private", .value = .{ .integer = "1" } },
@@ -111,6 +94,13 @@ fn allocationProof(backing: std.mem.Allocator) !void {
     const a = arena.allocator();
     const result = try expression.evaluate(a, "{'É':'b','a':'B','Z':'a'}|dictsort(by='value',reverse=true)", null);
     try std.testing.expectEqual(@as(usize, 3), result.list.len);
+    const entries = try a.alloc(expression.Entry, 80);
+    for (entries, 0..) |*entry, index| entry.* = .{
+        .key = try std.fmt.allocPrint(a, "key-{d}", .{index}),
+        .value = try expression.integerValue(a, (index * 37) % entries.len),
+    };
+    const larger = try apply(a, .{ .object = entries }, &.{.{ .name = "by", .value = .{ .string = "value" } }}, null);
+    try std.testing.expectEqual(@as(usize, 80), larger.list.len);
 }
 
 test "dictsort propagates allocation failures without leaking caller arena storage" {

@@ -1,4 +1,5 @@
 """Standard dictsort through native dxt and actual pinned Core on both adapters."""
+import json
 import pytest
 
 from test_cli import build_dxt
@@ -113,3 +114,16 @@ def test_dictsort_propagates_genuine_decimal_nan_comparison_error(tmp_path, conf
     pair = setup_pair(tmp_path, configuration_oracle, request, adapter)
     pair.write('models/marts/rendered.sql', "{% if execute %}{% set table=run_query(\"select cast('NaN' as double precision) as value\") %}select '{{ {'nan':table.rows[0][0],'finite':1}|dictsort(by='value') }}' as value{% else %}select 0{% endif %}")
     pair.invoke('compile', success=False)
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('size', [64, 65, 127, 128, 257])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_dictsort_large_scattered_nan_order_matches_core(tmp_path, configuration_oracle, request, adapter, size, reverse):
+    pair = setup_pair(tmp_path, configuration_oracle, request, adapter)
+    values = {str(index): 'nan' if index % 13 in (1, 6) else (index * 37) % size for index in range(size)}
+    pair.append_project('vars: ' + json.dumps({'sorting_values': values}) + '\n')
+    pair.write('models/marts/rendered.sql', "{% set data={} %}{% for key,value in var('sorting_values').items() %}{% do data.update({key:value|float}) %}{% endfor %}select '{{ data|dictsort(by='value',reverse=" + ('true' if reverse else 'false') + ")|map(attribute=0)|list }}' as value")
+    actual, reference = [manifest['nodes']['model.configuration_fixture.rendered'] for manifest in pair.invoke('compile')]
+    assert actual['compiled_code'] == reference['compiled_code']
+    assert actual['depends_on'] == reference['depends_on']
