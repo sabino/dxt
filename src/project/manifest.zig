@@ -539,6 +539,8 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
     try json.stringArray(writer, node.tags.items);
     try writer.writeAll(",\"build_path\":");
     try writeNullableString(writer, node.build_path);
+    try writer.writeAll(",\"compiled_path\":");
+    if (node.compiled_path) |path| try json.string(writer, util.normalizeForDisplay(path)) else try writer.writeAll("null");
 }
 
 fn writeTestNodeIdentityFields(
@@ -1016,8 +1018,6 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     if (node.compiled) {
         try writer.writeAll(",\"compiled\":true,\"compiled_code\":");
         try json.string(writer, node.compiled_code orelse "");
-        try writer.writeAll(",\"compiled_path\":");
-        try json.string(writer, util.normalizeForDisplay(node.compiled_path orelse ""));
         try writer.writeAll(",\"extra_ctes\":");
         try writeExtraCtes(writer, node.extra_ctes.items, graph.command_options.inject_ephemeral_ctes);
         try writer.writeAll(",\"extra_ctes_injected\":");

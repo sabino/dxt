@@ -125,6 +125,18 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         fields[result.object.len + 2] = .{ .key = "compiled_sql", .value = .{ .string = sql } };
         result = .{ .object = fields };
     }
+    if (node.compiled_path) |path| {
+        const fields = try allocator.alloc(expression.Entry, result.object.len + 1);
+        @memcpy(fields[0..result.object.len], result.object);
+        fields[result.object.len] = .{ .key = "compiled_path", .value = .{ .string = path } };
+        result = .{ .object = fields };
+    }
+    if (node.build_path) |path| {
+        const fields = try allocator.alloc(expression.Entry, result.object.len + 1);
+        @memcpy(fields[0..result.object.len], result.object);
+        fields[result.object.len] = .{ .key = "build_path", .value = .{ .string = path } };
+        result = .{ .object = fields };
+    }
     return result;
 }
 

@@ -69,7 +69,8 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 const node = @constCast(original);
                 node.compiled = true;
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
-                node.compiled_path = compiled_path;
+                runtime.allocator.free(compiled_path);
+                node.compiled_path = try @import("resource_artifacts.zig").compiledPath(runtime.allocator, graph, node);
                 try compiler.recordPythonScaffoldDependency(runtime.allocator, graph, node);
                 if (row.relation_name) |relation| node.relation_name = try runtime.allocator.dupe(u8, relation);
                 try compiler.appendCteCopies(runtime.allocator, &node.extra_ctes, row.compiled_ctes);

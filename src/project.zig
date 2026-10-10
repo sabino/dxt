@@ -1376,12 +1376,7 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
             if (row.compiled_code) |sql| {
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
                 node.compiled = true;
-                const artifact_path = if (node.snapshot_yaml_definition) try std.fmt.allocPrint(runtime.allocator, "{s}/{s}.sql", .{ node.original_file_path, node.name }) else node.original_file_path;
-                defer if (node.snapshot_yaml_definition) runtime.allocator.free(artifact_path);
-                const compiled_path = try pathJoin(runtime.allocator, &.{ target_dir, "compiled", node.package_name, artifact_path });
-                node.compiled_path = compiled_path;
-                if (std.fs.path.dirname(compiled_path)) |parent| try Io.Dir.cwd().createDirPath(runtime.io, parent);
-                try Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = compiled_path, .data = sql });
+                node.compiled_path = try @import("project/resource_artifacts.zig").writeCompiled(runtime, graph, node, sql);
             }
             if (row.relation_name) |relation| {
                 if (node.relation_name) |old| runtime.allocator.free(old);
@@ -1485,11 +1480,18 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
     if (resource == .node) {
         const original = resource.node;
         var node = original.*;
+        defer if (node.compiled_path) |path| {
+            if (original.compiled_path == null or original.compiled_path.?.ptr != path.ptr) runtime.allocator.free(path);
+        };
         var compilation_dependencies: std.ArrayList([]const u8) = .empty;
         defer compilation_dependencies.deinit(runtime.allocator);
         const compilation_started = execution_clock.now(runtime.io);
         compileConcurrentNode(runtime, &graph, &node, db_path, &compilation_dependencies) catch |err| {
             var row = resource.result("error");
+            if (host.written_path) |path| {
+                row.build_path = try runtime.allocator.dupe(u8, path);
+                row.owns_build_path = true;
+            }
             row.macro_dependencies = try compilation_dependencies.toOwnedSlice(runtime.allocator);
             row.owns_macro_dependencies = true;
             row.message = try runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource compilation failed");
@@ -1499,6 +1501,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
             return row;
         };
         const compilation_completed = execution_clock.now(runtime.io);
+        node.build_path = host.written_path orelse node.build_path;
         try host.commit();
         const execution = if (std.mem.eql(u8, node.resource_type, "seed")) executeSeedAppendingResult(runtime, db_path, project_dir, &graph, &node, &rows) else executeModelAppendingResult(runtime, db_path, &graph, &node, &rows);
         _ = execution catch |err| blk: {
@@ -1571,6 +1574,7 @@ fn compileConcurrentNode(runtime: Runtime, graph: *const Graph, node: *Node, db_
     node.compiled = true;
     node.compiled_code = compiled.compiled_code;
     node.extra_ctes = compiled.extra_ctes;
+    node.compiled_path = try @import("project/resource_artifacts.zig").writeCompiled(runtime, graph, node, compiled.compiled_code);
     node.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
 }
 
@@ -1855,6 +1859,7 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
         return std.mem.eql(u8, row.status, "success");
     }
     var build_path: ?[]const u8 = null;
+    try @import("project/resource_artifacts.zig").capture(runtime.allocator, &build_path, node.build_path);
     const previous_rows = executed.items.len;
     defer transferResourceBuildPath(runtime.allocator, executed, previous_rows, build_path);
     const execution = @import("project/materialization_runtime.zig").executeReturningWithArtifacts(runtime, db_path, graph, node, &build_path);
@@ -1882,6 +1887,7 @@ fn executeModelAppendingResult(runtime: Runtime, db_path: []const u8, graph: *co
 fn executeSeedAppendingResult(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node, executed: *std.ArrayList(run_results.NodeResult)) !bool {
     _ = project_dir;
     var build_path: ?[]const u8 = null;
+    try @import("project/resource_artifacts.zig").capture(runtime.allocator, &build_path, node.build_path);
     const previous_rows = executed.items.len;
     defer transferResourceBuildPath(runtime.allocator, executed, previous_rows, build_path);
     const response = @import("project/materialization_runtime.zig").executeReturningWithArtifacts(runtime, db_path, graph, node, &build_path) catch |err| switch (err) {
