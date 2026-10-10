@@ -153,7 +153,11 @@ test "catalog error arrays escape authored messages and clean up allocation fail
 
 fn catalogErrorAllocationProof(allocator: std.mem.Allocator) !void {
     const messages = [_][]const u8{ "catalog \"rejected\"\n\t\\ café🙂\x01", "second error" };
-    const rendered = try renderCatalogWithInvocationAndErrors(allocator, &.{}, &.{}, null, &messages);
+    const rendered = renderCatalogWithInvocationAndErrors(allocator, &.{}, &.{}, null, &messages) catch |err| switch (err) {
+        // The allocating writer has no I/O; WriteFailed here is allocator OOM.
+        error.WriteFailed => return error.OutOfMemory,
+        else => return err,
+    };
     defer allocator.free(rendered);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
     defer parsed.deinit();
