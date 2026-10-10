@@ -46,7 +46,10 @@ def compiled_sql(target: Path, models: int) -> dict[str, str]:
     rows = json.loads((target / "run_results.json").read_text())["results"]
     if len(rows) != models or any(row["status"] != "success" for row in rows):
         raise AssertionError("Performance project did not compile every model successfully")
-    return {key: " ".join(node["compiled_code"].split()) for key, node in artifact["nodes"].items() if node["resource_type"] == "model"}
+    sql = {key: node.get("compiled_code") for key, node in artifact["nodes"].items() if node["resource_type"] == "model"}
+    if len(sql) != models or any(not isinstance(code, str) for code in sql.values()):
+        raise AssertionError("Performance project did not compile every model successfully")
+    return sql
 
 
 def measure(binary: Path, models: int, repetitions: int) -> dict:
@@ -61,14 +64,22 @@ def measure(binary: Path, models: int, repetitions: int) -> dict:
         make_project(project, models)
         targets = {engine: project / f"target-{engine}" for engine in observations}
         for _ in range(repetitions):
-            for engine, executable in [("dxt", str(binary)), ("dbt", core)]:
-                target = targets[engine]
+            for target in targets.values():
                 shutil.rmtree(target, ignore_errors=True)
-                arguments = [executable, "compile", "--project-dir", str(project), "--profiles-dir", str(project), "--target-path", str(target)]
-                observations[engine]["cold"].append(invoke(arguments, project))
-                observations[engine]["warm"].append(invoke(arguments, project))
-            if compiled_sql(targets["dxt"], models) != compiled_sql(targets["dbt"], models):
-                raise AssertionError("Native and Core compiled SQL differ in the performance fixture")
+            for phase in ["cold", "warm"]:
+                samples = {}
+                outputs = {}
+                for engine, executable in [("dxt", str(binary)), ("dbt", core)]:
+                    target = targets[engine]
+                    arguments = [executable, "compile", "--project-dir", str(project), "--profiles-dir", str(project), "--target-path", str(target)]
+                    samples[engine] = invoke(arguments, project)
+                    # Read and validate this command's artifacts before a warm
+                    # command can replace them. Validation is outside timing.
+                    outputs[engine] = compiled_sql(target, models)
+                if outputs["dxt"] != outputs["dbt"]:
+                    raise AssertionError(f"Native and Core compiled SQL differ in the {phase} performance fixture")
+                for engine in observations:
+                    observations[engine][phase].append(samples[engine])
     medians = {engine: {phase: statistics.median(samples) for phase, samples in phases.items()} for engine, phases in observations.items()}
     return {
         "schema": "dxt/performance/v1",
