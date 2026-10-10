@@ -539,8 +539,10 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
     try json.stringArray(writer, node.tags.items);
     try writer.writeAll(",\"build_path\":");
     try writeNullableString(writer, node.build_path);
-    try writer.writeAll(",\"compiled_path\":");
-    if (node.compiled_path) |path| try json.string(writer, util.normalizeForDisplay(path)) else try writer.writeAll("null");
+    if (!std.mem.eql(u8, node.resource_type, "seed")) {
+        try writer.writeAll(",\"compiled_path\":");
+        if (node.compiled_path) |path| try json.string(writer, util.normalizeForDisplay(path)) else try writer.writeAll("null");
+    }
 }
 
 fn writeTestNodeIdentityFields(
@@ -1988,6 +1990,7 @@ test "manifest writer emits node identity fields and deterministic checksums" {
 
     const seed = nodes.get("seed.demo.raw_customers").?.object;
     try std.testing.expectEqualStrings("raw_customers", seed.get("alias").?.string);
+    try std.testing.expect(!seed.contains("compiled_path"));
     try std.testing.expectEqualStrings("55c71c9b41468b359a456098ac08d1c1680c00793c36fe8d0bab95ff678e6921", seed.get("checksum").?.object.get("checksum").?.string);
 
     const generic_test = nodes.get("test.demo.not_null_orders_order_id.abc").?.object;
