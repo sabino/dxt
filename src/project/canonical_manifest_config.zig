@@ -170,6 +170,12 @@ pub fn node(allocator: std.mem.Allocator, resource: *const types.Node) !Json {
             } else try values.put(allocator, &result, key, entry.value_ptr.*);
         }
     }
+    // Core finalizes config with omit_none=True, then reconstructs NodeConfig.
+    // An authored null therefore restores this non-null default; raw config
+    // still retains the authored value for state/artifact comparisons.
+    if (values.get(result, "on_schema_change")) |policy| if (policy == .null) {
+        try values.put(allocator, &result, "on_schema_change", .{ .string = "ignore" });
+    };
     inline for (.{ "pre-hook", "post-hook" }) |key| {
         var hooks = try normalizeHooks(allocator, result.object.get(key).?);
         defer values.deinit(allocator, &hooks);
@@ -208,4 +214,38 @@ test "resource config defaults distinguish models seeds snapshots and tests" {
         try std.testing.expectEqual(std.mem.eql(u8, kind, "seed"), result.object.contains("delimiter"));
         try std.testing.expectEqual(!std.mem.eql(u8, kind, "test"), result.object.contains("contract"));
     }
+}
+
+test "authored null schema policy restores Core default without erasing nullable config" {
+    const allocator = std.testing.allocator;
+    var authored = try std.json.parseFromSlice(Json, allocator,
+        \\{"unique_key":null,"incremental_strategy":null,"on_schema_change":null,"full_refresh":null,"incremental_predicates":null,"custom_nullable":{"value":null}}
+    , .{});
+    defer authored.deinit();
+    var resource: types.Node = .{
+        .package_name = "fixture",
+        .unique_id = "model.fixture.events",
+        .name = "events",
+        .path = "models/events.sql",
+        .original_file_path = "models/events.sql",
+        .raw_code = "select 1",
+        .materialized = "incremental",
+        .effective_config = authored.value,
+        .raw_config = authored.value,
+    };
+    var result = try node(allocator, &resource);
+    defer values.deinit(allocator, &result);
+    try std.testing.expectEqualStrings("ignore", values.get(result, "on_schema_change").?.string);
+    inline for (.{ "unique_key", "incremental_strategy", "full_refresh", "incremental_predicates" }) |key|
+        try std.testing.expect(values.get(result, key).? == .null);
+    try std.testing.expect(values.get(values.get(result, "custom_nullable").?, "value").? == .null);
+    try std.testing.expect(values.get(resource.raw_config, "on_schema_change").? == .null);
+    try std.testing.expect(values.get(resource.effective_config, "on_schema_change").? == .null);
+    var configured = try values.clone(allocator, authored.value);
+    defer values.deinit(allocator, &configured);
+    try values.put(allocator, &configured, "on_schema_change", .{ .string = "append_new_columns" });
+    resource.effective_config = configured;
+    var explicit = try node(allocator, &resource);
+    defer values.deinit(allocator, &explicit);
+    try std.testing.expectEqualStrings("append_new_columns", values.get(explicit, "on_schema_change").?.string);
 }
