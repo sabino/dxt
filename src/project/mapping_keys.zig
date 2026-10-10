@@ -34,6 +34,7 @@ pub fn hashable(candidate: Value) anyerror!void {
 
 fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (@import("datetime_operations.zig").offsetError(candidate)) return error.AbstractTimeZoneMethod;
     if (@import("native_tuple.zig").items(candidate)) |items| {
         for (items) |item| try checkHashable(item, depth + 1);
         return;
@@ -248,6 +249,14 @@ test "opaque tuple keys share immutable tuple equality and recursive hashability
     } };
     try std.testing.expectError(error.JinjaTypeError, hashable(forged));
     try std.testing.expect(!keyEqual(forged, tuple));
+}
+
+test "abstract temporal keys defer the same offset error through nested tuples" {
+    const temporal: Value = .{ .object = &.{
+        .{ .key = "__dxt_temporal_offset_error", .value = .{ .callable = "__dxt_temporal_offset_error" } },
+    } };
+    try std.testing.expectError(error.AbstractTimeZoneMethod, hashable(temporal));
+    try std.testing.expectError(error.AbstractTimeZoneMethod, hashable(.{ .tuple = &.{temporal} }));
 }
 
 test "immutable timezone and class keys retain identities across copies" {
