@@ -75,6 +75,21 @@ write policy and OOM propagation. Both corrections join the same single native
 build and focused certificate before isolated draft publication. No unrelated
 catalog transport, provider or feature surface is expanded.
 
+Focused certification now restores the compile/docs error artifacts, but the
+original actual Core retry check exposes its one-way docs flag bug: Core itself
+records false static/empty-catalog values and then rejects their generated
+negative CLI options when retrying its own artifact. The source worker owns
+only omission of default-false one-way docs flags in the native results writer
+and a native argument regression; enabled flags and the dual compile flag keep
+their effective behavior. This is an intentional artifact argument difference
+for Core retry interoperability, recorded by the supervisor in compatibility
+documentation. The expression worker extends the original failure/retry fixture
+with default docs generation while retaining its existing static case and all
+artifact/SQL/retry assertions. Core and its assertions are never patched. A
+fresh combined native build and every focused case remain mandatory. The
+older whole run's additional external-reader diagnostic failure is being
+grounded read-only by the oracle worker before any correction is authorized.
+
 The final unfiltered 5,626-case candidate run was intentionally interrupted
 after its first failure was grounded: a fixture rendered a dictionary created
 from a salted Python set, whose iteration order changes with PYTHONHASHSEED.
