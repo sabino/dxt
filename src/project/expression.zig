@@ -1967,6 +1967,7 @@ pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value
     };
 }
 pub fn indexValueWithHost(allocator: std.mem.Allocator, value: Value, key: Value, host: ?Host) !Value {
+    if (@import("query_type.zig").name(value) != null) return indexValue(allocator, value, key);
     if (key == .string and @import("datetime_bound_method.zig").isBound(value)) return attributeWithHost(allocator, value, key.string, host);
     if (key == .string and @import("datetime_protocol.zig").kind(value) != null) return attributeWithHost(allocator, value, key.string, host);
     if (key == .string and @import("timezone_context.zig").isTimezone(value)) return attributeWithHost(allocator, value, key.string, host);
@@ -2924,6 +2925,12 @@ test "DuckDB type indices and bounded iteration retain NotImplemented singleton"
     try std.testing.expect(!try testValue("mapping", kind, &.{}));
     try std.testing.expectError(error.JinjaTypeError, lengthWithHost(a, kind, null));
     try std.testing.expectError(error.QueryTypeChildNotFound, indexValue(a, kind, .{ .string = "id" }));
+    const primitive: Value = .{ .object = &.{
+        .{ .key = "__dxt_duck_type", .value = .{ .callable = "__dxt_duck_type" } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = "INTEGER" } },
+        .{ .key = "__dxt_getattr", .value = .{ .callable = "__dxt_cursor_type_primitive" } },
+    } };
+    try std.testing.expectError(error.QueryTypeChildNotFound, indexValueWithHost(a, primitive, .{ .string = "id" }, null));
     const first = try indexValue(a, kind, .{ .integer = "0" });
     const negative = try indexValue(a, kind, .{ .integer = "-1" });
     const sliced = try sliceValue(a, kind, null, null, null);
