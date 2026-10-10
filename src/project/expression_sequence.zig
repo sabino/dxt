@@ -9,11 +9,19 @@ pub fn kind(value: Value) ?[]const u8 {
     return if (marker == .string) marker.string else null;
 }
 
+/// An internal callable distinguishes native descriptors from authored map literals.
+pub fn descriptor(a: std.mem.Allocator, fields: []const expression.Entry) !Value {
+    const entries = try expression.allocateEntries(a, fields.len + 1);
+    @memcpy(entries[0..fields.len], fields);
+    entries[fields.len] = .{ .key = "__dxt_native_sequence", .value = .{ .callable = "__dxt_native_sequence" } };
+    return .{ .object = entries };
+}
+
 pub fn view(a: std.mem.Allocator, object: Value, name: []const u8) !Value {
     const entries = try expression.allocateEntries(a, 2);
     entries[0] = .{ .key = "__dxt_sequence_kind", .value = .{ .string = name } };
     entries[1] = .{ .key = "__dxt_sequence_source", .value = object };
-    return .{ .object = entries };
+    return descriptor(a, entries);
 }
 
 pub fn zip(a: std.mem.Allocator, inputs: []const Value) !Value {
@@ -25,7 +33,7 @@ pub fn zip(a: std.mem.Allocator, inputs: []const Value) !Value {
     const cursors = try expression.allocateValues(a, inputs.len);
     for (cursors) |*cursor| cursor.* = .{ .integer = "0" };
     entries[2] = .{ .key = "__dxt_sequence_cursor", .value = .{ .list = cursors } };
-    return .{ .object = entries };
+    return descriptor(a, entries);
 }
 
 pub fn iterator(a: std.mem.Allocator, values: []const Value) !Value {
@@ -33,7 +41,7 @@ pub fn iterator(a: std.mem.Allocator, values: []const Value) !Value {
     entries[0] = .{ .key = "__dxt_sequence_kind", .value = .{ .string = "iterator" } };
     entries[1] = .{ .key = "__dxt_sequence_source", .value = .{ .list = values } };
     entries[2] = .{ .key = "__dxt_sequence_cursor", .value = .{ .integer = "0" } };
-    return .{ .object = entries };
+    return descriptor(a, entries);
 }
 
 pub fn isIterator(value: Value) bool {
@@ -49,7 +57,7 @@ pub fn iter(a: std.mem.Allocator, input: Value) !Value {
     entries[0] = .{ .key = "__dxt_sequence_kind", .value = .{ .string = "iterator" } };
     entries[1] = .{ .key = "__dxt_sequence_source", .value = input };
     entries[2] = .{ .key = "__dxt_sequence_cursor", .value = .{ .integer = "0" } };
-    return .{ .object = entries };
+    return descriptor(a, entries);
 }
 
 pub fn next(a: std.mem.Allocator, value: Value, host: ?expression.Host) anyerror!?Value {
