@@ -54,7 +54,8 @@ two pre-COPY seed diagnostics and two alphabetically ordered macro arrays.
 Fresh Core CLI witnesses confirm the exact CSV diagnostic fields and authored
 macro dependency order. All four bounded corrections are integrated and pass
 on the unchanged verified product candidate. The fresh Actions developer job
-passes all 326 tests at the published checkpoint.
+passes all 326 tests at the published checkpoint. All three reported jobs pass
+again there, including the complete unchanged PostgreSQL package ladder.
 Product semantics and the strict public comparison remain intact.
 The full Python 3.12 compatibility jobs are still running on both architectures.
 
@@ -71,16 +72,16 @@ candidate-specific and do not establish merge readiness.
 
 The primary seed implementation, genuine sequence markers and borrowed
 transaction cleanup are integrated with actual Core fixtures for bundled
-DuckDB COPY and native PostgreSQL bindings. The first CSV certification repair
-passes all 63 primary seed cases, including the new Column cases and unchanged
-10,000-row, 70,000-binding PostgreSQL workload. It also passes 707 native tests
-and all 14 new alias/provider boundary comparisons. Its wide-seed execution
-still takes 321 seconds against Core's 8.5 seconds, so practical scaling remains
-open. The expression worker's separately reviewed append-only loop-prefix and
-copied-row certificate follow-up preserves pre-mutation invalidation. It passes
-708 native tests and all 18 actual Core alias/provider comparisons. Its full
-unchanged 63-case primary seed run remains active; practical wide-seed timing
-is required before integrating this follow-up.
+DuckDB COPY and native PostgreSQL bindings. The integrated CSV certification
+and append-only loop-prefix repairs pass all 63 primary seed cases, including
+the new Column cases and unchanged 10,000-row, 70,000-binding PostgreSQL workload.
+They also pass 708 native tests and all 18 actual Core alias/provider comparisons,
+with pre-mutation invalidation intact. Wide-seed execution improves from 321
+seconds to 145 seconds against Core's 9.2 seconds, so practical scaling remains
+open. The expression worker owns a separately reviewed completed-batch-only
+capacity certificate follow-up. It must preserve live iterator traversal and
+mutable receiver invalidation, pass the actual full-descriptor native budget
+and complete the same unchanged seed.
 The unchanged wide seed also exposes repeated alias traversal of the full
 Agate/loop graph. The expression worker owns a bounded performance diagnosis
 and any reviewed ownership-preserving repair; the running unchanged fixture
