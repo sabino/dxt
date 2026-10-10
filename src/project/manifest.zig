@@ -1282,6 +1282,7 @@ pub fn testContextNode(allocator: std.mem.Allocator, graph: *const Graph, runtim
     defer output.deinit();
     for (graph.tests.items) |original| if (std.mem.eql(u8, original.unique_id, runtime_node.unique_id)) {
         var node = original;
+        node.build_path = runtime_node.build_path orelse node.build_path;
         node.compiled = runtime_node.compiled;
         node.compiled_code = runtime_node.compiled_code;
         node.compiled_path = runtime_node.compiled_path;
@@ -1291,6 +1292,7 @@ pub fn testContextNode(allocator: std.mem.Allocator, graph: *const Graph, runtim
     };
     if (output.written().len == 0) for (graph.singular_tests.items) |original| if (std.mem.eql(u8, original.unique_id, runtime_node.unique_id)) {
         var node = original;
+        node.build_path = runtime_node.build_path orelse node.build_path;
         node.compiled = runtime_node.compiled;
         node.compiled_code = runtime_node.compiled_code;
         node.compiled_path = runtime_node.compiled_path;

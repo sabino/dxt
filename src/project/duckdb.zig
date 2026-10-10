@@ -188,6 +188,9 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
 
 fn executeCompiledDataTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const types.Node, config: types.GenericTestConfig, compiled: *compiler.CompiledModel, compilation_started: i96, compilation_completed: i96) !GenericTestExecutionResult {
     var runtime_node = node.*;
+    if (graph.execution_hooks) |host| if (host.get_written_path) |get_path| {
+        runtime_node.build_path = get_path(host.context, node.unique_id) orelse runtime_node.build_path;
+    };
     runtime_node.compiled_path = try @import("test_provenance.zig").writeCompiled(runtime, graph, node, compiled.compiled_code);
     defer runtime.allocator.free(runtime_node.compiled_path.?);
     var dependencies: std.ArrayList([]const u8) = .empty;

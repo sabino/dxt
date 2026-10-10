@@ -239,6 +239,9 @@ pub const Host = struct {
     // Compiler hosts can preserve the current resource across nested renders
     // without coupling this generic expression module to project Node types.
     set_node: ?*const fn (*anyopaque, ?*const anyopaque) ?*const anyopaque = null,
+    // Logical paths borrow the execution host; match the resource to avoid
+    // attributing a nested compilation's write to its caller.
+    get_written_path: ?*const fn (*anyopaque, []const u8) ?[]const u8 = null,
     capture_undefined: bool = false,
 };
 

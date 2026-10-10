@@ -1546,7 +1546,7 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
     var row = rows.items[0];
     // A completed compile-time write survives a later test compilation error.
     // A materialization's later write, if present, already owns its path.
-    if (resource != .unit and row.build_path == null) if (host.written_path) |path| {
+    if (resource != .unit and row.build_path == null) if (host.writtenPathForResource(resource.id())) |path| {
         row.build_path = try runtime.allocator.dupe(u8, path);
         row.owns_build_path = true;
     };

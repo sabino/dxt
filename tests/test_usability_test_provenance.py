@@ -452,3 +452,43 @@ def test_core_completed_test_write_and_later_compilation_error_follow_command_ar
                                'failures': None, 'relation_name': None, 'adapter_response': {}}
         observations[engine] = (result.returncode, node['build_path'], node['depends_on'], outcome)
     assert observations['dxt'] == observations['core']
+
+
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('generic', [False, True])
+@pytest.mark.parametrize('written_resource', ['test', 'ephemeral'])
+def test_core_earlier_compile_write_is_visible_in_later_test_materialization_context(tmp_path, request, duckdb_environment, adapter, generic, written_resource):
+    from pathlib import Path
+    from test_usability_artifacts import contracts
+    from test_usability_sql_operations import events
+    observations = {}
+    for engine in ['dxt', 'core']:
+        root, _ = fixture(tmp_path, engine, adapter, request, store=True, generic=generic, override_limit=False)
+        env = environment(duckdb_environment)
+        if written_resource == 'ephemeral':
+            (root / 'models/input.sql').write_text("{{ config(materialized='ephemeral') }}{% if execute %}{% do write('nested ephemeral write') %}{% endif %}select 1 as id")
+        elif generic:
+            (root / 'macros/bad_rows.sql').write_text("{% test bad_rows(model) %}{% if execute %}{% do write('earlier compile write') %}{% endif %}select * from {{ model }}{% endtest %}")
+        else:
+            path = root / 'tests/check.sql'
+            path.write_text("{% if execute %}{% do write('earlier compile write') %}{% endif %}" + path.read_text())
+        (root / 'macros/test_materialization.sql').write_text("{% materialization test, default %}{{ log('EARLIER:' ~ tojson(model.copy()),info=True) }}{% call statement('main',fetch_result=True) %}select 0 as failures, false as should_warn, false as should_error{% endcall %}{% endmaterialization %}")
+        command(engine, root, env, 'run')
+        result = command(engine, root, env, 'test', quiet=False)
+        event, = [event for event in events(result, 'JinjaLogInfo') if event['data']['msg'].startswith('EARLIER:')]
+        context = json.loads(event['data']['msg'][len('EARLIER:'):])
+        node = read_test_node(root)
+        contracts.assert_artifact(root / 'target/run_results.json')
+        row, = json.loads((root / 'target/run_results.json').read_text())['results']
+        assert row['status'] == 'pass' and row['failures'] == 0
+        if written_resource == 'test':
+            assert context['build_path'] == node['build_path']
+        else:
+            assert 'build_path' not in context
+            assert (root / 'target/run/preview/models/input.sql').read_text() == 'nested ephemeral write'
+        assert context['compiled_path'] == node['compiled_path']
+        assert context['compiled_code'] == node['compiled_code'] == row['compiled_code']
+        assert (root / Path(node['compiled_path'])).read_text() == node['compiled_code']
+        assert (root / Path(node['build_path'])).read_text() == 'select 0 as failures, false as should_warn, false as should_error'
+        observations[engine] = (node['unique_id'], node['build_path'], node['compiled_path'], row['status'], row['failures'], context.get('build_path'))
+    assert observations['dxt'] == observations['core']
