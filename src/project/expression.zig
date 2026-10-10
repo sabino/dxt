@@ -2327,6 +2327,7 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
     return filterValue(allocator, name, value, args, null);
 }
 pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []const Argument, host: ?Host) anyerror!Value {
+    if (std.mem.eql(u8, name, "dictsort")) return @import("dictsort_filter.zig").apply(allocator, value, args, host);
     inline for (.{ "lower", "upper", "string", "length", "count", "list", "first", "last", "reverse" }) |parameterless| {
         if (std.mem.eql(u8, name, parameterless) and args.len != 0) return error.InvalidJinjaArguments;
     }
