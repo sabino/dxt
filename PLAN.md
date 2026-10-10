@@ -78,6 +78,19 @@ distinction. Core reports zero unless a threshold fires, even with nonzero
 aggregates. The supervisor owns that correction and a fresh both-adapter gate.
 Project source files and strict gate comparisons remain unchanged.
 
+Passing-test outcomes now have 40 mandatory Core comparisons on both adapters,
+including signed aggregates, stored rows, test/build and warning escalation.
+The fresh public rerun caught a seed schema regression in the new compiled-path
+writer; seed nodes now omit the forbidden field. The combined native class and
+artifact integration passes 647 tests. A final unchanged-package rerun is
+still required before calling the public package gate repaired.
+
+The filter worker's harness-only Core lifecycle closure reproduces and resets
+both upstream module-global deprecation registries for each in-process oracle
+invocation. Fresh CLI comparisons and current-command strict-warning failures
+remain required. This prevents an unrelated earlier warning or failed command
+from contaminating the complete suite; it changes no product runtime behavior.
+
 The next shared compiler sequence is the resource artifact writer and model
 provenance, test compilation writes, console error events, the expression/class
 protocol chain, then the limited generic-test parse namespace and inline macro
