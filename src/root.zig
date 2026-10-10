@@ -33,7 +33,8 @@ pub const ExitCode = enum(u8) {
 };
 
 pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, runtime: ?Runtime) !ExitCode {
-    @import("project/compile_diagnostics.zig").clear();
+    const diagnostic_scope = @import("project/compile_diagnostics.zig").beginScope(if (runtime) |rt| rt.environment else null);
+    defer diagnostic_scope.end();
     const rt = runtime orelse return runCommand(args, stdout, stderr, runtime);
     var arena = std.heap.ArenaAllocator.init(rt.allocator);
     defer arena.deinit();
@@ -64,6 +65,36 @@ pub fn run(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, run
     const code = try result;
     try @import("project/cli_logs.zig").finish(scoped, prepared.options, prepared.args, stdout, stderr, output.written(), diagnostics.written());
     return code;
+}
+
+test "command diagnostic scope resets stale captures and releases its environment on preparation failure" {
+    const diagnostics = @import("project/compile_diagnostics.zig");
+    const baseline = diagnostics.beginScope(null);
+    defer baseline.end();
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    const authored = "private_engine_error" ** 5000;
+    try environment.put("DBT_ENV_SECRET_COMMAND", authored);
+    try environment.put("DBT_PROJECT_DIR", "fixture");
+    var stdout: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr.deinit();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    for ([_]std.mem.Allocator{ std.testing.allocator, failing.allocator() }) |allocator| {
+        diagnostics.capture("p", "n", "stale previous command");
+        const code = try run(&.{ "dxt", "--unknown-global" }, &stdout.writer, &stderr.writer, .{ .allocator = allocator, .io = std.testing.io, .environment = &environment });
+        try std.testing.expectEqual(ExitCode.usage, code);
+        try std.testing.expect(diagnostics.message(error.JinjaCompilerError) == null);
+        // A retained command environment would stop before this long value.
+        // The outer null scope must instead preserve the ordinary raw bound.
+        diagnostics.capture("p", "n", authored);
+        try std.testing.expectEqual(@as(usize, 65536), diagnostics.message(error.JinjaCompilerError).?.len);
+    }
+    try std.testing.expect(failing.has_induced_failure);
+    _ = try run(&.{ "dxt", "--help" }, &stdout.writer, &stderr.writer, null);
+    try std.testing.expect(diagnostics.message(error.JinjaCompilerError) == null);
+    diagnostics.clear();
 }
 
 fn runPrepared(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, runtime: ?Runtime) !ExitCode {

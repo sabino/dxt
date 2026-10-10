@@ -71,6 +71,8 @@ const Job = struct {
     single_threaded: bool,
 
     fn work(self: *Job) void {
+        const diagnostic_scope = @import("compile_diagnostics.zig").beginScope(self.runtime.environment);
+        defer diagnostic_scope.end();
         const timing = @import("timing_profile.zig").start(self.runtime.timing_profile, .{ .filename = @src().file, .line = @src().line, .function = "Job.work" }) catch @import("timing_profile.zig").Span{};
         defer timing.finish();
         const start = clock.now(self.runtime.io);
@@ -601,4 +603,62 @@ pub fn emitEvent(runtime: types.Runtime, options: types.Options, writer: *std.Io
 test "thread counts reject ignored or invalid concurrency values" {
     try std.testing.expectEqual(@as(u16, 4), try parseThreadCount("4"));
     for ([_][]const u8{ "0", "-1", "1.5", "257", "bogus", "" }) |value| try std.testing.expectError(error.InvalidThreadCount, parseThreadCount(value));
+}
+
+test "inline compilation jobs reset diagnostic captures and restore the command environment under OOM" {
+    const diagnostics = @import("compile_diagnostics.zig");
+    const baseline = diagnostics.beginScope(null);
+    defer baseline.end();
+    const authored = "private_engine_error" ** 5000;
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("DBT_ENV_SECRET_JOB", authored);
+    const outer = diagnostics.beginScope(&environment);
+    defer outer.end();
+    const graph = types.Graph{ .allocator = std.testing.allocator, .project_name = "demo" };
+    const node = types.Node{ .package_name = "demo", .unique_id = "model.demo.check", .name = "check", .path = "check.sql", .original_file_path = "models/check.sql", .raw_code = authored };
+    var shared: Shared = .{};
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    for ([_]std.mem.Allocator{ std.testing.allocator, failing.allocator() }) |allocator| {
+        var job: Job = .{
+            .resource = .{ .node = &node },
+            .arena = .init(allocator),
+            .shared = &shared,
+            .runtime = .{ .allocator = allocator, .io = std.testing.io, .environment = &environment },
+            .graph = &graph,
+            .execute = captureJobDiagnosticForTest,
+            .project_dir = "fixture",
+            .database_path = ":memory:",
+            .mode = .compile,
+            .single_threaded = true,
+        };
+        defer job.arena.deinit();
+        diagnostics.capture("p", "n", "stale previous job");
+        job.work();
+        try std.testing.expectEqual(State.finished, job.state);
+        try std.testing.expectEqualStrings("error", job.output.?.status);
+        if (failing.has_induced_failure) {
+            try std.testing.expect(job.output.?.message == null);
+        } else {
+            try std.testing.expectEqualStrings("Compilation Error in check (models/check.sql):\n", job.output.?.message.?);
+        }
+        // Returning from the worker keeps the captured error available. An
+        // inline job must also restore the outer command's declared values.
+        try std.testing.expectEqualStrings("Compilation Error in check (models/check.sql):\n", diagnostics.message(error.JinjaCompilerError).?);
+        diagnostics.capture("p", "n", authored);
+        try std.testing.expectEqualStrings("Compilation Error in n (p):\n", diagnostics.message(error.JinjaCompilerError).?);
+    }
+    try std.testing.expect(failing.has_induced_failure);
+    diagnostics.clear();
+}
+
+fn captureJobDiagnosticForTest(runtime: types.Runtime, graph: *const types.Graph, resource: Resource, database_path: []const u8, project_dir: []const u8) anyerror!results.NodeResult {
+    _ = runtime;
+    _ = graph;
+    _ = database_path;
+    _ = project_dir;
+    const diagnostics = @import("compile_diagnostics.zig");
+    if (diagnostics.message(error.JinjaCompilerError) != null) return error.StaleDiagnostic;
+    diagnostics.capture(resource.node.original_file_path, resource.node.name, resource.node.raw_code);
+    return error.JinjaCompilerError;
 }
