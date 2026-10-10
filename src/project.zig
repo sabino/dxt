@@ -458,12 +458,12 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
     defer if (catalog_error) |message| runtime.allocator.free(message);
     if (!options.docs_empty_catalog) if (duckdb.databasePath(runtime.allocator, target_dir, &graph)) |db_path| {
         defer runtime.allocator.free(db_path);
-        catalog_entries = (if (std.mem.eql(u8, graph.adapter_type, "postgres"))
+        catalog_entries = (if (std.mem.eql(u8, graph.adapter_type, "postgres") or @import("project/postgres_catalog.zig").usesAuthoredDuckCatalog(&graph))
             @import("project/postgres_catalog.zig").collect(runtime, db_path, &graph, selected, stdout)
         else
             duckdb.collectCatalogEntries(runtime, db_path, &graph, selected)) catch |err| blk: {
             if (err == error.OutOfMemory) return err;
-            catalog_error = try runtime.allocator.dupe(u8, @import("project/compile_diagnostics.zig").message(err) orelse @errorName(err));
+            catalog_error = try @import("project/secret_projection.zig").text(runtime.allocator, runtime.environment, @import("project/compile_diagnostics.zig").message(err) orelse @errorName(err));
             break :blk .{};
         };
     } else |err| switch (err) {
