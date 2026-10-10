@@ -48,6 +48,22 @@ def test_snapshot_main_response_first_unchanged_and_updated(tmp_path, configurat
         assert rows(pair, request, adapter, 'select count(*) from {schema}.history')[0] == rows(pair, request, adapter, 'select count(*) from {schema}.history')[1]
 
 
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+@pytest.mark.parametrize('strategy', ['timestamp', 'check'])
+def test_snapshot_new_record_main_response_counts_tombstones_and_changes(tmp_path, configuration_oracle, request, adapter, strategy):
+    pair = setup_pair(tmp_path, configuration_oracle, request, adapter)
+    settings = "check_cols=['label']," if strategy == 'check' else ''
+    initial = "select 1 as id, 'first' as label, timestamp '2024-01-01' as updated_at union all select 2, 'second', timestamp '2024-01-01'"
+    deleted = "select 1 as id, 'first' as label, timestamp '2024-01-01' as updated_at"
+    returned = "select 1 as id, 'changed' as label, timestamp '2024-01-02' as updated_at union all select 2, 'returned', timestamp '2024-01-02'"
+    for query in [initial, deleted, deleted, returned, returned]:
+        pair.write('snapshots/history.sql', "{% snapshot history %}{{ config(target_schema=target.schema, unique_key='id', strategy='" + strategy + "', " + settings + "updated_at='updated_at', hard_deletes='new_record', post_hook='select 999') }}" + query + "{% endsnapshot %}")
+        pair.invoke('snapshot')
+        assert results(pair)[0] == results(pair)[1]
+        actual, expected = rows(pair, request, adapter, "select id,label,dbt_is_deleted,dbt_valid_to is null from {schema}.history order by id,label,dbt_is_deleted,dbt_valid_to is null")
+        assert actual == expected
+
+
 def test_postgres_materialized_view_main_command_first_refresh_and_full_refresh(tmp_path, configuration_oracle, request):
     pair = setup_pair(tmp_path, configuration_oracle, request, 'postgres')
     pair.write('models/marts/rendered.sql', "{{ config(materialized='materialized_view', post_hook='select 999') }}select 1 as id")

@@ -343,22 +343,24 @@ fn renderExecutionSqlWithCleanup(allocator: std.mem.Allocator, graph: *const Gra
         try writer.print(";\nupdate {s} d set {s} = current_timestamp::timestamp from __dxt_snapshot_deletes t where d.{s} = t.{s} and (d.{s} is null", .{ relation, valid_to, scd_id, scd_id, valid_to });
         if (config.dbt_valid_to_current != null) try writer.print(" or d.{s} = ({s})", .{ valid_to, current });
         try writer.writeAll(");\n");
-        if (new_record) {
-            try writeInsertColumns(writer, allocator, relation, source_columns, names, true);
-            try writer.writeAll("select ");
-            for (source_columns, 0..) |column, index| {
-                if (index != 0) try writer.writeAll(", ");
-                if (findColumn(target_columns, column.name) == null) try writer.print("null as {s}", .{try compiler.quoteIdentifier(allocator, column.name)}) else try writer.print("t.{s}", .{try compiler.quoteIdentifier(allocator, column.name)});
-            }
-            try writer.print(", md5(coalesce(cast(t.{s} as varchar),'') || '|' || cast(current_timestamp::timestamp as varchar)), current_timestamp::timestamp, current_timestamp::timestamp, t.{s}, 'True' from __dxt_snapshot_deletes t;\n", .{ scd_id, valid_to });
-        }
     }
     try writeInsertColumns(writer, allocator, relation, source_columns, names, new_record);
     try writer.writeAll("select ");
     try writeSourceColumns(writer, allocator, source_columns, "s");
     try writer.print(", __dxt_snapshot_scd_id, __dxt_snapshot_updated_at, __dxt_snapshot_updated_at, coalesce(nullif(__dxt_snapshot_updated_at,__dxt_snapshot_updated_at), {s})", .{current});
     if (new_record) try writer.writeAll(", 'False'");
-    try writer.writeAll(" from __dxt_snapshot_changes s;\n");
+    try writer.writeAll(" from __dxt_snapshot_changes s");
+    // Core's main INSERT includes deleted-record tombstones and new versions.
+    // Keeping both projections in that statement also preserves its row count.
+    if (new_record) {
+        try writer.writeAll(" union all select ");
+        for (source_columns, 0..) |column, index| {
+            if (index != 0) try writer.writeAll(", ");
+            if (findColumn(target_columns, column.name) == null) try writer.print("null as {s}", .{try compiler.quoteIdentifier(allocator, column.name)}) else try writer.print("t.{s}", .{try compiler.quoteIdentifier(allocator, column.name)});
+        }
+        try writer.print(", md5(coalesce(cast(t.{s} as varchar),'') || '|' || cast(current_timestamp::timestamp as varchar)), current_timestamp::timestamp, current_timestamp::timestamp, t.{s}, 'True' from __dxt_snapshot_deletes t", .{ scd_id, valid_to });
+    }
+    try writer.writeAll(";\n");
     if (cleanup) {
         try writer.writeAll("drop table __dxt_snapshot_changes;\ndrop table __dxt_snapshot_target;\ndrop table __dxt_snapshot_source;\n");
         if (!std.mem.eql(u8, hardDeletes(config), "ignore")) try writer.writeAll("drop table __dxt_snapshot_deletes;\n");
@@ -399,6 +401,8 @@ test "snapshot SCD staging validates metadata and retains scalar versus composit
     try std.testing.expect(std.mem.endsWith(u8, sql, "commit;\n"));
     try std.testing.expect(std.mem.indexOf(u8, sql, "t.__dxt_snapshot_key_0 = s.__dxt_snapshot_key_0") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "'True' from __dxt_snapshot_deletes") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, sql, "insert into "));
+    try std.testing.expect(std.mem.indexOf(u8, sql, " from __dxt_snapshot_changes s union all select ") != null);
     var keys: std.ArrayList([]const u8) = .empty;
     try keys.appendSlice(allocator, &.{ "id", "ts" });
     node.snapshot_config.?.unique_key = .{ .list = keys };
