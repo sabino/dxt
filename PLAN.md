@@ -156,6 +156,20 @@ adds no arbitrary provider or new authored constructor. Original passing
 candidate receipts stay intact; the combined companion must pass before the
 final canonical and release acceptance run.
 
+The bounded range companion is now integrated after all 776 native tests,
+the CLI build, 36 strict returned-range comparisons and 62 Decimal comparisons
+pass on its immutable candidate. Independent review confirms arena lifetime,
+genuine class recognition and stock numeric/temporal inference; every integrated
+native source byte matches that candidate. The combined 365 query/UUID/seed/alias
+rerun remains active on the same CLI. Fresh main is unchanged and the branch is
+rebased before final validation. The final unfiltered canonical collection has
+5,622 cases; its real driver/browser fixtures, zero-skip report and clean shared
+CLI/native-test build remain mandatory. The supervisor owns this whole-tree
+run, the expression worker owns final unchanged public-project comparisons and
+the release worker owns genuine ReleaseSafe packaging/installation/performance.
+Developer evidence stays recoverable in verified lossless archives; current
+build caches, original slow baselines and unfinished fixtures stay protected.
+
 The source worker's 62 Decimal comparisons pass on the first, corrected and
 expanded typed CLIs. The expanded query gate retains 182 passing and seven
 failing cases: type subscription, keyword field names, infinite timestamps and
