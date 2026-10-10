@@ -8,6 +8,7 @@ pub fn isRange(v: Value) bool {
     return marker == .callable and std.mem.eql(u8, marker.callable, "__dxt_range");
 }
 fn endpoint(a: A, v: Value, repr: bool) ![]const u8 {
+    if (expr.floatProtocol(v)) |number| return @import("expression_number.zig").floatText(a, number);
     return switch (v) {
         .none => "None",
         .integer => |text| a.dupe(u8, text),
@@ -37,7 +38,7 @@ pub fn value(a: A, class_name: []const u8, lower: Value, upper: Value, bounds: [
         .{ .key = "upper_inc", .value = .{ .boolean = !empty and upper != .none and bounds[1] == ']' } },
         .{ .key = "lower_inf", .value = .{ .boolean = !empty and lower == .none } },
         .{ .key = "upper_inf", .value = .{ .boolean = !empty and upper == .none } },
-        .{ .key = "_bounds", .value = if (empty) .none else .{ .string = try a.dupe(u8, &bounds) } },
+        .{ .key = "__dxt_range_bounds", .value = if (empty) .none else .{ .string = try a.dupe(u8, &bounds) } },
     }) };
 }
 pub fn truthy(v: Value) ?bool {
@@ -47,7 +48,7 @@ pub fn truthy(v: Value) ?bool {
 pub fn equal(lhs: Value, rhs: Value) bool {
     if (!isRange(lhs) or !isRange(rhs)) return false;
     if (lhs.attribute("isempty").boolean or rhs.attribute("isempty").boolean) return lhs.attribute("isempty").boolean and rhs.attribute("isempty").boolean;
-    return expr.equalValues(lhs.attribute("lower"), rhs.attribute("lower")) and expr.equalValues(lhs.attribute("upper"), rhs.attribute("upper")) and expr.equalValues(lhs.attribute("_bounds"), rhs.attribute("_bounds"));
+    return expr.equalValues(lhs.attribute("lower"), rhs.attribute("lower")) and expr.equalValues(lhs.attribute("upper"), rhs.attribute("upper")) and expr.equalValues(lhs.attribute("__dxt_range_bounds"), rhs.attribute("__dxt_range_bounds"));
 }
 pub fn contains(a: A, range: Value, item: Value) anyerror!bool {
     if (!isRange(range)) return error.JinjaTypeError;
@@ -76,7 +77,7 @@ test "range carriers preserve empty and unbounded states without forged markers"
     const a = arena.allocator();
     const empty = try value(a, "NumericRange", .none, .none, .{ '[', ')' }, true);
     try std.testing.expect(!truthy(empty).?);
-    try std.testing.expect(empty.attribute("_bounds") == .none);
+    try std.testing.expect(empty.attribute("__dxt_range_bounds") == .none);
     try std.testing.expect(!empty.attribute("lower_inf").boolean);
     const unbounded = try value(a, "NumericRange", .none, .none, .{ '(', ')' }, false);
     try std.testing.expect(truthy(unbounded).?);
