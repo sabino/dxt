@@ -86,8 +86,11 @@ fn clock(text: []const u8, zone: bool) !i64 {
     } else if (hour > 23 or minute > 59 or second > 59) return error.InvalidDatetime;
     return total;
 }
-pub fn time(text_: []const u8) !Parsed {
-    const text = if (std.mem.startsWith(u8, text_, "T")) text_[1..] else text_;
+pub fn time(text: []const u8) !Parsed {
+    return parseTime(text, true);
+}
+fn parseTime(text_: []const u8, allow_prefix: bool) !Parsed {
+    const text = if (allow_prefix and std.mem.startsWith(u8, text_, "T")) text_[1..] else text_;
     if (text.len < 2) return error.InvalidDatetime;
     var offset: ?i64 = null;
     var body = text;
@@ -111,7 +114,7 @@ pub fn iso(a: Allocator, text: []const u8, date_only: bool) !Parsed {
     const separator = std.unicode.utf8ByteSequenceLength(text[date.consumed]) catch return error.InvalidDatetime;
     if (date.consumed + separator >= text.len) return error.InvalidDatetime;
     _ = std.unicode.utf8Decode(text[date.consumed .. date.consumed + separator]) catch return error.InvalidDatetime;
-    var result = try time(text[date.consumed + separator ..]);
+    var result = try parseTime(text[date.consumed + separator ..], false);
     result.civil_ns += @as(i96, date.days) * std.time.ns_per_day;
     return result;
 }
@@ -126,4 +129,5 @@ test "native ISO parser preserves basic week dates and exact subminute offsets" 
     try std.testing.expectEqual(@as(i96, 123456000), @mod(value.civil_ns, std.time.ns_per_s));
     try std.testing.expectError(error.InvalidDatetime, iso(a, "2023-W53-1", true));
     try std.testing.expectError(error.InvalidDatetime, iso(a, "2023-02-29", true));
+    try std.testing.expectError(error.InvalidDatetime, iso(a, "2024-01-01TT12", false));
 }

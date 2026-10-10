@@ -244,6 +244,13 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, options: Opt
         const ns = @as(i96, @intFromFloat(integral)) * std.time.ns_per_s + @as(i96, @intFromFloat(rounded)) * std.time.ns_per_us;
         return try fromInstant(a, ns, date_only, values[1], utc);
     }
+    if (std.mem.eql(u8, method, "strptime")) {
+        if (args.len != 2 or args[0].name != null or args[1].name != null) return error.InvalidJinjaArguments;
+        if (args[0].value != .string or args[1].value != .string) return error.JinjaTypeError;
+        const parsed = try @import("datetime_strptime.zig").parse(a, args[0].value.string, args[1].value.string);
+        const zone: ?Value = if (parsed.offset_us) |offset| try timezone_context.builtinValue(a, offset, parsed.zone_name) else null;
+        return try dates.datetimeValueWithOffsetUs(a, parsed.civil_ns, false, parsed.offset_us, zone, 0);
+    }
     if (std.mem.eql(u8, method, "fromisoformat")) {
         if (args.len != 1 or args[0].name != null) return error.InvalidJinjaArguments;
         if (args[0].value != .string) return error.JinjaTypeError;

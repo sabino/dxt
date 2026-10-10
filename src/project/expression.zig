@@ -217,11 +217,7 @@ pub const Host = struct {
 
 /// Named tuples use an internal callable marker, never authored string metadata.
 pub fn tupleProtocol(value: Value) ?[]const Value {
-    if (value == .tuple) return value.tuple;
-    const marker = value.attribute("__dxt_native_tuple");
-    if (marker != .callable or !std.mem.eql(u8, marker.callable, "__dxt_native_tuple")) return null;
-    const items = value.attribute("__dxt_iterable");
-    return if (items == .list) items.list else null;
+    return @import("native_tuple.zig").items(value);
 }
 pub fn sequence(value: Value) ?[]const Value {
     if (value == .list) return value.list;
@@ -1747,7 +1743,7 @@ fn builtin(allocator: std.mem.Allocator, name: []const u8, args: []const Argumen
             const key = arg.name orelse {
                 positional += 1;
                 if (positional > 1) return error.InvalidJinjaArguments;
-                if (arg.value == .object and !arg.value.attribute("__dxt_noniterable").truthy() and sequences.kind(arg.value) == null and !sets.isSet(arg.value)) {
+                if (arg.value == .object and !arg.value.attribute("__dxt_noniterable").truthy() and sequences.kind(arg.value) == null and !sets.isSet(arg.value) and tupleProtocol(arg.value) == null) {
                     for (arg.value.object) |entry| try mappingPut(allocator, &entries, entryKey(entry), entry.value);
                 } else {
                     for (try iterableValuesWithHost(allocator, arg.value, host)) |item| {
