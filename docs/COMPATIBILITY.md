@@ -2,8 +2,8 @@
 
 The initial execution contract is **SQL models on native DuckDB and PostgreSQL**.
 The implementation has focused native, CLI, warehouse and upstream comparison
-evidence. Final integrated release verification is in progress; an implemented
-row below does not establish universal dbt parity.
+evidence. Release acceptance requires the candidate-specific gates below; an
+implemented row does not establish universal dbt parity.
 
 | Contract | Pinned version |
 | --- | --- |
@@ -60,9 +60,9 @@ outside the user-confirmed initial SQL scope.
 | Effective flags | Actual workers/cancellation for threads/fail-fast; adapter-specific full-refresh; empty/sample/event-time input bounds; failure audits; env/CLI precedence, warnings, quiet/print/colors, JSON/file logging and parser/cache/profiling controls. Unsupported command placements/values reject. [CLI options](../tests/test_usability_cli_options.py), [execution](../tests/test_usability_cli_execution.py), [profiling](../tests/test_usability_cli_profiling.py), [parser options](../tests/test_usability_parser_options.py), [worker logs](../tests/test_usability_worker_logs.py). |
 
 Package-heavy compatibility is checked separately from individual macro
-features. The unchanged PostgreSQL dbt-utils baseline passes every command,
-complete schemas, graph/config/dependencies, compiled SQL, catalog columns and
-typed rows. Its final integrated candidate rerun remains required.
+features. Each release candidate must pass the unchanged PostgreSQL dbt-utils
+ladder: seven Native/Core command pairs, complete schemas,
+graph/config/dependencies, compiled SQL, catalog columns and typed rows.
 
 The pinned dbt-utils integration project does not configure DuckDB. Running it
 on the pinned DuckDB adapter also fails under Core: its date-spine model emits
@@ -163,14 +163,24 @@ Package transports can require `git`, `curl` and `tar`.
   oracle uses the canonical runtime; the 3.11 job runs developer/CLI checks.
 - `source_status:pass/warn/error` are dxt extensions. Core parity uses its
   `source_status:fresher` comparison.
-- Compile/docs compilation failures return exit code 2 and preserve earlier
-  results and catalog artifacts, as Core does. Set
+- Ordinary compile/docs compilation failures return exit code 2 and preserve
+  earlier results and catalog artifacts, as Core does. A completed
+  `compile --fail-fast` execution failure instead returns exit code 1 and
+  publishes its invocation results, matching the observed Core behavior.
+  Preflight failures still return exit code 2 and preserve earlier artifacts,
+  including with fail-fast enabled. Set
   `DXT_DURABLE_COMPILE_ERRORS=true` to publish durable compilation-error
   results for failed resources. This native extension retains exit code 2;
   preflight failures still preserve earlier artifacts. Its complete artifact
   schemas and retry interoperability are tested separately, including actual
   Core retry of unchanged native results. The native option is absent from
   recorded Core command arguments.
+- Published diagnostics and console/file log messages mask declared
+  `DBT_ENV_SECRET_*` values; durable error messages follow the same rule.
+  Native captured diagnostics remain bounded, and capture does not split a
+  complete declared secret at the truncation boundary. Authored SQL/config,
+  raw source artifacts, primary SQL/data output and successful custom result
+  metadata retain their values, as in the observed Core controls.
 - Docs results omit default-false `static` and `empty_catalog` argument keys.
   Core 1.10.5 records them but cannot retry its own default docs artifact:
   it generates unsupported `--no-static` and `--no-empty-catalog` options.
@@ -191,6 +201,12 @@ Package transports can require `git`, `curl` and `tar`.
 - Clone/external failure fixtures retain a stronger native rollback guarantee
   in observed upstream transaction/file-publication edge cases. Successful
   rows, ordering and no-op behavior have separate Core comparisons.
+- In the [sampled-once SQL unit fixture](../tests/test_usability_unit_fixtures.py),
+  native compilation exposes the sampled mock input to authored `run_query`.
+  Pinned Core 1.10.5 instead errors because `__dbt__cte__base` is unavailable
+  to that lookup. This input-introspection extension is separate from positive
+  Core unit-fixture comparisons; it does not establish a general limitation
+  on Core's unit-test callbacks.
 - Semantic commands, movement plans and versioned environments use dxt
   artifacts. They do not claim to implement a dbt Fusion or SQLMesh runtime.
 
@@ -202,19 +218,19 @@ recorded in [PR #221](https://github.com/sabino/dxt/pull/221) and
 passes cannot certify a subsequent product change.
 
 Focused feature gates exercise real native adapters and pinned Core/MetricFlow
-outputs, with negative cases and complete applicable schemas. All six unchanged
-public Jaffle CLI steps and the historical CLI regression gate have passed on
-integrated trees. Final-candidate reruns, the unchanged dbt-utils ladder, full
-native/pytest suites, both-adapter archive installation and cold/warm
-performance remain acceptance gates.
+outputs, with negative cases and complete applicable schemas. Candidate
+acceptance also requires all six unchanged public Jaffle CLI steps, the
+unchanged PostgreSQL dbt-utils ladder, full native/pytest suites, both-adapter
+archive installation and correctness-aware cold/warm performance checks.
 
 Actual Linux x86_64 and ARM full compatibility/install jobs are configured in
 [CI](../.github/workflows/ci.yml) and [release](../.github/workflows/release.yml).
-Actual extracted native installation passes on Linux x86_64 and ARM at the
-published checkpoint. Final complete canonical compatibility results remain
-pending; cross-compilation is not a substitute for
-running the full suite on that architecture. Existing skipped historical
-fixtures do not count as parity evidence.
+Acceptance requires complete canonical CPython 3.12 reports and extracted
+archive checks on both architectures, tied to the declared candidate source
+and binaries. Cross-compilation is not a substitute for running the full suite
+on that architecture. Skipped or xfail cases do not count as parity evidence.
+Publication requires accepted reports and applicable green CI for the published
+head; historical checkpoints cannot replace those results.
 
-See [the roadmap](DBT_REPLACEMENT_ROADMAP.md) for the remaining gates and
+See [the roadmap](DBT_REPLACEMENT_ROADMAP.md) for candidate acceptance gates and
 [release process](RELEASES.md) for archive/platform requirements.

@@ -10,7 +10,7 @@
   <a href="https://github.com/sabino/dxt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sabino/dxt/ci.yml?branch=main&label=CI" alt="CI" /></a>
   <a href="https://github.com/sabino/dxt/releases"><img src="https://img.shields.io/github/v/release/sabino/dxt?include_prereleases&label=release" alt="Release" /></a>
   <img src="https://img.shields.io/badge/runtime-Zig%200.16.0-f7a41d" alt="Zig 0.16.0 runtime" />
-  <img src="https://img.shields.io/badge/status-release%20validation-blue" alt="Release validation in progress" />
+  <img src="https://img.shields.io/badge/status-release%20candidate-blue" alt="Release candidate" />
 </p>
 
 `dxt` loads dbt projects, compiles typed Jinja and SQL, executes resource graphs
@@ -30,10 +30,12 @@ coverage for typed data and the unchanged 70,000-parameter PostgreSQL batch.
 
 Compatibility evidence targets dbt Core **1.10.5**, dbt-duckdb **1.9.6**,
 dbt-postgres **1.9.1**, MetricFlow **0.208.1** and semantic interfaces **0.9.0**.
-The integrated release checks are still in progress. Consult the
-[compatibility matrix](docs/COMPATIBILITY.md) for supported behavior,
-intentional differences and pending gates; this is not a universal dbt or
-adapter certification claim. The project is independent of dbt Labs.
+Release readiness is established for each candidate by the gates in the
+[compatibility matrix](docs/COMPATIBILITY.md). Candidate-specific receipts and
+outcomes are tracked in [PR #221](https://github.com/sabino/dxt/pull/221) and
+[issue #220](https://github.com/sabino/dxt/issues/220). Supported behavior and
+intentional differences do not establish universal dbt or adapter certification.
+The project is independent of dbt Labs.
 
 ## Quick Start
 
@@ -87,9 +89,9 @@ system `git`, `curl` and `tar` for the corresponding package transports.
 | Cross-database | Named connections, source reduction/pushdown, typed movement, retained stages, incremental watermarks, policy/budget guards, locks, recovery and adaptive task retries. |
 | Environments | Immutable model versions, isolated environment views, physical reuse, interval/backfill accounting, audits, promotion and rollback. |
 
-These rows describe implemented capabilities with focused evidence. Remaining
-artifact/context edge cases, package-heavy public-project validation and
-final platform/release checks are tracked in the
+These rows describe implemented capabilities with focused evidence. Functional
+coverage and candidate-specific public-project, platform and release acceptance
+are tracked in the
 [replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md).
 
 ## System Map
@@ -114,7 +116,7 @@ flowchart LR
 | --- | --- |
 | [Primer](docs/PRIMER.md) | Runnable workflows and command families. |
 | [Compatibility](docs/COMPATIBILITY.md) | Versioned support, evidence and explicit boundaries. |
-| [Replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) | Core/proposed feature coverage and remaining acceptance gates. |
+| [Replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) | Core/proposed feature coverage and candidate acceptance gates. |
 | [Architecture](docs/ARCHITECTURE.md) | Native modules, execution flow and dependencies. |
 | [Releases](docs/RELEASES.md) | Linux x86_64/ARM archives, notices, checksums and installation checks. |
 | [Performance](docs/PERFORMANCE.md) | Correctness-aware cold/warm measurement and budgets. |
