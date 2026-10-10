@@ -293,6 +293,7 @@ test "NaN scalar equality and container identity follow separate Python rules" {
 }
 
 pub fn checkedAttribute(value: Value, name: []const u8) !Value {
+    if (sequences.kind(value) != null) return .undefined;
     if (value == .capture_undefined) {
         if (std.mem.eql(u8, name, "name") or std.mem.eql(u8, name, "hint") or std.mem.eql(u8, name, "unsafe_callable") or std.mem.eql(u8, name, "alters_data")) return value.attribute(name);
         const captured = value.capture_undefined;
@@ -381,7 +382,7 @@ pub fn evaluate(allocator: std.mem.Allocator, input: []const u8, host: ?Host) !V
         const remainder = input[condition_at + 2 ..];
         const else_at = topLevelKeyword(remainder, "else");
         const condition = try evaluate(allocator, remainder[0 .. else_at orelse remainder.len], host);
-        if (condition.truthy()) return try evaluate(allocator, input[0..condition_at], host);
+        if (try truthyWithHost(allocator, condition, host)) return try evaluate(allocator, input[0..condition_at], host);
         return if (else_at) |position| try evaluate(allocator, remainder[position + 4 ..], host) else try undefinedValue(allocator, null);
     }
     var parser = Parser{ .allocator = allocator, .input = input, .host = host };
@@ -515,7 +516,9 @@ const Parser = struct {
                 continue;
             }
             const previous_active = self.active;
-            const short = (std.mem.eql(u8, operator, "and") and !lhs.truthy()) or (std.mem.eql(u8, operator, "or") and lhs.truthy());
+            const logical = std.mem.eql(u8, operator, "and") or std.mem.eql(u8, operator, "or");
+            const truth = if (self.active and logical) try truthyWithHost(self.allocator, lhs, self.host) else false;
+            const short = (std.mem.eql(u8, operator, "and") and !truth) or (std.mem.eql(u8, operator, "or") and truth);
             if (short) self.active = false;
             const rhs = self.binary(precedence + 1) catch |err| {
                 self.active = previous_active;
@@ -548,7 +551,7 @@ const Parser = struct {
     }
 
     fn unaryFiltered(self: *Parser, with_filters: bool) anyerror!Value {
-        if (self.take("not")) return .{ .boolean = !(try self.binary(3)).truthy() };
+        if (self.take("not")) return .{ .boolean = !try truthyWithHost(self.allocator, try self.binary(3), self.host) };
         const value: Value = if (self.take("-")) blk: {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
@@ -817,7 +820,7 @@ const Parser = struct {
             return try host.call(host.context, function, args, self.allocator);
         }
         if (try pureMethod(self.allocator, receiver, method_name, args, self.host)) |value| return value;
-        if (mappingSource(receiver) != null) return if (self.capturing()) try callUndefined(try captureUndefined(self.allocator, method_name)) else error.UndefinedJinjaValue;
+        if (mappingSource(receiver) != null or sequences.kind(receiver) != null) return if (self.capturing()) try callUndefined(try captureUndefined(self.allocator, method_name)) else error.UndefinedJinjaValue;
         const host = self.host orelse return error.UnsupportedJinjaCall;
         const arguments_with_receiver = try self.allocator.alloc(Argument, args.len + 1);
         arguments_with_receiver[0] = .{ .value = receiver };
@@ -899,6 +902,7 @@ fn ownedEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Entry)) ![
 }
 
 fn pureMethod(allocator: std.mem.Allocator, receiver: Value, name_: []const u8, args: []const Argument, host: ?Host) !?Value {
+    if (sequences.kind(receiver) != null) return null;
     if (sets.isSet(receiver)) return (try sets.call(allocator, receiver, name_, args)) orelse error.UndefinedJinjaValue;
     if (complexProtocol(receiver)) |number| if (std.mem.eql(u8, name_, "conjugate")) {
         if (args.len != 0) return error.InvalidJinjaArguments;
@@ -1356,7 +1360,7 @@ pub fn textWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) any
     }
     return value.text(allocator);
 }
-fn reprWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) ![]const u8 {
+pub fn reprWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) ![]const u8 {
     const rendered = value.attribute("__dxt_repr");
     if (rendered == .string) return rendered.string;
     if (rendered == .callable or value == .list or value == .tuple or (value == .object and value.attribute("__dxt_rendered") == .undefined)) return textWithHost(allocator, value, host);
@@ -1462,6 +1466,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     return try floatValue(allocator, if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else return error.InvalidJinjaExpression);
 }
 pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
+    if (sequences.kind(value) != null) return .undefined;
     if (value == .capture_undefined) return value;
     if (isUndefined(value)) return error.UndefinedJinjaValue;
     if (sets.isSet(value)) return .undefined;
@@ -1901,13 +1906,7 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
         const bound = try @import("filter_arguments.zig").bind(allocator, args, &.{ "default_value", "boolean" }, &.{ .{ .string = "" }, .{ .boolean = false } }, 0);
         return if (isUndefined(value) or (bound[1].truthy() and !value.truthy())) bound[0] else value;
     }
-    if (std.mem.eql(u8, name, "length") or std.mem.eql(u8, name, "count")) return try integerValue(allocator, switch (value) {
-        .string => |v| try unicode.count(v),
-        .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined => 0,
-        .list, .tuple => |v| v.len,
-        .object => |v| if (value.attribute("__dxt_noniterable").truthy()) return error.JinjaTypeError else if (try sequences.length(value)) |length| length else if (sequence(value)) |items| items.len else if (mappingSource(value)) |source| source.object.len else v.len,
-        else => return error.JinjaTypeError,
-    });
+    if (std.mem.eql(u8, name, "length") or std.mem.eql(u8, name, "count")) return try lengthWithHost(allocator, value, host);
     if (std.mem.eql(u8, name, "string")) return .{ .string = try textWithHost(allocator, value, host) };
     if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "float")) {
         if (isUndefined(value)) return error.UndefinedJinjaValue;
@@ -2352,4 +2351,17 @@ test "deferred repr uses current host through nested values" {
     try std.testing.expectEqualStrings("[<LoopContext 1/3>]", try textWithHost(a, .{ .list = &.{value} }, host));
     try std.testing.expectEqualStrings("{'loop': <LoopContext 1/3>}", try textWithHost(a, .{ .object = &.{.{ .key = "loop", .value = value }} }, host));
     try std.testing.expectEqual(@as(usize, 3), fixture.calls);
+}
+
+test "authored reserved iterator keys remain ordinary mapping data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const value = try evaluate(a, "{'__dxt_sequence_kind':'itertools_count','__dxt_native_sequence':'__dxt_native_sequence'}", null);
+    try std.testing.expect(sequences.kind(value) == null);
+    try std.testing.expectEqual(@as(usize, 2), (try iterableValues(a, value)).len);
+    const iterator = try sequences.iter(a, .{ .list = &.{.{ .integer = "1" }} });
+    try std.testing.expect((try indexValue(a, iterator, .{ .string = "__dxt_native_sequence" })) == .undefined);
+    try std.testing.expect((try checkedAttribute(iterator, "__dxt_native_sequence")) == .undefined);
+    try std.testing.expect((try pureMethod(a, iterator, "items", &.{}, null)) == null);
 }

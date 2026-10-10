@@ -5,6 +5,8 @@ const Value = expression.Value;
 threadlocal var pull_depth: usize = 0;
 
 pub fn kind(value: Value) ?[]const u8 {
+    const native = value.attribute("__dxt_native_sequence");
+    if (native != .callable or !std.mem.eql(u8, native.callable, "__dxt_native_sequence")) return null;
     const marker = value.attribute("__dxt_sequence_kind");
     return if (marker == .string) marker.string else null;
 }
