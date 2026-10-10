@@ -27,6 +27,7 @@ def driver(tmp_path_factory):
          "-DYAML_VERSION_MINOR=2", "-DYAML_VERSION_PATCH=5", "--",
          "vendor/libyaml/src/api.c", "vendor/libyaml/src/reader.c",
          "vendor/libyaml/src/scanner.c", "vendor/libyaml/src/parser.c",
+         "vendor/libyaml/src/writer.c", "vendor/libyaml/src/emitter.c",
          "-Madapter=src/project/adapter.zig",
          f"-femit-bin={output}"],
         cwd=ROOT, text=True, capture_output=True,

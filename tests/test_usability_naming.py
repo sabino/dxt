@@ -69,6 +69,32 @@ def test_core_root_policy_all_resource_and_disabled_identities(tmp_path, configu
         contracts.assert_artifact(path / 'target/manifest.json')
 
 
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_core_named_models_and_persisted_generic_singular_audits_execute(
+    tmp_path, configuration_oracle, request, adapter,
+):
+    pair = project(tmp_path, configuration_oracle, request, adapter)
+    actual, expected = pair.invoke('build')
+    assert_identity(actual, expected)
+    actual, expected = pair.invoke('test', flags=['--select', 'test_type:data'])
+    assert_identity(actual, expected)
+    for path in pair.projects:
+        contracts.assert_artifact(path / 'target/manifest.json')
+        contracts.assert_artifact(path / 'target/run_results.json')
+    actual_rows, expected_rows = [
+        json.loads((path / 'target/run_results.json').read_text())['results']
+        for path in pair.projects
+    ]
+    assert len(actual_rows) == len(expected_rows) == 2
+    actual_by_id = {row['unique_id']: row for row in actual_rows}
+    expected_by_id = {row['unique_id']: row for row in expected_rows}
+    assert actual_by_id.keys() == expected_by_id.keys()
+    for unique_id, core in expected_by_id.items():
+        native = actual_by_id[unique_id]
+        for field in ['unique_id', 'status', 'relation_name']:
+            assert native[field] == core[field], (core['unique_id'], field)
+
+
 @pytest.mark.parametrize('own_schema', [False, True])
 def test_core_imported_package_generators_and_root_macro_variable_scope(tmp_path, configuration_oracle, own_schema):
     pair = ConfigurationPair(tmp_path, configuration_oracle)

@@ -402,6 +402,8 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
     output.owns_relation_name = false;
     output.compiled_ctes = &.{};
     output.owns_compiled_ctes = false;
+    output.macro_dependencies = &.{};
+    output.owns_macro_dependencies = false;
     output.log_output = null;
     output.owns_log_output = false;
     output.log_events = &.{};
@@ -463,6 +465,10 @@ fn transferResult(allocator: std.mem.Allocator, source: results.NodeResult) !res
             cte.sql = try allocator.dupe(u8, original.sql);
         }
     }
+    if (source.macro_dependencies.len != 0) {
+        output.macro_dependencies = try allocator.dupe([]const u8, source.macro_dependencies);
+        output.owns_macro_dependencies = true;
+    }
     return output;
 }
 fn freeResult(allocator: std.mem.Allocator, output: results.NodeResult) void {
@@ -476,6 +482,7 @@ fn freeResult(allocator: std.mem.Allocator, output: results.NodeResult) void {
         for (output.compiled_ctes) |cte| if (cte.sql.len != 0) allocator.free(cte.sql);
         allocator.free(output.compiled_ctes);
     }
+    if (output.owns_macro_dependencies) allocator.free(output.macro_dependencies);
     if (output.message) |value| allocator.free(value);
     if (output.owns_compiled_code) if (output.compiled_code) |value| allocator.free(value);
     if (output.owns_relation_name) if (output.relation_name) |value| allocator.free(value);

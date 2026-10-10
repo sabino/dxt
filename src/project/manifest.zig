@@ -1273,6 +1273,33 @@ fn writeConstraints(writer: *Io.Writer, constraints: std.json.Value) !void {
     try writer.writeAll("]");
 }
 
+/// Runtime test providers expose the same resource metadata as artifacts.
+/// Worker-owned compilation fields override the read-only parsed graph node.
+pub fn testContextNode(allocator: std.mem.Allocator, graph: *const Graph, runtime_node: *const Node) !?std.json.Value {
+    var output: Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    for (graph.tests.items) |original| if (std.mem.eql(u8, original.unique_id, runtime_node.unique_id)) {
+        var node = original;
+        node.compiled = runtime_node.compiled;
+        node.compiled_code = runtime_node.compiled_code;
+        node.extra_ctes = runtime_node.extra_ctes;
+        try writeGenericTestNode(allocator, &output.writer, graph, node);
+        break;
+    };
+    if (output.written().len == 0) for (graph.singular_tests.items) |original| if (std.mem.eql(u8, original.unique_id, runtime_node.unique_id)) {
+        var node = original;
+        node.compiled = runtime_node.compiled;
+        node.compiled_code = runtime_node.compiled_code;
+        node.extra_ctes = runtime_node.extra_ctes;
+        try writeSingularTestNode(allocator, &output.writer, graph, node);
+        break;
+    };
+    if (output.written().len == 0) return null;
+    var document = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+    defer document.deinit();
+    return try @import("config_value.zig").clone(allocator, document.value);
+}
+
 fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, test_node: GenericTestNode) !void {
     const argument_column_name = genericTestNodeColumnName(&test_node);
     try writer.writeAll("{\"unique_id\":");

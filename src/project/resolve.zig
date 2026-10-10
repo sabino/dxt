@@ -281,13 +281,13 @@ pub fn resolveDependencies(graph: *Graph) !void {
             if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
         }
         sortStrings(test_node.macro_depends_on.items);
-        for (test_node.refs.items) |ref_dep| {
-            try appendUnique(graph.allocator, &test_node.depends_on, try resolveRefDependency(graph, test_node.package_name, ref_dep));
-        }
+        test_node.depends_on.clearRetainingCapacity();
         for (test_node.source_refs.items) |source_dep| {
             try appendUnique(graph.allocator, &test_node.depends_on, try resolveSourceDependency(graph, test_node.package_name, source_dep));
         }
-        sortStrings(test_node.depends_on.items);
+        for (test_node.refs.items) |ref_dep| {
+            try appendUnique(graph.allocator, &test_node.depends_on, try resolveRefDependency(graph, test_node.package_name, ref_dep));
+        }
     }
     for (graph.unit_tests.items) |*unit_test| {
         if (!unit_test.enabled) continue;

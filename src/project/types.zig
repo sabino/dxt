@@ -441,6 +441,7 @@ pub const UnmatchedModelProperty = struct {
 };
 
 pub const SingularTestProperty = struct {
+    config_values: std.json.Value = .null,
     package_name: []const u8,
     name: []const u8,
     patch_path: []const u8,
@@ -1027,6 +1028,7 @@ pub fn deinitSingularTestNode(allocator: std.mem.Allocator, test_node: *Singular
 }
 
 fn deinitSingularTestProperty(allocator: std.mem.Allocator, property: *SingularTestProperty) void {
+    config_value.deinit(allocator, &property.config_values);
     property.tags.deinit(allocator);
 }
 

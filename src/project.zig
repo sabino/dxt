@@ -1387,6 +1387,7 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
             }
             for (row.compiled_ctes) |cte| try node.extra_ctes.append(runtime.allocator, .{ .id = cte.id, .sql = try runtime.allocator.dupe(u8, cte.sql) });
         }
+        try publishDataTestCompilation(runtime, graph, row, target_dir);
     }
     if (!preparation_active) {
         preparation = try @import("project/adapter.zig").openSession(runtime, graph, db_path);
@@ -1516,8 +1517,8 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
     }
     const compilation_started = execution_clock.now(runtime.io);
     _ = (switch (resource) {
-        .generic => |node| appendOneDataTestResult(runtime, db_path, &graph, .{ .generic = @constCast(node) }, &rows),
-        .singular => |node| appendOneDataTestResult(runtime, db_path, &graph, .{ .singular = @constCast(node) }, &rows),
+        .generic => |node| appendOneDataTestResult(runtime, db_path, &graph, .{ .generic = @constCast(node) }, &rows, false),
+        .singular => |node| appendOneDataTestResult(runtime, db_path, &graph, .{ .singular = @constCast(node) }, &rows, false),
         .unit => |node| appendOneUnitTestResult(runtime, db_path, &graph, node, &rows),
         .node => unreachable,
     }) catch |err| blk: {
@@ -2021,7 +2022,7 @@ const GenericTestExecutionSummary = struct {
 fn appendDataTestResults(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_nodes: []const DataTestRef, executed: *std.ArrayList(run_results.NodeResult)) !GenericTestExecutionSummary {
     var summary: GenericTestExecutionSummary = .{};
     for (test_nodes) |test_ref| {
-        const result = try appendOneDataTestResult(runtime, db_path, graph, test_ref, executed);
+        const result = try appendOneDataTestResult(runtime, db_path, graph, test_ref, executed, true);
         summary.failed_tests += result.failed_tests;
         summary.total_failures += result.total_failures;
     }
@@ -2053,7 +2054,7 @@ fn appendReadyDataTestResults(
     for (test_nodes, 0..) |test_ref, index| {
         if (executed_tests[index]) continue;
         if (!try scheduler.dependenciesCompleted(runtime.allocator, graph, test_ref.dependsOn(), selected, completed_nodes)) continue;
-        const result = try appendOneDataTestResult(runtime, db_path, graph, test_ref, executed);
+        const result = try appendOneDataTestResult(runtime, db_path, graph, test_ref, executed, true);
         executed_tests[index] = true;
         if (result.failed_tests != 0) {
             try appendDataTestBlockedRoots(runtime.allocator, failed_blockers, test_ref);
@@ -2078,7 +2079,7 @@ fn appendRemainingReadyDataTestResults(
     for (test_nodes, 0..) |test_ref, index| {
         if (executed_tests[index]) continue;
         if (!try scheduler.dependenciesCompleted(runtime.allocator, graph, test_ref.dependsOn(), selected, completed_nodes)) continue;
-        const result = try appendOneDataTestResult(runtime, db_path, graph, test_ref, executed);
+        const result = try appendOneDataTestResult(runtime, db_path, graph, test_ref, executed, true);
         executed_tests[index] = true;
         summary.failed_tests += result.failed_tests;
         summary.total_failures += result.total_failures;
@@ -2086,20 +2087,24 @@ fn appendRemainingReadyDataTestResults(
     return summary;
 }
 
-fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_ref: DataTestRef, executed: *std.ArrayList(run_results.NodeResult)) !GenericTestExecutionSummary {
+fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_ref: DataTestRef, executed: *std.ArrayList(run_results.NodeResult), publish_compilation: bool) !GenericTestExecutionSummary {
     const execution = switch (test_ref) {
         .generic => |test_node| try duckdb.executeGenericTest(runtime, db_path, graph, test_node),
         .singular => |test_node| try duckdb.executeSingularTest(runtime, db_path, graph, test_node),
     };
-    errdefer {
+    var transferred = false;
+    errdefer if (!transferred) {
         runtime.allocator.free(execution.compiled_code);
+        runtime.allocator.free(execution.macro_dependencies);
+        if (execution.adapter_response) |response| response.deinit(runtime.allocator);
+        if (execution.execution_message) |detail| runtime.allocator.free(detail);
         for (execution.compiled_ctes) |cte| runtime.allocator.free(cte.sql);
         runtime.allocator.free(execution.compiled_ctes);
         if (execution.relation_name) |relation_name| runtime.allocator.free(relation_name);
-    }
+    };
     if (execution.execution_error) {
-        const message = try runtime.allocator.dupe(u8, if (execution.execution_cancelled) "Database query cancelled" else execution_failure_message);
-        errdefer runtime.allocator.free(message);
+        const message = execution.execution_message orelse try runtime.allocator.dupe(u8, if (execution.execution_cancelled) "Database query cancelled" else execution_failure_message);
+        errdefer if (!transferred and execution.execution_message == null) runtime.allocator.free(message);
         switch (test_ref) {
             .generic => |test_node| try executed.append(runtime.allocator, .{
                 .test_node = test_node,
@@ -2109,6 +2114,10 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
                 .owns_compiled_code = true,
                 .compiled_ctes = execution.compiled_ctes,
                 .owns_compiled_ctes = execution.compiled_ctes.len != 0,
+                .macro_dependencies = execution.macro_dependencies,
+                .owns_macro_dependencies = execution.macro_dependencies.len != 0,
+                .adapter_response = execution.adapter_response,
+                .owns_adapter_response = execution.adapter_response != null,
                 .compile_started_at = execution.compile_started_at,
                 .compile_completed_at = execution.compile_completed_at,
                 .relation_name = execution.relation_name,
@@ -2122,12 +2131,18 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
                 .owns_compiled_code = true,
                 .compiled_ctes = execution.compiled_ctes,
                 .owns_compiled_ctes = execution.compiled_ctes.len != 0,
+                .macro_dependencies = execution.macro_dependencies,
+                .owns_macro_dependencies = execution.macro_dependencies.len != 0,
+                .adapter_response = execution.adapter_response,
+                .owns_adapter_response = execution.adapter_response != null,
                 .compile_started_at = execution.compile_started_at,
                 .compile_completed_at = execution.compile_completed_at,
                 .relation_name = execution.relation_name,
                 .owns_relation_name = execution.relation_name != null,
             }),
         }
+        transferred = true;
+        if (publish_compilation) try publishDataTestCompilation(runtime, graph, executed.items[executed.items.len - 1], try targetDir(runtime, graph.command_options));
         return .{ .failed_tests = 1 };
     }
     var classification = switch (test_ref) {
@@ -2143,6 +2158,7 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
         try formatTestThresholdMessage(runtime.allocator, execution.failures, kind, classification.condition orelse "!= 0")
     else
         null;
+    errdefer if (!transferred) if (message) |detail| runtime.allocator.free(detail);
     switch (test_ref) {
         .generic => |test_node| try executed.append(runtime.allocator, .{
             .test_node = test_node,
@@ -2153,6 +2169,10 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .owns_compiled_code = true,
             .compiled_ctes = execution.compiled_ctes,
             .owns_compiled_ctes = execution.compiled_ctes.len != 0,
+            .macro_dependencies = execution.macro_dependencies,
+            .owns_macro_dependencies = execution.macro_dependencies.len != 0,
+            .adapter_response = execution.adapter_response,
+            .owns_adapter_response = execution.adapter_response != null,
             .compile_started_at = execution.compile_started_at,
             .compile_completed_at = execution.compile_completed_at,
             .relation_name = execution.relation_name,
@@ -2167,16 +2187,53 @@ fn appendOneDataTestResult(runtime: Runtime, db_path: []const u8, graph: *const 
             .owns_compiled_code = true,
             .compiled_ctes = execution.compiled_ctes,
             .owns_compiled_ctes = execution.compiled_ctes.len != 0,
+            .macro_dependencies = execution.macro_dependencies,
+            .owns_macro_dependencies = execution.macro_dependencies.len != 0,
+            .adapter_response = execution.adapter_response,
+            .owns_adapter_response = execution.adapter_response != null,
             .compile_started_at = execution.compile_started_at,
             .compile_completed_at = execution.compile_completed_at,
             .relation_name = execution.relation_name,
             .owns_relation_name = execution.relation_name != null,
         }),
     }
+    transferred = true;
+    if (publish_compilation) try publishDataTestCompilation(runtime, graph, executed.items[executed.items.len - 1], try targetDir(runtime, graph.command_options));
     return .{
         .failed_tests = if (classification.fails_command) 1 else 0,
         .total_failures = if (classification.fails_command) execution.failures else 0,
     };
+}
+
+fn publishDataTestCompilation(runtime: Runtime, graph: *const Graph, row: run_results.NodeResult, target_dir: []const u8) !void {
+    const sql = row.compiled_code orelse return;
+    if (row.test_node) |original| {
+        const node = @constCast(original);
+        try publishTestCompilationFields(runtime, node, row, sql, target_dir);
+        try compiler.recordGenericCompilationDependency(runtime.allocator, graph, node);
+        for (row.macro_dependencies) |id| try util.appendUnique(runtime.allocator, &node.macro_depends_on, id);
+    } else if (row.singular_test_node) |original| {
+        const node = @constCast(original);
+        try publishTestCompilationFields(runtime, node, row, sql, target_dir);
+        for (row.macro_dependencies) |id| try util.appendUnique(runtime.allocator, &node.macro_depends_on, id);
+    }
+}
+
+fn publishTestCompilationFields(runtime: Runtime, node: anytype, row: run_results.NodeResult, sql: []const u8, target_dir: []const u8) !void {
+    const code = try runtime.allocator.dupe(u8, sql);
+    if (node.compiled_code) |old| runtime.allocator.free(old);
+    node.compiled_code = code;
+    node.compiled = true;
+    for (node.extra_ctes.items) |cte| runtime.allocator.free(cte.sql);
+    node.extra_ctes.clearRetainingCapacity();
+    try compiler.appendCteCopies(runtime.allocator, &node.extra_ctes, row.compiled_ctes);
+    const resource_path = try @import("project/artifact_paths.zig").relative(runtime.allocator, node.path, node.original_file_path);
+    defer runtime.allocator.free(resource_path);
+    const path = try pathJoin(runtime.allocator, &.{ target_dir, "compiled", node.package_name, resource_path });
+    if (node.compiled_path) |old| runtime.allocator.free(old);
+    node.compiled_path = path;
+    if (std.fs.path.dirname(path)) |parent| try Io.Dir.cwd().createDirPath(runtime.io, parent);
+    try Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = path, .data = sql });
 }
 
 fn appendOneUnitTestResult(runtime: Runtime, db_path: []const u8, graph: *const Graph, unit_test: *const UnitTestDef, executed: *std.ArrayList(run_results.NodeResult)) !GenericTestExecutionSummary {
@@ -2427,6 +2484,7 @@ fn executeEphemeralSelection(runtime: Runtime, options: Options, graph: *Graph, 
 
 fn deinitRunResults(allocator: std.mem.Allocator, results: []const run_results.NodeResult) void {
     for (results) |result| {
+        if (result.owns_macro_dependencies) allocator.free(result.macro_dependencies);
         if (result.owns_batch_results) if (result.batch_results) |batches| batches.deinit(allocator);
         if (result.owns_compiled_ctes) {
             for (result.compiled_ctes) |cte| allocator.free(cte.sql);
@@ -3768,79 +3826,37 @@ fn parseModelPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, 
 }
 
 fn parseSingularTestPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
-    var in_data_tests = false;
-    var in_config = false;
-    var data_tests_indent: usize = 0;
-    var test_item_indent: usize = 0;
-    var config_indent: usize = 0;
-    var current_test: ?usize = null;
-
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw_line| {
-        const line = stripYamlComment(raw_line);
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0) continue;
-        const indent = leadingSpaces(line);
-
-        if (indent == 0 and (std.mem.eql(u8, trimmed, "data_tests:") or std.mem.eql(u8, trimmed, "tests:"))) {
-            in_data_tests = true;
-            in_config = false;
-            data_tests_indent = indent;
-            current_test = null;
-            continue;
+    const values = @import("project/config_value.zig");
+    const resource = @import("project/resource_config.zig");
+    var document = try @import("project/yaml.zig").parse(allocator, text);
+    defer document.deinit();
+    const tests = values.get(document.value, "data_tests") orelse values.get(document.value, "tests") orelse return;
+    if (tests != .array) return error.InvalidResourceProperties;
+    for (tests.array.items) |item| {
+        if (item != .object) return error.InvalidResourceProperties;
+        var property = types.SingularTestProperty{
+            .package_name = package_name,
+            .name = try allocator.dupe(u8, try resource.string(values.get(item, "name") orelse return error.InvalidResourceProperties)),
+            .patch_path = relative_path,
+        };
+        if (values.get(item, "description")) |description| property.description = try allocator.dupe(u8, try resource.string(description));
+        const config = values.get(item, "config") orelse .null;
+        if (config != .null and config != .object) return error.InvalidResourceProperties;
+        property.config_values = try values.clone(allocator, config);
+        try @import("project/properties.zig").parseTestConfig(allocator, config, &property.config);
+        if (property.config.configured.contains(.severity)) {
+            const raw_severity = property.config.severity;
+            property.config.severity = try dupNormalizedSingularTestSeverity(allocator, raw_severity);
+            allocator.free(raw_severity);
         }
-        if (!in_data_tests) continue;
-        if (indent <= data_tests_indent and !std.mem.eql(u8, trimmed, "data_tests:")) {
-            in_data_tests = false;
-            in_config = false;
-            current_test = null;
-            continue;
-        }
-        if (in_config and indent <= config_indent and !std.mem.eql(u8, trimmed, "config:")) {
-            in_config = false;
-        }
-
-        if (std.mem.startsWith(u8, trimmed, "- ")) {
-            if (in_config and indent > config_indent) return error.UnsupportedYaml;
-            if (!std.mem.startsWith(u8, trimmed, "- name:")) return error.UnsupportedYaml;
-            const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
-            try graph.singular_test_properties.append(allocator, .{
-                .package_name = package_name,
-                .name = name,
-                .patch_path = relative_path,
-            });
-            current_test = graph.singular_test_properties.items.len - 1;
-            test_item_indent = indent;
-            in_config = false;
-            continue;
-        }
-
-        const test_index = current_test orelse continue;
-        if (indent <= test_item_indent) continue;
-        if (splitKeyValue(trimmed)) |kv| {
-            if (in_config and indent > config_indent) {
-                var property = &graph.singular_test_properties.items[test_index];
-                if (std.mem.eql(u8, kv.key, "enabled")) {
-                    property.enabled = try parseBool(kv.value);
-                } else if (std.mem.eql(u8, kv.key, "tags")) {
-                    try parseInlineStringList(allocator, kv.value, &property.tags);
-                } else if (try applySingularTestConfigValue(allocator, property, kv.key, kv.value)) {
-                    continue;
-                } else if (std.mem.eql(u8, kv.key, "store_failures") or std.mem.eql(u8, kv.key, "store_failures_as")) {
-                    return error.UnsupportedYaml;
-                } else {
-                    return error.UnsupportedYaml;
-                }
-                continue;
-            }
-            if (std.mem.eql(u8, kv.key, "description")) {
-                graph.singular_test_properties.items[test_index].description = try dupTrimmedScalar(allocator, kv.value);
-            } else if (std.mem.eql(u8, kv.key, "config")) {
-                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
-                in_config = true;
-                config_indent = indent;
-            }
-        }
+        if (values.get(config, "enabled")) |enabled| property.enabled = try resource.boolean(enabled);
+        const tags = values.get(config, "tags") orelse values.get(item, "tags") orelse .null;
+        if (tags == .string) {
+            try property.tags.append(allocator, try allocator.dupe(u8, tags.string));
+        } else if (tags == .array) {
+            for (tags.array.items) |tag| try property.tags.append(allocator, try allocator.dupe(u8, try resource.string(tag)));
+        } else if (tags != .null) return error.InvalidResourceProperties;
+        try graph.singular_test_properties.append(allocator, property);
     }
 }
 
@@ -4099,6 +4115,12 @@ fn applySingularTestProperties(graph: *Graph, package_name: []const u8) !void {
         if (!std.mem.eql(u8, property.package_name, package_name)) continue;
         const test_index = findSingularTestIndexByPackageAndName(graph, property.package_name, property.name) orelse continue;
         var test_node = &graph.singular_tests.items[test_index];
+        const values = @import("project/config_value.zig");
+        var raw_config = try values.clone(graph.allocator, property.config_values);
+        errdefer values.deinit(graph.allocator, &raw_config);
+        try values.overlay(graph.allocator, &raw_config, test_node.config_values);
+        values.deinit(graph.allocator, &test_node.config_values);
+        test_node.config_values = raw_config;
         test_node.patch_path = property.patch_path;
         if (property.description.len != 0) test_node.description = property.description;
         if (property.enabled) |enabled| {

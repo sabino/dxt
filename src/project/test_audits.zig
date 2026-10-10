@@ -11,6 +11,7 @@ pub const Result = struct {
     should_warn: bool,
     should_error: bool,
     relation_name: ?[]const u8 = null,
+    adapter_response: ?@import("run_results.zig").AdapterResponse = null,
 };
 
 pub fn configuredStore(config: types.GenericTestConfig) ?bool {
@@ -122,6 +123,57 @@ pub fn executeWithIdentity(runtime: types.Runtime, graph: *const types.Graph, db
     const output = Result{ .failures = try parseFailures(result.rows[0][0]), .should_warn = try parseBoolean(result.rows[0][1]), .should_error = try parseBoolean(result.rows[0][2]), .relation_name = relation };
     if (postgres) try scoped_runtime.adapter_session.?.commit();
     return output;
+}
+
+/// Execute the actual selected materialization and its namespace helpers on
+/// the held connection. Schema preparation and published relation identity
+/// still follow authored config/CLI, independently of helper overrides.
+pub fn executeNode(runtime: types.Runtime, graph: *const types.Graph, db_path: []const u8, config: types.GenericTestConfig, node: *const types.Node, dependencies: *std.ArrayList([]const u8)) !Result {
+    const materialization = try @import("custom_materialization.zig").selected(graph, node) orelse
+        return executeWithIdentity(runtime, graph, db_path, config, node.config_alias orelse node.name, node.package_name, node.compiled_code orelse return error.UnsupportedTestSelection, node.resolved_identity);
+    var runtime_graph = graph.*;
+    var output: std.Io.Writer.Allocating = .init(runtime.allocator);
+    defer output.deinit();
+    var host = try @import("commands.zig").OperationHost.init(runtime, &runtime_graph, db_path, &output.writer);
+    defer host.deinit();
+    host.log_events = graph.log_collector;
+    runtime_graph.execution_hooks = host.host();
+    errdefer |err| if (host.lastError()) |message| @import("compile_diagnostics.zig").captureError(node.original_file_path, node.name, message, err);
+    var scratch = std.heap.ArenaAllocator.init(runtime.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    // TestRunner ignores the materialization return value and consumes main.
+    _ = try compiler.renderMaterializationForNode(a, &runtime_graph, node, materialization, runtime.allocator, dependencies);
+    const main = host.result("main") orelse return error.InvalidTestResult;
+    const rows = main.attribute("data");
+    if (rows != .list or rows.list.len != 1 or rows.list[0] != .list or rows.list[0].list.len != 3) return error.InvalidTestResult;
+    const row = rows.list[0].list;
+    const names = main.attribute("table").attribute("column_names");
+    if (names != .list or names.list.len != 3) return error.InvalidTestResult;
+    var failures: ?usize = null;
+    var warn: ?usize = null;
+    var err: ?usize = null;
+    for (names.list, 0..) |name, index| {
+        if (name != .string) return error.InvalidTestResult;
+        if (std.ascii.eqlIgnoreCase(name.string, "failures")) failures = index;
+        if (std.ascii.eqlIgnoreCase(name.string, "should_warn")) warn = index;
+        if (std.ascii.eqlIgnoreCase(name.string, "should_error")) err = index;
+    }
+    const failure_value = row[failures orelse return error.InvalidTestResult];
+    const warn_value = row[warn orelse return error.InvalidTestResult];
+    const error_value = row[err orelse return error.InvalidTestResult];
+    const options = runtime.invocation_options orelse runtime.global_options orelse &graph.command_options;
+    var result = Result{
+        .failures = try parseFailures(if (failure_value == .none) null else try failure_value.text(a)),
+        .should_warn = if (warn_value == .boolean) warn_value.boolean else try parseBoolean(if (warn_value == .none) null else try warn_value.text(a)),
+        .should_error = if (error_value == .boolean) error_value.boolean else try parseBoolean(if (error_value == .none) null else try error_value.text(a)),
+        .relation_name = if (shouldStore(config, options.*)) try compiler.relationNameForNode(runtime.allocator, graph, node) else null,
+    };
+    errdefer if (result.relation_name) |relation| runtime.allocator.free(relation);
+    const response = try @import("materialization_result.zig").fromValue(runtime.allocator, main.attribute("response"));
+    runtime.allocator.free(response.message);
+    result.adapter_response = response.response;
+    return result;
 }
 
 pub fn renderExecutionSql(a: std.mem.Allocator, query: []const u8, config: types.GenericTestConfig) ![]const u8 {

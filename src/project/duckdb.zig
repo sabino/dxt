@@ -24,6 +24,9 @@ const DuckDbObjectKind = enum { table, view };
 pub const GenericTestExecutionResult = struct {
     compiled_code: []const u8,
     compiled_ctes: []const types.ExtraCte = &.{},
+    macro_dependencies: []const []const u8 = &.{},
+    execution_message: ?[]const u8 = null,
+    adapter_response: ?@import("run_results.zig").AdapterResponse = null,
     failures: i64,
     should_warn: bool = false,
     should_error: bool = false,
@@ -150,30 +153,94 @@ pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const G
     errdefer compiled.deinit(runtime.allocator);
     const compiled_sql = compiled.compiled_code;
     const compilation_completed = clock.now(runtime.io);
-    const result = test_audits.executeWithIdentity(runtime, graph, db_path, test_node.config, test_node.alias, test_node.package_name, compiled_sql, test_node.resolved_identity) catch |err| switch (err) {
-        error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.AdapterQueryCancelled, error.InvalidTestFailureMaterialization, error.InvalidTestResult => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .compiled_ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator), .failures = 0, .execution_error = true },
-        else => return err,
+    var config = try @import("canonical_manifest_config.zig").testConfig(runtime.allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values);
+    defer @import("config_value.zig").deinit(runtime.allocator, &config);
+    var node = test_audits.auditNodeWithIdentity(test_node.config, test_node.alias, test_node.package_name, test_node.resolved_identity);
+    node.unique_id = test_node.unique_id;
+    node.name = test_node.name;
+    node.path = test_node.path;
+    node.original_file_path = test_node.original_file_path;
+    node.raw_code = test_node.raw_code;
+    node.description = test_node.description;
+    node.enabled = test_node.enabled;
+    node.tags = test_node.tags;
+    node.doc_blocks = test_node.doc_blocks;
+    node.refs = test_node.refs;
+    node.source_refs = test_node.source_refs;
+    node.depends_on = test_node.depends_on;
+    node.macro_depends_on = test_node.macro_depends_on;
+    node.materialized = "test";
+    node.test_config = test_node.config;
+    node.effective_config = config;
+    node.compiled_code = compiled_sql;
+    node.compiled = true;
+    node.extra_ctes = compiled.extra_ctes;
+    return executeCompiledDataTest(runtime, db_path, graph, &node, test_node.config, &compiled, compilation_started, compilation_completed);
+}
+
+fn executeCompiledDataTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const types.Node, config: types.GenericTestConfig, compiled: *compiler.CompiledModel, compilation_started: i96, compilation_completed: i96) !GenericTestExecutionResult {
+    var dependencies: std.ArrayList([]const u8) = .empty;
+    errdefer dependencies.deinit(runtime.allocator);
+    var execution_error: ?anyerror = null;
+    const result: ?test_audits.Result = test_audits.executeNode(runtime, graph, db_path, config, node, &dependencies) catch |err| blk: {
+        if (err == error.OutOfMemory) return err;
+        execution_error = err;
+        break :blk null;
     };
-    errdefer if (result.relation_name) |relation| runtime.allocator.free(relation);
-    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .compiled_ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator), .failures = result.failures, .should_warn = result.should_warn, .should_error = result.should_error, .relation_name = result.relation_name };
+    errdefer if (result) |value| if (value.relation_name) |relation| runtime.allocator.free(relation);
+    errdefer if (result) |value| if (value.adapter_response) |response| response.deinit(runtime.allocator);
+    const message = if (execution_error) |err| if (@import("compile_diagnostics.zig").message(err)) |detail| try runtime.allocator.dupe(u8, detail) else null else null;
+    errdefer if (message) |detail| runtime.allocator.free(detail);
+    const ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator);
+    errdefer {
+        for (ctes) |cte| runtime.allocator.free(cte.sql);
+        runtime.allocator.free(ctes);
+    }
+    return .{
+        .compile_started_at = compilation_started,
+        .compile_completed_at = compilation_completed,
+        .compiled_code = compiled.compiled_code,
+        .compiled_ctes = ctes,
+        .macro_dependencies = try dependencies.toOwnedSlice(runtime.allocator),
+        .execution_message = message,
+        .adapter_response = if (result) |value| value.adapter_response else null,
+        .execution_error = execution_error != null,
+        .execution_cancelled = if (execution_error) |err| err == error.AdapterQueryCancelled else false,
+        .failures = if (result) |value| value.failures else 0,
+        .should_warn = if (result) |value| value.should_warn else false,
+        .should_error = if (result) |value| value.should_error else false,
+        .relation_name = if (result) |value| value.relation_name else null,
+    };
 }
 
 pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const SingularTestNode) !GenericTestExecutionResult {
     const compilation_started = clock.now(runtime.io);
     var compiled = try compiler.compileSingularTestWithInjectedCtes(runtime.allocator, graph, test_node);
-    const original_sql = compiled.compiled_code;
-    // Config wrappers consume their input even when allocation fails.
-    compiled.compiled_code = "";
     errdefer compiled.deinit(runtime.allocator);
-    const compiled_sql = try applySingularTestConfig(runtime.allocator, original_sql, test_node.config.where, test_node.config.limit);
-    compiled.compiled_code = compiled_sql;
     const compilation_completed = clock.now(runtime.io);
-    const result = test_audits.executeWithIdentity(runtime, graph, db_path, test_node.config, test_node.alias, test_node.package_name, compiled_sql, test_node.resolved_identity) catch |err| switch (err) {
-        error.DuckDbExecutionFailed, error.PostgresExecutionFailed, error.AdapterQueryCancelled, error.InvalidTestFailureMaterialization, error.InvalidTestResult => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .compiled_ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator), .failures = 0, .execution_error = true },
-        else => return err,
-    };
-    errdefer if (result.relation_name) |relation| runtime.allocator.free(relation);
-    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = compiled_sql, .compiled_ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator), .failures = result.failures, .should_warn = result.should_warn, .should_error = result.should_error, .relation_name = result.relation_name };
+    var config = try @import("canonical_manifest_config.zig").testConfig(runtime.allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values);
+    defer @import("config_value.zig").deinit(runtime.allocator, &config);
+    var node = test_audits.auditNodeWithIdentity(test_node.config, test_node.alias, test_node.package_name, test_node.resolved_identity);
+    node.unique_id = test_node.unique_id;
+    node.name = test_node.name;
+    node.path = test_node.path;
+    node.original_file_path = test_node.original_file_path;
+    node.raw_code = test_node.raw_code;
+    node.description = test_node.description;
+    node.enabled = test_node.enabled;
+    node.tags = test_node.tags;
+    node.doc_blocks = test_node.doc_blocks;
+    node.refs = test_node.refs;
+    node.source_refs = test_node.source_refs;
+    node.depends_on = test_node.depends_on;
+    node.macro_depends_on = test_node.macro_depends_on;
+    node.materialized = "test";
+    node.test_config = test_node.config;
+    node.effective_config = config;
+    node.compiled_code = compiled.compiled_code;
+    node.compiled = true;
+    node.extra_ctes = compiled.extra_ctes;
+    return executeCompiledDataTest(runtime, db_path, graph, &node, test_node.config, &compiled, compilation_started, compilation_completed);
 }
 
 pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !void {

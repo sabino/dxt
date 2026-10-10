@@ -89,6 +89,9 @@ const CompileContext = struct {
     bindings: std.ArrayList(ValueBinding) = .empty,
     returned: ?native_expr.Value = null,
     parse_node: ?*Node = null,
+    runtime_macro_dependencies: ?*std.ArrayList([]const u8) = null,
+    runtime_dependency_allocator: std.mem.Allocator = undefined,
+    dependency_depth: usize = 0,
     execute_override: ?bool = null,
     capture_undefined_override: ?bool = null,
     var_render_depth: usize = 0,
@@ -110,6 +113,17 @@ const CompileContext = struct {
     fn init(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) CompileContext {
         const previous = if (graph.execution_hooks) |execution_host| if (execution_host.set_node) |set_node| set_node(execution_host.context, node) else null else null;
         return .{ .allocator = allocator, .graph = graph, .node = node, .value_arena = std.heap.ArenaAllocator.init(allocator), .previous_host_node = previous };
+    }
+
+    fn recordMacroDependency(self: *CompileContext, unique_id: []const u8) !void {
+        if (self.parse_node) |node| if (self.macro_render_depth == 0) try util.appendUnique(self.allocator, &node.macro_depends_on, unique_id);
+        if (self.runtime_macro_dependencies) |dependencies| if (self.macro_render_depth == self.dependency_depth) try util.appendUnique(self.runtime_dependency_allocator, dependencies, unique_id);
+    }
+
+    fn namespacePackage(self: *const CompileContext) []const u8 {
+        // ProviderContext builds one namespace for the resource package. A
+        // callee's package governs vars/dispatch, not unqualified macro lookup.
+        return self.node.package_name;
     }
 
     fn deinit(self: *CompileContext) void {
@@ -432,6 +446,38 @@ pub fn renderMacroForNode(allocator: std.mem.Allocator, graph: *const Graph, nod
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
     return try dbt_context.cloneValue(allocator, try callExpressionValue(&context, macro_name, args, context.value_arena.allocator()));
+}
+
+/// Core's materialization is the entry frame. Only its direct helper calls
+/// become resource dependencies; helpers called inside other macros do not.
+pub fn renderMaterializationForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, macro: *const MacroDef, dependency_allocator: std.mem.Allocator, dependencies: *std.ArrayList([]const u8)) !native_expr.Value {
+    var context = CompileContext.init(allocator, graph, node);
+    defer context.deinit();
+    context.runtime_macro_dependencies = dependencies;
+    context.runtime_dependency_allocator = dependency_allocator;
+    context.dependency_depth = 1;
+    return try dbt_context.cloneValue(allocator, try renderMacroValue(&context, macro, &.{}));
+}
+
+test "materialization uses the resource namespace and records direct helpers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "root" };
+    const definitions = [_][3][]const u8{
+        .{ "dbt", "materialization_test_default", "{% materialization test, default %}{{ return({'relations': [], 'selected': helper()}) }}{% endmaterialization %}" },
+        .{ "dbt", "helper", "{% macro helper() %}{{ return('core') }}{% endmacro %}" },
+        .{ "root", "helper", "{% macro helper() %}{{ return('root ' ~ nested()) }}{% endmacro %}" },
+        .{ "root", "nested", "{% macro nested() %}{{ return('nested') }}{% endmacro %}" },
+    };
+    for (definitions) |definition| try graph.macros.append(a, .{ .package_name = definition[0], .unique_id = try std.fmt.allocPrint(a, "macro.{s}.{s}", .{ definition[0], definition[1] }), .name = definition[1], .path = "macro.sql", .original_file_path = "macros/macro.sql", .macro_sql = definition[2] });
+    const node = Node{ .resource_type = "test", .package_name = "root", .unique_id = "test.root.check", .name = "check", .path = "check.sql", .original_file_path = "tests/check.sql", .raw_code = "" };
+    var dependencies: std.ArrayList([]const u8) = .empty;
+    defer dependencies.deinit(std.testing.allocator);
+    const result = try renderMaterializationForNode(a, &graph, &node, &graph.macros.items[0], std.testing.allocator, &dependencies);
+    try std.testing.expectEqualStrings("root nested", result.attribute("selected").string);
+    try std.testing.expectEqual(@as(usize, 1), dependencies.items.len);
+    try std.testing.expectEqualStrings("macro.root.helper", dependencies.items[0]);
 }
 
 /// Name generation uses Core's execute=false macro context, with variables
@@ -1344,6 +1390,8 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
         }
     }
     if (std.mem.eql(u8, path, "execute")) return .{ .boolean = context.execute_override orelse (context.parse_node == null) };
+    if (std.mem.eql(u8, path, "database")) return if (relationDatabaseForNode(context.graph, context.node)) |database| .{ .string = database } else .none;
+    if (std.mem.eql(u8, path, "schema")) return .{ .string = try relationSchemaForNode(allocator, context.graph, context.node) };
     if (std.mem.eql(u8, path, "sql") or std.mem.eql(u8, path, "compiled_code")) return if (context.node.compiled_code) |sql| .{ .string = sql } else .undefined;
     if (std.mem.eql(u8, path, "pre_hooks") or std.mem.eql(u8, path, "post_hooks")) {
         const config = try @import("canonical_manifest_config.zig").node(allocator, context.node);
@@ -1396,7 +1444,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     const macro_id = if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot|
         resolve.findMacroIdByPackageAndName(context.graph, path[0..dot], path[dot + 1 ..])
     else
-        resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.current_macro_package orelse context.node.package_name, path);
+        resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.namespacePackage(), path);
     if (macro_id) |unique_id| if (findMacroByUniqueId(context.graph, unique_id)) |macro| return .{ .callable = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ macro.package_name, macro.name }) };
     return .undefined;
 }
@@ -1588,7 +1636,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         // Loaded projects invoke the real macro and acquire relation metadata
         // only when the authored template calls it. Synthetic API graphs have
         // no bundled macros and retain their supplied execution state.
-        if (resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.current_macro_package orelse context.node.package_name, name) == null) return .{ .boolean = (context.execute_override orelse (context.parse_node == null)) and context.node.runtime_is_incremental };
+        if (resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.namespacePackage(), name) == null) return .{ .boolean = (context.execute_override orelse (context.parse_node == null)) and context.node.runtime_is_incremental };
     }
     if (std.mem.eql(u8, name, "var") or std.mem.eql(u8, name, "env_var")) {
         if (args.len < 1 or args.len > 2 or args[0].value != .string) return error.InvalidJinjaArguments;
@@ -1710,7 +1758,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
     var macro_id: ?[]const u8 = null;
     if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
         macro_id = resolve.findMacroIdByPackageAndName(context.graph, name[0..dot], name[dot + 1 ..]);
-    } else macro_id = resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.current_macro_package orelse context.node.package_name, name);
+    } else macro_id = resolve.findMacroIdForUnqualifiedNamespaceCall(context.graph, context.namespacePackage(), name);
     if (macro_id == null) {
         if (context.graph.execution_hooks) |hooks| {
             if (std.mem.eql(u8, name, "statement")) {
@@ -1738,9 +1786,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return error.UnresolvedMacro;
     }
     const macro = findMacroByUniqueId(context.graph, macro_id.?) orelse return error.UnresolvedMacro;
-    if (context.parse_node) |node| {
-        if (context.macro_render_depth == 0) try util.appendUnique(context.allocator, &node.macro_depends_on, macro.unique_id);
-    }
+    try context.recordMacroDependency(macro.unique_id);
     // The pinned DuckDB helper leaves explicitly quoted column names unquoted
     // in the INSERT projection. Honor the authored quoting policy while
     // preserving project overrides and the bundled dependency identity.
@@ -2352,9 +2398,7 @@ fn renderAdapterDispatchExpression(context: *CompileContext, span: []const u8) !
         dispatch_prefixes.slice(),
     ) orelse return error.UnresolvedMacro;
     const macro = findMacroByUniqueId(context.graph, macro_id) orelse return error.UnresolvedMacro;
-    if (context.parse_node) |node| {
-        if (context.macro_render_depth == 0) try util.appendUnique(context.allocator, &node.macro_depends_on, macro.unique_id);
-    }
+    try context.recordMacroDependency(macro.unique_id);
     if (context.parse_node == null) {
         const full_name = try std.fmt.allocPrint(context.allocator, "{s}.{s}", .{ macro.package_name, macro.name });
         defer context.allocator.free(full_name);

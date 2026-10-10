@@ -33,6 +33,13 @@ pub fn config(allocator: std.mem.Allocator, node: *const types.Node) !Value {
 }
 
 pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *const types.Node) !Value {
+    if (std.mem.eql(u8, node.resource_type, "test")) if (try @import("manifest.zig").testContextNode(allocator, graph, node)) |raw_metadata| {
+        var metadata = raw_metadata;
+        defer values.deinit(allocator, &metadata);
+        if (node.compiled_code) |sql| try values.put(allocator, &metadata, "compiled_sql", .{ .string = sql });
+        // ModelContext uses to_dict(omit_none=True), including nested configs.
+        return try withoutNone(allocator, metadata);
+    };
     const compiler = @import("compiler.zig");
     const effective_config = try config(allocator, node);
     var columns: std.ArrayList(expression.Entry) = .empty;
@@ -110,7 +117,53 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         fields[result.object.len] = .{ .key = "index", .value = try expression.integerValue(allocator, index) };
         result = .{ .object = fields };
     }
+    if (node.compiled_code) |sql| {
+        const fields = try allocator.alloc(expression.Entry, result.object.len + 3);
+        @memcpy(fields[0..result.object.len], result.object);
+        fields[result.object.len] = .{ .key = "compiled", .value = .{ .boolean = node.compiled } };
+        fields[result.object.len + 1] = .{ .key = "compiled_code", .value = .{ .string = sql } };
+        fields[result.object.len + 2] = .{ .key = "compiled_sql", .value = .{ .string = sql } };
+        result = .{ .object = fields };
+    }
     return result;
+}
+
+fn withoutNone(allocator: std.mem.Allocator, raw: std.json.Value) !Value {
+    switch (raw) {
+        .object => |object| {
+            var entries: std.ArrayList(expression.Entry) = .empty;
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| {
+                if (entry.value_ptr.* == .null) continue;
+                try entries.append(allocator, .{ .key = try allocator.dupe(u8, entry.key_ptr.*), .value = try withoutNone(allocator, entry.value_ptr.*) });
+            }
+            return .{ .object = try entries.toOwnedSlice(allocator) };
+        },
+        .array => |array| {
+            const items = try expression.allocateValues(allocator, array.items.len);
+            for (array.items, items) |item, *value| value.* = try withoutNone(allocator, item);
+            return .{ .list = items };
+        },
+        .string => |text| return .{ .string = try allocator.dupe(u8, text) },
+        else => return try values.toExpression(allocator, raw),
+    }
+}
+
+test "runtime tests preserve authored metadata and canonical compiled SQL" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = types.Graph{ .allocator = a, .project_name = "fixture" };
+    try graph.singular_tests.append(a, .{ .package_name = "fixture", .unique_id = "test.fixture.check", .name = "check", .alias = "check", .path = "check.sql", .original_file_path = "tests/check.sql", .raw_code = "select {{ ref('input') }}", .description = "Authored test" });
+    try graph.singular_tests.items[0].tags.append(a, "runtime");
+    const node = types.Node{ .resource_type = "test", .package_name = "fixture", .unique_id = "test.fixture.check", .name = "check", .path = "check.sql", .original_file_path = "tests/check.sql", .raw_code = "select {{ ref('input') }}", .compiled = true, .compiled_code = "select 1" };
+    const context = try model(a, &graph, &node);
+    try std.testing.expectEqualStrings("Authored test", context.attribute("description").string);
+    try std.testing.expectEqualStrings("runtime", context.attribute("tags").list[0].string);
+    try std.testing.expectEqualStrings("select 1", context.attribute("compiled_code").string);
+    try std.testing.expectEqualStrings("select 1", context.attribute("compiled_sql").string);
+    try std.testing.expect(context.attribute("compiled").boolean);
+    try std.testing.expect(context.attribute("config").attribute("limit") == .undefined);
 }
 
 fn fqn(allocator: std.mem.Allocator, node: *const types.Node) !Value {

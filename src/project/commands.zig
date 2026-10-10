@@ -282,7 +282,7 @@ pub const OperationHost = struct {
                 };
             };
             const base = if (std.fs.path.isAbsolute(target_path)) target_path else try std.fs.path.join(a, &.{ self.graph.command_options.project_dir, target_path });
-            const relative = if (node.snapshot_yaml_definition) try std.fmt.allocPrint(a, "{s}/{s}.sql", .{ node.original_file_path, node.name }) else node.original_file_path;
+            const relative = if (std.mem.eql(u8, node.resource_type, "test")) try @import("artifact_paths.zig").relative(a, node.path, node.original_file_path) else if (node.snapshot_yaml_definition) try std.fmt.allocPrint(a, "{s}/{s}.sql", .{ node.original_file_path, node.name }) else node.original_file_path;
             const path = try std.fs.path.join(a, &.{ base, "run", node.package_name, relative });
             if (std.fs.path.dirname(path)) |parent| try std.Io.Dir.cwd().createDirPath(self.runtime.io, parent);
             try std.Io.Dir.cwd().writeFile(self.runtime.io, .{ .sub_path = path, .data = payload.string });
