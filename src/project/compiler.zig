@@ -1515,6 +1515,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
             if (std.mem.eql(u8, name, unavailable)) return if (std.mem.eql(u8, path, name)) .conditional_undefined else error.UndefinedJinjaValue;
         }
     }
+    if (std.mem.eql(u8, path, "adapter.dispatch")) return .{ .callable = "adapter.dispatch" };
     if (std.mem.eql(u8, path, "execute")) return .{ .boolean = context.execute_override orelse (context.parse_node == null) };
     if (std.mem.eql(u8, path, "database")) return if (relationDatabaseForNode(context.graph, context.node)) |database| .{ .string = database } else .none;
     if (std.mem.eql(u8, path, "schema")) return .{ .string = try relationSchemaForNode(allocator, context.graph, context.node) };
@@ -1850,11 +1851,14 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return .{ .string = try quoteIdentifier(allocator, args[0].value.string) };
     }
     if (std.mem.eql(u8, name, "adapter.dispatch")) {
-        if (args.len < 1 or args.len > 2 or args[0].value != .string or (args.len == 2 and args[1].value != .string)) return error.InvalidJinjaArguments;
+        const dispatch = try dispatchArguments(args);
         const prefixes = jinja.dispatchPrefixesForAdapter(context.graph.adapter_type);
-        const macro_id = resolve.findMacroIdForAdapterDispatch(context.graph, context.current_macro_package orelse context.node.package_name, args[0].value.string, if (args.len == 2) args[1].value.string else null, prefixes.slice()) orelse return error.UnresolvedMacro;
-        const macro = findMacroByUniqueId(context.graph, macro_id) orelse return error.UnresolvedMacro;
-        return .{ .callable = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ macro.package_name, macro.name }) };
+        const macro_id = resolve.findMacroIdForAdapterDispatch(context.graph, context.current_macro_package orelse context.node.package_name, dispatch.name, dispatch.namespace, prefixes.slice()) orelse return error.UnresolvedMacro;
+        // Core's dispatch result is a MacroGenerator from the global resolver,
+        // even when the selected macro is absent from TestMacroNamespace. Its
+        // retained callable carries that selected ID, without extending the
+        // public qualified namespace or retaining the temporary render Host.
+        return .{ .callable = try std.fmt.allocPrint(allocator, "__dxt_dispatched_macro:{s}", .{macro_id}) };
     }
     if (std.mem.eql(u8, name, "ref")) {
         const dep = try refFromArguments(context.allocator, args);
@@ -1880,7 +1884,8 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return try relationValueForSource(allocator, context.graph, context.node, source);
     }
     if (context.documentation) return error.UnresolvedMacro;
-    const macro_id = context.macroId(name);
+    const dispatched = std.mem.startsWith(u8, name, "__dxt_dispatched_macro:");
+    const macro_id: ?[]const u8 = if (dispatched) name["__dxt_dispatched_macro:".len..] else context.macroId(name);
     if (macro_id == null) {
         if (context.graph.execution_hooks) |hooks| {
             if (std.mem.eql(u8, name, "statement")) {
@@ -1908,6 +1913,10 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return error.UnresolvedMacro;
     }
     const macro = findMacroByUniqueId(context.graph, macro_id.?) orelse return error.UnresolvedMacro;
+    if (dispatched and context.parse_node == null) {
+        const qualified = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ macro.package_name, macro.name });
+        if (unitMacroOverride(context.graph, qualified)) |override| return try valueFromJson(allocator, override);
+    }
     try context.recordMacroDependency(macro.unique_id);
     // The pinned DuckDB helper leaves explicitly quoted column names unquoted
     // in the INSERT projection. Honor the authored quoting policy while
@@ -1917,6 +1926,29 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         return @import("constraint_context.zig").columnNames(allocator, (try @import("context_values.zig").model(allocator, context.graph, context.node)).attribute("columns"));
     }
     return try renderMacroValue(context, macro, args);
+}
+
+fn dispatchArguments(args: []const native_expr.Argument) !struct { name: []const u8, namespace: ?[]const u8 } {
+    var values: [3]?native_expr.Value = .{ null, null, null };
+    var positional: usize = 0;
+    for (args) |arg| {
+        const index = if (arg.name) |key| blk: {
+            for ([_][]const u8{ "macro_name", "macro_namespace", "packages" }, 0..) |expected, at| if (std.mem.eql(u8, key, expected)) break :blk at;
+            return error.InvalidJinjaArguments;
+        } else blk: {
+            const at = positional;
+            positional += 1;
+            if (at >= values.len) return error.InvalidJinjaArguments;
+            break :blk at;
+        };
+        if (values[index] != null) return error.InvalidJinjaArguments;
+        values[index] = arg.value;
+    }
+    const name = values[0] orelse return error.InvalidJinjaArguments;
+    const namespace = values[1] orelse .none;
+    const packages = values[2] orelse .none;
+    if (name != .string or (namespace != .none and namespace != .string) or packages != .none) return error.InvalidJinjaArguments;
+    return .{ .name = name.string, .namespace = if (namespace == .string) namespace.string else null };
 }
 
 fn unitValueOverride(graph: *const Graph, category: []const u8, key: []const u8) ?std.json.Value {
@@ -4993,6 +5025,35 @@ test "generic parse context hides unrelated package macros and uses closure over
     try std.testing.expectEqualStrings("alpha", values.get(values.get(probe.inline_config, "meta").?, "body").?.string);
     try std.testing.expectEqualStrings("macro.alpha.test_check", probe.macro_depends_on.items[0]);
     try std.testing.expectError(error.JinjaCompilerError, parseGenericArgumentValue(a, &graph, &probe, .{ .string = "{{ hidden.fail() }}" }));
+}
+
+test "saved adapter dispatch invokes only its selected global macro outside parse closure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "root" };
+    defer graph.deinit();
+    try graph.macros.append(a, .{ .unique_id = "macro.root.test_check", .package_name = "root", .name = "test_check", .path = "check.sql", .original_file_path = "macros/check.sql", .macro_sql = "{% test check() %}{% set dispatch = adapter.dispatch %}{% set selected = dispatch(macro_namespace=none, macro_name='choice', packages=none) %}{{ config(meta={'selected':selected()}) }}{% endtest %}" });
+    try graph.macros.append(a, .{ .unique_id = "macro.root.default__choice", .package_name = "root", .name = "default__choice", .path = "choice.sql", .original_file_path = "macros/choice.sql", .macro_sql = "{% macro default__choice() %}{{ return('global') }}{% endmacro %}" });
+    const namespace = try @import("generic_test_namespace.zig").Namespace.init(a, &graph, &.{"macro.root.test_check"});
+    defer namespace.deinit(a);
+    var probe = Node{ .resource_type = "test", .package_name = "root", .unique_id = "test.root.check", .name = "check", .path = "check.sql", .original_file_path = "schema.yml", .raw_code = "" };
+    defer types.deinitNode(a, &probe);
+    try scanMacroDependenciesInNamespace(a, &graph, &probe, "test_check", &.{}, &namespace);
+    const values = @import("config_value.zig");
+    const meta = values.get(probe.inline_config, "meta").?;
+    try std.testing.expectEqualStrings("global", values.get(meta, "selected").?.string);
+    try std.testing.expect(namespace.find("root.default__choice") == null);
+    try std.testing.expectEqual(@as(usize, 1), probe.macro_depends_on.items.len);
+    try std.testing.expectEqualStrings("macro.root.test_check", probe.macro_depends_on.items[0]);
+}
+
+test "dispatch argument binding retains Python names defaults and duplicate errors" {
+    const selected = try dispatchArguments(&.{ .{ .name = "macro_namespace", .value = .none }, .{ .name = "macro_name", .value = .{ .string = "choice" } }, .{ .name = "packages", .value = .none } });
+    try std.testing.expectEqualStrings("choice", selected.name);
+    try std.testing.expect(selected.namespace == null);
+    try std.testing.expectError(error.InvalidJinjaArguments, dispatchArguments(&.{ .{ .value = .{ .string = "choice" } }, .{ .name = "macro_name", .value = .{ .string = "duplicate" } } }));
+    try std.testing.expectError(error.InvalidJinjaArguments, dispatchArguments(&.{ .{ .value = .{ .string = "choice" } }, .{ .name = "packages", .value = .{ .list = &.{} } } }));
 }
 
 test "compiler calls aliases of typed regex class objects" {
