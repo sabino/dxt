@@ -8,10 +8,12 @@ const Value = expression.Value;
 const Allocator = std.mem.Allocator;
 
 pub fn duration(value: Value) ?i96 {
+    if (@import("datetime_protocol.zig").kind(value) != .timedelta) return null;
     const marker = value.attribute("__dxt_duration");
     return if (marker == .integer) std.fmt.parseInt(i96, marker.integer, 10) catch null else null;
 }
 pub fn time(value: Value) ?i64 {
+    if (@import("datetime_protocol.zig").kind(value) != .time) return null;
     const marker = value.attribute("__dxt_time");
     return if (marker == .integer) std.fmt.parseInt(i64, marker.integer, 10) catch null else null;
 }

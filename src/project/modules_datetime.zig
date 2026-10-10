@@ -48,10 +48,11 @@ pub fn inheritedAttributeName(kind: []const u8, name: []const u8) bool {
     return std.mem.eql(u8, kind, "time") and std.mem.eql(u8, name, "fromisoformat");
 }
 fn descriptor(a: Allocator, kind: []const u8, member: []const u8) !Value {
+    const owner = if (std.mem.eql(u8, kind, "datetime") and (std.mem.eql(u8, member, "year") or std.mem.eql(u8, member, "month") or std.mem.eql(u8, member, "day"))) "date" else kind;
     return object(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
-        .{ .key = "__dxt_class_identity", .value = .{ .string = try std.fmt.allocPrint(a, "datetime.{s}.{s}.descriptor", .{ kind, member }) } },
-        .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<attribute '{s}' of 'datetime.{s}' objects>", .{ member, kind }) } },
+        .{ .key = "__dxt_class_identity", .value = .{ .string = try std.fmt.allocPrint(a, "datetime.{s}.{s}.descriptor", .{ owner, member }) } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(a, "<{s} '{s}' of 'datetime.{s}' objects>", .{ if (std.mem.eql(u8, kind, "timedelta")) @as([]const u8, "member") else "attribute", member, owner }) } },
     });
 }
 fn classValue(a: Allocator, kind: []const u8) !Value {
@@ -223,6 +224,7 @@ pub fn durationValue(a: Allocator, micros: i96) !Value {
     try text.writer.print("{d}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(@divFloor(seconds, 3600))), @as(u64, @intCast(@divFloor(@mod(seconds, 3600), 60))), @as(u64, @intCast(@mod(seconds, 60))) });
     if (fraction != 0) try text.writer.print(".{d:0>6}", .{@as(u64, @intCast(fraction))});
     return object(a, &.{
+        .{ .key = "__dxt_temporal_value", .value = @import("datetime_protocol.zig").marker(.timedelta) },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_duration", .value = try expr.integerValue(a, micros) },
         .{ .key = "__dxt_repr", .value = .{ .string = try durationRepr(a, days, seconds, fraction) } },
@@ -370,7 +372,7 @@ test "native datetime descriptors preserve inherited and base class semantics" {
     const moment = try dates.datetimeValue(a, ns, false, 0);
     const dt_class = (try resolve(a, "modules.datetime.datetime")).?;
     try std.testing.expect(dt_class.attribute("year") != .undefined);
-    try std.testing.expectEqualStrings("<attribute 'year' of 'datetime.datetime' objects>", try dt_class.attribute("year").text(a));
+    try std.testing.expectEqualStrings("<attribute 'year' of 'datetime.date' objects>", try dt_class.attribute("year").text(a));
     try std.testing.expectEqualStrings("2024-01-01T12:34:56+00:00", (try call(a, dt_class.attribute("isoformat").callable, &.{.{ .value = moment }}, .{})).?.string);
     try std.testing.expectEqualStrings("2024-01-01", (try call(a, "__dxt_datetime_unbound:date:isoformat", &.{.{ .value = moment }}, .{})).?.string);
     try std.testing.expectEqualStrings("Mon Jan  1 00:00:00 2024", (try call(a, "__dxt_datetime_unbound:date:ctime", &.{.{ .value = moment }}, .{})).?.string);

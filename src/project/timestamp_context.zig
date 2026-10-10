@@ -8,6 +8,8 @@ const calendar_methods = @import("datetime_calendar.zig");
 const abstract_zone = @import("datetime_tzinfo.zig");
 const times = @import("datetime_time.zig");
 const native_strftime = @import("datetime_strftime.zig");
+const protocol = @import("datetime_protocol.zig");
+var next_identity: std.atomic.Value(u64) = .init(0);
 const Value = expression.Value;
 const Argument = expression.Argument;
 
@@ -55,6 +57,8 @@ fn signedInteger(comptime T: type, v: Value) ?T {
     return std.fmt.parseInt(T, v.integer, 10) catch null;
 }
 pub fn state(v: Value) ?TemporalState {
+    const kind = protocol.kind(v) orelse return null;
+    if (kind != .date and kind != .datetime) return null;
     const ns = signedInteger(i96, v.attribute("__dxt_civil_ns")) orelse return null;
     const date_only = v.attribute("__dxt_date_only");
     if (date_only != .boolean) return null;
@@ -96,6 +100,9 @@ pub fn attachTimezone(a: std.mem.Allocator, civil_ns: i96, zone: Value) anyerror
     return datetimeValueWithOffsetUs(a, civil_ns, false, offset_us, zone, 0);
 }
 pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, input_ns: i96, date_only: bool, offset_us: ?i64, timezone: ?Value, fold: u1) anyerror!Value {
+    return datetimeWithIdentity(a, input_ns, date_only, offset_us, timezone, fold, next_identity.fetchAdd(1, .monotonic) + 1);
+}
+fn datetimeWithIdentity(a: std.mem.Allocator, input_ns: i96, date_only: bool, offset_us: ?i64, timezone: ?Value, fold: u1, identity: u64) anyerror!Value {
     const civil_ns = if (date_only) @divFloor(input_ns, std.time.ns_per_day) * std.time.ns_per_day else @divFloor(input_ns, std.time.ns_per_us) * std.time.ns_per_us;
     if (timezone) |zone| if (!timezones.isTimezone(zone)) return error.JinjaTypeError;
     const actual_timezone: ?Value = if (timezone) |zone| zone else if (offset_us) |offset| try timezones.builtinValue(a, offset, null) else null;
@@ -108,6 +115,8 @@ pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, input_ns: i96, date_only:
     const rendered = if (date_only) try a.dupe(u8, label[0..10]) else try isoformat(a, civil_ns, " ", "auto", offset_us);
     var entries: std.ArrayList(expression.Entry) = .empty;
     try entries.appendSlice(a, &.{
+        .{ .key = "__dxt_temporal_value", .value = if (date_only) protocol.marker(.date) else protocol.marker(.datetime) },
+        .{ .key = "__dxt_immutable_identity", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime_instance:{d}", .{identity}) } },
         .{ .key = "__dxt_rendered", .value = .{ .string = rendered } },
         .{ .key = "__dxt_temporal_offset_error", .value = if (actual_timezone != null and abstract_zone.isAbstract(actual_timezone.?)) .{ .callable = "__dxt_temporal_offset_error" } else .none },
         .{ .key = "__dxt_string_error", .value = .{ .boolean = actual_timezone != null and abstract_zone.isAbstract(actual_timezone.?) } },
@@ -143,7 +152,7 @@ pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, input_ns: i96, date_only:
         .{ .key = "tzinfo", .value = if (actual_timezone) |zone| zone else if (offset_us) |offset| .{ .string = try zoneName(a, offset) } else .none },
         .{ .key = "fold", .value = try expression.integerValue(a, fold) },
     });
-    const spec = try std.fmt.allocPrint(a, "{d}:{s}:{s}:{s}:{d}:{s}", .{ civil_ns, if (date_only) "date" else "datetime", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{@divTrunc(offset, std.time.us_per_min)}) else "naive", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{offset}) else "naive", fold, if (actual_timezone) |zone| zone.attribute("__dxt_timezone_identity").string else "" });
+    const spec = try std.fmt.allocPrint(a, "{d}:{s}:{s}:{s}:{d}:{d}:{s}", .{ civil_ns, if (date_only) "date" else "datetime", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{@divTrunc(offset, std.time.us_per_min)}) else "naive", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{offset}) else "naive", fold, identity, if (actual_timezone) |zone| zone.attribute("__dxt_timezone_identity").string else "" });
     for ([_][]const u8{ "strftime", "isoformat", "date", "timestamp", "weekday", "isoweekday", "replace", "utcoffset", "dst", "tzname", "astimezone", "toordinal", "isocalendar", "ctime", "timetuple", "utctimetuple", "time", "timetz" }) |method| {
         if (date_only and (std.mem.eql(u8, method, "date") or std.mem.eql(u8, method, "timestamp") or std.mem.eql(u8, method, "utcoffset") or std.mem.eql(u8, method, "dst") or std.mem.eql(u8, method, "tzname") or std.mem.eql(u8, method, "astimezone") or std.mem.eql(u8, method, "utctimetuple") or std.mem.eql(u8, method, "time") or std.mem.eql(u8, method, "timetz"))) continue;
         try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime:{s}:{s}", .{ method, spec }) } });
@@ -195,7 +204,17 @@ pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) anye
     const exact_text = parts.next();
     const offset_us: ?i64 = if (exact_text) |exact| (if (std.mem.eql(u8, exact, "naive")) null else try std.fmt.parseInt(i64, exact, 10)) else if (std.mem.eql(u8, offset_text, "naive")) null else @as(i64, try std.fmt.parseInt(i32, offset_text, 10)) * std.time.us_per_min;
     const fold: u1 = if (parts.next()) |field| try std.fmt.parseInt(u1, field, 10) else 0;
+    const identity = try std.fmt.parseInt(u64, parts.next() orelse return error.InvalidDatetime, 10);
     const timezone: ?Value = if (parts.rest().len != 0) try timezones.fromIdentity(a, parts.rest()) else null;
+    if (std.mem.eql(u8, method, "astimezone")) {
+        try checkArgs(args, &.{"tz"}, 0);
+        if (timezone) |zone| {
+            const target = named(args, "tz", 0) orelse .none;
+            const original_id = zone.attribute("__dxt_timezone_identity");
+            const target_id = target.attribute("__dxt_timezone_identity");
+            if (timezones.isTimezone(target) and original_id == .string and target_id == .string and std.mem.eql(u8, original_id.string, target_id.string)) return try datetimeWithIdentity(a, ns, date_only, offset_us, timezone, fold, identity);
+        }
+    }
     const abstract = if (timezone) |zone| abstract_zone.isAbstract(zone) else false;
     if (abstract) {
         for ([_][]const u8{ "strftime", "isoformat", "timestamp", "utcoffset", "dst", "tzname", "astimezone", "timetuple", "utctimetuple" }) |dependent| if (std.mem.eql(u8, method, dependent)) return error.AbstractTimeZoneMethod;
@@ -334,4 +353,24 @@ test "native UTC datetime values retain microseconds and Python ISO/format behav
     const ancient = try datetimeValue(a, -62135596800 * @as(i96, std.time.ns_per_s) + 4 * std.time.ns_per_us, false, 0);
     try std.testing.expectEqual(@as(f64, -62135596799.99999), (try call(a, ancient.attribute("timestamp").callable, &.{})).?.number);
     try std.testing.expectEqual(@as(i64, 3), try expression.integerIndex((try call(a, dt.attribute("weekday").callable, &.{})).?));
+}
+
+test "astimezone same-zone aliases preserve immutable identity before querying abstract offsets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const zone = try abstract_zone.value(a);
+    const moment = try datetimeValueWithOffsetUs(a, 0, false, null, zone, 1);
+    const alias = (try call(a, moment.attribute("astimezone").callable, &.{.{ .value = zone }})).?;
+    try std.testing.expectEqualStrings(moment.attribute("__dxt_immutable_identity").callable, alias.attribute("__dxt_immutable_identity").callable);
+    try std.testing.expectEqual(@as(u1, 1), state(alias).?.fold);
+    try std.testing.expectError(error.AbstractTimeZoneMethod, call(a, moment.attribute("astimezone").callable, &.{}));
+    try std.testing.expectError(error.InvalidJinjaArguments, call(a, moment.attribute("astimezone").callable, &.{ .{ .value = zone }, .{ .value = zone } }));
+    const replaced = (try call(a, moment.attribute("replace").callable, &.{})).?;
+    try std.testing.expect(!std.mem.eql(u8, moment.attribute("__dxt_immutable_identity").callable, replaced.attribute("__dxt_immutable_identity").callable));
+    try std.testing.expect((try expression.checkedAttribute(moment, "__dxt_immutable_identity")) == .undefined);
+    try std.testing.expect((try expression.indexValueWithHost(a, moment, .{ .string = "__dxt_temporal_value" }, null)) == .undefined);
+    const forged: Value = .{ .object = &.{ .{ .key = "__dxt_civil_ns", .value = .{ .integer = "0" } }, .{ .key = "__dxt_date_only", .value = .{ .boolean = false } }, .{ .key = "isoformat", .value = moment.attribute("isoformat") } } };
+    try std.testing.expect(state(forged) == null);
+    try std.testing.expect(!@import("yaml_values.zig").isHashable(forged));
 }

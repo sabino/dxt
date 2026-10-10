@@ -10,14 +10,7 @@ const Timestamp = struct { ns: i96, date: bool, offset: ?i64, timezone: ?Value =
 
 fn timestamp(value: Value) ?Timestamp {
     if (timestamps.state(value)) |state| return .{ .ns = state.civil_ns, .date = state.date_only, .offset = state.offset_us, .timezone = state.timezone, .fold = state.fold };
-    const method = value.attribute("isoformat");
-    const prefix = "__dxt_datetime:isoformat:";
-    if (method != .callable or !std.mem.startsWith(u8, method.callable, prefix)) return null;
-    var parts = std.mem.splitScalar(u8, method.callable[prefix.len..], ':');
-    const ns = std.fmt.parseInt(i96, parts.next() orelse return null, 10) catch return null;
-    const kind = parts.next() orelse return null;
-    const zone = parts.next() orelse return null;
-    return .{ .ns = ns, .date = std.mem.eql(u8, kind, "date"), .offset = if (std.mem.eql(u8, zone, "naive")) null else (std.fmt.parseInt(i64, zone, 10) catch return null) * std.time.us_per_min };
+    return null;
 }
 
 pub fn isHashable(value: Value) bool {

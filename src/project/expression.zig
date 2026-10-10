@@ -345,6 +345,7 @@ test "temporal membership validates nested values after exact aliases" {
 }
 
 pub fn checkedAttribute(value: Value, name: []const u8) !Value {
+    if (@import("datetime_protocol.zig").kind(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (sequences.kind(value) != null) return .undefined;
     if (tupleProtocol(value) != null and std.mem.startsWith(u8, name, "__dxt_")) return .undefined;
     if (value == .capture_undefined) {
@@ -1626,6 +1627,7 @@ pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value
     };
 }
 pub fn indexValueWithHost(allocator: std.mem.Allocator, value: Value, key: Value, host: ?Host) !Value {
+    if (key == .string and @import("datetime_protocol.zig").kind(value) != null) return attributeWithHost(allocator, value, key.string, host);
     if (key == .string and value.attribute("__dxt_getattr") == .callable) return attributeWithHost(allocator, value, key.string, host);
     return indexValue(allocator, value, key);
 }
