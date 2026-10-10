@@ -301,7 +301,9 @@ pub fn findValueStart(text: []const u8, start: usize) ?usize {
 pub fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
     var context = ScanContext{ .allocator = allocator };
     defer context.deinit();
-    try scanRange(allocator, sql, 0, sql.len, node, graph, &context);
+    const source = try @import("template_source.zig").normalize(allocator, sql);
+    defer if (source.ptr != sql.ptr) allocator.free(source);
+    try scanRange(allocator, source, 0, source.len, node, graph, &context);
 }
 
 /// Literal braces and delimiter-like strings inside expressions belong to the

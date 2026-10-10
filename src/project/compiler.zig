@@ -6,6 +6,7 @@ const resolve = @import("resolve.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 const native_expr = @import("expression.zig");
+const template_source = @import("template_source.zig");
 
 const Graph = types.Graph;
 const ExtraCte = types.ExtraCte;
@@ -634,8 +635,9 @@ fn compileModelBodyWithDependencies(allocator: std.mem.Allocator, graph: *const 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    const end = node.raw_code.len - @as(usize, if (!std.mem.eql(u8, node.resource_type, "sql_operation") and std.mem.endsWith(u8, node.raw_code, "\n")) 1 else 0);
-    try renderRange(&context, node.raw_code, 0, end, &out);
+    const source = try template_source.normalize(context.value_arena.allocator(), node.raw_code);
+    const end = source.len - @as(usize, if (!std.mem.eql(u8, node.resource_type, "sql_operation") and std.mem.endsWith(u8, source, "\n")) 1 else 0);
+    try renderRange(&context, source, 0, end, &out);
     return try out.toOwnedSlice(allocator);
 }
 
@@ -1025,8 +1027,13 @@ fn applyGenericTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?
     return sql;
 }
 
-fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_index: usize, out: *std.ArrayList(u8)) anyerror!void {
-    var index = start;
+fn renderRange(context: *CompileContext, authored: []const u8, start: usize, authored_end: usize, out: *std.ArrayList(u8)) anyerror!void {
+    // Caller blocks can escape their defining macro frame. Keep normalized
+    // template slices in the shared value arena, alongside their bindings.
+    const template = try template_source.range(context.value_arena.allocator(), authored, start, authored_end);
+    const sql = template.source;
+    const end_index = template.end;
+    var index = template.start;
     while (index < end_index) {
         if (context.returned != null or context.loop_break or context.loop_continue) return;
         if (index + 1 >= end_index or sql[index] != '{') {
@@ -2184,9 +2191,10 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     defer timing.finish();
     if (context.macro_render_depth >= max_macro_render_depth) return error.JinjaExpressionDepthExceeded;
     const allocator = context.value_arena.allocator();
-    const open_start = std.mem.indexOf(u8, macro.macro_sql, "{%") orelse return error.UnsupportedJinja;
-    const open_end = std.mem.indexOfPos(u8, macro.macro_sql, open_start + 2, "%}") orelse return error.UnsupportedJinja;
-    const declaration = std.mem.trim(u8, macro.macro_sql[open_start + 2 .. open_end], " \t\r\n-");
+    const sql = try template_source.normalize(allocator, macro.macro_sql);
+    const open_start = std.mem.indexOf(u8, sql, "{%") orelse return error.UnsupportedJinja;
+    const open_end = std.mem.indexOfPos(u8, sql, open_start + 2, "%}") orelse return error.UnsupportedJinja;
+    const declaration = std.mem.trim(u8, sql[open_start + 2 .. open_end], " \t\r\n-");
     const materialization = std.mem.startsWith(u8, declaration, "materialization ");
     const paren = if (materialization) declaration.len else std.mem.indexOfScalar(u8, declaration, '(') orelse return error.UnsupportedJinja;
     const close = if (materialization) declaration.len else findMatchingParen(declaration, paren) orelse return error.UnsupportedJinja;
@@ -2225,16 +2233,47 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(context.allocator);
     const body_end = if (materialization)
-        findEndGenericTestTag(macro.macro_sql, open_end + 2, "endmaterialization") orelse return error.UnsupportedJinja
+        findEndGenericTestTag(sql, open_end + 2, "endmaterialization") orelse return error.UnsupportedJinja
     else if (std.mem.startsWith(u8, declaration, "data_test "))
-        findEndGenericTestTag(macro.macro_sql, open_end + 2, "enddata_test") orelse return error.UnsupportedJinja
+        findEndGenericTestTag(sql, open_end + 2, "enddata_test") orelse return error.UnsupportedJinja
     else if (std.mem.startsWith(u8, declaration, "test "))
-        findEndGenericTestTag(macro.macro_sql, open_end + 2, "endtest") orelse return error.UnsupportedJinja
+        findEndGenericTestTag(sql, open_end + 2, "endtest") orelse return error.UnsupportedJinja
     else
-        findEndMacroTag(macro.macro_sql, open_end + 2) orelse return error.UnsupportedJinja;
-    try bindMacroArguments(context, parameters, args, try macroSpecials(macro.macro_sql, .{ .start = open_end + 2, .end = body_end }));
-    try renderRange(context, macro.macro_sql, afterTag(macro.macro_sql, open_end + 2, body_end), body_end, &out);
+        findEndMacroTag(sql, open_end + 2) orelse return error.UnsupportedJinja;
+    try bindMacroArguments(context, parameters, args, try macroSpecials(sql, .{ .start = open_end + 2, .end = body_end }));
+    try renderRange(context, sql, afterTag(sql, open_end + 2, body_end), body_end, &out);
     return context.returned orelse .{ .string = try allocator.dupe(u8, out.items) };
+}
+
+test "template newline normalization retains authored model and macro bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    for ([_][]const u8{ "\n", "\r\n", "\r" }) |newline| {
+        const macro_sql = try std.fmt.allocPrint(allocator, "{{% macro probe(value='a{s}b') %}}{{% set response %}}c{s}d{{% endset %}}{{{{ value|tojson }}}}|{{{{ response|tojson }}}}|{{{{ '\\r' }}}}{{% endmacro %}}", .{ newline, newline });
+        const sql = try std.fmt.allocPrint(allocator, "{{{{ probe() }}}}{s}{{{{ 'e{s}f'|tojson }}}}{s}", .{ newline, newline, newline });
+        var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+        try graph.macros.append(allocator, .{ .package_name = "demo", .unique_id = "macro.demo.probe", .name = "probe", .path = "probe.sql", .original_file_path = "macros/probe.sql", .macro_sql = macro_sql });
+        const node = Node{ .package_name = "demo", .unique_id = "model.demo.value", .name = "value", .path = "value.sql", .original_file_path = "models/value.sql", .raw_code = sql };
+        const compiled = try compileModel(allocator, &graph, &node);
+        try std.testing.expectEqualStrings("\"a\\nb\"|\"c\\nd\"|\r\n\"e\\nf\"", compiled);
+        try std.testing.expectEqualStrings(sql, node.raw_code);
+        try std.testing.expectEqualStrings(macro_sql, graph.macros.items[0].macro_sql);
+    }
+}
+
+test "static inline config normalizes physical strings before parsing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const sql = "{{ config(meta={'physical': 'a\r\nb\rc', 'escaped': '\\r'}) }}select 1";
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    var node = Node{ .package_name = "demo", .unique_id = "model.demo.value", .name = "value", .path = "value.sql", .original_file_path = "models/value.sql", .raw_code = sql };
+    try scanDependencies(allocator, sql, &node, &graph);
+    const meta = node.effective_config.object.get("meta").?;
+    try std.testing.expectEqualStrings("a\nb\nc", meta.object.get("physical").?.string);
+    try std.testing.expectEqualStrings("\r", meta.object.get("escaped").?.string);
+    try std.testing.expectEqualStrings(sql, node.raw_code);
 }
 
 test "compiled macro functions retain independent constant pools across repeated calls" {
