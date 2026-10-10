@@ -67,15 +67,18 @@ Each architecture's package job then:
 2. Installs the complete pinned compatibility/native fixtures for that runner.
 3. Runs native tests and the full compatibility suite on the actual target.
 4. Rebuilds ReleaseSafe after integration tests, which may build a Debug binary.
-5. Creates the real archive with `scripts/package_release.py` and validates its
-   contents, binary architecture/executable metadata, notices and public-safe
-   bytes.
-6. Extracts that archive and checks `debug`, `build`, static docs, actual rows
-   and complete artifacts against both live adapters with PATH empty.
+5. Creates the real archive with `scripts/package_release.py`, generates its
+   SHA256 file, and validates contents, ELF64 class and target machine,
+   executable metadata, notices and public-safe bytes.
+6. Verifies that checksum before opening or extracting the archive and checks
+   `debug`, `build`, static docs, actual rows and complete artifacts against
+   both live adapters with PATH empty.
 7. Uploads the exact validated archive for the draft-release job.
 
 The extracted-installation gate uses `scripts/check_install.py --archive` with
-`--require-postgres`; its disposable PostgreSQL service is a CI fixture. Full
+`--checksum-file` and `--require-postgres`; its disposable PostgreSQL service
+is a CI fixture. This checks the static docs output; browser behavior is
+covered by the separate compatibility fixtures. Full
 compatibility fixtures use `scripts/postgres_fixture.py` for isolated native
 clusters. Linux ARM selects installed PostgreSQL tools through
 `DXT_POSTGRES_BIN`, because the pinned `pgserver` wheel is available only on
@@ -144,8 +147,9 @@ python scripts/check_public_safety.py
 zig build -Doptimize=ReleaseSafe
 python scripts/check_performance.py
 python scripts/package_release.py --version 0.0.0 --target x86_64-linux-gnu
-python scripts/check_release_archive.py dist/dxt-v0.0.0-x86_64-linux-gnu.tar.gz --version 0.0.0 --target x86_64-linux-gnu
-python scripts/check_install.py --archive dist/dxt-v0.0.0-x86_64-linux-gnu.tar.gz --version 0.0.0 --require-postgres
+(cd dist && sha256sum dxt-v0.0.0-x86_64-linux-gnu.tar.gz > dxt-v0.0.0-x86_64-linux-gnu-SHA256SUMS.txt)
+python scripts/check_release_archive.py dist/dxt-v0.0.0-x86_64-linux-gnu.tar.gz --version 0.0.0 --target x86_64-linux-gnu --checksum-file dist/dxt-v0.0.0-x86_64-linux-gnu-SHA256SUMS.txt
+python scripts/check_install.py --archive dist/dxt-v0.0.0-x86_64-linux-gnu.tar.gz --checksum-file dist/dxt-v0.0.0-x86_64-linux-gnu-SHA256SUMS.txt --version 0.0.0 --require-postgres
 ```
 
 Set `DXT_DUCKDB_LIBRARY` to the installed native DuckDB library and

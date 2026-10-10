@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import posixpath
 import re
+import struct
 import sys
 import tarfile
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import NamedTuple
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+ELF_MACHINES = {"x86_64-linux-gnu": 62, "aarch64-linux-gnu": 183}
 
 REQUIRED_MEMBERS = {
     "dxt",
@@ -110,6 +112,8 @@ def infer_expectation(path: Path, version: str, target: str | None) -> ArchiveEx
         raise ValueError(f"{path}: archive target {inferred_target!r} is not valid")
     if target is not None and target != inferred_target:
         raise ValueError(f"{path}: archive target {inferred_target} does not match expected {target}")
+    if inferred_target not in ELF_MACHINES:
+        raise ValueError(f"{path}: unsupported release target {inferred_target!r}")
 
     return ArchiveExpectation(
         version=version,
@@ -165,6 +169,31 @@ def scan_bytes(data: bytes, context: str) -> list[str]:
     return findings
 
 
+def check_elf(data: bytes, target: str, context: str) -> list[str]:
+    """Check the executable header against the declared Linux release target."""
+    if len(data) < 64:
+        return [f"{context}: dxt binary has a truncated ELF64 header"]
+    if data[:4] != b"\x7fELF":
+        return [f"{context}: dxt binary is not an ELF executable"]
+    if data[4] != 2:
+        return [f"{context}: dxt binary must use the ELF64 class"]
+    if data[5] != 1:
+        return [f"{context}: dxt binary must use little-endian ELF encoding"]
+    header = struct.unpack("<16sHHIQQQIHHHHHH", data[:64])
+    _, file_type, machine, version, _, _, _, _, header_size, _, _, _, _, _ = header
+    findings = []
+    if data[6] != 1 or version != 1:
+        findings.append(f"{context}: dxt binary has an invalid ELF version")
+    if file_type not in {2, 3}:  # ET_EXEC or ET_DYN (position-independent executable)
+        findings.append(f"{context}: dxt binary is not an ELF executable or PIE")
+    if header_size != 64:
+        findings.append(f"{context}: dxt binary has an invalid ELF64 header size")
+    expected_machine = ELF_MACHINES.get(target)
+    if expected_machine is None or machine != expected_machine:
+        findings.append(f"{context}: ELF machine {machine} does not match target {target}")
+    return findings
+
+
 def check_archive(path: Path, expectation: ArchiveExpectation) -> list[str]:
     findings: list[str] = []
     seen: set[str] = set()
@@ -197,16 +226,24 @@ def check_archive(path: Path, expectation: ArchiveExpectation) -> list[str]:
                     findings.append(f"{path}: member {normalized!r} is not a regular file or directory")
                     continue
 
-                if relative_name == "dxt" and member.isfile() and member.mode & 0o111 == 0:
-                    findings.append(f"{path}: dxt binary is not executable in archive metadata")
+                if relative_name == "dxt":
+                    if not member.isfile():
+                        findings.append(f"{path}: dxt binary is not a regular file")
+                    elif member.mode & 0o111 == 0:
+                        findings.append(f"{path}: dxt binary is not executable in archive metadata")
+                elif relative_name in REQUIRED_MEMBERS and not member.isfile():
+                    findings.append(f"{path}: required member {relative_name!r} is not a regular file")
 
                 if member.isfile():
                     extracted = archive.extractfile(member)
                     if extracted is None:
                         findings.append(f"{path}: could not read {normalized!r}")
                         continue
-                    findings.extend(scan_bytes(extracted.read(), f"{path}:{relative_name}"))
-    except (tarfile.TarError, OSError) as exc:
+                    data = extracted.read()
+                    findings.extend(scan_bytes(data, f"{path}:{relative_name}"))
+                    if relative_name == "dxt":
+                        findings.extend(check_elf(data, expectation.target, f"{path}:dxt"))
+    except (tarfile.TarError, OSError, EOFError) as exc:
         return [f"{path}: could not read archive: {exc}"]
 
     for member in sorted(REQUIRED_MEMBERS - seen):
@@ -236,7 +273,9 @@ def parse_checksum_file(path: Path) -> dict[str, str]:
     return checksums
 
 
-def check_checksums(checksum_file: Path, archives: list[Path]) -> list[str]:
+def check_checksums(
+    checksum_file: Path, archives: list[Path], *, allow_other_archives: bool = False
+) -> list[str]:
     findings: list[str] = []
     try:
         checksums = parse_checksum_file(checksum_file)
@@ -247,8 +286,9 @@ def check_checksums(checksum_file: Path, archives: list[Path]) -> list[str]:
     checksum_names = set(checksums)
     for missing in sorted(expected_names - checksum_names):
         findings.append(f"{checksum_file}: missing checksum for {missing}")
-    for extra in sorted(checksum_names - expected_names):
-        findings.append(f"{checksum_file}: checksum references unexpected file {extra}")
+    if not allow_other_archives:
+        for extra in sorted(checksum_names - expected_names):
+            findings.append(f"{checksum_file}: checksum references unexpected file {extra}")
 
     for archive in archives:
         if archive.name not in checksums:

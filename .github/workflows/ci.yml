@@ -68,8 +68,12 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
       - name: Package the actual release target with docs and upstream licenses
         run: python scripts/package_release.py --target ${{ matrix.target }}
+      - name: Generate the target archive checksum before extracted installation
+        run: |
+          cd dist
+          sha256sum "dxt-v0.0.0-${{ matrix.target }}.tar.gz" > "dxt-v0.0.0-${{ matrix.target }}-SHA256SUMS.txt"
       - name: Certify both adapters from the actual release archive with PATH empty
-        run: python scripts/check_install.py --archive dist/dxt-v0.0.0-${{ matrix.target }}.tar.gz --require-postgres
+        run: python scripts/check_install.py --archive dist/dxt-v0.0.0-${{ matrix.target }}.tar.gz --checksum-file dist/dxt-v0.0.0-${{ matrix.target }}-SHA256SUMS.txt --require-postgres
 
   public-package:
     name: unchanged public dbt-utils PostgreSQL project

@@ -181,7 +181,7 @@ installation requirements.
 | Complete artifact schemas | `python scripts/validate_dbt_artifacts.py <artifact.json>` |
 | Product/runtime boundary | `python scripts/check_runtime_boundary.py` |
 | Public-safe repository | `python scripts/check_public_safety.py` |
-| Extracted release installation | `python scripts/check_install.py --archive <archive.tar.gz> --require-postgres` |
+| Extracted release installation | `python scripts/check_install.py --archive <archive.tar.gz> --checksum-file <SHA256SUMS.txt> --require-postgres` |
 | Public projects and performance | CI public-project/package gates and `scripts/check_performance.py` |
 
 PostgreSQL developer fixtures use `scripts/postgres_fixture.py`; installed

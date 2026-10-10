@@ -13,7 +13,7 @@ from pathlib import Path
 import duckdb
 
 from validate_dbt_artifacts import assert_artifact
-from check_release_archive import check_archive, infer_expectation
+from check_release_archive import check_archive, check_checksums, infer_expectation
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,16 +78,36 @@ def certify_adapter(install, binary, library, version, postgres_uri=None):
     print(f"Clean native {adapter} installation passed without a runtime CLI or Python executable")
 
 
-def main() -> int:
+def extract_verified_archive(archive_path: Path, checksum_file: Path, install: Path, version: str) -> Path:
+    # A published checksum file covers both target archives; installation selects one.
+    findings = check_checksums(checksum_file, [archive_path], allow_other_archives=True)
+    if findings:
+        raise ValueError('\n'.join(findings))
+    expectation = infer_expectation(archive_path, version, None)
+    findings = check_archive(archive_path, expectation)
+    if findings:
+        raise ValueError('\n'.join(findings))
+    with tarfile.open(archive_path, 'r:gz') as archive:
+        archive.extractall(install, filter='data')
+    return install / expectation.root_name / 'dxt'
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dxt", type=Path, default=ROOT / "zig-out/bin/dxt")
     parser.add_argument("--archive", type=Path,
                         help="Validate and extract the actual release archive before adapter certification")
+    parser.add_argument("--checksum-file", type=Path,
+                        help="Required with --archive: verify its SHA256 before opening or extracting it")
     parser.add_argument("--version", default="0.0.0")
     parser.add_argument("--postgres-uri", default=os.environ.get("DXT_INSTALL_POSTGRES_URI"),
                         help="Also certify an isolated PostgreSQL fixture supplied by the developer/CI")
     parser.add_argument("--require-postgres", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.archive and not args.checksum_file:
+        parser.error("--archive requires --checksum-file before extracted installation")
+    if args.checksum_file and not args.archive:
+        parser.error("--checksum-file requires --archive")
     library = os.environ.get("DXT_DUCKDB_LIBRARY")
     if not library or not Path(library).is_file():
         parser.error("Set DXT_DUCKDB_LIBRARY to the certified DuckDB native library")
@@ -96,13 +116,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="dxt-clean-install-") as temporary:
         install = Path(temporary)
         if args.archive:
-            expectation = infer_expectation(args.archive, args.version, None)
-            findings = check_archive(args.archive, expectation)
-            if findings:
-                raise ValueError('\n'.join(findings))
-            with tarfile.open(args.archive, 'r:gz') as archive:
-                archive.extractall(install, filter='data')
-            binary = install / expectation.root_name / 'dxt'
+            binary = extract_verified_archive(args.archive, args.checksum_file, install, args.version)
         else:
             binary = install / "bin/dxt"
             binary.parent.mkdir()

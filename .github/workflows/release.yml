@@ -179,15 +179,21 @@ jobs:
       - name: Package the actual release target with docs and upstream licenses
         run: python scripts/package_release.py --version "${{ needs.verify.outputs.version }}" --target "${{ matrix.target }}"
 
+      - name: Generate the target archive checksum before extraction
+        run: |
+          cd dist
+          sha256sum "dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" > "dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt"
+
       - name: Check release archive safety
         run: |
           python scripts/check_release_archive.py \
             "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" \
             --version "${{ needs.verify.outputs.version }}" \
-            --target "${{ matrix.target }}"
+            --target "${{ matrix.target }}" \
+            --checksum-file "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt"
 
       - name: Certify extracted archive with both live adapters and PATH empty
-        run: python scripts/check_install.py --archive "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" --version "${{ needs.verify.outputs.version }}" --require-postgres
+        run: python scripts/check_install.py --archive "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" --checksum-file "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt" --version "${{ needs.verify.outputs.version }}" --require-postgres
 
       - name: Upload packaged binary
         uses: actions/upload-artifact@v4
