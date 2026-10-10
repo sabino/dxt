@@ -3,6 +3,7 @@ const std = @import("std");
 const expression = @import("expression.zig");
 
 pub fn length(a: std.mem.Allocator, value: expression.Value, host: ?expression.Host) anyerror!expression.Value {
+    if (@import("query_type.zig").name(value) != null) return error.JinjaTypeError;
     if (try invoke(a, value, "__dxt_len", host)) |result| {
         const count = try expression.integerIndex(result);
         if (count < 0) return error.JinjaTypeError;

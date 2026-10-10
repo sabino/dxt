@@ -34,6 +34,8 @@ pub fn hashable(candidate: Value) anyerror!void {
 
 fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (expression.isNotImplemented(candidate)) return;
+    if (@import("query_memoryview.zig").state(candidate) != null or @import("query_memoryview.zig").chunkIdentity(candidate) != null) return;
     if (@import("query_column.zig").items(candidate) != null) return error.JinjaTypeError;
     if (@import("query_type.zig").name(candidate) != null) return;
     if (@import("builtin_bound_method.zig").isBound(candidate)) return;
@@ -80,6 +82,8 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
 }
 
 pub fn keyEqual(left: Value, right: Value) bool {
+    if (expression.isNotImplemented(left) or expression.isNotImplemented(right)) return expression.isNotImplemented(left) and expression.isNotImplemented(right);
+    if (@import("query_memoryview.zig").state(left) != null or @import("query_memoryview.zig").state(right) != null or @import("query_memoryview.zig").chunkIdentity(left) != null or @import("query_memoryview.zig").chunkIdentity(right) != null) return expression.equalValues(left, right);
     if (@import("query_type.zig").keyEqual(left, right)) |equal| return equal;
     if (@import("range_value.zig").isRange(left) or @import("range_value.zig").isRange(right)) return @import("range_value.zig").equal(left, right);
     if (@import("decimal_value.zig").state(left) != null or @import("decimal_value.zig").state(right) != null) return expression.equalValues(left, right);

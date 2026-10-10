@@ -55,6 +55,7 @@ pub fn isIterator(value: Value) bool {
 pub fn iter(a: std.mem.Allocator, input: Value) !Value {
     if (@import("builtin_bound_method.zig").isRelationMapping(input)) return error.JinjaTypeError;
     if (isIterator(input)) return input;
+    if (@import("query_type.zig").name(input) != null) return (try @import("itertools_context.zig").call(a, "modules.itertools.repeat", &.{.{ .value = try @import("query_type.zig").notImplemented(a) }}, null)).?;
     if (!expression.isIterable(input)) return error.JinjaTypeError;
     const entries = try expression.allocateEntries(a, 3);
     entries[0] = .{ .key = "__dxt_sequence_kind", .value = .{ .string = "iterator" } };

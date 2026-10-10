@@ -188,9 +188,14 @@ pub fn callUndefined(value: Value) !Value {
 pub fn isUndefined(value: Value) bool {
     return value == .undefined or value == .conditional_undefined or value == .ordinary_undefined or value == .capture_undefined;
 }
+pub fn isNotImplemented(value: Value) bool {
+    const marker = value.attribute("__dxt_not_implemented");
+    return marker == .callable and std.mem.eql(u8, marker.callable, "__dxt_not_implemented");
+}
 
 /// Probe the iterable protocol without consuming one-shot iterators.
 pub fn isIterable(value: Value) bool {
+    if (@import("query_type.zig").name(value) != null) return true;
     return isUndefined(value) or value == .list or value == .tuple or value == .string or
         @import("builtin_bound_method.zig").isMapping(value) or sequence(value) != null or sequences.kind(value) != null;
 }
@@ -1653,6 +1658,13 @@ fn immutableEqual(left: Value, right: Value) bool {
     return immutableSame(left, right);
 }
 pub fn equalValues(a: Value, b: Value) bool {
+    if (isNotImplemented(a) or isNotImplemented(b)) return isNotImplemented(a) and isNotImplemented(b);
+    if (@import("query_memoryview.zig").equal(a, b)) |matched| return matched;
+    if (@import("query_memoryview.zig").chunkIdentity(a)) |identity| {
+        const other = @import("query_memoryview.zig").chunkIdentity(b) orelse return false;
+        return std.mem.eql(u8, identity, other);
+    }
+    if (@import("query_memoryview.zig").chunkIdentity(b) != null) return false;
     if (@import("query_type.zig").equal(a, b)) |matched| return matched;
     if (@import("query_column.zig").equal(a, b)) |matched| return matched;
     if (ranges.isRange(a) or ranges.isRange(b)) return ranges.equal(a, b);
@@ -1786,6 +1798,10 @@ fn contains(allocator: std.mem.Allocator, container: Value, item: Value) anyerro
     return containsWithHost(allocator, container, item, null);
 }
 pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Value, host: ?Host) anyerror!bool {
+    if (@import("query_memoryview.zig").state(container) != null) {
+        for (sequence(container).?) |member| if (try equalMemberChecked(member, item)) return true;
+        return false;
+    }
     if (ranges.isRange(container)) return ranges.contains(allocator, container, item);
     if (@import("regex_context.zig").isFlagClass(container)) return @import("regex_context.zig").enumContains(allocator, item);
     if (sequences.isIterator(container)) {
@@ -1900,6 +1916,8 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     return try floatValue(allocator, if (std.mem.eql(u8, op, "+")) x + y else if (std.mem.eql(u8, op, "-")) x - y else if (std.mem.eql(u8, op, "*")) x * y else if (std.mem.eql(u8, op, "/")) x / y else return error.InvalidJinjaExpression);
 }
 pub fn indexValue(allocator: std.mem.Allocator, value: Value, key: Value) !Value {
+    if (@import("query_type.zig").name(value) != null) return if (key == .string) error.QueryTypeChildNotFound else try @import("query_type.zig").notImplemented(allocator);
+    if (@import("query_memoryview.zig").chunkIdentity(value) != null) return .undefined;
     if (@import("builtin_bound_method.zig").isBound(value)) return .undefined;
     if (sets.isSet(value)) return .undefined;
     if (@import("builtin_bound_method.zig").isContextObject(value) and key == .string and std.mem.startsWith(u8, key.string, "__dxt_")) return .undefined;
@@ -2016,6 +2034,7 @@ fn integer(value: Value) !i64 {
 }
 
 fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?Value, step: ?Value) !Value {
+    if (@import("query_type.zig").name(value) != null) return @import("query_type.zig").notImplemented(allocator);
     if (value == .capture_undefined) return value;
     if (isUndefined(value)) return error.UndefinedJinjaValue;
     if (sets.isSet(value)) return error.JinjaTypeError;
@@ -2039,6 +2058,13 @@ fn sliceValue(allocator: std.mem.Allocator, value: Value, start: ?Value, stop: ?
         return .{ .string = @import("expression_identity.zig").cachedString(try text_result.toOwnedSlice(allocator)) };
     }
     const values_result = try ownedValues(allocator, &result);
+    if (@import("query_memoryview.zig").state(value)) |view| {
+        const raw = try allocator.alloc(u8, values_result.len);
+        for (values_result, raw) |member, *byte| {
+            byte.* = if (view.format == 'c') member.attribute("__dxt_binary").string[0] else if (view.format == 'b') @bitCast(@as(i8, @intCast(try integerIndex(member)))) else @intCast(try integerIndex(member));
+        }
+        return @import("query_memoryview.zig").value(allocator, raw, view.format, value.attribute("obj"));
+    }
     if (value.attribute("__dxt_binary") == .string) return yaml_values.fromMembers(allocator, values_result);
     return if (tupleProtocol(value) != null or @import("query_column.zig").items(value) != null) .{ .tuple = values_result } else .{ .list = values_result };
 }
@@ -2048,6 +2074,7 @@ pub fn iterableValues(allocator: std.mem.Allocator, value: Value) anyerror![]con
 }
 pub fn iterableValuesWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) anyerror![]const Value {
     if (@import("builtin_bound_method.zig").isRelationMapping(value)) return error.JinjaTypeError;
+    if (@import("query_type.zig").name(value) != null) return (try sequences.itemsWithHost(allocator, try sequences.iter(allocator, value), host)).?;
     if (!isIterable(value)) return error.JinjaTypeError;
     if (try sequences.itemsWithHost(allocator, value, host)) |items| return items;
     if (sequence(value)) |items| return items;
@@ -2128,6 +2155,12 @@ pub fn testValue(name: []const u8, value: Value, args: []const Argument) !bool {
     if (std.mem.eql(u8, name, "sameas")) {
         if (args.len != 1) return error.InvalidJinjaArguments;
         const other = args[0].value;
+        if (isNotImplemented(value) or isNotImplemented(other)) return isNotImplemented(value) and isNotImplemented(other);
+        if (@import("query_memoryview.zig").chunkIdentity(value)) |identity| {
+            const other_identity = @import("query_memoryview.zig").chunkIdentity(other) orelse return false;
+            return std.mem.eql(u8, identity, other_identity);
+        }
+        if (@import("query_memoryview.zig").chunkIdentity(other) != null) return false;
         if (value == .capture_undefined and other == .capture_undefined) return value.capture_undefined.identity == other.capture_undefined.identity;
         if (value == .ordinary_undefined and other == .ordinary_undefined) return value.ordinary_undefined.identity == other.ordinary_undefined.identity;
         if (isUndefined(value) or isUndefined(other)) return false;
@@ -2871,4 +2904,90 @@ test "authored reserved iterator keys remain ordinary mapping data" {
     try std.testing.expect((try indexValue(a, iterator, .{ .string = "__dxt_native_sequence" })) == .undefined);
     try std.testing.expect((try checkedAttribute(iterator, "__dxt_native_sequence")) == .undefined);
     try std.testing.expect((try pureMethod(a, iterator, "items", &.{}, null)) == null);
+}
+
+test "DuckDB type indices and bounded iteration retain NotImplemented singleton" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const kind: Value = .{ .object = &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_duck_type", .value = .{ .callable = "__dxt_duck_type" } },
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = "INTEGER" } },
+    } };
+    try std.testing.expect(isIterable(kind));
+    try std.testing.expect(!try testValue("sequence", kind, &.{}));
+    try std.testing.expect(!try testValue("mapping", kind, &.{}));
+    try std.testing.expectError(error.JinjaTypeError, lengthWithHost(a, kind, null));
+    try std.testing.expectError(error.QueryTypeChildNotFound, indexValue(a, kind, .{ .string = "id" }));
+    const first = try indexValue(a, kind, .{ .integer = "0" });
+    const negative = try indexValue(a, kind, .{ .integer = "-1" });
+    const sliced = try sliceValue(a, kind, null, null, null);
+    try std.testing.expect(isNotImplemented(first));
+    try std.testing.expect(try testValue("sameas", first, &.{.{ .value = negative }}));
+    try std.testing.expect(try testValue("sameas", first, &.{.{ .value = sliced }}));
+    try std.testing.expectEqualStrings("NotImplemented", try first.text(a));
+    try hashableKey(first);
+    try std.testing.expect(@import("mapping_keys.zig").keyEqual(first, negative));
+    const iterator = try sequences.iter(a, kind);
+    for (0..3) |_| try std.testing.expect(try testValue("sameas", first, &.{.{ .value = (try sequences.next(a, iterator, null)).? }}));
+    const bounded = (try @import("itertools_context.zig").call(a, "modules.itertools.islice", &.{ .{ .value = kind }, .{ .value = .{ .integer = "3" } } }, null)).?;
+    const members = try iterableValues(a, bounded);
+    try std.testing.expectEqual(@as(usize, 3), members.len);
+    for (members) |member| try std.testing.expect(isNotImplemented(member));
+    const forged: Value = .{ .object = &.{.{ .key = "__dxt_not_implemented", .value = .{ .string = "__dxt_not_implemented" } }} };
+    try std.testing.expect(!isNotImplemented(forged));
+    try std.testing.expect(!equalValues(first, forged));
+}
+
+test "PostgreSQL buffer views preserve slice format and chunk identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const views = @import("query_memoryview.zig");
+    const raw = [_]u8{ 0, 128, 255 };
+    const original = try views.value(a, &raw, 'c', null);
+    const binary = try yaml_values.fromBytes(a, &raw);
+    const unsigned = (try views.call(a, original.attribute("cast").callable, &.{.{ .value = .{ .string = "B" } }})).?;
+    const signed = (try views.call(a, original.attribute("cast").callable, &.{.{ .value = .{ .string = "b" } }})).?;
+    try std.testing.expect(!equalValues(original, binary));
+    try std.testing.expect(equalValues(unsigned, binary));
+    try std.testing.expect(!equalValues(signed, binary));
+    try std.testing.expect(!equalValues(original, unsigned));
+    try std.testing.expect(try containsWithHost(a, original, try yaml_values.fromBytes(a, &.{128}), null));
+    try std.testing.expect(!try containsWithHost(a, original, .{ .integer = "128" }, null));
+    try std.testing.expect(try containsWithHost(a, unsigned, .{ .integer = "128" }, null));
+    const sliced = try sliceValue(a, original, .{ .integer = "1" }, null, null);
+    try std.testing.expectEqualStrings(raw[1..], views.state(sliced).?.bytes);
+    try std.testing.expectEqual(@as(u8, 'c'), views.state(sliced).?.format);
+    const sliced_cast = (try views.call(a, sliced.attribute("cast").callable, &.{.{ .value = .{ .string = "B" } }})).?;
+    try std.testing.expectEqualStrings(try original.attribute("obj").text(a), try sliced_cast.attribute("obj").text(a));
+    const reversed = try sliceValue(a, signed, null, null, .{ .integer = "-1" });
+    try std.testing.expectEqualStrings(&.{ 255, 128, 0 }, views.state(reversed).?.bytes);
+    try std.testing.expectEqual(@as(u8, 'b'), views.state(reversed).?.format);
+    const chunk = original.attribute("obj");
+    try std.testing.expect(try testValue("sameas", chunk, &.{.{ .value = sliced.attribute("obj") }}));
+    try std.testing.expect(try testValue("sameas", chunk, &.{.{ .value = unsigned.attribute("obj") }}));
+    const separate = try views.value(a, &raw, 'c', null);
+    try std.testing.expect(!equalValues(chunk, separate.attribute("obj")));
+    try hashableKey(original);
+    try hashableKey(chunk);
+    try std.testing.expect(@import("mapping_keys.zig").keyEqual(unsigned, binary));
+    try std.testing.expect(!@import("mapping_keys.zig").keyEqual(original, binary));
+    try std.testing.expect(chunk.truthy());
+    try std.testing.expect(!isIterable(chunk));
+    try std.testing.expectError(error.JinjaTypeError, lengthWithHost(a, chunk, null));
+    try std.testing.expect((try indexValue(a, chunk, .{ .integer = "0" })) == .undefined);
+    const forged: Value = .{ .object = &.{.{ .key = "__dxt_memoryview", .value = .{ .string = "__dxt_memoryview" } }} };
+    try std.testing.expect(views.state(forged) == null);
+    try std.testing.expectError(error.JinjaTypeError, hashableKey(forged));
+    const empty = try views.value(a, "", 'c', null);
+    const empty_copy = try views.value(a, "", 'c', null);
+    const empty_bytes = try yaml_values.fromBytes(a, "");
+    const empty_unsigned = (try views.call(a, empty.attribute("cast").callable, &.{.{ .value = .{ .string = "B" } }})).?;
+    try std.testing.expect(!try testValue("sameas", empty.attribute("obj"), &.{.{ .value = empty_copy.attribute("obj") }}));
+    try std.testing.expect(equalValues(empty, empty_bytes));
+    try std.testing.expect(equalValues(empty, empty_unsigned));
+    try std.testing.expect(@import("mapping_keys.zig").keyEqual(empty, empty_bytes));
 }
