@@ -84,6 +84,10 @@ databases, including cancellation and simultaneous DuckDB writers.
 | Resource/project hooks | Held-session pre/post resource hooks and on-run-start/on-run-end operation discovery/context/results. Transactional hook failures preserve prior relations. [Resource hooks](../tests/test_usability_resource_hooks.py), [global hooks](../tests/test_usability_global_hooks.py). |
 | Grants/persist-docs | Native adapter-dispatched privileges/comments, repeat behavior, PostgreSQL role revocation and rollback on invalid roles/comments. DuckDB follows its upstream grants warning capability. [Grants and docs](../tests/test_usability_grants_docs.py). |
 
+Native snapshot run files record the optimized SQL actually executed, so their
+statement text can differ from dbt Core's. The snapshot fixtures compare rows,
+types, lifecycle, paths and artifact schemas.
+
 Native DuckDB profiles apply configuration/settings, attachments, extension
 installation/loading and secrets, plus connection lifetime, transaction and
 typed retry policies. Private credentials stay outside public target/cache
