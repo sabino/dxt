@@ -118,9 +118,41 @@ fn sameReceiver(left: Value, right: Value) bool {
 }
 
 fn trustedIdentity(value: Value) bool {
+    // Only mutable receivers can acquire new backing storage. Immutable string
+    // views and tuples keep their existing pointer/length identity instead.
+    const type_name = value.attribute("__dxt_builtin_owner");
+    if (type_name != .string or !hasName(type_name.string, &.{ "dict", "list", "set" })) return false;
     const registered = value.attribute("__dxt_builtin_registered_identity");
     const portable = value.attribute("__dxt_builtin_portable_identity");
     return (registered == .boolean and registered.boolean) or (portable == .boolean and portable.boolean);
+}
+
+test "portable method IDs do not merge immutable string views" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = try a.dupe(u8, "abcdef");
+    const full = (try lookup(a, .{ .string = text }, "upper")).?;
+    for (full.object) |*entry| {
+        if (std.mem.eql(u8, entry.key, "__dxt_builtin_portable_identity")) entry.value = .{ .boolean = true };
+    }
+    const TestHost = struct {
+        fn resolve(_: *anyopaque, _: []const u8, _: Allocator) !Value {
+            return .undefined;
+        }
+        fn call(_: *anyopaque, _: []const u8, _: []const Argument, _: Allocator) !Value {
+            return error.UnexpectedMethodInvocation;
+        }
+        fn identity(_: *anyopaque, receiver: Value) !usize {
+            return @intFromPtr(receiver.string.ptr);
+        }
+    };
+    var context: u8 = 0;
+    const host: expression.Host = .{ .context = &context, .resolve = TestHost.resolve, .call = TestHost.call, .receiver_identity = TestHost.identity };
+    const prefix = (try lookupWithHost(a, .{ .string = text[0..3] }, "upper", host)).?;
+    try std.testing.expect(expression.equalValues(full.attribute("__dxt_builtin_receiver_identity"), prefix.attribute("__dxt_builtin_receiver_identity")));
+    try std.testing.expect(!equal(full, prefix));
+    try std.testing.expect(equal(full, (try lookupWithHost(a, .{ .string = text }, "upper", host)).?));
 }
 
 pub fn equal(left: Value, right: Value) bool {
