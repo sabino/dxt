@@ -33,6 +33,34 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 
 ### Full Usability Implementation Campaign
 
+The latest unchanged public PostgreSQL dbt-utils baseline passes all seven
+commands, complete artifact schemas, resource/config/dependency identities,
+every compiled SQL resource, catalog columns and every typed relation row.
+The developer gate fixes realtime only inside its isolated fixture process
+tree so volatile views are compared at the same instant; monotonic clocks
+remain real and deliberately different rows still fail. No authored source,
+SQL or comparison value is rewritten. Jaffle and native/safety jobs are green
+on the published checkpoint, along with native archive installation on Linux
+x86_64 and ARM. The complete canonical compatibility jobs remain in progress.
+
+The next combined callable/ownership candidate passes 696 native tests,
+18 both-adapter list-growth cases and 44 inline Core comparisons. Its fresh
+public PostgreSQL rerun exposes a genuine Relation Mapping regression in the
+new context classifier. The compiler worker now owns the bounded Relation
+protocol/serialization closure; the expression worker owns the 213-case
+saved-method/base/receiver certificate and an independent public DuckDB
+diagnosis. These results are candidate-specific and do not establish final
+replacement or merge readiness.
+
+The oracle worker's primary seed implementation has 72 passing actual Core
+cases for bundled DuckDB COPY and native PostgreSQL bindings. Integration is
+sequenced after genuine context markers and borrowed transaction cleanup are
+reviewed. The unchanged 70,000-binding seed remains mandatory on the combined
+amortized-growth candidate. The oracle worker then owns native result transport,
+embedded-NUL/composite parameters and the complete authored cursor contract.
+The supervisor owns integration, publication and the final release gates;
+workers keep their source and test evidence in separate clean worktrees.
+
 The current CI repair checkpoint has all 263 historical CLI tests passing with
 zero skips after Core-grounded expectation migrations and the profileless audit
 relation fix. The published candidate passes the native/safety job and all six
