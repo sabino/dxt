@@ -12,6 +12,8 @@ from check_jaffle_shop_duckdb_parse import (
     DEFAULT_REF,
     DEFAULT_REPO_URL,
     ROOT,
+    EXPECTED_MODELS,
+    EXPECTED_TESTS,
     GateError,
     assert_equal,
     build_dxt,
@@ -114,17 +116,14 @@ def validate_docs_manifest(path: Path, project_dir: Path) -> None:
     validate_manifest_shape(path, project_dir)
     manifest = load_manifest(path)
     compiled = sorted(unique_id for unique_id, node in manifest["nodes"].items() if node.get("compiled") is True)
-    assert_equal(
-        "docs compiled models",
-        compiled,
-        [
-            "model.jaffle_shop.customers",
-            "model.jaffle_shop.orders",
-            "model.jaffle_shop.stg_customers",
-            "model.jaffle_shop.stg_orders",
-            "model.jaffle_shop.stg_payments",
-        ],
-    )
+    assert_equal("docs compiled models and tests", compiled, sorted(EXPECTED_MODELS + EXPECTED_TESTS))
+    from jaffle_core_oracle import reference
+    with reference(project_dir, 'generate') as (_, core_target, _):
+        expected = load_json(core_target / 'catalog.json')
+        actual = load_json(path.parent / 'catalog.json')
+        for key in ['nodes', 'sources', 'errors']:
+            assert_equal(f'complete catalog {key} against Core', actual[key], expected[key])
+
 
 
 def parse_args() -> argparse.Namespace:

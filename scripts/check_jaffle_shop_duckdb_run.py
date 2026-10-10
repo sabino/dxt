@@ -78,7 +78,7 @@ def validate_run_results(path: Path) -> None:
     if not isinstance(results, list):
         raise GateError("run_results results must be an array")
     assert_equal("run model result count", len(results), 5)
-    assert_equal("run model unique ids", [result.get("unique_id") for result in results], EXPECTED_RUN_MODELS)
+    assert_equal("run model unique ids", sorted(result.get("unique_id") for result in results), sorted(EXPECTED_RUN_MODELS))
     status_counts = Counter(result.get("status") for result in results)
     assert_equal("run model status counts", dict(sorted(status_counts.items())), {"success": 5})
     for result in results:
