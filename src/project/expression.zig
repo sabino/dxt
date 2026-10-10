@@ -610,6 +610,31 @@ test "cursor ranges preserve bounded membership and numeric bound equality" {
     try std.testing.expect(!try containsWithHost(a, empty, .{ .integer = "2" }, null));
 }
 
+test "cursor DuckDB type equality keeps canonical dictionary key spelling" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const integer_type: Value = .{ .object = &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_duck_type", .value = .{ .callable = "__dxt_duck_type" } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = "INTEGER" } },
+    } };
+    try std.testing.expect(equalValues(integer_type, .{ .string = "integer" }));
+    try std.testing.expect(equalValues(.{ .string = "integer" }, integer_type));
+    try std.testing.expect(!equalValues(integer_type, .{ .string = "INT" }));
+    try std.testing.expect(!equalValues(integer_type, .{ .string = "int4" }));
+    try std.testing.expect(!equalValues(integer_type, .{ .string = " INTEGER" }));
+    var entries: std.ArrayList(Entry) = .empty;
+    try mappingPut(allocator, &entries, integer_type, .{ .string = "typed" });
+    const dictionary: Value = .{ .object = entries.items };
+    try std.testing.expectEqualStrings("typed", (try mappingGet(dictionary, .{ .string = "INTEGER" })).string);
+    try std.testing.expect((try mappingGet(dictionary, .{ .string = "integer" })) == .undefined);
+    try std.testing.expectEqualStrings("typed", (try mappingGet(dictionary, integer_type)).string);
+    const authored = try evaluate(allocator, "{'__dxt_duck_type':'__dxt_duck_type','__dxt_rendered':'INTEGER'}", null);
+    try std.testing.expect(!equalValues(authored, integer_type));
+    try std.testing.expectError(error.JinjaTypeError, hashableKey(authored));
+}
+
 pub fn repr(value: Value, allocator: std.mem.Allocator) ![]const u8 {
     if (isUndefined(value)) return "Undefined";
     const rendered = value.attribute("__dxt_repr");
@@ -1599,6 +1624,7 @@ fn immutableEqual(left: Value, right: Value) bool {
     return immutableSame(left, right);
 }
 pub fn equalValues(a: Value, b: Value) bool {
+    if (@import("query_type.zig").equal(a, b)) |equal| return equal;
     if (ranges.isRange(a) or ranges.isRange(b)) return ranges.equal(a, b);
     if (decimals.state(a) != null or decimals.state(b) != null) {
         const other = if (decimals.state(a) != null) b else a;

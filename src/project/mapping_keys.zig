@@ -34,6 +34,7 @@ pub fn hashable(candidate: Value) anyerror!void {
 
 fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (@import("query_type.zig").name(candidate) != null) return;
     if (@import("builtin_bound_method.zig").isBound(candidate)) return;
     if (@import("datetime_bound_method.zig").isBound(candidate)) return;
     if (@import("decimal_value.zig").state(candidate) != null) return;
@@ -78,6 +79,7 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
 }
 
 pub fn keyEqual(left: Value, right: Value) bool {
+    if (@import("query_type.zig").keyEqual(left, right)) |equal| return equal;
     if (@import("range_value.zig").isRange(left) or @import("range_value.zig").isRange(right)) return @import("range_value.zig").equal(left, right);
     if (@import("decimal_value.zig").state(left) != null or @import("decimal_value.zig").state(right) != null) return expression.equalValues(left, right);
     const builtin_methods = @import("builtin_bound_method.zig");
