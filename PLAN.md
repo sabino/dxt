@@ -62,6 +62,19 @@ receives the reviewed corrections and restarts the complete unfiltered suite
 and applicable final gates. Reports always identify their actual candidate;
 the older full run cannot certify the corrected branch.
 
+The new catalog negative case exposes a second grounded publication gap:
+an authored catalog exception makes Core write a Catalog v1 errors array and
+docs index with execution exit code 1; the native candidate exits 2 before
+publishing either, despite retaining successful compiled artifacts. The source
+worker owns only the additive catalog error-array writer, its native escaping
+and allocation check, and the existing catalog failure fixture's direct-index
+and authored-error cases. The expression worker owns only the docs facade's
+collection catch/publication hunk. Preserve successful catalog bytes, complete
+artifact schemas, authored diagnostics, static index output, existing effective
+write policy and OOM propagation. Both corrections join the same single native
+build and focused certificate before isolated draft publication. No unrelated
+catalog transport, provider or feature surface is expanded.
+
 The final unfiltered 5,626-case candidate run was intentionally interrupted
 after its first failure was grounded: a fixture rendered a dictionary created
 from a salted Python set, whose iteration order changes with PYTHONHASHSEED.
