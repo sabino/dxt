@@ -67,6 +67,13 @@ pub fn keyEqual(left: Value, right: Value) bool {
     const yaml_values = @import("yaml_values.zig");
     if (yaml_values.isHashable(left) or yaml_values.isHashable(right))
         return yaml_values.keyEqual(left, right);
+    const left_builtin = left.attribute("__dxt_timezone_builtin").truthy();
+    const right_builtin = right.attribute("__dxt_timezone_builtin").truthy();
+    if (left_builtin or right_builtin)
+        return left_builtin and right_builtin and expression.equalValues(
+            left.attribute("__dxt_timezone_offset_us"),
+            right.attribute("__dxt_timezone_offset_us"),
+        );
     if (immutableIdentity(left)) |a| {
         const b = immutableIdentity(right) orelse return false;
         return std.mem.eql(u8, a.kind, b.kind) and std.mem.eql(u8, a.value, b.value);
@@ -220,6 +227,33 @@ test "immutable timezone and class keys retain identities across copies" {
     try std.testing.expect(!matches(item, .{ .string = "UTC" }));
     try std.testing.expectError(error.JinjaTypeError, jsonKey(std.testing.allocator, zone));
     try std.testing.expectError(error.JinjaTypeError, jsonKey(std.testing.allocator, class));
+}
+
+test "builtin timezone keys compare offsets independently of names and instance identities" {
+    const first: Value = .{ .object = &.{
+        .{ .key = "__dxt_timezone_builtin", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_timezone_identity", .value = .{ .string = "first" } },
+        .{ .key = "__dxt_timezone_offset_us", .value = .{ .integer = "3600000000" } },
+    } };
+    const alias: Value = .{ .object = &.{
+        .{ .key = "__dxt_timezone_builtin", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_timezone_identity", .value = .{ .string = "alias" } },
+        .{ .key = "__dxt_timezone_offset_us", .value = .{ .integer = "3600000000" } },
+    } };
+    const different_offset: Value = .{ .object = &.{
+        .{ .key = "__dxt_timezone_builtin", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_timezone_identity", .value = .{ .string = "first" } },
+        .{ .key = "__dxt_timezone_offset_us", .value = .{ .integer = "7200000000" } },
+    } };
+    const pytz_zone: Value = .{ .object = &.{
+        .{ .key = "__dxt_timezone_identity", .value = .{ .string = "first" } },
+        .{ .key = "__dxt_timezone_offset_us", .value = .{ .integer = "3600000000" } },
+    } };
+    const item = try create(first, .{ .string = "stored" });
+    try std.testing.expect(matches(item, alias));
+    try std.testing.expect(!matches(item, different_offset));
+    try std.testing.expect(!matches(item, pytz_zone));
+    try std.testing.expect(!matches(item, .{ .integer = "3600000000" }));
 }
 
 test "relation keys compare complete identity and do not collapse to rendered SQL" {
