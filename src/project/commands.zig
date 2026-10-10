@@ -719,7 +719,7 @@ pub const OperationHost = struct {
             const cells = try expression.allocateValues(allocator, output.columns.len);
             for (cells, 0..) |*value, column_index| value.* = expression.sequence(columns[column_index].attribute("__dxt_iterable")).?[row_index];
             target.* = try self.mappedSequence(agate_names, cells);
-            raw_target.* = .{ .list = cells };
+            raw_target.* = .{ .tuple = cells };
         }
         const column_values = try self.mappedSequence(agate_names, columns);
         const method = try std.fmt.allocPrint(allocator, "dxt.print_table.{d}", .{self.stored.items.len});

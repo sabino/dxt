@@ -156,8 +156,13 @@ pub fn executeNodeWithArtifacts(runtime: types.Runtime, graph: *const types.Grap
     _ = try rendered;
     const main = host.result("main") orelse return error.InvalidTestResult;
     const rows = main.attribute("data");
-    if (rows != .list or rows.list.len != 1 or rows.list[0] != .list or rows.list[0].list.len != 3) return error.InvalidTestResult;
-    const row = rows.list[0].list;
+    if (rows != .list or rows.list.len != 1) return error.InvalidTestResult;
+    const row = switch (rows.list[0]) {
+        .tuple => rows.list[0].tuple,
+        .list => rows.list[0].list,
+        else => return error.InvalidTestResult,
+    };
+    if (row.len != 3) return error.InvalidTestResult;
     const column_names = main.attribute("table").attribute("column_names");
     // Agate exposes column_names as a tuple; retained custom tables may use a list.
     const names = switch (column_names) {

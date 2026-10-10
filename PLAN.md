@@ -48,6 +48,11 @@ Two independent consumer audits find no further production list-only mismatch.
 The empty-table constructor also publishes tuple column names, matching the
 pinned Core empty Agate witness; fetched and seed tables already do so. Existing
 real build/test/public-project checks validate these bounded integration fixes.
+The same audit confirms Core result matrices contain tuple rows inside the
+outer list. Native fetched matrices now preserve that shape, and the test
+runner validates tuple/list rows without relaxing row count, arity or types.
+Four new actual Core comparisons cover fetched and empty stored results on
+both initial adapters before the final canonical freeze.
 
 An earlier published checkpoint passes all three reported Actions jobs: the
 unchanged public PostgreSQL package, all six public Jaffle commands and the
