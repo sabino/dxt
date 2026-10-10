@@ -150,7 +150,7 @@ pub fn executeNodeWithArtifacts(runtime: types.Runtime, graph: *const types.Grap
     const a = scratch.allocator();
     // TestRunner ignores the materialization return value and consumes main.
     const rendered = compiler.renderMaterializationForNode(a, &runtime_graph, node, materialization, runtime.allocator, dependencies);
-    if (build_path) |output_path| if (host.written_path) |path| {
+    if (build_path) |output_path| if (host.writtenPathForResource(node.unique_id)) |path| {
         output_path.* = try runtime.allocator.dupe(u8, path);
     };
     _ = try rendered;
