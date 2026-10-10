@@ -1177,8 +1177,22 @@ fn numericOrder(a: std.mem.Allocator, left: Value, right: Value) !std.math.Order
     if (std.math.isNan(x) or std.math.isNan(y)) return error.UnorderedJinjaNumber;
     return std.math.order(x, y);
 }
-fn valueOrder(allocator: std.mem.Allocator, left: Value, right: Value) !std.math.Order {
+pub fn valueOrder(allocator: std.mem.Allocator, left: Value, right: Value) !std.math.Order {
+    return valueOrderDepth(allocator, left, right, 0);
+}
+fn valueOrderDepth(allocator: std.mem.Allocator, left: Value, right: Value, depth: usize) anyerror!std.math.Order {
+    if (depth > 128) return error.JinjaExpressionDepthExceeded;
     if (yaml_values.isHashable(left) or yaml_values.isHashable(right)) return yaml_values.order(left, right);
+    if (left == .list or left == .tuple or right == .list or right == .tuple) {
+        if (std.meta.activeTag(left) != std.meta.activeTag(right)) return error.JinjaTypeError;
+        const lhs = sequence(left).?;
+        const rhs = sequence(right).?;
+        for (lhs[0..@min(lhs.len, rhs.len)], rhs[0..@min(lhs.len, rhs.len)]) |x, y| {
+            if (equalMember(x, y)) continue;
+            return valueOrderDepth(allocator, x, y, depth + 1);
+        }
+        return std.math.order(lhs.len, rhs.len);
+    }
     if (left == .string and right == .string) return std.mem.order(u8, left.string, right.string);
     return numericOrder(allocator, left, right);
 }
@@ -1436,7 +1450,7 @@ fn argument(args: []const Argument, name: []const u8, position: usize, fallback:
 
 fn attributeValue(allocator: std.mem.Allocator, value: Value, attribute: Value) !Value {
     if (attribute == .none) return value;
-    if (attribute == .integer or attribute == .number) return try indexValue(allocator, value, attribute);
+    if (attribute == .integer or attribute == .number or attribute == .boolean) return try indexValue(allocator, value, attribute);
     if (attribute != .string) return error.JinjaTypeError;
     var parts = std.mem.splitScalar(u8, attribute.string, '.');
     var result = value;
@@ -1681,13 +1695,32 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
     if (std.mem.eql(u8, name, "sort") or std.mem.eql(u8, name, "unique") or std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
         const values = try iterableValues(allocator, value);
         const sorted = std.mem.eql(u8, name, "sort");
-        const case_sensitive = argument(args, "case_sensitive", if (sorted) 1 else 0, .{ .boolean = false }).truthy();
-        const attribute = argument(args, "attribute", if (sorted) 2 else 1, .none);
+        const bound = if (sorted)
+            try @import("filter_arguments.zig").bind(allocator, args, &.{ "reverse", "case_sensitive", "attribute" }, &.{ .{ .boolean = false }, .{ .boolean = false }, .none }, 0)
+        else
+            try @import("filter_arguments.zig").bind(allocator, args, &.{ "case_sensitive", "attribute" }, &.{ .{ .boolean = false }, .none }, 0);
+        const case_sensitive = bound[if (sorted) 1 else 0].truthy();
+        const attribute = bound[if (sorted) 2 else 1];
         const Item = struct { value: Value, key: Value };
         var items: std.ArrayList(Item) = .empty;
         for (values) |v| {
-            var key = try attributeValue(allocator, v, attribute);
-            if (!case_sensitive and key == .string) key = .{ .string = try unicode.convert(allocator, key.string, .lower) };
+            var key = if (sorted) blk: {
+                var fields: std.ArrayList(Value) = .empty;
+                if (attribute == .string) {
+                    var parts = std.mem.splitScalar(u8, attribute.string, ',');
+                    while (parts.next()) |part| {
+                        var field = try attributeValue(allocator, v, .{ .string = part });
+                        if (!case_sensitive and field == .string) field = .{ .string = try unicode.convert(allocator, field.string, .lower) };
+                        try fields.append(allocator, field);
+                    }
+                } else {
+                    var field = try attributeValue(allocator, v, attribute);
+                    if (!case_sensitive and field == .string) field = .{ .string = try unicode.convert(allocator, field.string, .lower) };
+                    try fields.append(allocator, field);
+                }
+                break :blk Value{ .list = try fields.toOwnedSlice(allocator) };
+            } else try attributeValue(allocator, v, attribute);
+            if (!sorted and !case_sensitive and key == .string) key = .{ .string = try unicode.convert(allocator, key.string, .lower) };
             if (std.mem.eql(u8, name, "unique")) {
                 var duplicate = false;
                 for (items.items) |item| if (equal(item.key, key)) {
@@ -1698,24 +1731,35 @@ fn filter(allocator: std.mem.Allocator, name: []const u8, value: Value, args: []
             }
             try items.append(allocator, .{ .value = v, .key = key });
         }
-        if (!std.mem.eql(u8, name, "unique")) {
-            const reverse = sorted and argument(args, "reverse", 0, .{ .boolean = false }).truthy();
-            if (items.items.len > 1) {
-                const first = items.items[0].key;
-                for (items.items[1..]) |item| _ = try apply(allocator, "<", item.key, first);
+        if (std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
+            if (items.items.len == 0) return .undefined;
+            var best = items.items[0];
+            for (items.items[1..]) |item| {
+                const order = valueOrder(allocator, item.key, best.key) catch |err| {
+                    if (err == error.UnorderedJinjaNumber) continue;
+                    return err;
+                };
+                if (order == (if (std.mem.eql(u8, name, "min")) std.math.Order.lt else std.math.Order.gt)) best = item;
             }
+            return best.value;
+        }
+        if (sorted) {
+            const reverse = bound[0].truthy();
+            var failure: ?anyerror = null;
             const Context = struct {
                 descending: bool,
+                allocator: std.mem.Allocator,
+                failure: *?anyerror,
                 fn less(context: @This(), a: Item, b: Item) bool {
-                    const order = valueOrder(std.heap.page_allocator, a.key, b.key) catch unreachable;
+                    const order = valueOrder(context.allocator, a.key, b.key) catch |err| {
+                        if (err != error.UnorderedJinjaNumber) context.failure.* = err;
+                        return false;
+                    };
                     return if (context.descending) order == .gt else order == .lt;
                 }
             };
-            std.sort.block(Item, items.items, Context{ .descending = reverse }, Context.less);
-        }
-        if (std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
-            if (items.items.len == 0) return .undefined;
-            return items.items[if (std.mem.eql(u8, name, "min")) 0 else items.items.len - 1].value;
+            std.sort.block(Item, items.items, Context{ .descending = reverse, .allocator = allocator, .failure = &failure }, Context.less);
+            if (failure) |err| return err;
         }
         const result = try allocateValues(allocator, items.items.len);
         for (items.items, result) |item, *v| v.* = item.value;
@@ -1876,6 +1920,19 @@ test "collection expressions preserve ordering, missing values and lazy branches
     try std.testing.expect((try evaluate(a, "{} is mapping and [1,2] is sequence and 3 is odd", null)).boolean);
     try std.testing.expectError(error.InvalidJinjaArguments, evaluate(a, "[1,2][::0]", null));
     try std.testing.expectError(error.JinjaTypeError, evaluate(a, "[1,'a'] | sort", null));
+}
+
+test "sequences order lexicographically and extrema retain the first tied row" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evaluate(a, "[1,[2,3]] < [1,[2,4]]", null)).boolean);
+    try std.testing.expect((try evaluate(a, "[] < [none]", null)).boolean);
+    try std.testing.expectEqualStrings("[(1,), (1, 2), (2,)]", try (try evaluate(a, "[(2,),(1,2),(1,)]|sort", null)).text(a));
+    try std.testing.expectEqualStrings("first", (try evaluate(a, "([{'n':1,'v':'first'},{'n':1,'v':'last'}]|max(attribute='n')).v", null)).string);
+    try std.testing.expectEqualStrings("[(0, 0)]", try (try evaluate(a, "[[(0,0),(1,none),(1,2)]|min]", null)).text(a));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "[(0,0),(1,none),(1,2)]|sort", null));
+    try std.testing.expectError(error.JinjaTypeError, evaluate(a, "[] < ()", null));
 }
 
 // Jinja's parse_pow loop is deliberately left associative and binds below
