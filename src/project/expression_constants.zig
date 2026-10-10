@@ -87,7 +87,7 @@ test "constant probes reject every runtime name and call" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{ "missing|default('x')", "range(3)", "dict(x=1)", "'abc'.upper()", "zip([],[])|list", "x + 1" }) |input|
+    for ([_][]const u8{ "missing|default('x')", "range(3)", "dict(x=1)", "'abc'.upper()", "zip([],[])|list", "x + 1", "[1]|map('float')|first", "[1]|select|first" }) |input|
         try std.testing.expect(try probe(a, input) == null);
     try std.testing.expectEqualStrings("1000", (try probe(a, "500 + 500")).?.integer);
     try std.testing.expectEqualStrings("ABC", (try probe(a, "'abc'|upper")).?.string);

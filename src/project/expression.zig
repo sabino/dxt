@@ -779,6 +779,10 @@ const Parser = struct {
                 const filter_name = try self.name();
                 const args = if (self.take("(")) try self.arguments() else &.{};
                 if (self.active) {
+                    if (self.host != null and self.host.?.static_only) {
+                        inline for (.{ "map", "select", "reject", "selectattr", "rejectattr" }) |context_filter|
+                            if (std.mem.eql(u8, filter_name, context_filter)) return error.NotStaticJinjaExpression;
+                    }
                     value = try filterValue(self.allocator, filter_name, value, args, self.host);
                     if (value == .undefined) value = try self.missing(null);
                 }
