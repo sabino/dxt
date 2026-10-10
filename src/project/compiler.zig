@@ -89,6 +89,8 @@ const CompileContext = struct {
     validating_skipped_loop_body: bool = false,
     value_arena: std.heap.ArenaAllocator,
     modules_cache: @import("modules_context.zig").Cache = .{},
+    constants: @import("compiler_constants.zig").Pool = .{},
+    constant_function: ?[]const u8 = null,
     bindings: std.ArrayList(ValueBinding) = .empty,
     binding_visibility: BindingVisibility = .{},
     returned: ?native_expr.Value = null,
@@ -219,7 +221,12 @@ const CompileContext = struct {
     }
 
     fn host(self: *CompileContext) native_expr.Host {
-        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue, .capture_undefined = self.capturesUndefined() };
+        return .{ .context = self, .resolve = resolveExpressionValue, .call = callExpressionValue, .capture_undefined = self.capturesUndefined(), .constant = retainConstant };
+    }
+
+    fn retainConstant(raw: *anyopaque, value: native_expr.Value, allocator: std.mem.Allocator) anyerror!native_expr.Value {
+        const self: *CompileContext = @ptrCast(@alignCast(raw));
+        return self.constants.intern(allocator, self.constant_function orelse self.node.unique_id, value);
     }
 
     fn capturesUndefined(self: *const CompileContext) bool {
@@ -1110,6 +1117,7 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                     .macro_package = context.current_macro_package,
                     .capture_undefined = context.capturesUndefined(),
                     .binding_visibility = context.binding_visibility,
+                    .constant_function = try std.fmt.allocPrint(arena, "{s}:caller:{d}", .{ context.constant_function orelse context.node.unique_id, block.start }),
                 };
                 const caller_name = try std.fmt.allocPrint(arena, "__dxt_caller:{d}", .{context.caller_blocks.items.len});
                 try context.caller_blocks.append(arena, caller);
@@ -1150,6 +1158,7 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                     .macro_package = context.current_macro_package,
                     .capture_undefined = context.capturesUndefined(),
                     .binding_visibility = context.binding_visibility,
+                    .constant_function = try std.fmt.allocPrint(arena, "{s}:filter:{d}", .{ context.constant_function orelse context.node.unique_id, block.body_start }),
                 };
                 const loop_id = context.loop_states.items.len;
                 try context.loop_states.append(arena, frame);
@@ -1242,6 +1251,7 @@ const LoopFrame = struct {
     macro_package: ?[]const u8,
     capture_undefined: bool,
     binding_visibility: BindingVisibility,
+    constant_function: []const u8,
 };
 
 fn loopItem(context: *CompileContext, frame: *LoopFrame, index: usize) anyerror!?native_expr.Value {
@@ -1266,6 +1276,7 @@ fn loopFilter(context: *CompileContext, frame: *LoopFrame, value: native_expr.Va
     const previous_package = context.current_macro_package;
     const previous_capture = context.capture_undefined_override;
     const previous_visibility = context.binding_visibility;
+    const previous_constants = context.constant_function;
     try context.loop_filter_bindings.append(context.value_arena.allocator(), previous_bindings.items);
     defer _ = context.loop_filter_bindings.pop();
     context.bindings = .empty;
@@ -1275,6 +1286,7 @@ fn loopFilter(context: *CompileContext, frame: *LoopFrame, value: native_expr.Va
     context.current_macro_package = frame.macro_package;
     context.capture_undefined_override = frame.capture_undefined;
     context.binding_visibility = frame.binding_visibility;
+    context.constant_function = frame.constant_function;
     defer {
         context.bindings.deinit(context.allocator);
         context.vars.deinit(context.allocator);
@@ -1286,6 +1298,7 @@ fn loopFilter(context: *CompileContext, frame: *LoopFrame, value: native_expr.Va
         context.current_macro_package = previous_package;
         context.capture_undefined_override = previous_capture;
         context.binding_visibility = previous_visibility;
+        context.constant_function = previous_constants;
     }
     try context.bindings.appendSlice(context.allocator, frame.bindings);
     try context.vars.appendSlice(context.allocator, frame.vars);
@@ -1938,6 +1951,7 @@ const CallerBlock = struct {
     macro_package: ?[]const u8,
     capture_undefined: bool,
     binding_visibility: BindingVisibility,
+    constant_function: []const u8,
 };
 
 fn macroParameters(allocator: std.mem.Allocator, declaration: []const u8) ![]const MacroParameter {
@@ -2111,6 +2125,7 @@ fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args:
     const previous_loop_depth = context.loop_depth;
     const previous_capture = context.capture_undefined_override;
     const previous_visibility = context.binding_visibility;
+    const previous_constants = context.constant_function;
     context.bindings = .empty;
     context.vars = .empty;
     context.lists = .empty;
@@ -2120,6 +2135,7 @@ fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args:
     context.loop_depth = 0;
     context.capture_undefined_override = caller.capture_undefined;
     context.binding_visibility = caller.binding_visibility;
+    context.constant_function = caller.constant_function;
     context.macro_render_depth += 1;
     defer {
         context.bindings.deinit(context.allocator);
@@ -2134,6 +2150,7 @@ fn renderCallerValue(context: *CompileContext, caller: *const CallerBlock, args:
         context.loop_depth = previous_loop_depth;
         context.capture_undefined_override = previous_capture;
         context.binding_visibility = previous_visibility;
+        context.constant_function = previous_constants;
         context.macro_render_depth -= 1;
     }
     try context.bindings.appendSlice(context.allocator, caller.bindings);
@@ -2176,6 +2193,8 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     const previous_return = context.returned;
     const previous_loop_depth = context.loop_depth;
     const previous_capture = context.capture_undefined_override;
+    const previous_constants = context.constant_function;
+    context.constant_function = macro.unique_id;
     context.loop_depth = 0;
     // dbt's separately cached macro template uses the ordinary environment,
     // including when invoked by a model's capture-mode parser.
@@ -2198,6 +2217,7 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
         context.returned = previous_return;
         context.loop_depth = previous_loop_depth;
         context.capture_undefined_override = previous_capture;
+        context.constant_function = previous_constants;
         context.binding_visibility = previous_visibility;
     }
     var out: std.ArrayList(u8) = .empty;
@@ -2213,6 +2233,34 @@ fn renderMacroValue(context: *CompileContext, macro: *const MacroDef, args: []co
     try bindMacroArguments(context, parameters, args, try macroSpecials(macro.macro_sql, .{ .start = open_end + 2, .end = body_end }));
     try renderRange(context, macro.macro_sql, afterTag(macro.macro_sql, open_end + 2, body_end), body_end, &out);
     return context.returned orelse .{ .string = try allocator.dupe(u8, out.items) };
+}
+
+test "compiled macro functions retain independent constant pools across repeated calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    for ([_][]const u8{ "first", "second" }) |name| {
+        try graph.macros.append(allocator, .{
+            .package_name = "demo",
+            .unique_id = try std.fmt.allocPrint(allocator, "macro.demo.{s}", .{name}),
+            .name = name,
+            .path = "macros/constants.sql",
+            .original_file_path = "macros/constants.sql",
+            .macro_sql = try std.fmt.allocPrint(allocator, "{{% macro {s}() %}}{{{{ return((1000, 'a b', 'word')) }}}}{{% endmacro %}}", .{name}),
+        });
+    }
+    const node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.rendered",
+        .name = "rendered",
+        .path = "rendered.sql",
+        .original_file_path = "models/rendered.sql",
+        .raw_code = "{% set a=first() %}{% set b=first() %}{% set c=second() %}{% set local=(1000, 'a b', 'word') %}{{ a is sameas b }}:{{ a is sameas c }}:{{ a is sameas local }}:{{ a[2] is sameas c[2] }}",
+    };
+    const rendered = try compileModel(allocator, &graph, &node);
+    try std.testing.expectEqualStrings("True:False:False:True", rendered);
 }
 
 test "dynamic native tuple configuration bypasses textual repr reparsing" {
