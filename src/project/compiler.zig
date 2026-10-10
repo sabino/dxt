@@ -86,6 +86,7 @@ const CompileContext = struct {
     macro_render_depth: usize = 0,
     validating_skipped_loop_body: bool = false,
     value_arena: std.heap.ArenaAllocator,
+    modules_cache: @import("modules_context.zig").Cache = .{},
     bindings: std.ArrayList(ValueBinding) = .empty,
     returned: ?native_expr.Value = null,
     parse_node: ?*Node = null,
@@ -1381,7 +1382,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     }
     if (context.documentation_block) return if (std.mem.indexOfScalar(u8, path, '.') == null) .conditional_undefined else error.UndefinedJinjaValue;
     if (@import("base_context.zig").callable(path)) return .{ .callable = path };
-    if (try @import("modules_context.zig").resolve(allocator, path)) |value| return value;
+    if (try @import("modules_context.zig").resolveCached(context.value_arena.allocator(), path, &context.modules_cache)) |value| return value;
     if (try @import("regex_context.zig").resolve(allocator, path)) |value| return value;
     if (context.documentation) {
         if (@import("doc_context.zig").baseCallable(path)) return .{ .callable = path };
@@ -4797,4 +4798,15 @@ test "compiler delegates typed datetime constructors and preserves regex module 
     defer graph.deinit();
     const node = Node{ .unique_id = "model.fixture.clock", .package_name = "fixture", .name = "clock", .path = "clock.sql", .original_file_path = "models/clock.sql", .raw_code = "{% set calendar = modules.datetime.datetime %}{{ calendar(2024,1,2,3,4,5).strftime('%Y-%m-%d %H:%M:%S') }}|{{ modules.re.sub('a','b','a') }}" };
     try std.testing.expectEqualStrings("2024-01-02 03:04:05|b", try compileModel(a, &graph, &node));
+}
+
+test "module singleton exports retain identity across native macro frames" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "fixture" };
+    defer graph.deinit();
+    try @import("parse.zig").parseMacrosFromText(a, "{% macro same_module(value) %}{{ value is sameas modules.pytz.country_timezones }}{% endmacro %}", "module.sql", "fixture", &graph);
+    const node = Node{ .unique_id = "model.fixture.identity", .package_name = "fixture", .name = "identity", .path = "identity.sql", .original_file_path = "models/identity.sql", .raw_code = "{% set countries = modules.pytz.country_timezones %}{{ countries is sameas modules.pytz.country_timezones }}|{{ same_module(countries) }}|{{ modules.datetime.datetime.max is sameas modules.datetime.datetime.max }}" };
+    try std.testing.expectEqualStrings("True|True|True", try compileModel(a, &graph, &node));
 }
