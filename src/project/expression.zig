@@ -1385,6 +1385,8 @@ pub fn reprWithHost(allocator: std.mem.Allocator, value: Value, host: ?Host) ![]
     return repr(value, allocator);
 }
 fn applyWithHost(allocator: std.mem.Allocator, op: []const u8, left: Value, right: Value, host: ?Host) !Value {
+    if (std.mem.eql(u8, op, "in")) return .{ .boolean = try containsWithHost(allocator, right, left, host) };
+    if (std.mem.eql(u8, op, "not in")) return .{ .boolean = !(try containsWithHost(allocator, right, left, host)) };
     if (std.mem.eql(u8, op, "~")) return .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ try textWithHost(allocator, left, host), try textWithHost(allocator, right, host) }) };
     return apply(allocator, op, left, right);
 }

@@ -59,3 +59,21 @@ test "render-owned module cache preserves exported collection identity" {
     const again = (try resolveCached(a, "modules", &cache)).?;
     try std.testing.expect(modules.object.ptr == again.object.ptr);
 }
+
+test "membership pulls native streams until a match and preserves remaining state" {
+    const Fixture = struct {
+        fn resolve(_: *anyopaque, path: []const u8, a: std.mem.Allocator) !expression.Value {
+            return (try @import("modules_context.zig").resolve(a, path)) orelse .undefined;
+        }
+        fn call(context: *anyopaque, name: []const u8, args: []const expression.Argument, a: std.mem.Allocator) !expression.Value {
+            return (try @import("modules_context.zig").call(a, name, args, .{ .host = .{ .context = context, .resolve = @This().resolve, .call = @This().call } })) orelse error.UnsupportedJinjaCall;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var context: u8 = 0;
+    const host = expression.Host{ .context = &context, .resolve = Fixture.resolve, .call = Fixture.call };
+    const result = try expression.evaluate(a, "7 in modules.itertools.count(3)", host);
+    try std.testing.expect(result.boolean);
+}
