@@ -71,9 +71,25 @@ oracles, including column tags and transitive parse-time macro visibility.
 Static macro dependencies now resolve before schema-test configuration. The
 compiler worker separately owns reached singular and generic runtime calls,
 including selection of the explicitly authored package macro during execution.
-The focused parser/config regressions pass; the combined public package rerun
-still awaits the runtime collector integration.
+The focused parser/config regressions pass and runtime collectors are integrated.
+The unchanged PostgreSQL project now passes the complete resource/config/dependency
+comparison; its build outcomes exposed a remaining passing-test failure count
+distinction. Core reports zero unless a threshold fires, even with nonzero
+aggregates. The supervisor owns that correction and a fresh both-adapter gate.
 Project source files and strict gate comparisons remain unchanged.
+
+The next shared compiler sequence is the resource artifact writer and model
+provenance, test compilation writes, console error events, the expression/class
+protocol chain, then the limited generic-test parse namespace and inline macro
+closures, followed by the literal/primitive identity pools. The dedicated
+namespace worker owns discovery-order resolver hooks and the limited parse
+namespace, including recursive overwrite order and argument rendering; runtime
+provider lookup remains separate. Every slice needs actual Core comparisons.
+The expression worker owns callable container method aliases after its complete
+temporal API certificate. The oracle worker owns stock execution SQL artifacts
+and actual DuckDB COPY/PostgreSQL parameterized seed loading. These known gaps
+and full final candidate gates remain open; focused green results do not make
+the branch merge-ready.
 
 PR #219 is merged. The user has authorized completing the replacement roadmap,
 including its proposed features, from fresh main on `feat/full-usability`.
