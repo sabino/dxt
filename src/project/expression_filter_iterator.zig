@@ -76,7 +76,7 @@ fn initialize(a: std.mem.Allocator, value: Value, name: []const u8, host: ?expre
     set(value, "__dxt_filter_initialized", .{ .boolean = true });
     const source = get(value, "__dxt_filter_source");
     if (std.mem.eql(u8, name, "filter_map") or std.mem.eql(u8, name, "filter_select")) {
-        if (!source.truthy()) {
+        if (!try expression.truthyWithHost(a, source, host)) {
             set(value, "__dxt_filter_done", .{ .boolean = true });
             return;
         }
@@ -236,7 +236,7 @@ pub fn pull(a: std.mem.Allocator, value: Value, host: ?expression.Host) anyerror
         }
         if (std.mem.eql(u8, name, "filter_select")) {
             const tested = try attributes.get(a, row, get(value, "__dxt_filter_path").list, .none, host);
-            const accepted = if (!get(value, "__dxt_filter_uses_operation").truthy()) tested.truthy() else blk: {
+            const accepted = if (!get(value, "__dxt_filter_uses_operation").truthy()) try expression.truthyWithHost(a, tested, host) else blk: {
                 if (operation != .string) return error.UnsupportedJinjaTest;
                 break :blk try expression.testValueWithHost(a, operation.string, tested, try unpack(a, get(value, "__dxt_filter_params").list), host);
             };
@@ -331,5 +331,86 @@ test "private batch and unique capacity remains typed during alias publication" 
         }
         // Completed LoopContext frames retain these descriptors too.
         try @import("container_methods.zig").replaceAliases(&stream, original, replacement, 0);
+    }
+}
+
+test "checked filter source truthiness defers boolean errors to the first pull" {
+    const Fixture = struct {
+        calls: usize = 0,
+        fn resolve(_: *anyopaque, _: []const u8, _: std.mem.Allocator) !Value {
+            return .undefined;
+        }
+        fn call(context: *anyopaque, name: []const u8, _: []const Argument, _: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            if (std.mem.eql(u8, name, "released")) return error.ReleasedQueryMemoryview;
+            return .{ .boolean = false };
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture = Fixture{};
+    const host = expression.Host{ .context = &fixture, .resolve = Fixture.resolve, .call = Fixture.call };
+    const source = Value{ .object = &.{
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+        .{ .key = "__dxt_bool", .value = .{ .callable = "released" } },
+        .{ .key = "__dxt_iterable", .value = .{ .list = &.{} } },
+    } };
+    try std.testing.expect(!source.truthy());
+    inline for (.{ "map", "select" }) |operation| {
+        const before = fixture.calls;
+        const stream = if (std.mem.eql(u8, operation, "map"))
+            try map(a, source, &.{.{ .value = .{ .string = "string" } }})
+        else
+            try select(a, source, &.{}, false, false);
+        try std.testing.expectEqual(before, fixture.calls);
+        try std.testing.expectError(error.ReleasedQueryMemoryview, sequence.next(a, stream, host));
+        try std.testing.expectEqual(before + 1, fixture.calls);
+        try std.testing.expect((try sequence.next(a, stream, host)) == null);
+        try std.testing.expectEqual(before + 1, fixture.calls);
+    }
+    const empty = Value{ .object = &.{.{ .key = "__dxt_bool", .value = .{ .callable = "empty" } }} };
+    // A checked false source still suppresses invalid map arguments as Core does.
+    const stream = try map(a, empty, &.{});
+    try std.testing.expect((try sequence.next(a, stream, host)) == null);
+}
+
+test "checked filter select and reject evaluate each row boolean and length protocol" {
+    const Fixture = struct {
+        calls: usize = 0,
+        fn resolve(_: *anyopaque, _: []const u8, _: std.mem.Allocator) !Value {
+            return .undefined;
+        }
+        fn call(context: *anyopaque, name: []const u8, _: []const Argument, _: std.mem.Allocator) !Value {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            if (std.mem.eql(u8, name, "released")) return error.ReleasedQueryMemoryview;
+            return error.JinjaTypeError;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture = Fixture{};
+    const host = expression.Host{ .context = &fixture, .resolve = Fixture.resolve, .call = Fixture.call };
+    inline for (.{ "__dxt_bool", "__dxt_len" }) |protocol| {
+        const row = Value{ .object = &.{
+            .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+            .{ .key = protocol, .value = .{ .callable = if (std.mem.eql(u8, protocol, "__dxt_bool")) "released" else "scalar" } },
+            .{ .key = "__dxt_iterable", .value = .{ .list = &.{} } },
+        } };
+        try std.testing.expect(!row.truthy());
+        inline for (.{ false, true }) |reject| {
+            const before = fixture.calls;
+            const stream = try select(a, .{ .list = &.{row} }, &.{}, false, reject);
+            try std.testing.expectEqual(before, fixture.calls);
+            if (std.mem.eql(u8, protocol, "__dxt_bool"))
+                try std.testing.expectError(error.ReleasedQueryMemoryview, sequence.next(a, stream, host))
+            else
+                try std.testing.expectError(error.JinjaTypeError, sequence.next(a, stream, host));
+            try std.testing.expectEqual(before + 1, fixture.calls);
+            try std.testing.expect((try sequence.next(a, stream, host)) == null);
+        }
     }
 }
