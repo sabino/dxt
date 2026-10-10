@@ -125,7 +125,7 @@ def test_postgres_check_default_clock_addition_and_character_widening(tmp_path, 
     pair.compare()
 
 
-def test_postgres_snapshot_failure_restores_rows_schema_and_public_errors(tmp_path, postgres_server):
+def test_postgres_snapshot_failure_restores_rows_schema_and_public_errors(tmp_path, postgres_server, monkeypatch):
     pair = Pair(tmp_path, postgres_server, "check")
     pair.run()
     before = pair.compare()
@@ -133,6 +133,7 @@ def test_postgres_snapshot_failure_restores_rows_schema_and_public_errors(tmp_pa
     for project in pair.projects:
         path = project / "snapshots/history.sql"
         path.write_text(path.read_text().replace("check_cols='all'", "check_cols='all',dbt_valid_to_current=\"cast('PRIVATE_BAD_SENTINEL' as timestamp)\""))
+    monkeypatch.setenv("DBT_ENV_SECRET_SNAPSHOT_SENTINEL", "PRIVATE_BAD_SENTINEL")
     pair.run(success=False)
     assert pair.compare() == before
     native = pair.invoke(pair.projects[0], "dxt")

@@ -144,13 +144,14 @@ def test_snapshot_custom_metadata_sentinel_and_composite_key(tmp_path):
     assert rows[2]['valid_to'] == '9999-12-31 00:00:00'
 
 
-def test_snapshot_runtime_error_is_atomic_and_sanitized(tmp_path):
+def test_snapshot_runtime_error_is_atomic_and_sanitized(tmp_path, monkeypatch):
     project = project_at(tmp_path / "dxt", "check_cols=['name']", strategy="check")
     before = snapshot(project)
     # A successful ALTER precedes the invalid sentinel insert in the transaction.
     query(project, "alter table input add column extra varchar; update input set name='New',ts='2020-02-01'")
     path = project / 'snapshots/history.sql'
     path.write_text(path.read_text().replace("check_cols=['name']", "check_cols=['name'],dbt_valid_to_current=\"cast('PRIVATE_BAD_SENTINEL' as timestamp)\""))
+    monkeypatch.setenv("DBT_ENV_SECRET_SNAPSHOT_SENTINEL", "PRIVATE_BAD_SENTINEL")
     result = run(project)
     assert result.returncode != 0 and 'PRIVATE_BAD_SENTINEL' not in result.stderr
     assert query(project, "select * from archive.history order by id,dbt_valid_from,dbt_scd_id") == before
