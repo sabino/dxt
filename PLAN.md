@@ -40,7 +40,18 @@ source changes to collect integrated evidence; its failed scratch and reports
 are retained and cannot count as acceptance. Read-only triage is disjoint:
 the oracle worker grounds generated DuckDB profile paths and invalid-init
 logging, the source worker grounds the statement-output color expectation, and
-the expression worker traces compile/docs error publication. Any correction
+the expression worker traces compile/docs error publication. Fresh pinned Core
+CLI witnesses confirm the initialization and color expectations are stale:
+relative database paths use invocation CWD, invalid init still writes its
+diagnostic log, and default output includes ANSI reset sequences. The oracle
+worker owns only those command-fixture corrections, including explicit color
+flags, in its isolated worktree. The expression worker restores only the two
+facade catches that lost existing durable error artifacts and execution exit
+codes. A ninth failure confirms an authored PostgreSQL catalog fixture indexes
+Core's set-valued relation collection. The source worker owns the bounded
+native catalog set constructor and that fixture's explicit list conversion,
+with actual Core container/metadata evidence; the command test file remains
+owned by the oracle worker to prevent overlapping edits. Any correction
 must retain the original database effects, diagnostics, retry and full-schema
 assertions. The supervisor records planning in a separate worktree during the
 original run, integrates only reviewed bounded corrections after its closure,
