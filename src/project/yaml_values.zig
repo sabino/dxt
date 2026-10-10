@@ -3,10 +3,13 @@ const std = @import("std");
 const expression = @import("expression.zig");
 const Value = expression.Value;
 const Argument = expression.Argument;
+const temporal = @import("datetime_operations.zig");
+const timestamps = @import("timestamp_context.zig");
 
-const Timestamp = struct { ns: i96, date: bool, offset: ?i32 };
+const Timestamp = struct { ns: i96, date: bool, offset: ?i64, timezone: ?Value = null, fold: u1 = 0 };
 
 fn timestamp(value: Value) ?Timestamp {
+    if (timestamps.state(value)) |state| return .{ .ns = state.civil_ns, .date = state.date_only, .offset = state.offset_us, .timezone = state.timezone, .fold = state.fold };
     const method = value.attribute("isoformat");
     const prefix = "__dxt_datetime:isoformat:";
     if (method != .callable or !std.mem.startsWith(u8, method.callable, prefix)) return null;
@@ -14,11 +17,11 @@ fn timestamp(value: Value) ?Timestamp {
     const ns = std.fmt.parseInt(i96, parts.next() orelse return null, 10) catch return null;
     const kind = parts.next() orelse return null;
     const zone = parts.next() orelse return null;
-    return .{ .ns = ns, .date = std.mem.eql(u8, kind, "date"), .offset = if (std.mem.eql(u8, zone, "naive")) null else std.fmt.parseInt(i32, zone, 10) catch return null };
+    return .{ .ns = ns, .date = std.mem.eql(u8, kind, "date"), .offset = if (std.mem.eql(u8, zone, "naive")) null else (std.fmt.parseInt(i64, zone, 10) catch return null) * std.time.us_per_min };
 }
 
 pub fn isHashable(value: Value) bool {
-    return value.attribute("__dxt_binary") == .string or timestamp(value) != null;
+    return value.attribute("__dxt_binary") == .string or timestamp(value) != null or temporal.hashable(value);
 }
 
 pub fn timestampText(value: Value) ?[]const u8 {
@@ -28,6 +31,7 @@ pub fn timestampText(value: Value) ?[]const u8 {
 }
 
 pub fn order(lhs: Value, rhs: Value) !std.math.Order {
+    if (temporal.hashable(lhs) or temporal.hashable(rhs)) return temporal.order(lhs, rhs);
     const lhs_bytes = lhs.attribute("__dxt_binary");
     const rhs_bytes = rhs.attribute("__dxt_binary");
     if (lhs_bytes == .string or rhs_bytes == .string) {
@@ -37,8 +41,8 @@ pub fn order(lhs: Value, rhs: Value) !std.math.Order {
     const left = timestamp(lhs) orelse return error.JinjaTypeError;
     const right = timestamp(rhs) orelse return error.JinjaTypeError;
     if (left.date != right.date or (left.offset == null) != (right.offset == null)) return error.JinjaTypeError;
-    const lhs_instant = left.ns - @as(i96, left.offset orelse 0) * std.time.ns_per_min;
-    const rhs_instant = right.ns - @as(i96, right.offset orelse 0) * std.time.ns_per_min;
+    const lhs_instant = left.ns - @as(i96, left.offset orelse 0) * std.time.ns_per_us;
+    const rhs_instant = right.ns - @as(i96, right.offset orelse 0) * std.time.ns_per_us;
     return std.math.order(lhs_instant, rhs_instant);
 }
 
@@ -52,6 +56,7 @@ pub fn nan(a: std.mem.Allocator) !Value {
 
 /// Immutable SafeLoader scalar keys obey Python bytes/date/datetime equality.
 pub fn keyEqual(lhs: Value, rhs: Value) bool {
+    if (temporal.hashable(lhs) or temporal.hashable(rhs)) return temporal.equal(lhs, rhs);
     const lhs_bytes = lhs.attribute("__dxt_binary");
     const rhs_bytes = rhs.attribute("__dxt_binary");
     if (lhs_bytes == .string or rhs_bytes == .string)
@@ -61,8 +66,8 @@ pub fn keyEqual(lhs: Value, rhs: Value) bool {
     if (left.date != right.date) return false;
     if (left.date) return @divFloor(left.ns, std.time.ns_per_day) == @divFloor(right.ns, std.time.ns_per_day);
     if ((left.offset == null) != (right.offset == null)) return false;
-    const lhs_instant = left.ns - @as(i96, left.offset orelse 0) * std.time.ns_per_min;
-    const rhs_instant = right.ns - @as(i96, right.offset orelse 0) * std.time.ns_per_min;
+    const lhs_instant = left.ns - @as(i96, left.offset orelse 0) * std.time.ns_per_us;
+    const rhs_instant = right.ns - @as(i96, right.offset orelse 0) * std.time.ns_per_us;
     return lhs_instant == rhs_instant;
 }
 

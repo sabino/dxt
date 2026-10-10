@@ -6,6 +6,7 @@ const complex_numbers = @import("expression_complex.zig");
 const mapping_keys = @import("mapping_keys.zig");
 const sets = @import("set_context.zig");
 const yaml_values = @import("yaml_values.zig");
+const temporal = @import("datetime_operations.zig");
 
 /// Native Jinja expression values. Allocations belong to the caller's render
 /// arena; values can cross macro returns without borrowing a temporary frame.
@@ -26,6 +27,7 @@ pub const Value = union(enum) {
     callable: []const u8,
 
     pub fn truthy(self: Value) bool {
+        if (temporal.duration(self)) |micros| return micros != 0;
         if (floatProtocol(self)) |number| return number != 0;
         if (complexProtocol(self)) |number| return number.real != 0 or number.imaginary != 0;
         if (integerProtocol(self)) |number| return !std.mem.eql(u8, number, "0");
@@ -543,6 +545,7 @@ const Parser = struct {
         const value: Value = if (self.take("-")) blk: {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
+            if (try temporal.unary(self.allocator, "-", operand)) |result| break :blk result;
             if (complexProtocol(operand)) |number| break :blk try complexValue(self.allocator, .{ .real = -number.real, .imaginary = -number.imaginary });
             if (integerText(operand)) |number| break :blk .{ .integer = try numbers.negate(self.allocator, number) };
             break :blk try floatValue(self.allocator, -(try numeric(operand)));
@@ -550,6 +553,7 @@ const Parser = struct {
             const operand = try self.unaryFiltered(false);
             if (!self.active) break :blk .none;
             if (isUndefined(operand)) return error.UndefinedJinjaValue;
+            if (try temporal.unary(self.allocator, "+", operand)) |result| break :blk result;
             if (operand == .boolean) break :blk try integerValue(self.allocator, @as(u8, @intFromBool(operand.boolean)));
             if (integerProtocol(operand)) |number| break :blk .{ .integer = number };
             if (operand != .integer and floatProtocol(operand) == null and complexProtocol(operand) == null) return error.JinjaTypeError;
@@ -1213,6 +1217,7 @@ pub fn valueOrder(allocator: std.mem.Allocator, left: Value, right: Value) !std.
 }
 fn valueOrderDepth(allocator: std.mem.Allocator, left: Value, right: Value, depth: usize) anyerror!std.math.Order {
     if (depth > 128) return error.JinjaExpressionDepthExceeded;
+    if (temporal.hashable(left) or temporal.hashable(right)) return temporal.order(left, right);
     if (yaml_values.isHashable(left) or yaml_values.isHashable(right)) return yaml_values.order(left, right);
     if (left == .list or left == .tuple or right == .list or right == .tuple) {
         if (std.meta.activeTag(left) != std.meta.activeTag(right)) return error.JinjaTypeError;
@@ -1392,6 +1397,7 @@ fn apply(allocator: std.mem.Allocator, op: []const u8, a: Value, b: Value) !Valu
     if (std.mem.eql(u8, op, "~") or (std.mem.eql(u8, op, "+") and a == .string and b == .string)) return .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ try a.text(allocator), try b.text(allocator) }) };
     if (try sets.apply(allocator, op, a, b)) |value| return value;
     if (try yaml_values.apply(allocator, op, a, b)) |value| return value;
+    if (try temporal.apply(allocator, op, a, b)) |value| return value;
     const complex_a = complexProtocol(a);
     const complex_b = complexProtocol(b);
     if (complex_a != null or complex_b != null) {

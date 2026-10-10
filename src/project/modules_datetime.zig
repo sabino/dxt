@@ -5,6 +5,7 @@ const dates = @import("timestamp_context.zig");
 const calendar = @import("workflow_intervals.zig");
 const local_time = @import("native_local_time.zig");
 const timezone_context = @import("timezone_context.zig");
+const operations = @import("datetime_operations.zig");
 const Value = expr.Value;
 const Argument = expr.Argument;
 const Allocator = std.mem.Allocator;
@@ -116,14 +117,8 @@ fn fromComponents(a: Allocator, kind: []const u8, args: []const Argument) !Value
         const names = [_][]const u8{ "days", "seconds", "microseconds", "milliseconds", "minutes", "hours", "weeks" };
         var values: [7]Value = @splat(.{ .integer = "0" });
         try bind(args, &names, 0, &@as([7]Value, @splat(.{ .integer = "0" })), &values);
-        const scales = [_]f64{ std.time.us_per_day, std.time.us_per_s, 1, 1000, std.time.us_per_min, std.time.us_per_hour, 7 * std.time.us_per_day };
-        var total: f64 = 0;
-        for (values, scales) |value, scale| total += try expr.numericFloat(value) * scale;
-        if (!std.math.isFinite(total) or total < -999999999.0 * std.time.us_per_day or total >= 1000000000.0 * std.time.us_per_day) return error.JinjaNumericOverflow;
-        const floor = @floor(total);
-        const fraction = total - floor;
-        const rounded = floor + @as(f64, if (fraction > 0.5 or (fraction == 0.5 and @mod(floor, 2) != 0)) 1 else 0);
-        return durationValue(a, @intFromFloat(rounded));
+        const scales = [_]i96{ std.time.us_per_day, std.time.us_per_s, 1, 1000, std.time.us_per_min, std.time.us_per_hour, 7 * std.time.us_per_day };
+        return operations.constructDuration(a, &values, &scales);
     }
     const time_only = std.mem.eql(u8, kind, "time");
     const date_only = std.mem.eql(u8, kind, "date");
@@ -168,7 +163,20 @@ fn fromInstant(a: Allocator, utc_ns: i96, date_only: bool, zone: Value, utc: boo
     return dates.datetimeValueWithOffsetUs(a, civil_ns, date_only, null, null, fold);
 }
 
+fn durationRepr(a: Allocator, days: i96, seconds: i96, micros: i96) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(a);
+    try out.writer.writeAll("datetime.timedelta(");
+    var present = false;
+    for ([_]i96{ days, seconds, micros }, [_][]const u8{ "days", "seconds", "microseconds" }) |value, label| if (value != 0) {
+        try out.writer.print("{s}{s}={d}", .{ if (present) @as([]const u8, ", ") else "", label, value });
+        present = true;
+    };
+    if (!present) try out.writer.writeByte('0');
+    try out.writer.writeByte(')');
+    return out.toOwnedSlice();
+}
 pub fn durationValue(a: Allocator, micros: i96) !Value {
+    if (micros < -999999999 * @as(i96, std.time.us_per_day) or micros >= 1000000000 * @as(i96, std.time.us_per_day)) return error.JinjaNumericOverflow;
     const days = @divFloor(micros, std.time.us_per_day);
     const remainder = @mod(micros, std.time.us_per_day);
     const seconds = @divFloor(remainder, std.time.us_per_s);
@@ -180,6 +188,7 @@ pub fn durationValue(a: Allocator, micros: i96) !Value {
     return object(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_duration", .value = try expr.integerValue(a, micros) },
+        .{ .key = "__dxt_repr", .value = .{ .string = try durationRepr(a, days, seconds, fraction) } },
         .{ .key = "__dxt_rendered", .value = .{ .string = try text.toOwnedSlice() } },
         .{ .key = "days", .value = try expr.integerValue(a, days) },
         .{ .key = "seconds", .value = try expr.integerValue(a, seconds) },
@@ -270,4 +279,39 @@ test "native datetime module constructors preserve civil values and fixed clock"
     try std.testing.expectError(error.JinjaTypeError, call(a, "modules.datetime.date", &.{ .{ .value = .{ .number = 2024 } }, .{ .value = .{ .integer = "1" } }, .{ .value = .{ .integer = "1" } } }, .{}));
     try std.testing.expect(expr.callableName((try resolve(a, "modules.datetime.datetime")).?) != null);
     try std.testing.expect((try resolve(a, "modules.datetime.timezone")).? == .undefined);
+}
+
+test "native timedeltas retain exact integer range rounding and datetime arithmetic" {
+    const Fixture = struct {
+        fn resolve(_: *anyopaque, name: []const u8, a: Allocator) !Value {
+            return (try @import("modules_context.zig").resolve(a, name)) orelse .undefined;
+        }
+        fn call(context: *anyopaque, name: []const u8, args: []const Argument, a: Allocator) !Value {
+            const host = expr.Host{ .context = context, .resolve = @This().resolve, .call = @This().call };
+            return (try @import("modules_context.zig").call(a, name, args, .{ .host = host })) orelse (try dates.call(a, name, args)) orelse error.UnsupportedJinjaCall;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture: u8 = 0;
+    const host = expr.Host{ .context = &fixture, .resolve = Fixture.resolve, .call = Fixture.call };
+    const cases = [_][2][]const u8{
+        .{ "modules.datetime.timedelta(days=999999999,microseconds=999999)", "999999999 days, 0:00:00.999999" },
+        .{ "modules.datetime.timedelta(microseconds=-1.5)", "-1 day, 23:59:59.999998" },
+        .{ "modules.datetime.timedelta(microseconds=3)*0.5", "0:00:00.000002" },
+        .{ "modules.datetime.timedelta(microseconds=5)/2", "0:00:00.000002" },
+        .{ "modules.datetime.timedelta(microseconds=-5)//2", "-1 day, 23:59:59.999997" },
+        .{ "modules.datetime.timedelta(microseconds=-5)%modules.datetime.timedelta(microseconds=2)", "0:00:00.000001" },
+        .{ "modules.datetime.datetime(2020,2,28,23,59,59)+modules.datetime.timedelta(seconds=2)", "2020-02-29 00:00:01" },
+        .{ "modules.datetime.date(2020,3,1)-modules.datetime.timedelta(microseconds=1)", "2020-03-01" },
+        .{ "modules.datetime.datetime(2020,2,29)-modules.datetime.datetime(2020,2,28)", "1 day, 0:00:00" },
+        .{ "modules.datetime.timedelta(microseconds=3)/modules.datetime.timedelta(microseconds=2)", "1.5" },
+        .{ "-modules.datetime.timedelta(seconds=2)", "-1 day, 23:59:58" },
+        .{ "[modules.datetime.timedelta(microseconds=1)]", "[datetime.timedelta(microseconds=1)]" },
+    };
+    for (cases) |case| try std.testing.expectEqualStrings(case[1], try (try expr.evaluate(a, case[0], host)).text(a));
+    try std.testing.expect(!(try call(a, "modules.datetime.timedelta", &.{}, .{})).?.truthy());
+    try std.testing.expectError(error.JinjaNumericOverflow, expr.evaluate(a, "modules.datetime.timedelta.max+modules.datetime.timedelta.resolution", host));
+    try std.testing.expectError(error.JinjaDivisionByZero, expr.evaluate(a, "modules.datetime.timedelta(seconds=1)/0", host));
 }
