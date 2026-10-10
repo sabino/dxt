@@ -234,7 +234,14 @@ pub fn call(a: Allocator, name: []const u8, args: []const Argument, options: Opt
         try bind(args, if (date_only or utc) &.{"timestamp"} else &.{ "timestamp", "tz" }, 1, if (date_only or utc) values[0..1] else &values, if (date_only or utc) values[0..1] else &values);
         const seconds = try expr.numericFloat(values[0]);
         if (!std.math.isFinite(seconds) or @abs(seconds) > 4e11) return error.JinjaNumericOverflow;
-        const ns = @as(i96, @intFromFloat(@round(seconds * std.time.us_per_s))) * std.time.ns_per_us;
+        // CPython splits seconds before rounding the fractional microseconds;
+        // multiplying the whole timestamp would lose fractional precision.
+        const integral = @trunc(seconds);
+        const fractional = (seconds - integral) * std.time.us_per_s;
+        var rounded = @floor(fractional);
+        const fraction = fractional - rounded;
+        if (fraction > 0.5 or (fraction == 0.5 and @mod(@as(i64, @intFromFloat(rounded)), 2) != 0)) rounded += 1;
+        const ns = @as(i96, @intFromFloat(integral)) * std.time.ns_per_s + @as(i96, @intFromFloat(rounded)) * std.time.ns_per_us;
         return try fromInstant(a, ns, date_only, values[1], utc);
     }
     if (std.mem.eql(u8, method, "fromisoformat")) {
@@ -273,6 +280,7 @@ test "native datetime module constructors preserve civil values and fixed clock"
     try std.testing.expectEqualStrings("1969-12-31 23:59:59.750000", try (try call(a, "modules.datetime.datetime.fromtimestamp", &.{.{ .value = .{ .number = -0.25 } }}, .{})).?.text(a));
     try std.testing.expectEqualStrings("2024-02-29", try (try call(a, "modules.datetime.date.fromordinal", &.{.{ .value = .{ .integer = "738945" } }}, .{})).?.text(a));
     try std.testing.expectEqualStrings("1970-01-01 00:00:00.123456", try (try call(a, "modules.datetime.datetime.utcnow", &.{}, .{ .now_ns = 123456000 })).?.text(a));
+    for ([_]f64{ 0.0000005, 0.0000015, -0.0000005, -0.0000015, 1.0000005, 1.0000015 }, [_][]const u8{ "1970-01-01 00:00:00", "1970-01-01 00:00:00.000002", "1970-01-01 00:00:00", "1969-12-31 23:59:59.999998", "1970-01-01 00:00:01.000001", "1970-01-01 00:00:01.000001" }) |instant, expected| try std.testing.expectEqualStrings(expected, try (try call(a, "modules.datetime.datetime.utcfromtimestamp", &.{.{ .value = .{ .number = instant } }}, .{})).?.text(a));
     try std.testing.expectEqualStrings("13:04:05.600007", try (try call(a, "modules.datetime.time", &.{ .{ .value = .{ .integer = "13" } }, .{ .value = .{ .integer = "4" } }, .{ .value = .{ .integer = "5" } }, .{ .value = .{ .integer = "600007" } } }, .{})).?.text(a));
     try std.testing.expectEqualStrings("0:00:00.000002", try (try call(a, "modules.datetime.timedelta", &.{.{ .name = "microseconds", .value = .{ .number = 1.5 } }}, .{})).?.text(a));
     try std.testing.expectError(error.JinjaTypeError, call(a, "modules.datetime.date", &.{ .{ .value = .{ .number = 2024 } }, .{ .value = .{ .integer = "1" } }, .{ .value = .{ .integer = "1" } } }, .{}));

@@ -25,6 +25,7 @@ pub fn toExpression(allocator: std.mem.Allocator, value: std.json.Value) anyerro
 }
 
 pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) anyerror!std.json.Value {
+    if (value == .object) if (expression.tupleProtocol(value)) |items| return fromExpression(allocator, .{ .tuple = items });
     if (expression.integerProtocol(value)) |number| return fromExpression(allocator, .{ .integer = number });
     if (expression.floatProtocol(value)) |number| return .{ .float = number };
     if (@import("yaml_values.zig").isHashable(value)) return error.InvalidConfiguration;

@@ -1400,6 +1400,10 @@ pub fn containsWithHost(allocator: std.mem.Allocator, container: Value, item: Va
         return false;
     }
     if (isUndefined(container)) return false;
+    if (tupleProtocol(container)) |items| {
+        for (items) |member| if (equalMember(member, item)) return true;
+        return false;
+    }
     if (mappingSource(container)) |source| return if (item == .string) (try mapping_keys.entry(source, item)) != null else false;
     if (container.attribute("__dxt_binary") == .string) return yaml_values.contains(container, item);
     if (sets.isSet(container)) return try sets.contains(container, item);
@@ -1819,8 +1823,9 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
         return .{ .string = try indent.render(allocator, value.string, width, bound[1].truthy(), bound[2].truthy()) };
     }
     if (std.mem.eql(u8, name, "attr")) {
-        if (sequences.kind(value) != null) return .undefined;
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
+        if (sequences.kind(value) != null) return .undefined;
+        if (tupleProtocol(value) != null) return checkedAttribute(value, args[0].value.string);
         if (value == .capture_undefined and std.mem.startsWith(u8, args[0].value.string, "__") and std.mem.endsWith(u8, args[0].value.string, "__") and !undefinedUnsafeAttribute(args[0].value.string, true)) return try captureUndefined(allocator, args[0].value.string);
         if (isUndefined(value)) return try checkedAttribute(value, args[0].value.string);
         return value.attribute(args[0].value.string);
