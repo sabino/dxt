@@ -37,7 +37,7 @@ fn descriptor(a: Allocator, name: []const u8, fields: []const expression.Entry) 
     const entries = try expression.allocateEntries(a, fields.len + 1);
     entries[0] = .{ .key = "__dxt_sequence_kind", .value = .{ .string = try std.fmt.allocPrint(a, "itertools_{s}", .{name}) } };
     @memcpy(entries[1..], fields);
-    return .{ .object = entries };
+    return sequence.descriptor(a, entries);
 }
 fn set(value: Value, name: []const u8, replacement: Value) void {
     for (@constCast(value.object)) |*entry| if (std.mem.eql(u8, entry.key, name)) {
@@ -499,4 +499,19 @@ test "native islice drains skipped positions and defers starmap callback errors"
     try std.testing.expectError(error.JinjaTypeError, sequence.next(a, mapped, null));
     const deferred = (try call(a, "modules.itertools.chain", &.{.{ .value = .none }}, null)).?;
     try std.testing.expectError(error.JinjaTypeError, sequence.next(a, deferred, null));
+}
+
+test "native tee and cycle growth retains the values shared by iterator aliases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const items = try expression.allocateValues(a, 40);
+    for (items, 0..) |*item, i| item.* = try object(a, &.{.{ .key = "n", .value = try expression.integerValue(a, i) }});
+    const branches = (try call(a, "modules.itertools.tee", &.{.{ .value = .{ .list = items } }}, null)).?.tuple;
+    for (items) |item| try std.testing.expect(item.object.ptr == (try sequence.next(a, branches[0], null)).?.object.ptr);
+    try std.testing.expect((try sequence.next(a, branches[0], null)) == null);
+    for (items) |item| try std.testing.expect(item.object.ptr == (try sequence.next(a, branches[1], null)).?.object.ptr);
+    try std.testing.expect((try sequence.next(a, branches[1], null)) == null);
+    const cycle = (try call(a, "modules.itertools.cycle", &.{.{ .value = .{ .list = items } }}, null)).?;
+    for (0..120) |i| try std.testing.expect(items[i % items.len].object.ptr == (try sequence.next(a, cycle, null)).?.object.ptr);
 }
