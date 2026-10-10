@@ -74,6 +74,7 @@ pub fn writeInherited(writer: *std.Io.Writer, config: std.json.Value, created_at
 }
 
 pub fn fileKeyName(a: std.mem.Allocator, graph: *const types.Graph, test_node: *const types.GenericTestNode) !?[]const u8 {
+    if (test_node.unattached_file_key_name) |key| return try a.dupe(u8, key);
     if (test_node.attached_source) |source| return try std.fmt.allocPrint(a, "sources.{s}", .{source.source_name});
     const attached = test_node.attached_node orelse return null;
     for (graph.nodes.items) |node| if (std.mem.eql(u8, node.unique_id, attached)) {

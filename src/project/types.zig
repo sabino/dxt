@@ -655,6 +655,9 @@ pub const GenericTestNode = struct {
     relationship_to: []const u8 = "",
     relationship_field: []const u8 = "",
     attached_node: ?[]const u8 = null,
+    // YAML targets without a corresponding SQL/CSV node still declare tests.
+    unattached_model_kwarg: ?[]const u8 = null,
+    unattached_file_key_name: ?[]const u8 = null,
     attached_source: ?SourceDep = null,
     attached_source_unique_id: ?[]const u8 = null,
     relationship_source_to: ?SourceDep = null,
@@ -1000,6 +1003,8 @@ pub fn deinitNode(allocator: std.mem.Allocator, node: *Node) void {
 }
 
 pub fn deinitGenericTestNode(allocator: std.mem.Allocator, test_node: *GenericTestNode) void {
+    if (test_node.unattached_model_kwarg) |value| allocator.free(value);
+    if (test_node.unattached_file_key_name) |value| allocator.free(value);
     if (test_node.build_path) |path| allocator.free(path);
     for (test_node.extra_ctes.items) |cte| allocator.free(cte.sql);
     test_node.extra_ctes.deinit(allocator);

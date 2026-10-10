@@ -62,6 +62,14 @@ macro-error comparisons. New class, identity, null/provenance and allocator
 closures and the complete final candidate gates remain pending; this checkpoint
 does not establish full replacement or merge readiness.
 
+The strict public package rerun exposed a further schema-test distinction:
+Core seeds generic-test macro dependencies with its unqualified resolver even
+when raw code calls a package namespace, and it retains tests declared on an
+unmatched YAML target as non-executable manifest nodes after missing-reference
+resolution. The root owns this generic parse/artifact closure and its both-adapter
+oracles; the compiler worker separately owns reached singular runtime calls.
+Project source files and strict gate comparisons remain unchanged.
+
 PR #219 is merged. The user has authorized completing the replacement roadmap,
 including its proposed features, from fresh main on `feat/full-usability`.
 The previous snapshot slice's stop boundary is historical and does not constrain

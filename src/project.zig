@@ -4181,6 +4181,44 @@ fn materializeGenericTests(graph: *Graph) !void {
             }
         }
     }
+    // SchemaParser parses the YAML declaration independently of patch lookup.
+    // Keep its tests even when the named SQL/CSV target is absent; ordinary
+    // dependency resolution then disables execution while retaining metadata.
+    for (graph.model_properties.items) |property| {
+        if ((if (property.assigned_unique_id) |id| findNodeIndexByUniqueId(graph, id) else findNodeIndexByResourceTypeAndName(graph, property.package_name, property.resource_type, property.name)) != null) continue;
+        var target = Node{
+            .package_name = property.package_name,
+            .resource_type = property.resource_type,
+            .unique_id = "",
+            .name = property.name,
+            .path = property.patch_path,
+            .original_file_path = property.patch_path,
+            .patch_path = property.patch_path,
+            .version = property.version,
+            .raw_code = "",
+        };
+        if (property.version != .null) {
+            const version = try @import("project/config_value.zig").scalarText(graph.allocator, property.version);
+            defer graph.allocator.free(version);
+            target.default_alias = try std.fmt.allocPrint(graph.allocator, "{s}_v{s}", .{ property.name, version });
+        }
+        defer if (target.default_alias) |value| graph.allocator.free(value);
+        const first = graph.tests.items.len;
+        for (property.tests.items) |definition| {
+            const test_def = if (isSupportedGenericTest(definition, null)) definition else (try nodeColumnCustomGenericTestDef(graph, &target, definition, null)) orelse continue;
+            try appendGenericTestNode(graph, &target, test_def, null);
+        }
+        for (property.columns.items) |column| for (column.tests.items) |definition| {
+            const test_def = if (isSupportedGenericTest(definition, column.name)) definition else (try nodeColumnCustomGenericTestDef(graph, &target, definition, column.name)) orelse continue;
+            try appendGenericTestNode(graph, &target, test_def, column.name);
+        };
+        for (graph.tests.items[first..]) |*test_node| {
+            test_node.attached_node = null;
+            test_node.unattached_model_kwarg = try @import("project/model_versions.zig").modelKwarg(graph.allocator, &target);
+            const plural = if (std.mem.eql(u8, property.resource_type, "seed")) "seeds" else if (std.mem.eql(u8, property.resource_type, "snapshot")) "snapshots" else "models";
+            test_node.unattached_file_key_name = try std.fmt.allocPrint(graph.allocator, "{s}.{s}", .{ plural, property.name });
+        }
+    }
     for (graph.sources.items) |*source| {
         for (source.tests.items) |test_def| {
             if (isSupportedSourceGenericTest(test_def, null)) {
@@ -4461,16 +4499,36 @@ fn columnCustomGenericTestDef(graph: *const Graph, package_name: []const u8, tes
 fn appendGenericTestMacroDependency(graph: *Graph, test_node: *GenericTestNode, test_def: GenericTestDef) !void {
     const macro_name = try std.fmt.allocPrint(graph.allocator, "test_{s}", .{test_def.name});
     defer graph.allocator.free(macro_name);
-    const macro_id = if (test_def.namespace) |package|
-        findMacroIdByPackageAndName(graph, package, macro_name)
-    else
-        project_resolve.findMacroIdForUnqualifiedNamespaceCall(graph, test_node.package_name, macro_name);
+    // Core seeds this dependency through its unqualified resolver, before
+    // rendering the builder's potentially namespaced raw macro call.
+    const macro_id = project_resolve.findMacroIdForUnqualifiedMacroDependency(graph, test_node.package_name, macro_name);
     if (macro_id) |resolved| {
         try test_node.macro_depends_on.append(graph.allocator, resolved);
         if (!std.mem.startsWith(u8, resolved, "macro.dbt.")) try test_node.macro_depends_on.append(graph.allocator, "macro.dbt.get_where_subquery");
     } else if (isBuiltInGenericTestName(test_def.name) and (test_def.namespace == null or std.mem.eql(u8, test_def.namespace.?, "dbt"))) {
         try test_node.macro_depends_on.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "macro.dbt.test_{s}", .{test_def.name}));
     } else return error.UnresolvedMacro;
+}
+
+test "unmatched YAML targets retain generic declarations without fabricating graph nodes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "demo" };
+    defer graph.deinit();
+    var property = types.ModelProperty{ .package_name = "demo", .resource_type = "seed", .name = "absent", .patch_path = "models/schema.yml" };
+    var column = ColumnDef{ .name = "id" };
+    try column.tests.append(a, .{ .name = "not_null" });
+    try property.columns.append(a, column);
+    try graph.model_properties.append(a, property);
+    try materializeGenericTests(&graph);
+    try std.testing.expectEqual(@as(usize, 0), graph.nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), graph.tests.items.len);
+    const declared = graph.tests.items[0];
+    try std.testing.expect(declared.attached_node == null);
+    try std.testing.expectEqualStrings("seeds.absent", declared.unattached_file_key_name.?);
+    try std.testing.expectEqualStrings("{{ get_where_subquery(ref('absent')) }}", declared.unattached_model_kwarg.?);
+    try std.testing.expectEqualStrings("absent", declared.refs.items[0].name);
 }
 
 test "materializeGenericTests activates root project model column custom generic tests" {

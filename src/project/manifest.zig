@@ -1355,7 +1355,7 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try writer.writeAll(",\"test_metadata\":{\"name\":");
     try json.string(writer, test_node.test_name);
     try writer.writeAll(",\"kwargs\":{\"model\":");
-    const model_kwarg = if (test_node.attached_node) |attached_node| blk: {
+    const model_kwarg = if (test_node.unattached_model_kwarg) |kwarg| try allocator.dupe(u8, kwarg) else if (test_node.attached_node) |attached_node| blk: {
         for (graph.nodes.items) |*model| if (std.mem.eql(u8, model.unique_id, attached_node)) break :blk try @import("model_versions.zig").modelKwarg(allocator, model);
         const model_name = modelNameFromUniqueId(attached_node);
         break :blk try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
