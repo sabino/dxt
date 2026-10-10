@@ -5,10 +5,14 @@ import subprocess
 
 import pytest
 
-from test_usability_commands import core_runner, write_project
+from test_usability_configuration import (
+    ConfigurationPair,
+    configuration_oracle,
+    configuration_postgres,
+    configure_adapter,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
-DXT = ROOT / 'zig-out/bin/dxt'
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -61,39 +65,39 @@ CASES = [
 ]
 
 
-def compile_pair(tmp_path, core_runner, source, expected):
-    project = tmp_path / 'project'
-    write_project(project, {'models/mutated.sql': source, 'macros/growth.sql': MACROS})
-    common = ['--project-dir', str(project), '--profiles-dir', str(project), '--no-partial-parse']
-    reference = core_runner.invoke(['compile', *common, '--target-path', 'core-target', '--quiet'])
-    assert reference.success, reference.exception
-    core_node = json.loads((project / 'core-target/manifest.json').read_text())['nodes']['model.commands.mutated']
-    assert core_node['compiled_code'] == expected
-    result = subprocess.run([DXT, 'compile', *common, '--target-path', 'native-target'], text=True, capture_output=True)
-    assert result.returncode == 0, result.stdout + result.stderr
-    native_node = json.loads((project / 'native-target/manifest.json').read_text())['nodes']['model.commands.mutated']
-    assert native_node['compiled_code'] == core_node['compiled_code']
+def compile_pair(tmp_path, configuration_oracle, request, adapter, source, expected):
+    pair = ConfigurationPair(tmp_path, configuration_oracle)
+    configure_adapter(pair, request, adapter)
+    pair.write('models/marts/mutated.sql', source)
+    pair.write('macros/growth.sql', MACROS)
+    native_manifest, core_manifest = pair.invoke()
+    node_id = 'model.configuration_fixture.mutated'
+    assert core_manifest['nodes'][node_id]['compiled_code'] == expected
+    assert native_manifest['nodes'][node_id]['compiled_code'] == expected
 
 
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
 @pytest.mark.parametrize('setup, expression, values', CASES)
-def test_mutable_list_growth_preserves_aliases_methods_and_copies(tmp_path, core_runner, setup, expression, values):
-    compile_pair(tmp_path, core_runner, setup + "select '{{ " + expression + "|tojson }}' as value", "select '" + json.dumps(values) + "' as value")
+def test_mutable_list_growth_preserves_aliases_methods_and_copies(tmp_path, configuration_oracle, request, adapter, setup, expression, values):
+    compile_pair(tmp_path, configuration_oracle, request, adapter, setup + "select '{{ " + expression + "|tojson }}' as value", "select '" + json.dumps(values) + "' as value")
 
 
-def test_caller_captured_aliases_observe_growth_from_suspended_macro_frame(tmp_path, core_runner):
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_caller_captured_aliases_observe_growth_from_suspended_macro_frame(tmp_path, configuration_oracle, request, adapter):
     source = (
         "{% set x=[] %}{% set alias=x %}{% set box={'child':x} %}select '"
         '{% call collect() %}{% do grow(x) %}{{ [box.child, alias, box.child is sameas x]|tojson }}{% endcall %}'
         "' as value"
     )
-    compile_pair(tmp_path, core_runner, source, "select '" + json.dumps([[7, 8, 9], [7, 8, 9], True]) + "' as value")
+    compile_pair(tmp_path, configuration_oracle, request, adapter, source, "select '" + json.dumps([[7, 8, 9], [7, 8, 9], True]) + "' as value")
 
 
-def test_seventy_thousand_bindings_accumulate_through_generic_authored_jinja(tmp_path, core_runner):
+@pytest.mark.parametrize('adapter', ['duckdb', 'postgres'])
+def test_seventy_thousand_bindings_accumulate_through_generic_authored_jinja(tmp_path, configuration_oracle, request, adapter):
     source = (
         '{% set bindings=[] %}{% set alias=bindings %}'
         '{% for row in range(10000) %}{% do bindings.extend([row,1,2,3,4,5,6]) %}{% endfor %}'
         "select '{{ [bindings|length, bindings[:7], bindings[-7:], alias is sameas bindings]|tojson }}' as value"
     )
     values = [70000, [0, 1, 2, 3, 4, 5, 6], [9999, 1, 2, 3, 4, 5, 6], True]
-    compile_pair(tmp_path, core_runner, source, "select '" + json.dumps(values) + "' as value")
+    compile_pair(tmp_path, configuration_oracle, request, adapter, source, "select '" + json.dumps(values) + "' as value")
