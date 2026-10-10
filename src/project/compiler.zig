@@ -546,19 +546,25 @@ fn valueFromJson(allocator: std.mem.Allocator, value: std.json.Value) anyerror!n
 }
 
 pub fn compileModelWithInjectedCtes(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) !CompiledModel {
+    return compileModelWithDependencies(allocator, graph, node, null);
+}
+
+/// Captures direct model template calls reached during runtime compilation.
+/// The collector owns its list; macro identifiers borrow the immutable graph.
+pub fn compileModelWithDependencies(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, dependencies: ?*std.ArrayList([]const u8)) !CompiledModel {
     if (std.mem.eql(u8, node.language, "python")) {
         for (node.depends_on.items) |id| {
             const parent = findNodeByUniqueId(graph, id) orelse continue;
             if (std.mem.eql(u8, parent.materialized, "ephemeral")) return error.PythonModelEphemeralDependency;
         }
-        return .{ .compiled_code = try compileModelBody(allocator, graph, node) };
+        return .{ .compiled_code = try compileModelBodyWithDependencies(allocator, graph, node, dependencies) };
     }
     var state = EphemeralCompileState.init(allocator, graph);
     errdefer state.deinit();
 
     try collectEphemeralDependencies(&state, node);
 
-    const body = try compileModelBody(allocator, graph, node);
+    const body = try compileModelBodyWithDependencies(allocator, graph, node, dependencies);
     errdefer allocator.free(body);
 
     const compiled_code = if (state.extra_ctes.items.len == 0 or !graph.command_options.inject_ephemeral_ctes)
@@ -576,10 +582,16 @@ pub fn compileModelWithInjectedCtes(allocator: std.mem.Allocator, graph: *const 
 }
 
 fn compileModelBody(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
+    return compileModelBodyWithDependencies(allocator, graph, node, null);
+}
+
+fn compileModelBodyWithDependencies(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, dependencies: ?*std.ArrayList([]const u8)) ![]const u8 {
     const timing = try @import("timing_profile.zig").start(graph.timing_profile, .{ .filename = @src().file, .line = @src().line, .function = "compileModelBody" });
     defer timing.finish();
     var context = CompileContext.init(allocator, graph, node);
     defer context.deinit();
+    context.runtime_macro_dependencies = dependencies;
+    context.runtime_dependency_allocator = allocator;
 
     if (std.mem.eql(u8, node.language, "python")) {
         var out: std.ArrayList(u8) = .empty;
@@ -1102,6 +1114,7 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                     .scope_depth = context.scope_depth,
                     .macro_package = context.current_macro_package,
                     .capture_undefined = context.capturesUndefined(),
+                    .binding_visibility = context.binding_visibility,
                 };
                 const loop_id = context.loop_states.items.len;
                 try context.loop_states.append(arena, frame);
@@ -1193,6 +1206,7 @@ const LoopFrame = struct {
     scope_depth: usize,
     macro_package: ?[]const u8,
     capture_undefined: bool,
+    binding_visibility: BindingVisibility,
 };
 
 fn loopItem(context: *CompileContext, frame: *LoopFrame, index: usize) anyerror!?native_expr.Value {
@@ -1216,6 +1230,7 @@ fn loopFilter(context: *CompileContext, frame: *LoopFrame, value: native_expr.Va
     const previous_scope = context.scope_depth;
     const previous_package = context.current_macro_package;
     const previous_capture = context.capture_undefined_override;
+    const previous_visibility = context.binding_visibility;
     try context.loop_filter_bindings.append(context.value_arena.allocator(), previous_bindings.items);
     defer _ = context.loop_filter_bindings.pop();
     context.bindings = .empty;
@@ -1224,6 +1239,7 @@ fn loopFilter(context: *CompileContext, frame: *LoopFrame, value: native_expr.Va
     context.scope_depth = frame.scope_depth;
     context.current_macro_package = frame.macro_package;
     context.capture_undefined_override = frame.capture_undefined;
+    context.binding_visibility = frame.binding_visibility;
     defer {
         context.bindings.deinit(context.allocator);
         context.vars.deinit(context.allocator);
@@ -1234,6 +1250,7 @@ fn loopFilter(context: *CompileContext, frame: *LoopFrame, value: native_expr.Va
         context.scope_depth = previous_scope;
         context.current_macro_package = previous_package;
         context.capture_undefined_override = previous_capture;
+        context.binding_visibility = previous_visibility;
     }
     try context.bindings.appendSlice(context.allocator, frame.bindings);
     try context.vars.appendSlice(context.allocator, frame.vars);
@@ -4875,4 +4892,22 @@ test "ordinary macro globals ignore caller local provider shadows" {
     try @import("parse.zig").parseMacrosFromText(a, "{% macro same_countries() %}{{ return(modules.pytz.country_timezones) }}{% endmacro %}{% macro nested(value) %}{{ return(value) }}{% endmacro %}", "module.sql", "fixture", &graph);
     const node = Node{ .unique_id = "model.fixture.shadow", .package_name = "fixture", .name = "shadow", .path = "shadow.sql", .original_file_path = "models/shadow.sql", .raw_code = "{% set original=modules %}{% set modules={'value':'shadow'} %}{{ modules.value }}|{{ original.pytz.country_timezones is sameas same_countries() }}|{{ nested(modules.value) }}" };
     try std.testing.expectEqualStrings("shadow|True|shadow", try compileModel(a, &graph, &node));
+}
+
+test "runtime compilation captures direct macro calls in argument evaluation order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "fixture" };
+    defer graph.deinit();
+    try @import("parse.zig").parseMacrosFromText(a, "{% macro z_inner(value) %}{{ return(value) }}{% endmacro %}{% macro a_outer(value) %}{{ return(hidden(value)) }}{% endmacro %}{% macro hidden(value) %}{{ return(value) }}{% endmacro %}", "order.sql", "fixture", &graph);
+    const node = Node{ .unique_id = "model.fixture.order", .package_name = "fixture", .name = "order", .path = "order.sql", .original_file_path = "models/order.sql", .raw_code = "{% if execute %}{{ a_outer(z_inner(1)) }}{% endif %}" };
+    var dependencies: std.ArrayList([]const u8) = .empty;
+    defer dependencies.deinit(a);
+    var compiled = try compileModelWithDependencies(a, &graph, &node, &dependencies);
+    defer compiled.deinit(a);
+    try std.testing.expectEqualStrings("1", compiled.compiled_code);
+    try std.testing.expectEqual(@as(usize, 2), dependencies.items.len);
+    try std.testing.expectEqualStrings("macro.fixture.z_inner", dependencies.items[0]);
+    try std.testing.expectEqualStrings("macro.fixture.a_outer", dependencies.items[1]);
 }

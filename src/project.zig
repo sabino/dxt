@@ -1371,6 +1371,7 @@ fn executeConcurrentCommand(runtime: Runtime, options: Options, graph: *Graph, s
     for (summary.rows) |row| {
         if (row.node) |original| {
             const node = @constCast(original);
+            for (row.macro_dependencies) |id| try util.appendUnique(runtime.allocator, &node.macro_depends_on, id);
             if (row.compiled_code) |sql| {
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
                 node.compiled = true;
@@ -1483,8 +1484,10 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
     if (resource == .node) {
         const original = resource.node;
         var node = original.*;
+        var compilation_dependencies: std.ArrayList([]const u8) = .empty;
+        defer compilation_dependencies.deinit(runtime.allocator);
         const compilation_started = execution_clock.now(runtime.io);
-        compileConcurrentNode(runtime, &graph, &node, db_path) catch |err| {
+        compileConcurrentNode(runtime, &graph, &node, db_path, &compilation_dependencies) catch |err| {
             var row = resource.result("error");
             row.message = try runtime.allocator.dupe(u8, if (err == error.AdapterQueryCancelled) "Database query cancelled" else "Resource compilation failed");
             row.compile_started_at = compilation_started;
@@ -1502,6 +1505,10 @@ fn executeConcurrentResource(runtime: Runtime, graph_readonly: *const Graph, res
             break :blk false;
         };
         var row = rows.items[0];
+        for (row.macro_dependencies) |id| try util.appendUnique(runtime.allocator, &compilation_dependencies, id);
+        if (row.owns_macro_dependencies) runtime.allocator.free(row.macro_dependencies);
+        row.macro_dependencies = try compilation_dependencies.toOwnedSlice(runtime.allocator);
+        row.owns_macro_dependencies = true;
         row.node = original;
         if (row.compiled_code == null) {
             row.compiled_code = node.compiled_code;
@@ -1544,14 +1551,14 @@ fn captureResourceLogs(allocator: std.mem.Allocator, row: *run_results.NodeResul
     row.owns_log_events = true;
 }
 
-fn compileConcurrentNode(runtime: Runtime, graph: *const Graph, node: *Node, db_path: []const u8) !void {
+fn compileConcurrentNode(runtime: Runtime, graph: *const Graph, node: *Node, db_path: []const u8, dependencies: *std.ArrayList([]const u8)) !void {
     if (std.mem.eql(u8, node.resource_type, "seed")) return;
     if (microbatch.enabled(node)) {
         node.relation_name = try compiler.relationNameForNode(runtime.allocator, graph, node);
         return;
     }
     if (std.mem.eql(u8, node.materialized, "incremental")) node.runtime_is_incremental = try incremental.isIncremental(runtime, db_path, graph, node);
-    const compiled = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, node);
+    const compiled = try compiler.compileModelWithDependencies(runtime.allocator, graph, node, dependencies);
     node.compiled = true;
     node.compiled_code = compiled.compiled_code;
     node.extra_ctes = compiled.extra_ctes;

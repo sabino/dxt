@@ -68,6 +68,7 @@ pub fn compile(runtime: types.Runtime, graph: *types.Graph, options: types.Optio
                 node.compiled_code = try runtime.allocator.dupe(u8, sql);
                 node.compiled_path = compiled_path;
                 try compiler.recordPythonScaffoldDependency(runtime.allocator, graph, node);
+                for (row.macro_dependencies) |id| try @import("util.zig").appendUnique(runtime.allocator, &node.macro_depends_on, id);
                 if (row.relation_name) |relation| node.relation_name = try runtime.allocator.dupe(u8, relation);
                 try compiler.appendCteCopies(runtime.allocator, &node.extra_ctes, row.compiled_ctes);
                 if (std.mem.eql(u8, node.resource_type, "analysis")) counts.analyses += 1 else if (std.mem.eql(u8, node.resource_type, "snapshot")) counts.snapshots += 1 else if (node.hook_index == null and !std.mem.eql(u8, node.materialized, "ephemeral")) counts.models += 1;
@@ -194,7 +195,11 @@ fn render(runtime: types.Runtime, graph: *const types.Graph, resource: runner.Re
         .node => |original| {
             if (std.mem.eql(u8, original.resource_type, "seed")) return;
             const node = original.*;
-            const compiled = try compiler.compileModelWithInjectedCtes(runtime.allocator, graph, &node);
+            var dependencies: std.ArrayList([]const u8) = .empty;
+            defer dependencies.deinit(runtime.allocator);
+            const compiled = try compiler.compileModelWithDependencies(runtime.allocator, graph, &node, &dependencies);
+            row.macro_dependencies = try dependencies.toOwnedSlice(runtime.allocator);
+            row.owns_macro_dependencies = true;
             row.compiled_code = compiled.compiled_code;
             row.owns_compiled_code = true;
             row.compiled_ctes = compiled.extra_ctes.items;

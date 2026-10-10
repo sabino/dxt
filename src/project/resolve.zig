@@ -221,7 +221,6 @@ pub fn resolveDependencies(graph: *Graph) !void {
         for (node.macro_depends_on.items) |macro_dep| {
             if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
         }
-        sortStrings(node.macro_depends_on.items);
         // Core resolves source edges before ref edges for parsed nodes.
         for (node.source_refs.items) |source_dep| {
             try appendUnique(graph.allocator, &node.depends_on, try resolveSourceDependency(graph, node.package_name, source_dep));
@@ -280,7 +279,6 @@ pub fn resolveDependencies(graph: *Graph) !void {
         for (test_node.macro_depends_on.items) |macro_dep| {
             if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
         }
-        sortStrings(test_node.macro_depends_on.items);
         test_node.depends_on.clearRetainingCapacity();
         for (test_node.source_refs.items) |source_dep| {
             try appendUnique(graph.allocator, &test_node.depends_on, try resolveSourceDependency(graph, test_node.package_name, source_dep));
