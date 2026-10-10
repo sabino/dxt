@@ -1,6 +1,7 @@
 const std = @import("std");
 test {
     _ = @import("project/modules_context.zig");
+    _ = @import("project/timezone_context.zig");
 }
 pub const DuckDBPool = @import("project/native_duckdb.zig").Pool;
 const Io = std.Io;
