@@ -89,6 +89,7 @@ pub fn columnValue(allocator: std.mem.Allocator, definition: ColumnDef) !Value {
     var entries: std.ArrayList(expression.Entry) = .empty;
     try entries.appendSlice(allocator, &.{
         .{ .key = "__dxt_column", .value = .{ .string = serialized } },
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_rendered", .value = .{ .string = try std.fmt.allocPrint(allocator, "<Column {s} ({s})>", .{ definition.column, try columnDataType(allocator, definition) }) } },
         .{ .key = "column", .value = .{ .string = definition.column } },
         .{ .key = "name", .value = .{ .string = definition.column } },
@@ -269,6 +270,7 @@ pub fn relationValue(allocator: std.mem.Allocator, definition: RelationDef) !Val
     var entries: std.ArrayList(expression.Entry) = .empty;
     try entries.appendSlice(allocator, &.{
         .{ .key = "__dxt_relation", .value = .{ .string = serialized } },
+        .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
         .{ .key = "__dxt_rendered", .value = .{ .string = definition.rendered_sql orelse rendered } },
         .{ .key = "__dxt_repr", .value = .{ .string = try std.fmt.allocPrint(allocator, "<{s} {s}>", .{ class_name, rendered }) } },
         .{ .key = "database", .value = optional(definition.database) },
