@@ -208,7 +208,10 @@ fn timezoneObject(a: Allocator, id: Identity) !Value {
         .{ .key = "__dxt_timezone_identity", .value = .{ .string = info } },
         .{ .key = "zone", .value = if (fixed or base) .none else .{ .string = zone_name } },
     });
-    for ([_][]const u8{ "localize", "normalize", "utcoffset", "dst", "tzname", "fromutc" }) |method| try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_pytz_method:{s}:{s}", .{ method, info }) } });
+    for ([_][]const u8{ "localize", "normalize", "utcoffset", "dst", "tzname", "fromutc" }) |method| {
+        if (base and (std.mem.eql(u8, method, "localize") or std.mem.eql(u8, method, "normalize"))) continue;
+        try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_pytz_method:{s}:{s}", .{ method, info }) } });
+    }
     return .{ .object = try entries.toOwnedSlice(a) };
 }
 pub fn timezoneValue(a: Allocator, name: []const u8, localized: ?Info) !Value {
@@ -216,11 +219,11 @@ pub fn timezoneValue(a: Allocator, name: []const u8, localized: ?Info) !Value {
     const info = localized orelse transitionInfo(zone, 0);
     return timezoneObject(a, .{ .zone = @intCast(zone.index), .offset_us = @as(i64, info.offset_seconds) * std.time.us_per_s, .dst_us = @as(i64, info.dst_seconds) * std.time.us_per_s, .abbreviation = info.abbreviation });
 }
-pub fn atUtc(a: Allocator, timezone: Value, utc_ns: i96) !Value {
+pub fn atUtc(a: Allocator, timezone: Value, utc_seconds: i64) !Value {
     const name = timezone.attribute("__dxt_timezone_name");
     if (name != .string) return error.JinjaTypeError;
     if (std.mem.startsWith(u8, name.string, "pytz.FixedOffset(")) return timezone;
-    return timezoneValue(a, name.string, try offsetAtUtc(name.string, @intCast(@divFloor(utc_ns, std.time.ns_per_s))));
+    return timezoneValue(a, name.string, try offsetAtUtc(name.string, utc_seconds));
 }
 fn durationText(a: Allocator, micros: i64) ![]const u8 {
     const days = @divFloor(micros, std.time.us_per_day);
@@ -233,7 +236,7 @@ fn durationText(a: Allocator, micros: i64) ![]const u8 {
     if (fraction != 0) try writer.writer.print(".{d:0>6}", .{fraction});
     return writer.toOwnedSlice();
 }
-fn durationValue(a: Allocator, micros: i64) !Value {
+pub fn durationValue(a: Allocator, micros: i64) !Value {
     return object(a, &.{
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_duration", .value = try expr.integerValue(a, micros) },
@@ -245,8 +248,6 @@ fn durationValue(a: Allocator, micros: i64) !Value {
     });
 }
 
-// The datetime integration is supplied by the native datetime provider.
-// Country mapping dispatch is exported separately to preserve LazyDict lookup.
 fn unmunged(a: Allocator, name: []const u8) ![]const u8 {
     var result: std.ArrayList(u8) = .empty;
     var i: usize = 0;
@@ -264,7 +265,108 @@ fn unmunged(a: Allocator, name: []const u8) ![]const u8 {
     }
     return result.toOwnedSlice(a);
 }
-pub fn call(a: Allocator, name: []const u8, args: []const Argument) !?Value {
+fn parseIdentity(encoded: []const u8) !Identity {
+    var parts = std.mem.splitScalar(u8, encoded, ':');
+    const id: Identity = .{
+        .zone = try std.fmt.parseInt(i32, parts.next() orelse return error.InvalidTimeZone, 10),
+        .offset_us = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidTimeZone, 10),
+        .dst_us = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidTimeZone, 10),
+        .abbreviation = parts.rest(),
+    };
+    if (id.zone < -2 or id.zone >= zone_count) return error.InvalidTimeZone;
+    return id;
+}
+pub fn fromIdentity(a: Allocator, encoded: []const u8) !Value {
+    return timezoneObject(a, try parseIdentity(encoded));
+}
+fn parameter(args: []const Argument, name: []const u8, position: usize) ?Value {
+    for (args) |arg| if (arg.name) |key| if (std.mem.eql(u8, key, name)) return arg.value;
+    var index: usize = 0;
+    for (args) |arg| if (arg.name == null) {
+        if (index == position) return arg.value;
+        index += 1;
+    };
+    return null;
+}
+fn bindMethod(args: []const Argument, extra: bool) !void {
+    var supplied: [2]bool = @splat(false);
+    var positional: usize = 0;
+    for (args) |arg| {
+        const at = if (arg.name) |key| (if (std.mem.eql(u8, key, "dt")) @as(usize, 0) else if (extra and std.mem.eql(u8, key, "is_dst")) 1 else return error.InvalidJinjaArguments) else blk: {
+            const at = positional;
+            positional += 1;
+            break :blk at;
+        };
+        if (at >= (if (extra) @as(usize, 2) else 1) or supplied[at]) return error.InvalidJinjaArguments;
+        supplied[at] = true;
+    }
+    if (!supplied[0]) return error.InvalidJinjaArguments;
+}
+fn methodCall(a: Allocator, encoded: []const u8, args: []const Argument) anyerror!Value {
+    var parts = std.mem.splitScalar(u8, encoded, ':');
+    const method = parts.next() orelse return error.InvalidTimeZone;
+    const id = try parseIdentity(parts.rest());
+    const utc = id.zone >= 0 and std.mem.eql(u8, zoneAt(@intCast(id.zone)).name, "UTC");
+    const dynamic = id.zone >= 0 and zoneAt(@intCast(id.zone)).dynamic;
+    const accessor = std.mem.eql(u8, method, "utcoffset") or std.mem.eql(u8, method, "dst") or std.mem.eql(u8, method, "tzname");
+    const localize = std.mem.eql(u8, method, "localize");
+    const normalize = std.mem.eql(u8, method, "normalize");
+    const fromutc = std.mem.eql(u8, method, "fromutc");
+    if (!accessor and !localize and !normalize and !fromutc) return error.UndefinedJinjaValue;
+    try bindMethod(args, localize or (normalize and !dynamic) or (accessor and id.zone >= 0 and !utc));
+    if (id.zone == -2) return error.AbstractTimeZoneMethod;
+    const dt = parameter(args, "dt", 0).?;
+    const is_dst_value: Value = parameter(args, "is_dst", 1) orelse if (accessor) .none else .{ .boolean = false };
+    const is_dst: ?bool = if (is_dst_value == .none) null else is_dst_value.truthy();
+    if (accessor and !dynamic) {
+        if (std.mem.eql(u8, method, "tzname")) return if (id.zone < 0) .none else .{ .string = id.abbreviation };
+        return try durationValue(a, if (std.mem.eql(u8, method, "dst")) id.dst_us else id.offset_us);
+    }
+    if (accessor and dt == .none) return if (std.mem.eql(u8, method, "tzname")) .{ .string = zoneAt(@intCast(id.zone)).name } else .none;
+    const temporal = dates.state(dt) orelse return error.JinjaTypeError;
+    if (temporal.date_only) return error.JinjaTypeError;
+    const receiver = try timezoneObject(a, id);
+    const own_identity = receiver.attribute("__dxt_timezone_identity").string;
+    const actual_identity = if (temporal.timezone) |zone| zone.attribute("__dxt_timezone_identity") else .undefined;
+    const same_timezone = actual_identity == .string and std.mem.eql(u8, own_identity, actual_identity.string);
+    if (localize or (accessor and !same_timezone)) {
+        if (temporal.offset_us != null) return error.AlreadyAwareDatetime;
+        const info = if (dynamic) try localizeInfo(zoneAt(@intCast(id.zone)).name, @intCast(@divFloor(temporal.civil_ns, std.time.ns_per_s)), is_dst) else Info{ .offset_seconds = @intCast(@divTrunc(id.offset_us, std.time.us_per_s)), .dst_seconds = 0, .abbreviation = id.abbreviation };
+        const zone = if (dynamic) try timezoneValue(a, zoneAt(@intCast(id.zone)).name, info) else receiver;
+        if (accessor) {
+            if (std.mem.eql(u8, method, "tzname")) return .{ .string = info.abbreviation };
+            return try durationValue(a, @as(i64, if (std.mem.eql(u8, method, "dst")) info.dst_seconds else info.offset_seconds) * std.time.us_per_s);
+        }
+        return try dates.attachTimezone(a, temporal.civil_ns, zone);
+    }
+    if (accessor) {
+        if (std.mem.eql(u8, method, "tzname")) return .{ .string = id.abbreviation };
+        return try durationValue(a, if (std.mem.eql(u8, method, "dst")) id.dst_us else id.offset_us);
+    }
+    if (normalize) {
+        const original_offset = temporal.offset_us orelse return error.NaiveDatetime;
+        if (!dynamic and same_timezone) return dt;
+        const utc_ns = temporal.civil_ns - @as(i96, original_offset) * std.time.ns_per_us;
+        const zone = try atUtc(a, receiver, @intCast(@divFloor(utc_ns, std.time.ns_per_s)));
+        const offset = try expr.integerIndex(zone.attribute("__dxt_timezone_offset_us"));
+        return try dates.attachTimezone(a, utc_ns + @as(i96, offset) * std.time.ns_per_us, zone);
+    }
+    if (fromutc) {
+        if (temporal.offset_us != null and !same_timezone) {
+            // DstTzInfo accepts any instance from the same zone's tzinfo cache.
+            if (!dynamic or temporal.timezone == null) return error.InvalidFromUtcTimezone;
+            const supplied = try parseIdentity(actual_identity.string);
+            if (supplied.zone != id.zone) return error.InvalidFromUtcTimezone;
+        }
+        if (id.zone == -1 and temporal.offset_us == null) return error.InvalidFromUtcTimezone;
+        const zone = try atUtc(a, receiver, @intCast(@divFloor(temporal.civil_ns, std.time.ns_per_s)));
+        const offset = try expr.integerIndex(zone.attribute("__dxt_timezone_offset_us"));
+        return try dates.attachTimezone(a, temporal.civil_ns + @as(i96, offset) * std.time.ns_per_us, zone);
+    }
+    return error.UndefinedJinjaValue;
+}
+pub fn call(a: Allocator, name: []const u8, args: []const Argument) anyerror!?Value {
+    if (std.mem.startsWith(u8, name, "__dxt_pytz_method:")) return try methodCall(a, name[18..], args);
     if (std.mem.eql(u8, name, "modules.pytz.timezone")) {
         if (args.len != 1 or (args[0].name != null and !std.mem.eql(u8, args[0].name.?, "zone"))) return error.InvalidJinjaArguments;
         const binary = args[0].value.attribute("__dxt_binary");
@@ -357,4 +459,30 @@ test "pytz native exports fixed offsets duration methods and exceptions" {
     try std.testing.expectEqualStrings("'Missing'", try failure.text(a));
     const duration = try durationValue(a, -19800000000);
     try std.testing.expectEqualStrings("-1 day, 18:30:00", try duration.text(a));
+}
+
+test "native pytz localization normalization and exact datetime timezone metadata" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const calendar = @import("workflow_intervals.zig");
+    const eastern = try timezoneValue(a, "US/Eastern", null);
+    const naive = try dates.datetimeValue(a, @as(i96, try calendar.parseTimestamp("2020-11-01 01:30:00")) * std.time.ns_per_s, false, null);
+    const localized = (try call(a, eastern.attribute("localize").callable, &.{ .{ .value = naive }, .{ .name = "is_dst", .value = .{ .boolean = false } } })).?;
+    try std.testing.expectEqualStrings("2020-11-01 01:30:00-05:00", try localized.text(a));
+    try std.testing.expectEqualStrings("EST -0500", (try dates.call(a, localized.attribute("strftime").callable, &.{.{ .value = .{ .string = "%Z %z" } }})).?.string);
+    const temporal = dates.state(localized).?;
+    try std.testing.expectEqualStrings("US/Eastern", temporal.zone_name.?);
+    try std.testing.expectEqual(@as(i64, -18000000000), temporal.offset_us.?);
+    const earlier = try dates.datetimeValueWithOffsetUs(a, temporal.civil_ns - std.time.ns_per_hour, false, temporal.offset_us, temporal.timezone, 0);
+    const normalized = (try call(a, eastern.attribute("normalize").callable, &.{.{ .value = earlier }})).?;
+    try std.testing.expectEqualStrings("2020-11-01 01:30:00-04:00", try normalized.text(a));
+    const fixed = (try call(a, "modules.pytz.FixedOffset", &.{.{ .value = .{ .number = 5.5 } }})).?;
+    const fixed_dt = (try call(a, fixed.attribute("localize").callable, &.{.{ .value = naive }})).?;
+    try std.testing.expectEqualStrings("2020-11-01 01:30:00+00:05:30", try fixed_dt.text(a));
+    try std.testing.expectEqualStrings("+000530 ", (try dates.call(a, fixed_dt.attribute("strftime").callable, &.{.{ .value = .{ .string = "%z %Z" } }})).?.string);
+    const fixed_offset = (try dates.call(a, fixed_dt.attribute("utcoffset").callable, &.{})).?;
+    try std.testing.expectEqualStrings("0:05:30", try fixed_offset.text(a));
+    try std.testing.expectError(error.AlreadyAwareDatetime, call(a, eastern.attribute("localize").callable, &.{.{ .value = localized }}));
+    try std.testing.expectError(error.NaiveDatetime, call(a, eastern.attribute("normalize").callable, &.{.{ .value = naive }}));
 }
