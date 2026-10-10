@@ -47,6 +47,7 @@ fn checkHashable(candidate: Value, depth: usize) anyerror!void {
     if (expression.complexProtocol(candidate) != null) return;
     if (immutableIdentity(candidate) != null) return;
     switch (candidate) {
+        .missing,
         .none,
         .boolean,
         .integer,

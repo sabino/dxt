@@ -18,6 +18,8 @@ pub fn truthyWithHost(a: std.mem.Allocator, value: Value, host: ?Host) anyerror!
 /// Native Jinja expression values. Allocations belong to the caller's render
 /// arena; values can cross macro returns without borrowing a temporary frame.
 pub const Value = union(enum) {
+    // Jinja clears escaped control-scope cells to its internal singleton.
+    missing,
     undefined,
     conditional_undefined,
     ordinary_undefined: *CaptureUndefined,
@@ -43,6 +45,7 @@ pub const Value = union(enum) {
         if (mappingSource(self)) |source| return source.object.len != 0;
         return switch (self) {
             .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined, .none => false,
+            .missing => true,
             .boolean => |v| v,
             .number => |v| v != 0,
             .complex => |v| v.real != 0 or v.imaginary != 0,
@@ -60,6 +63,7 @@ pub const Value = union(enum) {
         if (complexProtocol(self)) |number| return complex_numbers.text(allocator, number);
         return switch (self) {
             .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined => "",
+            .missing => "missing",
             .callable => error.JinjaTypeError,
             .none => try allocator.dupe(u8, "None"),
             .boolean => |v| if (v) "True" else "False",
@@ -127,6 +131,24 @@ pub const Value = union(enum) {
         };
     }
 };
+
+test "cleared Jinja cells retain the internal Missing singleton" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const value: Value = .missing;
+    try std.testing.expectEqualStrings("missing", try value.text(a));
+    try std.testing.expectEqualStrings("missing", try repr(value, a));
+    try std.testing.expect(value.truthy());
+    try std.testing.expect(!isUndefined(value));
+    try std.testing.expect(equalValues(value, .missing));
+    try std.testing.expect(!equalValues(value, .{ .string = "missing" }));
+    try std.testing.expect(!isIterable(value));
+    try std.testing.expectError(error.JinjaTypeError, iterableValues(a, value));
+    try mapping_keys.hashable(value);
+    try std.testing.expectError(error.JinjaTypeError, @import("context_json.zig").stringify(a, value));
+    try std.testing.expectError(error.InvalidConfiguration, @import("config_value.zig").fromExpression(a, value));
+}
 
 /// dbt's parse environment propagates unresolved attributes and calls. A
 /// mutable cell preserves its observable name and identity across aliases.
@@ -1536,7 +1558,7 @@ pub fn equalValues(a: Value, b: Value) bool {
     if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
     return switch (a) {
         .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined => unreachable,
-        .none => true,
+        .missing, .none => true,
         .string => |s| std.mem.eql(u8, s, b.string),
         .number => |n| n == b.number,
         .complex => unreachable,

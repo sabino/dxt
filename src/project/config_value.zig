@@ -33,7 +33,7 @@ pub fn fromExpression(allocator: std.mem.Allocator, value: expression.Value) any
     if (value.attribute("__dxt_noniterable").truthy()) return error.InvalidConfiguration;
     return switch (value) {
         .none => .null,
-        .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined, .callable, .complex => error.InvalidConfiguration,
+        .missing, .undefined, .conditional_undefined, .ordinary_undefined, .capture_undefined, .callable, .complex => error.InvalidConfiguration,
         .boolean => |v| .{ .bool = v },
         .integer => |v| if (std.fmt.parseInt(i64, v, 10)) |number| .{ .integer = number } else |_| .{ .number_string = try allocator.dupe(u8, v) },
         .number => |v| .{ .float = v },
