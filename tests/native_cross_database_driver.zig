@@ -1,6 +1,6 @@
 //! Developer facade oracle; behavior comes directly from product Zig modules.
 const std = @import("std");
-const cross = @import("cross");
+const cross = @import("dxt").CrossDatabase;
 const Request = struct { sql: []const u8, bindings: []cross.RelationBinding, options: cross.QueryOptions };
 
 pub fn main(init: std.process.Init) void {

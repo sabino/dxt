@@ -10,6 +10,7 @@ const Io = std.Io;
 const project = @import("project.zig");
 const dependencies = @import("project/dependencies.zig");
 const cross_database = @import("project/cross_database.zig");
+pub const CrossDatabase = cross_database;
 pub const yaml = @import("project/yaml.zig");
 
 test "shared native YAML reader is available" {

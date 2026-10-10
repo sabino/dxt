@@ -107,17 +107,11 @@ def state(project):
 
 
 @pytest.fixture(scope="module")
-def query_driver(tmp_path_factory, native_environment):
-    output = tmp_path_factory.mktemp("cross-driver") / "driver"
-    command = ["zig", "build-exe", "-lc", "--dep", "cross",
-               "-Mroot=tests/native_cross_database_driver.zig", "-Ivendor/libyaml/include",
-               "-cflags", "-std=gnu99", '-DYAML_VERSION_STRING="0.2.5"',
-               "-DYAML_VERSION_MAJOR=0", "-DYAML_VERSION_MINOR=2", "-DYAML_VERSION_PATCH=5", "--",
-               *[f"vendor/libyaml/src/{name}.c" for name in ("api", "reader", "scanner", "parser")],
-               "-Mcross=src/project/cross_database.zig", f"-femit-bin={output}"]
-    built = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+def query_driver(native_environment):
+    built = subprocess.run(["zig", "build", "cross-database-driver"], cwd=ROOT,
+                           capture_output=True, text=True)
     assert built.returncode == 0, built.stderr
-    return output
+    return ROOT / "zig-out" / "bin" / "dxt-cross-database-driver"
 
 
 def invoke_query(driver, project, request, environment, mode="query"):

@@ -127,6 +127,18 @@ pub fn build(b: *std.Build) void {
     });
     const adapter_driver_install = b.addInstallArtifact(adapter_driver, .{});
     b.step("adapter-driver", "Build the developer native adapter conformance driver").dependOn(&adapter_driver_install.step);
+
+    const cross_database_driver = b.addExecutable(.{
+        .name = "dxt-cross-database-driver",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/native_cross_database_driver.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "dxt", .module = mod }},
+        }),
+    });
+    const cross_database_driver_install = b.addInstallArtifact(cross_database_driver, .{});
+    b.step("cross-database-driver", "Build the developer cross-database conformance driver").dependOn(&cross_database_driver_install.step);
 }
 
 /// A cache written by another build must never retain graph values produced
