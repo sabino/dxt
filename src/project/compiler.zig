@@ -99,6 +99,7 @@ const CompileContext = struct {
     documentation: bool = false,
     documentation_block: bool = false,
     caller_blocks: std.ArrayList(*CallerBlock) = .empty,
+    loop_states: std.ArrayList(*LoopFrame) = .empty,
 
     const ValueBinding = struct {
         name: []const u8,
@@ -1037,28 +1038,28 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
             if (isForStatement(span)) {
                 const block = try parseForBlock(sql, afterTag(sql, close + 2, end_index), span);
                 const iterable = try context.evaluate(block.list_name);
-                var values = try iterationValues(context.value_arena.allocator(), iterable);
-                if (block.filter_expression) |filter| {
-                    var filtered: std.ArrayList(native_expr.Value) = .empty;
-                    for (values) |value| {
-                        context.pushScope();
-                        defer context.popScope();
-                        try assignValue(context, block.variable_name, value);
-                        if ((try context.evaluate(filter)).truthy()) try filtered.append(context.value_arena.allocator(), value);
-                    }
-                    values = filtered.items;
-                }
-                for (values, 0..) |value, loop_index| {
+                const arena = context.value_arena.allocator();
+                const frame = try arena.create(LoopFrame);
+                frame.* = .{
+                    .state = .{ .iterator = try @import("expression_sequence.zig").iter(arena, iterable) },
+                    .block = block,
+                    .bindings = try arena.dupe(CompileContext.ValueBinding, context.bindings.items),
+                    .vars = try arena.dupe(StaticVar, context.vars.items),
+                    .lists = try arena.dupe(StaticList, context.lists.items),
+                    .scope_depth = context.scope_depth,
+                    .macro_package = context.current_macro_package,
+                    .capture_undefined = context.capturesUndefined(),
+                };
+                if (block.filter_expression == null and !@import("expression_sequence.zig").isIterator(iterable)) frame.state.known_length = (try native_expr.iterableValuesWithHost(arena, iterable, context.host())).len;
+                const loop_id = context.loop_states.items.len;
+                try context.loop_states.append(arena, frame);
+                const loop_value = try @import("loop_context.zig").value(arena, loop_id);
+                var loop_index: usize = 0;
+                while (try loopItem(context, frame, loop_index)) |value| : (loop_index += 1) {
+                    frame.state.index = loop_index;
                     context.pushScope();
                     try assignValue(context, block.variable_name, value);
-                    const entries = try context.value_arena.allocator().alloc(native_expr.Entry, 6);
-                    entries[0] = .{ .key = "index", .value = try native_expr.integerValue(context.value_arena.allocator(), loop_index + 1) };
-                    entries[1] = .{ .key = "index0", .value = try native_expr.integerValue(context.value_arena.allocator(), loop_index) };
-                    entries[2] = .{ .key = "first", .value = .{ .boolean = loop_index == 0 } };
-                    entries[3] = .{ .key = "last", .value = .{ .boolean = loop_index + 1 == values.len } };
-                    entries[4] = .{ .key = "length", .value = try native_expr.integerValue(context.value_arena.allocator(), values.len) };
-                    entries[5] = .{ .key = "revindex", .value = try native_expr.integerValue(context.value_arena.allocator(), values.len - loop_index) };
-                    try context.setValue("loop", .{ .object = entries });
+                    try context.setValue("loop", loop_value);
                     context.loop_depth += 1;
                     renderRange(context, sql, block.body_start, block.body_end, out) catch |err| {
                         context.loop_depth -= 1;
@@ -1070,10 +1071,9 @@ fn renderRange(context: *CompileContext, sql: []const u8, start: usize, end_inde
                     const stop = context.loop_break;
                     context.loop_break = false;
                     context.loop_continue = false;
-                    if (stop) break;
-                    if (context.returned != null) break;
+                    if (stop or context.returned != null) break;
                 }
-                if (values.len == 0) if (block.else_body_start) |else_start| try renderRange(context, sql, else_start, block.else_body_end, out);
+                if (frame.state.items.items.len == 0 and context.returned == null) if (block.else_body_start) |else_start| try renderRange(context, sql, else_start, block.else_body_end, out);
                 index = afterTag(sql, block.end_tag_close, end_index);
                 continue;
             }
@@ -1131,9 +1131,80 @@ fn afterTag(sql: []const u8, end: usize, limit: usize) usize {
     return next;
 }
 
-fn iterationValues(allocator: std.mem.Allocator, iterable: native_expr.Value) ![]const native_expr.Value {
-    if (iterable == .undefined) return error.UndefinedJinjaValue;
-    return try native_expr.iterableValues(allocator, iterable);
+const LoopFrame = struct {
+    state: @import("loop_context.zig").State,
+    block: ForBlock,
+    bindings: []CompileContext.ValueBinding,
+    vars: []StaticVar,
+    lists: []StaticList,
+    scope_depth: usize,
+    macro_package: ?[]const u8,
+    capture_undefined: bool,
+};
+
+fn loopItem(context: *CompileContext, frame: *LoopFrame, index: usize) anyerror!?native_expr.Value {
+    while (frame.state.items.items.len <= index and !frame.state.ended) {
+        const next = try @import("expression_sequence.zig").next(context.value_arena.allocator(), frame.state.iterator, context.host());
+        if (next == null) {
+            frame.state.ended = true;
+            break;
+        }
+        if (frame.block.filter_expression) |filter| if (!try loopFilter(context, frame, next.?, filter)) continue;
+        if (frame.state.items.items.len == 100000) return error.JinjaIterationLimitExceeded;
+        try frame.state.items.append(context.value_arena.allocator(), next.?);
+    }
+    return if (index < frame.state.items.items.len) frame.state.items.items[index] else null;
+}
+
+fn loopFilter(context: *CompileContext, frame: *LoopFrame, value: native_expr.Value, filter: []const u8) anyerror!bool {
+    const previous_bindings = context.bindings;
+    const previous_vars = context.vars;
+    const previous_lists = context.lists;
+    const previous_scope = context.scope_depth;
+    const previous_package = context.current_macro_package;
+    const previous_capture = context.capture_undefined_override;
+    context.bindings = .empty;
+    context.vars = .empty;
+    context.lists = .empty;
+    context.scope_depth = frame.scope_depth;
+    context.current_macro_package = frame.macro_package;
+    context.capture_undefined_override = frame.capture_undefined;
+    defer {
+        context.bindings.deinit(context.allocator);
+        context.vars.deinit(context.allocator);
+        context.lists.deinit(context.allocator);
+        context.bindings = previous_bindings;
+        context.vars = previous_vars;
+        context.lists = previous_lists;
+        context.scope_depth = previous_scope;
+        context.current_macro_package = previous_package;
+        context.capture_undefined_override = previous_capture;
+    }
+    try context.bindings.appendSlice(context.allocator, frame.bindings);
+    try context.vars.appendSlice(context.allocator, frame.vars);
+    try context.lists.appendSlice(context.allocator, frame.lists);
+    context.pushScope();
+    defer context.popScope();
+    try assignValue(context, frame.block.variable_name, value);
+    return (try context.evaluate(filter)).truthy();
+}
+
+fn loopCall(context: *CompileContext, name: []const u8, args: []const native_expr.Argument, a: std.mem.Allocator) anyerror!native_expr.Value {
+    const colon = std.mem.lastIndexOfScalar(u8, name, ':') orelse return error.InvalidJinjaArguments;
+    const id = std.fmt.parseUnsigned(usize, name[colon + 1 ..], 10) catch return error.InvalidJinjaArguments;
+    if (id >= context.loop_states.items.len) return error.InvalidJinjaArguments;
+    const frame = context.loop_states.items[id];
+    if (std.mem.startsWith(u8, name, "__dxt_loop_attribute:")) {
+        if (args.len != 1 or args[0].name != null or args[0].value != .string) return error.InvalidJinjaArguments;
+        const attribute = args[0].value.string;
+        if (std.mem.eql(u8, attribute, "last") or std.mem.eql(u8, attribute, "nextitem")) _ = try loopItem(context, frame, frame.state.index + 1);
+        if (frame.state.known_length == null and (std.mem.eql(u8, attribute, "length") or std.mem.eql(u8, attribute, "revindex") or std.mem.eql(u8, attribute, "revindex0"))) {
+            while (try loopItem(context, frame, frame.state.items.items.len)) |_| {}
+            frame.state.known_length = frame.state.items.items.len;
+        }
+        return @import("loop_context.zig").attribute(a, &frame.state, id, attribute);
+    }
+    return @import("loop_context.zig").method(a, &frame.state, name[11..colon], args);
 }
 
 fn validateSkippedLoopBody(context: *CompileContext, sql: []const u8, block: ForBlock) anyerror!void {
@@ -1250,7 +1321,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
             var value = binding.value;
             while (parts.next()) |attribute| {
                 if (value == .undefined and context.capturesUndefined()) value = try native_expr.captureUndefined(allocator, binding.name);
-                value = try native_expr.checkedAttribute(value, attribute);
+                value = try native_expr.attributeWithHost(allocator, value, attribute, context.host());
                 if (value == .undefined and context.capturesUndefined()) value = try native_expr.captureUndefined(allocator, attribute);
             }
             return value;
@@ -1396,6 +1467,7 @@ fn configProxy(allocator: std.mem.Allocator, context: *CompileContext) !native_e
 
 fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const native_expr.Argument, allocator: std.mem.Allocator) anyerror!native_expr.Value {
     const context: *CompileContext = @ptrCast(@alignCast(raw_context));
+    if (std.mem.startsWith(u8, name, "__dxt_loop_")) return loopCall(context, name, args, allocator);
     if (std.mem.startsWith(u8, name, "__dxt_caller:")) {
         const index = std.fmt.parseUnsigned(usize, name[13..], 10) catch return error.InvalidJinjaArguments;
         if (index >= context.caller_blocks.items.len) return error.InvalidJinjaArguments;
@@ -2617,7 +2689,7 @@ fn assignValue(context: *CompileContext, target: []const u8, value: native_expr.
     const trimmed = std.mem.trim(u8, target, " \t\r\n");
     if (trimmed.len >= 2 and trimmed[0] == '(' and findMatchingParen(trimmed, 0) == trimmed.len - 1) return try assignValue(context, trimmed[1 .. trimmed.len - 1], value);
     if (expressionBoundary(trimmed, 0, trimmed.len) < trimmed.len) {
-        const items = try native_expr.iterableValues(context.value_arena.allocator(), value);
+        const items = try native_expr.iterableValuesWithHost(context.value_arena.allocator(), value, context.host());
         var i: usize = 0;
         var start: usize = 0;
         while (start < trimmed.len) : (i += 1) {
@@ -4120,6 +4192,24 @@ test "compileModel renders for else when the iterator is empty" {
     });
 
     try std.testing.expectEqualStrings("empty", try compileModel(allocator, &graph, &graph.nodes.items[0]));
+}
+
+test "compileModel consumes generators incrementally with deferred loop metadata" {
+    const cases = [_]struct { template: []const u8, expected: []const u8 }{
+        .{ .template = "{% set stream=zip([1,2,3],[4,5,6]) %}{% for x in stream %}{{ x }}{% break %}{% endfor %}|{{ stream|list }}", .expected = "(1, 4)|[(2, 5), (3, 6)]" },
+        .{ .template = "{% set stream=zip([1,2,3],[4,5,6]) %}{% for x in stream %}{{ loop.last }}{% break %}{% endfor %}|{{ stream|list }}", .expected = "False|[(3, 6)]" },
+        .{ .template = "{% set stream=zip([1,2],[3,4]) %}{% for x in stream %}{{ loop.index }}/{{ loop.length }}:{{ loop.last }};{% endfor %}|{{ stream|list }}", .expected = "1/2:False;2/2:True;|[]" },
+        .{ .template = "{% set cutoff=3 %}{% for x in [1,2,3] if x<cutoff %}{% set cutoff=0 %}{{ x }}:{{ loop.last }};{% endfor %}", .expected = "1:False;2:True;" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+        defer graph.deinit();
+        const node = Node{ .unique_id = "model.demo.loop", .package_name = "demo", .name = "loop", .path = "loop.sql", .original_file_path = "models/loop.sql", .raw_code = case.template };
+        try std.testing.expectEqualStrings(case.expected, try compileModel(allocator, &graph, &node));
+    }
 }
 
 test "compileModel renders static if branches for render-only context" {
