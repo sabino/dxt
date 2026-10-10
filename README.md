@@ -71,7 +71,7 @@ system `git`, `curl` and `tar` for the corresponding package transports.
 | Area | Native implementation |
 | --- | --- |
 | Project and resources | Shared YAML/config precedence, custom database/schema/alias naming, packages, versions, groups/access, models, analyses, seeds, sources, SQL/YAML snapshots, macros, docs, exposures, data/unit tests and semantic resources. |
-| Compiler | Typed expressions and containers, macro arguments/returns, dispatch, bundled upstream SQL macros, native regular expressions, Relation/Column/timestamp context, database-backed queries/statements and adapter introspection. |
+| Compiler | Typed expressions and containers, string formatting, macro arguments/returns, dispatch, bundled upstream SQL macros, native `re`/`datetime`/`pytz`/`itertools` providers, Relation/Column context, database-backed queries/statements and adapter introspection. |
 | Execution | Native DuckDB/libpq sessions, dependency workers, ephemeral ancestry, unit-test gates, durable errors/skips, fail-fast cancellation, transactions and retry. |
 | Materializations | Table/view, enforced contracts/constraints, authored SQL materializations, hooks/grants/persisted docs, adapter-specific incremental strategies and schema changes, microbatch, seeds, snapshots and clone views; PostgreSQL materialized views and DuckDB local external/table functions. |
 | Profiles | Native DuckDB configuration, settings, attachments, secrets, connection lifetime and retry policies; PostgreSQL connection profiles through libpq. |
@@ -83,7 +83,7 @@ system `git`, `curl` and `tar` for the corresponding package transports.
 | Environments | Immutable model versions, isolated environment views, physical reuse, interval/backfill accounting, audits, promotion and rollback. |
 
 These rows describe implemented capabilities with focused evidence. Remaining
-materialization lifecycle work, package-heavy public-project validation and
+artifact/context edge cases, package-heavy public-project validation and
 final platform/release checks are tracked in the
 [replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md).
 
@@ -121,9 +121,12 @@ flowchart LR
 
 ## Development And Verification
 
-Python requirements are developer-only oracle and fixture dependencies:
+Python requirements are developer-only oracle and fixture dependencies. Use
+CPython **3.12** for the canonical Core comparisons:
 
 ```sh
+python3.12 -m venv .venv
+. .venv/bin/activate
 python -m pip install -r requirements-dev.txt -r requirements-oracle.txt
 zig build
 zig build test
@@ -139,12 +142,19 @@ tools through `DXT_POSTGRES_BIN`. Run `pytest -q` for integrated validation and
 `python scripts/validate_dbt_artifacts.py <artifact.json>` for complete upstream
 artifact schemas.
 
+DuckDB warehouse execution requires its native library and held sessions. The
+retained CLI autocommit query helper has separate developer conformance coverage; forcing
+`DXT_DUCKDB_BACKEND=cli` does not enable full transformation commands.
+
 CI configures native tests/safety, full compatibility fixtures, all six public
 Jaffle steps, an unchanged PostgreSQL dbt-utils project, performance checks and
 actual Linux x86_64/ARM installation tests. Release jobs extract the real
 checksum-validated archive and exercise both adapters with PATH empty. These
 configured gates must pass on the final candidate before claiming release
 readiness; earlier focused successes do not replace that final run.
+
+Python 3.11 jobs run developer/native CLI checks. The complete canonical Core
+suite runs under Python 3.12 on both Linux architectures.
 
 Optional native coverage artifacts are produced by the
 [Coverage workflow](.github/workflows/coverage.yml). They supplement the CLI,

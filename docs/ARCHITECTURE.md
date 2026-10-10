@@ -84,6 +84,21 @@ substitutions and iteration over the statically linked PCRE2 10.44 UTF-8 engine.
 Unicode tables and named-character data retain their pinned provenance. This
 provider does not invoke an interpreter or require an external regex library.
 
+`modules_context.zig` supplies Core's restricted `pytz`, `datetime`, `re` and
+`itertools` namespaces through native providers and an owned render cache.
+Date/datetime/time/timedelta/tzinfo values use native calendar and parsing
+helpers; timezone localization/normalization uses embedded pytz **2026.5** /
+IANA **2026e** transitions. `expression_format.zig` implements `str.format` and
+`format_map`, including typed temporal format specifications.
+
+`expression_sequence.zig` and `itertools_context.zig` retain mutable stream
+cursors and buffers across aliases and macro returns. Pulls are lazy; callbacks
+resolve through the active consuming Jinja host rather than borrowing a host
+from a completed macro frame. Internal descriptors remain opaque to authored
+attribute/subscript access. These APIs have native and actual Core positive,
+negative, consumption and identity comparisons; canonical helper behavior
+targets CPython **3.12** without executing a Python interpreter.
+
 ## Adapters And Execution
 
 `adapter.zig` defines the shared `Session` and `QueryResult` contracts: typed
@@ -93,10 +108,11 @@ database handles across bounded workers. `native_postgres.zig` dynamically loads
 libpq and opens PostgreSQL sessions from the selected profile.
 
 DuckDB defaults to automatic library discovery. `DXT_DUCKDB_LIBRARY` selects a
-specific library; `DXT_DUCKDB_BACKEND=native` requires native execution. A legacy
-DuckDB CLI fallback remains for supported autocommit calls when a native library
-is unavailable. Held transactions, native analysis and concurrent execution
-require the native driver. PostgreSQL loads `libpq.so.5` by default, with
+specific library; `DXT_DUCKDB_BACKEND=native` requires native execution.
+Database-backed commands use held native sessions and reject forced CLI
+execution. The retained `adapter.queryJson` compatibility API supports DuckDB CLI autocommit queries,
+with separate SELECT/NULL/empty-result conformance. PostgreSQL loads
+`libpq.so.5` by default, with
 `DXT_POSTGRES_LIBRARY` available as an explicit override.
 
 `duckdb_profile.zig` validates and applies private native connection options,
@@ -178,6 +194,7 @@ separate from dbt snapshots, dbt incremental materializations and dbt schemas.
 | `loader`, `parse`, `python_model`, `resolve`, `model_versions`, `group_access` | Resource construction, static Python metadata, dependency resolution and access validation. |
 | `selector`, `selection_expression`, `selector_config`, `state`, `defer` | Selection and upstream artifact state. |
 | `compiler`, `expression`, `dbt_context`, `context_values`, `adapter_context` | Typed rendering and native database context. |
+| `modules_context`, `modules_datetime`, `timezone_context`, `itertools_context`, `expression_format` | Restricted module providers, temporal values, lazy iterators and typed string formatting. |
 | `adapter`, `adapter_result`, `native_duckdb`, `native_postgres`, `relation_cache`, `postgres_catalog` | Native connection/result boundary and warehouse metadata. |
 | `scheduler`, `concurrent_runner`, `concurrent_compiler` | Dependency readiness, workers and cancellation. |
 | `incremental`, `postgres_incremental`, `microbatch_run`, `snapshot_runner`, `seed_lifecycle`, `unit_runtime` | Resource execution lifecycles. |
@@ -209,12 +226,15 @@ the native HTTP server.
 | Tree-sitter 0.25.10 and tree-sitter-python 0.23.6 | Static Python model syntax | Compiled into the binary; MIT and retained Unicode/ICU notices. |
 | Unicode 15.0 tables | Typed string operations | Embedded tables; Unicode license and provenance. |
 | PCRE2 10.44 | Native regular-expression engine | Statically linked UTF-8 engine without JIT; BSD license and source checksums. |
+| pytz 2026.5 / IANA 2026e | Native timezone transitions, aliases and country tables | Embedded data; MIT/public-domain notices and checksum provenance. |
 | DuckDB C library | DuckDB execution/AST | External native library; CI pins 1.4.2. |
 | libpq | PostgreSQL execution | External native library. |
 | dbt SQL includes and docs browser | Macro defaults and documentation UI | Embedded sources; upstream licenses/provenance ship with releases. |
 
 Developer comparisons pin dbt Core **1.10.5**, dbt-duckdb **1.9.6**,
 dbt-postgres **1.9.1**, MetricFlow **0.208.1** and semantic interfaces **0.9.0**.
+Canonical helper comparisons run under CPython **3.12**; documented 3.11
+differences do not change the installed native runtime.
 The full upstream artifact schema classes, native tests, actual database
 fixtures, public projects and installation checks provide compatibility
 evidence. They do not establish universal dbt or adapter certification. See

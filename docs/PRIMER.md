@@ -43,6 +43,27 @@ loads `libpq.so.5`, or an explicit `DXT_POSTGRES_LIBRARY`. Credentials can remai
 in the profile's `env_var()` expressions. Neither adapter needs an installed
 Python/dbt runtime to execute through dxt.
 
+DuckDB warehouse execution uses held native sessions. The retained developer CLI
+autocommit query API has a separate compatibility gate; `DXT_DUCKDB_BACKEND=cli`
+does not replace the native library for these workflows.
+
+## Native Macro Contexts
+
+SQL macros can use the pinned Core contexts without installing Python modules.
+For example, a model can render dates and consume a finite lazy iterator:
+
+```sql
+select
+  '{{ "{:%Y-%m-%d}".format(modules.datetime.date(2024, 2, 29)) }}' as day,
+  '{{ modules.itertools.islice(modules.itertools.count(1), 3) | list }}' as batches
+```
+
+Native providers cover the declared `datetime`, `pytz`, `re` and `itertools`
+exports, typed values, string formatting and supported callbacks. Their
+comparison contract uses CPython **3.12**; the installed binary keeps those
+semantics regardless of a developer's Python environment. See
+[Compatibility](COMPATIBILITY.md) for APIs, evidence and version differences.
+
 ## Command Families
 
 | Commands | Purpose |
@@ -102,8 +123,10 @@ its own immutable model versions, environment views and UTC intervals; it uses
 separate namespaced state.
 
 Incremental models support adapter-specific strategies and schema policies.
-Microbatch models add calendar intervals, lookback, event-time filtering and
-failed-batch retry. Explicit `--event-time-start` and `--event-time-end` are
+Microbatch models add calendar intervals, lookback, event-time filtering,
+authored per-batch materializations, first/last-batch hooks and failed-batch
+retry. Earlier successful batches remain committed when a later batch fails.
+Explicit `--event-time-start` and `--event-time-end` are
 paired run/build options. `--empty` and `--sample` affect input relation SQL.
 The pinned DuckDB adapter's stock microbatch limitation and dxt's extension are
 documented in [Compatibility](COMPATIBILITY.md).

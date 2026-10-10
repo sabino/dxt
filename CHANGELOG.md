@@ -21,6 +21,8 @@ DuckDB and PostgreSQL.
   behavior.
 - Calendar microbatch orchestration, lookback, event-time/sample input bounds,
   native typed batch timestamps, partial outcomes, batch rollback and retry.
+  Authored materializations execute per batch with Core's first/last-batch hook
+  boundaries; a failed final hook preserves previously committed batches.
   Stock DuckDB microbatch is an explicit extension to the pinned adapter.
 - Native SQL/YAML timestamp/check snapshots on both adapters, including
   updates/deletes/returning rows, metadata configs and schema evolution.
@@ -47,6 +49,8 @@ DuckDB and PostgreSQL.
 - Native generic/singular data-test configs, SQL thresholds and persisted
   failure tables/views; dict/CSV/SQL unit fixtures, sparse/empty inputs, typed
   macro/var/env overrides and versioned models.
+- Executed data-test materialization helpers, compiled SQL/files and macro
+  dependencies, inherited test metadata, and retained audit table/view reruns.
 - Shared native YAML parsing, typed project/profile/env/var handling, complete
   config layering, package overlays, disabled resources, versions and
   groups/access validation.
@@ -55,6 +59,17 @@ DuckDB and PostgreSQL.
   mutation and adapter dispatch.
 - Native `modules.re` pattern/match objects, substitutions, iteration and
   flags through statically linked PCRE2 and a Zig compatibility layer.
+- Native restricted `modules.datetime` and `modules.pytz` contexts, typed
+  date/datetime/time/timedelta/tzinfo values, ISO/strptime constructors,
+  timezone transitions and DST localization/normalization. Pinned pytz/IANA
+  data and provenance ship with the native binary's notices.
+- All fourteen pinned Core `modules.itertools` exports as lazy native
+  iterators, including shared cursors, tee buffers and active Jinja callbacks.
+- Native `str.format` and `format_map`: typed fields, conversions, nested
+  specifications, numeric/Unicode formatting and temporal formatting, with
+  actual Core error and sandbox comparisons.
+- Invocation-wide `warn_once` deduplication and stock materialization
+  status/message/adapter-response metadata, including snapshot tombstone counts.
 - Embedded pinned dbt Core/DuckDB/PostgreSQL SQL macros and native
   Relation/Column/timestamp/query-result objects, database queries/statements,
   named results and adapter metadata caches.
@@ -122,11 +137,13 @@ DuckDB and PostgreSQL.
 - Comparisons target dbt Core **1.10.5**, dbt-duckdb **1.9.6**, dbt-postgres
   **1.9.1**, MetricFlow **0.208.1** and semantic interfaces **0.9.0**; native
   fixtures pin DuckDB **1.4.2** and Zig **0.16.0**.
-- Contracts, authored SQL materializations, parsed/compiled naming policies
-  and native DuckDB profile initialization have focused upstream evidence.
-  Executed data-test helper/publication closure, invocation-wide warning
-  deduplication, stock result metadata and microbatch custom-lifecycle
-  integration remain active completion work.
+- Contracts, authored materializations, naming, native profile initialization,
+  executed data-test helpers, warnings, stock responses and microbatch custom
+  lifecycle have focused upstream evidence. Final path/null publication,
+  builtin-override deprecation and class protocol and literal identity checks remain.
+- Native helper semantics target CPython **3.12**. Version-specific Core 3.11
+  iterator identity and floating-sum differences are explicit compatibility
+  boundaries, rather than changes to the installed native runtime.
 - Focused native/CLI/Core/MetricFlow evidence exists across the implemented
   tracks. Final whole-tree/public-project, both-adapter archive, platform and
   performance acceptance remains pending.

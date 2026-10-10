@@ -28,8 +28,8 @@ warehouse certification before publication as supported targets.
 Install DuckDB's native library for DuckDB execution, and libpq for PostgreSQL.
 The libraries are external to the dxt archive. Native CI pins DuckDB **1.4.2**
 and downloads architecture-specific CLI/library archives with SHA-256 checks.
-The CLI is a fixture/fallback dependency, not required by the certified native
-installation path.
+The CLI is used by developer fixtures and the retained autocommit query helper.
+Warehouse execution through held sessions requires the native library.
 
 DuckDB discovery can load `libduckdb.so`; `DXT_DUCKDB_LIBRARY` selects a specific
 installed file. Set `DXT_DUCKDB_BACKEND=native` to require that driver and fail
@@ -40,9 +40,9 @@ Dependency transports use external `git`, `curl` and `tar` when fetching and
 extracting packages; install those tools for the corresponding `deps` workflows.
 
 The YAML parser, PostgreSQL SQL grammar, static Python model syntax frontend,
-Unicode tables/names, PCRE2 regular-expression engine, default SQL macro sources
-and docs application are embedded in the executable. The regex engine is
-statically linked without JIT or an external runtime library. Python model
+Unicode tables/names, PCRE2 regular-expression engine, pytz/IANA timezone data,
+default SQL macro sources and docs application are embedded in the executable.
+The regex engine is statically linked without JIT or an external runtime library. Python model
 discovery and compilation preserve resources; model execution in the initial
 release is SQL only. End users do not install dbt,
 MetricFlow, a Python interpreter or developer requirements to run dxt.
@@ -81,12 +81,17 @@ clusters. Linux ARM selects installed PostgreSQL tools through
 `DXT_POSTGRES_BIN`, because the pinned `pgserver` wheel is available only on
 Linux x86_64. No emulated database or skipped adapter gate replaces these tests.
 
-[CI](../.github/workflows/ci.yml) also configures native tests/safety, Python
-3.11/3.12 integration, public Jaffle/package projects, performance and actual
+[CI](../.github/workflows/ci.yml) also configures native tests/safety,
+developer integration, canonical CPython **3.12** Core comparisons, public
+Jaffle/package projects, performance and actual
 Linux x86_64/ARM installation gates. Its full platform compatibility jobs and
 the release jobs are configured gates; their results must be checked on the
 release candidate. See [Performance](PERFORMANCE.md) for artifact/compiled-SQL
 comparisons and cold/warm budgets.
+
+Python 3.11 CI jobs run developer/native CLI checks; both architectures run the
+complete canonical Core compatibility suite under Python 3.12. Oracle routing
+does not remove that suite from a published platform's acceptance requirements.
 
 ## Archive Contents And Licenses
 
@@ -107,6 +112,8 @@ CHANGELOG, SECURITY, the public `docs/` tree and a project LICENSE if present.
 - Unicode **15.0** table license, upstream generation reference and
   named-character data checksum provenance.
 - PCRE2 **10.44** BSD license, pinned upstream reference and source checksums.
+- pytz **2026.5** MIT license and IANA **2026e** public-domain timezone data
+  provenance, including the exact embedded table checksum.
 - The embedded dbt docs application's Apache-2.0 license/upstream reference;
   its original third-party notices remain embedded.
 - dbt Core/DuckDB/PostgreSQL macro-source licenses and checksum provenance for
