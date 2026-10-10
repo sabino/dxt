@@ -64,6 +64,24 @@ extension. The current original full-suite checkout stays frozen while a
 bounded correction is prepared and certified in isolated worktrees. All
 result counts and final acceptance must identify their actual candidate.
 
+All seven exact Core CLI failure witnesses return 2. Four unchanged native
+error artifacts also replay successfully through real Core retry. Preserve
+Core's default compile/docs artifact policy and exit code 2. Durable
+compilation-error artifacts become the explicit native environment option
+`DXT_DURABLE_COMPILE_ERRORS`, default false and validated through the existing
+boolean option path. Only opted-in genuine per-resource failures publish the
+existing manifest/results; preflight failures always retain earlier artifacts.
+The option is absent from recorded Core command arguments, so error results
+remain readable by Core retry. Catalog collection errors retain exit code 1.
+The source worker owns the two facade catches, focused policy helper and
+native option wiring/tests in a dedicated worktree. The expression worker
+owns only the compile artifact/diagnostic extension fixtures: enable the
+native option explicitly, expect grounded exit code 2 and retain every
+original schema, diagnostic, warehouse, SQL and real retry assertion. Original
+default Core fixtures are unchanged. The supervisor owns documentation,
+review and integration. A new native/CLI build and the affected default plus
+extension checks precede the corrected full-suite and final release gates.
+
 The earlier unfiltered 5,808-case run on the published sorting candidate
 exposed eight failures across initialization, a colored-output expectation and
 durable compile/docs error artifacts. It continued without
