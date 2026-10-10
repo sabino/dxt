@@ -1,0 +1,14 @@
+dbt documentation browser bundled with dbt-core 1.10.5 (PyPI wheel).
+File: dbt/task/docs/index.html
+SHA256: 98822311655171044cae10028d36e134b7511364014cf84044bd7bd627087113
+
+License: Apache-2.0; embedded third-party notices remain in index.html.
+License source: dbt-labs/dbt-docs at efd3fe52f706a5c585222458076e185da5c70510
+License SHA256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+
+dxt embeds this browser to support dbt-compatible documentation artifacts.
+The native runtime changes the displayed page title and logo to dxt, supplies a
+local favicon, defers interpolated icon URLs until Angular resolves them, and
+optionally inlines generated artifacts for offline viewing. The vendored file is
+unchanged.
+dxt is an independent project and is not affiliated with dbt Labs.

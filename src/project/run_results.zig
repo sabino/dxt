@@ -2,26 +2,99 @@ const std = @import("std");
 const Io = std.Io;
 const project_fs = @import("fs.zig");
 const json = @import("json.zig");
+const yaml = @import("yaml.zig");
 const types = @import("types.zig");
+const secrets = @import("secret_projection.zig");
 
 const Node = types.Node;
 const GenericTestNode = types.GenericTestNode;
 const SingularTestNode = types.SingularTestNode;
 const UnitTestDef = types.UnitTestDef;
 const Runtime = types.Runtime;
+const clock = @import("execution_clock.zig");
+
+pub const LogMessage = struct {
+    message: []const u8,
+    level: []const u8,
+    is_print: bool = false,
+    is_adapter_warning: bool = false,
+    is_jinja_warning: bool = false,
+};
 
 pub const NodeResult = struct {
+    thread_name: ?[]const u8 = null,
+    operation_id: ?[]const u8 = null,
     node: ?*const Node = null,
     test_node: ?*const GenericTestNode = null,
     singular_test_node: ?*const SingularTestNode = null,
     unit_test_node: ?*const UnitTestDef = null,
     status: []const u8 = "success",
     message: ?[]const u8 = null,
-    failures: ?u64 = null,
+    failures: ?i64 = null,
     compiled_code: ?[]const u8 = null,
     owns_compiled_code: bool = false,
+    build_path: ?[]const u8 = null,
+    owns_build_path: bool = false,
     relation_name: ?[]const u8 = null,
     owns_relation_name: bool = false,
+    compiled_override: ?bool = null,
+    thread_number: u16 = 1,
+    execution_started_at: ?i96 = null,
+    execution_completed_at: ?i96 = null,
+    execution_time: f64 = 0,
+    compile_started_at: ?i96 = null,
+    compile_completed_at: ?i96 = null,
+    adapter_response: ?AdapterResponse = null,
+    owns_adapter_response: bool = false,
+    compiled_artifact_code: ?[]const u8 = null,
+    owns_compiled_artifact_code: bool = false,
+    preview: ?[]const u8 = null,
+    owns_preview: bool = false,
+    compiled_ctes: []const types.ExtraCte = &.{},
+    owns_compiled_ctes: bool = false,
+    macro_dependencies: []const []const u8 = &.{},
+    owns_macro_dependencies: bool = false,
+    log_output: ?[]const u8 = null,
+    owns_log_output: bool = false,
+    log_events: []const LogMessage = &.{},
+    owns_log_events: bool = false,
+    batch_results: ?BatchResults = null,
+    owns_batch_results: bool = false,
+};
+
+pub const BatchResults = struct {
+    successful: []const types.SampleWindow = &.{},
+    failed: []const types.SampleWindow = &.{},
+
+    pub fn deinit(self: BatchResults, allocator: std.mem.Allocator) void {
+        allocator.free(self.successful);
+        allocator.free(self.failed);
+    }
+};
+
+pub const AdapterResponse = struct {
+    include_nulls: bool = false,
+    include_query_id: bool = false,
+    message: ?[]const u8 = null,
+    code: ?[]const u8 = null,
+    rows_affected: ?i64 = null,
+    rows_affected_value: std.json.Value = .null,
+
+    pub fn deinit(self: AdapterResponse, allocator: std.mem.Allocator) void {
+        if (self.message) |text| allocator.free(text);
+        if (self.code) |text| allocator.free(text);
+        var value = self.rows_affected_value;
+        @import("config_value.zig").deinit(allocator, &value);
+    }
+
+    pub fn clone(self: AdapterResponse, allocator: std.mem.Allocator) !AdapterResponse {
+        var output = AdapterResponse{ .include_nulls = self.include_nulls, .include_query_id = self.include_query_id, .rows_affected = self.rows_affected };
+        errdefer output.deinit(allocator);
+        if (self.message) |text| output.message = try allocator.dupe(u8, text);
+        if (self.code) |text| output.code = try allocator.dupe(u8, text);
+        output.rows_affected_value = try @import("config_value.zig").clone(allocator, self.rows_affected_value);
+        return output;
+    }
 };
 
 pub const ResultStatusRow = struct {
@@ -106,35 +179,278 @@ pub fn isSupportedResultSelectorStatus(status: []const u8) bool {
 }
 
 pub fn renderRunResults(allocator: std.mem.Allocator, results: []const NodeResult) ![]const u8 {
+    return renderRunResultsWithContext(allocator, results, null, null);
+}
+
+pub fn renderRunResultsForRuntime(runtime: Runtime, results: []const NodeResult) ![]const u8 {
+    return renderRunResultsWithEnvironment(runtime.allocator, results, runtime.invocation_options, runtime.invocation, runtime.environment);
+}
+
+pub fn renderEmptyRunResultsForRuntime(runtime: Runtime) ![]const u8 {
+    return renderRunResultsWithElapsed(runtime.allocator, &.{}, runtime.invocation_options, runtime.invocation, 0, runtime.environment);
+}
+
+pub fn renderRunResultsWithInvocation(allocator: std.mem.Allocator, results: []const NodeResult, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
+    return renderRunResultsWithContext(allocator, results, null, metadata);
+}
+
+pub fn renderRunResultsWithArgs(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options) ![]const u8 {
+    return renderRunResultsWithContext(allocator, results, options, null);
+}
+
+fn renderRunResultsWithContext(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
+    return renderRunResultsWithEnvironment(allocator, results, options, metadata, null);
+}
+
+fn renderRunResultsWithEnvironment(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options, metadata: ?*const @import("invocation.zig").Metadata, environment: ?*const std.process.Environ.Map) ![]const u8 {
+    return renderRunResultsWithElapsed(allocator, results, options, metadata, if (metadata) |value| value.elapsed() else 0, environment);
+}
+
+fn renderRunResultsWithElapsed(allocator: std.mem.Allocator, results: []const NodeResult, options: ?*const types.Options, metadata: ?*const @import("invocation.zig").Metadata, elapsed: f64, environment: ?*const std.process.Environ.Map) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
 
-    try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": ");
-    try json.string(writer, "https://schemas.getdbt.com/dbt/run-results/v6.json");
-    try writer.writeAll(", \"dbt_version\": ");
-    try json.string(writer, "0.0.0");
-    try writer.writeAll(", \"generated_at\": ");
-    try json.string(writer, "1970-01-01T00:00:00Z");
-    try writer.writeAll(", \"invocation_id\": null, \"invocation_started_at\": null, \"env\": {}},\n");
+    try writer.writeAll("{\n  \"metadata\": {");
+    try @import("invocation.zig").writeFields(writer, "https://schemas.getdbt.com/dbt/run-results/v6.json", metadata);
+    try writer.writeAll("},\n");
     try writer.writeAll("  \"results\": [");
     for (results, 0..) |result, index| {
         if (index != 0) try writer.writeAll(",");
-        try writeResult(writer, result);
+        try writeResult(writer, allocator, environment, result);
     }
-    try writer.writeAll("\n  ],\n  \"elapsed_time\": 0.0\n}\n");
+    try writer.print("\n  ],\n  \"elapsed_time\": {d},\n  \"args\": ", .{elapsed});
+    try writeArgs(writer, allocator, options);
+    try writer.writeAll("\n}\n");
     return try out.toOwnedSlice();
 }
 
-fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
+fn writeTiming(writer: *Io.Writer, name: []const u8, start: ?i96, finish: ?i96) !void {
+    try writer.writeAll("{\"name\": ");
+    try json.string(writer, name);
+    try writer.writeAll(", \"started_at\": ");
+    try clock.writeTimestamp(writer, start);
+    try writer.writeAll(", \"completed_at\": ");
+    try clock.writeTimestamp(writer, finish);
+    try writer.writeByte('}');
+}
+
+fn writeArgs(writer: *Io.Writer, allocator: std.mem.Allocator, options: ?*const types.Options) !void {
+    const opts = options orelse {
+        try writer.writeAll("{}");
+        return;
+    };
+    try writer.writeAll("{\"which\":");
+    try json.string(writer, opts.which);
+    inline for (.{ "profile", "target", "state", "defer_state", "selector" }) |key| {
+        if (@field(opts, key)) |value| {
+            try writer.print(",\"{s}\":", .{key});
+            try json.string(writer, value);
+        }
+    }
+    inline for (.{ "select", "exclude" }) |key| {
+        try writer.print(",\"{s}\":", .{key});
+        if (std.mem.eql(u8, opts.which, "run-operation")) {
+            try writer.writeAll("null");
+        } else {
+            try writer.writeByte('[');
+            if (@field(opts, key)) |value| {
+                var parts = std.mem.tokenizeAny(u8, value, " \t\r\n");
+                var first = true;
+                while (parts.next()) |part| {
+                    if (!first) try writer.writeByte(',');
+                    first = false;
+                    try json.string(writer, part);
+                }
+            }
+            try writer.writeByte(']');
+        }
+    }
+    try writer.writeAll(",\"vars\":");
+    try writeMapping(writer, allocator, opts.vars);
+    if (opts.threads) |value| {
+        try writer.writeAll(",\"threads\":");
+        const threads = std.fmt.parseInt(u32, value, 10) catch return error.InvalidOption;
+        if (threads == 0) return error.InvalidOption;
+        try writer.print("{d}", .{threads});
+    }
+    if (std.mem.eql(u8, opts.which, "seed") or std.mem.eql(u8, opts.which, "build")) try writer.print(",\"show\":{s}", .{if (opts.seed_show) "true" else "false"});
+    try writer.print(",\"full_refresh\":{s}", .{if (opts.full_refresh) "true" else "false"});
+    if (std.mem.eql(u8, opts.which, "test") or std.mem.eql(u8, opts.which, "build")) try writer.print(",\"store_failures\":{s}", .{if (opts.store_failures) "true" else "false"});
+    if (std.mem.eql(u8, opts.which, "run") or std.mem.eql(u8, opts.which, "build") or std.mem.eql(u8, opts.which, "compile") or std.mem.eql(u8, opts.which, "snapshot")) try writer.print(",\"empty\":{s}", .{if (opts.empty) "true" else "false"});
+    if (opts.sample_window) |window| {
+        try writer.writeAll(",\"sample\":{\"start\":");
+        inline for (.{ "start", "end" }) |key| {
+            if (std.mem.eql(u8, key, "end")) try writer.writeAll(",\"end\":");
+            const timestamp = try @import("input_relations.zig").formatSampleTimestamp(allocator, @field(window, key));
+            defer allocator.free(timestamp);
+            const zoned = try std.fmt.allocPrint(allocator, "{s}T{s}+00:00", .{ timestamp[0..10], timestamp[11..] });
+            defer allocator.free(zoned);
+            try json.string(writer, zoned);
+        }
+        try writer.writeByte('}');
+    } else if (opts.sample) |value| {
+        try writer.writeAll(",\"sample\":");
+        try json.string(writer, value);
+    }
+    inline for (.{ "event_time_start", "event_time_end" }) |key| if (@field(opts, key)) |value| {
+        try writer.print(",\"{s}\":", .{key});
+        try json.string(writer, value);
+    };
+    try writer.print(",\"fail_fast\":{s},\"log_format\":", .{if (opts.fail_fast) "true" else "false"});
+    try json.string(writer, @tagName(opts.log_format));
+    try writer.print(",\"quiet\":{s},\"write_json\":{s},\"warn_error\":{s},\"version_check\":{s}", .{ if (opts.quiet) "true" else "false", if (opts.write_json) "true" else "false", if (opts.warn_error) "true" else "false", if (opts.version_check) "true" else "false" });
+    try writer.print(",\"debug\":{s}", .{if (opts.debug) "true" else "false"});
+    try writer.print(",\"show_all_deprecations\":{s}", .{if (opts.show_all_deprecations) "true" else "false"});
+    try writer.print(",\"populate_cache\":{s},\"cache_selected_only\":{s}", .{ if (opts.populate_cache) "true" else "false", if (opts.cache_selected_only) "true" else "false" });
+    try writer.print(",\"partial_parse\":{s},\"partial_parse_file_diff\":{s},\"static_parser\":{s}", .{ if (opts.partial_parse) "true" else "false", if (opts.partial_parse_file_diff) "true" else "false", if (opts.static_parser) "true" else "false" });
+    if (opts.partial_parse_file_path) |path| {
+        try writer.writeAll(",\"partial_parse_file_path\":");
+        try json.string(writer, path);
+    }
+    if (std.mem.eql(u8, opts.which, "compile") or std.mem.eql(u8, opts.which, "show")) {
+        try writer.print(",\"introspect\":{s},\"output\":", .{if (opts.introspect) "true" else "false"});
+        try json.string(writer, @tagName(opts.output));
+        if (opts.inline_sql) |sql| {
+            try writer.writeAll(",\"inline\":");
+            try json.string(writer, sql);
+        }
+        if (std.mem.eql(u8, opts.which, "show")) try writer.print(",\"limit\":{d}", .{opts.query_limit}) else try writer.print(",\"inject_ephemeral_ctes\":{s}", .{if (opts.inject_ephemeral_ctes) "true" else "false"});
+    }
+    if (opts.log_cache_events) try writer.writeAll(",\"log_cache_events\":true");
+    if (opts.single_threaded) try writer.writeAll(",\"single_threaded\":true");
+    if (opts.record_timing_info) |path| {
+        try writer.writeAll(",\"record_timing_info\":");
+        try json.string(writer, path);
+    }
+    try writer.print(",\"use_colors\":{s},\"use_colors_file\":{s},\"print\":{s}", .{ if (opts.use_colors) "true" else "false", if (opts.use_colors_file) "true" else "false", if (opts.print_enabled) "true" else "false" });
+    try writer.writeAll(",\"warn_error_options\":");
+    try writeMapping(writer, allocator, opts.warn_error_options);
+    try writer.writeAll(",\"log_level\":");
+    try json.string(writer, @tagName(opts.log_level));
+    try writer.writeAll(",\"log_level_file\":");
+    try json.string(writer, @tagName(opts.log_level_file));
+    try writer.writeAll(",\"log_format_file\":");
+    try json.string(writer, @tagName(opts.log_format_file));
+    if (opts.log_path) |path| {
+        try writer.writeAll(",\"log_path\":");
+        try json.string(writer, path);
+    }
+    try writer.print(",\"defer\":{s},\"favor_state\":{s},\"indirect_selection\":", .{ if (opts.defer_enabled) "true" else "false", if (opts.favor_state) "true" else "false" });
+    try json.string(writer, opts.indirect_selection);
+    if (std.mem.eql(u8, opts.which, "generate")) {
+        // Core retry cannot replay negative options for these one-way flags.
+        if (opts.docs_static) try writer.writeAll(",\"static\":true");
+        try writer.print(",\"compile\":{s}", .{if (opts.docs_compile) "true" else "false"});
+        if (opts.docs_empty_catalog) try writer.writeAll(",\"empty_catalog\":true");
+    }
+    if (std.mem.eql(u8, opts.which, "run-operation")) {
+        try writer.writeAll(",\"macro\":");
+        if (opts.command_name) |value| try json.string(writer, value) else try writer.writeAll("null");
+        try writer.writeAll(",\"args\":");
+        try writeMapping(writer, allocator, opts.command_args);
+    }
+    try writer.writeAll("}");
+}
+
+fn writeMapping(writer: *Io.Writer, allocator: std.mem.Allocator, text: ?[]const u8) !void {
+    if (text) |value| {
+        var document = try yaml.parse(allocator, value);
+        defer document.deinit();
+        if (document.value != .object) return error.InvalidOperationArgs;
+        try std.json.Stringify.value(document.value, .{}, writer);
+    } else try writer.writeAll("{}");
+}
+
+test "docs replay arguments omit false one-way flags and retain enabled and dual flags" {
+    for ([_]bool{ false, true }) |static_enabled| {
+        for ([_]bool{ false, true }) |empty_catalog_enabled| {
+            for ([_]bool{ false, true }) |compile_enabled| {
+                const options = types.Options{
+                    .which = "generate",
+                    .docs_static = static_enabled,
+                    .docs_empty_catalog = empty_catalog_enabled,
+                    .docs_compile = compile_enabled,
+                };
+                const rendered = try renderRunResultsWithArgs(std.testing.allocator, &.{}, &options);
+                defer std.testing.allocator.free(rendered);
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+                defer parsed.deinit();
+                const args = parsed.value.object.get("args").?.object;
+                if (static_enabled) {
+                    try std.testing.expect(args.get("static").?.bool);
+                } else try std.testing.expect(args.get("static") == null);
+                if (empty_catalog_enabled) {
+                    try std.testing.expect(args.get("empty_catalog").?.bool);
+                } else try std.testing.expect(args.get("empty_catalog") == null);
+                try std.testing.expectEqual(compile_enabled, args.get("compile").?.bool);
+                try std.testing.expect(!args.get("full_refresh").?.bool);
+                try std.testing.expectEqualStrings("generate", args.get("which").?.string);
+                try std.testing.expectEqual(@as(usize, 0), parsed.value.object.get("results").?.array.items.len);
+            }
+        }
+    }
+}
+
+fn writeResult(writer: *Io.Writer, allocator: std.mem.Allocator, environment: ?*const std.process.Environ.Map, result: NodeResult) !void {
     try writer.writeAll("\n    {\"status\": ");
     try json.string(writer, result.status);
     try writer.writeAll(", \"timing\": [");
-    try writer.writeAll("{\"name\": \"compile\", \"started_at\": null, \"completed_at\": null}, ");
-    try writer.writeAll("{\"name\": \"execute\", \"started_at\": null, \"completed_at\": null}");
-    try writer.writeAll("], \"thread_id\": \"Thread-1\", \"execution_time\": 0.0, \"adapter_response\": {}, \"message\": ");
+    var has_timing = false;
+    if (result.compile_started_at != null and result.compile_completed_at != null) {
+        try writeTiming(writer, "compile", result.compile_started_at, result.compile_completed_at);
+        has_timing = true;
+    }
+    if (result.execution_started_at != null and result.execution_completed_at != null) {
+        if (has_timing) try writer.writeAll(", ");
+        try writeTiming(writer, "execute", result.execution_started_at, result.execution_completed_at);
+    }
+    try writer.writeAll("], \"thread_id\": ");
+    if (result.thread_name) |name| try json.string(writer, name) else if (result.thread_number == 0) try writer.writeAll("\"MainThread\"") else try writer.print("\"Thread-{d}\"", .{result.thread_number});
+    try writer.print(", \"execution_time\": {d}, \"adapter_response\": {{", .{result.execution_time});
+    if (result.adapter_response) |response| {
+        var fields: usize = 0;
+        if (response.message) |message| {
+            try writer.writeAll("\"_message\": ");
+            try json.string(writer, message);
+            fields += 1;
+        }
+        if (response.code) |code| {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.writeAll("\"code\": ");
+            try json.string(writer, code);
+            fields += 1;
+        } else if (response.include_nulls) {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.writeAll("\"code\": null");
+            fields += 1;
+        }
+        if (response.rows_affected_value != .null) {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.writeAll("\"rows_affected\": ");
+            try std.json.Stringify.value(response.rows_affected_value, .{}, writer);
+            fields += 1;
+        } else if (response.rows_affected) |count| {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.print("\"rows_affected\": {d}", .{count});
+            fields += 1;
+        } else if (response.include_nulls) {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.writeAll("\"rows_affected\": null");
+            fields += 1;
+        }
+        if (response.include_query_id) {
+            if (fields != 0) try writer.writeAll(", ");
+            try writer.writeAll("\"query_id\": null");
+        }
+    }
+    try writer.writeAll("}, \"message\": ");
     if (result.message) |message| {
-        try json.string(writer, message);
+        // Error messages are public diagnostics. Other statuses may carry an
+        // authored main-response message that Core retains in its artifact.
+        const projected = if (std.mem.eql(u8, result.status, "error")) try secrets.text(allocator, environment, message) else null;
+        defer if (projected) |value| allocator.free(value);
+        try json.string(writer, projected orelse message);
     } else {
         try writer.writeAll("null");
     }
@@ -147,7 +463,20 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     try writer.writeAll(", \"unique_id\": ");
     try json.string(writer, resultUniqueId(result));
     try writer.writeAll(", \"compiled\": ");
-    if (result.test_node != null or result.singular_test_node != null or result.unit_test_node != null or result.compiled_code != null) {
+    const skipped = std.mem.eql(u8, result.status, "skipped");
+    if (result.compiled_override) |compiled| {
+        try writer.writeAll(if (compiled) "true" else "false");
+    } else if (result.operation_id != null) {
+        try writer.writeAll("false");
+    } else if (skipped) {
+        if (result.test_node != null or result.singular_test_node != null) {
+            try writer.writeAll("false");
+        } else if (result.node) |node| {
+            try writer.writeAll(if (isCompiledResultNode(node)) "false" else "null");
+        } else try writer.writeAll("null");
+    } else if (result.unit_test_node != null and std.mem.eql(u8, result.status, "error")) {
+        try writer.writeAll("null");
+    } else if (result.test_node != null or result.singular_test_node != null or result.unit_test_node != null or result.compiled_code != null) {
         try writer.writeAll("true");
     } else if (result.node) |node| if (isCompiledResultNode(node)) {
         try writer.writeAll(if (node.compiled) "true" else "false");
@@ -155,7 +484,9 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
         try writer.writeAll("null");
     } else try writer.writeAll("null");
     try writer.writeAll(", \"compiled_code\": ");
-    if (result.compiled_code) |compiled_code| {
+    if (skipped) {
+        try writer.writeAll("null");
+    } else if (result.compiled_code) |compiled_code| {
         try json.string(writer, compiled_code);
     } else if (result.node) |node| if (isCompiledResultNode(node) and node.compiled_code != null) {
         const compiled_code = node.compiled_code.?;
@@ -172,10 +503,89 @@ fn writeResult(writer: *Io.Writer, result: NodeResult) !void {
     } else {
         try writer.writeAll("null");
     } else try writer.writeAll("null");
+    if (result.batch_results) |batches| {
+        try writer.writeAll(", \"batch_results\": {\"successful\": ");
+        try writeBatchIntervals(writer, batches.successful);
+        try writer.writeAll(", \"failed\": ");
+        try writeBatchIntervals(writer, batches.failed);
+        try writer.writeAll("}");
+    }
     try writer.writeAll("}");
 }
 
+test "runtime results mask public messages while preserving authored SQL and custom responses" {
+    const allocator = std.testing.allocator;
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("DBT_ENV_SECRET_VALUE", "PRIVATE_VALUE");
+    const runtime = Runtime{ .allocator = allocator, .io = std.Io.Threaded.global_single_threaded.io(), .environment = &environment };
+    const rows = [_]NodeResult{
+        .{ .operation_id = "operation.demo.secret", .status = "error", .message = "PRIVATE_VALUE useful diagnostic", .compiled_code = "select 'PRIVATE_VALUE'", .adapter_response = .{ .message = "authored PRIVATE_VALUE" } },
+        .{ .operation_id = "operation.demo.normal", .status = "error", .message = "ordinary diagnostic" },
+        .{ .operation_id = "operation.demo.empty", .message = null },
+    };
+    const rendered = try renderRunResultsForRuntime(runtime, &rows);
+    defer allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+    const results = parsed.value.object.get("results").?.array.items;
+    try std.testing.expectEqualStrings("***** useful diagnostic", results[0].object.get("message").?.string);
+    try std.testing.expectEqualStrings("select 'PRIVATE_VALUE'", results[0].object.get("compiled_code").?.string);
+    try std.testing.expectEqualStrings("authored PRIVATE_VALUE", results[0].object.get("adapter_response").?.object.get("_message").?.string);
+    try std.testing.expectEqualStrings("ordinary diagnostic", results[1].object.get("message").?.string);
+    try std.testing.expect(results[2].object.get("message").? == .null);
+    for ([_][]const u8{ "success", "fail", "warn", "skipped" }) |status| {
+        const authored_rows = [_]NodeResult{.{ .operation_id = "operation.demo.authored", .status = status, .message = "authored PRIVATE_VALUE", .adapter_response = .{ .message = "authored PRIVATE_VALUE" } }};
+        const authored = try renderRunResultsForRuntime(runtime, &authored_rows);
+        defer allocator.free(authored);
+        var authored_parsed = try std.json.parseFromSlice(std.json.Value, allocator, authored, .{});
+        defer authored_parsed.deinit();
+        const result = authored_parsed.value.object.get("results").?.array.items[0].object;
+        try std.testing.expectEqualStrings("authored PRIVATE_VALUE", result.get("message").?.string);
+        try std.testing.expectEqualStrings("authored PRIVATE_VALUE", result.get("adapter_response").?.object.get("_message").?.string);
+    }
+    const internal = try renderRunResults(allocator, &rows);
+    defer allocator.free(internal);
+    var internal_parsed = try std.json.parseFromSlice(std.json.Value, allocator, internal, .{});
+    defer internal_parsed.deinit();
+    try std.testing.expectEqualStrings("PRIVATE_VALUE useful diagnostic", internal_parsed.value.object.get("results").?.array.items[0].object.get("message").?.string);
+}
+
+fn writeBatchTimestamp(writer: *Io.Writer, timestamp: i96) !void {
+    // Event-time histories may predate the Unix epoch; execution clocks do not.
+    var storage: [128]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const label = try @import("workflow_intervals.zig").formatTimestamp(fixed.allocator(), @intCast(@divFloor(timestamp, std.time.ns_per_s)));
+    const microseconds: u64 = @intCast(@divFloor(@mod(timestamp, std.time.ns_per_s), std.time.ns_per_us));
+    try writer.print("\"{s}T{s}", .{ label[0..10], label[11..19] });
+    if (microseconds != 0) try writer.print(".{d:0>6}", .{microseconds});
+    try writer.writeAll("+00:00\"");
+}
+
+test "microbatch intervals use Core UTC isoformat with optional microseconds" {
+    var out: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeBatchTimestamp(&out.writer, 0);
+    try out.writer.writeByte('|');
+    try writeBatchTimestamp(&out.writer, -std.time.ns_per_s + 123456 * std.time.ns_per_us);
+    try std.testing.expectEqualStrings("\"1970-01-01T00:00:00+00:00\"|\"1969-12-31T23:59:59.123456+00:00\"", out.written());
+}
+
+fn writeBatchIntervals(writer: *Io.Writer, batches: []const types.SampleWindow) !void {
+    try writer.writeByte('[');
+    for (batches, 0..) |batch, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.writeByte('[');
+        try writeBatchTimestamp(writer, batch.start);
+        try writer.writeByte(',');
+        try writeBatchTimestamp(writer, batch.end);
+        try writer.writeByte(']');
+    }
+    try writer.writeByte(']');
+}
+
 fn resultUniqueId(result: NodeResult) []const u8 {
+    if (result.operation_id) |id| return id;
     if (result.node) |node| return node.unique_id;
     if (result.test_node) |test_node| return test_node.unique_id;
     if (result.singular_test_node) |test_node| return test_node.unique_id;
@@ -184,7 +594,7 @@ fn resultUniqueId(result: NodeResult) []const u8 {
 }
 
 fn isCompiledResultNode(node: *const Node) bool {
-    return std.mem.eql(u8, node.resource_type, "model");
+    return std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "snapshot") or std.mem.eql(u8, node.resource_type, "operation");
 }
 
 test "run-results writer emits dbt v6 success shape" {
@@ -372,7 +782,7 @@ test "run-results writer emits compiled model error result" {
     try std.testing.expectEqualStrings("\"main\".\"orders\"", result.get("relation_name").?.string);
 }
 
-test "run-results writer emits compiled model skipped result" {
+test "run-results writer omits compiled model fields for skipped execution" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -403,8 +813,8 @@ test "run-results writer emits compiled model skipped result" {
     try std.testing.expectEqual(.null, result.get("message").?);
     try std.testing.expectEqual(.null, result.get("failures").?);
     try std.testing.expectEqualStrings("model.demo.orders", result.get("unique_id").?.string);
-    try std.testing.expectEqual(true, result.get("compiled").?.bool);
-    try std.testing.expectEqualStrings("select * from \"main\".\"customers\"", result.get("compiled_code").?.string);
+    try std.testing.expectEqual(false, result.get("compiled").?.bool);
+    try std.testing.expectEqual(.null, result.get("compiled_code").?);
     try std.testing.expectEqualStrings("\"main\".\"orders\"", result.get("relation_name").?.string);
 }
 
@@ -448,6 +858,43 @@ test "run-results writer emits generic test pass and fail statuses" {
     try std.testing.expectEqual(true, result.get("compiled").?.bool);
     try std.testing.expectEqualStrings("select 1 as failures", result.get("compiled_code").?.string);
     try std.testing.expectEqualStrings("\"dbt_test__audit\".\"not_null_customers_customer_id\"", result.get("relation_name").?.string);
+}
+
+test "skipped data and unit test rows never expose preflight compiled SQL" {
+    const allocator = std.testing.allocator;
+    const generic = GenericTestNode{
+        .package_name = "demo",
+        .unique_id = "test.demo.not_null_orders_id.abc",
+        .name = "not_null_orders_id",
+        .alias = "not_null_orders_id",
+        .path = "not_null_orders_id.sql",
+        .original_file_path = "models/schema.yml",
+        .raw_code = "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+        .test_name = "not_null",
+        .column_name = "id",
+    };
+    const unit = UnitTestDef{
+        .package_name = "demo",
+        .unique_id = "unit_test.demo.orders.skipped",
+        .name = "skipped",
+        .path = "schema.yml",
+        .original_file_path = "models/schema.yml",
+    };
+    const rendered = try renderRunResults(allocator, &.{
+        .{ .test_node = &generic, .status = "skipped", .compiled_code = "preflight data SQL" },
+        .{ .unit_test_node = &unit, .status = "skipped", .compiled_code = "preflight unit SQL" },
+    });
+    defer allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+    const rows = parsed.value.object.get("results").?.array.items;
+    try std.testing.expectEqual(false, rows[0].object.get("compiled").?.bool);
+    try std.testing.expectEqual(.null, rows[1].object.get("compiled").?);
+    for (rows) |row| {
+        try std.testing.expectEqual(.null, row.object.get("compiled_code").?);
+        try std.testing.expectEqual(.null, row.object.get("failures").?);
+        try std.testing.expectEqual(.null, row.object.get("message").?);
+    }
 }
 
 test "run-results writer preserves mixed model and generic test order" {

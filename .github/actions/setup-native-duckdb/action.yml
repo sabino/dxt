@@ -1,0 +1,37 @@
+name: Set up native DuckDB
+description: Install checksum-verified DuckDB 1.4.2 for the actual Linux runner architecture
+runs:
+  using: composite
+  steps:
+    - name: Install DuckDB CLI and native library
+      shell: bash
+      run: |
+        case "$(uname -m)" in
+          x86_64)
+            architecture=amd64
+            cli_sha=fae3ba93eedf20b08bca4b23aeac1ba94c446f1c10d029c193e2fc4b4e0bc1bc
+            library_sha=0a68e623cbdcfa06e10e1b5d6a3092d3fd3679f616008fb1a39b92e4a10d8f43
+            ;;
+          aarch64)
+            architecture=arm64
+            cli_sha=2b62c2fa4cb2f2e76e937b3b4baf20259cf6a5370e07ff310008ca9d5d6009c4
+            library_sha=095194f4a16aa507afcb4c2e83aa682162a87dd8e779c00bc1bd9c0ebb2ec970
+            ;;
+          *) echo "Unsupported certification architecture" >&2; exit 1 ;;
+        esac
+        fixture_dir="$RUNNER_TEMP/dxt-adapter-fixtures"
+        mkdir -p "$fixture_dir/bin" "$fixture_dir/lib"
+        curl --fail --location --show-error --output "$fixture_dir/duckdb_cli.zip" \
+          "https://github.com/duckdb/duckdb/releases/download/v1.4.2/duckdb_cli-linux-${architecture}.zip"
+        echo "$cli_sha  $fixture_dir/duckdb_cli.zip" | sha256sum --check -
+        unzip -q "$fixture_dir/duckdb_cli.zip" -d "$fixture_dir/bin"
+        curl --fail --location --show-error --output "$fixture_dir/libduckdb.zip" \
+          "https://github.com/duckdb/duckdb/releases/download/v1.4.2/libduckdb-linux-${architecture}.zip"
+        echo "$library_sha  $fixture_dir/libduckdb.zip" | sha256sum --check -
+        unzip -q "$fixture_dir/libduckdb.zip" -d "$fixture_dir/lib"
+        chmod +x "$fixture_dir/bin/duckdb"
+        echo "$fixture_dir/bin" >> "$GITHUB_PATH"
+        echo "DXT_DUCKDB_LIBRARY=$fixture_dir/lib/libduckdb.so" >> "$GITHUB_ENV"
+        echo "DXT_NATIVE_ADAPTER_CERTIFY=1" >> "$GITHUB_ENV"
+        echo "DBT_SEND_ANONYMOUS_USAGE_STATS=false" >> "$GITHUB_ENV"
+        "$fixture_dir/bin/duckdb" --version

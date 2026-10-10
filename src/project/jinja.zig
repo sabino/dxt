@@ -301,7 +301,39 @@ pub fn findValueStart(text: []const u8, start: usize) ?usize {
 pub fn scanSql(allocator: std.mem.Allocator, sql: []const u8, node: *Node, graph: ?*const Graph) !void {
     var context = ScanContext{ .allocator = allocator };
     defer context.deinit();
-    try scanRange(allocator, sql, 0, sql.len, node, graph, &context);
+    const source = try @import("template_source.zig").normalize(allocator, sql);
+    defer if (source.ptr != sql.ptr) allocator.free(source);
+    try scanRange(allocator, source, 0, source.len, node, graph, &context);
+}
+
+/// Literal braces and delimiter-like strings inside expressions belong to the
+/// expression lexer. Only a delimiter outside strings and containers ends it.
+pub fn findExpressionClose(text: []const u8, start: usize) ?usize {
+    var index = start;
+    var quote: ?u8 = null;
+    var depth: usize = 0;
+    while (index < text.len) : (index += 1) {
+        const byte = text[index];
+        if (quote) |q| {
+            if (byte == '\\') {
+                index += 1;
+                continue;
+            }
+            if (byte == q) quote = null;
+            continue;
+        }
+        if (byte == '\'' or byte == '"') {
+            quote = byte;
+            continue;
+        }
+        if (byte == '}' and depth == 0 and index + 1 < text.len and text[index + 1] == '}') return index;
+        if (byte == '(' or byte == '[' or byte == '{') depth += 1;
+        if (byte == ')' or byte == ']' or byte == '}') {
+            if (depth == 0) return null;
+            depth -= 1;
+        }
+    }
+    return null;
 }
 
 pub fn renderParseExpression(allocator: std.mem.Allocator, span: []const u8, node: *Node, graph: ?*const Graph) ![]const u8 {
@@ -330,7 +362,7 @@ fn scanRange(allocator: std.mem.Allocator, sql: []const u8, start: usize, range_
         }
         const tag_kind = sql[index + 1];
         const close = if (tag_kind == '{')
-            std.mem.indexOfPos(u8, sql, index + 2, "}}")
+            findExpressionClose(sql, index + 2)
         else if (tag_kind == '%')
             std.mem.indexOfPos(u8, sql, index + 2, "%}")
         else
@@ -785,6 +817,12 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
         const args = span[call.open + 1 .. call.close];
 
         if (call.package_name) |package_name| {
+            if ((std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "quote")) or
+                (std.mem.eql(u8, package_name, "exceptions") and std.mem.eql(u8, call.name, "raise_compiler_error")))
+            {
+                i = call.close + 1;
+                continue;
+            }
             if (graph) |known_graph| {
                 if (std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "dispatch")) {
                     const dispatch_args = try parseAdapterDispatchArgs(allocator, args);
@@ -813,6 +851,10 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
             const rendered = try parse_context.renderCall(call, args);
             allocator.free(rendered);
         } else {
+            if (isExpressionBuiltin(call.name) or (start > 0 and std.mem.trimEnd(u8, span[0..start], " \t\r\n").len > 0 and std.mem.trimEnd(u8, span[0..start], " \t\r\n")[std.mem.trimEnd(u8, span[0..start], " \t\r\n").len - 1] == '|')) {
+                i = call.close + 1;
+                continue;
+            }
             if (graph) |known_graph| {
                 if (findMacroIdForUnqualifiedNamespaceCall(known_graph, node.package_name, call.name)) |macro_id| {
                     try appendUnique(allocator, &node.macro_depends_on, macro_id);
@@ -824,6 +866,13 @@ fn scanJinjaSpan(allocator: std.mem.Allocator, span: []const u8, node: *Node, gr
         }
         i = call.close + 1;
     }
+}
+
+fn isExpressionBuiltin(name: []const u8) bool {
+    for ([_][]const u8{ "var", "env_var", "range", "dict", "namespace", "return" }) |builtin_name| {
+        if (std.mem.eql(u8, name, builtin_name)) return true;
+    }
+    return false;
 }
 
 pub fn scanMacroSqlForKnownMacroCalls(allocator: std.mem.Allocator, sql: []const u8, graph: *const Graph, current_macro_id: []const u8, macro_depends_on: *std.ArrayList([]const u8)) !void {
@@ -839,7 +888,7 @@ pub fn scanMacroSqlForKnownMacroCalls(allocator: std.mem.Allocator, sql: []const
             continue;
         }
         const close = if (sql[index + 1] == '{')
-            std.mem.indexOfPos(u8, sql, index + 2, "}}")
+            findExpressionClose(sql, index + 2)
         else if (sql[index + 1] == '%')
             std.mem.indexOfPos(u8, sql, index + 2, "%}")
         else
@@ -870,17 +919,17 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
         while (i < span.len and isIdentChar(span[i])) i += 1;
         const ident = span[start..i];
         const call = (readJinjaCall(span, ident, i) catch break) orelse continue;
-        if (call.package_name == null and std.mem.eql(u8, call.name, "return")) {
-            try scanMacroSpanForKnownMacroCalls(allocator, span[call.open + 1 .. call.close], graph, current_macro_id, macro_depends_on);
-            i = call.close + 1;
-            continue;
-        }
-        const macro_id = if (call.package_name) |package_name| blk: {
+        const preceding = std.mem.trimEnd(u8, span[0..start], " \t\r\n");
+        // Jinja filters are Filter nodes, not macro Call nodes. Their argument
+        // expressions can still contain macro calls.
+        const is_filter = preceding.len != 0 and preceding[preceding.len - 1] == '|';
+        const macro_id = if (is_filter or (call.package_name == null and std.mem.eql(u8, call.name, "return")))
+            null
+        else if (call.package_name) |package_name| blk: {
             if (std.mem.eql(u8, package_name, "adapter") and std.mem.eql(u8, call.name, "dispatch")) {
                 const args = span[call.open + 1 .. call.close];
                 const dispatch_args = parseAdapterDispatchArgs(allocator, args) catch {
-                    i = call.close + 1;
-                    continue;
+                    break :blk null;
                 };
                 defer deinitAdapterDispatchArgs(allocator, dispatch_args);
                 const dispatch_prefixes = dispatchPrefixesForAdapter(graph.adapter_type);
@@ -889,18 +938,38 @@ fn scanMacroSpanForKnownMacroCalls(allocator: std.mem.Allocator, span: []const u
                 break :blk resolved;
             }
             const resolved = findMacroIdByPackageAndName(graph, package_name, call.name);
-            if (resolved == null and hasMacroPackage(graph, package_name)) return error.UnresolvedMacro;
             break :blk resolved;
         } else findMacroIdForUnqualifiedMacroDependency(graph, current_package, call.name);
         if (macro_id) |resolved_macro_id| {
-            if (std.mem.eql(u8, resolved_macro_id, current_macro_id)) {
-                i = call.close + 1;
-                continue;
-            }
-            try appendUnique(allocator, macro_depends_on, resolved_macro_id);
+            if (!std.mem.eql(u8, resolved_macro_id, current_macro_id)) try appendUnique(allocator, macro_depends_on, resolved_macro_id);
         }
+        // Core traverses Call nodes in preorder: the outer callee precedes
+        // calls nested in positional and keyword arguments.
+        try scanMacroSpanForKnownMacroCalls(allocator, span[call.open + 1 .. call.close], graph, current_macro_id, macro_depends_on);
         i = call.close + 1;
     }
+}
+
+test "macro dependency scanner visits nested arguments but excludes filters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "root" };
+    defer graph.deinit();
+    for ([_][]const u8{ "probe", "outer", "inner", "length", "default" }) |name| try graph.macros.append(a, .{
+        .package_name = "root",
+        .name = name,
+        .unique_id = try std.fmt.allocPrint(a, "macro.root.{s}", .{name}),
+        .path = "probe.sql",
+        .original_file_path = "macros/probe.sql",
+        .macro_sql = "",
+    });
+    var dependencies: std.ArrayList([]const u8) = .empty;
+    defer dependencies.deinit(a);
+    try scanMacroSqlForKnownMacroCalls(a, "{% macro probe() %}{{ outer(inner(), extra=inner()) }}{{ [] | length() }}{{ '' | default(inner()) }}{% endmacro %}", &graph, "macro.root.probe", &dependencies);
+    try std.testing.expectEqual(@as(usize, 2), dependencies.items.len);
+    try std.testing.expectEqualStrings("macro.root.outer", dependencies.items[0]);
+    try std.testing.expectEqualStrings("macro.root.inner", dependencies.items[1]);
 }
 
 pub fn dispatchPrefixesForAdapter(adapter_type: []const u8) DispatchPrefixes {
@@ -999,32 +1068,8 @@ pub fn deinitAdapterDispatchArgs(allocator: std.mem.Allocator, args: AdapterDisp
     if (args.macro_namespace) |namespace| allocator.free(namespace);
 }
 
-fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !void {
-    if (try parseConfigQuotedValue(allocator, args, "materialized")) |value| {
-        node.materialized = value;
-        node.inline_materialized = true;
-    }
-    if (try parseConfigBoolLiteral(args, "enabled")) |enabled| {
-        node.enabled = enabled;
-        node.inline_enabled = true;
-    }
-    if (findKeyword(args, "tags")) |pos| {
-        if (findValueStart(args, pos + "tags".len)) |value_pos| {
-            try parseTagList(allocator, args[value_pos..], &node.tags);
-            node.inline_tags = true;
-            sortStrings(node.tags.items);
-        }
-    }
-    if (try parseConfigQuotedValue(allocator, args, "schema")) |value| {
-        node.config_schema = value;
-    }
-    if (try parseConfigQuotedValue(allocator, args, "alias")) |value| {
-        node.config_alias = value;
-    }
-    if (try parseConfigBoolLiteral(args, "store_failures")) |store_failures| {
-        node.test_config.store_failures = store_failures;
-        node.inline_store_failures = true;
-    }
+pub fn parseConfig(allocator: std.mem.Allocator, args: []const u8, node: *Node) !void {
+    return try @import("resource_config.zig").applyInline(allocator, args, node);
 }
 
 fn parseConfigQuotedValue(allocator: std.mem.Allocator, args: []const u8, key: []const u8) !?[]const u8 {
@@ -1038,14 +1083,24 @@ fn parseConfigQuotedValue(allocator: std.mem.Allocator, args: []const u8, key: [
     return null;
 }
 
+fn parseConfigNoneLiteral(args: []const u8, key: []const u8) !bool {
+    const pos = findKeyword(args, key) orelse return false;
+    const value_pos = findValueStart(args, pos + key.len) orelse return false;
+    if (args.len - value_pos >= 4 and std.ascii.eqlIgnoreCase(args[value_pos .. value_pos + 4], "none")) {
+        try validateConfigLiteralEnd(args, value_pos + 4);
+        return true;
+    }
+    return false;
+}
+
 fn parseConfigBoolLiteral(args: []const u8, key: []const u8) !?bool {
     const pos = findKeyword(args, key) orelse return null;
     const value_pos = findValueStart(args, pos + key.len) orelse return null;
-    if (std.mem.startsWith(u8, args[value_pos..], "true")) {
+    if (args.len - value_pos >= 4 and std.ascii.eqlIgnoreCase(args[value_pos .. value_pos + 4], "true")) {
         try validateConfigLiteralEnd(args, value_pos + "true".len);
         return true;
     }
-    if (std.mem.startsWith(u8, args[value_pos..], "false")) {
+    if (args.len - value_pos >= 5 and std.ascii.eqlIgnoreCase(args[value_pos .. value_pos + 5], "false")) {
         try validateConfigLiteralEnd(args, value_pos + "false".len);
         return false;
     }
@@ -1865,7 +1920,7 @@ test "sql scanner resolves vars inside ref and source calls" {
     try std.testing.expectEqualStrings("payments", node.source_refs.items[0].table_name);
 }
 
-test "macro scanner records known dependencies skips self and rejects missing known package macros" {
+test "macro scanner records known dependencies and tolerates unresolved calls in unused definitions" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1891,7 +1946,8 @@ test "macro scanner records known dependencies skips self and rejects missing kn
     try std.testing.expectEqualStrings("macro.demo.format_id", macro_depends_on.items[0]);
     try std.testing.expectEqualStrings("macro.pkg.star", macro_depends_on.items[1]);
 
-    try std.testing.expectError(error.UnresolvedMacro, scanMacroSqlForKnownMacroCalls(allocator, "{{ pkg.missing() }}", &graph, current_macro, &macro_depends_on));
+    try scanMacroSqlForKnownMacroCalls(allocator, "{{ pkg.missing() }}", &graph, current_macro, &macro_depends_on);
+    try std.testing.expectEqual(@as(usize, 2), macro_depends_on.items.len);
 }
 
 test "macro scanner uses package root and dbt macro namespace order" {
@@ -1977,4 +2033,27 @@ test "macro scanner records adapter dispatch dependencies inside return wrappers
 
     try std.testing.expectEqual(@as(usize, 1), macro_depends_on.items.len);
     try std.testing.expectEqualStrings("macro.demo.default__cents_to_dollars", macro_depends_on.items[0]);
+}
+
+test "sql scanner records incremental keys policy predicates and refresh override" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var node = Node{
+        .package_name = "demo",
+        .unique_id = "model.demo.events",
+        .name = "events",
+        .path = "events.sql",
+        .original_file_path = "models/events.sql",
+        .raw_code = "",
+    };
+    defer types.deinitNode(allocator, &node);
+    try scanSql(allocator, "{{ config(materialized='incremental', unique_key=['id','tenant'], incremental_strategy='delete+insert', on_schema_change='sync_all_columns', full_refresh=False, incremental_predicates=['DBT_INCREMENTAL_TARGET.updated > 0']) }} select 1", &node, null);
+    try std.testing.expectEqualStrings("incremental", node.materialized);
+    try std.testing.expectEqualStrings("delete+insert", node.incremental.strategy.?);
+    try std.testing.expectEqualStrings("sync_all_columns", node.incremental.on_schema_change.?);
+    try std.testing.expectEqual(false, node.incremental.full_refresh.?);
+    try std.testing.expectEqual(@as(usize, 2), node.incremental.unique_key.?.list.items.len);
+    try std.testing.expectEqualStrings("tenant", node.incremental.unique_key.?.list.items[1]);
+    try std.testing.expectEqualStrings("DBT_INCREMENTAL_TARGET.updated > 0", node.incremental.predicates.items[0]);
 }

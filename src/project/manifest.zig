@@ -5,6 +5,7 @@ const json = @import("json.zig");
 const selector = @import("selector.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
+const audits = @import("test_audits.zig");
 
 const Graph = types.Graph;
 const Node = types.Node;
@@ -41,6 +42,28 @@ pub fn writeSelectedJsonWithKeys(writer: *Io.Writer, selected: []selector.Select
         }
     }
     try writer.writeAll("]\n");
+}
+
+/// Core's list JSON output is one object per line. Reading from the same
+/// manifest node preserves typed config/dependency fields and permits every
+/// authored top-level --output-keys field that Core exposes.
+pub fn writeSelectedJsonLines(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, selected: []selector.SelectedResource, output_keys: ?[]const []const u8) !void {
+    const rendered = try renderManifest(allocator, graph);
+    defer allocator.free(rendered);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+    const defaults = [_][]const u8{ "alias", "name", "package_name", "depends_on", "tags", "config", "resource_type", "source_name", "original_file_path", "unique_id" };
+    const keys = output_keys orelse &defaults;
+    for (selected) |item| {
+        const collection = if (std.mem.eql(u8, item.resource_type, "source")) "sources" else if (std.mem.eql(u8, item.resource_type, "exposure")) "exposures" else if (std.mem.eql(u8, item.resource_type, "metric")) "metrics" else if (std.mem.eql(u8, item.resource_type, "semantic_model")) "semantic_models" else if (std.mem.eql(u8, item.resource_type, "saved_query")) "saved_queries" else if (std.mem.eql(u8, item.resource_type, "unit_test")) "unit_tests" else "nodes";
+        const resources = parsed.value.object.get(collection) orelse return error.InvalidListResource;
+        const node = resources.object.get(item.unique_id) orelse return error.InvalidListResource;
+        var object: std.json.ObjectMap = .empty;
+        defer object.deinit(allocator);
+        for (keys) |key| if (node.object.get(key)) |value| try object.put(allocator, key, value);
+        try std.json.Stringify.value(std.json.Value{ .object = object }, .{}, writer);
+        try writer.writeByte('\n');
+    }
 }
 
 fn writeSelectedJsonObject(writer: *Io.Writer, item: selector.SelectedResource) !void {
@@ -139,6 +162,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeNode(allocator, writer, graph, node);
     }
     for (graph.tests.items) |test_node| {
+        if (test_node.disabled) continue;
         if (node_index != 0) try writer.writeAll(",");
         node_index += 1;
         try writer.writeAll("\n    ");
@@ -156,12 +180,15 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeSingularTestNode(allocator, writer, graph, test_node);
     }
     try writer.writeAll("\n  },\n  \"sources\": {");
-    for (graph.sources.items, 0..) |source, index| {
-        if (index != 0) try writer.writeAll(",");
+    var source_index: usize = 0;
+    for (graph.sources.items) |source| {
+        if (!source.enabled) continue;
+        if (source_index != 0) try writer.writeAll(",");
+        source_index += 1;
         try writer.writeAll("\n    ");
         try json.string(writer, source.unique_id);
         try writer.writeAll(": ");
-        try writeSourceNode(allocator, writer, source);
+        try writeSourceNode(allocator, writer, graph, source);
     }
     try writer.writeAll("\n  },\n  \"macros\": {");
     for (graph.macros.items, 0..) |macro, index| {
@@ -201,7 +228,22 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll(": ");
         try writeExposureNode(writer, exposure);
     }
-    try writer.writeAll("\n  },\n  \"metrics\": {},\n  \"groups\": {},\n  \"selectors\": {},\n  \"group_map\": {},\n  \"saved_queries\": {},\n  \"semantic_models\": {},\n  \"unit_tests\": {");
+    try writer.writeAll("\n  },\n");
+    for ([_][]const u8{ "metrics", "saved_queries", "semantic_models" }, [_][]const u8{ "metric", "saved_query", "semantic_model" }) |key, kind| {
+        try writer.print("  \"{s}\": {{", .{key});
+        var semantic_first = true;
+        for (graph.semantic_resources.items) |resource| {
+            if (!resource.enabled or !std.mem.eql(u8, resource.resource_type, kind)) continue;
+            if (!semantic_first) try writer.writeByte(',');
+            semantic_first = false;
+            try json.string(writer, resource.unique_id);
+            try writer.writeByte(':');
+            try std.json.Stringify.value(resource.data, .{}, writer);
+        }
+        try writer.writeAll("},\n");
+    }
+    try @import("group_access.zig").writeManifest(writer, graph);
+    try writer.writeAll("  \"selectors\": {},\n  \"unit_tests\": {");
     var unit_test_index: usize = 0;
     for (graph.unit_tests.items) |unit_test| {
         if (!unit_test.enabled) continue;
@@ -224,6 +266,34 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeNode(allocator, writer, graph, node);
         try writer.writeAll("]");
     }
+    for (graph.tests.items, 0..) |test_node, index| {
+        if (!test_node.disabled) continue;
+        var prior = false;
+        for (graph.tests.items[0..index]) |other| if (other.disabled and std.mem.eql(u8, other.unique_id, test_node.unique_id)) {
+            prior = true;
+        };
+        if (prior) continue;
+        if (disabled_index != 0) try writer.writeByte(',');
+        disabled_index += 1;
+        try json.string(writer, test_node.unique_id);
+        try writer.writeAll(":[");
+        var wrote = false;
+        for (graph.tests.items) |other| if (other.disabled and std.mem.eql(u8, other.unique_id, test_node.unique_id)) {
+            if (wrote) try writer.writeByte(',');
+            wrote = true;
+            try writeGenericTestNode(allocator, writer, graph, other);
+        };
+        try writer.writeByte(']');
+    }
+    for (graph.unit_tests.items) |unit| {
+        if (unit.enabled) continue;
+        if (disabled_index != 0) try writer.writeByte(',');
+        disabled_index += 1;
+        try json.string(writer, unit.unique_id);
+        try writer.writeAll(":[");
+        try writeUnitTestNode(writer, unit);
+        try writer.writeByte(']');
+    }
     for (graph.singular_tests.items) |test_node| {
         if (test_node.enabled) continue;
         if (disabled_index != 0) try writer.writeAll(",");
@@ -234,8 +304,33 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writeSingularTestNode(allocator, writer, graph, test_node);
         try writer.writeAll("]");
     }
+    for (graph.semantic_resources.items) |resource| {
+        if (resource.enabled) continue;
+        if (disabled_index != 0) try writer.writeByte(',');
+        disabled_index += 1;
+        try json.string(writer, resource.unique_id);
+        try writer.writeAll(":[");
+        try std.json.Stringify.value(resource.data, .{}, writer);
+        try writer.writeByte(']');
+    }
+    for (graph.sources.items) |source| {
+        if (source.enabled) continue;
+        if (disabled_index != 0) try writer.writeAll(",");
+        disabled_index += 1;
+        try json.string(writer, source.unique_id);
+        try writer.writeAll(":[");
+        try writeSourceNode(allocator, writer, graph, source);
+        try writer.writeAll("]");
+    }
     try writer.writeAll("\n  },\n  \"parent_map\": {");
     var parent_index: usize = 0;
+    for (graph.sources.items) |source| {
+        if (!source.enabled) continue;
+        if (parent_index != 0) try writer.writeByte(',');
+        parent_index += 1;
+        try json.string(writer, source.unique_id);
+        try writer.writeAll(":[]");
+    }
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
         if (parent_index != 0) try writer.writeAll(",");
@@ -243,15 +338,16 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, node.unique_id);
         try writer.writeAll(": ");
-        try json.stringArray(writer, node.depends_on.items);
+        try writeSortedDependencies(allocator, writer, node.depends_on.items);
     }
     for (graph.tests.items) |test_node| {
+        if (test_node.disabled) continue;
         if (parent_index != 0) try writer.writeAll(",");
         parent_index += 1;
         try writer.writeAll("\n    ");
         try json.string(writer, test_node.unique_id);
         try writer.writeAll(": ");
-        try json.stringArray(writer, test_node.depends_on.items);
+        try writeSortedDependencies(allocator, writer, test_node.depends_on.items);
     }
     for (graph.singular_tests.items) |test_node| {
         if (!test_node.enabled) continue;
@@ -260,7 +356,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, test_node.unique_id);
         try writer.writeAll(": ");
-        try json.stringArray(writer, test_node.depends_on.items);
+        try writeSortedDependencies(allocator, writer, test_node.depends_on.items);
     }
     for (graph.exposures.items) |exposure| {
         if (!exposure.enabled) continue;
@@ -269,7 +365,7 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, exposure.unique_id);
         try writer.writeAll(": ");
-        try json.stringArray(writer, exposure.depends_on.items);
+        try writeSortedDependencies(allocator, writer, exposure.depends_on.items);
     }
     for (graph.unit_tests.items) |unit_test| {
         if (!unit_test.enabled) continue;
@@ -278,101 +374,118 @@ pub fn renderManifest(allocator: std.mem.Allocator, graph: *const Graph) ![]cons
         try writer.writeAll("\n    ");
         try json.string(writer, unit_test.unique_id);
         try writer.writeAll(": ");
-        try json.stringArray(writer, unit_test.depends_on.items);
+        try writeSortedDependencies(allocator, writer, unit_test.depends_on.items);
+    }
+    for (graph.semantic_resources.items) |resource| {
+        if (!resource.enabled) continue;
+        if (parent_index != 0) try writer.writeByte(',');
+        parent_index += 1;
+        try json.string(writer, resource.unique_id);
+        try writer.writeByte(':');
+        const dependencies = try allocator.dupe([]const u8, resource.depends_on.items);
+        defer allocator.free(dependencies);
+        util.sortStrings(dependencies);
+        try json.stringArray(writer, dependencies);
     }
     try writer.writeAll("\n  },\n  \"child_map\": {");
-    try writeChildMap(writer, graph);
+    try writeChildMap(allocator, writer, graph);
     try writer.writeAll("\n  }\n}\n");
     return try out.toOwnedSlice();
 }
 
+fn writeSortedDependencies(allocator: std.mem.Allocator, writer: *Io.Writer, dependencies: []const []const u8) !void {
+    const sorted = try allocator.dupe([]const u8, dependencies);
+    defer allocator.free(sorted);
+    util.sortStrings(sorted);
+    try json.stringArray(writer, sorted);
+}
+
 fn writeManifestMetadata(writer: *Io.Writer, graph: *const Graph) !void {
-    try writer.writeAll("{\"dbt_schema_version\":");
-    try json.string(writer, manifest_schema_version);
-    try writer.writeAll(",\"dbt_version\":");
-    try json.string(writer, deterministic_dbt_version);
-    try writer.writeAll(",\"generated_at\":");
-    try json.string(writer, deterministic_generated_at);
-    try writer.writeAll(",\"invocation_id\":null,\"invocation_started_at\":null,\"env\":{},\"project_name\":");
+    try writer.writeAll("{");
+    try @import("invocation.zig").writeFields(writer, manifest_schema_version, graph.invocation);
+    try writer.writeAll(",\"project_name\":");
     try json.string(writer, graph.project_name);
     try writer.writeAll(",\"adapter_type\":");
     try json.string(writer, graph.adapter_type);
     try writer.writeAll("}");
 }
 
-fn writeChildMap(writer: *Io.Writer, graph: *const Graph) !void {
+fn writeChildMap(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph) !void {
     var first = true;
     for (graph.nodes.items) |candidate| {
         if (!candidate.enabled) continue;
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.tests.items) |candidate| {
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        if (candidate.disabled) continue;
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.singular_tests.items) |candidate| {
         if (!candidate.enabled) continue;
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.sources.items) |candidate| {
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        if (!candidate.enabled) continue;
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.exposures.items) |candidate| {
         if (!candidate.enabled) continue;
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
     }
     for (graph.unit_tests.items) |candidate| {
         if (!candidate.enabled) continue;
-        try writeChildMapEntry(writer, graph, candidate.unique_id, &first);
+        try writeChildMapEntry(allocator, writer, graph, candidate.unique_id, &first);
+    }
+    for (graph.semantic_resources.items) |resource| {
+        if (!resource.enabled) continue;
+        try writeChildMapEntry(allocator, writer, graph, resource.unique_id, &first);
     }
 }
 
-fn writeChildMapEntry(writer: *Io.Writer, graph: *const Graph, unique_id: []const u8, first: *bool) !void {
+fn writeChildMapEntry(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, unique_id: []const u8, first: *bool) !void {
     if (!first.*) try writer.writeAll(",");
     first.* = false;
     try writer.writeAll("\n    ");
     try json.string(writer, unique_id);
-    try writer.writeAll(": [");
-    var child_first = true;
+    try writer.writeAll(": ");
+    var children: std.ArrayList([]const u8) = .empty;
+    defer children.deinit(allocator);
     for (graph.nodes.items) |node| {
         if (!node.enabled) continue;
         if (util.containsString(node.depends_on.items, unique_id)) {
-            if (!child_first) try writer.writeAll(",");
-            child_first = false;
-            try json.string(writer, node.unique_id);
+            try children.append(allocator, node.unique_id);
         }
     }
     for (graph.tests.items) |test_node| {
+        if (test_node.disabled) continue;
         if (util.containsString(test_node.depends_on.items, unique_id)) {
-            if (!child_first) try writer.writeAll(",");
-            child_first = false;
-            try json.string(writer, test_node.unique_id);
+            try children.append(allocator, test_node.unique_id);
         }
     }
     for (graph.singular_tests.items) |test_node| {
         if (!test_node.enabled) continue;
         if (util.containsString(test_node.depends_on.items, unique_id)) {
-            if (!child_first) try writer.writeAll(",");
-            child_first = false;
-            try json.string(writer, test_node.unique_id);
+            try children.append(allocator, test_node.unique_id);
         }
     }
     for (graph.exposures.items) |exposure| {
         if (!exposure.enabled) continue;
         if (util.containsString(exposure.depends_on.items, unique_id)) {
-            if (!child_first) try writer.writeAll(",");
-            child_first = false;
-            try json.string(writer, exposure.unique_id);
+            try children.append(allocator, exposure.unique_id);
         }
     }
     for (graph.unit_tests.items) |unit_test| {
         if (!unit_test.enabled) continue;
         if (util.containsString(unit_test.depends_on.items, unique_id)) {
-            if (!child_first) try writer.writeAll(",");
-            child_first = false;
-            try json.string(writer, unit_test.unique_id);
+            try children.append(allocator, unit_test.unique_id);
         }
     }
-    try writer.writeAll("]");
+    for (graph.semantic_resources.items) |resource| {
+        if (!resource.enabled or !util.containsString(resource.depends_on.items, unique_id)) continue;
+        try children.append(allocator, resource.unique_id);
+    }
+    util.sortStrings(children.items);
+    try json.stringArray(writer, children.items);
 }
 
 fn writeNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, node: Node) !void {
@@ -390,15 +503,46 @@ fn writeNodeIdentityFields(allocator: std.mem.Allocator, writer: *Io.Writer, gra
 
     try writer.writeAll(",\"database\":");
     const snapshot_config = node.snapshot_config;
-    try writeNullableString(writer, if (snapshot_config) |config| config.target_database orelse databaseNameForGraph(graph) else databaseNameForGraph(graph));
+    try writeNullableString(writer, if (node.resolved_identity) |identity| identity.database else compiler.relationDatabaseForNode(graph, node) orelse databaseNameForGraph(graph));
     try writer.writeAll(",\"schema\":");
-    try json.string(writer, if (snapshot_config) |config| config.target_schema orelse schema_name else schema_name);
+    try json.string(writer, if (node.resolved_identity != null) schema_name else if (snapshot_config) |config| config.target_schema orelse schema_name else schema_name);
     try writer.writeAll(",\"alias\":");
     try json.string(writer, alias);
+    try writer.writeAll(",\"relation_name\":");
+    const relational = std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "seed") or std.mem.eql(u8, node.resource_type, "snapshot");
+    if (relational and !std.mem.eql(u8, node.materialized, "ephemeral")) {
+        if (node.relation_name) |relation| try json.string(writer, relation) else {
+            const relation = try compiler.relationNameForNode(allocator, graph, node);
+            defer allocator.free(relation);
+            try json.string(writer, relation);
+        }
+    } else try writer.writeAll("null");
     try writer.writeAll(",\"fqn\":");
-    try writeFqnFromPath(writer, node.package_name, node.path, node.name, if (snapshot_config != null) node.name else null);
+    if (node.version != .null) {
+        const version = try @import("config_value.zig").scalarText(allocator, node.version);
+        defer allocator.free(version);
+        const logical_path = try std.fmt.allocPrint(allocator, "{s}{s}{s}.sql", .{ std.fs.path.dirname(node.path) orelse "", if (std.fs.path.dirname(node.path) != null) "/" else "", node.name });
+        defer allocator.free(logical_path);
+        const version_part = try std.fmt.allocPrint(allocator, "v{s}", .{version});
+        defer allocator.free(version_part);
+        try writeFqnFromPath(writer, node.package_name, logical_path, node.name, version_part);
+    } else try writeFqnFromPath(writer, node.package_name, node.snapshot_fqn_path orelse node.path, node.name, if (snapshot_config != null and !node.snapshot_yaml_definition) node.name else null);
     try writer.writeAll(",\"checksum\":");
-    try writeSha256Checksum(writer, if (node.snapshot_file_code) |file_code| std.mem.trim(u8, file_code, " \t\r\n\x0b\x0c") else node.raw_code);
+    if (node.hook_checksum) |digest| {
+        var hex: [64]u8 = undefined;
+        _ = try std.fmt.bufPrint(&hex, "{x}", .{&digest});
+        try writer.writeAll("{\"name\":\"sha256\",\"checksum\":");
+        try json.string(writer, &hex);
+        try writer.writeAll("}");
+    } else try writeSha256Checksum(writer, if (node.snapshot_file_code) |file_code| std.mem.trim(u8, file_code, " \t\r\n\x0b\x0c") else node.raw_code);
+    try writer.writeAll(",\"tags\":");
+    try json.stringArray(writer, node.tags.items);
+    try writer.writeAll(",\"build_path\":");
+    try writeNullableString(writer, node.build_path);
+    if (!std.mem.eql(u8, node.resource_type, "seed")) {
+        try writer.writeAll(",\"compiled_path\":");
+        if (node.compiled_path) |path| try json.string(writer, util.normalizeForDisplay(path)) else try writer.writeAll("null");
+    }
 }
 
 fn writeTestNodeIdentityFields(
@@ -409,16 +553,28 @@ fn writeTestNodeIdentityFields(
     path: []const u8,
     name: []const u8,
     raw_code: ?[]const u8,
+    config: types.GenericTestConfig,
+    fqn: ?[]const []const u8,
+    identity: ?types.ResolvedIdentity,
+    alias: []const u8,
 ) !void {
-    const schema_name = try std.fmt.allocPrint(allocator, "{s}_dbt_test__audit", .{graph.target_schema});
+    var audit_node = audits.auditNode(config, alias, package_name);
+    audit_node.resolved_identity = identity;
+    const schema_name = try compiler.relationSchemaForNode(allocator, graph, &audit_node);
     defer allocator.free(schema_name);
 
     try writer.writeAll(",\"database\":");
-    try writeNullableString(writer, databaseNameForGraph(graph));
+    try writeNullableString(writer, if (identity) |resolved| resolved.database else config.database orelse compiler.relationDatabaseForNode(graph, &audit_node) orelse databaseNameForGraph(graph));
     try writer.writeAll(",\"schema\":");
     try json.string(writer, schema_name);
+    try writer.writeAll(",\"relation_name\":");
+    if (audits.shouldStore(config, graph.command_options)) {
+        const relation = try audits.relationNameWithIdentity(allocator, graph, config, alias, package_name, identity);
+        defer allocator.free(relation);
+        try json.string(writer, relation);
+    } else try writer.writeAll("null");
     try writer.writeAll(",\"fqn\":");
-    try writeFqnFromPath(writer, package_name, path, name, null);
+    if (fqn) |parts| try json.stringArray(writer, parts) else try writeFqnFromPath(writer, package_name, path, name, null);
     try writer.writeAll(",\"checksum\":");
     if (raw_code) |code| {
         try writeSha256Checksum(writer, code);
@@ -428,6 +584,7 @@ fn writeTestNodeIdentityFields(
 }
 
 fn databaseNameForGraph(graph: *const Graph) ?[]const u8 {
+    if (@import("config_value.zig").get(graph.target_context, "database")) |database| if (database == .string) return database.string;
     if (!std.mem.eql(u8, graph.adapter_type, "duckdb")) return null;
     const configured_path = graph.database_path orelse return "memory";
     const trimmed = std.mem.trim(u8, configured_path, " \t\r\n");
@@ -475,7 +632,7 @@ fn stemFromPath(path: []const u8) []const u8 {
 }
 
 fn writeSha256Checksum(writer: *Io.Writer, raw_code: []const u8) !void {
-    const checksum_input = trimTrailingNewlines(raw_code);
+    const checksum_input = std.mem.trim(u8, raw_code, " \t\r\n\x0b\x0c");
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(checksum_input, &digest, .{});
     var hex: [64]u8 = undefined;
@@ -487,14 +644,6 @@ fn writeSha256Checksum(writer: *Io.Writer, raw_code: []const u8) !void {
 
 fn writeNoneChecksum(writer: *Io.Writer) !void {
     try writer.writeAll("{\"name\":\"none\",\"checksum\":\"\"}");
-}
-
-fn trimTrailingNewlines(value: []const u8) []const u8 {
-    var end = value.len;
-    while (end != 0 and (value[end - 1] == '\n' or value[end - 1] == '\r')) {
-        end -= 1;
-    }
-    return value[0..end];
 }
 
 fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: MacroDef) !void {
@@ -537,8 +686,8 @@ fn writeMacroNode(allocator: std.mem.Allocator, writer: *Io.Writer, macro: Macro
     try writer.writeAll("}");
 }
 
-fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: SourceDef) !void {
-    const database_name = compiler.sourceDatabaseName(&source);
+fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, source: SourceDef) !void {
+    const database_name = compiler.sourceDatabaseName(&source) orelse databaseNameForGraph(graph);
     const schema_name = compiler.sourceSchemaName(&source);
     const relation_name = try compiler.relationNameForSource(allocator, &source);
     defer allocator.free(relation_name);
@@ -571,21 +720,76 @@ fn writeSourceNode(allocator: std.mem.Allocator, writer: *Io.Writer, source: Sou
     try json.string(writer, source.source_name);
     try writer.writeAll(",");
     try json.string(writer, source.table_name);
-    try writer.writeAll("],\"source_description\":\"\",\"loader\":\"\",\"loaded_at_field\":");
-    try writeNullableString(writer, source.loaded_at_field);
-    try writer.writeAll(",\"loaded_at_query\":");
-    try writeNullableString(writer, source.loaded_at_query);
-    try writer.writeAll(",\"freshness\":");
-    try writeFreshnessThreshold(writer, source.freshness);
-    try writer.writeAll(",\"columns\":");
-    try writeColumns(writer, source.columns.items);
-    try writer.writeAll(",\"config\":{\"enabled\":true,\"freshness\":");
-    try writeFreshnessThreshold(writer, source.freshness);
+    try writer.writeAll("],\"description\":");
+    try json.string(writer, source.description);
+    try writer.writeAll(",\"source_description\":");
+    try json.string(writer, source.source_description);
+    try writer.writeAll(",\"doc_blocks\":");
+    try json.stringArray(writer, source.doc_blocks.items);
+    try writer.writeAll(",\"loader\":");
+    try json.string(writer, source.loader);
     try writer.writeAll(",\"loaded_at_field\":");
     try writeNullableString(writer, source.loaded_at_field);
     try writer.writeAll(",\"loaded_at_query\":");
     try writeNullableString(writer, source.loaded_at_query);
-    try writer.writeAll(",\"meta\":{},\"tags\":[]}}");
+    try writer.writeAll(",\"freshness\":");
+    if (source.freshness == null and source.freshness_set) try writer.writeAll("null") else try writeSourceFreshnessThreshold(writer, source.freshness orelse .{});
+    try writer.writeAll(",\"columns\":");
+    try writeColumns(writer, source.columns.items);
+    const fields = @import("config_value.zig");
+    try writer.writeAll(",\"meta\":");
+    try std.json.Stringify.value(fields.get(source.effective_config, "meta") orelse @as(std.json.Value, .{ .object = .empty }), .{}, writer);
+    try writer.writeAll(",\"tags\":");
+    try std.json.Stringify.value(fields.get(source.effective_config, "tags") orelse @as(std.json.Value, .{ .array = std.json.Array.init(std.heap.page_allocator) }), .{}, writer);
+    try writer.writeAll(",\"config\":");
+    try writeSourceConfig(writer, source, false);
+    try writer.writeAll(",\"unrendered_config\":");
+    try writeSourceConfig(writer, source, true);
+    try writer.writeAll("}");
+}
+
+fn writeSourceConfig(writer: *Io.Writer, source: SourceDef, raw: bool) !void {
+    const fields = @import("config_value.zig");
+    const config = if (raw) source.raw_config else source.effective_config;
+    try writer.writeAll("{");
+    var wrote = false;
+    if (!raw) {
+        try writer.writeAll("\"enabled\":");
+        try writer.writeAll(if (source.enabled) "true" else "false");
+        try writer.writeAll(",\"event_time\":");
+        try std.json.Stringify.value(fields.get(config, "event_time") orelse .null, .{}, writer);
+        wrote = true;
+    }
+    inline for (.{ "loaded_at_field", "loaded_at_query", "meta", "tags" }) |key| {
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try json.string(writer, key);
+        try writer.writeAll(":");
+        const fallback: std.json.Value = if (std.mem.eql(u8, key, "meta")) .{ .object = .empty } else if (std.mem.eql(u8, key, "tags")) .{ .array = std.json.Array.init(std.heap.page_allocator) } else if (std.mem.eql(u8, key, "loaded_at_field") and source.loaded_at_field != null) .{ .string = source.loaded_at_field.? } else if (std.mem.eql(u8, key, "loaded_at_query") and source.loaded_at_query != null) .{ .string = source.loaded_at_query.? } else .null;
+        const value = fields.get(config, key) orelse fallback;
+        try std.json.Stringify.value(value, .{}, writer);
+    }
+    if (!raw or fields.get(config, "freshness") != null or (source.freshness != null and source.properties == .null)) {
+        if (wrote) try writer.writeAll(",");
+        try writer.writeAll("\"freshness\":");
+        if (source.freshness == null and source.freshness_set) try writer.writeAll("null") else try writeSourceFreshnessThreshold(writer, source.freshness orelse .{});
+    }
+    if (config == .object) {
+        var it = config.object.iterator();
+        while (it.next()) |entry| {
+            var known = false;
+            for ([_][]const u8{ "loaded_at_field", "loaded_at_query", "meta", "tags", "freshness" }) |key| if (std.mem.eql(u8, key, entry.key_ptr.*)) {
+                known = true;
+            };
+            if (!raw and (std.mem.eql(u8, entry.key_ptr.*, "enabled") or std.mem.eql(u8, entry.key_ptr.*, "event_time"))) known = true;
+            if (known) continue;
+            try writer.writeAll(",");
+            try json.string(writer, entry.key_ptr.*);
+            try writer.writeAll(":");
+            try std.json.Stringify.value(entry.value_ptr.*, .{}, writer);
+        }
+    }
+    try writer.writeAll("}");
 }
 
 fn writeSourceQuoting(writer: *Io.Writer, quoting: types.SourceQuoting) !void {
@@ -595,7 +799,9 @@ fn writeSourceQuoting(writer: *Io.Writer, quoting: types.SourceQuoting) !void {
     try writeNullableBool(writer, quoting.schema);
     try writer.writeAll(",\"identifier\":");
     try writeNullableBool(writer, quoting.identifier);
-    try writer.writeAll(",\"column\":null}");
+    try writer.writeAll(",\"column\":");
+    try writeNullableBool(writer, quoting.column);
+    try writer.writeAll("}");
 }
 
 fn writeExposureNode(writer: *Io.Writer, exposure: ExposureDef) !void {
@@ -665,23 +871,33 @@ fn writeUnitTestNode(writer: *Io.Writer, unit_test: UnitTestDef) !void {
     try json.string(writer, util.normalizeForDisplay(unit_test.original_file_path));
     try writer.writeAll(",\"unique_id\":");
     try json.string(writer, unit_test.unique_id);
-    try writer.writeAll(",\"fqn\":[");
-    try json.string(writer, unit_test.package_name);
-    try writer.writeAll(",");
-    try json.string(writer, unit_test.model);
-    try writer.writeAll(",");
-    try json.string(writer, unit_test.name);
-    try writer.writeAll("],\"description\":");
+    try writer.writeAll(",\"fqn\":");
+    try json.stringArray(writer, if (unit_test.fqn.items.len != 0) unit_test.fqn.items else &.{ unit_test.package_name, unit_test.model, unit_test.name });
+    try writer.writeAll(",\"description\":");
     try json.string(writer, unit_test.description);
-    try writer.writeAll(",\"overrides\":null,\"depends_on\":{\"macros\":[],\"nodes\":");
+    try writer.writeAll(",\"overrides\":");
+    try std.json.Stringify.value(unit_test.overrides, .{}, writer);
+    try writer.writeAll(",\"depends_on\":{\"macros\":[],\"nodes\":");
     try json.stringArray(writer, unit_test.depends_on.items);
-    try writer.writeAll("},\"config\":{\"tags\":");
-    try json.stringArray(writer, unit_test.tags.items);
-    try writer.writeAll(",\"meta\":");
-    try writeMetaObject(writer, unit_test.meta.items);
-    try writer.writeAll(",\"enabled\":");
-    try writer.writeAll(if (unit_test.enabled) "true" else "false");
-    try writer.writeAll(",\"static_analysis\":null},\"checksum\":null,\"schema\":null,\"created_at\":0.0,\"versions\":null,\"version\":null}");
+    try writer.writeAll("},\"config\":");
+    if (unit_test.config_values == .object) try std.json.Stringify.value(unit_test.config_values, .{}, writer) else {
+        try writer.writeAll("{\"tags\":");
+        try json.stringArray(writer, unit_test.tags.items);
+        try writer.writeAll(",\"meta\":");
+        try writeMetaObject(writer, unit_test.meta.items);
+        try writer.writeAll(",\"enabled\":");
+        try writer.writeAll(if (unit_test.enabled) "true" else "false");
+        try writer.writeAll(",\"static_analysis\":null}");
+    }
+    try writer.writeAll(",\"checksum\":");
+    if (unit_test.checksum) |checksum| try json.string(writer, checksum) else try writer.writeAll("null");
+    try writer.writeAll(",\"schema\":");
+    if (unit_test.schema) |schema| try json.string(writer, schema) else try writer.writeAll("null");
+    try writer.writeAll(",\"created_at\":0.0,\"versions\":");
+    try std.json.Stringify.value(unit_test.versions, .{}, writer);
+    try writer.writeAll(",\"version\":");
+    try std.json.Stringify.value(unit_test.version, .{}, writer);
+    try writer.writeAll("}");
 }
 
 fn writeUnitTestGivenFixtures(writer: *Io.Writer, fixtures: []const types.UnitTestFixture) !void {
@@ -744,6 +960,26 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
+    if (node.hook_index) |index| {
+        try writer.print(",\"index\":{d},\"contract\":{{\"enforced\":false,\"alias_types\":true,\"checksum\":null}}", .{index});
+    }
+    if (std.mem.eql(u8, node.resource_type, "model")) {
+        try writer.writeAll(",\"contract\":");
+        var contract = try @import("contracts.zig").metadata(allocator, &node);
+        defer @import("config_value.zig").deinit(allocator, &contract);
+        try std.json.Stringify.value(contract, .{}, writer);
+        try writer.writeAll(",\"constraints\":");
+        var constraints = try @import("contracts.zig").artifactConstraints(allocator, graph, &node, @import("config_value.zig").get(node.properties, "constraints") orelse .null, true);
+        defer @import("config_value.zig").deinit(allocator, &constraints);
+        try std.json.Stringify.value(constraints, .{}, writer);
+        try writer.writeAll(",\"access\":");
+        try json.string(writer, @import("group_access.zig").access(&node));
+        try writer.writeAll(",\"version\":");
+        try std.json.Stringify.value(node.version, .{}, writer);
+        try writer.writeAll(",\"latest_version\":");
+        try std.json.Stringify.value(node.latest_version, .{}, writer);
+    }
+    try writeUnrenderedNodeConfig(writer, graph, &node);
     try writeNodeIdentityFields(allocator, writer, graph, &node);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(node.path));
@@ -757,7 +993,9 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     } else {
         try writer.writeAll("null");
     }
-    try writer.writeAll(",\"language\":\"sql\",\"raw_code\":");
+    try writer.writeAll(",\"language\":");
+    try json.string(writer, node.language);
+    try writer.writeAll(",\"raw_code\":");
     try json.string(writer, node.raw_code);
     try writer.writeAll(",\"description\":");
     try json.string(writer, node.description);
@@ -766,17 +1004,12 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
     try writer.writeAll(",\"columns\":");
-    try writeColumns(writer, node.columns.items);
-    try writer.writeAll(",\"config\":{\"enabled\":");
-    try writer.writeAll(if (node.enabled) "true" else "false");
-    try writer.writeAll(",\"materialized\":");
-    try json.string(writer, node.materialized);
-    try writer.writeAll(",\"tags\":");
-    try json.stringArray(writer, node.tags.items);
-    try writer.writeAll(",\"docs\":");
-    try writeDocsConfig(writer, node.docs);
-    if (node.snapshot_config) |config| try writeSnapshotConfig(writer, &node, config);
-    try writer.writeAll("},\"depends_on\":{\"macros\":");
+    if (std.mem.eql(u8, node.resource_type, "model")) try writeModelColumns(allocator, writer, graph, &node) else try writeColumns(writer, node.columns.items);
+    try writer.writeAll(",\"config\":");
+    var canonical_config = try @import("canonical_manifest_config.zig").node(allocator, &node);
+    defer @import("config_value.zig").deinit(allocator, &canonical_config);
+    try std.json.Stringify.value(canonical_config, .{}, writer);
+    try writer.writeAll(",\"depends_on\":{\"macros\":");
     try json.stringArray(writer, node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, node.depends_on.items);
@@ -787,30 +1020,113 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
     if (node.compiled) {
         try writer.writeAll(",\"compiled\":true,\"compiled_code\":");
         try json.string(writer, node.compiled_code orelse "");
-        try writer.writeAll(",\"compiled_path\":");
-        try json.string(writer, util.normalizeForDisplay(node.compiled_path orelse ""));
-        try writer.writeAll(",\"relation_name\":");
-        if (node.relation_name) |relation_name| {
-            try json.string(writer, relation_name);
-        } else {
-            try writer.writeAll("null");
-        }
         try writer.writeAll(",\"extra_ctes\":");
-        try writeExtraCtes(writer, node.extra_ctes.items);
+        try writeExtraCtes(writer, node.extra_ctes.items, graph.command_options.inject_ephemeral_ctes);
         try writer.writeAll(",\"extra_ctes_injected\":");
-        try writer.writeAll(if (node.extra_ctes.items.len != 0) "true" else "false");
+        try writer.writeAll(if (graph.command_options.inject_ephemeral_ctes) "true" else "false");
+    }
+    try writer.writeAll(",\"meta\":");
+    if (@import("config_value.zig").get(node.effective_config, "meta")) |meta| try std.json.Stringify.value(meta, .{}, writer) else if (node.snapshot_meta_json) |meta| try writeJsonValue(writer, meta) else try writeMetaObject(writer, node.meta.items);
+    try writer.writeAll("}");
+}
+
+fn writePersistDocs(writer: *Io.Writer, docs: types.PersistDocs) !void {
+    try writer.writeAll("{");
+    var wrote = false;
+    if (docs.relation) |value| {
+        try writer.writeAll("\"relation\":");
+        try json.boolValue(writer, value);
+        wrote = true;
+    }
+    if (docs.columns) |value| {
+        if (wrote) try writer.writeAll(",");
+        try writer.writeAll("\"columns\":");
+        try json.boolValue(writer, value);
     }
     try writer.writeAll("}");
 }
 
-fn writeExtraCtes(writer: *Io.Writer, extra_ctes: []const types.ExtraCte) !void {
+fn writeUnrenderedNodeConfig(writer: *Io.Writer, graph: *const Graph, node: *const Node) !void {
+    if (node.raw_config == .object) {
+        try writer.writeAll(",\"unrendered_config\":");
+        try std.json.Stringify.value(node.raw_config, .{}, writer);
+        return;
+    }
+    try writer.writeAll(",\"unrendered_config\":{");
+    var wrote = false;
+    var configured_materialized = node.inline_materialized;
+    var configured_enabled = node.inline_enabled;
+    for (graph.model_properties.items) |property| {
+        if (!std.mem.eql(u8, property.package_name, node.package_name) or !std.mem.eql(u8, property.resource_type, node.resource_type) or !std.mem.eql(u8, property.name, node.name)) continue;
+        configured_materialized = configured_materialized or property.materialized.len != 0;
+        configured_enabled = configured_enabled or property.enabled != null;
+    }
+    if (configured_materialized or (std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.materialized, "view"))) try json.stringField(writer, "materialized", node.materialized, &wrote);
+    if (configured_enabled) {
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try writer.writeAll("\"enabled\":");
+        try json.boolValue(writer, node.enabled);
+    }
+    if (node.snapshot_config) |config| {
+        if (!wrote) {
+            try writer.writeAll("\"strategy\":");
+            try writeNullableString(writer, config.strategy);
+        } else {
+            try writer.writeAll(",\"strategy\":");
+            try writeNullableString(writer, config.strategy);
+        }
+        wrote = true;
+        try writer.writeAll(",\"unique_key\":");
+        try writeSnapshotColumns(writer, config.unique_key);
+        if (config.target_schema) |value| try json.stringField(writer, "target_schema", value, &wrote);
+        if (config.target_database) |value| try json.stringField(writer, "target_database", value, &wrote);
+        if (config.updated_at) |value| try json.stringField(writer, "updated_at", value, &wrote);
+        if (config.check_cols != null) {
+            try writer.writeAll(",\"check_cols\":");
+            try writeSnapshotColumns(writer, config.check_cols);
+        }
+        if (config.invalidate_hard_deletes) |value| {
+            try writer.writeAll(",\"invalidate_hard_deletes\":");
+            try json.boolValue(writer, value);
+        }
+    }
+    if (node.config_schema) |value| try json.stringField(writer, "schema", value, &wrote);
+    if (node.config_alias) |value| try json.stringField(writer, "alias", value, &wrote);
+    if (node.persist_docs) |docs| {
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try writer.writeAll("\"persist_docs\":");
+        try writePersistDocs(writer, docs);
+    }
+    if (node.docs.configured) {
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try writer.writeAll("\"docs\":");
+        try writeDocsConfig(writer, node.docs);
+    }
+    if (node.quote_columns) |quote_columns| {
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try writer.writeAll("\"quote_columns\":");
+        try json.boolValue(writer, quote_columns);
+    }
+    if (node.seed_column_types.items.len != 0) {
+        if (wrote) try writer.writeAll(",");
+        try writer.writeAll("\"column_types\":");
+        try writeSeedColumnTypes(writer, node.seed_column_types.items);
+    }
+    try writer.writeAll("}");
+}
+
+fn writeExtraCtes(writer: *Io.Writer, extra_ctes: []const types.ExtraCte, injected: bool) !void {
     try writer.writeAll("[");
     for (extra_ctes, 0..) |extra_cte, index| {
         if (index != 0) try writer.writeAll(",");
         try writer.writeAll("{\"id\":");
         try json.string(writer, extra_cte.id);
         try writer.writeAll(",\"sql\":");
-        try json.string(writer, extra_cte.sql);
+        if (injected) try json.string(writer, extra_cte.sql) else try writer.writeAll("null");
         try writer.writeAll("}");
     }
     try writer.writeAll("]");
@@ -823,6 +1139,7 @@ fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const
     try json.string(writer, node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, node.name);
+    try writeUnrenderedNodeConfig(writer, graph, &node);
     try writeNodeIdentityFields(allocator, writer, graph, &node);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(node.path));
@@ -842,20 +1159,15 @@ fn writeSeedNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const
     try json.stringArray(writer, node.doc_blocks.items);
     try writer.writeAll(",\"columns\":");
     try writeColumns(writer, node.columns.items);
-    try writer.writeAll(",\"config\":{\"enabled\":");
-    try writer.writeAll(if (node.enabled) "true" else "false");
-    try writer.writeAll(",\"materialized\":\"seed\",\"tags\":");
-    try json.stringArray(writer, node.tags.items);
+    try writer.writeAll(",\"config\":");
+    var canonical_config = try @import("canonical_manifest_config.zig").node(allocator, &node);
+    defer @import("config_value.zig").deinit(allocator, &canonical_config);
+    try std.json.Stringify.value(canonical_config, .{}, writer);
     try writer.writeAll(",\"docs\":");
     try writeDocsConfig(writer, node.docs);
-    try writer.writeAll(",\"quote_columns\":");
-    try writeNullableBool(writer, node.quote_columns);
-    try writer.writeAll(",\"column_types\":");
-    try writeSeedColumnTypes(writer, node.seed_column_types.items);
-    try writer.writeAll("},\"docs\":");
-    try writeDocsConfig(writer, node.docs);
-    try writer.writeAll(",\"depends_on\":{\"macros\":[],\"nodes\":");
-    try json.stringArray(writer, node.depends_on.items);
+    try writer.writeAll(",\"raw_code\":\"\"");
+    try writer.writeAll(",\"depends_on\":{\"macros\":");
+    try json.stringArray(writer, node.macro_depends_on.items);
     try writer.writeAll("}}");
 }
 
@@ -870,6 +1182,21 @@ fn writeSeedColumnTypes(writer: *Io.Writer, column_types: []const types.SeedColu
     try writer.writeAll("}");
 }
 
+fn writeModelColumns(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, node: *const Node) !void {
+    if (!node.compiled) return writeColumns(writer, node.columns.items);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const columns = try scratch.dupe(types.ColumnDef, node.columns.items);
+    for (columns) |*column| {
+        if (column.properties != .object) continue;
+        column.properties = try @import("config_value.zig").clone(scratch, column.properties);
+        const constraints = try @import("contracts.zig").artifactConstraints(scratch, graph, node, @import("config_value.zig").get(column.properties, "constraints") orelse .null, false);
+        try @import("config_value.zig").put(scratch, &column.properties, "constraints", constraints);
+    }
+    return writeColumns(writer, columns);
+}
+
 fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
     try writer.writeAll("{");
     for (columns, 0..) |column, index| {
@@ -879,11 +1206,106 @@ fn writeColumns(writer: *Io.Writer, columns: []const types.ColumnDef) !void {
         try json.string(writer, column.name);
         try writer.writeAll(",\"description\":");
         try json.string(writer, column.description);
-        try writer.writeAll(",\"meta\":{},\"data_type\":null,\"quote\":null,\"tags\":[],\"config\":{},\"doc_blocks\":");
+        if (column.properties == .null) {
+            try writer.writeAll(",\"meta\":");
+            if (column.meta_json) |value| try writeJsonValue(writer, value) else try writer.writeAll("{}");
+            try writer.writeAll(",\"data_type\":");
+            try writeNullableString(writer, column.data_type);
+            try writer.writeAll(",\"quote\":");
+            if (column.quote) |value| try writer.writeAll(if (value) "true" else "false") else try writer.writeAll("null");
+            try writer.writeAll(",\"tags\":");
+            try json.stringArray(writer, column.tags.items);
+            try writer.writeAll(",\"config\":");
+            if (column.config_json) |value| try writeJsonValue(writer, value) else try writer.writeAll("{}");
+            try writer.writeAll(",\"constraints\":[],\"granularity\":null");
+        } else {
+            const fields = @import("config_value.zig");
+            const config = fields.get(column.properties, "config") orelse @as(std.json.Value, .{ .object = .empty });
+            const meta = fields.get(column.properties, "meta") orelse @as(std.json.Value, .{ .object = .empty });
+            const tags = fields.get(column.properties, "tags") orelse @as(std.json.Value, .{ .array = std.json.Array.init(std.heap.page_allocator) });
+            try writer.writeAll(",\"meta\":");
+            try std.json.Stringify.value(meta, .{}, writer);
+            try writer.writeAll(",\"data_type\":");
+            try std.json.Stringify.value(fields.get(column.properties, "data_type") orelse .null, .{}, writer);
+            try writer.writeAll(",\"quote\":");
+            try std.json.Stringify.value(fields.get(column.properties, "quote") orelse .null, .{}, writer);
+            try writer.writeAll(",\"tags\":");
+            try std.json.Stringify.value(tags, .{}, writer);
+            try writer.writeAll(",\"config\":");
+            try writer.writeAll("{\"meta\":");
+            try std.json.Stringify.value(fields.get(config, "meta") orelse @as(std.json.Value, .{ .object = .empty }), .{}, writer);
+            try writer.writeAll(",\"tags\":");
+            try std.json.Stringify.value(fields.get(config, "tags") orelse @as(std.json.Value, .{ .array = std.json.Array.init(std.heap.page_allocator) }), .{}, writer);
+            if (config == .object) {
+                var it = config.object.iterator();
+                while (it.next()) |entry| {
+                    if (std.mem.eql(u8, entry.key_ptr.*, "meta") or std.mem.eql(u8, entry.key_ptr.*, "tags")) continue;
+                    try writer.writeAll(",");
+                    try json.string(writer, entry.key_ptr.*);
+                    try writer.writeAll(":");
+                    try std.json.Stringify.value(entry.value_ptr.*, .{}, writer);
+                }
+            }
+            try writer.writeAll("}");
+            try writer.writeAll(",\"constraints\":");
+            try writeConstraints(writer, fields.get(column.properties, "constraints") orelse .null);
+            try writer.writeAll(",\"granularity\":");
+            try std.json.Stringify.value(fields.get(column.properties, "granularity") orelse .null, .{}, writer);
+        }
+        try writer.writeAll(",\"doc_blocks\":");
         try json.stringArray(writer, column.doc_blocks.items);
         try writer.writeAll("}");
     }
     try writer.writeAll("}");
+}
+
+fn writeConstraints(writer: *Io.Writer, constraints: std.json.Value) !void {
+    const fields = @import("config_value.zig");
+    try writer.writeAll("[");
+    if (constraints == .array) for (constraints.array.items, 0..) |constraint, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("{");
+        inline for (.{ "type", "name", "expression", "warn_unenforced", "warn_unsupported", "to", "to_columns" }, 0..) |key, field_index| {
+            if (field_index != 0) try writer.writeAll(",");
+            try json.string(writer, key);
+            try writer.writeAll(":");
+            const fallback: std.json.Value = if (std.mem.startsWith(u8, key, "warn_")) .{ .bool = true } else if (std.mem.eql(u8, key, "to_columns")) .{ .array = std.json.Array.init(std.heap.page_allocator) } else .null;
+            try std.json.Stringify.value(fields.get(constraint, key) orelse fallback, .{}, writer);
+        }
+        try writer.writeAll("}");
+    };
+    try writer.writeAll("]");
+}
+
+/// Runtime test providers expose the same resource metadata as artifacts.
+/// Worker-owned compilation fields override the read-only parsed graph node.
+pub fn testContextNode(allocator: std.mem.Allocator, graph: *const Graph, runtime_node: *const Node) !?std.json.Value {
+    var output: Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    for (graph.tests.items) |original| if (std.mem.eql(u8, original.unique_id, runtime_node.unique_id)) {
+        var node = original;
+        node.build_path = runtime_node.build_path orelse node.build_path;
+        node.compiled = runtime_node.compiled;
+        node.compiled_code = runtime_node.compiled_code;
+        node.compiled_path = runtime_node.compiled_path;
+        node.extra_ctes = runtime_node.extra_ctes;
+        try writeGenericTestNode(allocator, &output.writer, graph, node);
+        break;
+    };
+    if (output.written().len == 0) for (graph.singular_tests.items) |original| if (std.mem.eql(u8, original.unique_id, runtime_node.unique_id)) {
+        var node = original;
+        node.build_path = runtime_node.build_path orelse node.build_path;
+        node.compiled = runtime_node.compiled;
+        node.compiled_code = runtime_node.compiled_code;
+        node.compiled_path = runtime_node.compiled_path;
+        node.extra_ctes = runtime_node.extra_ctes;
+        try writeSingularTestNode(allocator, &output.writer, graph, node);
+        break;
+    };
+    if (output.written().len == 0) return null;
+    var document = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+    defer document.deinit();
+    return try @import("config_value.zig").clone(allocator, document.value);
 }
 
 fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *const Graph, test_node: GenericTestNode) !void {
@@ -894,15 +1316,37 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try json.string(writer, test_node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, test_node.name);
+    if (test_node.unrendered_config == .object) {
+        try writer.writeAll(",\"unrendered_config\":");
+        try std.json.Stringify.value(test_node.unrendered_config, .{}, writer);
+    } else try writeUnrenderedTestConfig(writer, test_node.config);
     try writer.writeAll(",\"alias\":");
-    try json.string(writer, test_node.alias);
-    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, null);
+    try json.string(writer, if (test_node.resolved_identity) |identity| identity.identifier else test_node.config.alias orelse test_node.alias);
+    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, null, test_node.config, if (test_node.fqn.items.len != 0) test_node.fqn.items else null, test_node.resolved_identity, test_node.alias);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.original_file_path));
     try writer.writeAll(",\"patch_path\":null,\"language\":\"sql\",\"raw_code\":");
-    try json.string(writer, test_node.raw_code);
+    const raw_code = try genericTestRawCode(allocator, test_node);
+    defer allocator.free(raw_code);
+    try json.string(writer, raw_code);
+    try writer.writeAll(",\"description\":");
+    try json.string(writer, test_node.description);
+    try writer.writeAll(",\"doc_blocks\":");
+    try json.stringArray(writer, test_node.doc_blocks.items);
+    try writer.writeAll(",\"tags\":");
+    try json.stringArray(writer, test_node.tags.items);
+    try writer.writeAll(",\"meta\":");
+    try std.json.Stringify.value(@import("config_value.zig").get(test_node.config_values, "meta") orelse @as(std.json.Value, .{ .object = .empty }), .{}, writer);
+    try writer.writeAll(",\"group\":");
+    try writeNullableString(writer, @import("group_access.zig").genericGroup(graph, &test_node));
+    try @import("test_provenance.zig").writeInherited(writer, test_node.config_values, test_node.created_at, test_node.build_path);
+    if (!test_node.compiled) try writer.writeAll(",\"compiled_path\":null");
+    try writer.writeAll(",\"file_key_name\":");
+    const file_key = try @import("test_provenance.zig").fileKeyName(allocator, graph, &test_node);
+    defer if (file_key) |key| allocator.free(key);
+    try writeNullableString(writer, file_key);
     try writer.writeAll(",\"attached_node\":");
     if (test_node.attached_node) |attached_node| {
         try json.string(writer, attached_node);
@@ -918,7 +1362,8 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     try writer.writeAll(",\"test_metadata\":{\"name\":");
     try json.string(writer, test_node.test_name);
     try writer.writeAll(",\"kwargs\":{\"model\":");
-    const model_kwarg = if (test_node.attached_node) |attached_node| blk: {
+    const model_kwarg = if (test_node.unattached_model_kwarg) |kwarg| try allocator.dupe(u8, kwarg) else if (test_node.attached_node) |attached_node| blk: {
+        for (graph.nodes.items) |*model| if (std.mem.eql(u8, model.unique_id, attached_node)) break :blk try @import("model_versions.zig").modelKwarg(allocator, model);
         const model_name = modelNameFromUniqueId(attached_node);
         break :blk try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
     } else blk: {
@@ -931,19 +1376,29 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
         try writer.writeAll(",\"column_name\":");
         try json.string(writer, column_name);
     }
-    if (test_node.accepted_values.items.len != 0) {
+    if (test_node.arguments == .object) {
+        var iterator = test_node.arguments.object.iterator();
+        while (iterator.next()) |entry| {
+            if (std.mem.eql(u8, entry.key_ptr.*, "model") or std.mem.eql(u8, entry.key_ptr.*, "column_name")) continue;
+            try writer.writeAll(",");
+            try json.string(writer, entry.key_ptr.*);
+            try writer.writeAll(":");
+            try std.json.Stringify.value(entry.value_ptr.*, .{}, writer);
+        }
+    }
+    if (test_node.arguments != .object and test_node.accepted_values.items.len != 0) {
         try writer.writeAll(",\"values\":");
         try json.stringArray(writer, test_node.accepted_values.items);
     }
-    if (test_node.accepted_values_quote) |quote| {
+    if (if (test_node.arguments == .object) null else test_node.accepted_values_quote) |quote| {
         try writer.writeAll(",\"quote\":");
         try writer.writeAll(if (quote) "true" else "false");
     }
-    if (test_node.relationship_to.len != 0) {
+    if (test_node.arguments != .object and test_node.relationship_to.len != 0) {
         try writer.writeAll(",\"to\":");
         try json.string(writer, test_node.relationship_to);
     }
-    if (test_node.relationship_field.len != 0) {
+    if (test_node.arguments != .object and test_node.relationship_field.len != 0) {
         try writer.writeAll(",\"field\":");
         try json.string(writer, test_node.relationship_field);
     }
@@ -953,31 +1408,11 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
     } else {
         try writer.writeAll("null");
     }
-    try writer.writeAll("},\"config\":{\"enabled\":true,\"materialized\":\"test\",\"severity\":");
-    try json.string(writer, test_node.config.severity);
-    try writer.writeAll(",\"fail_calc\":\"count(*)\",\"warn_if\":");
-    try json.string(writer, test_node.config.warn_if);
-    try writer.writeAll(",\"error_if\":");
-    try json.string(writer, test_node.config.error_if);
-    try writer.writeAll(",\"schema\":\"dbt_test__audit\",\"where\":");
-    if (test_node.config.where) |where_sql| {
-        try json.string(writer, where_sql);
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"limit\":");
-    if (test_node.config.limit) |limit| {
-        try writer.print("{d}", .{limit});
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"store_failures\":");
-    if (test_node.config.store_failures) |store_failures| {
-        try writer.writeAll(if (store_failures) "true" else "false");
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"tags\":[],\"meta\":{}},\"depends_on\":{\"macros\":");
+    try writer.writeAll("},\"config\":");
+    var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, test_node.enabled, &.{}, test_node.config_values);
+    defer @import("config_value.zig").deinit(allocator, &canonical_config);
+    try std.json.Stringify.value(canonical_config, .{}, writer);
+    try writer.writeAll(",\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, test_node.depends_on.items);
@@ -990,7 +1425,10 @@ fn writeGenericTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph:
         try json.string(writer, test_node.compiled_code orelse "");
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(test_node.compiled_path orelse ""));
-        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":false");
+        try writer.writeAll(",\"extra_ctes\":");
+        try writeExtraCtes(writer, test_node.extra_ctes.items, graph.command_options.inject_ephemeral_ctes);
+        try writer.writeAll(",\"extra_ctes_injected\":");
+        try writer.writeAll(if (graph.command_options.inject_ephemeral_ctes) "true" else "false");
     }
     try writer.writeAll("}");
 }
@@ -1002,9 +1440,10 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     try json.string(writer, test_node.package_name);
     try writer.writeAll(",\"name\":");
     try json.string(writer, test_node.name);
+    try writeUnrenderedTestConfigWithValues(writer, test_node.config, test_node.config_values);
     try writer.writeAll(",\"alias\":");
-    try json.string(writer, test_node.alias);
-    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, test_node.raw_code);
+    try json.string(writer, if (test_node.resolved_identity) |identity| identity.identifier else test_node.config.alias orelse test_node.alias);
+    try writeTestNodeIdentityFields(allocator, writer, graph, test_node.package_name, test_node.path, test_node.name, test_node.raw_code, test_node.config, null, test_node.resolved_identity, test_node.alias);
     try writer.writeAll(",\"path\":");
     try json.string(writer, util.normalizeForDisplay(test_node.path));
     try writer.writeAll(",\"original_file_path\":");
@@ -1025,35 +1464,17 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
     try json.stringArray(writer, test_node.doc_blocks.items);
     try writer.writeAll(",\"tags\":");
     try json.stringArray(writer, test_node.tags.items);
-    try writer.writeAll(",\"config\":{\"enabled\":");
-    try writer.writeAll(if (test_node.enabled) "true" else "false");
-    try writer.writeAll(",\"materialized\":\"test\",\"severity\":");
-    try json.string(writer, test_node.config.severity);
-    try writer.writeAll(",\"fail_calc\":\"count(*)\",\"warn_if\":");
-    try json.string(writer, test_node.config.warn_if);
-    try writer.writeAll(",\"error_if\":");
-    try json.string(writer, test_node.config.error_if);
-    try writer.writeAll(",\"schema\":\"dbt_test__audit\",\"where\":");
-    if (test_node.config.where) |where_sql| {
-        try json.string(writer, where_sql);
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"limit\":");
-    if (test_node.config.limit) |limit| {
-        try writer.print("{d}", .{limit});
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"store_failures\":");
-    if (test_node.config.store_failures) |store_failures| {
-        try writer.writeAll(if (store_failures) "true" else "false");
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"tags\":");
-    try json.stringArray(writer, test_node.tags.items);
-    try writer.writeAll(",\"meta\":{}},\"depends_on\":{\"macros\":");
+    try writer.writeAll(",\"config\":");
+    var canonical_config = try @import("canonical_manifest_config.zig").testConfig(allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values);
+    defer @import("config_value.zig").deinit(allocator, &canonical_config);
+    try std.json.Stringify.value(canonical_config, .{}, writer);
+    try @import("test_provenance.zig").writeInherited(writer, canonical_config, test_node.created_at, test_node.build_path);
+    if (!test_node.compiled) try writer.writeAll(",\"compiled_path\":null");
+    try writer.writeAll(",\"meta\":");
+    try std.json.Stringify.value(@import("config_value.zig").get(canonical_config, "meta") orelse @as(std.json.Value, .{ .object = .empty }), .{}, writer);
+    try writer.writeAll(",\"group\":");
+    try std.json.Stringify.value(@import("config_value.zig").get(canonical_config, "group") orelse @as(std.json.Value, .null), .{}, writer);
+    try writer.writeAll(",\"depends_on\":{\"macros\":");
     try json.stringArray(writer, test_node.macro_depends_on.items);
     try writer.writeAll(",\"nodes\":");
     try json.stringArray(writer, test_node.depends_on.items);
@@ -1066,8 +1487,111 @@ fn writeSingularTestNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph
         try json.string(writer, test_node.compiled_code orelse "");
         try writer.writeAll(",\"compiled_path\":");
         try json.string(writer, util.normalizeForDisplay(test_node.compiled_path orelse ""));
-        try writer.writeAll(",\"extra_ctes\":[],\"extra_ctes_injected\":false");
+        try writer.writeAll(",\"extra_ctes\":");
+        try writeExtraCtes(writer, test_node.extra_ctes.items, graph.command_options.inject_ephemeral_ctes);
+        try writer.writeAll(",\"extra_ctes_injected\":");
+        try writer.writeAll(if (graph.command_options.inject_ephemeral_ctes) "true" else "false");
     }
+    try writer.writeAll("}");
+}
+
+fn genericTestRawCode(allocator: std.mem.Allocator, node: GenericTestNode) ![]const u8 {
+    if (node.builder_config == .object or node.config.configured_order_len == 0) return try allocator.dupe(u8, node.raw_code);
+    var out: Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    const writer = &out.writer;
+    const config_start = std.mem.indexOf(u8, node.raw_code, "{{ config(");
+    try writer.writeAll(if (config_start) |index| node.raw_code[0..index] else node.raw_code);
+    try writer.writeAll("{{ config(");
+    for (node.config.configured_order[0..node.config.configured_order_len], 0..) |key, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll(@tagName(key));
+        try writer.writeAll("=");
+        switch (key) {
+            .where => try writeGenericConfigString(writer, node.config.where orelse ""),
+            .severity => try writeGenericConfigString(writer, node.config.severity),
+            .warn_if => try writeGenericConfigString(writer, node.config.warn_if),
+            .error_if => try writeGenericConfigString(writer, node.config.error_if),
+            .limit => if (node.config.limit) |limit| try writer.print("{d}", .{limit}) else try writer.writeAll("None"),
+            .store_failures => if (node.config.store_failures) |value| try writer.writeAll(if (value) "True" else "False") else try writer.writeAll("None"),
+            .store_failures_as => if (node.config.store_failures_as) |value| try writeGenericConfigString(writer, value) else try writer.writeAll("None"),
+            .schema => if (node.config.schema) |value| try writeGenericConfigString(writer, value) else try writer.writeAll("None"),
+            .alias => if (node.config.alias) |value| try writeGenericConfigString(writer, value) else try writer.writeAll("None"),
+            .database => if (node.config.database) |value| try writeGenericConfigString(writer, value) else try writer.writeAll("None"),
+            .fail_calc => try writeGenericConfigString(writer, node.config.fail_calc),
+        }
+    }
+    if (config_start) |start| {
+        const args_start = start + "{{ config(".len;
+        const args_end = std.mem.indexOfPos(u8, node.raw_code, args_start, ") }}") orelse return error.UnsupportedManifest;
+        if (args_end > args_start) {
+            try writer.writeAll(",");
+            try writer.writeAll(node.raw_code[args_start..args_end]);
+        }
+    }
+    try writer.writeAll(") }}");
+    return try out.toOwnedSlice();
+}
+
+fn writeGenericConfigString(writer: *Io.Writer, value: []const u8) !void {
+    try writer.writeAll("\"");
+    for (value) |byte| {
+        if (byte == '"') try writer.writeAll("\\");
+        try writer.writeByte(byte);
+    }
+    try writer.writeAll("\"");
+}
+
+fn writeUnrenderedTestConfig(writer: *Io.Writer, config: types.GenericTestConfig) !void {
+    return writeUnrenderedTestConfigWithValues(writer, config, .null);
+}
+
+fn writeUnrenderedTestConfigWithValues(writer: *Io.Writer, config: types.GenericTestConfig, extra: std.json.Value) !void {
+    try writer.writeAll(",\"unrendered_config\":{");
+    var wrote = false;
+    inline for (std.meta.fields(types.GenericTestConfigField)) |field| {
+        const key = @field(types.GenericTestConfigField, field.name);
+        const non_default = switch (key) {
+            .where => config.where != null,
+            .limit => config.limit != null,
+            .severity => !std.mem.eql(u8, config.severity, "ERROR"),
+            .warn_if => !std.mem.eql(u8, config.warn_if, "!= 0"),
+            .error_if => !std.mem.eql(u8, config.error_if, "!= 0"),
+            .store_failures => config.store_failures != null,
+            .store_failures_as => config.store_failures_as != null,
+            .schema => config.schema != null,
+            .alias => config.alias != null,
+            .database => config.database != null,
+            .fail_calc => !std.mem.eql(u8, config.fail_calc, "count(*)"),
+        };
+        if (config.configured.contains(key) or non_default) {
+            if (wrote) try writer.writeAll(",");
+            wrote = true;
+            try json.string(writer, field.name);
+            try writer.writeAll(":");
+            switch (key) {
+                .where => try writeNullableString(writer, config.where),
+                .limit => if (config.limit) |limit| try writer.print("{d}", .{limit}) else try writer.writeAll("null"),
+                .severity => try json.string(writer, config.severity),
+                .warn_if => try json.string(writer, config.warn_if),
+                .error_if => try json.string(writer, config.error_if),
+                .store_failures => try writeNullableBool(writer, config.store_failures),
+                .store_failures_as => try writeNullableString(writer, config.store_failures_as),
+                .schema => try writeNullableString(writer, config.schema),
+                .alias => try writeNullableString(writer, config.alias),
+                .database => try writeNullableString(writer, config.database),
+                .fail_calc => try json.string(writer, config.fail_calc),
+            }
+        }
+    }
+    if (extra == .object) for (extra.object.keys(), extra.object.values()) |key, value| {
+        if (std.meta.stringToEnum(types.GenericTestConfigField, key) != null) continue;
+        if (wrote) try writer.writeAll(",");
+        wrote = true;
+        try json.string(writer, key);
+        try writer.writeAll(":");
+        try std.json.Stringify.value(value, .{}, writer);
+    };
     try writer.writeAll("}");
 }
 
@@ -1105,15 +1629,11 @@ fn writeNullableBool(writer: *Io.Writer, value: ?bool) !void {
     }
 }
 
-fn writeFreshnessThreshold(writer: *Io.Writer, value: ?types.FreshnessThreshold) !void {
-    const threshold = value orelse {
-        try writer.writeAll("null");
-        return;
-    };
+fn writeSourceFreshnessThreshold(writer: *Io.Writer, threshold: types.FreshnessThreshold) !void {
     try writer.writeAll("{\"warn_after\":");
-    try writeFreshnessTime(writer, threshold.warn_after);
+    if (threshold.warn_after) |time| try writeFreshnessTime(writer, time) else try writer.writeAll("{\"count\":null,\"period\":null}");
     try writer.writeAll(",\"error_after\":");
-    try writeFreshnessTime(writer, threshold.error_after);
+    if (threshold.error_after) |time| try writeFreshnessTime(writer, time) else try writer.writeAll("{\"count\":null,\"period\":null}");
     try writer.writeAll(",\"filter\":");
     try writeNullableString(writer, threshold.filter);
     try writer.writeAll("}");
@@ -1157,7 +1677,7 @@ fn writeDocsConfig(writer: *Io.Writer, docs: DocsConfig) !void {
 fn writeJsonScalar(writer: *Io.Writer, value: JsonScalar) !void {
     switch (value.kind) {
         .string => try json.string(writer, value.text),
-        .number, .bool, .null => try writer.writeAll(value.text),
+        .number, .bool, .null, .json => try writer.writeAll(value.text),
     }
 }
 
@@ -1169,7 +1689,9 @@ fn writeRefDeps(writer: *Io.Writer, refs: []const RefDep) !void {
         try json.string(writer, ref_dep.name);
         try writer.writeAll(",\"package\":");
         try writeNullableString(writer, ref_dep.package);
-        try writer.writeAll(",\"version\":null}");
+        try writer.writeAll(",\"version\":");
+        try std.json.Stringify.value(ref_dep.version, .{}, writer);
+        try writer.writeAll("}");
     }
     try writer.writeAll("]");
 }
@@ -1194,7 +1716,7 @@ fn writeMacroArguments(writer: *Io.Writer, arguments: []const MacroArgument) !vo
         try writer.writeAll("{\"name\":");
         try json.string(writer, argument.name);
         try writer.writeAll(",\"type\":");
-        if (argument.type.len == 0) {
+        if (argument.type.len == 0 and !argument.has_type) {
             try writer.writeAll("null");
         } else {
             try json.string(writer, argument.type);
@@ -1468,6 +1990,7 @@ test "manifest writer emits node identity fields and deterministic checksums" {
 
     const seed = nodes.get("seed.demo.raw_customers").?.object;
     try std.testing.expectEqualStrings("raw_customers", seed.get("alias").?.string);
+    try std.testing.expect(!seed.contains("compiled_path"));
     try std.testing.expectEqualStrings("55c71c9b41468b359a456098ac08d1c1680c00793c36fe8d0bab95ff678e6921", seed.get("checksum").?.object.get("checksum").?.string);
 
     const generic_test = nodes.get("test.demo.not_null_orders_order_id.abc").?.object;
@@ -1575,7 +2098,7 @@ test "manifest writer emits source generic tests with null attached node" {
         test_node.get("compiled_path").?.string,
     );
     try std.testing.expectEqual(@as(usize, 0), test_node.get("extra_ctes").?.array.items.len);
-    try std.testing.expect(!test_node.get("extra_ctes_injected").?.bool);
+    try std.testing.expect(test_node.get("extra_ctes_injected").?.bool);
     const sources = test_node.get("sources").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), sources.len);
     try std.testing.expectEqualStrings("raw", sources[0].array.items[0].string);
@@ -1851,7 +2374,7 @@ test "manifest writer emits singular tests without generic-only fields" {
         test_node.get("compiled_path").?.string,
     );
     try std.testing.expectEqual(@as(usize, 0), test_node.get("extra_ctes").?.array.items.len);
-    try std.testing.expect(!test_node.get("extra_ctes_injected").?.bool);
+    try std.testing.expect(test_node.get("extra_ctes_injected").?.bool);
     try std.testing.expectEqualStrings("customers", test_node.get("refs").?.array.items[0].object.get("name").?.string);
     try std.testing.expectEqualStrings(
         "model.demo.customers",
@@ -2063,8 +2586,8 @@ test "manifest writer filters disabled resources and writes graph maps" {
     const child_map = root.get("child_map").?.object;
     const source_children = child_map.get("source.demo.raw.customers").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), source_children.len);
-    try std.testing.expectEqualStrings("model.demo.customers", source_children[0].string);
-    try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", source_children[1].string);
+    try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", source_children[0].string);
+    try std.testing.expectEqualStrings("model.demo.customers", source_children[1].string);
     const model_children = child_map.get("model.demo.customers").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), model_children.len);
     try std.testing.expectEqualStrings("exposure.demo.weekly_kpis", model_children[0].string);
@@ -2081,33 +2604,6 @@ fn writeSnapshotColumns(writer: *Io.Writer, columns: ?types.SnapshotColumns) !vo
             .list => |list| try json.stringArray(writer, list.items),
         }
     } else try writer.writeAll("null");
-}
-
-fn writeSnapshotConfig(writer: *Io.Writer, node: *const Node, config: types.SnapshotConfig) !void {
-    try writer.writeAll(",\"strategy\":");
-    try writeNullableString(writer, config.strategy);
-    try writer.writeAll(",\"unique_key\":");
-    try writeSnapshotColumns(writer, config.unique_key);
-    try writer.writeAll(",\"target_schema\":");
-    try writeNullableString(writer, config.target_schema);
-    try writer.writeAll(",\"target_database\":");
-    try writeNullableString(writer, config.target_database);
-    try writer.writeAll(",\"updated_at\":");
-    try writeNullableString(writer, config.updated_at);
-    try writer.writeAll(",\"check_cols\":");
-    try writeSnapshotColumns(writer, config.check_cols);
-    if (config.invalidate_hard_deletes) |value| {
-        try writer.writeAll(",\"invalidate_hard_deletes\":");
-        try writer.writeAll(if (value) "true" else "false");
-    }
-    if (node.config_schema) |value| {
-        try writer.writeAll(",\"schema\":");
-        try json.string(writer, value);
-    }
-    if (node.config_alias) |value| {
-        try writer.writeAll(",\"alias\":");
-        try json.string(writer, value);
-    }
 }
 
 test "snapshot manifest identity retains file checksum and block FQN" {
@@ -2132,4 +2628,36 @@ test "snapshot manifest identity retains file checksum and block FQN" {
     try std.testing.expectEqualStrings("097ad32ce920143de83bc07e2bdd8a3825c89545a9edf0bab98c93500b1518e9", node.get("checksum").?.object.get("checksum").?.string);
     try std.testing.expectEqualStrings("timestamp", node.get("config").?.object.get("strategy").?.string);
     try std.testing.expect(!disabled.get("config").?.object.get("enabled").?.bool);
+}
+
+fn writeJsonValue(writer: *Io.Writer, value: std.json.Value) anyerror!void {
+    switch (value) {
+        .null => try writer.writeAll("null"),
+        .bool => try writer.writeAll(if (value.bool) "true" else "false"),
+        .string => try json.string(writer, value.string),
+        .integer => try writer.print("{d}", .{value.integer}),
+        .float => try writer.print("{d}", .{value.float}),
+        .number_string => try writer.writeAll(value.number_string),
+        .array => {
+            try writer.writeAll("[");
+            for (value.array.items, 0..) |item, index| {
+                if (index != 0) try writer.writeAll(",");
+                try writeJsonValue(writer, item);
+            }
+            try writer.writeAll("]");
+        },
+        .object => {
+            try writer.writeAll("{");
+            var entries = value.object.iterator();
+            var count: usize = 0;
+            while (entries.next()) |entry| {
+                if (count != 0) try writer.writeAll(",");
+                try json.string(writer, entry.key_ptr.*);
+                try writer.writeAll(":");
+                try writeJsonValue(writer, entry.value_ptr.*);
+                count += 1;
+            }
+            try writer.writeAll("}");
+        },
+    }
 }

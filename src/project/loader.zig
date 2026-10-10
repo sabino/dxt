@@ -4,9 +4,13 @@ const project_fs = @import("fs.zig");
 const project_parse = @import("parse.zig");
 const project_profile = @import("profile.zig");
 const snapshot = @import("snapshot.zig");
+const snapshot_yaml = @import("snapshot_yaml.zig");
+const compiler = @import("compiler.zig");
 const project_resolve = @import("resolve.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
+const config_value = @import("config_value.zig");
+const microbatch = @import("microbatch.zig");
 
 const Runtime = types.Runtime;
 const Options = types.Options;
@@ -57,34 +61,114 @@ pub fn graphDefaultTarget(runtime: Runtime, project_dir: []const u8) ![]const u8
     return config.target_path;
 }
 
-pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Graph {
+/// Connection diagnostics deliberately do not parse model SQL or packages.
+pub fn loadConnectionGraph(base_runtime: Runtime, options: Options) !Graph {
+    var runtime = base_runtime;
+    runtime.global_options = &options;
     var config = try loadProjectConfig(runtime, options.project_dir);
     defer deinitProjectConfig(runtime.allocator, &config);
+    const profile_flags_moved = try @import("project_flags.zig").apply(runtime, options, &config);
+    var graph = Graph{ .allocator = runtime.allocator, .environment = runtime.environment, .invocation = runtime.invocation, .command_options = options, .timing_profile = runtime.timing_profile, .project_name = config.name, .project_flags_moved_deprecation = profile_flags_moved };
+    errdefer graph.deinit();
+    graph.warning_registry = try runtime.allocator.create(@import("warning_registry.zig").Registry);
+    graph.warning_registry.?.* = @import("warning_registry.zig").Registry.init(std.heap.smp_allocator, runtime.io);
+    graph.warning_registry.?.runtime = runtime;
+    const identity = (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) orelse return error.MissingProfileFile;
+    graph.adapter_type = identity.adapter_type;
+    graph.target_schema = identity.target_schema;
+    graph.database_path = identity.database_path;
+    graph.database_path_base = identity.database_path_base;
+    graph.connection_info = identity.connection_info;
+    graph.target_context = identity.target_context;
+    graph.duckdb_credentials = identity.duckdb_credentials;
+    graph.target_threads = identity.threads;
+    graph.profile_name = identity.profile_name;
+    graph.target_name = identity.target_name;
+    return graph;
+}
+
+pub fn loadGraph(base_runtime: Runtime, options: Options, callbacks: Callbacks) !Graph {
+    const timing = try @import("timing_profile.zig").start(base_runtime.timing_profile, .{ .filename = @src().file, .line = @src().line, .function = "loadGraph" });
+    defer timing.finish();
+    var runtime = base_runtime;
+    runtime.global_options = &options;
+    var cli_vars: std.ArrayList(types.VarEntry) = .empty;
+    defer types.deinitVars(runtime.allocator, &cli_vars);
+    if (options.vars) |text| try parseVarsText(runtime.allocator, text, &cli_vars);
+    var config = try project_config.loadProjectConfigWithContext(runtime, options.project_dir, cli_vars.items, .null);
+    defer deinitProjectConfig(runtime.allocator, &config);
+    const adapter_requires_batched = config.require_batched_execution_for_custom_microbatch_strategy;
+    const profile_flags_moved = try @import("project_flags.zig").apply(runtime, options, &config);
 
     var graph = Graph{
         .allocator = runtime.allocator,
+        .environment = runtime.environment,
+        .invocation = runtime.invocation,
+        .command_options = options,
+        .timing_profile = runtime.timing_profile,
         .project_name = config.name,
+        .project_flags_moved_deprecation = profile_flags_moved,
         .validate_macro_args = config.validate_macro_args,
+        .require_generic_test_arguments_property = config.require_generic_test_arguments_property,
+        .require_batched_execution_for_custom_microbatch_strategy = config.require_batched_execution_for_custom_microbatch_strategy,
+        .adapter_require_batched_execution_for_custom_microbatch_strategy = adapter_requires_batched,
+        .enable_truthy_nulls_equals_macro = config.enable_truthy_nulls_equals_macro,
+        .full_refresh = options.full_refresh,
     };
     errdefer graph.deinit();
+    graph.warning_registry = try runtime.allocator.create(@import("warning_registry.zig").Registry);
+    graph.warning_registry.?.* = @import("warning_registry.zig").Registry.init(std.heap.smp_allocator, runtime.io);
+    graph.warning_registry.?.runtime = runtime;
+    graph.relation_cache = try runtime.allocator.create(@import("relation_cache.zig").Cache);
+    graph.relation_cache.?.* = @import("relation_cache.zig").Cache.init(std.heap.smp_allocator, runtime.io);
+    graph.relation_cache.?.log_events = options.log_cache_events;
+    graph.relation_cache.?.populate = options.populate_cache;
     if (try loadAdapterIdentity(runtime, options.project_dir, &config, options)) |identity| {
         graph.adapter_type = identity.adapter_type;
         graph.target_schema = identity.target_schema;
         graph.database_path = identity.database_path;
         graph.database_path_base = identity.database_path_base;
+        graph.connection_info = identity.connection_info;
+        graph.target_context = identity.target_context;
+        graph.duckdb_credentials = identity.duckdb_credentials;
+        graph.target_threads = identity.threads;
         graph.profile_name = identity.profile_name;
         graph.target_name = identity.target_name;
+        const rendered_config = try project_config.loadProjectConfigWithContext(runtime, options.project_dir, cli_vars.items, graph.target_context);
+        deinitProjectConfig(runtime.allocator, &config);
+        config = rendered_config;
     }
+    try @import("semantic.zig").captureProject(&graph, &config);
     try appendDispatchConfigsToGraph(runtime.allocator, &graph, config.dispatch_configs.items);
     try appendSourceProjectConfigsToGraph(runtime.allocator, &graph, config.source_project_configs.items);
-    try graph.vars.appendSlice(runtime.allocator, config.vars.items);
+    for (config.vars.items) |entry| try graph.vars.append(runtime.allocator, .{
+        .name = entry.name,
+        .value = entry.value,
+        .typed_value = if (entry.typed_value) |value| try config_value.clone(runtime.allocator, value) else null,
+        .package_name = entry.package_name,
+        .priority = entry.priority,
+    });
     if (options.vars) |vars_text| {
         try parseVarsText(runtime.allocator, vars_text, &graph.vars);
     }
 
-    try loadProjectMacros(runtime, options.project_dir, config.name, config.macro_paths.items, true, callbacks, &graph);
+    const parse_state = try @import("parse_cache.zig").prepare(runtime, options, &graph, &config);
+    if (@import("parse_cache.zig").restore(runtime, parse_state, &graph)) return graph;
+    if (!options.partial_parse_file_diff) {
+        // Core's hidden no-file-diff option supplies an empty external diff:
+        // ReadFilesFromDiff reuses saved files and reads no files from disk.
+        // With no usable saved manifest, the supplied file set is empty.
+        try @import("parse_cache.zig").save(runtime, parse_state, &graph);
+        return graph;
+    }
+
+    try @import("bundled_macros.zig").load(runtime.allocator, &graph);
+    try loadProjectMacros(runtime, options.project_dir, config.name, config.macro_paths.items, config.test_paths.items, true, callbacks, &graph);
+    try loadGenericTestMacros(runtime, options.project_dir, config.name, config.test_paths.items, &graph);
     try loadInstalledPackageMacros(runtime, options.project_dir, callbacks, &graph);
+    for (graph.macros.items, 0..) |*macro, index| macro.namespace_order = index;
     try loadInstalledPackageResources(runtime, options.project_dir, callbacks, &graph);
+    try @import("doc_blocks.zig").load(runtime, options.project_dir, &config, &graph);
 
     for (config.model_paths.items) |model_path| {
         var sql_files: std.ArrayList([]const u8) = .empty;
@@ -99,18 +183,16 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
             error.FileNotFound => continue,
             else => return err,
         };
+        try project_fs.discoverPythonFiles(runtime, root, model_path, &sql_files);
         sortStrings(sql_files.items);
         sortStrings(yaml_files.items);
         sortStrings(md_files.items);
 
-        for (md_files.items) |md_path| {
-            try callbacks.parse_doc_blocks(runtime, options.project_dir, model_path, md_path, config.name, &graph);
-        }
         for (yaml_files.items) |yaml_path| {
             try callbacks.parse_yaml_properties(runtime, options.project_dir, model_path, yaml_path, config.name, &graph);
         }
         for (sql_files.items) |sql_path| {
-            try callbacks.parse_model(runtime, options.project_dir, model_path, sql_path, config.name, &graph);
+            if (std.mem.endsWith(u8, sql_path, ".py")) try callbacks.parse_model(runtime, options.project_dir, model_path, sql_path, config.name, &graph) else try @import("parse_cache.zig").model(runtime, options.project_dir, model_path, sql_path, config.name, &graph, callbacks.parse_model);
         }
     }
 
@@ -131,9 +213,6 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
         sortStrings(yaml_files.items);
         sortStrings(md_files.items);
 
-        for (md_files.items) |md_path| {
-            try callbacks.parse_doc_blocks(runtime, options.project_dir, analysis_path, md_path, config.name, &graph);
-        }
         for (yaml_files.items) |yaml_path| {
             try callbacks.parse_yaml_properties(runtime, options.project_dir, analysis_path, yaml_path, config.name, &graph);
         }
@@ -141,8 +220,6 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
             try callbacks.parse_analysis(runtime, options.project_dir, analysis_path, sql_path, config.name, &graph);
         }
     }
-
-    try applyProjectModelPathConfigs(&graph, config.model_path_configs.items, true, null);
 
     for (config.seed_paths.items) |seed_path| {
         var seed_files: std.ArrayList([]const u8) = .empty;
@@ -175,24 +252,59 @@ pub fn loadGraph(runtime: Runtime, options: Options, callbacks: Callbacks) !Grap
     }
     applyProjectSeedDocs(&graph, config.name, config.seed_docs);
     try loadSingularTests(runtime, options.project_dir, config.name, config.test_paths.items, callbacks, &graph);
+    try @import("unit_yaml.zig").loadFixtures(runtime, options.project_dir, config.name, config.test_paths.items, &graph);
     try loadSnapshots(runtime, options.project_dir, config.name, config.snapshot_paths.items, callbacks, &graph);
+    try @import("model_versions.zig").assign(&graph, config.name);
+    try applyProjectModelPathConfigs(&graph, config.model_path_configs.items, true, null);
 
     try rejectDuplicateMacroProperties(&graph);
     try applyMacroProperties(&graph);
     try callbacks.apply_singular_test_properties(&graph, config.name);
     try callbacks.apply_model_properties(&graph, config.name);
+    for (graph.nodes.items) |*node| {
+        if (!std.mem.eql(u8, node.language, "python")) continue;
+        // Core's Python model patch supplies table when properties omit a
+        // materialization. Inline config still has its usual higher priority.
+        if (config_value.get(node.property_config, "materialized") == null) {
+            try config_value.put(runtime.allocator, &node.property_config, "materialized", .{ .string = "table" });
+            try config_value.put(runtime.allocator, &node.property_raw_config, "materialized", .{ .string = "table" });
+            try @import("resource_config.zig").rebuild(runtime.allocator, node);
+        }
+    }
+    try project_resolve.rejectDuplicateSnapshots(&graph);
+    for (graph.nodes.items) |*node| {
+        if (node.snapshot_config == null) continue;
+        node.refs.clearRetainingCapacity();
+        node.source_refs.clearRetainingCapacity();
+        try compiler.scanDependencies(runtime.allocator, node.raw_code, node, &graph);
+    }
+    try snapshot_yaml.finalize(runtime, &graph);
+    try @import("contracts.zig").finalize(runtime, &graph);
+    // Generic TestMacroNamespace includes seeded macros' static dependencies
+    // before rendering schema-test bodies and their config calls.
+    try rejectDuplicateMacros(&graph);
+    try callbacks.resolve_macro_dependencies(&graph);
     try callbacks.materialize_generic_tests(&graph);
+    try @import("generic_test_config.zig").finalize(runtime, &graph);
+    try @import("test_provenance.zig").initialize(runtime, &graph);
+    try @import("unit_metadata.zig").checksums(&graph);
+    try @import("unit_versions.zig").assign(&graph);
+    try @import("hook_operations.zig").load(runtime, &graph);
+    try rejectDuplicateDocs(&graph);
+    try @import("naming.zig").finalize(runtime, &graph);
+    try snapshot_yaml.rejectRelationCollisions(&graph);
+    try @import("doc_context.zig").finalize(runtime, &graph);
     sortGraphResources(&graph);
     try rejectDuplicateAnalyses(&graph);
     try rejectDuplicateModels(&graph);
     try rejectDuplicateSeeds(&graph);
-    try project_resolve.rejectDuplicateSnapshots(&graph);
     try rejectDuplicateSingularTests(&graph);
-    try rejectDuplicateDocs(&graph);
     try rejectDuplicateExposures(&graph);
     try rejectDuplicateUnitTests(&graph);
-    try rejectDuplicateMacros(&graph);
-    try callbacks.resolve_macro_dependencies(&graph);
+    for (graph.nodes.items) |*node| if (node.enabled and microbatch.enabled(node)) {
+        try microbatch.normalizeConfig(runtime.allocator, node);
+    };
+    try @import("parse_cache.zig").save(runtime, parse_state, &graph);
     return graph;
 }
 
@@ -209,10 +321,14 @@ fn appendDispatchConfigsToGraph(allocator: std.mem.Allocator, graph: *Graph, con
 }
 
 fn appendSourceProjectConfigsToGraph(allocator: std.mem.Allocator, graph: *Graph, configs: []const SourceProjectConfig) !void {
-    try graph.source_project_configs.appendSlice(allocator, configs);
+    for (configs) |config| {
+        var copied = config;
+        copied.values = try config_value.clone(allocator, config.values);
+        try graph.source_project_configs.append(allocator, copied);
+    }
 }
 
-fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []const u8, macro_paths: []const []const u8, parse_properties: bool, callbacks: Callbacks, graph: *Graph) !void {
+fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []const u8, macro_paths: []const []const u8, test_paths: []const []const u8, parse_properties: bool, callbacks: Callbacks, graph: *Graph) !void {
     for (macro_paths) |macro_path| {
         var macro_files: std.ArrayList([]const u8) = .empty;
         defer macro_files.deinit(runtime.allocator);
@@ -233,13 +349,51 @@ fn loadProjectMacros(runtime: Runtime, project_dir: []const u8, package_name: []
             }
         }
         for (macro_files.items) |relative_path| {
+            if (isGenericTestMacroPath(relative_path, test_paths)) continue;
             try callbacks.parse_macros(runtime, project_dir, relative_path, package_name, graph);
         }
     }
 }
 
+fn isGenericTestMacroPath(relative_path: []const u8, test_paths: []const []const u8) bool {
+    for (test_paths) |test_path| {
+        const path = project_fs.relativeUnderResourcePath(relative_path, test_path);
+        if (path.len != relative_path.len and (std.mem.startsWith(u8, path, "generic/") or std.mem.startsWith(u8, path, "generic\\"))) return true;
+    }
+    return false;
+}
+
+fn loadGenericTestMacros(runtime: Runtime, project_dir: []const u8, package_name: []const u8, test_paths: []const []const u8, graph: *Graph) !void {
+    for (test_paths) |test_path| {
+        const generic_path = try pathJoin(runtime.allocator, &.{ test_path, "generic" });
+        var sql_files: std.ArrayList([]const u8) = .empty;
+        defer sql_files.deinit(runtime.allocator);
+        var yaml_files: std.ArrayList([]const u8) = .empty;
+        defer yaml_files.deinit(runtime.allocator);
+        const root = try pathJoin(runtime.allocator, &.{ project_dir, generic_path });
+        discoverMacroFiles(runtime, root, generic_path, &sql_files, &yaml_files) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        sortStrings(sql_files.items);
+        for (sql_files.items) |relative_path| try project_parse.parseGenericTestMacros(runtime, project_dir, relative_path, package_name, graph);
+    }
+}
+
+fn cliVariableMap(allocator: std.mem.Allocator, vars: []const types.VarEntry) !std.json.Value {
+    var result: std.json.Value = .{ .object = .empty };
+    errdefer config_value.deinit(allocator, &result);
+    for (vars) |entry| {
+        if (entry.priority < 100 or entry.package_name != null) continue;
+        try config_value.put(allocator, &result, entry.name, entry.typed_value orelse .{ .string = entry.value });
+    }
+    return result;
+}
+
 fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, callbacks: Callbacks, graph: *Graph) !void {
-    const packages_dir = try pathJoin(runtime.allocator, &.{ project_dir, "dbt_packages" });
+    var install_vars = try cliVariableMap(runtime.allocator, graph.vars.items);
+    defer config_value.deinit(runtime.allocator, &install_vars);
+    const packages_dir = try @import("dependencies.zig").installPathWithVars(runtime, project_dir, install_vars);
     var package_dirs: std.ArrayList([]const u8) = .empty;
     defer package_dirs.deinit(runtime.allocator);
 
@@ -247,21 +401,31 @@ fn loadInstalledPackageMacros(runtime: Runtime, project_dir: []const u8, callbac
         error.FileNotFound => return,
         else => return err,
     };
-    sortStrings(package_dirs.items);
+    // Core preserves installed-directory discovery order. Its global macro
+    // namespace lets later packages win collisions, so sorting these paths
+    // changes generic-test bodies and argument-helper visibility.
 
     for (package_dirs.items) |package_dir| {
-        var package_config = loadProjectConfig(runtime, package_dir) catch |err| switch (err) {
+        var package_config = project_config.loadProjectConfigWithContext(runtime, package_dir, graph.vars.items, graph.target_context) catch |err| switch (err) {
             error.MissingProjectFile => continue,
             else => return err,
         };
         defer deinitProjectConfig(runtime.allocator, &package_config);
 
-        try loadProjectMacros(runtime, package_dir, package_config.name, package_config.macro_paths.items, true, callbacks, graph);
+        for (package_config.vars.items) |entry| {
+            const scope = entry.package_name orelse package_config.name;
+            try graph.vars.append(runtime.allocator, .{ .name = entry.name, .value = entry.value, .typed_value = if (entry.typed_value) |v| try config_value.clone(runtime.allocator, v) else null, .package_name = scope, .priority = if (entry.package_name == null) 10 else 20 });
+        }
+
+        try loadProjectMacros(runtime, package_dir, package_config.name, package_config.macro_paths.items, package_config.test_paths.items, true, callbacks, graph);
+        try loadGenericTestMacros(runtime, package_dir, package_config.name, package_config.test_paths.items, graph);
     }
 }
 
 fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, callbacks: Callbacks, graph: *Graph) !void {
-    const packages_dir = try pathJoin(runtime.allocator, &.{ project_dir, "dbt_packages" });
+    var install_vars = try cliVariableMap(runtime.allocator, graph.vars.items);
+    defer config_value.deinit(runtime.allocator, &install_vars);
+    const packages_dir = try @import("dependencies.zig").installPathWithVars(runtime, project_dir, install_vars);
     var package_dirs: std.ArrayList([]const u8) = .empty;
     defer package_dirs.deinit(runtime.allocator);
 
@@ -269,14 +433,16 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
         error.FileNotFound => return,
         else => return err,
     };
-    sortStrings(package_dirs.items);
+    // Core's doc fallback preserves installed-directory discovery order.
 
     for (package_dirs.items) |package_dir| {
-        var package_config = loadProjectConfig(runtime, package_dir) catch |err| switch (err) {
+        var package_config = project_config.loadProjectConfigWithContext(runtime, package_dir, graph.vars.items, graph.target_context) catch |err| switch (err) {
             error.MissingProjectFile => continue,
             else => return err,
         };
         defer deinitProjectConfig(runtime.allocator, &package_config);
+        try @import("semantic.zig").captureProject(graph, &package_config);
+        try @import("doc_blocks.zig").load(runtime, package_dir, &package_config, graph);
 
         for (package_config.model_paths.items) |model_path| {
             var sql_files: std.ArrayList([]const u8) = .empty;
@@ -291,19 +457,17 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
                 error.FileNotFound => continue,
                 else => return err,
             };
+            try project_fs.discoverPythonFiles(runtime, root, model_path, &sql_files);
             sortStrings(sql_files.items);
             sortStrings(yaml_files.items);
             sortStrings(md_files.items);
 
-            for (md_files.items) |md_path| {
-                try callbacks.parse_doc_blocks(runtime, package_dir, model_path, md_path, package_config.name, graph);
-            }
             for (yaml_files.items) |yaml_path| {
                 try callbacks.parse_yaml_properties(runtime, package_dir, model_path, yaml_path, package_config.name, graph);
             }
 
             for (sql_files.items) |sql_path| {
-                try callbacks.parse_model(runtime, package_dir, model_path, sql_path, package_config.name, graph);
+                if (std.mem.endsWith(u8, sql_path, ".py")) try callbacks.parse_model(runtime, package_dir, model_path, sql_path, package_config.name, graph) else try @import("parse_cache.zig").model(runtime, package_dir, model_path, sql_path, package_config.name, graph, callbacks.parse_model);
             }
         }
 
@@ -324,9 +488,6 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
             sortStrings(yaml_files.items);
             sortStrings(md_files.items);
 
-            for (md_files.items) |md_path| {
-                try callbacks.parse_doc_blocks(runtime, package_dir, analysis_path, md_path, package_config.name, graph);
-            }
             for (yaml_files.items) |yaml_path| {
                 try callbacks.parse_yaml_properties(runtime, package_dir, analysis_path, yaml_path, package_config.name, graph);
             }
@@ -364,12 +525,14 @@ fn loadInstalledPackageResources(runtime: Runtime, project_dir: []const u8, call
                 try callbacks.parse_seed(runtime, package_dir, seed_path, relative_path, package_config.name, graph);
             }
         }
-        try applyProjectModelPathConfigs(graph, package_config.model_path_configs.items, false, package_config.name);
-        try callbacks.apply_model_properties(graph, package_config.name);
         applyProjectSeedDocs(graph, package_config.name, package_config.seed_docs);
         try loadSingularTests(runtime, package_dir, package_config.name, package_config.test_paths.items, callbacks, graph);
+        try @import("unit_yaml.zig").loadFixtures(runtime, package_dir, package_config.name, package_config.test_paths.items, graph);
         try callbacks.apply_singular_test_properties(graph, package_config.name);
         try loadSnapshots(runtime, package_dir, package_config.name, package_config.snapshot_paths.items, callbacks, graph);
+        try @import("model_versions.zig").assign(graph, package_config.name);
+        try applyProjectModelPathConfigs(graph, package_config.model_path_configs.items, false, package_config.name);
+        try callbacks.apply_model_properties(graph, package_config.name);
     }
 }
 

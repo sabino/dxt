@@ -7,38 +7,105 @@ const project_fs = @import("fs.zig");
 
 pub const max_served_file_bytes = 64 * 1024 * 1024;
 
-const index_html =
-    \\<!doctype html>
-    \\<html lang="en">
-    \\<head>
-    \\  <meta charset="utf-8">
-    \\  <meta name="viewport" content="width=device-width, initial-scale=1">
-    \\  <title>dxt docs</title>
-    \\  <style>
-    \\    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 56rem; line-height: 1.5; }
-    \\    code { background: #f4f4f5; padding: 0.1rem 0.25rem; border-radius: 0.25rem; }
-    \\    a { color: #075985; }
-    \\  </style>
-    \\</head>
-    \\<body>
-    \\  <h1>dxt docs</h1>
-    \\  <p>This pre-alpha docs server serves generated dbt-shaped artifacts from the target directory.</p>
-    \\  <ul>
-    \\    <li><a href="/manifest.json"><code>manifest.json</code></a></li>
-    \\    <li><a href="/catalog.json"><code>catalog.json</code></a></li>
-    \\  </ul>
-    \\</body>
-    \\</html>
-    \\
-;
+const index_html = @import("docs_ui").index_html;
 
-pub fn serve(runtime: types.Runtime, options: types.Options, target_dir: []const u8, stdout: *Io.Writer) !void {
-    if (options.docs_open_browser) return error.UnsupportedDocsBrowserOpen;
-
-    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
+pub fn writeIndex(runtime: types.Runtime, target_dir: []const u8, static: bool) !void {
+    const page = try renderIndexHtml(runtime.allocator);
+    defer runtime.allocator.free(page);
     const index_path = try project_fs.pathJoin(runtime.allocator, &.{ target_dir, "index.html" });
     defer runtime.allocator.free(index_path);
-    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = index_path, .data = index_html });
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = index_path, .data = page });
+    if (!static) return;
+    const manifest_path = try project_fs.pathJoin(runtime.allocator, &.{ target_dir, "manifest.json" });
+    defer runtime.allocator.free(manifest_path);
+    const catalog_path = try project_fs.pathJoin(runtime.allocator, &.{ target_dir, "catalog.json" });
+    defer runtime.allocator.free(catalog_path);
+    const manifest = try std.Io.Dir.cwd().readFileAlloc(runtime.io, manifest_path, runtime.allocator, .limited(max_served_file_bytes));
+    defer runtime.allocator.free(manifest);
+    const catalog = try std.Io.Dir.cwd().readFileAlloc(runtime.io, catalog_path, runtime.allocator, .limited(max_served_file_bytes));
+    defer runtime.allocator.free(catalog);
+    const result = try renderStaticPage(runtime.allocator, page, manifest, catalog);
+    defer runtime.allocator.free(result);
+    const static_path = try project_fs.pathJoin(runtime.allocator, &.{ target_dir, "static_index.html" });
+    defer runtime.allocator.free(static_path);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = static_path, .data = result });
+}
+
+fn renderIndexHtml(allocator: std.mem.Allocator) ![]const u8 {
+    var page = try allocator.dupe(u8, index_html);
+    errdefer allocator.free(page);
+    const changes = [_]struct { from: []const u8, to: []const u8 }{
+        .{ .from = "dbt Docs", .to = "dxt docs" },
+        .{ .from = "documentation for dbt", .to = "documentation for dxt" },
+        .{ .from = "<img style=\"width: 100px; height: 40px\" class=\"logo\" ng-src=\"{{ logo }}\" />", .to = "<span style=\"font:700 28px system-ui;color:#16302b\">dxt</span>" },
+        .{ .from = "${require('./assets/favicons/favicon.ico')}", .to = "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2016%2016'%3E%3Ctext%20y='13'%20font-size='14'%3Ed%3C/text%3E%3C/svg%3E" },
+        .{ .from = " src=\"{{ getIcon", .to = " ng-src=\"{{ getIcon" },
+    };
+    for (changes) |change| {
+        const previous = page;
+        page = try std.mem.replaceOwned(u8, allocator, previous, change.from, change.to);
+        allocator.free(previous);
+    }
+    return page;
+}
+
+fn renderStaticPage(allocator: std.mem.Allocator, page: []const u8, manifest: []const u8, catalog: []const u8) ![]const u8 {
+    const replacements = [_]struct { token: []const u8, data: []const u8 }{
+        .{ .token = "\"MANIFEST.JSON INLINE DATA\"", .data = manifest },
+        .{ .token = "\"CATALOG.JSON INLINE DATA\"", .data = catalog },
+    };
+    var out: Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    var offset: usize = 0;
+    while (offset < page.len) {
+        var next: ?usize = null;
+        var replacement: usize = 0;
+        for (replacements, 0..) |item, i| {
+            if (std.mem.indexOfPos(u8, page, offset, item.token)) |position| {
+                if (next == null or position < next.?) {
+                    next = position;
+                    replacement = i;
+                }
+            }
+        }
+        const position = next orelse break;
+        try out.writer.writeAll(page[offset..position]);
+        // JSON '<' characters only occur inside strings. Escaping them prevents
+        // model SQL or descriptions from terminating the enclosing script tag.
+        for (replacements[replacement].data) |character| {
+            if (character == '<') try out.writer.writeAll("\\u003c") else try out.writer.writeByte(character);
+        }
+        offset = position + replacements[replacement].token.len;
+    }
+    try out.writer.writeAll(page[offset..]);
+    return out.toOwnedSlice();
+}
+
+fn openBrowser(runtime: types.Runtime, options: types.Options, stdout: *Io.Writer) !void {
+    const host = if (std.mem.eql(u8, options.docs_host, "0.0.0.0") or std.mem.eql(u8, options.docs_host, "::")) "localhost" else options.docs_host;
+    const url = try std.fmt.allocPrint(runtime.allocator, "http://{s}:{d}", .{ host, options.docs_port });
+    defer runtime.allocator.free(url);
+    const opener = if (@import("builtin").os.tag == .macos) "open" else "xdg-open";
+    var child = std.process.spawn(runtime.io, .{ .argv = &.{ opener, url }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore }) catch {
+        try stdout.writeAll("Browser launcher unavailable; open the URL above.\n");
+        try stdout.flush();
+        return;
+    };
+    const thread = std.Thread.spawn(.{}, waitBrowser, .{ runtime.io, child }) catch {
+        child.kill(runtime.io);
+        return;
+    };
+    thread.detach();
+}
+
+fn waitBrowser(io: Io, process: std.process.Child) void {
+    var child = process;
+    _ = child.wait(io) catch {};
+}
+
+pub fn serve(runtime: types.Runtime, options: types.Options, target_dir: []const u8, stdout: *Io.Writer) !void {
+    try std.Io.Dir.cwd().createDirPath(runtime.io, target_dir);
+    try writeIndex(runtime, target_dir, false);
 
     var address = try Io.net.IpAddress.resolve(runtime.io, options.docs_host, options.docs_port);
     var server = try address.listen(runtime.io, .{
@@ -47,15 +114,33 @@ pub fn serve(runtime: types.Runtime, options: types.Options, target_dir: []const
     });
     defer server.deinit(runtime.io);
 
-    try stdout.print("Serving docs at {d}\n", .{options.docs_port});
-    try stdout.print("To access from your browser, navigate to: http://{s}:{d}\n", .{ options.docs_host, options.docs_port });
-    try stdout.writeAll("\n\nPress Ctrl+C to exit.\n");
+    var startup: std.Io.Writer.Allocating = .init(runtime.allocator);
+    defer startup.deinit();
+    try startup.writer.print("Serving docs at {d}\n", .{options.docs_port});
+    try startup.writer.print("To access from your browser, navigate to: http://{s}:{d}\n", .{ options.docs_host, options.docs_port });
+    try startup.writer.writeAll("\n\nPress Ctrl+C to exit.\n");
+    if (options.docs_open_browser) try openBrowser(runtime, options, &startup.writer);
+    var diagnostics: std.Io.Writer.Discarding = .init(&.{});
+    try @import("cli_logs.zig").finish(runtime, options, &.{ "dxt", "docs", "serve" }, stdout, &diagnostics.writer, startup.written(), "");
     try stdout.flush();
 
     while (true) {
         const stream = try server.accept(runtime.io);
-        accept(runtime, stream, target_dir) catch {};
+        const thread = std.Thread.spawn(.{}, serveConnection, .{ runtime, stream, target_dir }) catch {
+            var rejected = stream;
+            rejected.close(runtime.io);
+            continue;
+        };
+        thread.detach();
     }
+}
+
+fn serveConnection(runtime: types.Runtime, stream: Io.net.Stream, target_dir: []const u8) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var connection_runtime = runtime;
+    connection_runtime.allocator = arena.allocator();
+    accept(connection_runtime, stream, target_dir) catch {};
 }
 
 fn accept(runtime: types.Runtime, stream: Io.net.Stream, target_dir: []const u8) !void {
@@ -74,7 +159,7 @@ fn accept(runtime: types.Runtime, stream: Io.net.Stream, target_dir: []const u8)
             else => return,
         };
         try serveRequest(runtime, &request, target_dir);
-        if (!request.head.keep_alive) return;
+        return;
     }
 }
 
@@ -96,6 +181,7 @@ fn serveRequest(runtime: types.Runtime, request: *http.Server.Request, target_di
     defer runtime.allocator.free(file_contents);
 
     try request.respond(file_contents, .{
+        .keep_alive = false,
         .extra_headers = &.{
             .{ .name = "Content-Type", .value = contentType(relative_path) },
             .{ .name = "Cache-Control", .value = "no-store" },
@@ -106,6 +192,7 @@ fn serveRequest(runtime: types.Runtime, request: *http.Server.Request, target_di
 fn respondText(request: *http.Server.Request, status: http.Status, body: []const u8, content_type: []const u8) !void {
     try request.respond(body, .{
         .status = status,
+        .keep_alive = false,
         .extra_headers = &.{
             .{ .name = "Content-Type", .value = content_type },
             .{ .name = "Cache-Control", .value = "no-store" },
@@ -163,4 +250,11 @@ test "docs serve assigns common content types" {
     try std.testing.expectEqualStrings("application/json; charset=utf-8", contentType("manifest.json"));
     try std.testing.expectEqualStrings("text/plain; charset=utf-8", contentType("compiled/pkg/models/orders.sql"));
     try std.testing.expectEqualStrings("application/octet-stream", contentType("asset.bin"));
+}
+
+test "static docs inline artifacts once and escape script terminators" {
+    const page = "manifest=\"MANIFEST.JSON INLINE DATA\";catalog=\"CATALOG.JSON INLINE DATA\";";
+    const result = try renderStaticPage(std.testing.allocator, page, "{\"raw_code\":\"</script> \\\"CATALOG.JSON INLINE DATA\\\"\"}", "{}");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("manifest={\"raw_code\":\"\\u003c/script> \\\"CATALOG.JSON INLINE DATA\\\"\"};catalog={};", result);
 }

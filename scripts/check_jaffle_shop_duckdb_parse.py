@@ -7,15 +7,18 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DXT = ROOT / "zig-out" / "bin" / "dxt"
 DEFAULT_REPO_URL = "https://github.com/dbt-labs/jaffle_shop_duckdb.git"
 DEFAULT_REF = "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb"
-SCHEMA_VALIDATOR_PATH = ROOT / "scripts" / "validate_manifest_schema.py"
+SCHEMA_VALIDATOR_PATH = ROOT / "scripts" / "validate_dbt_artifacts.py"
 
 EXPECTED_MODELS = [
     "model.jaffle_shop.customers",
@@ -30,6 +33,7 @@ EXPECTED_SEEDS = [
     "seed.jaffle_shop.raw_payments",
 ]
 EXPECTED_DOCS = [
+    "doc.dbt.__overview__",
     "doc.jaffle_shop.__overview__",
     "doc.jaffle_shop.orders_status",
 ]
@@ -75,6 +79,10 @@ EXPECTED_ORDERS_PLUS = [
 ]
 
 
+if __name__ == "__main__":
+    sys.modules.setdefault("check_jaffle_shop_duckdb_parse", sys.modules[__name__])
+
+
 class GateError(Exception):
     pass
 
@@ -106,10 +114,43 @@ def load_schema_validator() -> Any:
 
 def run(args: list[str | Path], *, cwd: Path) -> subprocess.CompletedProcess[str]:
     command = [str(arg) for arg in args]
-    try:
-        result = subprocess.run(command, cwd=cwd, text=True, capture_output=True)
-    except FileNotFoundError as exc:
-        raise GateError(f"command not found: {command[0]}") from exc
+    with ExitStack() as cleanup:
+        # This unchanged public revision requires Core >=1.11 and its nested
+        # test-argument default. Our pinned 1.10.5 comparison uses the explicit
+        # version override and its existing behavior flag in an external
+        # profile, identically for Core and dxt. No authored file is rewritten.
+        if "--project-dir" in command:
+            command.append("--no-version-check")
+            project = Path(command[command.index("--project-dir") + 1])
+            profile_source = project
+            if "--profiles-dir" in command:
+                profile_source = Path(command[command.index("--profiles-dir") + 1])
+            cwd = project.resolve()
+            profiles_file = profile_source / "profiles.yml"
+            if profiles_file.is_file():
+                project_config = yaml.safe_load((project / "dbt_project.yml").read_text())
+                if not project_config.get("flags"):
+                    profiles = yaml.safe_load(profiles_file.read_text())
+                    profiles.setdefault("config", {})["require_generic_test_arguments_property"] = True
+                    # External profiles isolate each copied project while retaining
+                    # the authored database basename and Core CWD-relative policy.
+                    for profile in profiles.values():
+                        if not isinstance(profile, dict):
+                            continue
+                        for output in profile.get("outputs", {}).values():
+                            path = output.get("path")
+                            if output.get("type") == "duckdb" and path and path != ":memory:" and not Path(path).is_absolute():
+                                output["path"] = str((cwd / path).resolve())
+                    profile_dir = Path(cleanup.enter_context(tempfile.TemporaryDirectory(prefix="dxt-jaffle-profiles-")))
+                    (profile_dir / "profiles.yml").write_text(yaml.safe_dump(profiles))
+                    if "--profiles-dir" in command:
+                        command[command.index("--profiles-dir") + 1] = str(profile_dir)
+                    else:
+                        command.extend(["--profiles-dir", str(profile_dir)])
+        try:
+            result = subprocess.run(command, cwd=cwd, text=True, capture_output=True)
+        except FileNotFoundError as exc:
+            raise GateError(f"command not found: {command[0]}") from exc
     if result.returncode != 0:
         raise GateError(
             f"command failed with exit code {result.returncode}: {display_command(command)}\n"
@@ -179,17 +220,15 @@ def assert_no_absolute_paths(value: Any, *, key: str = "$", project_dir: Path) -
 def validate_manifest_shape(manifest_path: Path, project_dir: Path) -> None:
     schema_validator = load_schema_validator()
     manifest = load_manifest(manifest_path)
-    schema = schema_validator.load_json(schema_validator.DEFAULT_SCHEMA)
-    errors = schema_validator.validate_manifest(manifest, schema)
+    errors = schema_validator.validate_artifact(manifest)
     if errors:
         formatted = "\n".join(f"  - {error}" for error in errors)
-        raise GateError(f"manifest schema slice validation failed:\n{formatted}")
+        raise GateError(f"complete upstream Manifest schema validation failed:\n{formatted}")
 
     assert_equal("project name", manifest["metadata"]["project_name"], "jaffle_shop")
     assert_equal("manifest schema version", manifest["metadata"]["dbt_schema_version"], "https://schemas.getdbt.com/dbt/manifest/v12.json")
-    assert_equal("manifest dbt version", manifest["metadata"]["dbt_version"], "0.0.0")
-    assert_equal("manifest invocation id", manifest["metadata"]["invocation_id"], None)
-    assert_equal("manifest invocation started at", manifest["metadata"]["invocation_started_at"], None)
+    from jaffle_core_oracle import validate_metadata
+    validate_metadata(manifest["metadata"], engine="dxt")
     assert_equal("manifest env", manifest["metadata"]["env"], {})
     assert_equal("model unique ids", sorted(id for id in manifest["nodes"] if id.startswith("model.")), EXPECTED_MODELS)
     assert_equal("seed unique ids", sorted(id for id in manifest["nodes"] if id.startswith("seed.")), EXPECTED_SEEDS)
@@ -197,7 +236,7 @@ def validate_manifest_shape(manifest_path: Path, project_dir: Path) -> None:
     assert_equal("docs unique ids", sorted(manifest["docs"]), EXPECTED_DOCS)
     assert_equal("sources", manifest["sources"], {})
     assert_equal("exposures", manifest["exposures"], {})
-    assert_equal("macros", manifest["macros"], {})
+    assert_equal("complete bundled macro count", len(manifest["macros"]), 431)
     assert_equal("disabled", manifest["disabled"], {})
     if "dxt_metadata" in manifest:
         raise GateError("manifest must not emit dxt_metadata in the dbt artifact")
@@ -238,7 +277,7 @@ def validate_manifest_shape(manifest_path: Path, project_dir: Path) -> None:
     assert_equal(
         "relationships test macro deps",
         manifest["nodes"][relationships_id]["depends_on"]["macros"],
-        ["macro.dbt.test_relationships", "macro.dbt.get_where_subquery"],
+        ["macro.dbt.test_relationships", "macro.dbt.get_where_subquery"] + (["macro.dbt.get_limit_subquery_sql", "macro.dbt.should_store_failures", "macro.dbt.statement"] if manifest["nodes"][relationships_id].get("compiled") and (manifest_path.parent / "run_results.json").exists() and json.loads((manifest_path.parent / "run_results.json").read_text())["args"]["which"] == "build" else []),
     )
     assert_equal(
         "customers depends_on nodes",
@@ -295,6 +334,11 @@ def validate_manifest_shape(manifest_path: Path, project_dir: Path) -> None:
     assert_equal("customers docs color", manifest["nodes"]["model.jaffle_shop.customers"]["config"]["docs"]["node_color"], "gold")
     assert_equal("orders docs color", manifest["nodes"]["model.jaffle_shop.orders"]["config"]["docs"]["node_color"], "gold")
     assert_no_absolute_paths(manifest, project_dir=project_dir)
+    from jaffle_core_oracle import reference, command_for_manifest, compare_manifest, compare_results
+    with reference(project_dir, command_for_manifest(manifest_path)) as (_, core_target, expected):
+        compare_manifest(manifest, expected)
+        if (manifest_path.parent / "run_results.json").exists():
+            compare_results(manifest_path.parent / "run_results.json", core_target / "run_results.json")
 
 
 def run_parse_gate(dxt: Path, project_dir: Path, target_dir: Path) -> Path:
@@ -306,29 +350,30 @@ def run_parse_gate(dxt: Path, project_dir: Path, target_dir: Path) -> Path:
 
 
 def ls_text(dxt: Path, project_dir: Path, selector: str) -> list[str]:
-    result = run([dxt, "ls", "--project-dir", project_dir, "--select", selector], cwd=ROOT)
+    result = run([dxt, "--quiet", "ls", "--project-dir", project_dir, "--select", selector, "--output", "text"], cwd=ROOT)
     return result.stdout.splitlines()
 
 
 def ls_json(dxt: Path, project_dir: Path, selector: str) -> list[str]:
-    result = run([dxt, "ls", "--project-dir", project_dir, "--select", selector, "--output", "json"], cwd=ROOT)
-    data = json.loads(result.stdout)
+    result = run([dxt, "--quiet", "ls", "--project-dir", project_dir, "--select", selector, "--output", "json"], cwd=ROOT)
+    data = [json.loads(line) for line in result.stdout.splitlines()]
     return [item["unique_id"] for item in data]
 
 
 def ls_resource_type_json(dxt: Path, project_dir: Path, resource_type: str) -> list[str]:
-    result = run([dxt, "ls", "--project-dir", project_dir, "--resource-type", resource_type, "--output", "json"], cwd=ROOT)
-    data = json.loads(result.stdout)
+    result = run([dxt, "--quiet", "ls", "--project-dir", project_dir, "--resource-type", resource_type, "--output", "json"], cwd=ROOT)
+    data = [json.loads(line) for line in result.stdout.splitlines()]
     return [item["unique_id"] for item in data]
 
 
 def validate_selectors(dxt: Path, project_dir: Path) -> None:
     assert_equal("model resource-type selector", ls_resource_type_json(dxt, project_dir, "model"), EXPECTED_MODELS)
     assert_equal("seed resource-type selector", ls_resource_type_json(dxt, project_dir, "seed"), EXPECTED_SEEDS)
-    assert_equal("view materialization selector", ls_json(dxt, project_dir, "config.materialized:view"), EXPECTED_STAGING_MODELS)
+    staging = ls_json(dxt, project_dir, "fqn:*.stg_*")
+    assert_equal("view materialization selector", ls_json(dxt, project_dir, "config.materialized:view"), staging)
     assert_equal(
         "staging wildcard selector",
-        ls_text(dxt, project_dir, "stg_*"),
+        ls_json(dxt, project_dir, "fqn:*.stg_*"),
         [
             "model.jaffle_shop.stg_customers",
             "model.jaffle_shop.stg_orders",
@@ -345,7 +390,7 @@ def validate_selectors(dxt: Path, project_dir: Path) -> None:
     )
     assert_equal(
         "graph expansion selector",
-        ls_text(dxt, project_dir, "customers+"),
+        ls_json(dxt, project_dir, "customers+"),
         [
             "model.jaffle_shop.customers",
             "test.jaffle_shop.not_null_customers_customer_id.5c9bf9911d",
@@ -356,9 +401,16 @@ def validate_selectors(dxt: Path, project_dir: Path) -> None:
     assert_equal(
         "staging path selector",
         ls_json(dxt, project_dir, "path:models/staging/*.sql"),
-        EXPECTED_STAGING_MODELS,
+        staging,
     )
     assert_equal("orders graph expansion selector", ls_json(dxt, project_dir, "orders+"), EXPECTED_ORDERS_PLUS)
+    from jaffle_core_oracle import reference
+    with reference(project_dir) as (core_project, _, _):
+        core = Path("dbt")
+        for selection in ["config.materialized:view", "fqn:*.stg_*", "customers+", "path:models/staging/*.sql", "orders+"]:
+            assert_equal(f"{selection} IDs against Core", ls_json(dxt, project_dir, selection), ls_json(core, core_project, selection))
+        for resource_type in ["model", "seed"]:
+            assert_equal(f"{resource_type} IDs against Core", ls_resource_type_json(dxt, project_dir, resource_type), ls_resource_type_json(core, core_project, resource_type))
 
 
 def parse_args() -> argparse.Namespace:
@@ -395,6 +447,8 @@ def main() -> int:
                 if not (project_dir / "dbt_project.yml").exists():
                     raise GateError(f"--project-dir does not look like a dbt project: {project_dir}")
 
+            from check_jaffle_shop_duckdb_build import copy_public_project
+            project_dir = copy_public_project(project_dir, workdir / "project")
             target_dir = workdir / "target-dxt"
             manifest_path = run_parse_gate(dxt, project_dir, target_dir)
             validate_manifest_shape(manifest_path, project_dir)

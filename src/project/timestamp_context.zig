@@ -1,0 +1,376 @@
+//! Native UTC datetime values exposed by dbt's microbatch model context.
+const std = @import("std");
+const expression = @import("expression.zig");
+const calendar = @import("workflow_intervals.zig");
+const timezones = @import("timezone_context.zig");
+const local_time = @import("native_local_time.zig");
+const calendar_methods = @import("datetime_calendar.zig");
+const abstract_zone = @import("datetime_tzinfo.zig");
+const times = @import("datetime_time.zig");
+const native_strftime = @import("datetime_strftime.zig");
+const protocol = @import("datetime_protocol.zig");
+var next_identity: std.atomic.Value(u64) = .init(0);
+const Value = expression.Value;
+const Argument = expression.Argument;
+
+pub fn value(a: std.mem.Allocator, epoch_ns: i96) !Value {
+    return datetimeValue(a, epoch_ns, false, 0);
+}
+
+/// Core config datetimes retain authored timezone awareness; batch datetimes
+/// themselves are always UTC. The epoch argument here represents civil fields.
+pub fn configuredValue(a: std.mem.Allocator, civil_ns: i96, original: []const u8) !Value {
+    var offset: ?i32 = null;
+    if (original.len > 19 and std.mem.endsWith(u8, original, "Z")) offset = 0 else if (original.len >= 25) {
+        const zone = original[original.len - 6 ..];
+        if ((zone[0] == '+' or zone[0] == '-') and zone[3] == ':') {
+            const hour = try std.fmt.parseInt(i32, zone[1..3], 10);
+            const minute = try std.fmt.parseInt(i32, zone[4..6], 10);
+            offset = (hour * 60 + minute) * @as(i32, if (zone[0] == '-') -1 else 1);
+        }
+    }
+    return datetimeValue(a, civil_ns, false, offset);
+}
+
+pub fn fromYaml(a: std.mem.Allocator, canonical: []const u8) !Value {
+    const seconds = try calendar.parseTimestamp(if (canonical.len == 10) canonical else canonical[0..19]);
+    var ns = @as(i96, seconds) * std.time.ns_per_s;
+    if (canonical.len > 19 and canonical[19] == '.') ns += @as(i96, try std.fmt.parseInt(u32, canonical[20..26], 10)) * std.time.ns_per_us;
+    const original = if (canonical.len == 10) try datetimeValue(a, ns, true, null) else try configuredValue(a, ns, canonical);
+    const entries = try expression.allocateEntries(a, original.object.len + 1);
+    @memcpy(entries[0..original.object.len], original.object);
+    entries[original.object.len] = .{ .key = "__dxt_yaml_timestamp", .value = .{ .string = canonical } };
+    return .{ .object = entries };
+}
+
+pub const TemporalState = struct {
+    civil_ns: i96,
+    date_only: bool,
+    utc_offset: ?i32,
+    offset_us: ?i64,
+    zone_name: ?[]const u8 = null,
+    timezone: ?Value = null,
+    fold: u1 = 0,
+};
+fn signedInteger(comptime T: type, v: Value) ?T {
+    if (v != .integer) return null;
+    return std.fmt.parseInt(T, v.integer, 10) catch null;
+}
+pub fn state(v: Value) ?TemporalState {
+    const kind = protocol.kind(v) orelse return null;
+    if (kind != .date and kind != .datetime) return null;
+    const ns = signedInteger(i96, v.attribute("__dxt_civil_ns")) orelse return null;
+    const date_only = v.attribute("__dxt_date_only");
+    if (date_only != .boolean) return null;
+    const offset = signedInteger(i64, v.attribute("__dxt_offset_us"));
+    const zone = v.attribute("__dxt_timezone");
+    const zone_name = if (zone != .undefined) zone.attribute("__dxt_timezone_name") else .undefined;
+    return .{
+        .civil_ns = ns,
+        .date_only = date_only.boolean,
+        .utc_offset = if (offset) |micros| @intCast(@divTrunc(micros, std.time.us_per_min)) else null,
+        .offset_us = offset,
+        .zone_name = if (zone_name == .string) zone_name.string else null,
+        .timezone = if (zone == .object) zone else null,
+        .fold = signedInteger(u1, v.attribute("fold")) orelse 0,
+    };
+}
+fn writeZone(w: *std.Io.Writer, offset_us: i64, colon: bool) !void {
+    const total = @abs(offset_us);
+    const seconds = total / std.time.us_per_s;
+    const fraction = total % std.time.us_per_s;
+    try w.print("{c}{d:0>2}{s}{d:0>2}", .{ @as(u8, if (offset_us < 0) '-' else '+'), seconds / 3600, if (colon) ":" else "", (seconds % 3600) / 60 });
+    if (seconds % 60 != 0 or fraction != 0) {
+        try w.print("{s}{d:0>2}", .{ if (colon) @as([]const u8, ":") else "", seconds % 60 });
+        if (fraction != 0) try w.print(".{d:0>6}", .{fraction});
+    }
+}
+fn zoneName(a: std.mem.Allocator, offset_us: i64) ![]const u8 {
+    if (offset_us == 0) return "UTC";
+    var out: std.Io.Writer.Allocating = .init(a);
+    try out.writer.writeAll("UTC");
+    try writeZone(&out.writer, offset_us, true);
+    return out.toOwnedSlice();
+}
+pub fn datetimeValue(a: std.mem.Allocator, civil_ns: i96, date_only: bool, utc_offset: ?i32) anyerror!Value {
+    return datetimeValueWithOffsetUs(a, civil_ns, date_only, if (utc_offset) |offset| @as(i64, offset) * std.time.us_per_min else null, null, 0);
+}
+pub fn attachTimezone(a: std.mem.Allocator, civil_ns: i96, zone: Value) anyerror!Value {
+    const offset_us = signedInteger(i64, zone.attribute("__dxt_timezone_offset_us")) orelse return error.JinjaTypeError;
+    return datetimeValueWithOffsetUs(a, civil_ns, false, offset_us, zone, 0);
+}
+pub fn datetimeValueWithOffsetUs(a: std.mem.Allocator, input_ns: i96, date_only: bool, offset_us: ?i64, timezone: ?Value, fold: u1) anyerror!Value {
+    return datetimeWithIdentity(a, input_ns, date_only, offset_us, timezone, fold, next_identity.fetchAdd(1, .monotonic) + 1);
+}
+fn datetimeWithIdentity(a: std.mem.Allocator, input_ns: i96, date_only: bool, offset_us: ?i64, timezone: ?Value, fold: u1, identity: u64) anyerror!Value {
+    const civil_ns = if (date_only) @divFloor(input_ns, std.time.ns_per_day) * std.time.ns_per_day else @divFloor(input_ns, std.time.ns_per_us) * std.time.ns_per_us;
+    if (timezone) |zone| if (!timezones.isTimezone(zone)) return error.JinjaTypeError;
+    const actual_timezone: ?Value = if (timezone) |zone| zone else if (offset_us) |offset| try timezones.builtinValue(a, offset, null) else null;
+    if (civil_ns < -62135596800 * @as(i96, std.time.ns_per_s) or civil_ns >= 253402300800 * @as(i96, std.time.ns_per_s)) return error.JinjaNumericOverflow;
+    if (offset_us) |offset| if (@abs(offset) >= std.time.us_per_day) return error.InvalidTimeZoneOffset;
+    const label = try calendar.formatTimestamp(a, @intCast(@divFloor(civil_ns, std.time.ns_per_s)));
+    const year = try std.fmt.parseInt(u32, label[0..4], 10);
+    if (year < 1 or year > 9999) return error.InvalidDatetime;
+    const micros: u64 = @intCast(@divFloor(@mod(civil_ns, std.time.ns_per_s), std.time.ns_per_us));
+    const rendered = if (date_only) try a.dupe(u8, label[0..10]) else try isoformat(a, civil_ns, " ", "auto", offset_us);
+    var entries: std.ArrayList(expression.Entry) = .empty;
+    try entries.appendSlice(a, &.{
+        .{ .key = "__dxt_temporal_value", .value = if (date_only) protocol.marker(.date) else protocol.marker(.datetime) },
+        .{ .key = "__dxt_immutable_identity", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime_instance:{d}", .{identity}) } },
+        .{ .key = "__dxt_rendered", .value = .{ .string = rendered } },
+        .{ .key = "__dxt_temporal_offset_error", .value = if (actual_timezone != null and abstract_zone.isAbstract(actual_timezone.?)) .{ .callable = "__dxt_temporal_offset_error" } else .none },
+        .{ .key = "__dxt_string_error", .value = .{ .boolean = actual_timezone != null and abstract_zone.isAbstract(actual_timezone.?) } },
+        .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
+        .{ .key = "__dxt_civil_ns", .value = try expression.integerValue(a, civil_ns) },
+        .{ .key = "__dxt_date_only", .value = .{ .boolean = date_only } },
+        .{ .key = "__dxt_offset_us", .value = if (offset_us) |offset| try expression.integerValue(a, offset) else .none },
+        .{ .key = "__dxt_timezone", .value = actual_timezone orelse .none },
+    });
+    var representation: std.Io.Writer.Allocating = .init(a);
+    try representation.writer.writeAll(if (date_only) "datetime.date(" else "datetime.datetime(");
+    for ([_][2]usize{ .{ 0, 4 }, .{ 5, 7 }, .{ 8, 10 } }, 0..) |span, i| {
+        if (i != 0) try representation.writer.writeAll(", ");
+        try representation.writer.print("{d}", .{try std.fmt.parseInt(u32, label[span[0]..span[1]], 10)});
+    }
+    if (!date_only) {
+        const hour = try std.fmt.parseInt(u32, label[11..13], 10);
+        const minute = try std.fmt.parseInt(u32, label[14..16], 10);
+        const second = try std.fmt.parseInt(u32, label[17..19], 10);
+        try representation.writer.print(", {d}, {d}", .{ hour, minute });
+        if (second != 0 or micros != 0) try representation.writer.print(", {d}", .{second});
+        if (micros != 0) try representation.writer.print(", {d}", .{micros});
+        if (actual_timezone) |zone| try representation.writer.print(", tzinfo={s}", .{try expression.repr(zone, a)});
+        if (fold != 0) try representation.writer.print(", fold={d}", .{fold});
+    }
+    try representation.writer.writeByte(')');
+    try entries.append(a, .{ .key = "__dxt_repr", .value = .{ .string = try representation.toOwnedSlice() } });
+    inline for (.{ .{ "year", 0, 4 }, .{ "month", 5, 7 }, .{ "day", 8, 10 }, .{ "hour", 11, 13 }, .{ "minute", 14, 16 }, .{ "second", 17, 19 } }) |field| {
+        if (!date_only or field[1] < 10) try entries.append(a, .{ .key = field[0], .value = try expression.integerValue(a, try std.fmt.parseInt(u64, label[field[1]..field[2]], 10)) });
+    }
+    if (!date_only) try entries.appendSlice(a, &.{
+        .{ .key = "microsecond", .value = try expression.integerValue(a, micros) },
+        .{ .key = "tzinfo", .value = if (actual_timezone) |zone| zone else if (offset_us) |offset| .{ .string = try zoneName(a, offset) } else .none },
+        .{ .key = "fold", .value = try expression.integerValue(a, fold) },
+    });
+    const spec = try std.fmt.allocPrint(a, "{d}:{s}:{s}:{s}:{d}:{d}:{s}", .{ civil_ns, if (date_only) "date" else "datetime", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{@divTrunc(offset, std.time.us_per_min)}) else "naive", if (offset_us) |offset| try std.fmt.allocPrint(a, "{d}", .{offset}) else "naive", fold, identity, if (actual_timezone) |zone| zone.attribute("__dxt_timezone_identity").string else "" });
+    for ([_][]const u8{ "strftime", "isoformat", "date", "timestamp", "weekday", "isoweekday", "replace", "utcoffset", "dst", "tzname", "astimezone", "toordinal", "isocalendar", "ctime", "timetuple", "utctimetuple", "time", "timetz" }) |method| {
+        if (date_only and (std.mem.eql(u8, method, "date") or std.mem.eql(u8, method, "timestamp") or std.mem.eql(u8, method, "utcoffset") or std.mem.eql(u8, method, "dst") or std.mem.eql(u8, method, "tzname") or std.mem.eql(u8, method, "astimezone") or std.mem.eql(u8, method, "utctimetuple") or std.mem.eql(u8, method, "time") or std.mem.eql(u8, method, "timetz"))) continue;
+        try entries.append(a, .{ .key = method, .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_datetime:{s}:{s}", .{ method, spec }) } });
+    }
+    return .{ .object = try entries.toOwnedSlice(a) };
+}
+
+fn named(args: []const Argument, name: []const u8, position: usize) ?Value {
+    for (args) |arg| if (arg.name) |key| if (std.mem.eql(u8, key, name)) return arg.value;
+    var index: usize = 0;
+    for (args) |arg| if (arg.name == null) {
+        if (index == position) return arg.value;
+        index += 1;
+    };
+    return null;
+}
+
+fn textArg(args: []const Argument, name: []const u8, position: usize, fallback: []const u8) ![]const u8 {
+    const v = named(args, name, position) orelse return fallback;
+    if (v != .string) return error.JinjaTypeError;
+    return v.string;
+}
+
+fn checkArgs(args: []const Argument, names: []const []const u8, required: usize) !void {
+    var present: [10]bool = @splat(false);
+    var position: usize = 0;
+    for (args) |arg| {
+        const index = if (arg.name) |key| blk: {
+            for (names, 0..) |name, i| if (std.mem.eql(u8, name, key)) break :blk i;
+            return error.InvalidJinjaArguments;
+        } else blk: {
+            const at = position;
+            position += 1;
+            break :blk at;
+        };
+        if (index >= names.len or present[index]) return error.InvalidJinjaArguments;
+        present[index] = true;
+    }
+    for (present[0..required]) |supplied| if (!supplied) return error.InvalidJinjaArguments;
+}
+pub fn call(a: std.mem.Allocator, name: []const u8, args: []const Argument) anyerror!?Value {
+    const prefix = "__dxt_datetime:";
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    var parts = std.mem.splitScalar(u8, name[prefix.len..], ':');
+    const method = parts.next() orelse return error.InvalidDatetime;
+    const ns = std.fmt.parseInt(i96, parts.next() orelse return error.InvalidDatetime, 10) catch return error.InvalidDatetime;
+    const date_only = std.mem.eql(u8, parts.next() orelse return error.InvalidDatetime, "date");
+    const offset_text = parts.next() orelse "0";
+    const exact_text = parts.next();
+    const offset_us: ?i64 = if (exact_text) |exact| (if (std.mem.eql(u8, exact, "naive")) null else try std.fmt.parseInt(i64, exact, 10)) else if (std.mem.eql(u8, offset_text, "naive")) null else @as(i64, try std.fmt.parseInt(i32, offset_text, 10)) * std.time.us_per_min;
+    const fold: u1 = if (parts.next()) |field| try std.fmt.parseInt(u1, field, 10) else 0;
+    const identity = try std.fmt.parseInt(u64, parts.next() orelse return error.InvalidDatetime, 10);
+    const timezone: ?Value = if (parts.rest().len != 0) try timezones.fromIdentity(a, parts.rest()) else null;
+    if (std.mem.eql(u8, method, "astimezone")) {
+        try checkArgs(args, &.{"tz"}, 0);
+        if (timezone) |zone| {
+            const target = named(args, "tz", 0) orelse .none;
+            const original_id = zone.attribute("__dxt_timezone_identity");
+            const target_id = target.attribute("__dxt_timezone_identity");
+            if (timezones.isTimezone(target) and original_id == .string and target_id == .string and std.mem.eql(u8, original_id.string, target_id.string)) return try datetimeWithIdentity(a, ns, date_only, offset_us, timezone, fold, identity);
+        }
+    }
+    const abstract = if (timezone) |zone| abstract_zone.isAbstract(zone) else false;
+    if (abstract) {
+        for ([_][]const u8{ "strftime", "isoformat", "timestamp", "utcoffset", "dst", "tzname", "astimezone", "timetuple", "utctimetuple" }) |dependent| if (std.mem.eql(u8, method, dependent)) return error.AbstractTimeZoneMethod;
+    }
+    if (std.mem.eql(u8, method, "strftime")) {
+        try checkArgs(args, &.{"format"}, 1);
+        return .{ .string = try strftime(a, ns, try textArg(args, "format", 0, ""), date_only, offset_us, timezone) };
+    }
+    if (std.mem.eql(u8, method, "isoformat")) {
+        try checkArgs(args, if (date_only) &.{} else &.{ "sep", "timespec" }, 0);
+        if (date_only) {
+            const label = try calendar.formatTimestamp(a, @intCast(@divFloor(ns, std.time.ns_per_s)));
+            return .{ .string = try a.dupe(u8, label[0..10]) };
+        }
+        return .{ .string = try isoformat(a, ns, try textArg(args, "sep", 0, "T"), try textArg(args, "timespec", 1, "auto"), offset_us) };
+    }
+    if (std.mem.eql(u8, method, "replace")) {
+        const names = [_][]const u8{ "year", "month", "day", "hour", "minute", "second", "microsecond", "tzinfo", "fold" };
+        try checkArgs(args, if (date_only) names[0..3] else &names, 0);
+        var positions: usize = 0;
+        for (args) |arg| if (arg.name == null) {
+            positions += 1;
+        };
+        if (positions > 8) return error.InvalidJinjaArguments;
+        const original = try calendar.formatTimestamp(a, @intCast(@divFloor(ns, std.time.ns_per_s)));
+        var fields: [7]u64 = undefined;
+        inline for (.{ .{ "year", 0, 4 }, .{ "month", 5, 7 }, .{ "day", 8, 10 }, .{ "hour", 11, 13 }, .{ "minute", 14, 16 }, .{ "second", 17, 19 } }, 0..) |field, index| {
+            fields[index] = try std.fmt.parseInt(u64, original[field[1]..field[2]], 10);
+            if (named(args, field[0], index)) |replacement| fields[index] = try integer(replacement);
+        }
+        fields[6] = @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_us));
+        if (named(args, "microsecond", 6)) |replacement| fields[6] = try integer(replacement);
+        if (fields[6] > 999999 or fields[0] == 0 or fields[0] > 9999) return error.InvalidDatetime;
+        const label = try std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{ fields[0], fields[1], fields[2], fields[3], fields[4], fields[5] });
+        const timestamp = @as(i96, calendar.parseTimestamp(label) catch return error.InvalidDatetime) * std.time.ns_per_s;
+        var replaced_zone = timezone;
+        var replaced_offset = offset_us;
+        if (named(args, "tzinfo", 7)) |zone| {
+            replaced_zone = if (zone == .none) null else zone;
+            replaced_offset = if (zone == .none or abstract_zone.isAbstract(zone)) null else signedInteger(i64, zone.attribute("__dxt_timezone_offset_us")) orelse return error.JinjaTypeError;
+        }
+        const replacement_fold: u1 = if (named(args, "fold", 8)) |value_| blk: {
+            const replacement = try expression.integerIndex(value_);
+            if (replacement < 0 or replacement > 1) return error.InvalidDatetime;
+            break :blk @intCast(replacement);
+        } else fold;
+        return try datetimeValueWithOffsetUs(a, timestamp + @as(i96, @intCast(fields[6])) * std.time.ns_per_us, date_only, replaced_offset, replaced_zone, replacement_fold);
+    }
+    if (std.mem.eql(u8, method, "astimezone")) {
+        try checkArgs(args, &.{"tz"}, 0);
+        const zone = named(args, "tz", 0) orelse .none;
+        const utc_ns = if (offset_us) |offset| ns - @as(i96, offset) * std.time.ns_per_us else try local_time.timestamp(a, ns, fold);
+        const actual = if (zone == .none) blk: {
+            const local_ns = try local_time.civil(a, utc_ns);
+            const local_offset: i64 = @intCast(@divTrunc(local_ns - utc_ns, std.time.ns_per_us));
+            break :blk try timezones.builtinValue(a, local_offset, try local_time.zoneName(a, utc_ns));
+        } else blk: {
+            if (zone.attribute("__dxt_timezone_offset_us") != .integer) return error.JinjaTypeError;
+            break :blk try timezones.atUtc(a, zone, @intCast(@divFloor(utc_ns, std.time.ns_per_s)));
+        };
+        const offset = signedInteger(i64, actual.attribute("__dxt_timezone_offset_us")).?;
+        return try attachTimezone(a, utc_ns + @as(i96, offset) * std.time.ns_per_us, actual);
+    }
+    try checkArgs(args, &.{}, 0);
+    if (std.mem.eql(u8, method, "date")) return try datetimeValue(a, @divFloor(ns, std.time.ns_per_day) * std.time.ns_per_day, true, null);
+    if (std.mem.eql(u8, method, "timestamp") and !date_only) {
+        const utc_ns = if (offset_us) |offset| ns - @as(i96, offset) * std.time.ns_per_us else try local_time.timestamp(a, ns, fold);
+        const seconds = if (offset_us != null) try @import("expression_number.zig").divide(a, try std.fmt.allocPrint(a, "{d}", .{@divFloor(utc_ns, std.time.ns_per_us)}), "1000000") else @as(f64, @floatFromInt(@divFloor(utc_ns, std.time.ns_per_s))) + @as(f64, @floatFromInt(@mod(utc_ns, std.time.ns_per_s))) / std.time.ns_per_s;
+        return .{ .number = seconds };
+    }
+    if (std.mem.eql(u8, method, "utcoffset")) return if (offset_us) |offset| try timezones.durationValue(a, offset) else .none;
+    if (std.mem.eql(u8, method, "dst")) return if (timezone) |zone| (if (signedInteger(i64, zone.attribute("__dxt_timezone_dst_us"))) |dst_us| try timezones.durationValue(a, dst_us) else .none) else .none;
+    if (std.mem.eql(u8, method, "tzname")) return if (timezone) |zone| zone.attribute("__dxt_timezone_abbreviation") else if (offset_us) |offset| .{ .string = try zoneName(a, offset) } else .none;
+    if (std.mem.eql(u8, method, "ctime")) return .{ .string = try calendar_methods.ctime(a, ns) };
+    if (std.mem.eql(u8, method, "isocalendar")) return try calendar_methods.isoCalendar(a, ns);
+    if (std.mem.eql(u8, method, "time") or std.mem.eql(u8, method, "timetz")) return try times.value(a, @intCast(@divFloor(@mod(ns, std.time.ns_per_day), std.time.ns_per_us)), if (std.mem.eql(u8, method, "timetz")) timezone else null, fold);
+    if (std.mem.eql(u8, method, "timetuple") or std.mem.eql(u8, method, "utctimetuple")) {
+        const utc = std.mem.eql(u8, method, "utctimetuple");
+        const tuple_ns = if (utc) ns - @as(i96, offset_us orelse 0) * std.time.ns_per_us else ns;
+        const dst_us: ?i64 = if (timezone) |zone| signedInteger(i64, zone.attribute("__dxt_timezone_dst_us")) else null;
+        return try calendar_methods.timeTuple(a, tuple_ns, if (utc) 0 else if (dst_us) |dst| (if (dst == 0) 0 else 1) else -1);
+    }
+    const day = @divFloor(ns, std.time.ns_per_day);
+    if (std.mem.eql(u8, method, "toordinal")) return try expression.integerValue(a, day + 719163);
+    if (std.mem.eql(u8, method, "weekday")) return try expression.integerValue(a, @mod(day + 3, 7));
+    if (std.mem.eql(u8, method, "isoweekday")) return try expression.integerValue(a, @mod(day + 3, 7) + 1);
+    return error.JinjaTypeError;
+}
+
+fn integer(v: Value) !u64 {
+    const count = try expression.integerIndex(v);
+    if (count < 0 or count > 999999999) return error.JinjaTypeError;
+    return @intCast(count);
+}
+
+fn isoformat(a: std.mem.Allocator, ns: i96, separator: []const u8, timespec: []const u8, offset_us: ?i64) ![]const u8 {
+    if ((std.unicode.utf8CountCodepoints(separator) catch return error.JinjaTypeError) != 1) return error.JinjaTypeError;
+    const label = try calendar.formatTimestamp(a, @intCast(@divFloor(ns, std.time.ns_per_s)));
+    const micros: u64 = @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_us));
+    const spec = if (std.mem.eql(u8, timespec, "auto")) (if (micros == 0) "seconds" else "microseconds") else timespec;
+    const length: usize = if (std.mem.eql(u8, spec, "hours")) 13 else if (std.mem.eql(u8, spec, "minutes")) 16 else if (std.mem.eql(u8, spec, "seconds") or std.mem.eql(u8, spec, "milliseconds") or std.mem.eql(u8, spec, "microseconds")) 19 else return error.InvalidDatetimeTimespec;
+    var out: std.Io.Writer.Allocating = .init(a);
+    try out.writer.print("{s}{s}{s}", .{ label[0..10], separator, label[11..length] });
+    if (std.mem.eql(u8, spec, "milliseconds")) try out.writer.print(".{d:0>3}", .{micros / 1000});
+    if (std.mem.eql(u8, spec, "microseconds")) try out.writer.print(".{d:0>6}", .{micros});
+    if (offset_us) |offset| try writeZone(&out.writer, offset, true);
+    return out.toOwnedSlice();
+}
+
+fn strftime(a: std.mem.Allocator, ns: i96, format: []const u8, date_only: bool, offset_us: ?i64, timezone: ?Value) ![]const u8 {
+    const abbreviation: ?[]const u8 = if (timezone) |zone| blk: {
+        const name = zone.attribute("__dxt_timezone_abbreviation");
+        break :blk if (name == .string) name.string else null;
+    } else if (offset_us) |offset| try zoneName(a, offset) else null;
+    const dst_us: ?i64 = if (timezone) |zone| signedInteger(i64, zone.attribute("__dxt_timezone_dst_us")) else null;
+    return native_strftime.render(a, ns, format, .{ .date_only = date_only, .offset_us = offset_us, .abbreviation = abbreviation, .dst_us = dst_us });
+}
+
+test "native UTC datetime values retain microseconds and Python ISO/format behavior" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ns = @as(i96, try calendar.parseTimestamp("2024-02-29 16:17:18")) * std.time.ns_per_s + 123456 * std.time.ns_per_us;
+    const dt = try value(a, ns);
+    try std.testing.expectEqualStrings("2024-02-29 16:17:18.123456+00:00", try dt.text(a));
+    const formatted = (try call(a, dt.attribute("strftime").callable, &.{.{ .value = .{ .string = "%Y-%m-%d %H:%M:%S.%f %z %Z %A %j" } }})).?;
+    try std.testing.expectEqualStrings("2024-02-29 16:17:18.123456 +0000 UTC Thursday 060", formatted.string);
+    try std.testing.expectEqualStrings("2024-02-29T16:17:18.123+00:00", (try call(a, dt.attribute("isoformat").callable, &.{.{ .name = "timespec", .value = .{ .string = "milliseconds" } }})).?.string);
+    const date = (try call(a, dt.attribute("date").callable, &.{})).?;
+    try std.testing.expectEqualStrings("2024-02-29", try date.text(a));
+    const replaced = (try call(a, dt.attribute("replace").callable, &.{ .{ .name = "hour", .value = .{ .integer = "0" } }, .{ .name = "microsecond", .value = .{ .integer = "0" } } })).?;
+    try std.testing.expectEqualStrings("2024-02-29 00:17:18+00:00", try replaced.text(a));
+    const folded = (try call(a, dt.attribute("replace").callable, &.{.{ .name = "fold", .value = .{ .boolean = true } }})).?;
+    try std.testing.expectEqual(@as(u1, 1), state(folded).?.fold);
+    try std.testing.expectError(error.JinjaTypeError, call(a, dt.attribute("replace").callable, &.{.{ .name = "fold", .value = .{ .number = 1.0 } }}));
+    const ancient = try datetimeValue(a, -62135596800 * @as(i96, std.time.ns_per_s) + 4 * std.time.ns_per_us, false, 0);
+    try std.testing.expectEqual(@as(f64, -62135596799.99999), (try call(a, ancient.attribute("timestamp").callable, &.{})).?.number);
+    try std.testing.expectEqual(@as(i64, 3), try expression.integerIndex((try call(a, dt.attribute("weekday").callable, &.{})).?));
+}
+
+test "astimezone same-zone aliases preserve immutable identity before querying abstract offsets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const zone = try abstract_zone.value(a);
+    const moment = try datetimeValueWithOffsetUs(a, 0, false, null, zone, 1);
+    const alias = (try call(a, moment.attribute("astimezone").callable, &.{.{ .value = zone }})).?;
+    try std.testing.expectEqualStrings(moment.attribute("__dxt_immutable_identity").callable, alias.attribute("__dxt_immutable_identity").callable);
+    try std.testing.expectEqual(@as(u1, 1), state(alias).?.fold);
+    try std.testing.expectError(error.AbstractTimeZoneMethod, call(a, moment.attribute("astimezone").callable, &.{}));
+    try std.testing.expectError(error.InvalidJinjaArguments, call(a, moment.attribute("astimezone").callable, &.{ .{ .value = zone }, .{ .value = zone } }));
+    const replaced = (try call(a, moment.attribute("replace").callable, &.{})).?;
+    try std.testing.expect(!std.mem.eql(u8, moment.attribute("__dxt_immutable_identity").callable, replaced.attribute("__dxt_immutable_identity").callable));
+    try std.testing.expect((try expression.checkedAttribute(moment, "__dxt_immutable_identity")) == .undefined);
+    try std.testing.expect((try expression.indexValueWithHost(a, moment, .{ .string = "__dxt_temporal_value" }, null)) == .undefined);
+    const forged: Value = .{ .object = &.{ .{ .key = "__dxt_civil_ns", .value = .{ .integer = "0" } }, .{ .key = "__dxt_date_only", .value = .{ .boolean = false } }, .{ .key = "isoformat", .value = moment.attribute("isoformat") } } };
+    try std.testing.expect(state(forged) == null);
+    try std.testing.expect(!@import("yaml_values.zig").isHashable(forged));
+}

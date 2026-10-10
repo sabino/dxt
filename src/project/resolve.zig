@@ -93,6 +93,7 @@ pub fn findMacroIdForUnqualifiedNamespaceCall(graph: *const Graph, package_name:
     if (!std.mem.eql(u8, package_name, graph.project_name)) {
         if (findProjectMacroIdByName(graph, name)) |macro_id| return macro_id;
     }
+    if (findMacroIdByPackageAndName(graph, adapterPackage(graph), name)) |macro_id| return macro_id;
     if (findMacroIdByPackageAndName(graph, "dbt", name)) |macro_id| return macro_id;
     return null;
 }
@@ -103,8 +104,18 @@ pub fn findMacroIdForUnqualifiedMacroDependency(graph: *const Graph, package_nam
         if (findProjectMacroIdByName(graph, name)) |macro_id| return macro_id;
     }
     if (findNonInternalPackageMacroIdByName(graph, package_name, name)) |macro_id| return macro_id;
+    if (findMacroIdByPackageAndName(graph, adapterPackage(graph), name)) |macro_id| return macro_id;
     if (findMacroIdByPackageAndName(graph, "dbt", name)) |macro_id| return macro_id;
     return null;
+}
+
+/// Test argument helpers use MacroResolver's global namespace, without a
+/// resource-local package taking precedence over the root project.
+pub fn findMacroIdForGlobalMacroDependency(graph: *const Graph, name: []const u8) ?[]const u8 {
+    if (findProjectMacroIdByName(graph, name)) |id| return id;
+    if (findNonInternalPackageMacroIdByName(graph, "", name)) |id| return id;
+    if (findMacroIdByPackageAndName(graph, adapterPackage(graph), name)) |id| return id;
+    return findMacroIdByPackageAndName(graph, "dbt", name);
 }
 
 pub fn findMacroIdForAdapterDispatch(graph: *const Graph, current_package: []const u8, macro_name: []const u8, macro_namespace: ?[]const u8, adapter_prefixes: []const []const u8) ?[]const u8 {
@@ -117,6 +128,10 @@ pub fn findMacroIdForAdapterDispatch(graph: *const Graph, current_package: []con
                 return findDispatchMacroIdInConfiguredOrder(graph, config.search_order.items, adapter_prefixes, macro_name);
             }
         }
+    }
+
+    if (std.mem.eql(u8, namespace, "dbt") and hasMacroPackage(graph, "dbt")) {
+        return findDispatchMacroIdInConfiguredOrder(graph, &.{ graph.project_name, "dbt" }, adapter_prefixes, macro_name);
     }
 
     const use_dependency_namespace = namespace.len != 0 and
@@ -158,26 +173,52 @@ pub fn packageNameFromMacroUniqueId(unique_id: []const u8) ?[]const u8 {
 
 pub fn resolveRefDependency(graph: *const Graph, current_package: []const u8, ref_dep: RefDep) ![]const u8 {
     const package = ref_dep.package orelse current_package;
-    if (try resolveRefInPackage(graph, package, ref_dep.name)) |unique_id| return unique_id;
+    if (try resolveVersionedRefInPackage(graph, package, ref_dep)) |unique_id| return unique_id;
     if (ref_dep.package != null) return error.UnresolvedRef;
-
     var found: ?[]const u8 = null;
     for (graph.nodes.items) |node| {
-        if (!std.mem.eql(u8, node.name, ref_dep.name)) continue;
+        if (!std.mem.eql(u8, node.name, ref_dep.name) or !node.enabled) continue;
         if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot")) continue;
-        if (!node.enabled) continue;
+        if (!try versionMatches(graph.allocator, node, ref_dep.version)) continue;
         if (found != null) return error.UnresolvedRef;
         found = node.unique_id;
     }
     return found orelse error.UnresolvedRef;
 }
 
+fn versionMatches(allocator: std.mem.Allocator, node: Node, requested: std.json.Value) !bool {
+    if (requested != .null) return node.version != .null and try @import("model_versions.zig").equal(allocator, node.version, requested);
+    return node.version == .null or try @import("model_versions.zig").equal(allocator, node.version, node.latest_version);
+}
+fn resolveVersionedRefInPackage(graph: *const Graph, package: []const u8, ref_dep: RefDep) !?[]const u8 {
+    var found: ?[]const u8 = null;
+    var disabled = false;
+    for (graph.nodes.items) |node| {
+        if (!std.mem.eql(u8, node.package_name, package) or !std.mem.eql(u8, node.name, ref_dep.name) or node.version == .null) continue;
+        if (!try versionMatches(graph.allocator, node, ref_dep.version)) continue;
+        if (!node.enabled) {
+            disabled = true;
+            continue;
+        }
+        if (found != null) return error.UnresolvedRef;
+        found = node.unique_id;
+    }
+    if (found != null) return found;
+    if (disabled) return error.DisabledRef;
+    if (ref_dep.version != .null) return null;
+    return try resolveRefInPackage(graph, package, ref_dep.name);
+}
+
 pub fn resolveSourceDependency(graph: *const Graph, current_package: []const u8, source_dep: SourceDep) ![]const u8 {
     const unique_id = try std.fmt.allocPrint(graph.allocator, "source.{s}.{s}.{s}", .{ current_package, source_dep.source_name, source_dep.table_name });
-    if (hasSource(graph, unique_id)) return unique_id;
+    for (graph.sources.items) |source| if (std.mem.eql(u8, source.unique_id, unique_id)) {
+        if (!source.enabled) return error.UnresolvedSource;
+        return unique_id;
+    };
 
     var found: ?[]const u8 = null;
     for (graph.sources.items) |source| {
+        if (!source.enabled) continue;
         if (!std.mem.eql(u8, source.source_name, source_dep.source_name)) continue;
         if (!std.mem.eql(u8, source.table_name, source_dep.table_name)) continue;
         if (found != null) return error.UnresolvedSource;
@@ -187,19 +228,54 @@ pub fn resolveSourceDependency(graph: *const Graph, current_package: []const u8,
 }
 
 pub fn resolveDependencies(graph: *Graph) !void {
+    try @import("semantic.zig").resolve(graph);
     for (graph.nodes.items) |*node| {
         if (!node.enabled) continue;
         for (node.macro_depends_on.items) |macro_dep| {
             if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
         }
-        sortStrings(node.macro_depends_on.items);
-        for (node.refs.items) |ref_dep| {
-            try appendUnique(graph.allocator, &node.depends_on, try resolveRefDependency(graph, node.package_name, ref_dep));
-        }
+        // Core resolves source edges before ref edges for parsed nodes.
         for (node.source_refs.items) |source_dep| {
             try appendUnique(graph.allocator, &node.depends_on, try resolveSourceDependency(graph, node.package_name, source_dep));
         }
-        sortStrings(node.depends_on.items);
+        for (node.refs.items) |ref_dep| {
+            try appendUnique(graph.allocator, &node.depends_on, try resolveRefDependency(graph, node.package_name, ref_dep));
+        }
+    }
+    for (graph.tests.items) |*test_node| {
+        if (test_node.disabled) continue;
+        test_node.depends_on.clearRetainingCapacity();
+        for (test_node.source_refs.items) |source_dep| {
+            const target = resolveSourceDependency(graph, test_node.package_name, source_dep) catch |err| switch (err) {
+                error.UnresolvedSource => {
+                    test_node.enabled = false;
+                    try @import("config_value.zig").put(graph.allocator, &test_node.config_values, "enabled", .{ .bool = false });
+                    var disabled = false;
+                    for (graph.sources.items) |source| if (!source.enabled and std.mem.eql(u8, source.source_name, source_dep.source_name) and std.mem.eql(u8, source.table_name, source_dep.table_name)) {
+                        disabled = true;
+                    };
+                    if (!disabled) try test_node.reference_warnings.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "Test '{s}' ({s}) depends on a source named '{s}.{s}' which was not found", .{ test_node.unique_id, test_node.original_file_path, source_dep.source_name, source_dep.table_name }));
+                    continue;
+                },
+                else => return err,
+            };
+            if (test_node.relationship_source_to) |relationship| if (std.mem.eql(u8, relationship.source_name, source_dep.source_name) and std.mem.eql(u8, relationship.table_name, source_dep.table_name)) {
+                test_node.relationship_source_to_unique_id = target;
+            };
+            try appendUnique(graph.allocator, &test_node.depends_on, target);
+        }
+        for (test_node.refs.items) |ref_dep| {
+            const target = resolveRefDependency(graph, test_node.package_name, ref_dep) catch |err| switch (err) {
+                error.DisabledRef, error.UnresolvedRef => {
+                    test_node.enabled = false;
+                    try @import("config_value.zig").put(graph.allocator, &test_node.config_values, "enabled", .{ .bool = false });
+                    if (err == error.UnresolvedRef) try test_node.reference_warnings.append(graph.allocator, try std.fmt.allocPrint(graph.allocator, "Test '{s}' ({s}) depends on a node named '{s}' which was not found", .{ test_node.unique_id, test_node.original_file_path, ref_dep.name }));
+                    continue;
+                },
+                else => return err,
+            };
+            try appendUnique(graph.allocator, &test_node.depends_on, target);
+        }
     }
     for (graph.exposures.items) |*exposure| {
         if (!exposure.enabled) continue;
@@ -216,23 +292,28 @@ pub fn resolveDependencies(graph: *Graph) !void {
         for (test_node.macro_depends_on.items) |macro_dep| {
             if (!hasMacro(graph, macro_dep)) return error.UnresolvedMacro;
         }
-        sortStrings(test_node.macro_depends_on.items);
-        for (test_node.refs.items) |ref_dep| {
-            try appendUnique(graph.allocator, &test_node.depends_on, try resolveRefDependency(graph, test_node.package_name, ref_dep));
-        }
+        test_node.depends_on.clearRetainingCapacity();
         for (test_node.source_refs.items) |source_dep| {
             try appendUnique(graph.allocator, &test_node.depends_on, try resolveSourceDependency(graph, test_node.package_name, source_dep));
         }
-        sortStrings(test_node.depends_on.items);
+        for (test_node.refs.items) |ref_dep| {
+            try appendUnique(graph.allocator, &test_node.depends_on, try resolveRefDependency(graph, test_node.package_name, ref_dep));
+        }
     }
     for (graph.unit_tests.items) |*unit_test| {
         if (!unit_test.enabled) continue;
-        const model_unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ unit_test.package_name, unit_test.model });
-        if (hasDisabledNode(graph, model_unique_id)) return error.DisabledRef;
-        if (!hasNode(graph, model_unique_id)) return error.UnresolvedUnitTestModel;
+        const model_unique_id = resolveRefDependency(graph, unit_test.package_name, .{ .package = unit_test.package_name, .name = unit_test.model, .version = unit_test.version }) catch |err| switch (err) {
+            error.UnresolvedRef => return error.UnresolvedUnitTestModel,
+            else => return err,
+        };
+        for (graph.nodes.items) |*node| if (std.mem.eql(u8, node.unique_id, model_unique_id)) {
+            unit_test.schema = try @import("compiler.zig").relationSchemaForNode(graph.allocator, graph, node);
+            break;
+        };
         try appendUnique(graph.allocator, &unit_test.depends_on, model_unique_id);
         sortStrings(unit_test.depends_on.items);
     }
+    try @import("group_access.zig").validate(graph);
 }
 
 pub fn sortGraphResources(graph: *Graph) void {
@@ -387,17 +468,11 @@ fn hasSource(graph: *const Graph, unique_id: []const u8) bool {
 }
 
 fn resolveRefInPackage(graph: *const Graph, package: []const u8, name: []const u8) !?[]const u8 {
-    var refable_count: usize = 0;
-    var has_snapshot = false;
-    for (graph.nodes.items) |node| {
-        if (!node.enabled or !std.mem.eql(u8, node.package_name, package) or !std.mem.eql(u8, node.name, name)) continue;
-        if (std.mem.eql(u8, node.resource_type, "snapshot")) {
-            has_snapshot = true;
-            refable_count += 1;
-        } else if (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "seed")) refable_count += 1;
-    }
-    // Core's parse-order precedence for colliding names is outside this read-only slice.
-    if (has_snapshot and refable_count > 1) return error.UnsupportedSnapshotRefCollision;
+    // RefableLookup follows Core parser insertion order: seed > snapshot > model.
+    const preferred_seed = try std.fmt.allocPrint(graph.allocator, "seed.{s}.{s}", .{ package, name });
+    if (hasNode(graph, preferred_seed)) return preferred_seed;
+    const preferred_snapshot = try std.fmt.allocPrint(graph.allocator, "snapshot.{s}.{s}", .{ package, name });
+    if (hasNode(graph, preferred_snapshot)) return preferred_snapshot;
 
     const model_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ package, name });
     if (hasDisabledNode(graph, model_id)) return error.DisabledRef;
@@ -482,14 +557,20 @@ fn findProjectMacroIdByName(graph: *const Graph, name: []const u8) ?[]const u8 {
 }
 
 fn findNonInternalPackageMacroIdByName(graph: *const Graph, current_package: []const u8, name: []const u8) ?[]const u8 {
-    for (graph.macros.items) |macro| {
+    var selected: ?[]const u8 = null;
+    var selected_order: usize = 0;
+    for (graph.macros.items, 0..) |macro, index| {
         if (!std.mem.eql(u8, macro.name, name)) continue;
         if (std.mem.eql(u8, macro.package_name, current_package)) continue;
         if (std.mem.eql(u8, macro.package_name, graph.project_name)) continue;
-        if (std.mem.eql(u8, macro.package_name, "dbt")) continue;
-        return macro.unique_id;
+        if (std.mem.eql(u8, macro.package_name, "dbt") or std.mem.eql(u8, macro.package_name, "dbt_duckdb") or std.mem.eql(u8, macro.package_name, "dbt_postgres")) continue;
+        const order = macro.namespace_order orelse index;
+        if (selected == null or order >= selected_order) {
+            selected = macro.unique_id;
+            selected_order = order;
+        }
     }
-    return null;
+    return selected;
 }
 
 fn findDispatchConfig(graph: *const Graph, macro_namespace: []const u8) ?*const types.DispatchConfig {
@@ -502,6 +583,9 @@ fn findDispatchConfig(graph: *const Graph, macro_namespace: []const u8) ?*const 
 fn findDispatchMacroIdInConfiguredOrder(graph: *const Graph, search_order: []const []const u8, adapter_prefixes: []const []const u8, macro_name: []const u8) ?[]const u8 {
     for (search_order) |package_name| {
         for (adapter_prefixes) |prefix| {
+            if (std.mem.eql(u8, package_name, "dbt")) {
+                if (findDispatchMacroIdByPackageAndName(graph, adapterPackage(graph), prefix, macro_name)) |macro_id| return macro_id;
+            }
             if (findDispatchMacroIdByPackageAndName(graph, package_name, prefix, macro_name)) |macro_id| return macro_id;
         }
     }
@@ -513,8 +597,13 @@ fn findDispatchMacroIdInNamespace(graph: *const Graph, package_name: []const u8,
     if (!std.mem.eql(u8, package_name, graph.project_name)) {
         if (findDispatchMacroIdByPackageAndName(graph, graph.project_name, prefix, macro_name)) |macro_id| return macro_id;
     }
+    if (findDispatchMacroIdByPackageAndName(graph, adapterPackage(graph), prefix, macro_name)) |macro_id| return macro_id;
     if (findDispatchMacroIdByPackageAndName(graph, "dbt", prefix, macro_name)) |macro_id| return macro_id;
     return null;
+}
+
+fn adapterPackage(graph: *const Graph) []const u8 {
+    return if (std.mem.eql(u8, graph.adapter_type, "postgres")) "dbt_postgres" else "dbt_duckdb";
 }
 
 fn findDispatchMacroIdByPackageAndName(graph: *const Graph, package_name: []const u8, prefix: []const u8, macro_name: []const u8) ?[]const u8 {
@@ -658,6 +747,25 @@ test "unqualified macro dependency lookup falls back to other packages before db
     try std.testing.expectEqualStrings("macro.dbt.internal_only", findMacroIdForUnqualifiedMacroDependency(&graph, "pkg", "internal_only").?);
 }
 
+test "static and global resolver use discovered package order after canonical sorting" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var graph = Graph{ .allocator = arena.allocator(), .project_name = "root" };
+    defer graph.deinit();
+    try appendMacro(&graph, "zeta", "choose");
+    try appendMacro(&graph, "alpha", "choose");
+    try appendMacro(&graph, "dbt", "choose");
+    for (graph.macros.items, 0..) |*macro, index| macro.namespace_order = index;
+    sortMacros(graph.macros.items);
+    try std.testing.expectEqualStrings("macro.alpha.choose", findMacroIdForGlobalMacroDependency(&graph, "choose").?);
+    try std.testing.expectEqualStrings("macro.alpha.choose", findMacroIdForUnqualifiedMacroDependency(&graph, "root", "choose").?);
+    try std.testing.expectEqualStrings("macro.zeta.choose", findMacroIdForUnqualifiedMacroDependency(&graph, "zeta", "choose").?);
+    // Runtime namespace lookup is deliberately independent of static fallback.
+    try std.testing.expectEqualStrings("macro.dbt.choose", findMacroIdForUnqualifiedNamespaceCall(&graph, "root", "choose").?);
+    try appendMacro(&graph, "root", "choose");
+    try std.testing.expectEqualStrings("macro.root.choose", findMacroIdForGlobalMacroDependency(&graph, "choose").?);
+}
+
 test "adapter dispatch lookup follows prefixes and package search order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -683,6 +791,48 @@ test "adapter dispatch lookup follows prefixes and package search order" {
     try std.testing.expectEqualStrings("macro.dbt.default__internal_only", findMacroIdForAdapterDispatch(&graph, "pkg", "internal_only", "dbt", prefixes).?);
     try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "pkg", "pkg.render", null, prefixes) == null);
     try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "pkg", "missing", "pkg", prefixes) == null);
+}
+
+test "explicit dbt dispatch searches project packages before adapter prefixes" {
+    const adapters = [_]struct { name: []const u8, package: []const u8 }{
+        .{ .name = "duckdb", .package = "dbt_duckdb" },
+        .{ .name = "postgres", .package = "dbt_postgres" },
+    };
+    for (adapters) |adapter| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var graph = Graph{ .allocator = arena.allocator(), .project_name = "demo", .adapter_type = adapter.name };
+        defer graph.deinit();
+        const prefixes = &[_][]const u8{ adapter.name, "default" };
+        const adapter_catalog = try std.fmt.allocPrint(graph.allocator, "{s}__get_catalog", .{adapter.name});
+        const adapter_stock = try std.fmt.allocPrint(graph.allocator, "{s}__stock_only", .{adapter.name});
+        const bundled_catalog_id = try std.fmt.allocPrint(graph.allocator, "macro.{s}.{s}", .{ adapter.package, adapter_catalog });
+        const bundled_stock_id = try std.fmt.allocPrint(graph.allocator, "macro.{s}.{s}", .{ adapter.package, adapter_stock });
+
+        try appendMacro(&graph, "demo", "default__get_catalog");
+        try appendMacro(&graph, adapter.package, adapter_catalog);
+        try appendMacro(&graph, adapter.package, adapter_stock);
+        // Preserve the existing fallback when the dbt package is not loaded.
+        try std.testing.expectEqualStrings(bundled_catalog_id, findMacroIdForAdapterDispatch(&graph, "pkg", "get_catalog", "dbt", prefixes).?);
+
+        try appendMacro(&graph, "dbt", "get_catalog");
+        try appendMacro(&graph, "dbt", "default__get_catalog");
+        try appendMacro(&graph, "dbt", "default__core_only");
+        try std.testing.expectEqualStrings("macro.demo.default__get_catalog", findMacroIdForAdapterDispatch(&graph, "dbt", "get_catalog", "dbt", prefixes).?);
+        try std.testing.expectEqualStrings(bundled_stock_id, findMacroIdForAdapterDispatch(&graph, "demo", "stock_only", "dbt", prefixes).?);
+        try std.testing.expectEqualStrings("macro.dbt.default__core_only", findMacroIdForAdapterDispatch(&graph, "demo", "core_only", "dbt", prefixes).?);
+        // Unqualified dispatch still follows the existing prefix-first path.
+        try std.testing.expectEqualStrings(bundled_catalog_id, findMacroIdForAdapterDispatch(&graph, "dbt", "get_catalog", null, prefixes).?);
+
+        try appendMacro(&graph, "demo", adapter_catalog);
+        const root_catalog_id = try std.fmt.allocPrint(graph.allocator, "macro.demo.{s}", .{adapter_catalog});
+        try std.testing.expectEqualStrings(root_catalog_id, findMacroIdForAdapterDispatch(&graph, "dbt", "get_catalog", "dbt", prefixes).?);
+
+        try appendDispatchConfig(&graph, "dbt", &.{"dbt"});
+        try std.testing.expectEqualStrings(bundled_catalog_id, findMacroIdForAdapterDispatch(&graph, "demo", "get_catalog", "dbt", prefixes).?);
+        graph.dispatch_configs.items[0].search_order.items[0] = "missing";
+        try std.testing.expect(findMacroIdForAdapterDispatch(&graph, "demo", "get_catalog", "dbt", prefixes) == null);
+    }
 }
 
 test "adapter dispatch configured search order overrides dependency fallback" {
@@ -843,8 +993,8 @@ test "dependency resolution populates sorted unique node exposure and unit test 
     try resolveDependencies(&graph);
 
     try std.testing.expectEqual(@as(usize, 2), graph.nodes.items[1].depends_on.items.len);
-    try std.testing.expectEqualStrings("model.demo.customers", graph.nodes.items[1].depends_on.items[0]);
-    try std.testing.expectEqualStrings("source.demo.raw.customers", graph.nodes.items[1].depends_on.items[1]);
+    try std.testing.expectEqualStrings("source.demo.raw.customers", graph.nodes.items[1].depends_on.items[0]);
+    try std.testing.expectEqualStrings("model.demo.customers", graph.nodes.items[1].depends_on.items[1]);
     try std.testing.expectEqual(@as(usize, 1), graph.nodes.items[1].macro_depends_on.items.len);
     try std.testing.expectEqualStrings("macro.demo.format_id", graph.nodes.items[1].macro_depends_on.items[0]);
     try std.testing.expectEqual(@as(usize, 2), graph.exposures.items[0].depends_on.items.len);
@@ -967,5 +1117,7 @@ test "snapshot refs resolve and disabled or colliding snapshot refs fail closed"
     try std.testing.expectEqualStrings("snapshot.demo.history", try resolveRefDependency(&graph, "demo", .{ .package = null, .name = "history" }));
     try std.testing.expectError(error.DisabledRef, resolveRefDependency(&graph, "demo", .{ .package = null, .name = "disabled" }));
     try appendNode(&graph, "model", "demo", "model.demo.history", "history", true);
-    try std.testing.expectError(error.UnsupportedSnapshotRefCollision, resolveRefDependency(&graph, "demo", .{ .package = null, .name = "history" }));
+    try std.testing.expectEqualStrings("snapshot.demo.history", try resolveRefDependency(&graph, "demo", .{ .package = null, .name = "history" }));
+    try appendNode(&graph, "seed", "demo", "seed.demo.history", "history", true);
+    try std.testing.expectEqualStrings("seed.demo.history", try resolveRefDependency(&graph, "demo", .{ .package = null, .name = "history" }));
 }

@@ -2,3 +2,6 @@ name: source_column_tests
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+
+flags:
+  require_generic_test_arguments_property: true

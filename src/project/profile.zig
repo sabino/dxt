@@ -11,61 +11,138 @@ const leadingSpaces = util.leadingSpaces;
 const splitKeyValue = util.splitKeyValue;
 const dupTrimmedScalar = util.dupTrimmedScalar;
 
-pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *const ProjectConfig, options: Options) !?AdapterIdentity {
-    const explicit_profile_lookup = options.profiles_dir != null or options.profile != null or options.target != null;
-    const profiles_path = if (options.profiles_dir) |profiles_dir|
-        try std.fs.path.join(runtime.allocator, &.{ profiles_dir, "profiles.yml" })
+/// Use the same explicit/CWD/HOME/project discovery for credentials and Core's
+/// deprecated root profile configuration. The returned file text is owned.
+pub fn loadProfileText(runtime: Runtime, project_dir: []const u8, options: Options) !?[]const u8 {
+    var owned_default_base: ?[]const u8 = null;
+    defer if (owned_default_base) |directory| runtime.allocator.free(directory);
+    const environment_profiles = if (runtime.environment) |environment| environment.get("DBT_PROFILES_DIR") else null;
+    const profiles_dir = options.profiles_dir orelse environment_profiles;
+    const explicit_profile_lookup = profiles_dir != null or options.profile != null or options.target != null;
+    var default_base: []const u8 = project_dir;
+    if (profiles_dir == null) {
+        if (std.Io.Dir.cwd().access(runtime.io, "profiles.yml", .{})) |_| {
+            default_base = ".";
+        } else |err| switch (err) {
+            error.FileNotFound => {
+                if (runtime.environment) |environment| if (environment.get("HOME")) |home| {
+                    const directory = try std.fs.path.join(runtime.allocator, &.{ home, ".dbt" });
+                    owned_default_base = directory;
+                    const candidate = try std.fs.path.join(runtime.allocator, &.{ directory, "profiles.yml" });
+                    defer runtime.allocator.free(candidate);
+                    if (std.Io.Dir.cwd().access(runtime.io, candidate, .{})) |_| default_base = directory else |failure| switch (failure) {
+                        error.FileNotFound => {},
+                        else => return failure,
+                    }
+                };
+            },
+            else => return err,
+        }
+    }
+    const profiles_path = if (profiles_dir) |directory|
+        try std.fs.path.join(runtime.allocator, &.{ directory, "profiles.yml" })
     else
-        try std.fs.path.join(runtime.allocator, &.{ project_dir, "profiles.yml" });
+        try std.fs.path.join(runtime.allocator, &.{ default_base, "profiles.yml" });
 
-    const text = std.Io.Dir.cwd().readFileAlloc(runtime.io, profiles_path, runtime.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+    defer runtime.allocator.free(profiles_path);
+    return std.Io.Dir.cwd().readFileAlloc(runtime.io, profiles_path, runtime.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => {
             if (explicit_profile_lookup) return error.MissingProfileFile;
+            if (runtime.environment) |environment| if (environment.get("HOME")) |home| {
+                const fallback_path = try std.fs.path.join(runtime.allocator, &.{ home, ".dbt", "profiles.yml" });
+                defer runtime.allocator.free(fallback_path);
+                return std.Io.Dir.cwd().readFileAlloc(runtime.io, fallback_path, runtime.allocator, .limited(1024 * 1024)) catch |failure| switch (failure) {
+                    error.FileNotFound => return null,
+                    else => return failure,
+                };
+            };
             return null;
         },
         else => return err,
     };
+}
 
+pub fn loadAdapterIdentity(runtime: Runtime, project_dir: []const u8, config: *const ProjectConfig, options: Options) !?AdapterIdentity {
+    const text = (try loadProfileText(runtime, project_dir, options)) orelse return null;
+    defer runtime.allocator.free(text);
     const selected_profile = options.profile orelse config.profile_name orelse return error.MissingProfileName;
-    var identity = try parseAdapterIdentityText(runtime.allocator, text, selected_profile, options.target);
-    if (identity.database_path != null) {
-        const base = std.fs.path.dirname(profiles_path) orelse ".";
-        identity.database_path_base = try runtime.allocator.dupe(u8, base);
-    }
+    var identity = try parseAdapterIdentityTextWithEnvironment(runtime.allocator, text, selected_profile, options.target, runtime.environment);
+    if (identity.database_path != null) identity.database_path_base = try std.process.currentPathAlloc(runtime.io, runtime.allocator);
     return identity;
 }
 
 pub fn parseAdapterIdentityText(allocator: std.mem.Allocator, text: []const u8, selected_profile: []const u8, target_override: ?[]const u8) !AdapterIdentity {
-    const profile_name = try dupTrimmedScalar(allocator, selected_profile);
-    if (profile_name.len == 0) return error.MissingProfileName;
+    return try parseAdapterIdentityTextWithEnvironment(allocator, text, selected_profile, target_override, null);
+}
 
-    const target_name = if (target_override) |target|
-        try dupTrimmedScalar(allocator, target)
-    else if (try findProfileTarget(allocator, text, profile_name)) |target|
-        target
-    else
-        try allocator.dupe(u8, "default");
-    if (target_name.len == 0) return error.MissingProfileTarget;
+pub fn parseAdapterIdentityTextWithEnvironment(allocator: std.mem.Allocator, text: []const u8, selected_profile: []const u8, target_override: ?[]const u8, environment: ?*const std.process.Environ.Map) !AdapterIdentity {
+    const values = @import("config_value.zig");
+    const resource = @import("resource_config.zig");
+    var document = try @import("yaml.zig").parse(allocator, text);
+    defer document.deinit();
+    const profile = values.get(document.value, selected_profile) orelse return error.MissingProfile;
+    if (profile != .object) return error.MissingProfile;
+    // Scalar profile rendering performs no filesystem or database operations.
+    var renderer = @import("config_render.zig").Context{ .runtime = .{ .allocator = allocator, .io = undefined, .environment = environment }, .allow_secrets = true };
+    var rendered_target = if (target_override) |name| try values.clone(allocator, .{ .string = name }) else try renderer.render(values.get(profile, "target") orelse .{ .string = "default" });
+    defer values.deinit(allocator, &rendered_target);
+    const target = resource.string(rendered_target) catch return error.MissingProfileTarget;
+    if (target.len == 0) return error.MissingProfileTarget;
+    const outputs = values.get(profile, "outputs") orelse return error.MissingProfileOutputs;
+    const selected = values.get(outputs, target) orelse return error.MissingProfileTarget;
+    var output = try renderer.render(selected);
+    defer values.deinit(allocator, &output);
+    if (output != .object) return error.MissingProfileTarget;
+    const adapter = values.get(output, "type") orelse return error.MissingProfileType;
+    const normalized_adapter_type = try normalizeAdapterType(allocator, resource.string(adapter) catch return error.MissingProfileType);
+    const target_schema = if (values.get(output, "schema")) |v| try allocator.dupe(u8, resource.string(v) catch return error.MissingProfileSchema) else if (std.mem.eql(u8, normalized_adapter_type, "duckdb")) try allocator.dupe(u8, "main") else return error.MissingProfileSchema;
+    const path = if (std.mem.eql(u8, normalized_adapter_type, "duckdb")) if (values.get(output, "path")) |v| try allocator.dupe(u8, resource.string(v) catch return error.MissingProfileDatabasePath) else try allocator.dupe(u8, ":memory:") else null;
+    const threads: u16 = if (values.get(output, "threads")) |v| blk: {
+        const count = if (v == .integer) v.integer else if (v == .string) try std.fmt.parseInt(i64, v.string, 10) else return error.InvalidProfileThreads;
+        if (count < 1 or count > 65535) return error.InvalidProfileThreads;
+        break :blk @intCast(count);
+    } else 1;
+    var target_context: std.json.Value = .null;
+    var it = output.object.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.key_ptr.*, "password") or std.mem.eql(u8, entry.key_ptr.*, "pass") or std.mem.eql(u8, entry.key_ptr.*, "private_key") or std.mem.eql(u8, entry.key_ptr.*, "token") or std.mem.eql(u8, entry.key_ptr.*, "secrets")) continue;
+        try values.put(allocator, &target_context, entry.key_ptr.*, entry.value_ptr.*);
+    }
+    try values.put(allocator, &target_context, "name", .{ .string = target });
+    try values.put(allocator, &target_context, "profile_name", .{ .string = selected_profile });
+    try values.put(allocator, &target_context, "schema", .{ .string = target_schema });
+    try values.put(allocator, &target_context, "type", .{ .string = normalized_adapter_type });
+    try values.put(allocator, &target_context, "threads", .{ .integer = threads });
+    if (values.get(output, "dbname")) |database| try values.put(allocator, &target_context, "database", database);
+    if (std.mem.eql(u8, normalized_adapter_type, "duckdb")) {
+        const basename = std.fs.path.basename(path orelse ":memory:");
+        const extension = std.fs.path.extension(basename);
+        const database = if (std.mem.eql(u8, basename, ":memory:")) "memory" else basename[0 .. basename.len - extension.len];
+        try values.put(allocator, &target_context, "database", .{ .string = database });
+    }
+    const connection_info = if (std.mem.eql(u8, normalized_adapter_type, "postgres")) try postgresConnectionInfoValue(allocator, output) else null;
+    return .{ .profile_name = try allocator.dupe(u8, selected_profile), .target_name = try allocator.dupe(u8, target), .adapter_type = normalized_adapter_type, .target_schema = target_schema, .database_path = path, .connection_info = connection_info, .threads = threads, .target_context = target_context, .duckdb_credentials = if (std.mem.eql(u8, normalized_adapter_type, "duckdb")) try values.clone(allocator, output) else .null };
+}
 
-    const adapter_type = (try findProfileOutputScalar(allocator, text, profile_name, target_name, "type", error.MissingProfileType)) orelse return error.MissingProfileType;
-    const normalized_adapter_type = try normalizeAdapterType(allocator, adapter_type);
-    const target_schema = if (try findProfileOutputScalar(allocator, text, profile_name, target_name, "schema", error.MissingProfileSchema)) |schema|
-        schema
-    else if (std.mem.eql(u8, normalized_adapter_type, "duckdb"))
-        try allocator.dupe(u8, "main")
-    else
-        return error.MissingProfileSchema;
-    const database_path = if (std.mem.eql(u8, normalized_adapter_type, "duckdb"))
-        try findProfileOutputScalar(allocator, text, profile_name, target_name, "path", error.MissingProfileDatabasePath)
-    else
-        null;
-    return .{
-        .profile_name = profile_name,
-        .target_name = target_name,
-        .adapter_type = normalized_adapter_type,
-        .target_schema = target_schema,
-        .database_path = database_path,
-    };
+fn postgresConnectionInfoValue(allocator: std.mem.Allocator, output: std.json.Value) ![]const u8 {
+    const values = @import("config_value.zig");
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "connect_timeout=10 application_name=dxt ");
+    inline for (.{ "host", "port", "dbname", "user", "password", "sslmode", "sslcert", "sslkey", "sslrootcert", "connect_timeout", "keepalives_idle" }) |key| {
+        if (values.get(output, key)) |raw| {
+            const value = try values.scalarText(allocator, raw);
+            defer allocator.free(value);
+            if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidPostgresProfile;
+            try out.appendSlice(allocator, key ++ "='");
+            for (value) |byte| {
+                if (byte == '\'' or byte == '\\') try out.append(allocator, '\\');
+                try out.append(allocator, byte);
+            }
+            try out.appendSlice(allocator, "' ");
+        }
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
 fn findProfileTarget(allocator: std.mem.Allocator, text: []const u8, selected_profile: []const u8) !?[]const u8 {
@@ -110,6 +187,57 @@ fn findProfileTarget(allocator: std.mem.Allocator, text: []const u8, selected_pr
 
     if (!profile_found) return error.MissingProfile;
     return null;
+}
+
+fn postgresConnectionInfo(allocator: std.mem.Allocator, text: []const u8, profile_name: []const u8, target_name: []const u8, environment: ?*const std.process.Environ.Map) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "connect_timeout=10 application_name=dxt ");
+    inline for (.{ "host", "port", "dbname", "user", "password", "sslmode", "connect_timeout", "keepalives_idle" }) |key| {
+        if (try findProfileOutputScalar(allocator, text, profile_name, target_name, key, error.InvalidPostgresProfile)) |raw| {
+            const value = try resolveProfileEnvironment(allocator, raw, environment);
+            if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidPostgresProfile;
+            try out.appendSlice(allocator, key ++ "='");
+            for (value) |byte| {
+                if (byte == '\'' or byte == '\\') try out.append(allocator, '\\');
+                try out.append(allocator, byte);
+            }
+            try out.appendSlice(allocator, "' ");
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn resolveProfileEnvironment(allocator: std.mem.Allocator, value: []const u8, environment: ?*const std.process.Environ.Map) ![]const u8 {
+    if (std.mem.indexOf(u8, value, "{{") == null) return value;
+    if (!std.mem.startsWith(u8, value, "{{") or !std.mem.endsWith(u8, value, "}}")) return error.UnsupportedProfileExpression;
+    const expression = std.mem.trim(u8, value[2 .. value.len - 2], " \t\r\n");
+    if (!std.mem.startsWith(u8, expression, "env_var(") or !std.mem.endsWith(u8, expression, ")")) return error.UnsupportedProfileExpression;
+    var arguments = try @import("jinja.zig").parseLiteralArgs(allocator, expression[8 .. expression.len - 1], error.UnsupportedProfileExpression);
+    defer arguments.deinit(allocator);
+    if (arguments.items.len != 1 and arguments.items.len != 2) return error.UnsupportedProfileExpression;
+    if (environment) |map| if (map.get(arguments.items[0])) |resolved| return try allocator.dupe(u8, resolved);
+    if (arguments.items.len == 2) return arguments.items[1];
+    return error.MissingProfileEnvironmentVariable;
+}
+
+test "postgres profile credentials use libpq escaping and stay in memory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const text =
+        \\demo:
+        \\  target: dev
+        \\  outputs:
+        \\    dev:
+        \\      type: postgres
+        \\      schema: analytics
+        \\      host: localhost
+        \\      user: "{{ env_var('DXT_SYNTHETIC_USER', 'fixture_user') }}"
+        \\      password: a'b\c
+    ;
+    const identity = try parseAdapterIdentityText(arena.allocator(), text, "demo", null);
+    try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "user='fixture_user'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "password='a\\'b\\\\c'") != null);
 }
 
 fn findProfileOutputScalar(
@@ -309,6 +437,49 @@ test "profile parser captures scalar duckdb path" {
     try std.testing.expectEqualStrings("duckdb", identity.adapter_type);
     try std.testing.expectEqualStrings("analytics", identity.target_schema);
     try std.testing.expectEqualStrings("warehouse.duckdb", identity.database_path.?);
+}
+
+test "profile YAML anchors env target and native credential values stay in memory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var environment: std.process.Environ.Map = .init(allocator);
+    defer environment.deinit();
+    try environment.put("DXT_PROFILE_TARGET", "dev");
+    try environment.put("DXT_PROFILE_THREADS", "3");
+    try environment.put("DBT_ENV_SECRET_PASSWORD", "synthetic ' escaped\\ password");
+    const identity = try parseAdapterIdentityTextWithEnvironment(allocator,
+        \\base: &base {type: postgres, schema: public, host: localhost, user: synthetic, dbname: fixture, port: 5432}
+        \\fixture:
+        \\  target: "{{ env_var('DXT_PROFILE_TARGET') }}"
+        \\  outputs:
+        \\    dev:
+        \\      <<: *base
+        \\      threads: "{{ env_var('DXT_PROFILE_THREADS') | int }}"
+        \\      password: "{{ env_var('DBT_ENV_SECRET_PASSWORD') }}"
+    , "fixture", null, &environment);
+    try std.testing.expectEqual(@as(u16, 3), identity.threads);
+    try std.testing.expect(identity.target_context.object.get("password") == null);
+    try std.testing.expectEqualStrings("fixture", identity.target_context.object.get("database").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "password='synthetic \\' escaped\\\\ password'") != null);
+}
+
+test "DuckDB secrets belong to native driver credentials and are absent from target" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const identity = try parseAdapterIdentityText(a,
+        \\fixture:
+        \\  target: dev
+        \\  outputs:
+        \\    dev:
+        \\      type: duckdb
+        \\      secrets: [{type: http, bearer_token: synthetic-private-token}]
+        \\      settings: {threads: 2}
+    , "fixture", null);
+    try std.testing.expect(identity.target_context.object.get("secrets") == null);
+    try std.testing.expectEqualStrings("synthetic-private-token", identity.duckdb_credentials.object.get("secrets").?.array.items[0].object.get("bearer_token").?.string);
+    try std.testing.expectEqual(@as(i64, 2), identity.target_context.object.get("settings").?.object.get("threads").?.integer);
 }
 
 test "profile parser reports missing profile target and type" {

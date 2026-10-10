@@ -24,14 +24,925 @@ Build `dxt` into a practical dbt alternative that can eventually run real public
 - Parse dbt projects and reproduce graph semantics.
 - Compile common dbt SQL/Jinja behavior.
 - Execute models, seeds, tests, snapshots, and docs workflows for supported adapters.
-- Emit dbt-compatible artifacts such as `manifest.json`, `run_results.json`, `catalog.json`, `sources.json`, and later `semantic_manifest.json`.
+- Emit dbt-compatible artifacts such as `manifest.json`, `run_results.json`, `catalog.json`, `sources.json`, and `semantic_manifest.json`.
 - Support semantic models and metrics as first-class graph resources.
 - Add efficient cross-database transformation through explicit multi-connection planning, pushdown, staging, and cost controls.
 - Maintain public-safe repo hygiene and a PR/green-check release workflow.
 
 ## Operating Loop
 
-### Active Snapshot Foundation Slice
+### Full Usability Implementation Campaign
+
+The initial release contract is SQL execution on DuckDB and PostgreSQL.
+Eight functional Core tracks and four proposed feature tracks have native
+implementations and focused evidence; release acceptance is a separate track.
+The current combined candidate includes reviewed compile/docs durability,
+Core retry interoperability, declared-secret diagnostic publication and
+authored catalog hook/dispatch corrections. A fresh native/CLI build and all
+focused checks precede publication, followed by the complete unfiltered suite,
+unchanged public projects, release/install/performance checks and actual
+x86_64/ARM CI. Exact candidate identities, counts and outcomes are recorded in
+[PR #221](https://github.com/sabino/dxt/pull/221) and
+[issue #220](https://github.com/sabino/dxt/issues/220).
+
+Both complete platform reports for `c81a20b` contain all 5,819 expected unique
+identities: each has 5,759 passes, 60 failures, zero errors and zero skips.
+They share 56 failures, leaving 64 distinct negative cases. Separate
+same-repository diagnostics verify the sealed original reports and their source;
+successful extraction is negative evidence, never compatibility acceptance.
+Both original reports are retained before publishing a corrected candidate.
+
+Bounded failure triage has disjoint ownership: the workflow worker owns physical
+version identities in `workflow.zig`; the snapshot worker owns the two modern
+YAML snapshot allocator panics; the source worker grounds runtime diagnostic,
+stored-audit and PostgreSQL rollback failures; the oracle worker grounds parallel
+compile, native-session and executed test-helper behavior; the readiness worker
+grounds documentation fallback order and invalid-cache equivalence. The
+supervisor owns nullable incremental configuration, deprecation environment
+policy, metric movement budgets, planning and integration. Read-only original
+fixture and actual pinned Core controls precede each bounded correction. Keep
+the original cases, artifact/row/rollback/privacy assertions and full-suite
+identities; correct stale expectations only when observed Core or the documented
+native extension contract establishes their replacement. Coordinate shared
+source files before edits. A new combined candidate requires fresh native,
+affected focused, complete platform, public-project and release acceptance.
+The oracle worker exclusively owns the compile facade catch while closing
+Core's fail-fast exception: completed fail-fast compilation errors publish
+results and exit 1; ordinary compilation errors exit 2, with durable publication
+only through the documented native opt-in. Keep docs catches and preflight,
+infrastructure, out-of-memory and earlier-artifact policies unchanged. Integrate
+this bounded facade commit before any subsequent worker edits that shared file.
+
+The compile fail-fast correction is integrated. The source worker now owns only
+the concurrent data-test queue seam in that facade, reusing the existing merged
+test order while preserving dependency readiness and result completion. Its
+other bounded slices retain contextual Core-backed data errors, declared-secret
+snapshot rollback checks and stock DuckDB stored-audit transaction behavior.
+The native long-error control also exposes a secret prefix cut by diagnostic
+truncation; preserve the memory bound and mask declared values before publishing
+that truncated boundary. Do not treat complete-value masking alone as proof of
+this boundary's privacy. The oracle worker owns the deprecation fixture's
+serial Core policy baseline while native concurrent deduplication remains
+strictly tested; the supervisor owns nullable incremental normalization.
+The source worker delegates diagnostic capture to a separate editing worktree:
+the bounded capture helper, native drivers, compile diagnostic thread scope and
+necessary environment/open-site plumbing. Inspect complete borrowed diagnostics
+before the raw size cap. Copy whole UTF-8 units and complete declared values;
+if a complete secret match would cross the cap, stop before that match. Existing
+publication then masks the retained values without reprocessing inserted masks.
+Keep raw capped errors available to internal classification and SQL analysis,
+and never publish an unsafe raw fallback after allocation failure. Scope compile
+environments per thread with cleanup; preserve authored SQL and successful
+metadata. This worker does not edit the concurrently owned data-test facade or
+stored-audit file.
+
+The corrected `8fe99a7` candidate passes a genuine clean native build with
+816/816 tests and a genuine Debug CLI build. Its original 626-case focused run
+finishes with 625 passes, one failure, zero errors and zero skips. Every
+original ARM failure and the earlier 265 focused cases executes; the complete
+5,819-case collection is unchanged. The only remaining failure calls pinned
+Core's intentionally prohibited `WritableManifest.validate` entry point after
+the privacy, durability and raw/compiled SQL assertions pass. Replace that
+entry point with the existing complete manifest/run-results schema validator.
+Retain the normally completed negative report and all fixture scratch.
+
+Two x86_64-only fixture assertions have actual read-only controls. Native
+fail-fast cancellation may report either pre-query cancellation or the exact
+DuckDB interrupted-query diagnostic; preserve status, timing, skipped work and
+event assertions while accepting those two exact messages. SQL unit sampling
+retains `random()` and its once-only comparison: cast the observed quoted
+DOUBLE text back to DOUBLE rather than converting a DECIMAL numeric literal,
+which actual Core and Native controls show can differ by one ULP. This native
+mock-input introspection fixture is documented separately from positive Core
+unit-fixture comparisons. No product source changes are needed for these
+three bounded fixture corrections.
+
+The final focused gate contains 664 unique original cases: all sixteen negative
+modules plus the earlier 265-case selection, covering all 64 platform-negative
+identities. Use the original literal selectors for partially selected modules;
+expanding them to whole modules would change the selected set. Fresh native
+and CLI builds, exact 5,819-case collection and original fixture builders are
+required; preserve strict artifact/row/rollback checks and default all-directory
+retention. Its result is focused evidence only. Both complete platform suites
+and candidate-specific public/release gates remain required before acceptance.
+
+Fresh `8fe99a7` local gates pass the unchanged PostgreSQL dbt-utils ladder
+(seven Native/Core command pairs), all six public Jaffle steps, a genuine
+ReleaseSafe build, byte-identical deterministic archives, extracted installation
+with both adapters and PATH empty, the unchanged 70,000-binding seed and the
+correctness-aware cold/warm benchmark. These source-bound receipts do not
+certify complete platform compatibility or production readiness. Final fixture,
+planning and documentation changes require their own held candidate source;
+any adoption of an unchanged native binary must verify every native input and
+package the final documentation bytes explicitly.
+
+The first combined clean native run on `e8f4998` completes with 815 passes and
+one crash out of 816 tests. The new workflow identity regression exposes an
+aggregate assignment whose schema/identifier helpers read the identity being
+initialized. The supervisor owns the bounded correction: compute both fields
+while the clone remains unresolved, then assign the complete identity. Keep
+the original regression and all logical/physical naming assertions. The failed
+build report is retained; the CLI and 626-case run did not start. A fresh source
+candidate must restart the genuine build and combined checks.
+
+The metric movement failure fixture now deliberately keeps its declared source
+estimate below the row limit while making actual source rows exceed it. Actual
+native controls prove three moved rows fit the limit and six rows fail at the
+same limit, with no retained stages. Destination-local result rows do not count
+as movement. The original case identity and failure/privacy/cleanup assertions
+remain intact. This fixture correction is not combined-candidate acceptance.
+
+The compile-policy candidate `000eb74` passes all 796 native tests and all 95
+affected focused checks. Its interrupted complete-suite run is negative
+evidence, not final acceptance. Subsequent namespace corrections require fresh
+candidate-specific native, focused, full, public, release and platform results,
+tracked in the PR and issue until acceptance is complete.
+
+The following triage notes describe the earlier known-failing candidates and
+the bounded corrections; they do not establish final acceptance.
+
+The original 5,819-case run on `000eb74` was stopped normally after 2,622
+passes and eleven failures, with zero errors or skips. Four failures expose
+installed-package macro discovery order: Core preserves directory enumeration
+order while the native loader sorted it, changing the visible generic-test
+body and `get_where_subquery` helper. Preserve Core's discovery order without
+changing resource or artifact sorting. Two further namespace failures expose
+a filesystem-dependent assumption in the hidden-body fixture; ground its
+unchanged inputs with actual Core CLI, then make the hidden namespace explicit
+with a root seed while retaining the original positive and negative assertions.
+The other five failures are PostgreSQL schema collisions caused by the
+supervisor's failed-only temporary-directory retention: successful paths are
+reused while module database fixtures retain relations. Restore pytest's
+default all-directory retention; do not change hook/grants product behavior or
+weaken their assertions. The interrupted JUnit's unnamed sentinel is not a
+test or pass. Preserve failed scratch, complete fixture shutdown and the exact
+1608-file terminal source hold. Certify the bounded namespace correction,
+then restart every full/public/release acceptance gate on the new candidate.
+
+The fresh 5,819-case run on `0fd4457` exposes three base CLI compile/docs
+exit-code regressions. Actual pinned Core CLI witnesses return 2 for these
+missing-variable/macro failures; the new durable-result catches return 1.
+The original exit-code assertions remain intact. A read-only audit also
+identifies later preflight and previous-artifact preservation contracts at
+the same catches. The expression worker grounds all original and synthetic
+failure cases with actual Core CLI commands before changing product behavior.
+The source worker reviews the distinction between preflight failure and
+per-resource durable error publication. The supervisor owns planning and
+integration; no blanket assertion conversion is permitted. Preserve Core
+default command behavior, completed database effects, diagnostic messages,
+existing artifact policies and the separately documented durable-error/retry
+extension. The current original full-suite checkout stays frozen while a
+bounded correction is prepared and certified in isolated worktrees. All
+result counts and final acceptance must identify their actual candidate.
+
+All seven exact Core CLI failure witnesses return 2. Four unchanged native
+error artifacts also replay successfully through real Core retry. Preserve
+Core's default compile/docs artifact policy and exit code 2. Durable
+compilation-error artifacts become the explicit native environment option
+`DXT_DURABLE_COMPILE_ERRORS`, default false and validated through the existing
+boolean option path. Only opted-in genuine per-resource failures publish the
+existing manifest/results; preflight failures always retain earlier artifacts.
+The option is absent from recorded Core command arguments, so error results
+remain readable by Core retry. Catalog collection errors retain exit code 1.
+The source worker owns the two facade catches, focused policy helper and
+native option wiring/tests in a dedicated worktree. The expression worker
+owns only the compile artifact/diagnostic extension fixtures: enable the
+native option explicitly, expect grounded exit code 2 and retain every
+original schema, diagnostic, warehouse, SQL and real retry assertion. Original
+default Core fixtures are unchanged. The supervisor owns documentation,
+review and integration. A new native/CLI build and the affected default plus
+extension checks precede the corrected full-suite and final release gates.
+
+The frozen `0fd4457` full run confirms the three base CLI failures and three
+command-flag failures at the same compile catch. It is deliberately stopped
+with one normal pytest interrupt so standard finalizers and the partial JUnit
+report run before the corrected complete suite starts. The partial report,
+failed scratch, original clean/driver build receipts and candidate hashes
+remain negative evidence, never full acceptance. No assertions or fixture
+prerequisites are changed in that original run.
+
+The earlier unfiltered 5,808-case run on the published sorting candidate
+exposed eight failures across initialization, a colored-output expectation and
+durable compile/docs error artifacts. It continued without
+source changes to collect integrated evidence; its failed scratch and reports
+are retained and cannot count as acceptance. Read-only triage is disjoint:
+the oracle worker grounds generated DuckDB profile paths and invalid-init
+logging, the source worker grounds the statement-output color expectation, and
+the expression worker traces compile/docs error publication. Fresh pinned Core
+CLI witnesses confirm the initialization and color expectations are stale:
+relative database paths use invocation CWD, invalid init still writes its
+diagnostic log, and default output includes ANSI reset sequences. The oracle
+worker owns only those command-fixture corrections, including explicit color
+flags, in its isolated worktree. The expression worker restores only the two
+facade catches that lost existing durable error artifacts and execution exit
+codes. A ninth failure confirms an authored PostgreSQL catalog fixture indexes
+Core's set-valued relation collection. The source worker owns the bounded
+native catalog set constructor and that fixture's explicit list conversion,
+with actual Core container/metadata evidence; the command test file remains
+owned by the oracle worker to prevent overlapping edits. Any correction
+must retain the original database effects, diagnostics, retry and full-schema
+assertions. The supervisor records planning in a separate worktree during the
+original run and integrates reviewed bounded corrections in that separate
+checkout. After focused certification, it can push the draft branch and start
+corrected actual-platform CI while the original local checkout remains frozen
+on its failing candidate. Once that original run closes, the local checkout
+receives the reviewed corrections and restarts the complete unfiltered suite
+and applicable final gates. Reports always identify their actual candidate;
+the older full run cannot certify the corrected branch.
+
+The new catalog negative case exposes a second grounded publication gap:
+an authored catalog exception makes Core write a Catalog v1 errors array and
+docs index with execution exit code 1; the native candidate exits 2 before
+publishing either, despite retaining successful compiled artifacts. The source
+worker owns only the additive catalog error-array writer, its native escaping
+and allocation check, and the existing catalog failure fixture's direct-index
+and authored-error cases. The expression worker owns only the docs facade's
+collection catch/publication hunk. Preserve successful catalog bytes, complete
+artifact schemas, authored diagnostics, static index output, existing effective
+write policy and OOM propagation. Both corrections join the same single native
+build and focused certificate before isolated draft publication. No unrelated
+catalog transport, provider or feature surface is expanded.
+
+Focused certification now restores the compile/docs error artifacts, but the
+original actual Core retry check exposes its one-way docs flag bug: Core itself
+records false static/empty-catalog values and then rejects their generated
+negative CLI options when retrying its own artifact. The source worker owns
+only omission of default-false one-way docs flags in the native results writer
+and a native argument regression; enabled flags and the dual compile flag keep
+their effective behavior. This is an intentional artifact argument difference
+for Core retry interoperability, recorded by the supervisor in compatibility
+documentation. The expression worker extends the original failure/retry fixture
+with default docs generation while retaining its existing static case and all
+artifact/SQL/retry assertions. Core and its assertions are never patched. A
+fresh combined native build and every focused case remain mandatory. The
+older whole run's additional external-reader diagnostic failure is being
+grounded read-only by the oracle worker before any correction is authorized.
+
+The same docs replay review identifies a bounded existing omission: native
+retry restores static and compile settings but drops enabled empty-catalog.
+The expression worker owns only that argument-restoration assignment in the
+command module and an enabled-empty-catalog case in its existing actual Core
+failure/retry fixture. Preserve the prior compile/default/static cases and
+their SQL, timings and complete-schema assertions; verify both engines replay
+the unchanged artifact and retain the enabled flag and empty catalog. The
+writer's omission of false one-way keys remains unchanged.
+
+Actual Core and native external-reader witnesses confirm the plain authored
+invalid-boolean literal is part of the database diagnostic. Native rollback
+retains the original file bytes, relation rows and absence of staging files;
+those assertions stay intact. The oracle worker owns only correction of that
+literal expectation and an actual Core/native declared-secret regression in
+the same external-file fixture module. The separate declared DBT_ENV_SECRET_
+control proves a real native publication gap: Core masks the value in console,
+file log and result messages, while both engines retain authored raw SQL. The
+source worker owns a bounded native secret-value projection and its console,
+file-log and durable result-message seams, with allocation/overlap/empty-value
+checks. It must first trace the current publication owners, preserve authored
+SQL/config artifacts, retain useful non-secret diagnostics and propagate OOM.
+Any additional facade seam needs a grounded handoff before editing. The
+expression worker integrates these disjoint commits and certifies the combined
+native CLI; no independent heavy build starts without disk headroom.
+
+The catalog secret control proves Core masks durable catalog errors and exposes
+a separate native DuckDB routing gap: docs ignores authored get_catalog hooks.
+The source worker owns only reuse of the existing held catalog collector for
+selected authored DuckDB catalog hooks. Detect the effective global/dispatched
+entry through the existing resolver, retaining stock DuckDB introspection when
+the selected hook is bundled. DuckDB calls get_catalog with its genuine
+InformationSchema object and lowercased schema set, as defined by Core's
+SchemaSearchMap.add; PostgreSQL retains its
+relation-set/get_catalog_relations path. Reuse existing row ownership/filtering,
+native query context and Unicode/set helpers; no compiler or dispatch semantics
+are expanded. The expression worker owns only the docs facade's bounded DuckDB
+routing branch and projection of its owned catalog error before artifact
+publication, propagating OOM and preserving authored resources. The oracle
+worker owns two actual Core positive DuckDB entry/dispatch comparisons, a
+declared-secret DuckDB negative and a declared-secret case in the existing
+PostgreSQL failure fixture. Preserve all existing catalog, successful compile,
+index, SQL and complete-schema checks. These cases join the same final native
+build and focused certificate before publication and the fresh whole run.
+
+An actual Core/native run-operation witness now confirms the explicit dbt
+namespace resolves packages before adapter prefixes: a root default catalog
+override wins over the bundled DuckDB implementation. The source worker owns
+only that namespace branch in the existing dispatch resolver, after configured
+search-order handling, using its existing package-order helper with root and
+dbt when the dbt package is loaded. Preserve unqualified and other namespace
+paths and explicit search-order semantics. Add a native competing-prefix
+regression. The oracle worker adds the root default override to its existing
+actual Core catalog comparison without weakening artifact or warehouse checks.
+The expression worker rebuilds the combined native tests and CLI after these
+disjoint commits, then certifies every focused case. The earlier 792-test native
+pass and 5,818-case collection are partial evidence for their recorded source;
+they cannot certify this subsequent resolver correction.
+
+The older known-failing 5,808-case run was intentionally interrupted with SIGINT
+after preserving 2,063 passes, ten known failures and its source/binary receipts.
+It cannot reach acceptance, and continued fixture growth threatens the space
+needed for corrected clean builds. The wrapper returned 130 without normal
+pytest finalization or JUnit publication. Its child processes were verified
+closed and the owned orphan database stopped before changing that checkout;
+the interruption and closure receipts remain retained. This is partial
+negative evidence only. All corrections still require a fresh complete unfiltered run,
+original build fixtures, both actual CI architectures and final public/release
+gates. Closed database scratch may be retired only by exact approved scope with
+two independently verified complete physical restores and durable recovery
+indexes; failed fixture scratch and unknown/live consumers remain protected.
+
+The final unfiltered 5,626-case candidate run was intentionally interrupted
+after its first failure was grounded: a fixture rendered a dictionary created
+from a salted Python set, whose iteration order changes with PYTHONHASHSEED.
+The source worker owns only the deterministic fixture correction and retains
+both original Core orders. Using the standard dictsort filter then exposed a
+confirmed missing native filter. The expression worker owns a focused filter
+helper, one dispatcher branch, native allocation/ordering tests and a disjoint
+actual Core fixture module; it reuses existing argument binding, genuine items
+dispatch, Unicode lower and value ordering. The supervisor owns integration and
+will restart the entire unfiltered canonical suite after focused certification.
+No test selection, assertion or schema check is weakened. The interrupted run
+and its failure remain recoverable and cannot count as final acceptance.
+
+The same interrupted run retains a second fixture failure: Core emits runtime
+errors on stdout under quiet logging. The corrected test keeps the return code,
+native stderr wrapper, exact database diagnostic and file-log assertions. Both
+test-only corrections are integrated. The filter's original focused pass also
+exposed genuine readonly Mapping dispatch and large unordered-float ordering
+differences. These remain product blockers until the native helper matches the
+pinned Core behavior on both adapters; no alternate fixture bypass is accepted.
+The bounded native adaptive-sort helper records its pinned upstream source and
+reuses the shipped PSF notices. Complete focused certification precedes a fresh
+unfiltered run, final public/release checks and both architecture CI suites.
+The reviewed filter and adaptive-sort implementation are integrated, and the
+fresh unfiltered collection contains 5,760 tests. Product-source edits are now
+held while the worker certifies all 134 actual Core filter comparisons and the
+corrected base-context and quiet-log fixtures on its frozen native CLI.
+
+All 782 native tests, 134 actual Core filter pairs and three original fixture
+checks pass. Both unchanged public ladders and eight shorter Actions jobs pass
+on that candidate. A bounded two-case follow-up then confirms the existing
+standard sort filter shares the same ascending/reverse unordered-float bug.
+The complete 5,760-case run is intentionally stopped with its partial evidence
+retained. The expression worker owns only standard sort routing to the already
+certified adaptive helper, original reverse/tie behavior and disjoint regression
+fixtures; the supervisor owns integration and restarts the whole suite. The
+earlier native/public/install receipts remain candidate-specific. No other
+provider or feature family is broadened by this correction.
+
+The reviewed standard-sort correction is committed and integrated. It changes
+only ascending adaptive sorting and Python's input/output reversal, retaining
+stable ties, original typed payloads and comparison errors. Forty-eight actual
+Core regression cases cover both initial adapters, including all five required
+large unordered-float sizes; all 134 dictionary-sort cases remain mandatory.
+The complete unfiltered collection now contains 5,808 tests. All 784 native
+tests, the CLI build, all 182 paired sorting comparisons and the three original
+fixture regressions pass on one frozen CLI. Product source is held during this
+candidate's certification; the fresh whole-suite run, final public ladders,
+ReleaseSafe packaging/performance and both actual-platform suites remain gates.
+The local whole-suite run uses standard pytest failed-only temporary retention
+to bound scratch storage, without changing test selection, assertions or build,
+adapter and browser fixtures. Durable logs/JUnit reports remain outside the
+temporary root. Pytest retains call-failure scratch; setup/teardown-only failures
+can still lose their function scratch under its documented cleanup behavior.
+The former observation/archival tooling stays outside this fresh test process.
+
+The preceding candidate passes both unchanged public-project ladders and the
+original autocommit check. Its actual x86_64 and ARM native/install CI jobs,
+all 776 native tests, 326 Python 3.11 cases, snapshots and performance pass.
+Its independent ReleaseSafe archive is deterministic, both extracted adapters
+work with PATH empty, the unchanged 70,000-binding seed passes and every
+250-model cold/warm comparison meets its budget. These receipts remain scoped
+to that candidate; the dictsort integration requires final recertification.
+
+The integrated typed cursor/range candidate passes 776 native tests and 463
+strict Core comparisons. Final unchanged PostgreSQL dbt-utils and Jaffle
+acceptance exposed one shared consumer regression: stock test materializations
+still require list column names after Agate correctly publishes a tuple.
+The supervisor owns the bounded test-result consumer correction; independent
+workers audit related consumers before the complete canonical run and repeat
+both unchanged public-project ladders on the corrected frozen CLI. Earlier
+passing public/release receipts remain historical evidence, not certification
+of this candidate. Native release installation, performance and both actual
+architecture CI runs remain mandatory.
+
+Two independent consumer audits find no further production list-only mismatch.
+The empty-table constructor also publishes tuple column names, matching the
+pinned Core empty Agate witness; fetched and seed tables already do so. Existing
+real build/test/public-project checks validate these bounded integration fixes.
+The same audit confirms Core result matrices contain tuple rows inside the
+outer list. Native fetched matrices now preserve that shape, and the test
+runner validates tuple/list rows without relaxing row count, arity or types.
+Four new actual Core comparisons cover fetched and empty stored results on
+both initial adapters before the final canonical freeze.
+
+An earlier published checkpoint passes all three reported Actions jobs: the
+unchanged public PostgreSQL package, all six public Jaffle commands and the
+native Zig/safety checks. Exact cold/warm performance, snapshots and extracted
+installation on both architectures also pass. The developer-only clock fixture
+handles interrupted and partial diagnostic writes under fortified runner
+headers; five regressions, including both actual database engines, pass.
+The broader Python 3.11 developer job exposed four historical expectations:
+two pre-COPY seed diagnostics and two alphabetically ordered macro arrays.
+Fresh Core CLI witnesses confirm the exact CSV diagnostic fields and authored
+macro dependency order. All four bounded corrections are integrated and pass
+on the unchanged verified product candidate. The fresh Actions developer job
+passes all 326 tests at the published checkpoint. All three reported jobs pass
+again there, including the complete unchanged PostgreSQL package ladder.
+Product semantics and the strict public comparison remain intact.
+The full Python 3.12 compatibility jobs are still running on both architectures.
+
+The combined callable/ownership candidate passes 704 native tests and 70
+developer acceptance checks. The Relation Mapping closure is integrated after
+48 actual Core comparisons; earlier callable certificates include 18
+both-adapter list-growth cases, 44 inline cases and the complete 213-case
+saved-method/base/receiver suite. The lazy iterator capacity repair initializes
+spare tagged cells before alias publication and passes eight actual Core cases
+for live and completed saved loop contexts. The fresh strict public PostgreSQL
+ladder passes on this combined candidate in 156 seconds. Failed earlier public
+and small seed fixtures remain regression evidence. These results are
+candidate-specific and do not establish merge readiness.
+
+The primary seed implementation, genuine sequence markers and borrowed
+transaction cleanup are integrated with actual Core fixtures for bundled
+DuckDB COPY and native PostgreSQL bindings. The integrated CSV certification
+and append-only loop-prefix repairs pass all 63 primary seed cases, including
+the new Column cases and unchanged 10,000-row, 70,000-binding PostgreSQL workload.
+They also pass 708 native tests and all 18 actual Core alias/provider comparisons,
+with pre-mutation invalidation intact. The integrated completed-batch-only
+capacity certificate also passes all 708 native tests and all 81 actual Core
+seed/alias cases. Its native budget retains the genuine 16,384-cell capacity
+buffer, while active buffers still traverse future mutable aliases. The same
+unchanged wide-seed execution improves from 321 seconds through 145 seconds to
+31.5 seconds, against Core's 8.4 seconds, in Debug. The same unchanged fixture
+also passes on the immutable ReleaseSafe CLI: 6.15 seconds native and 15.41
+seconds Core in that shared-machine invocation, including exact SQL/artifact
+parity, 70,000 placeholders, 10,000 rows and both sums of 49,995,000. This closes
+the observed minutes-long alias traversal with production-build evidence;
+it is not a universal speed claim. The original slow fixture remains intact.
+The final combined query transport must retain this complete workload.
+The oracle worker also owns native result transport, embedded-NUL/composite
+parameters and the authored cursor contract, with the cache worker owning a
+separate PostgreSQL typed-cell/description module. The release worker's ELF
+architecture and checksum-before-extraction checks are integrated and pass
+their developer regressions; genuine ReleaseSafe and ARM acceptance remain
+required. The supervisor owns integration, publication and the final release
+gates; workers retain source and test evidence in separate clean worktrees.
+
+The supervisor's collection audit found 60 separate session registrations of
+the identical imported CLI-build fixture across 5,213 collected cases. A shared
+cached developer helper now performs that fixture's clean CLI build and native
+test run once per pytest process; every registration still checks the binary
+exists, and native driver/browser fixtures remain mandatory. This removes
+redundant compilation without reducing test selection or oracle assertions.
+An actual clean-build check across two existing modules passes, with a receipt
+showing one completed build/test helper invocation and one cache reuse.
+
+Active final closure ownership is disjoint and sequenced by reviewed commits:
+the expression worker owns compiler alias publication and immutable CSV backing
+certificates, including the unchanged wide-seed scaling gate; the oracle worker
+owns typed native result transport, original cursor/Agate separation and parameter
+execution; the source worker owns exact Decimal/Range and narrowly grounded
+DuckDB type/PostgreSQL Column expression/mapping hooks, followed by the finite
+cursor UUID equality/key protocol if actual Core confirms the review gap;
+the oracle worker owns query-cursor constructor wiring for those helpers.
+The cache worker owns the isolated Column value helper, native bytea cast/order
+and release API closure and actual Core cursor descriptor witnesses. After the
+bytea helper lands, the source worker owns its narrow expression call/slice
+hooks and compiler local-callable routing immediately before callable-name
+resolution; these hunks are separate from the expression worker's alias
+publication and seed-performance changes. Constructor wiring stays with the
+oracle worker. Independent bridge review found two filter truthiness paths
+that bypass checked released/zero-dimensional buffer behavior. The cache worker
+owns their narrow `expression_filter_iterator.zig` correction and native
+regressions; the source worker owns the finite actual Core negative witnesses.
+The oracle worker integrates this companion before the final combined build.
+The cache worker also owns the bounded saved-memoryview-method string/repr
+formatter: methods must render their real method/class/receiver identity rather
+than expose private native callable metadata. Actual Core witnesses use authored
+stable shape/identity comparisons; comparison SQL is never normalized.
+The immutable final typed-query worker candidate passes 772 native tests and
+the CLI build, including the checked filter and saved-method companions.
+Actual Core grounding covers Unicode/numeric parameter slots, token boundaries,
+nonfinite numeric bindings, finite date/timestamp string fallbacks, buffer
+lifetimes and method representation. Its strict 274 query plus ten UUID pairs,
+and all 62 Decimal pairs pass on the same immutable CLI, with zero failures,
+errors, skips or deselections: 346 complete API comparisons. The supervisor
+integrated all 33 reviewed helper commits and the certified transport commit;
+every native source file matches the certified worker tree byte for byte.
+The unchanged 63 seed/18 alias comparisons also pass on that same CLI in 217
+seconds, including all 70,000 PostgreSQL bindings, 10,000 rows and both sums of
+49,995,000. This checkpoint therefore passes 427 actual Core comparisons and
+772 native tests. Final unfiltered campaign gates remain required. No product
+edits occur during an immutable candidate's comparisons.
+
+A final actual Core witness confirms that all six returned PostgreSQL range
+types can be rebound as parameters, including finite, empty and unbounded
+values. The native conversion currently rejects these genuine carriers. The
+oracle worker owns the bounded companion's genuine range kind/class metadata,
+recursive parameter endpoints, conversion, adapter wiring and paired fixtures;
+the source worker has released only those range-helper hunks. The cache worker
+owns PostgreSQL literal adaptation in its separate helper, sequenced after the
+oracle's parameter definition. NumericRange keeps unknown scalar/text-array
+inference; temporal ranges use the stock typed constructors and arrays. This
+adds no arbitrary provider or new authored constructor. Original passing
+candidate receipts stay intact; the combined companion must pass before the
+final canonical and release acceptance run.
+
+The bounded range companion is now integrated after all 776 native tests,
+the CLI build, 36 strict returned-range comparisons and 62 Decimal comparisons
+pass on its immutable candidate. Independent review confirms arena lifetime,
+genuine class recognition and stock numeric/temporal inference; every integrated
+native source byte matches that candidate. The combined 365 query/UUID/seed/alias
+rerun passes in 636.68 seconds on the same CLI, bringing the complete focused
+certificate to 463 comparisons with zero failures, errors or skips. Fresh main
+is unchanged and the branch is
+rebased before final validation. The final unfiltered canonical collection has
+5,626 cases including the four Agate result-shape comparisons; its real
+driver/browser fixtures, zero-skip report and clean shared
+CLI/native-test build remain mandatory. The supervisor owns this whole-tree
+run, the expression worker owns final unchanged public-project comparisons and
+the release worker owns genuine ReleaseSafe packaging/installation/performance.
+Developer evidence stays recoverable in verified lossless archives; current
+build caches, original slow baselines and unfinished fixtures stay protected.
+
+The source worker's 62 Decimal comparisons pass on the first, corrected and
+expanded typed CLIs. The expanded query gate retains 182 passing and seven
+failing cases: type subscription, keyword field names, infinite timestamps and
+parameter adaptation exposed concrete native differences, plus a fixture's
+process-specific memory address. Corrections use actual Core witnesses; only
+the address output changes to deterministic bytes/format/type evidence. UUID
+safety and bytea lifecycle/method companions now pass the final combined native
+build and unchanged actual Core comparisons. Its independent transport review
+found cursor consumption, eager Agate serialization and duplicate-name
+mismatches; the certified transport corrects all three. The supervisor owns final integration, docs and
+publication. The release worker preserves completed ignored proof data through
+verified lossless archives to make room for the complete final suite.
+
+An earlier CI repair checkpoint had all 263 historical CLI tests passing with
+zero skips after Core-grounded expectation migrations and the profileless audit
+relation fix. The published candidate passes the native/safety job and all six
+public Jaffle gates, the retained autocommit query contract and both native
+installation targets on Linux x86_64 and ARM. Held-session commands
+require the native library. Vendored upstream whitespace remains byte-preserved
+through narrowly scoped Git attributes. Public dbt-utils now executes every
+command under both engines on PostgreSQL; the strict artifact comparison exposed
+missing test columns and runtime model macro ordering, whose certified native
+fixes are integrated for a fresh unchanged-project rerun on both adapters.
+
+Canonical full Core compatibility uses CPython 3.12 on Linux x86_64 and ARM.
+The Python 3.11 job covers developer/native CLI checks rather than asserting a
+different Python runtime's expression semantics. The expanded full oracle suite
+needs a longer bounded CI timeout. No test skips count as parity evidence.
+
+Current shared-file ownership is sequenced by reviewed cherry-picks: the root
+owns mapping-proxy recognition and tuple JSON companions; the filter worker
+owns numeric identity and consuming comparisons; the expression worker owns
+datetime providers and class protocols; the compiler worker owns literal pools,
+model provenance, macro-error dependencies and deprecation effects; the test
+worker owns context nulls and compiled-path provenance; the oracle worker owns
+temporal format specifications and final public docs. A separate adapter worker
+owns QueryResult allocator lifetime. Certified focused gates include 110
+datetime, 181 pytz, 96 strptime, 204 itertools, 44 temporal-format and 18
+macro-error comparisons. New class, identity, null/provenance and allocator
+closures and the complete final candidate gates remain pending; this checkpoint
+does not establish full replacement or merge readiness.
+
+The strict public package rerun exposed a further schema-test distinction:
+Core seeds generic-test macro dependencies with its unqualified resolver even
+when raw code calls a package namespace, and it retains tests declared on an
+unmatched YAML target as non-executable manifest nodes after missing-reference
+resolution. The root owns this generic parse/artifact closure and its both-adapter
+oracles, including column tags and transitive parse-time macro visibility.
+Static macro dependencies now resolve before schema-test configuration. The
+compiler worker separately owns reached singular and generic runtime calls,
+including selection of the explicitly authored package macro during execution.
+The focused parser/config regressions pass and runtime collectors are integrated.
+The unchanged PostgreSQL project now passes the complete resource/config/dependency
+comparison; its build outcomes exposed a remaining passing-test failure count
+distinction. Core reports zero unless a threshold fires, even with nonzero
+aggregates. The supervisor owns that correction and a fresh both-adapter gate.
+Project source files and strict gate comparisons remain unchanged.
+
+Passing-test outcomes now have 40 mandatory Core comparisons on both adapters,
+including signed aggregates, stored rows, test/build and warning escalation.
+The fresh public rerun caught a seed schema regression in the new compiled-path
+writer; seed nodes now omit the forbidden field. The combined native class and
+artifact integration passes 647 tests. A final unchanged-package rerun is
+still required before calling the public package gate repaired.
+
+The next unchanged public PostgreSQL rerun passes command execution, complete
+artifact schemas, resource/config/dependency identities and build outcomes. Its
+remaining strict compiled-SQL difference is a physical CRLF macro in dbt-utils:
+Jinja normalizes template source newlines before lexing. The filter worker owns
+that rendering-source correction and its both-adapter oracle; authored bytes,
+checksums and the strict public comparison must remain intact.
+
+The integrated limited generic-test namespace has 50 mandatory Core cases and
+preserves authored discovery and dependency traversal order. Per-function
+literal pools and RegexFlag class identity are integrated with their focused
+certificates. Stock execution now writes its actual dispatched main SQL at the
+execution boundary, with 86 focused materialization/contract cases. Test
+materialization write paths have 60 mandatory both-adapter Core cases and use
+their resource's own completed-write record. Actual DuckDB COPY and PostgreSQL
+bound seed loading remain open. Native snapshot main SQL deliberately records
+the SQL actually executed; optimized execution must retain Core-compatible
+rows, types, lifecycle, paths and artifact schemas, rather than publish a second
+unexecuted SQL reconstruction.
+
+The filter worker's harness-only Core lifecycle closure reproduces and resets
+both upstream module-global deprecation registries for each in-process oracle
+invocation. Fresh CLI comparisons and current-command strict-warning failures
+remain required. This prevents an unrelated earlier warning or failed command
+from contaminating the complete suite; it changes no product runtime behavior.
+
+The remaining shared compiler sequence is rendering-source newline normalization,
+inline macro closures and saved callable container methods. Resource provenance,
+test compilation writes, console errors, expression/class protocols, the limited
+generic-test namespace and literal/primitive identity pools are integrated. The dedicated
+namespace worker owns discovery-order resolver hooks and the limited parse
+namespace, including recursive overwrite order and argument rendering; runtime
+provider lookup remains separate. Every slice needs actual Core comparisons.
+The expression worker owns callable container method aliases after its complete
+temporal API certificate. The oracle worker owns stock execution SQL artifacts
+and actual DuckDB COPY/PostgreSQL parameterized seed loading. These known gaps
+and full final candidate gates remain open; focused green results do not make
+the branch merge-ready.
+
+The rendering-source closure now passes 14 mandatory Core projects while
+preserving authored bytes. The fresh unchanged PostgreSQL package passes all
+seven commands, schemas, graph/config/dependency identities, build outcomes and
+every compiled SQL resource. Its time-dependent views expose the developer
+gate's separate-query clock mismatch; deterministic comparison must retain
+every relation and typed value. The namespace worker owns the combined static
+dependency and saved-dispatch certificate. The compiler worker's inline macro
+closure has 44 mandatory passing Core cases and now owns receiver forwarding
+and memoized public context cloning. The expression worker owns saved builtin
+method activation and its native receiver API. The supervisor owns genuine
+mapping/iterable and JSON/config classification; shared edits integrate in this
+order. The filter worker owns amortized native list mutation to close the
+authentic wide seed's quadratic binding accumulation. These slices and their
+combined final candidate gates remain required before merge readiness.
+
+PR #219 is merged. The user has authorized completing the replacement roadmap,
+including its proposed features, from fresh main on `feat/full-usability`.
+The previous snapshot slice's stop boundary is historical and does not constrain
+this campaign. Implement and verify the roadmap in dependency order; never
+label a planned or unverified feature complete.
+
+Wave one uses isolated worktrees: scheduler/ephemeral ancestry and mixed unit
+builds; durable test error rows; incremental materializations; snapshot
+materializations; state/freshness selectors; package dependency installation.
+The supervisor owns CLI integration, Jinja/compiler improvements and this plan.
+Shared `project.zig`, types, root/main, compiler and integration-test edits are
+sequenced by cherry-pick: scheduler, errors, incremental, snapshots, selectors,
+dependencies, then supervisor integration. Workers keep new logic in focused
+modules, add native/CLI and pinned Core evidence, and do not edit docs or PLAN.
+Later waves cover remaining configuration/macros, adapter certification,
+commands/artifacts, semantic/static-analysis/stateful/cross-database features.
+
+Wave three assigns configuration/property parsing, bundled macros and PostgreSQL
+resource execution to the configuration worker; threaded scheduling, cancellation
+and structured logs to the adapter worker; semantic resources and MetricFlow
+planning to the command worker; shared-YAML snapshots followed by SQL analysis to
+the snapshot worker; durable environment/interval planning to the state worker;
+and dependency transports followed by cross-database movement to the YAML worker.
+The supervisor owns complete artifact validation, CI/release packaging, public
+project gates, docs browsing and performance verification. Shared types, loader,
+compiler, options and root command routing are integrated sequentially by
+cherry-pick. Worker modules remain isolated and must bring native, CLI and
+source-grounded oracle evidence before integration.
+
+Integration now sequences compile/docs durable results and Core-readable retry
+arguments, threaded native jobs and lazy database-backed compilation, semantic
+resources/query planning, shared-YAML snapshots, stateful environments,
+cross-database movement, then the remaining property/materialization surface.
+The SQL-analysis worker owns focused native dialect parsing, typed logical IR,
+lineage, source diagnostics and dependency-aware caches, with narrow hooks for
+namespaced `analyze`/`explain` commands after the other command-routing commits.
+The supervisor owns the developer cold/warm performance budget and public
+package-heavy project validation. These additions retain dbt artifact schemas.
+
+The environment worker has integrated versioned environments/intervals and now
+owns the remaining CLI discovery/alias/global-option/environment compatibility
+in a fresh worktree. Profile defaults, quiet/write-json/logging effects and
+Core-defined environment precedence require actual oracle fixtures. This
+command-routing slice follows workflow/threaded hooks; it preserves namespaced
+semantic, environment and cross-database commands. The supervisor owns the
+catalog writer's optional warehouse comments/owner fields; the configuration
+worker supplies PostgreSQL introspection and materialization persistence.
+
+Current integrated work includes native DuckDB/PostgreSQL drivers and bounded
+threaded commands; Core CLI option/profile discovery behavior and JSON-line
+listing; full artifact schemas and docs application; versions and source
+freshness; native expression filters and slices; semantic planning/exports;
+typed dialect SQL analysis with lineage; and durable environment and
+cross-database plans. Focused reference gates include 28 expression comparisons,
+107 semantic cases (with three corrected diagnostic expectations rerun), 23
+SQL-analysis cases and the earlier snapshot/environment gates. These worker and
+focused results are integration evidence, not the final release claim.
+
+The remaining active integration wave owns unchanged public package execution,
+typed Relation/Column and bundled macros; complete unit fixtures and overrides;
+configuration/access/contracts/hooks/custom materializations; native microbatch
+execution; effective remaining command flags and parser/relation caches; and
+retained cross-database stages/catalog observations/adaptive scheduling. The
+supervisor owns legacy test reconciliation, public projects, release licenses,
+platform builds, complete integrated validation, support docs and publication.
+Native/static parser and macro third-party notices must ship in binary archives.
+Release packaging now uses one deterministic developer archive builder. Native
+installation certification extracts that exact, safety-validated archive with all
+upstream notices and runs both adapters with PATH empty on each actual target.
+The developer PostgreSQL fixture now selects installed native tools where the
+pinned pgserver wheel is unavailable; the full compatibility CI/release matrix
+includes an actual Linux ARM runner. Local forced-native fixtures pass all 14
+PostgreSQL adapter checks; ARM verification remains pending remote execution.
+The supervisor now owns native group definitions, model access validation and
+selection in focused group_access.zig plus narrow graph/parser/artifact hooks.
+The configuration worker retains adapter contexts, catalog, contracts and hooks;
+the CLI and adapter workers coordinate parser-cache persistence and controls.
+The supervisor also owns the complete resource config projection shared by the
+manifest and macro context. Model, seed, snapshot and test defaults, typed extra
+fields and normalized hooks are compared in full against pinned Core; shared
+configuration merge/execution changes remain with the configuration worker.
+
+The supervisor owns project hook operation discovery, compile artifacts and the
+on-run-start/on-run-end lifecycle in a focused native module. Narrow Node index,
+loader, compiler, OperationHost context and run-results hooks integrate after the
+typed expression/compiler helpers. The configuration worker owns resource hooks
+and their held-session body wrapper; these are separate execution lifecycles.
+Actual Core failure, ordering, context and transaction behavior is the oracle.
+
+The developer performance harness compares complete artifacts and every compiled
+model before enforcing cold/warm budgets. Its first 250-model, three-repetition
+ReleaseSafe measurement passed both budgets. Clean-install checks also passed
+with PATH empty and no Python/CLI product fallback. Both gates, the native test
+suite, mandatory Core/public project suite and safety scans must run again on the
+final integrated tree before publishing the PR and marking milestones complete.
+
+The user confirmed SQL model execution only for the initial release. Native
+Python syntax discovery and parse/compile artifacts remain visible; selecting
+Python models for execution must fail before warehouse mutations.
+The initial adapter certification scope is DuckDB and PostgreSQL, as confirmed
+by the user. Remaining dbt adapters are a subsequent certification scope, with
+their own drivers and live warehouse targets; they must not be advertised as
+working merely because profiles parse. Compatibility checks use dbt Core 1.10.5,
+dbt-duckdb 1.9.6, dbt-postgres 1.9.1 and MetricFlow 0.208.1. Full artifact schema
+checks use the pinned upstream schema classes, which produce the published
+schemas, and run in mandatory CI alongside native driver fixtures.
+
+The current closure wave uses six isolated editing worktrees. The expression
+worker owns native regular expressions and ordinary/parse-time undefined
+semantics; the configuration worker owns contracts, constraints, authored
+materializations and lifecycle result metadata, plus the sequenced compiler
+and JSON companion for new expression values. The command worker owns inline
+show/compile operations, diagnostic exit codes, effective remaining flags and
+general SQL snapshot Jinja. The docs worker owns deferred description rendering
+and typed doc providers. The naming worker owns custom identity finalization,
+saved-query exports and generic-test compile dispatch. Its adapter child owns
+native DuckDB profile initialization and retry behavior. Shared compiler,
+context, facade and artifact changes integrate by reviewed cherry-picks.
+The supervisor retains project-hook session lifetimes, regression migrations,
+unchanged public project execution, archive notices and final release gates.
+
+Integrated project-hook comparisons now cover root-before-dependency ordering,
+global model indices, ephemeral end contexts, persisted-test audit schemas and
+start/end compilation failure artifacts. Parsed JSON rejects duplicate keys
+and non-finite numbers in the developer validator. The first full historical
+CLI run stopped after 20 failures and 220 passes; Core-grounded migrations and
+compiler error-code corrections precede a complete rerun. Seed view rejection,
+unquoted identifiers/types and retained passing audit tables receive fresh
+both-adapter Core comparisons. These partial runs do not establish release
+acceptance. Regular-expression runtime/provenance notices must accompany the
+existing grammar, adapter-macro and Unicode notices in actual archives.
+
+The integrated closure includes typed dictionary keys and JSON errors,
+ephemeral generic/singular data-test CTEs, custom relation naming, enforced
+contracts/constraints, typed documentation providers and native DuckDB profile
+settings, retries and transaction policies. Its earlier 501-test native gate
+passed. The supervisor's typed JSON slice passed 30 actual Core comparisons;
+the exact integrated profile candidate passed all 24 actual Core profile cases.
+The frozen historical CLI/project-hook/ephemeral run completed with all 40
+hook/ephemeral Core comparisons passing and 175 historical CLI failures.
+Most historical failures share a subsequently fixed profileless naming
+regression; remaining expectations are being reconciled with fresh Core
+parse/compile probes before the complete rerun. This run is not release evidence.
+The unchanged PostgreSQL dbt-utils parse advanced beyond Relation-keyed maps
+and stopped on a missing required macro argument: Core binds an Undefined value
+where the native binder rejects the call. The expression/configuration workers
+own the sequenced Undefined and macro-binding closure. This public workflow
+failure remains an acceptance blocker; no project files or gate scope are changed.
+
+Ordinary and parse-time Undefined values now retain identity through typed
+expressions. The supervisor owns dictionary-key and JSON switch companions
+and historical native/CLI assertion migrations; the configuration worker owns
+value cloning, package-render constant probing and compiler host overrides;
+the adapter child owns macro argument and callback binding. The expression
+worker owns a complete phase matrix. Actual Core confirms missing macro
+parameters use ordinary Undefined even in model parse, while model callback
+parameters use capture values. Two historical loop-error expectations are
+replaced with Core's empty SQL result. The combined native gate awaits the
+package-render companion; no weaker gate replaces it.
+
+The docs worker owns native SafeLoader/SafeDumper-compatible runtime YAML and
+JSON loading, including immutable bytes/date key protocols. The supervisor
+will route those protocols through the shared mapping-key module after the
+worker's narrow helper API lands. The command worker owns deprecated profile
+behavior-flag fallback and executed generic-test materialization helpers,
+including complete compiled SQL/CTE/file publication. The naming worker owns
+the paired final identity fixtures and public support docs; final acceptance
+counts and publication remain with the supervisor. The unchanged pinned
+Jaffle project requires an explicit Core version-check override and an external
+profile flag for nested generic-test arguments under Core 1.10.5. The shared
+developer harness provides the same external profile to both engines without
+editing authored project/profile files; this is not a Core 1.11 claim.
+
+The current native integration gate passes 544 cases. A complete historical
+CLI run reported 235 passes and 28 failures; Core-grounded assertion migrations
+have passing focused reruns, with the complete historical rerun and the
+configured test-limit regression still pending. Neither run is release
+acceptance. The supervisor now owns Core selector grammar closure and final
+historical reruns. The expression worker owns native datetime/pytz/itertools
+module providers and timestamp constructor protocols after delivering scalar
+operators. The byte worker owns codec/API certificates; the formatter worker
+owns string format/format_map and final public documentation. Shared compiler
+module hooks remain sequenced with the configuration worker's reference
+dependency guards, parse warnings and materialization result lifecycle.
+
+Draft PR #221 publishes the committed implementation on `feat/full-usability`.
+The branch uses the repository owner's GitHub noreply commit identity. The
+supervisor additionally owns source tag inheritance and selector config
+projection, followed by complete native parse-cache code/data fingerprinting.
+All 75 mandatory selector comparisons now pass against Core, including the
+complete source/table and legacy/config tag inheritance matrix. Full combined gates and platform CI
+remain required before marking this PR ready to merge.
+
+The published draft's first CI run exposed three blockers. The supervisor owns
+their closure: replace the public Jaffle harness's historical null invocation
+expectation with pinned Core UUID/version/timestamp and complete resource checks;
+preserve upstream C/header whitespace through scoped Git attributes; and discover
+generic test macros below each configured test path in both root and dependency
+projects. The unchanged dbt-utils PostgreSQL project fails because its authored
+tests/generic definition is absent from the graph, not because the gate needs
+filtering. Native discovery and both-adapter Core execution regressions precede
+the unchanged project's full command ladder.
+
+Generic-directory discovery now passes eight mandatory Core comparisons for
+root/package definitions, default/custom test paths and DuckDB/PostgreSQL
+execution. The unchanged public PostgreSQL project passes parse, seed and run;
+compile exposes eager map(None) behavior and an Agate column/mapping update
+callback, owned by the filter and compiler workers respectively. Keep the
+complete public command ladder blocked until those behaviors and all artifact,
+SQL and row comparisons pass. The test-context worker additionally owns missing
+inherited context fields and lifecycle provenance, with both-adapter Core probes.
+
+The integrated lazy loop/cache/options/provider checkpoint passes all 45 cases.
+Authored test-helper execution has 52 distinct passing Core comparisons across
+DuckDB/PostgreSQL, including four retained audit regressions, and the helper
+candidate passes all six unchanged public Jaffle command gates. Those focused
+certificates do not replace the final combined suite. The first published CI
+candidate also passes actual Linux x86_64 and ARM native installation, both
+adapters from extracted archives with PATH empty, the snapshot oracle and the
+performance job; all required checks must pass again on the final candidate.
+
+After its scheduling commit, the scheduler worker owns the focused native
+DuckDB/Postgres adapter contract in a second isolated worktree. Shared backend
+integration follows test-error, incremental and snapshot commits. Threaded
+execution requires shared native connections rather than concurrent DuckDB CLI
+writers; coordinate the scheduler on that contract. Dependencies use the same
+Runtime.environment interface as Jinja. Registry live verification currently
+receives an actual proxy denial for dbt Hub; deterministic HTTP fixtures cover
+the API while native code remains available for allowed deployments.
+The completed test-error worker next owns native debug/init/run-operation,
+retry/clone and command/flag integration in its own worktree. It coordinates
+macro invocation with the supervisor and live connection checks with the
+adapter worker; command commits integrate after state/defer and dependencies.
+Parallel pytest runs use separate ignored basetemp directories to prevent
+pytest's shared temporary-retention cleanup from removing active fixtures.
+After dependency installation, that worker owns a general native YAML reader
+and completes remaining dependency syntax/transports using it. The reader
+returns std.json.Value with source diagnostics and supports block/flow maps and
+sequences, multiline scalars, anchors/aliases/merge, tags and quoted escapes.
+Configuration/profile and semantic workers will consume this shared reader
+after its commit, preserving scope and configuration precedence during migration.
+The completed incremental worker next owns full project/profile/resource
+configuration, model versions/groups/access and contract/hook/grant execution.
+It stacks on its incremental slice and consumes the shared YAML reader when
+ready; narrow compiler/test-macro interfaces coordinate with the supervisor.
+Configuration commits follow the YAML/dependency and snapshot parser commits.
+
+Validation uses the current pinned Core/adapter contract, repeated-run and
+failure fixtures, full applicable schemas, public projects, native tests,
+runtime/safety scans and release builds. Inspect every failed gate before
+continuing; never replace implementation with accepted-but-ignored arguments,
+empty artifacts, canned results or Python product code. Cloud adapter
+certification requires declared targets and usable warehouse connections;
+continue independent native work while those requirements are clarified.
+
+### Historical Snapshot Foundation Slice
+
+The following records issue #213's earlier parser-only milestone. SQL/YAML
+snapshot execution is now implemented; current scope and remaining acceptance
+are defined by the Full Usability Implementation Campaign above and
+`docs/DBT_REPLACEMENT_ROADMAP.md`.
 
 Issue #213 is the next read-only dbt compatibility slice: discover legacy SQL
 snapshot blocks, add Snapshot nodes to Manifest v12 and the shared selector
@@ -205,7 +1116,8 @@ Initial flags:
 - `--full-refresh`
 - `--output json` for listing and machine-readable inspection
 
-Deferred commands:
+Commands implemented after the original MVP, with final campaign acceptance
+still required:
 
 - `debug`
 - `deps`
@@ -225,7 +1137,7 @@ The implementation must account for:
 - Parse-time versus execute-time Jinja behavior.
 - Macro namespace resolution, package overrides, and adapter dispatch.
 - Resource configs, column properties, tests, tags, meta, groups, access, versions, contracts, disabled nodes, docs blocks, exposures, metrics, and semantic models.
-- Materializations: view, table, incremental, ephemeral, seed, test, snapshot, materialized view where supported, and custom materializations later.
+- Materializations: view, table, incremental, ephemeral, seed, test, snapshot, materialized view where supported, and custom materializations.
 - Selectors: names, `+`, `@`, comma intersection, `--exclude`, tags, paths, files, packages, configs, resource types, sources, exposures, states, results, source status, test types, and YAML selectors.
 - State/defer: `--state`, `--defer`, `--defer-state`, `--favor-state`, `state:new`, `state:modified`, and result selectors.
 
@@ -239,11 +1151,11 @@ Required:
 - `run_results.json`
 - `catalog.json`
 - `sources.json`
-
-Later:
-
 - `semantic_manifest.json`
-- `partial_parse.msgpack` or a separate dxt parse cache
+- `dxt_parse_cache.json` for native parse caching
+
+Namespaced extensions:
+
 - `dxt_metadata.json` for namespaced data that does not belong in dbt schemas
 
 Rules:
@@ -390,7 +1302,7 @@ Every compatibility slice must record:
 - Stop conditions that keep mechanical extractions separate from behavior
   changes and prevent Python from crossing into product runtime behavior.
 
-Immediate source-grounded queue, refreshed on 2026-10-09 after the public
+Historical source-grounded queue, recorded on 2026-10-09 after the public
 Jaffle command gates, state:new, custom generic execution, and dict-fixture
 unit-test execution slices shipped:
 
@@ -417,7 +1329,14 @@ Each item must remain a Zig product-runtime slice with native tests first and
 Python/dbt oracle coverage only for CLI, filesystem, fixture, or artifact
 parity.
 
-## Future SQLMesh Reference Track
+## Stateful Planning Reference And Historical Slice Notes
+
+Native stateful plan/apply, environments, intervals, audits and rollback now
+have implementations and focused evidence in the replacement roadmap. The
+following retains the original reference rationale and earlier bounded slice
+notes through the Fixture Ladder section. Their "current" and "future" wording
+describes those historical slices, not today's support contract; use
+`docs/COMPATIBILITY.md` for the current product surface.
 
 After the dbt Core M1/M2/M3 baseline is materially stronger, evaluate SQLMesh
 as an architecture reference for dxt's state store, environment model,
@@ -1485,7 +2404,11 @@ Exit criteria:
   they must still use one issue, one branch, and one worktree per slice, and
   merge only after green checks.
 
-## Current Status
+## Historical Implementation Notes
+
+These notes record earlier slices and their original boundaries. The active
+Full Usability Implementation Campaign above and the replacement roadmap govern
+current scope, known gaps, validation evidence and release status.
 
 - Issue #213 adds the read-only SQL snapshot foundation: default/configured
   root and installed-package discovery, named blocks, literal configs, disabled

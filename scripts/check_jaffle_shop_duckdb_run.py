@@ -38,11 +38,10 @@ EXPECTED_RUN_MODELS = [
 def validate_run_results_schema(path: Path) -> None:
     schema_validator = load_schema_validator()
     data = load_json(path)
-    schema = schema_validator.load_json(RUN_RESULTS_SCHEMA)
-    errors = schema_validator.validate_manifest(data, schema)
+    errors = schema_validator.validate_artifact(data)
     if errors:
         formatted = "\n".join(f"  - {error}" for error in errors)
-        raise GateError(f"run_results schema slice validation failed:\n{formatted}")
+        raise GateError(f"complete upstream Run Results schema validation failed:\n{formatted}")
 
 
 def run_seed_prep(dxt: Path, project_dir: Path, target_dir: Path) -> None:
@@ -79,7 +78,7 @@ def validate_run_results(path: Path) -> None:
     if not isinstance(results, list):
         raise GateError("run_results results must be an array")
     assert_equal("run model result count", len(results), 5)
-    assert_equal("run model unique ids", [result.get("unique_id") for result in results], EXPECTED_RUN_MODELS)
+    assert_equal("run model unique ids", sorted(result.get("unique_id") for result in results), sorted(EXPECTED_RUN_MODELS))
     status_counts = Counter(result.get("status") for result in results)
     assert_equal("run model status counts", dict(sorted(status_counts.items())), {"success": 5})
     for result in results:

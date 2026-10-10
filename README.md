@@ -3,227 +3,166 @@
 <p align="center">
   <strong>Data eXecution & Transformation</strong>
   <br />
-  A Zig-first, dbt-project-compatible transformation engine.
+  A native, dbt-project-compatible transformation engine.
 </p>
 
 <p align="center">
   <a href="https://github.com/sabino/dxt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sabino/dxt/ci.yml?branch=main&label=CI" alt="CI" /></a>
   <a href="https://github.com/sabino/dxt/releases"><img src="https://img.shields.io/github/v/release/sabino/dxt?include_prereleases&label=release" alt="Release" /></a>
   <img src="https://img.shields.io/badge/runtime-Zig%200.16.0-f7a41d" alt="Zig 0.16.0 runtime" />
-  <img src="https://img.shields.io/badge/status-pre--alpha-red" alt="Pre-alpha" />
+  <img src="https://img.shields.io/badge/status-release%20candidate-blue" alt="Release candidate" />
 </p>
 
-`dxt` is building toward a fast native alternative for dbt Core projects. The
-first target is artifact-compatible dbt Core behavior for public DuckDB fixtures
-such as Jaffle Shop. Fusion-era static analysis, semantic resources, metrics,
-and cross-database execution shape the architecture, but dbt Core compatibility
-comes first.
+`dxt` loads dbt projects, compiles typed Jinja and SQL, executes resource graphs
+and writes dbt artifacts through a native Zig binary. The initial execution
+scope is **SQL models on DuckDB and PostgreSQL**. Python model files remain
+visible in discovery, parsing, selection and compilation; selecting them for
+execution fails before warehouse writes. Authored Python is never run.
 
-This repository is **pre-alpha**. Do not use it for production data
-transformations yet.
+Native semantic queries, typed SQL analysis, versioned environments and
+governed cross-database execution are also implemented. They have namespaced
+commands and artifacts alongside the dbt-compatible interface.
 
-## Why dxt Exists
+Database-backed macros use native held sessions with typed bindings and cursor
+values. Fetched query tables apply dbt's separate Agate conversion contract.
+CSV seeds execute the actual COPY or bound INSERT lifecycle, with regression
+coverage for typed data and the unchanged 70,000-parameter PostgreSQL batch.
 
-- **Native runtime:** implemented product surfaces are Zig; planned parser,
-  compiler, planner, adapter, graph, artifact, and runner work must stay Zig.
-- **Artifact-first compatibility:** generated artifacts are treated as public
-  contracts and validated against pinned dbt-shaped schema slices.
-- **Source-grounded implementation:** feature slices name the dbt Core v1 and
-  Fusion source files they are matching.
-- **Deterministic local validation:** synthetic fixtures and public Jaffle-style
-  projects come before live warehouses.
-- **Future cross-database execution:** relation identity, adapter capabilities,
-  staging, and movement policies are explicit architecture concerns.
+Compatibility evidence targets dbt Core **1.10.5**, dbt-duckdb **1.9.6**,
+dbt-postgres **1.9.1**, MetricFlow **0.208.1** and semantic interfaces **0.9.0**.
+Release readiness is established for each candidate by the gates in the
+[compatibility matrix](docs/COMPATIBILITY.md). Candidate-specific receipts and
+outcomes are tracked in [PR #221](https://github.com/sabino/dxt/pull/221) and
+[issue #220](https://github.com/sabino/dxt/issues/220). Supported behavior and
+intentional differences do not establish universal dbt or adapter certification.
+The project is independent of dbt Labs.
 
 ## Quick Start
 
-Install Zig `0.16.0`, then build and smoke-test the native binary:
+Build the current source with Zig **0.16.0**. The
+[release process](docs/RELEASES.md) describes packaged installation once the
+candidate passes its release gates.
 
 ```sh
-zig build
-zig build test
-./zig-out/bin/dxt --help
-./zig-out/bin/dxt version
+zig build -Doptimize=ReleaseSafe
+export PATH="$PWD/zig-out/bin:$PATH"
+dxt version
 ```
 
-Run a small parse/list/compile flow:
+Install DuckDB's native library so `libduckdb.so` is discoverable, or select
+the installed library with `DXT_DUCKDB_LIBRARY`. Then create and build a local
+project:
 
 ```sh
-./zig-out/bin/dxt parse --project-dir tests/fixtures/model_ref --target-path target-dxt
-./zig-out/bin/dxt ls --project-dir tests/fixtures/model_ref --output json
-./zig-out/bin/dxt ls --project-dir tests/fixtures/model_ref --output json --output-keys unique_id name
-./zig-out/bin/dxt parse --project-dir tests/fixtures/snapshot_sql --target-path target-dxt
-./zig-out/bin/dxt ls --project-dir tests/fixtures/snapshot_sql --select resource_type:snapshot --output selector
-./zig-out/bin/dxt compile --project-dir tests/fixtures/compile_basic --target-path target-dxt
-./zig-out/bin/dxt compile --project-dir tests/fixtures/generic_test_arguments --target-path target-dxt --select test_type:generic
+export DXT_DUCKDB_BACKEND=native
+dxt init demo
+dxt debug --project-dir demo --profiles-dir demo
+dxt build --project-dir demo --profiles-dir demo --threads 2
+dxt docs generate --project-dir demo --profiles-dir demo --static
+dxt docs serve --project-dir demo --profiles-dir demo --port 8080 --no-browser
 ```
 
-Legacy SQL snapshots currently support `parse` and `ls` for the documented
-literal config subset. Snapshot compilation and execution remain planned.
+The scaffold includes a DuckDB profile, seed, model and data tests. Generated
+artifacts are written to `demo/target`; static docs include an offline
+`static_index.html`. Stop the docs server with Ctrl+C.
 
-Run the current DuckDB execution slices:
+Existing projects retain their dbt project files, profiles, SQL and packages.
+Use `--project-dir`, `--profiles-dir`, `--profile` and `--target` as needed.
+PostgreSQL uses a dbt `type: postgres` profile and native libpq, discovered as
+`libpq.so.5` or selected with `DXT_POSTGRES_LIBRARY`. End users do not need
+Python, dbt or MetricFlow installed. Dependency fetching/extraction uses
+system `git`, `curl` and `tar` for the corresponding package transports.
 
-```sh
-./zig-out/bin/dxt run --project-dir tests/fixtures/compile_basic --target-path target-dxt --select orders
-./zig-out/bin/dxt seed --project-dir tests/fixtures/seed_ref --target-path target-dxt --select raw_customers
-./zig-out/bin/dxt build --project-dir tests/fixtures/seed_ref --target-path target-dxt --select +stg_customers
-./zig-out/bin/dxt run --project-dir tests/fixtures/model_properties --target-path target-dxt-tests --select customers
-./zig-out/bin/dxt test --project-dir tests/fixtures/model_properties --target-path target-dxt-tests --select "not_null_customers_customer_id unique_customers_customer_id"
-./zig-out/bin/dxt build --project-dir tests/fixtures/model_properties --target-path target-dxt --select "not_null_customers_customer_id unique_customers_customer_id"
-./zig-out/bin/dxt build --project-dir tests/fixtures/source_column_tests --target-path target-dxt --select "source:raw.customers+"
-./zig-out/bin/dxt docs generate --project-dir tests/fixtures/docs_blocks --target-path target-dxt
-./zig-out/bin/dxt source freshness --project-dir tests/fixtures/source_freshness --target-path target-dxt --select source:raw.customers
-```
+## Implemented Surface
 
-DuckDB execution tests require the `duckdb` CLI on `PATH`. The current DuckDB
-backend is a Zig-owned CLI boundary; the long-term adapter ABI should move to
-embedded DuckDB or another native adapter boundary, not Python runtime calls.
-
-## Documentation
-
-| Document | Purpose |
+| Area | Native implementation |
 | --- | --- |
-| [Primer](docs/PRIMER.md) | Product goals, current workflow, architecture map, and development loop. |
-| [Compatibility Matrix](docs/COMPATIBILITY.md) | Truthful current support vs planned dbt surfaces. |
-| [dbt Replacement Roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) | Remaining correctness gaps, Core parity release gates, and proposed feature sequencing. |
-| [Architecture](docs/ARCHITECTURE.md) | Module ownership, execution flow, and Mermaid diagrams. |
-| [Agent OS](docs/AGENT_OS.md) | Multidisciplinary agent-team operating model plus local autonomous Codex worker loop across GitHub Issues, Projects, PRs, and worktrees. |
-| [Agent Protocols](docs/AGENT_PROTOCOLS.md) | Public-safe issue/PR comment formats, role nudges, handoffs, and reflection protocol. |
-| [GitHub Projects Setup](docs/GITHUB_PROJECTS.md) | Desired Project fields, views, label syncing, seed issue bootstrap, and worker-loop commands. |
-| [Multi-Agent Workflow](docs/MULTI_AGENT_WORKFLOW.md) | Concurrent Codex/worktree workflow, project agent roles, autonomous orchestration, validation, and PR convergence. |
-| [Release Process](docs/RELEASES.md) | GitHub release workflow, binary artifacts, checksums, and safety gates. |
-| [Changelog](CHANGELOG.md) | Human-readable history of shipped pre-alpha slices. |
-| [ExecPlan](PLAN.md) | Active engineering plan and milestone tracker. |
-| [Agent Rules](AGENTS.md) | Durable rules for Zig runtime, planning, tests, PRs, and public safety. |
+| Project and resources | Shared YAML/config precedence, custom database/schema/alias naming, packages, versions, groups/access, models, analyses, seeds, sources, SQL/YAML snapshots, macros, docs, exposures, data/unit tests and semantic resources. |
+| Compiler | Typed expressions and containers, string formatting, macro arguments/returns, dispatch, bundled upstream SQL macros, native `re`/`datetime`/`pytz`/`itertools` providers, Relation/Column context, database-backed queries/statements and adapter introspection. |
+| Execution | Native DuckDB/libpq sessions, dependency workers, ephemeral ancestry, unit-test gates, durable errors/skips, fail-fast cancellation, transactions and retry. |
+| Materializations | Table/view, enforced contracts/constraints, authored SQL materializations, hooks/grants/persisted docs, adapter-specific incremental strategies and schema changes, microbatch, seeds, snapshots and clone views; PostgreSQL materialized views and DuckDB local external/table functions. |
+| Profiles | Native DuckDB configuration, settings, attachments, secrets, connection lifetime and retry policies; PostgreSQL connection profiles through libpq. |
+| Selection and integration | Graph/YAML selectors, indirect selection, state comparisons, defer/favor-state, effective command/env options, structured logs, real debug/init/operations, docs and freshness. |
+| Artifacts and caches | Manifest v12, Run Results v6, Catalog v1, Sources v3, semantic manifests, native parse/relation/SQL caches and the embedded dbt docs application. |
+| SQL analysis | Native dialect grammars, typed logical IR, column lineage, source diagnostics, explain output and dependency-aware invalidation. |
+| Metrics | Simple, derived, ratio, cumulative and conversion planning, entity/grain checks, time spines/windows, saved queries and transactional exports. |
+| Cross-database | Named connections, source reduction/pushdown, typed movement, retained stages, incremental watermarks, policy/budget guards, locks, recovery and adaptive task retries. |
+| Environments | Immutable model versions, isolated environment views, physical reuse, interval/backfill accounting, audits, promotion and rollback. |
 
-## Current Support Snapshot
-
-| Area | Supported Now | Planned |
-| --- | --- | --- |
-| Commands | `parse`, `ls`, `clean`, `compile`, `run`, `seed`, `test`, `build`, `docs generate`, `docs serve`, `source freshness`, `version`, help | `debug`, `deps`, `init`, `run-operation`, `snapshot`, `retry`, `clone` |
-| Runtime | Zig product runtime | Broader native adapter ABI and runner |
-| Adapter | DuckDB through a Zig-owned external CLI backend | Embedded DuckDB, Postgres, cloud adapters, cross-database planner |
-| Artifacts | `manifest.json`, `run_results.json`, `catalog.json`, `sources.json` slices | fuller dbt schemas, `semantic_manifest.json`, parse cache/state artifacts |
-| dbt resources | models, analyses in parse/list/compile, legacy SQL snapshots in parse/list, seeds, sources with schema/freshness/identifier slices, exposures, docs, macros, supported generic tests in compile and the DuckDB subset, singular SQL tests in compile and the DuckDB subset, unit-test manifest/list artifacts, and the first DuckDB dict-fixture unit-test execution subset | snapshot compilation/execution and YAML definitions, fuller analysis configs/tests, full singular-test configs/patches, broader unit-test fixtures/overrides, semantic models, metrics, saved queries |
-| Jinja | literal, narrow scalar var-backed, and static loop-var `ref`/`source`, `doc`, inline `config`, static list `set` + simple `for`, narrow static `if`/`elif` with simple supported comparisons, selected `target`/`this` context | full parse/runtime context, macro execution, dispatch, filters, database-backed `execute`, adapter introspection |
-| Selectors and listing | names/FQN, tags, paths/files, packages, resource types, sources, exposures, unit tests, config materialization, wildcards, `+` and `@` graph expansion, excludes, scalar YAML aliases and narrow union/intersection/exclude composition, `state:new`, supported `result:*` statuses, dxt source-status extensions, `ls` output formats and narrow resource/config/identity/dependency `--output-keys` | Broader YAML composition, state comparison/defer, Core `source_status:fresher`, full dbt JSON and arbitrary nested `--output-keys` |
-
-See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the detailed matrix and
-[the replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) for the work needed
-before claiming drop-in parity, including the proposed semantic, static
-analysis, stateful planning, and cross-database features.
+These rows describe implemented capabilities with focused evidence. Functional
+coverage and candidate-specific public-project, platform and release acceptance
+are tracked in the
+[replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md).
 
 ## System Map
 
 ```mermaid
 flowchart LR
-    CLI[dxt CLI] --> Loader[Project Loader]
-    Loader --> Parser[Parser and YAML Readers]
-    Parser --> Graph[Manifest Graph]
-    Graph --> Selector[Selector Engine]
-    Graph --> Compiler[Compiler]
-    Compiler --> DuckDB[DuckDB Adapter Boundary]
-    DuckDB --> Results[Run Results and Catalog Artifacts]
-    Graph --> Manifest[manifest.json]
-    Graph --> Sources[sources.json]
+    Files[dbt project and profiles] --> Graph[Native loader and resource graph]
+    Graph --> Select[Selectors, state and defer]
+    Select --> Compile[Typed Jinja and SQL compiler]
+    Compile --> Workers[Dependency workers]
+    Workers --> DuckDB[(Native DuckDB)]
+    Workers --> PG[(Native PostgreSQL)]
+    Graph --> Plans[SQL, metrics, environments and movement plans]
+    Plans --> Workers
+    Graph --> Artifacts[dbt artifacts and docs]
+    Workers --> Artifacts
 ```
 
-## Development
+## Documentation
 
-Run focused local gates from the repository root before committing:
+| Document | Purpose |
+| --- | --- |
+| [Primer](docs/PRIMER.md) | Runnable workflows and command families. |
+| [Compatibility](docs/COMPATIBILITY.md) | Versioned support, evidence and explicit boundaries. |
+| [Replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) | Core/proposed feature coverage and candidate acceptance gates. |
+| [Architecture](docs/ARCHITECTURE.md) | Native modules, execution flow and dependencies. |
+| [Releases](docs/RELEASES.md) | Linux x86_64/ARM archives, notices, checksums and installation checks. |
+| [Performance](docs/PERFORMANCE.md) | Correctness-aware cold/warm measurement and budgets. |
+| [Changelog](CHANGELOG.md) | Unreleased implementation changes and earlier history. |
+| [ExecPlan](PLAN.md) | Active integration and validation work. |
+| [Agent rules](AGENTS.md) | Runtime, planning and public-safety requirements. |
+| [Multi-agent workflow](docs/MULTI_AGENT_WORKFLOW.md) | Isolated branch/worktree ownership and convergence. |
+| [Agent OS](docs/AGENT_OS.md), [protocols](docs/AGENT_PROTOCOLS.md), [GitHub Projects](docs/GITHUB_PROJECTS.md) | Repository coordination and developer automation. |
+
+## Development And Verification
+
+Python requirements are developer-only oracle and fixture dependencies. Use
+CPython **3.12** for the canonical Core comparisons:
 
 ```sh
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt -r requirements-oracle.txt
 zig build
 zig build test
-pytest -q tests/test_cli.py::test_name_for_the_changed_behavior
+pytest -q tests/test_usability_scheduler.py
 python scripts/check_runtime_boundary.py
 python scripts/check_public_safety.py
 ```
 
-Use the test layers deliberately:
+Native database and browser fixtures are required for the complete suite.
+[CI fixture setup](.github/actions/setup-oracles/action.yml) documents the
+pinned dependencies; the portable PostgreSQL helper can use installed native
+tools through `DXT_POSTGRES_BIN`. Run `pytest -q` for integrated validation and
+`python scripts/validate_dbt_artifacts.py <artifact.json>` for complete upstream
+artifact schemas.
 
-- `zig build` compiles the native CLI.
-- `zig build test` runs fast native unit/regression tests for core Zig logic.
-- Focused `pytest` runs black-box integration and compatibility checks against
-  the compiled Zig binary for touched CLI/artifact behavior.
-- `python scripts/check_runtime_boundary.py` verifies Python has not crossed
-  into product runtime responsibilities.
-- `python scripts/check_public_safety.py` scans for local paths, secrets, caches,
-  logs, and private artifacts.
+DuckDB warehouse execution requires its native library and held sessions. The
+retained CLI autocommit query helper has separate developer conformance coverage; forcing
+`DXT_DUCKDB_BACKEND=cli` does not enable full transformation commands.
 
-Use full `pytest -q` locally for broad runner/artifact changes or before a
-high-risk PR. Otherwise, let GitHub CI run the full integration matrix and
-publish pytest JUnit reports for review. GitHub CI also runs the public Jaffle
-parse, DuckDB build, DuckDB run, and docs-generate gates with a pinned,
-checksum-verified DuckDB CLI, so routine local work can stay focused on the
-touched layer. CI cancels superseded runs for the same branch or PR and applies
-job timeouts so stale work does not consume runner time. The public fixture job
-checks out the pinned Jaffle repository once and passes that checkout to each
-gate to avoid repeated network clones.
+CI configures native tests/safety, full compatibility fixtures, all six public
+Jaffle steps, an unchanged PostgreSQL dbt-utils project, performance checks and
+actual Linux x86_64/ARM installation tests. Release jobs extract the real
+checksum-validated archive and exercise both adapters with PATH empty. These
+configured gates must pass on the final candidate before claiming release
+readiness; earlier focused successes do not replace that final run.
 
-Native Zig coverage is collected on GitHub, not as a required local gate. The
-`Coverage` workflow runs on `src/` or build-file pull requests, pushes to
-`main`, and manual dispatch. It runs native Zig tests, compiles the standalone
-Zig test binary, and uploads a native test coverage map by source module for
-review. This is intentionally not Python coverage and does not claim line
-coverage for the Zig runtime.
+Python 3.11 jobs run developer/native CLI checks. The complete canonical Core
+suite runs under Python 3.12 on both Linux architectures.
 
-For concurrent Codex work, use one branch and one git worktree per editing
-agent. The project-scoped roles under `.codex/agents/` and helper scripts under
-`scripts/worktree_*.sh` are documented in
-[Multi-Agent Workflow](docs/MULTI_AGENT_WORKFLOW.md).
-This repo also has project-local Codex subagent settings in `.codex/config.toml`
-so restarts pick up the dxt-specific thread limits and role registry.
-For issue/project-backed coordination across multiple specialist roles, use
-[Agent OS](docs/AGENT_OS.md), [Agent Protocols](docs/AGENT_PROTOCOLS.md), and
-[GitHub Projects Setup](docs/GITHUB_PROJECTS.md).
-To let development continue from ready GitHub issues into local Codex worker
-subprocesses, run `python scripts/agent_os_orchestrator.py run --profile azure
---model gpt-5.5 --max-workers 3 --loop` from a clean supervisor checkout.
-Use `python scripts/agent_os_orchestrator.py product-manager --profile azure
---model gpt-5.5 --dry-run` to preview the Product Manager launch command and
-GitHub Project scope check. Remove `--dry-run` only when you want the Product
-Manager agent to write repo-scoped GitHub issue, label, or Project updates
-before launching workers.
-When project-local Codex settings change, use the pull-plug helpers documented
-in [Agent OS](docs/AGENT_OS.md): detached relaunches use
-`scripts/codex_pull_plug.py`, while exact visible-terminal restarts require
-launching Codex through `scripts/codex_tmux_supervisor.py` first.
-
-Optional compatibility gates:
-
-```sh
-python scripts/check_jaffle_shop_duckdb_parse.py
-python scripts/check_jaffle_shop_duckdb_build.py
-python scripts/check_jaffle_shop_duckdb_run.py
-python scripts/check_jaffle_shop_duckdb_docs.py
-python scripts/check_dbt_core_m1_oracle.py
-```
-
-The snapshot oracle has a dedicated CI gate. To reproduce its pinned Core and
-adapter contract locally:
-
-```sh
-python -m pip install -r requirements-dev.txt -r requirements-oracle.txt
-DBT_SEND_ANONYMOUS_USAGE_STATS=false pytest -q tests/test_cli.py::test_snapshot_dbt_core_1105_oracle
-```
-
-The Jaffle scripts use public fixtures and may clone their pinned refs by
-default. Pass `--project-dir path/to/jaffle_shop_duckdb` to run against an
-existing checkout. The build, run, and docs gates require the `duckdb` CLI on
-`PATH` when run locally.
-
-## Release Builds
-
-Tagged releases are built by [release.yml](.github/workflows/release.yml).
-Release artifacts are native `dxt` binaries packaged per target with a
-`SHA256SUMS.txt` file. Initial binary releases are Linux-only because current
-file discovery is Linux-specific; macOS and Windows artifacts are planned after
-that path is portable. See [docs/RELEASES.md](docs/RELEASES.md).
-
-## Status
-
-Pre-alpha. The shipped surface is intentionally narrow and documented. The next
-work remains dbt Core compatibility first: wider Jinja/macro behavior, stronger
-runner semantics, broader selector parity, fuller artifacts, and public
-Jaffle-style compatibility coverage.
+Optional native coverage artifacts are produced by the
+[Coverage workflow](.github/workflows/coverage.yml). They supplement the CLI,
+warehouse and artifact comparisons rather than replacing compatibility gates.
