@@ -28,7 +28,7 @@ def setup_case(pair, case):
         pair.write(f"dbt_packages/{folder}/macros/positive.sql", "{% test positive(model,column_name) %}" + body + "{% endtest %}")
     root = "models/marts"
     authored = "alpha.positive"
-    if case in {"root_override", "transitive_collision", "visible_body_error", "nested_collision", "custom_getwhere", "custom_getwhere_error", "argument_hidden", "argument_visible", "dependency_getwhere", "static_order", "static_reverse_order"}:
+    if case in {"root_override", "hidden_body_error", "transitive_collision", "visible_body_error", "nested_collision", "custom_getwhere", "custom_getwhere_error", "argument_hidden", "argument_visible", "dependency_getwhere", "static_order", "static_reverse_order"}:
         expose = ""
         if case in {"transitive_collision", "visible_body_error"}:
             expose = "{% if false %}{{ alpha.test_positive(model,column_name) }}{% endif %}"
@@ -46,7 +46,8 @@ def setup_case(pair, case):
         if case in {"static_order", "static_reverse_order"}:
             config = "{{ config(meta={'choice':choose()}) }}"
         pair.write("macros/positive.sql", "{% test positive(model,column_name,extra=none) %}" + expose + config + "select * from {{ model }} where {{ column_name }} < 0{% endtest %}")
-        if case != "root_override":
+        # A root seed hides the explicit package body in either discovery order.
+        if case not in {"root_override", "hidden_body_error"}:
             authored = "positive"
     if case == "package_local":
         root = "dbt_packages/alpha/models"
@@ -122,7 +123,10 @@ def test_generic_namespace_order_survives_native_warm_parse(tmp_path, configurat
             field: value for field, value in cold[0]["nodes"][key].items() if field != "created_at"}
     cache = json.loads((pair.projects[0] / "target/dxt_parse_cache.json").read_text())
     stored = {macro["package_name"]: macro["namespace_order"] for macro in cache["graph"]["macros"] if macro["name"] == "test_positive"}
-    assert stored["alpha"] > stored["zeta"]
+    core_order = [macro["package_name"] for macro in cold[1]["macros"].values()
+                  if macro["name"] == "test_positive" and macro["package_name"] in {"alpha", "zeta"}]
+    assert len(core_order) == 2 and set(core_order) == {"alpha", "zeta"}
+    assert sorted(stored, key=stored.get) == core_order
     # Logging flags form part of the parse context: use the same flags for a
     # fresh fill and reuse so the debug witness proves a real cache hit.
     command = [ROOT / "zig-out/bin/dxt", "parse", "--debug", "--log-format", "json",
