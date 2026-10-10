@@ -1264,6 +1264,7 @@ fn resolveExpressionValue(raw_context: *anyopaque, path: []const u8, allocator: 
     }
     if (context.documentation_block) return if (std.mem.indexOfScalar(u8, path, '.') == null) .conditional_undefined else error.UndefinedJinjaValue;
     if (@import("base_context.zig").callable(path)) return .{ .callable = path };
+    if (try @import("modules_context.zig").resolve(allocator, path)) |value| return value;
     if (try @import("regex_context.zig").resolve(allocator, path)) |value| return value;
     if (context.documentation) {
         if (@import("doc_context.zig").baseCallable(path)) return .{ .callable = path };
@@ -1429,6 +1430,7 @@ fn callExpressionValue(raw_context: *anyopaque, name: []const u8, args: []const 
         if (mutation.original) |original| for (context.bindings.items) |*binding| try @import("container_methods.zig").replaceAliases(&binding.value, original, mutation.replacement.?, 0);
         return mutation.result;
     }
+    if (try @import("modules_context.zig").call(allocator, name, args, .{ .host = context.host() })) |value| return value;
     if (try @import("regex_context.zig").call(allocator, name, args, context.host())) |value| return value;
     if (try @import("grants_context.zig").call(allocator, name, args)) |value| return value;
     if (try @import("constraint_context.zig").call(allocator, context.graph.adapter_type, name, args, context.host())) |value| return value;
@@ -4651,4 +4653,14 @@ test "parse evaluates non-dependency output expressions and keeps literal calls 
     }
     try std.testing.expect(!requiresNativeRendering("{{ config(materialized='table') }} select * from {{ ref('base') }} join {{ source('raw','events') }} using(id)"));
     try std.testing.expect(requiresNativeRendering("select {{ ref('base') ~ missing + 1 }}"));
+}
+
+test "compiler delegates typed datetime constructors and preserves regex module aggregate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = Graph{ .allocator = a, .project_name = "fixture" };
+    defer graph.deinit();
+    const node = Node{ .unique_id = "model.fixture.clock", .package_name = "fixture", .name = "clock", .path = "clock.sql", .original_file_path = "models/clock.sql", .raw_code = "{% set calendar = modules.datetime.datetime %}{{ calendar(2024,1,2,3,4,5).strftime('%Y-%m-%d %H:%M:%S') }}|{{ modules.re.sub('a','b','a') }}" };
+    try std.testing.expectEqualStrings("2024-01-02 03:04:05|b", try compileModel(a, &graph, &node));
 }
