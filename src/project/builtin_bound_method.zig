@@ -130,7 +130,11 @@ pub fn equal(left: Value, right: Value) bool {
 
 pub fn call(a: Allocator, value: Value, args: []const Argument, host: ?expression.Host) anyerror!Value {
     if (!isBound(value)) return error.JinjaTypeError;
-    return expression.callBuiltinMethod(a, value.attribute("__dxt_builtin_receiver"), value.attribute("__dxt_builtin_name").string, args, host);
+    var receiver = value.attribute("__dxt_builtin_receiver");
+    if (host) |current| if (current.receiver_value) |forward| {
+        receiver = try forward(current.context, receiver);
+    };
+    return expression.callBuiltinMethod(a, receiver, value.attribute("__dxt_builtin_name").string, args, host);
 }
 
 test "saved builtin methods have receiver equality and fresh lookup identity" {
@@ -229,4 +233,33 @@ test "authored boolean markers stay mappings while native providers stay closed"
     try std.testing.expect(isContextObject(regex));
     try std.testing.expect(!isMapping(regex));
     try std.testing.expect((try expression.checkedAttribute(regex, "__dxt_context_object")) == .undefined);
+}
+
+test "saved builtin calls resolve their receiver through the current render registry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const TestHost = struct {
+        original: Value,
+        current: Value,
+        fn resolve(_: *anyopaque, _: []const u8, _: Allocator) !Value {
+            return .undefined;
+        }
+        fn call(_: *anyopaque, _: []const u8, _: []const Argument, _: Allocator) !Value {
+            return error.UnexpectedMethodInvocation;
+        }
+        fn receiver(raw: *anyopaque, stored: Value) !Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expect(stored.object.ptr == self.original.object.ptr);
+            return self.current;
+        }
+    };
+    var context = TestHost{
+        .original = .{ .object = try a.dupe(expression.Entry, &.{.{ .key = "x", .value = .{ .integer = "1" } }}) },
+        .current = .{ .object = try a.dupe(expression.Entry, &.{.{ .key = "x", .value = .{ .integer = "2" } }}) },
+    };
+    const host: expression.Host = .{ .context = &context, .resolve = TestHost.resolve, .call = TestHost.call, .receiver_value = TestHost.receiver };
+    const get = (try lookupWithHost(a, context.original, "get", host)).?;
+    try std.testing.expectEqualStrings("2", (try call(a, get, &.{.{ .value = .{ .string = "x" } }}, host)).integer);
+    try std.testing.expect(get.attribute("__dxt_builtin_receiver").object.ptr == context.original.object.ptr);
 }

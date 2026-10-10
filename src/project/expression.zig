@@ -269,6 +269,7 @@ pub const Host = struct {
     // A render-owned registry preserves a mutable receiver's identity when
     // its native backing slice is replaced. Methods retain only this ID.
     receiver_identity: ?*const fn (*anyopaque, Value) anyerror!usize = null,
+    receiver_value: ?*const fn (*anyopaque, Value) anyerror!Value = null,
     capture_undefined: bool = false,
     // Compiled template hosts retain immutable constants per generated
     // function. Probes forbid runtime names and calls before executing them.
