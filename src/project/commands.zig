@@ -560,7 +560,12 @@ pub const OperationHost = struct {
             names[column_index] = .{ .string = try allocator.dupe(u8, column.name) };
             const cells = try expression.allocateValues(allocator, output.rows.len);
             for (output.rows, 0..) |row, row_index| cells[row_index] = try cellValue(allocator, column.kind, row[column_index]);
-            columns[column_index] = .{ .object = try allocator.dupe(expression.Entry, &.{ .{ .key = "name", .value = names[column_index] }, .{ .key = "values", .value = try self.callback(.{ .tuple = cells }) } }) };
+            columns[column_index] = .{ .object = try allocator.dupe(expression.Entry, &.{
+                .{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } },
+                .{ .key = "__dxt_iterable", .value = .{ .list = cells } },
+                .{ .key = "name", .value = names[column_index] },
+                .{ .key = "values", .value = try self.callback(.{ .tuple = cells }) },
+            }) };
         }
         for (output.rows, rows, data) |row, *target, *raw_target| {
             const cells = try expression.allocateValues(allocator, output.columns.len);
