@@ -96,6 +96,16 @@ environments per thread with cleanup; preserve authored SQL and successful
 metadata. This worker does not edit the concurrently owned data-test facade or
 stored-audit file.
 
+All bounded corrections are integrated for fresh combined validation. The
+focused selection contains 626 unique original cases: all 361 cases in the
+fourteen ARM-negative modules plus the earlier 265 focused cases, including
+every one of the sixty original failures. Collection preserves the complete
+5,819-case identity set. Native tests and the CLI require genuine clean builds;
+the focused run keeps original build fixtures, strict artifact/row/rollback
+checks and default temporary-directory retention. This preparation is not a
+pass certificate. The published candidate and its original platform reports
+remain separate until the corrected candidate has its own results.
+
 The metric movement failure fixture now deliberately keeps its declared source
 estimate below the row limit while making actual source rows exceed it. Actual
 native controls prove three moved rows fit the limit and six rows fail at the
