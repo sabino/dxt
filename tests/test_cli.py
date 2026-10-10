@@ -14,6 +14,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,14 @@ def dbt_protobuf_json_compat(message_to_json):
 
 @pytest.fixture(scope="session", autouse=True)
 def build_dxt():
+    # Pytest registers this imported fixture separately in each test module.
+    # Share its clean build and native test run across those registrations.
+    build_dxt_once()
+    assert DXT.exists()
+
+
+@cache
+def build_dxt_once():
     with tempfile.TemporaryDirectory(prefix="dxt-zig-cache-") as cache_root:
         subprocess.run(
             [
@@ -100,7 +109,6 @@ def build_dxt():
             cwd=ROOT,
             check=True,
         )
-    assert DXT.exists()
 
 
 def test_version_command():

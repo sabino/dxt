@@ -43,23 +43,36 @@ SQL or comparison value is rewritten. Jaffle and native/safety jobs are green
 on the published checkpoint, along with native archive installation on Linux
 x86_64 and ARM. The complete canonical compatibility jobs remain in progress.
 
-The next combined callable/ownership candidate passes 696 native tests,
-18 both-adapter list-growth cases and 44 inline Core comparisons. Its fresh
-public PostgreSQL rerun exposes a genuine Relation Mapping regression in the
-new context classifier. The compiler worker now owns the bounded Relation
-protocol/serialization closure; the expression worker owns the 213-case
-saved-method/base/receiver certificate and an independent public DuckDB
-diagnosis. These results are candidate-specific and do not establish final
-replacement or merge readiness.
+The combined callable/ownership candidate passes 703 native tests and 70
+developer acceptance checks. The Relation Mapping closure is integrated after
+48 actual Core comparisons; earlier callable certificates include 18
+both-adapter list-growth cases, 44 inline cases and the complete 213-case
+saved-method/base/receiver suite. The fresh public PostgreSQL rerun reaches
+seed execution and exposes invalid spare cells in a lazy iterator's private
+capacity buffer during alias publication. The expression worker owns this
+bounded buffer/loop ownership regression; completed LoopContext behavior must
+remain intact. Failed public and small seed fixtures remain regression evidence.
+These results are candidate-specific and do not establish merge readiness.
 
-The oracle worker's primary seed implementation has 72 passing actual Core
-cases for bundled DuckDB COPY and native PostgreSQL bindings. Integration is
-sequenced after genuine context markers and borrowed transaction cleanup are
-reviewed. The unchanged 70,000-binding seed remains mandatory on the combined
-amortized-growth candidate. The oracle worker then owns native result transport,
-embedded-NUL/composite parameters and the complete authored cursor contract.
-The supervisor owns integration, publication and the final release gates;
-workers keep their source and test evidence in separate clean worktrees.
+The primary seed implementation, genuine sequence markers and borrowed
+transaction cleanup are integrated after 72 actual Core cases for bundled
+DuckDB COPY and native PostgreSQL bindings. The oracle worker owns the combined
+seed rerun, including the new Column cases and unchanged 70,000-binding seed;
+none can count as final evidence before the iterator regression is repaired.
+The oracle worker also owns native result transport, embedded-NUL/composite
+parameters and the authored cursor contract, with the cache worker owning a
+separate PostgreSQL typed-cell/description module. The release worker's ELF
+architecture and checksum-before-extraction checks are integrated and pass
+their developer regressions; genuine ReleaseSafe and ARM acceptance remain
+required. The supervisor owns integration, publication and the final release
+gates; workers retain source and test evidence in separate clean worktrees.
+
+The supervisor's collection audit found 60 separate session registrations of
+the identical imported CLI-build fixture across 5,213 collected cases. A shared
+cached developer helper now performs that fixture's clean CLI build and native
+test run once per pytest process; every registration still checks the binary
+exists, and native driver/browser fixtures remain mandatory. This removes
+redundant compilation without reducing test selection or oracle assertions.
 
 The current CI repair checkpoint has all 263 historical CLI tests passing with
 zero skips after Core-grounded expectation migrations and the profileless audit
