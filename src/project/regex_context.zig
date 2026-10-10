@@ -15,6 +15,7 @@ const Capture = struct {
     pos: i64,
     endpos: i64,
 };
+const context_marker = expr.Entry{ .key = "__dxt_context_object", .value = .{ .callable = "__dxt_context_object" } };
 const functions = [_][]const u8{ "compile", "search", "match", "fullmatch", "findall", "finditer", "sub", "subn", "split", "escape", "purge", "template" };
 const exports = [_][]const u8{ "match", "fullmatch", "search", "sub", "subn", "split", "findall", "finditer", "compile", "purge", "template", "escape", "error", "Pattern", "Match", "A", "I", "L", "M", "S", "X", "U", "ASCII", "IGNORECASE", "LOCALE", "MULTILINE", "DOTALL", "VERBOSE", "UNICODE", "NOFLAG", "RegexFlag" };
 const flags = [_]struct { name: []const u8, value: u32 }{
@@ -127,6 +128,7 @@ fn flagFromText(a: Allocator, authored: []const u8) !Value {
         name_value = .{ .string = try std.fmt.allocPrint(a, "{s}{s}", .{ try std.mem.join(a, "|", names.items), suffix }) };
     }
     const value = try entry(a, &.{
+        context_marker,
         .{ .key = "__dxt_immutable_identity", .value = .{ .callable = try std.fmt.allocPrint(a, "__dxt_regex_flag:{s}", .{number}) } },
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_integer", .value = .{ .string = number } },
@@ -144,6 +146,7 @@ fn flagFromText(a: Allocator, authored: []const u8) !Value {
 fn classValue(a: Allocator, name: []const u8) !Value {
     if (std.mem.eql(u8, name, "RegexFlag")) return flagClassValue(a);
     return try entry(a, &.{
+        context_marker,
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_callable", .value = .{ .callable = try std.fmt.allocPrint(a, "modules.re.{s}", .{name}) } },
         .{ .key = "__dxt_rendered", .value = .{ .string = if (std.mem.eql(u8, name, "RegexFlag")) "<flag 'RegexFlag'>" else try std.fmt.allocPrint(a, "<class 're.{s}'>", .{name}) } },
@@ -160,6 +163,7 @@ fn flagClassValue(a: Allocator) !Value {
     var fields: std.ArrayList(expr.Entry) = .empty;
     try fields.appendSlice(a, members.items);
     try fields.appendSlice(a, &.{
+        context_marker,
         .{ .key = "__dxt_native_regex_enum", .value = .{ .callable = "__dxt_regex_enum_class" } },
         .{ .key = "__dxt_callable", .value = .{ .callable = "modules.re.RegexFlag" } },
         .{ .key = "__dxt_rendered", .value = .{ .string = "<flag 'RegexFlag'>" } },
@@ -207,6 +211,7 @@ fn patternValue(a: Allocator, definition: Pattern) !Value {
     const actual = Pattern{ .pattern = definition.pattern, .flags = @bitCast(regex.flags) };
     var fields: std.ArrayList(expr.Entry) = .empty;
     try fields.appendSlice(a, &.{
+        context_marker,
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_regex_pattern", .value = .{ .string = try std.json.Stringify.valueAlloc(a, actual, .{}) } },
         .{ .key = "pattern", .value = .{ .string = definition.pattern } },
@@ -259,6 +264,7 @@ fn matchValue(a: Allocator, capture: Capture) !Value {
     const matched_repr = try expr.repr(group(capture, 0, .none), a);
     const short_repr = matched_repr[0..try engine.byteOffset(matched_repr, 50)];
     try fields.appendSlice(a, &.{
+        context_marker,
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_indexed", .value = .{ .list = groups } },
         .{ .key = "__dxt_string_index", .value = .{ .object = try names.toOwnedSlice(a) } },
@@ -499,6 +505,7 @@ fn errorValue(a: Allocator, args: []const Argument) !Value {
     const arguments = try expr.allocateValues(a, 1);
     arguments[0] = message;
     return try entry(a, &.{
+        context_marker,
         .{ .key = "__dxt_noniterable", .value = .{ .boolean = true } },
         .{ .key = "__dxt_rendered", .value = .{ .string = try message.text(a) } },
         .{ .key = "__dxt_repr", .value = .{ .string = try std.fmt.allocPrint(a, "error({s})", .{try expr.repr(message, a)}) } },
