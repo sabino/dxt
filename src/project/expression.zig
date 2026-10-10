@@ -373,6 +373,9 @@ test "runtime numeric identities survive aliases without merging equal values" {
     const fake = try evaluate(a, "{'__dxt_native_numeric':'__dxt_native_numeric','__dxt_float':1.0}", null);
     try std.testing.expect(floatProtocol(fake) == null);
     try std.testing.expect((try checkedAttribute(float, "__dxt_float")) == .undefined);
+    try std.testing.expect((try filter(a, "attr", float, &.{.{ .value = .{ .string = "__dxt_float_identity" } }})) == .undefined);
+    try std.testing.expect(try testValue("sameas", float, &.{.{ .value = try filter(a, "attr", float, &.{.{ .value = .{ .string = "real" } }}) }}));
+    try std.testing.expectEqual(@as(f64, 0), numericFloat(try filter(a, "attr", float, &.{.{ .value = .{ .string = "imag" } }})));
     const one = try integerValue(a, 1000);
     try std.testing.expect(try testValue("sameas", one, &.{.{ .value = one }}));
     try std.testing.expect(!try testValue("sameas", one, &.{.{ .value = try integerValue(a, 1000) }}));
@@ -2072,6 +2075,7 @@ pub fn filterValue(allocator: std.mem.Allocator, name: []const u8, value: Value,
     if (std.mem.eql(u8, name, "attr")) {
         if (args.len != 1 or args[0].value != .string) return error.InvalidJinjaArguments;
         if (sequences.kind(value) != null) return .undefined;
+        if (nativeNumeric(value)) return attributeWithHost(allocator, value, args[0].value.string, host);
         if (tupleProtocol(value) != null) return checkedAttribute(value, args[0].value.string);
         if (value == .capture_undefined and std.mem.startsWith(u8, args[0].value.string, "__") and std.mem.endsWith(u8, args[0].value.string, "__") and !undefinedUnsafeAttribute(args[0].value.string, true)) return try captureUndefined(allocator, args[0].value.string);
         if (isUndefined(value)) return try checkedAttribute(value, args[0].value.string);
