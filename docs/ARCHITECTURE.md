@@ -228,9 +228,10 @@ All module names in this table refer to `src/project/<name>.zig`.
 
 The native writers target Manifest v12, Run Results v6, Catalog v1, Sources v3
 and the semantic-interface manifest contract. Invocation IDs and UTC timestamps
-come from the native runtime. Compile/docs also write durable results;
-compilation-error results are an explicit dxt extension where Core stops before
-writing an artifact. SQL/movement/workflow metadata uses separate dxt artifacts.
+come from the native runtime. Compile/docs preserve Core's default failure
+artifact policy. Set `DXT_DURABLE_COMPILE_ERRORS=true` to publish durable
+compilation-error results as an explicit dxt extension. SQL/movement/workflow
+metadata uses separate dxt artifacts.
 
 `docs generate` writes the embedded dbt documentation application and warehouse
 catalog. `--static` also writes `static_index.html` with manifest/catalog data

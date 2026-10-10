@@ -45,6 +45,13 @@ x86_64/ARM CI. Exact candidate identities, counts and outcomes are recorded in
 [PR #221](https://github.com/sabino/dxt/pull/221) and
 [issue #220](https://github.com/sabino/dxt/issues/220).
 
+The corrected source passes all 796 native tests and all 95 affected focused
+checks. The complete unfiltered 5,819-case run retains its original build and
+database fixtures on that source. Final documentation clarifies the existing
+compile-error opt-in at every summary; it changes no runtime, test or tooling
+inputs. Candidate-specific public, release and platform results remain tracked
+in the PR and issue until acceptance is complete.
+
 The following triage notes describe the earlier known-failing candidates and
 the bounded corrections; they do not establish final acceptance.
 
