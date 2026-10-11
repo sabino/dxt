@@ -1,5 +1,10 @@
 const std = @import("std");
+const clock = @import("execution_clock.zig");
+const adapter = @import("adapter.zig");
+const test_audits = @import("test_audits.zig");
 const catalog = @import("catalog.zig");
+const incremental = @import("incremental.zig");
+const postgres_materialization = @import("postgres_materialization.zig");
 const compiler = @import("compiler.zig");
 const project_fs = @import("fs.zig");
 const selector = @import("selector.zig");
@@ -17,16 +22,25 @@ const UnitTestDef = types.UnitTestDef;
 const DuckDbObjectKind = enum { table, view };
 
 pub const GenericTestExecutionResult = struct {
+    build_path: ?[]const u8 = null,
     compiled_code: []const u8,
-    failures: u64,
+    compiled_ctes: []const types.ExtraCte = &.{},
+    macro_dependencies: []const []const u8 = &.{},
+    execution_message: ?[]const u8 = null,
+    adapter_response: ?@import("run_results.zig").AdapterResponse = null,
+    failures: i64,
+    should_warn: bool = false,
+    should_error: bool = false,
     relation_name: ?[]const u8 = null,
     execution_error: bool = false,
+    execution_cancelled: bool = false,
+    compile_started_at: ?i96 = null,
+    compile_completed_at: ?i96 = null,
 };
 
-pub const UnitTestExecutionResult = struct {
-    compiled_code: []const u8,
-    failures: u64,
-};
+pub const UnitTestExecutionResult = @import("unit_runtime.zig").Result;
+
+pub const queryJson = adapter.queryJson;
 
 pub const FreshnessQueryResult = struct {
     max_loaded_at: []const u8,
@@ -41,6 +55,7 @@ pub fn deinitFreshnessQueryResult(allocator: std.mem.Allocator, result: Freshnes
 
 pub fn databasePath(allocator: std.mem.Allocator, target_dir: []const u8, graph: *const Graph) ![]const u8 {
     if (graph.database_path) |configured_path| {
+        if (std.mem.eql(u8, configured_path, ":memory:")) return try allocator.dupe(u8, configured_path);
         if (isUnsupportedConnectionPath(configured_path)) return error.UnsupportedDuckDbPath;
         if (std.fs.path.isAbsolute(configured_path)) return try allocator.dupe(u8, configured_path);
         const base = graph.database_path_base orelse ".";
@@ -50,59 +65,214 @@ pub fn databasePath(allocator: std.mem.Allocator, target_dir: []const u8, graph:
 }
 
 pub fn isSupportedMaterialization(value: []const u8) bool {
-    return std.mem.eql(u8, value, "table") or std.mem.eql(u8, value, "view");
+    return std.mem.eql(u8, value, "table") or std.mem.eql(u8, value, "view") or std.mem.eql(u8, value, "incremental");
+}
+
+pub fn isSupportedMaterializationForAdapter(adapter_type: []const u8, value: []const u8) bool {
+    return isSupportedMaterialization(value) or (std.mem.eql(u8, adapter_type, "postgres") and postgres_materialization.isSupported(value)) or
+        (std.mem.eql(u8, adapter_type, "duckdb") and (std.mem.eql(u8, value, "external") or std.mem.eql(u8, value, "table_function")));
 }
 
 fn isUnsupportedConnectionPath(value: []const u8) bool {
-    return std.mem.eql(u8, value, ":memory:") or
-        std.mem.startsWith(u8, value, "md:") or
+    return std.mem.startsWith(u8, value, "md:") or
         std.mem.startsWith(u8, value, "motherduck:");
 }
 
 pub fn executeModel(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node) !void {
-    try dropConflictingMaterialization(runtime, db_path, graph, node);
+    return executeModelWithPolicy(runtime, db_path, graph, node, .{});
+}
 
+pub const ExecutionPolicy = postgres_materialization.ExecutionPolicy;
+pub fn executeModelWithPolicy(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
+    try executeModelBody(runtime, db_path, graph, node, policy);
+    if (std.mem.eql(u8, graph.adapter_type, "duckdb")) try @import("materialization_result.zig").captureQuery(runtime.allocator, policy.main_result, .{});
+}
+
+fn executeModelBody(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
+    if (std.mem.eql(u8, node.materialized, "external") or std.mem.eql(u8, node.materialized, "table_function")) return @import("duckdb_file_materialization.zig").execute(runtime, db_path, graph, node, policy);
+    if (std.mem.eql(u8, node.materialized, "incremental")) return try incremental.executeWithPolicy(runtime, db_path, graph, node, policy);
+    if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
+        const sql = trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution);
+        return postgres_materialization.executeWithPolicy(runtime, graph, node, sql, policy) catch |err| switch (err) {
+            error.PostgresMaterializedViewConfigurationChanged => error.DuckDbExecutionFailed,
+            else => err,
+        };
+    }
+    var owned: ?adapter.Session = null;
+    defer if (owned) |*session| session.deinit();
+    if (runtime.adapter_session == null) if (runtime.duckdb_pool) |pool| {
+        const connection = if (std.mem.eql(u8, db_path, ":memory:")) try pool.acquireSharedMemoryWithProfile(if (runtime.invocation) |invocation| &invocation.id else graph.project_name, false, graph.duckdb_credentials) else try pool.acquireWithProfile(db_path, false, graph.duckdb_credentials);
+        if (connection) |native| owned = .{ .duckdb = native };
+    };
+    const held: ?*adapter.Session = runtime.adapter_session orelse if (owned) |*session| session else null;
+    if (held) |session| {
+        return @import("duckdb_stock_materialization.zig").execute(runtime, graph, node, session, policy);
+    }
     const sql = try renderModelSql(runtime.allocator, graph, node);
     defer runtime.allocator.free(sql);
-
-    try executeSql(runtime, db_path, sql);
+    // The CLI fallback also performs switches in one transaction. A failed
+    // batch closes the connection, rolling back both the DROP and replacement.
+    const drop_kind: DuckDbObjectKind = if (std.mem.eql(u8, node.materialized, "table")) .view else .table;
+    const conflict = try relationObjectExists(runtime, db_path, graph, node, drop_kind);
+    const drop_sql = if (conflict) try renderDropSql(runtime.allocator, graph, node, drop_kind) else try runtime.allocator.dupe(u8, "");
+    defer runtime.allocator.free(drop_sql);
+    const batch = try std.fmt.allocPrint(runtime.allocator, "{s}{s}{s}{s}", .{ if (policy.manage_transaction) "begin transaction;\n" else "", drop_sql, sql, if (policy.manage_transaction) "commit;" else "" });
+    defer runtime.allocator.free(batch);
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, sql);
+    try executeSql(runtime, db_path, batch);
 }
 
 pub fn executeSeed(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node) !void {
+    return executeSeedWithPolicy(runtime, db_path, project_dir, graph, node, .{});
+}
+
+pub fn executeSeedWithPolicy(runtime: Runtime, db_path: []const u8, project_dir: []const u8, graph: *const Graph, node: *const Node, policy: ExecutionPolicy) !void {
+    if (!policy.manage_transaction and runtime.adapter_session == null) return error.NativeAdapterSessionRequired;
+    if (runtime.adapter_session != null or std.mem.eql(u8, graph.adapter_type, "postgres")) return @import("seed_lifecycle.zig").executeWithPolicy(runtime, graph, db_path, node, policy);
     try dropRelationIfExists(runtime, db_path, graph, node, .view);
 
     const sql = try renderSeedSql(runtime.allocator, project_dir, graph, node);
     defer runtime.allocator.free(sql);
 
     try executeSql(runtime, db_path, sql);
+    try @import("stock_artifacts.zig").write(policy.artifact_writer, node, sql);
 }
 
 pub fn executeGenericTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const GenericTestNode) !GenericTestExecutionResult {
-    const compiled_sql = try renderGenericTestSql(runtime.allocator, graph, test_node);
-    errdefer runtime.allocator.free(compiled_sql);
-    const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
-    defer runtime.allocator.free(execution_sql);
-    const failures = queryGenericTestFailures(runtime, db_path, execution_sql) catch |err| switch (err) {
-        error.DuckDbExecutionFailed => {
-            if (!isBuiltInGenericTestName(test_node.test_name)) {
-                return .{ .compiled_code = compiled_sql, .failures = 0, .execution_error = true };
-            }
-            return err;
-        },
-        else => return err,
+    const compilation_started = clock.now(runtime.io);
+    var dependencies: std.ArrayList([]const u8) = .empty;
+    defer dependencies.deinit(runtime.allocator);
+    var compiled = try compiler.compileGenericTestWithDependencies(runtime.allocator, graph, test_node, &dependencies);
+    var owns_compilation = true;
+    errdefer if (owns_compilation) compiled.deinit(runtime.allocator);
+    const compiled_sql = compiled.compiled_code;
+    const compilation_completed = clock.now(runtime.io);
+    var config = try @import("canonical_manifest_config.zig").testConfig(runtime.allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values);
+    defer @import("config_value.zig").deinit(runtime.allocator, &config);
+    var node = test_audits.auditNodeWithIdentity(test_node.config, test_node.alias, test_node.package_name, test_node.resolved_identity);
+    node.unique_id = test_node.unique_id;
+    node.name = test_node.name;
+    node.path = test_node.path;
+    node.original_file_path = test_node.original_file_path;
+    node.raw_code = test_node.raw_code;
+    node.description = test_node.description;
+    node.enabled = test_node.enabled;
+    node.tags = test_node.tags;
+    node.doc_blocks = test_node.doc_blocks;
+    node.refs = test_node.refs;
+    node.source_refs = test_node.source_refs;
+    node.depends_on = test_node.depends_on;
+    node.macro_depends_on = test_node.macro_depends_on;
+    node.materialized = "test";
+    node.test_config = test_node.config;
+    node.effective_config = config;
+    node.compiled_code = compiled_sql;
+    node.compiled = true;
+    node.extra_ctes = compiled.extra_ctes;
+    var execution = try executeCompiledDataTest(runtime, db_path, graph, &node, test_node.config, &compiled, compilation_started, compilation_completed);
+    owns_compilation = false;
+    errdefer deinitDataTestExecutionResult(runtime.allocator, execution);
+    try mergeDataTestDependencies(runtime.allocator, &execution, &dependencies);
+    return execution;
+}
+
+fn executeCompiledDataTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, node: *const types.Node, config: types.GenericTestConfig, compiled: *compiler.CompiledModel, compilation_started: i96, compilation_completed: i96) !GenericTestExecutionResult {
+    var runtime_node = node.*;
+    if (graph.execution_hooks) |host| if (host.get_written_path) |get_path| {
+        runtime_node.build_path = get_path(host.context, node.unique_id) orelse runtime_node.build_path;
     };
-    const relation_name = try syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures);
-    return .{ .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
+    runtime_node.compiled_path = try @import("test_provenance.zig").writeCompiled(runtime, graph, node, compiled.compiled_code);
+    defer runtime.allocator.free(runtime_node.compiled_path.?);
+    var dependencies: std.ArrayList([]const u8) = .empty;
+    errdefer dependencies.deinit(runtime.allocator);
+    var execution_error: ?anyerror = null;
+    var build_path: ?[]const u8 = null;
+    errdefer if (build_path) |path| runtime.allocator.free(path);
+    const result: ?test_audits.Result = test_audits.executeNodeWithArtifacts(runtime, graph, db_path, config, &runtime_node, &dependencies, &build_path) catch |err| blk: {
+        if (err == error.OutOfMemory) return err;
+        execution_error = err;
+        break :blk null;
+    };
+    errdefer if (result) |value| if (value.relation_name) |relation| runtime.allocator.free(relation);
+    errdefer if (result) |value| if (value.adapter_response) |response| response.deinit(runtime.allocator);
+    const message = if (execution_error) |err| if (@import("compile_diagnostics.zig").message(err)) |detail| try runtime.allocator.dupe(u8, detail) else null else null;
+    errdefer if (message) |detail| runtime.allocator.free(detail);
+    const ctes = try compiled.extra_ctes.toOwnedSlice(runtime.allocator);
+    errdefer {
+        for (ctes) |cte| runtime.allocator.free(cte.sql);
+        runtime.allocator.free(ctes);
+    }
+    return .{
+        .compile_started_at = compilation_started,
+        .compile_completed_at = compilation_completed,
+        .compiled_code = compiled.compiled_code,
+        .compiled_ctes = ctes,
+        .macro_dependencies = try dependencies.toOwnedSlice(runtime.allocator),
+        .build_path = build_path,
+        .execution_message = message,
+        .adapter_response = if (result) |value| value.adapter_response else null,
+        .execution_error = execution_error != null,
+        .execution_cancelled = if (execution_error) |err| err == error.AdapterQueryCancelled else false,
+        .failures = if (result) |value| value.failures else 0,
+        .should_warn = if (result) |value| value.should_warn else false,
+        .should_error = if (result) |value| value.should_error else false,
+        .relation_name = if (result) |value| value.relation_name else null,
+    };
 }
 
 pub fn executeSingularTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, test_node: *const SingularTestNode) !GenericTestExecutionResult {
-    const compiled_sql = try renderSingularTestSql(runtime.allocator, graph, test_node);
-    errdefer runtime.allocator.free(compiled_sql);
-    const execution_sql = try renderGenericTestExecutionSql(runtime.allocator, compiled_sql);
-    defer runtime.allocator.free(execution_sql);
-    const failures = try queryGenericTestFailures(runtime, db_path, execution_sql);
-    const relation_name = try syncTestFailureRelation(runtime, db_path, test_node.config, test_node.alias, compiled_sql, failures);
-    return .{ .compiled_code = compiled_sql, .failures = failures, .relation_name = relation_name };
+    const compilation_started = clock.now(runtime.io);
+    var dependencies: std.ArrayList([]const u8) = .empty;
+    defer dependencies.deinit(runtime.allocator);
+    var compiled = try compiler.compileSingularTestWithDependencies(runtime.allocator, graph, test_node, &dependencies);
+    var owns_compilation = true;
+    errdefer if (owns_compilation) compiled.deinit(runtime.allocator);
+    const compilation_completed = clock.now(runtime.io);
+    var config = try @import("canonical_manifest_config.zig").testConfig(runtime.allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values);
+    defer @import("config_value.zig").deinit(runtime.allocator, &config);
+    var node = test_audits.auditNodeWithIdentity(test_node.config, test_node.alias, test_node.package_name, test_node.resolved_identity);
+    node.unique_id = test_node.unique_id;
+    node.name = test_node.name;
+    node.path = test_node.path;
+    node.original_file_path = test_node.original_file_path;
+    node.raw_code = test_node.raw_code;
+    node.description = test_node.description;
+    node.enabled = test_node.enabled;
+    node.tags = test_node.tags;
+    node.doc_blocks = test_node.doc_blocks;
+    node.refs = test_node.refs;
+    node.source_refs = test_node.source_refs;
+    node.depends_on = test_node.depends_on;
+    node.macro_depends_on = test_node.macro_depends_on;
+    node.materialized = "test";
+    node.test_config = test_node.config;
+    node.effective_config = config;
+    node.compiled_code = compiled.compiled_code;
+    node.compiled = true;
+    node.extra_ctes = compiled.extra_ctes;
+    var execution = try executeCompiledDataTest(runtime, db_path, graph, &node, test_node.config, &compiled, compilation_started, compilation_completed);
+    owns_compilation = false;
+    errdefer deinitDataTestExecutionResult(runtime.allocator, execution);
+    try mergeDataTestDependencies(runtime.allocator, &execution, &dependencies);
+    return execution;
+}
+
+fn mergeDataTestDependencies(allocator: std.mem.Allocator, execution: *GenericTestExecutionResult, dependencies: *std.ArrayList([]const u8)) !void {
+    for (execution.macro_dependencies) |id| try @import("util.zig").appendUnique(allocator, dependencies, id);
+    allocator.free(execution.macro_dependencies);
+    execution.macro_dependencies = &.{};
+    execution.macro_dependencies = try dependencies.toOwnedSlice(allocator);
+}
+
+fn deinitDataTestExecutionResult(allocator: std.mem.Allocator, execution: GenericTestExecutionResult) void {
+    allocator.free(execution.compiled_code);
+    for (execution.compiled_ctes) |cte| allocator.free(cte.sql);
+    allocator.free(execution.compiled_ctes);
+    allocator.free(execution.macro_dependencies);
+    if (execution.build_path) |path| allocator.free(path);
+    if (execution.execution_message) |message| allocator.free(message);
+    if (execution.adapter_response) |response| response.deinit(allocator);
+    if (execution.relation_name) |relation| allocator.free(relation);
 }
 
 pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !void {
@@ -110,11 +280,19 @@ pub fn validateUnitTestExecution(allocator: std.mem.Allocator, graph: *const Gra
 }
 
 pub fn executeUnitTest(runtime: Runtime, db_path: []const u8, graph: *const Graph, unit_test: *const UnitTestDef) !UnitTestExecutionResult {
+    if (runtime.adapter_session != null or std.mem.eql(u8, graph.adapter_type, "postgres")) return try @import("unit_runtime.zig").execute(runtime, db_path, graph, unit_test);
+    const compilation_started = clock.now(runtime.io);
+    // Supported dict fixtures construct every relation in an isolated connection.
+    // Failed SQL must never replace or alter relations in the target database.
     const planned = try unit_test_plan.renderUnitTestSql(runtime.allocator, graph, unit_test);
     defer runtime.allocator.free(planned.execution_sql);
     errdefer runtime.allocator.free(planned.compiled_code);
-    const failures = try queryUnitTestFailures(runtime, db_path, planned.execution_sql);
-    return .{ .compiled_code = planned.compiled_code, .failures = failures };
+    const compilation_completed = clock.now(runtime.io);
+    const failures = queryUnitTestFailures(runtime, ":memory:", planned.execution_sql) catch |err| switch (err) {
+        error.DuckDbExecutionFailed, error.AdapterQueryCancelled => return .{ .execution_cancelled = err == error.AdapterQueryCancelled, .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = planned.compiled_code, .failures = 0, .execution_error = true },
+        else => return err,
+    };
+    return .{ .compile_started_at = compilation_started, .compile_completed_at = compilation_completed, .compiled_code = planned.compiled_code, .failures = if (failures == 0) 0 else 1 };
 }
 
 fn syncTestFailureRelation(runtime: Runtime, db_path: []const u8, config: types.GenericTestConfig, alias: []const u8, compiled_sql: []const u8, failures: u64) !?[]const u8 {
@@ -165,27 +343,9 @@ pub fn querySourceFreshness(runtime: Runtime, db_path: []const u8, source: *cons
     const sql = try renderSourceFreshnessSql(runtime.allocator, source);
     defer runtime.allocator.free(sql);
 
-    const result = std.process.run(runtime.allocator, runtime.io, .{
-        .argv = &.{ "duckdb", "-readonly", db_path, "-json", "-batch", "-bail", "-c", sql },
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
-    errdefer runtime.allocator.free(result.stdout);
-    defer runtime.allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| if (code == 0) {
-            const parsed = try parseFreshnessQueryJson(runtime.allocator, result.stdout);
-            runtime.allocator.free(result.stdout);
-            return parsed;
-        },
-        else => {},
-    }
-    runtime.allocator.free(result.stdout);
-    return error.DuckDbExecutionFailed;
+    const rows_json = try adapter.queryJson(runtime, db_path, sql, true);
+    defer runtime.allocator.free(rows_json);
+    return try parseFreshnessQueryJson(runtime.allocator, rows_json);
 }
 
 pub fn renderSourceFreshnessSql(allocator: std.mem.Allocator, source: *const SourceDef) ![]const u8 {
@@ -234,11 +394,12 @@ pub fn collectCatalogEntries(runtime: Runtime, db_path: []const u8, graph: *cons
 
     for (graph.nodes.items) |*node| {
         if (!selectionContains(selected, node.unique_id)) continue;
-        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed")) continue;
+        if (!std.mem.eql(u8, node.resource_type, "model") and !std.mem.eql(u8, node.resource_type, "seed") and !std.mem.eql(u8, node.resource_type, "snapshot")) continue;
         const entry = try catalogEntryForNode(runtime.allocator, graph, node, rows) orelse continue;
         try entries.nodes.append(runtime.allocator, entry);
     }
     for (graph.sources.items) |*source| {
+        if (!source.enabled) continue;
         if (!selectionContains(selected, source.unique_id)) continue;
         const entry = try catalogEntryForSource(runtime.allocator, source, rows) orelse continue;
         try entries.sources.append(runtime.allocator, entry);
@@ -255,37 +416,31 @@ fn databaseFileExists(runtime: Runtime, db_path: []const u8) bool {
 
 fn queryCatalogColumnsJson(runtime: Runtime, db_path: []const u8) ![]const u8 {
     const sql =
+        \\with relations as (
+        \\ select database_name, schema_name, table_name, 'BASE TABLE' as table_type, comment
+        \\ from duckdb_tables()
+        \\ union all
+        \\ select database_name, schema_name, view_name, 'VIEW', comment from duckdb_views()
+        \\)
         \\select
-        \\    c.table_catalog,
-        \\    c.table_schema,
+        \\    c.database_name as table_catalog,
+        \\    c.schema_name as table_schema,
         \\    c.table_name,
         \\    t.table_type,
         \\    c.column_name,
-        \\    c.ordinal_position,
-        \\    c.data_type
-        \\from information_schema.columns c
-        \\join information_schema.tables t
-        \\    on c.table_schema = t.table_schema
+        \\    c.column_index as ordinal_position,
+        \\    c.data_type,
+        \\    t.comment as table_comment,
+        \\    c.comment as column_comment
+        \\from duckdb_columns() c
+        \\join relations t
+        \\    on c.database_name = t.database_name
+        \\    and c.schema_name = t.schema_name
         \\    and c.table_name = t.table_name
-        \\where c.table_schema not in ('information_schema', 'pg_catalog')
-        \\order by c.table_schema, c.table_name, c.ordinal_position;
+        \\where c.schema_name not in ('information_schema', 'pg_catalog')
+        \\order by c.schema_name, c.table_name, c.column_index;
     ;
-    const result = std.process.run(runtime.allocator, runtime.io, .{
-        .argv = &.{ "duckdb", "-readonly", db_path, "-json", "-batch", "-bail", "-c", sql },
-        .stdout_limit = .limited(4 * 1024 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
-    errdefer runtime.allocator.free(result.stdout);
-    defer runtime.allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| if (code == 0) return result.stdout,
-        else => {},
-    }
-    return error.DuckDbExecutionFailed;
+    return try adapter.queryJson(runtime, db_path, sql, true);
 }
 
 fn catalogEntryForNode(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node, rows: []const std.json.Value) !?catalog.CatalogEntry {
@@ -293,7 +448,7 @@ fn catalogEntryForNode(allocator: std.mem.Allocator, graph: *const Graph, node: 
     defer allocator.free(schema_name);
     const identifier = compiler.relationIdentifierForNode(node);
 
-    return try catalogEntryForRelation(allocator, node.unique_id, null, schema_name, identifier, rows);
+    return try catalogEntryForRelation(allocator, node.unique_id, compiler.relationDatabaseForNode(graph, node), schema_name, identifier, rows);
 }
 
 fn catalogEntryForSource(allocator: std.mem.Allocator, source: *const SourceDef, rows: []const std.json.Value) !?catalog.CatalogEntry {
@@ -326,11 +481,13 @@ fn catalogEntryForRelation(allocator: std.mem.Allocator, unique_id: []const u8, 
         if (entry.columns.items.len == 0) {
             allocator.free(entry.relation_type);
             entry.relation_type = try allocator.dupe(u8, row_type);
+            if (jsonObjectString(object, "table_comment")) |comment| entry.comment = try allocator.dupe(u8, comment);
         }
         try entry.columns.append(allocator, .{
             .name = try allocator.dupe(u8, row_column),
             .data_type = try allocator.dupe(u8, row_data_type),
             .index = row_index,
+            .comment = if (jsonObjectString(object, "column_comment")) |comment| try allocator.dupe(u8, comment) else null,
         });
     }
 
@@ -369,6 +526,7 @@ fn jsonObjectNumber(object: std.json.ObjectMap, key: []const u8) ?f64 {
     return switch (value) {
         .float => |float| float,
         .integer => |integer| @floatFromInt(integer),
+        .number_string => |number| std.fmt.parseFloat(f64, number) catch null,
         else => null,
     };
 }
@@ -383,12 +541,16 @@ fn jsonObjectUnsigned(object: std.json.ObjectMap, key: []const u8) ?u64 {
 
 fn deinitCatalogEntry(allocator: std.mem.Allocator, entry: *catalog.CatalogEntry) void {
     allocator.free(entry.unique_id);
+    if (entry.database) |database| allocator.free(database);
     allocator.free(entry.schema);
     allocator.free(entry.name);
     allocator.free(entry.relation_type);
+    if (entry.comment) |comment| allocator.free(comment);
+    if (entry.owner) |owner| allocator.free(owner);
     for (entry.columns.items) |column| {
         allocator.free(column.name);
         allocator.free(column.data_type);
+        if (column.comment) |comment| allocator.free(comment);
     }
     entry.columns.deinit(allocator);
 }
@@ -400,15 +562,17 @@ fn selectionContains(selected: []const selector.SelectedResource, unique_id: []c
     return false;
 }
 
-fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
+pub fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
+    if (try adapter.nativeDuckDbQuery(runtime, db_path, sql, false)) |native| {
+        var output = native;
+        output.deinit(runtime.allocator);
+        return;
+    }
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
+    }) catch |err| return normalizeExecutionProcessError(err);
     defer runtime.allocator.free(result.stdout);
     defer runtime.allocator.free(result.stderr);
 
@@ -420,21 +584,22 @@ fn executeSql(runtime: Runtime, db_path: []const u8, sql: []const u8) !void {
 }
 
 fn queryGenericTestFailures(runtime: Runtime, db_path: []const u8, sql: []const u8) !u64 {
+    if (try adapter.nativeDuckDbQuery(runtime, db_path, sql, false)) |native| {
+        var output = native;
+        defer output.deinit(runtime.allocator);
+        return parseTestFailureCount(output.firstScalar() orelse return error.DuckDbExecutionFailed);
+    }
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
+    }) catch |err| return normalizeExecutionProcessError(err);
     defer runtime.allocator.free(result.stdout);
     defer runtime.allocator.free(result.stderr);
 
     switch (result.term) {
         .exited => |code| if (code == 0) {
-            const field = firstCsvField(result.stdout) orelse return error.DuckDbExecutionFailed;
-            return std.fmt.parseUnsigned(u64, field, 10) catch error.DuckDbExecutionFailed;
+            return parseTestFailureCount(result.stdout);
         },
         else => {},
     }
@@ -442,25 +607,39 @@ fn queryGenericTestFailures(runtime: Runtime, db_path: []const u8, sql: []const 
 }
 
 fn queryUnitTestFailures(runtime: Runtime, db_path: []const u8, sql: []const u8) !u64 {
+    if (try adapter.nativeDuckDbQuery(runtime, db_path, sql, false)) |native| {
+        var output = native;
+        defer output.deinit(runtime.allocator);
+        return parseTestFailureCount(output.firstScalar() orelse return error.DuckDbExecutionFailed);
+    }
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", sql },
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.DuckDbCliNotFound,
-        else => return err,
-    };
+    }) catch |err| return normalizeExecutionProcessError(err);
     defer runtime.allocator.free(result.stdout);
     defer runtime.allocator.free(result.stderr);
 
     switch (result.term) {
         .exited => |code| if (code == 0) {
-            const field = firstCsvField(result.stdout) orelse return error.DuckDbExecutionFailed;
-            return std.fmt.parseUnsigned(u64, field, 10) catch error.DuckDbExecutionFailed;
+            return parseTestFailureCount(result.stdout);
         },
         else => {},
     }
     return error.DuckDbExecutionFailed;
+}
+
+fn normalizeExecutionProcessError(err: anyerror) anyerror {
+    return switch (err) {
+        error.FileNotFound => error.DuckDbCliNotFound,
+        error.StreamTooLong => error.DuckDbExecutionFailed,
+        else => err,
+    };
+}
+
+fn parseTestFailureCount(stdout: []const u8) !u64 {
+    const field = firstCsvField(stdout) orelse return error.DuckDbExecutionFailed;
+    return std.fmt.parseUnsigned(u64, field, 10) catch error.DuckDbExecutionFailed;
 }
 
 fn firstCsvField(stdout: []const u8) ?[]const u8 {
@@ -490,6 +669,13 @@ fn relationObjectExists(runtime: Runtime, db_path: []const u8, graph: *const Gra
         },
     );
     defer runtime.allocator.free(query);
+
+    if (try adapter.nativeDuckDbQuery(runtime, db_path, query, false)) |native| {
+        var output = native;
+        defer output.deinit(runtime.allocator);
+        const count = try parseTestFailureCount(output.firstScalar() orelse return error.DuckDbExecutionFailed);
+        return count != 0;
+    }
 
     const result = std.process.run(runtime.allocator, runtime.io, .{
         .argv = &.{ "duckdb", db_path, "-csv", "-noheader", "-batch", "-bail", "-c", query },
@@ -537,7 +723,7 @@ fn renderDropSql(allocator: std.mem.Allocator, graph: *const Graph, node: *const
 }
 
 pub fn renderModelSql(allocator: std.mem.Allocator, graph: *const Graph, node: *const Node) ![]const u8 {
-    if (!isSupportedMaterialization(node.materialized)) {
+    if (!isSupportedMaterializationForAdapter(graph.adapter_type, node.materialized) or std.mem.eql(u8, node.materialized, "incremental")) {
         return error.UnsupportedModelMaterialization;
     }
     const compiled_code = trimTrailingSqlTerminator(node.compiled_code orelse return error.UnsupportedModelExecution);
@@ -548,6 +734,14 @@ pub fn renderModelSql(allocator: std.mem.Allocator, graph: *const Graph, node: *
     const relation_name = node.relation_name orelse try compiler.relationNameForNode(allocator, graph, node);
     const should_free_relation = node.relation_name == null;
     defer if (should_free_relation) allocator.free(relation_name);
+
+    if (std.mem.eql(u8, graph.adapter_type, "postgres")) return postgres_materialization.renderCreate(allocator, node, relation_name, compiled_code);
+
+    if (@import("contracts.zig").enforced(node)) {
+        const creation = try @import("contracts.zig").renderCreation(allocator, graph, node, relation_name, compiled_code, node.materialized);
+        defer allocator.free(creation);
+        return std.fmt.allocPrint(allocator, "create schema if not exists {s};\n{s}", .{ quoted_schema, creation });
+    }
 
     const materialization_keyword: []const u8 = if (std.mem.eql(u8, node.materialized, "table")) "table" else "view";
     return try std.fmt.allocPrint(
@@ -638,7 +832,7 @@ pub fn renderSingularTestSql(allocator: std.mem.Allocator, graph: *const Graph, 
     return try applySingularTestConfig(allocator, compiled_sql, test_node.config.where, test_node.config.limit);
 }
 
-fn applySingularTestConfig(allocator: std.mem.Allocator, compiled_sql: []const u8, where_sql: ?[]const u8, limit: ?u64) ![]const u8 {
+fn applySingularTestConfig(allocator: std.mem.Allocator, compiled_sql: []const u8, where_sql: ?[]const u8, limit: ?i64) ![]const u8 {
     if (where_sql) |filter| {
         defer allocator.free(compiled_sql);
         const query_sql = trimTrailingSqlTerminator(compiled_sql);
@@ -648,7 +842,7 @@ fn applySingularTestConfig(allocator: std.mem.Allocator, compiled_sql: []const u
     return try applyTestLimit(allocator, compiled_sql, limit);
 }
 
-fn applyTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?u64) ![]const u8 {
+fn applyTestLimit(allocator: std.mem.Allocator, sql: []const u8, limit: ?i64) ![]const u8 {
     if (limit) |row_limit| {
         defer allocator.free(sql);
         const query_sql = trimTrailingSqlTerminator(sql);
@@ -666,13 +860,6 @@ pub fn renderGenericTestExecutionSql(allocator: std.mem.Allocator, compiled_sql:
     );
 }
 
-fn isBuiltInGenericTestName(test_name: []const u8) bool {
-    return std.mem.eql(u8, test_name, "not_null") or
-        std.mem.eql(u8, test_name, "unique") or
-        std.mem.eql(u8, test_name, "accepted_values") or
-        std.mem.eql(u8, test_name, "relationships");
-}
-
 fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -685,7 +872,7 @@ fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     return try out.toOwnedSlice(allocator);
 }
 
-fn trimTrailingSqlTerminator(sql: []const u8) []const u8 {
+pub fn trimTrailingSqlTerminator(sql: []const u8) []const u8 {
     const trimmed_end = trimSqlRightEnd(sql, sql.len);
     var end = trimmed_end;
     while (stripOneTrailingSqlComment(sql[0..end])) |comment_start| {
@@ -835,7 +1022,7 @@ test "renderModelSql rejects unsupported materialization" {
         .path = "orders.sql",
         .original_file_path = "models/orders.sql",
         .raw_code = "select 1 as id",
-        .materialized = "incremental",
+        .materialized = "custom_unknown",
         .compiled = true,
         .compiled_code = "select 1 as id",
     });
@@ -1427,6 +1614,16 @@ test "renderGenericTestSql rejects unsupported accepted_values shapes" {
     try std.testing.expectError(error.UnsupportedTestExecution, renderGenericTestSql(allocator, &graph, &graph.tests.items[0]));
 }
 
+test "test execution distinguishes SQL output errors from setup failures" {
+    try std.testing.expectEqual(error.DuckDbExecutionFailed, normalizeExecutionProcessError(error.StreamTooLong));
+    try std.testing.expectEqual(error.DuckDbCliNotFound, normalizeExecutionProcessError(error.FileNotFound));
+    try std.testing.expectEqual(error.OutOfMemory, normalizeExecutionProcessError(error.OutOfMemory));
+    try std.testing.expectEqual(@as(u64, 2), try parseTestFailureCount("2,true,true\n"));
+    for ([_][]const u8{ "", "not a count", "-1", "18446744073709551616" }) |output| {
+        try std.testing.expectError(error.DuckDbExecutionFailed, parseTestFailureCount(output));
+    }
+}
+
 test "firstCsvField reads the leading failures value" {
     try std.testing.expectEqualStrings("12", firstCsvField("12,true,true\n").?);
     try std.testing.expectEqualStrings("0", firstCsvField(" 0 \n").?);
@@ -1449,7 +1646,7 @@ test "databasePath resolves configured relative path from profile base" {
     try std.testing.expectEqualStrings("profiles/warehouse.duckdb", resolved);
 }
 
-test "databasePath rejects unsupported connection strings for CLI backend" {
+test "databasePath preserves memory identity and rejects remote connection strings" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1460,6 +1657,10 @@ test "databasePath rejects unsupported connection strings for CLI backend" {
     };
     defer graph.deinit();
 
+    const memory_path = try databasePath(allocator, "target", &graph);
+    defer allocator.free(memory_path);
+    try std.testing.expectEqualStrings(":memory:", memory_path);
+    graph.database_path = "md:demo";
     try std.testing.expectError(error.UnsupportedDuckDbPath, databasePath(allocator, "target", &graph));
 }
 

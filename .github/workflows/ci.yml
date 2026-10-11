@@ -21,6 +21,82 @@ env:
   JAFFLE_SHOP_DUCKDB_REF: "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb"
 
 jobs:
+  platform-installation:
+    name: native installation ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-linux-gnu
+            runner: ubuntu-24.04-arm
+    services:
+      postgres:
+        image: postgres:17.7
+        env:
+          POSTGRES_PASSWORD: installation_fixture
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DXT_INSTALL_POSTGRES_URI: postgresql://postgres:installation_fixture@localhost:5432/postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install complete artifact and database validation tools
+        run: python -m pip install dbt-core==1.10.5 dbt-duckdb==1.9.6 dbt-postgres==1.9.1 duckdb==1.4.2 jsonschema==4.26.0
+      - name: Install native adapter fixtures
+        uses: ./.github/actions/setup-native-duckdb
+      - name: Test the actual target
+        run: zig build test -Dtarget=${{ matrix.target }} --summary all
+      - name: Build the release-safe target
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
+      - name: Package the actual release target with docs and upstream licenses
+        run: python scripts/package_release.py --target ${{ matrix.target }}
+      - name: Generate the target archive checksum before extracted installation
+        run: |
+          cd dist
+          sha256sum "dxt-v0.0.0-${{ matrix.target }}.tar.gz" > "dxt-v0.0.0-${{ matrix.target }}-SHA256SUMS.txt"
+      - name: Certify both adapters from the actual release archive with PATH empty
+        run: python scripts/check_install.py --archive dist/dxt-v0.0.0-${{ matrix.target }}.tar.gz --checksum-file dist/dxt-v0.0.0-${{ matrix.target }}-SHA256SUMS.txt --require-postgres
+
+  public-package:
+    name: unchanged public dbt-utils PostgreSQL project
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
+      - name: Build the release-safe native binary
+        run: zig build -Doptimize=ReleaseSafe
+      - name: Certify unchanged package installation, SQL, artifacts and rows against Core
+        run: python scripts/check_dbt_utils.py --adapter postgres
+
   native:
     name: native zig and safety
     runs-on: ubuntu-latest
@@ -69,15 +145,22 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe --summary all
 
   integration:
-    name: test py${{ matrix.python-version }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: ${{ matrix.context }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.python-version == '3.11' && 60 || 360 }}
     strategy:
       fail-fast: false
       matrix:
-        python-version:
-          - "3.11"
-          - "3.12"
+        include:
+          - python-version: "3.11"
+            runner: ubuntu-24.04
+            context: test py3.11
+          - python-version: "3.12"
+            runner: ubuntu-24.04
+            context: test py3.12
+          - python-version: "3.12"
+            runner: ubuntu-24.04-arm
+            context: test py3.12 aarch64
 
     steps:
       - name: Checkout
@@ -88,33 +171,78 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-oracle.txt
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Install test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
 
       - name: Print tool versions
         run: |
           zig version
           python --version
 
-      - name: Run tests
-        run: pytest -q --junitxml=reports/pytest-${{ matrix.python-version }}.xml
+      - name: Run developer and native CLI checks
+        if: matrix.python-version == '3.11'
+        run: >-
+          python -m pytest -q
+          --junitxml=reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
+          tests/test_agent_os_orchestrator.py tests/test_github_agent_os.py
+          tests/test_public_safety.py tests/test_runtime_boundary_metadata.py
+          tests/test_artifact_json.py tests/test_cli.py tests/test_usability_adapters.py
+
+      # Native Jinja semantics follow CPython 3.12. The complete Core oracle
+      # remains mandatory on both architectures under that reference runtime.
+      - name: Run the complete canonical Core compatibility suite
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m pytest -q --junitxml=reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
+          python scripts/check_pytest_report.py reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
 
       - name: Upload pytest report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-${{ matrix.python-version }}
-          path: reports/pytest-${{ matrix.python-version }}.xml
+          name: pytest-${{ matrix.python-version }}-${{ runner.arch }}
+          path: reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
           if-no-files-found: ignore
+
+  performance:
+    name: cold and warm native performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
+      - name: Build release-safe binary
+        run: zig build -Doptimize=ReleaseSafe
+      - name: Verify an extracted binary without subprocess fallbacks
+        run: python scripts/check_install.py
+      - name: Certify compiled SQL and cold/warm budgets against Core
+        run: python scripts/check_performance.py --report .agent/runs/performance.json
+      - name: Upload measured performance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-performance
+          path: .agent/runs/performance.json
+          if-no-files-found: error
 
   snapshot-oracle:
     name: dbt snapshot oracle
@@ -141,8 +269,8 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Install pinned oracle dependencies
-        run: python -m pip install -r requirements-dev.txt -r requirements-oracle.txt
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
 
       - name: Compare SQL snapshots with dbt Core and the full Snapshot schema
         run: pytest -q tests/test_cli.py::test_snapshot_dbt_core_1105_oracle
@@ -152,7 +280,7 @@ jobs:
     # public Jaffle parse, ls, compile, DuckDB build/run, and docs-generate gates.
     name: public jaffle parse gate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -167,6 +295,9 @@ jobs:
         uses: mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
+
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
 
       - name: Fetch public Jaffle fixture
         run: |
@@ -183,18 +314,6 @@ jobs:
       - name: Run public Jaffle compile gate
         run: python scripts/check_jaffle_shop_duckdb_compile.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
 
-      - name: Install DuckDB CLI
-        run: |
-          mkdir -p "$RUNNER_TEMP/duckdb"
-          curl --fail --location --show-error \
-            --output "$RUNNER_TEMP/duckdb_cli.zip" \
-            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip"
-          echo "${DUCKDB_CLI_SHA256}  $RUNNER_TEMP/duckdb_cli.zip" | sha256sum --check -
-          unzip -q "$RUNNER_TEMP/duckdb_cli.zip" -d "$RUNNER_TEMP/duckdb"
-          chmod +x "$RUNNER_TEMP/duckdb/duckdb"
-          echo "$RUNNER_TEMP/duckdb" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/duckdb/duckdb" --version
-
       - name: Run public Jaffle build gate
         run: python scripts/check_jaffle_shop_duckdb_build.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
 
@@ -203,3 +322,6 @@ jobs:
 
       - name: Run public Jaffle docs gate
         run: python scripts/check_jaffle_shop_duckdb_docs.py --no-build --project-dir "$RUNNER_TEMP/jaffle_shop_duckdb"
+
+      - name: Verify DuckDB CLI autocommit query compatibility
+        run: pytest -q tests/test_usability_adapters.py::test_cli_fallback_remains_available_and_normalizes_empty_rows

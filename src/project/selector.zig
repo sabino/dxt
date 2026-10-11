@@ -2,6 +2,8 @@ const std = @import("std");
 const run_results = @import("run_results.zig");
 const source_freshness = @import("source_freshness.zig");
 const state = @import("state.zig");
+const expression_ast = @import("selection_expression.zig");
+pub const SelectionExpression = expression_ast.Expression;
 const types = @import("types.zig");
 const util = @import("util.zig");
 
@@ -14,9 +16,15 @@ const ExposureDef = types.ExposureDef;
 const UnitTestDef = types.UnitTestDef;
 
 pub const SelectionContext = struct {
+    execution_only: bool = false,
+    allowed_ids: ?[]const []const u8 = null,
     source_status_index: ?*const source_freshness.SourceStatusIndex = null,
     result_status_index: ?*const run_results.ResultStatusIndex = null,
     prior_manifest_index: ?*const state.PriorManifestIndex = null,
+    current_manifest_index: ?*const state.PriorManifestIndex = null,
+    current_source_status_index: ?*const source_freshness.SourceStatusIndex = null,
+    indirect_selection: []const u8 = "eager",
+    expression: ?*const SelectionExpression = null,
 };
 
 pub const SelectedResource = struct {
@@ -55,14 +63,10 @@ const SelectorSpec = struct {
 };
 
 pub fn validateSelectorSyntax(value: []const u8) !void {
-    if (value.len == 0) return error.UnsupportedSelector;
     var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
-    var matched_any = false;
     while (expressions.next()) |expression| {
         try validateSelectorExpression(expression);
-        matched_any = true;
     }
-    if (!matched_any) return error.UnsupportedSelector;
 }
 
 pub fn usesSourceStatusSelector(select: ?[]const u8, exclude: ?[]const u8) bool {
@@ -71,6 +75,14 @@ pub fn usesSourceStatusSelector(select: ?[]const u8, exclude: ?[]const u8) bool 
     }
     if (exclude) |value| {
         if (selectorValueUsesSourceStatus(value)) return true;
+    }
+    return false;
+}
+
+pub fn usesFresherSelector(select: ?[]const u8, exclude: ?[]const u8) bool {
+    for ([_]?[]const u8{ select, exclude }) |candidate| {
+        const value = candidate orelse continue;
+        if (std.mem.indexOf(u8, value, "source_status:fresher") != null) return true;
     }
     return false;
 }
@@ -133,64 +145,28 @@ fn selectorValueUsesState(value: []const u8) bool {
 
 fn validateSelectorExpression(value: []const u8) !void {
     var terms = std.mem.splitScalar(u8, value, ',');
-    var matched_any = false;
     while (terms.next()) |raw_term| {
-        if (raw_term.len == 0) return error.UnsupportedSelector;
-        const part = try selectorTermValueForValidation(raw_term);
-        if (part.len == 0) return error.UnsupportedSelector;
+        const part = try selectorTermValueForValidation(if (std.mem.startsWith(u8, raw_term, "!")) raw_term[1..] else raw_term);
         if (std.mem.indexOfAny(u8, part, " \t\r")) |_| return error.UnsupportedSelector;
-        if (std.mem.indexOfScalar(u8, part, '+')) |_| return error.UnsupportedSelector;
-        if (std.mem.indexOfScalar(u8, part, '@')) |_| return error.UnsupportedSelector;
-        if (std.mem.indexOfScalar(u8, part, ':')) |_| try validateSelectorMethod(part);
-        matched_any = true;
+        if (std.mem.indexOfScalar(u8, part, ':')) |colon| {
+            // Core recognizes a method only when its prefix is a word/dotted
+            // name. Operators inside the value remain literal FQN characters.
+            if (isMethodPrefix(part[0..colon])) try validateSelectorMethod(part);
+        }
     }
-    if (!matched_any) return error.UnsupportedSelector;
 }
 
 fn selectorTermValueForValidation(raw_term: []const u8) ![]const u8 {
-    var start: usize = 0;
-    var end: usize = raw_term.len;
-    var has_childrens_parents = false;
-
-    if (start < end and raw_term[start] == '@') {
-        has_childrens_parents = true;
-        start += 1;
-    }
-
-    if (has_childrens_parents and std.mem.indexOfScalar(u8, raw_term[start..], '+') != null) return error.UnsupportedSelector;
-
-    if (start < end) {
-        if (raw_term[start] == '+') {
-            start += 1;
-        } else {
-            var digit_end = start;
-            while (digit_end < end and isSelectorDigit(raw_term[digit_end])) digit_end += 1;
-            if (digit_end > start and digit_end < end and raw_term[digit_end] == '+') {
-                _ = std.fmt.parseInt(usize, raw_term[start..digit_end], 10) catch return error.UnsupportedSelector;
-                start = digit_end + 1;
-            }
-        }
-    }
-
-    if (start >= end or raw_term[start] == '+' or raw_term[start] == '@') return error.UnsupportedSelector;
-
-    if (start < end) {
-        if (raw_term[end - 1] == '+') {
-            end -= 1;
-        } else {
-            var digit_start = end;
-            while (digit_start > start and isSelectorDigit(raw_term[digit_start - 1])) digit_start -= 1;
-            if (digit_start < end and digit_start > start and raw_term[digit_start - 1] == '+') {
-                _ = std.fmt.parseInt(usize, raw_term[digit_start..end], 10) catch return error.UnsupportedSelector;
-                end = digit_start - 1;
-            }
-        }
-    }
-    if (start >= end or raw_term[end - 1] == '+') return error.UnsupportedSelector;
-    return raw_term[start..end];
+    const term = parseSelectorTerm(raw_term);
+    if (!term.valid) return error.UnsupportedSelector;
+    return term.value;
 }
 
 fn validateSelectorMethod(part: []const u8) !void {
+    const colon = std.mem.indexOfScalar(u8, part, ':') orelse return error.UnsupportedSelector;
+    const method = part[0..colon];
+    const root = method[0 .. std.mem.indexOfScalar(u8, method, '.') orelse method.len];
+    if (std.mem.eql(u8, root, "config")) return;
     const prefixes = [_][]const u8{
         "tag:",
         "path:",
@@ -198,50 +174,92 @@ fn validateSelectorMethod(part: []const u8) !void {
         "package:",
         "resource_type:",
         "test_type:",
+        "test_name:",
         "source:",
         "exposure:",
         "unit_test:",
+        "metric:",
+        "semantic_model:",
+        "saved_query:",
         "config.materialized:",
+        "version:",
+        "group:",
+        "access:",
+        "fqn:",
         "source_status:",
         "result:",
         "state:",
     };
     for (prefixes) |prefix| {
-        if (std.mem.startsWith(u8, part, prefix)) {
-            if (part.len == prefix.len) return error.UnsupportedSelector;
-            const value = part[prefix.len..];
+        if (std.mem.eql(u8, root, prefix[0 .. prefix.len - 1])) {
+            const value = part[colon + 1 ..];
             if (std.mem.eql(u8, prefix, "resource_type:") and !isSupportedResourceType(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "test_type:") and !isSupportedTestType(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "source_status:") and !isSupportedSourceStatusSelector(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "result:") and !run_results.isSupportedResultSelectorStatus(value)) return error.UnsupportedSelector;
             if (std.mem.eql(u8, prefix, "state:") and !isSupportedStateSelector(value)) return error.UnsupportedSelector;
+            if (std.mem.eql(u8, prefix, "version:") and !std.mem.eql(u8, value, "latest") and !std.mem.eql(u8, value, "old") and !std.mem.eql(u8, value, "prerelease") and !std.mem.eql(u8, value, "none")) return error.UnsupportedSelector;
             return;
         }
     }
     return error.UnsupportedSelector;
 }
 
+fn isMethodPrefix(prefix: []const u8) bool {
+    if (prefix.len == 0) return false;
+    var unicode = false;
+    for (prefix) |byte| {
+        if (byte >= 128) unicode = true else if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '.') return false;
+    }
+    if (!unicode) return true;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const engine = @import("regex_engine.zig");
+    const pattern = engine.compile(arena.allocator(), "\\A[\\w.]+\\Z", 0) catch return false;
+    defer pattern.deinit();
+    return (pattern.find(arena.allocator(), prefix, 0, prefix.len, 0) catch return false) != null;
+}
+
+const MethodValue = struct {
+    value: []const u8,
+    owned: bool = false,
+    fn deinit(self: MethodValue, allocator: std.mem.Allocator) void {
+        if (self.owned) allocator.free(self.value);
+    }
+};
+
+fn normalizeMethod(allocator: std.mem.Allocator, raw: []const u8) !MethodValue {
+    const colon = std.mem.indexOfScalar(u8, raw, ':') orelse return .{ .value = raw };
+    const method = raw[0..colon];
+    const dot = std.mem.indexOfScalar(u8, method, '.') orelse return .{ .value = raw };
+    if (!isMethodPrefix(method) or std.mem.eql(u8, method[0..dot], "config")) return .{ .value = raw };
+    return .{ .value = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ method[0..dot], raw[colon + 1 ..] }), .owned = true };
+}
+
 fn isSupportedResourceType(value: []const u8) bool {
-    return std.mem.eql(u8, value, "model") or
+    return std.mem.eql(u8, value, "sql_operation") or std.mem.eql(u8, value, "model") or
         std.mem.eql(u8, value, "analysis") or
         std.mem.eql(u8, value, "snapshot") or
         std.mem.eql(u8, value, "seed") or
         std.mem.eql(u8, value, "source") or
         std.mem.eql(u8, value, "exposure") or
         std.mem.eql(u8, value, "test") or
-        std.mem.eql(u8, value, "unit_test");
+        std.mem.eql(u8, value, "unit_test") or
+        std.mem.eql(u8, value, "metric") or
+        std.mem.eql(u8, value, "semantic_model") or
+        std.mem.eql(u8, value, "saved_query");
 }
 
 fn isSupportedTestType(value: []const u8) bool {
-    return std.mem.eql(u8, value, "generic") or std.mem.eql(u8, value, "singular") or std.mem.eql(u8, value, "data") or std.mem.eql(u8, value, "unit");
+    return std.mem.eql(u8, value, "generic") or std.mem.eql(u8, value, "schema") or std.mem.eql(u8, value, "singular") or std.mem.eql(u8, value, "data") or std.mem.eql(u8, value, "unit");
 }
 
 fn isSupportedSourceStatusSelector(value: []const u8) bool {
-    return std.mem.eql(u8, value, "pass") or std.mem.eql(u8, value, "warn") or std.mem.eql(u8, value, "error");
+    return std.mem.eql(u8, value, "pass") or std.mem.eql(u8, value, "warn") or std.mem.eql(u8, value, "error") or std.mem.eql(u8, value, "fresher");
 }
 
 fn isSupportedStateSelector(value: []const u8) bool {
-    return std.mem.eql(u8, value, "new");
+    return state.isSupportedMethod(value);
 }
 
 fn matchesResultSelector(unique_id: []const u8, value: []const u8, context: SelectionContext) bool {
@@ -253,23 +271,58 @@ fn matchesResultSelector(unique_id: []const u8, value: []const u8, context: Sele
 
 fn matchesStateSelector(unique_id: []const u8, value: []const u8, context: SelectionContext) bool {
     const requested = value["state:".len..];
-    if (!std.mem.eql(u8, requested, "new")) return false;
     const index = context.prior_manifest_index orelse return false;
-    return !index.contains(unique_id);
+    if (context.current_manifest_index) |current| return index.matches(current, unique_id, requested);
+    if (std.mem.eql(u8, requested, "new")) return !index.contains(unique_id);
+    if (std.mem.eql(u8, requested, "old")) return index.contains(unique_id);
+    return false;
 }
 
 pub fn selectResources(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8) ![]SelectedResource {
     return try selectResourcesWithContext(allocator, graph, resource_type, select, exclude, .{});
 }
 
+pub fn selectExecutionResourcesWithContext(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8, context: SelectionContext) ![]SelectedResource {
+    var execution_context = context;
+    execution_context.execution_only = true;
+    const selected = try selectResourcesWithContext(allocator, graph, resource_type, select, exclude, execution_context);
+    var count: usize = 0;
+    for (selected) |item| {
+        if (emptySqlResource(graph, item.unique_id)) continue;
+        selected[count] = item;
+        count += 1;
+    }
+    return allocator.realloc(selected, count);
+}
+
+/// Core excludes empty SQL after evaluating selection criteria, so a criterion
+/// matching an empty file does not itself produce an unmatched warning.
+fn emptySqlResource(graph: *const Graph, id: []const u8) bool {
+    for (graph.nodes.items) |node| if (std.mem.eql(u8, node.unique_id, id)) {
+        return !std.mem.eql(u8, node.resource_type, "seed") and std.mem.trim(u8, node.raw_code, " \t\r\n").len == 0;
+    };
+    for (graph.singular_tests.items) |node| if (std.mem.eql(u8, node.unique_id, id)) return std.mem.trim(u8, node.raw_code, " \t\r\n").len == 0;
+    return false;
+}
+
 pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Graph, resource_type: ?[]const u8, select: ?[]const u8, exclude: ?[]const u8, context: SelectionContext) ![]SelectedResource {
-    const select_spec = parseSelectorSpec(select);
-    const exclude_spec = parseSelectorSpec(exclude);
+    var owned_expression: ?*SelectionExpression = null;
+    defer if (owned_expression) |expression| expression.destroy(allocator);
+    const expression = context.expression orelse expression: {
+        const included = try expression_ast.parseCli(allocator, select);
+        errdefer included.destroy(allocator);
+        if (exclude) |excluded_value| {
+            const excluded = try expression_ast.parseCli(allocator, excluded_value);
+            errdefer excluded.destroy(allocator);
+            owned_expression = try expression_ast.difference(allocator, included, excluded);
+        } else owned_expression = included;
+        break :expression owned_expression.?;
+    };
     var selected: std.ArrayList(SelectedResource) = .empty;
     errdefer selected.deinit(allocator);
     for (graph.nodes.items) |*node| {
         if (!node.enabled) continue;
-        if (matchesResourceType(resource_type, node.resource_type) and matchesSelector(graph, node, select_spec, context) and (!exclude_spec.active or !matchesSelector(graph, node, exclude_spec, context))) {
+        if (matchesResourceType(resource_type, node.resource_type) and evaluateExpression(graph, node.unique_id, expression, context).direct) {
             try selected.append(allocator, .{
                 .unique_id = node.unique_id,
                 .name = node.name,
@@ -294,7 +347,8 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
         }
     }
     for (graph.tests.items) |*test_node| {
-        if (matchesResourceType(resource_type, "test") and matchesTestSelector(graph, test_node, select_spec, context) and (!exclude_spec.active or !matchesTestSelector(graph, test_node, exclude_spec, context))) {
+        if (!test_node.enabled) continue;
+        if (matchesResourceType(resource_type, "test") and evaluateExpression(graph, test_node.unique_id, expression, context).direct) {
             try selected.append(allocator, .{
                 .unique_id = test_node.unique_id,
                 .name = test_node.name,
@@ -305,9 +359,10 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
                 .original_file_path = test_node.original_file_path,
                 .selector = try pathBackedOutputSelector(allocator, test_node.package_name, test_node.path),
                 .alias = test_node.alias,
+                .config_tags = @import("generic_test_config.zig").configTags(test_node),
                 .config_materialized = "test",
                 .has_config_tags = true,
-                .config_enabled = true,
+                .config_enabled = test_node.enabled,
                 .has_config_enabled = true,
                 .depends_on_nodes = test_node.depends_on.items,
                 .depends_on_macros = test_node.macro_depends_on.items,
@@ -317,7 +372,7 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
     }
     for (graph.singular_tests.items) |*test_node| {
         if (!test_node.enabled) continue;
-        if (matchesResourceType(resource_type, "test") and matchesSingularTestSelector(graph, test_node, select_spec, context) and (!exclude_spec.active or !matchesSingularTestSelector(graph, test_node, exclude_spec, context))) {
+        if (matchesResourceType(resource_type, "test") and evaluateExpression(graph, test_node.unique_id, expression, context).direct) {
             try selected.append(allocator, .{
                 .unique_id = test_node.unique_id,
                 .name = test_node.name,
@@ -340,7 +395,8 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
         }
     }
     for (graph.sources.items) |*source| {
-        if (matchesResourceType(resource_type, "source") and matchesSourceSelector(graph, source, select_spec, context) and (!exclude_spec.active or !matchesSourceSelector(graph, source, exclude_spec, context))) {
+        if (!source.enabled) continue;
+        if (matchesResourceType(resource_type, "source") and evaluateExpression(graph, source.unique_id, expression, context).direct) {
             try selected.append(allocator, .{
                 .unique_id = source.unique_id,
                 .name = source.table_name,
@@ -357,7 +413,7 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
     }
     for (graph.exposures.items) |*exposure| {
         if (!exposure.enabled) continue;
-        if (matchesResourceType(resource_type, "exposure") and matchesExposureSelector(graph, exposure, select_spec, context) and (!exclude_spec.active or !matchesExposureSelector(graph, exposure, exclude_spec, context))) {
+        if (matchesResourceType(resource_type, "exposure") and evaluateExpression(graph, exposure.unique_id, expression, context).direct) {
             try selected.append(allocator, .{
                 .unique_id = exposure.unique_id,
                 .name = exposure.name,
@@ -378,7 +434,7 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
     }
     for (graph.unit_tests.items) |*unit_test| {
         if (!unit_test.enabled) continue;
-        if (matchesResourceType(resource_type, "unit_test") and matchesUnitTestSelector(graph, unit_test, select_spec, context) and (!exclude_spec.active or !matchesUnitTestSelector(graph, unit_test, exclude_spec, context))) {
+        if (matchesResourceType(resource_type, "unit_test") and evaluateExpression(graph, unit_test.unique_id, expression, context).direct) {
             try selected.append(allocator, .{
                 .unique_id = unit_test.unique_id,
                 .name = unit_test.name,
@@ -397,17 +453,49 @@ pub fn selectResourcesWithContext(allocator: std.mem.Allocator, graph: *const Gr
             });
         }
     }
+    for (graph.semantic_resources.items) |*resource| {
+        if (context.execution_only) continue;
+        if (!resource.enabled or !matchesResourceType(resource_type, resource.resource_type) or !evaluateExpression(graph, resource.unique_id, expression, context).direct) continue;
+        try selected.append(allocator, .{
+            .unique_id = resource.unique_id,
+            .name = resource.name,
+            .resource_type = resource.resource_type,
+            .package_name = resource.package_name,
+            .search_name = resource.name,
+            .path = resource.path,
+            .original_file_path = resource.original_file_path,
+            .selector = try std.fmt.allocPrint(allocator, "{s}:{s}.{s}", .{ resource.resource_type, resource.package_name, resource.name }),
+            .config_tags = resource.tags.items,
+            .has_config_tags = true,
+            .config_enabled = resource.enabled,
+            .has_config_enabled = true,
+            .depends_on_nodes = resource.depends_on.items,
+            .has_depends_on = true,
+        });
+    }
     std.mem.sort(SelectedResource, selected.items, {}, struct {
         fn lessThan(_: void, a: SelectedResource, b: SelectedResource) bool {
             return std.mem.lessThan(u8, a.unique_id, b.unique_id);
         }
     }.lessThan);
+    if (context.allowed_ids) |allowed| {
+        var kept: usize = 0;
+        for (selected.items) |resource| {
+            for (allowed) |id| {
+                if (!std.mem.eql(u8, id, resource.unique_id)) continue;
+                selected.items[kept] = resource;
+                kept += 1;
+                break;
+            }
+        }
+        selected.shrinkRetainingCapacity(kept);
+    }
     return try selected.toOwnedSlice(allocator);
 }
 
 fn nodeOutputSelector(allocator: std.mem.Allocator, node: *const Node) ![]const u8 {
-    const path_selector = try pathBackedOutputSelector(allocator, node.package_name, node.path);
-    if (!std.mem.eql(u8, node.resource_type, "snapshot")) return path_selector;
+    const path_selector = try pathBackedOutputSelector(allocator, node.package_name, node.snapshot_fqn_path orelse node.path);
+    if (!std.mem.eql(u8, node.resource_type, "snapshot") or node.snapshot_yaml_definition) return path_selector;
     defer allocator.free(path_selector);
     return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ path_selector, node.name });
 }
@@ -450,18 +538,41 @@ fn matchesNodeSelectorIntersection(graph: *const Graph, node: *const Node, value
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
-        const term = parseSelectorTerm(raw_term);
-        if (!term.valid) return false;
-        if (term.value.len == 0) return false;
-        if (!matchesNodeSelectorTerm(graph, node, term.value, context) and !matchesGraphExpansion(graph, node.unique_id, term, context)) return false;
+        const negated = std.mem.startsWith(u8, raw_term, "!");
+        const term = parseSelectorTerm(if (negated) raw_term[1..] else raw_term);
+        if (!term.valid or term.value.len == 0) return false;
+        const matches = matchesNodeSelectorTerm(graph, node, term.value, context) or matchesGraphExpansion(graph, node.unique_id, term, context);
+        if (matches == negated) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []const u8, context: SelectionContext) bool {
+fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
+    if (std.mem.startsWith(u8, value, "config.")) {
+        var configured = @import("canonical_manifest_config.zig").node(graph.allocator, node) catch return false;
+        defer @import("config_value.zig").deinit(graph.allocator, &configured);
+        return @import("config_selector.zig").matches(configured, value[7..]);
+    }
+    if (std.mem.startsWith(u8, value, "group:")) return if (@import("group_access.zig").group(node.effective_config)) |name| matchesSelectorPattern(value[6..], name) else false;
+    if (std.mem.startsWith(u8, value, "access:")) return std.mem.eql(u8, node.resource_type, "model") and std.mem.eql(u8, value[7..], @import("group_access.zig").access(node));
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(node.unique_id, value, context);
+    if (std.mem.startsWith(u8, value, "fqn:")) return matchesNodeFqnPattern(value[4..], node);
+    if (std.mem.startsWith(u8, value, "version:")) {
+        if (!std.mem.eql(u8, node.resource_type, "model")) return false;
+        const kind = value[8..];
+        if (std.mem.eql(u8, kind, "none")) return node.version == .null;
+        if (node.version == .null or node.latest_version == .null) return false;
+        const versions = @import("model_versions.zig");
+        if (std.mem.eql(u8, kind, "latest")) return versions.equal(graph.allocator, node.version, node.latest_version) catch false;
+        if (std.mem.eql(u8, kind, "old")) return versions.less(graph.allocator, node.version, node.latest_version) catch false;
+        if (std.mem.eql(u8, kind, "prerelease")) return versions.less(graph.allocator, node.latest_version, node.version) catch false;
+        return false;
+    }
     if (matchesSelectorPattern(value, node.name) or std.mem.eql(u8, value, node.unique_id) or matchesNodeFqnPattern(value, node)) return true;
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
@@ -490,10 +601,6 @@ fn matchesNodeSelectorTerm(graph: *const Graph, node: *const Node, value: []cons
     if (std.mem.startsWith(u8, value, "source:")) {
         return false;
     }
-    if (std.mem.startsWith(u8, value, "config.materialized:")) {
-        const materialized = value["config.materialized:".len..];
-        return (std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.resource_type, "analysis") or std.mem.eql(u8, node.resource_type, "snapshot")) and std.mem.eql(u8, materialized, node.materialized);
-    }
     return false;
 }
 
@@ -515,27 +622,46 @@ fn matchesTestSelectorIntersection(graph: *const Graph, test_node: *const Generi
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
-        const term = parseSelectorTerm(raw_term);
-        if (!term.valid) return false;
-        if (term.value.len == 0) return false;
-        if (!matchesTestSelectorTerm(graph, test_node, term.value, context) and !matchesGraphExpansion(graph, test_node.unique_id, term, context)) return false;
+        const negated = std.mem.startsWith(u8, raw_term, "!");
+        const term = parseSelectorTerm(if (negated) raw_term[1..] else raw_term);
+        if (!term.valid or term.value.len == 0) return false;
+        const matches = matchesTestSelectorTerm(graph, test_node, term.value, context) or matchesGraphExpansion(graph, test_node.unique_id, term, context);
+        if (matches == negated) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8, context: SelectionContext) bool {
+fn matchesTestSelectorTerm(graph: *const Graph, test_node: *const GenericTestNode, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
+    if (!test_node.enabled) return false;
+    if (std.mem.startsWith(u8, value, "fqn:")) return matchesGenericTestFqnPattern(value[4..], test_node);
+    if (std.mem.startsWith(u8, value, "test_name:")) return matchesSelectorPattern(value[10..], test_node.test_name);
+    if (std.mem.startsWith(u8, value, "tag:")) {
+        for (test_node.tags.items) |tag| if (matchesSelectorPattern(value[4..], tag)) return true;
+        return false;
+    }
+    if (std.mem.startsWith(u8, value, "config.")) {
+        var configured = @import("canonical_manifest_config.zig").testConfig(graph.allocator, test_node.config, test_node.enabled, test_node.config_tags.items, test_node.config_values) catch return false;
+        defer @import("config_value.zig").deinit(graph.allocator, &configured);
+        return @import("config_selector.zig").matches(configured, value[7..]);
+    }
+    if (std.mem.startsWith(u8, value, "group:")) {
+        return if (@import("group_access.zig").group(test_node.config_values)) |name| matchesSelectorPattern(value[6..], name) else false;
+    }
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(test_node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(test_node.unique_id, value, context);
     if (matchesSelectorPattern(value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id) or matchesGenericTestFqnPattern(value, test_node)) return true;
-    if (matchesAttachedNodeNameOrFqnSelector(graph, test_node, value)) return true;
+
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
         return std.mem.eql(u8, resource_type, "test");
     }
     if (std.mem.startsWith(u8, value, "test_type:")) {
         const test_type = value["test_type:".len..];
-        return std.mem.eql(u8, test_type, "generic") or std.mem.eql(u8, test_type, "data");
+        return std.mem.eql(u8, test_type, "generic") or std.mem.eql(u8, test_type, "schema") or std.mem.eql(u8, test_type, "data");
     }
     if (std.mem.startsWith(u8, value, "package:")) {
         return matchesUniqueIdPackage(graph, test_node.unique_id, value["package:".len..]);
@@ -569,16 +695,25 @@ fn matchesSingularTestSelectorIntersection(graph: *const Graph, test_node: *cons
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
-        const term = parseSelectorTerm(raw_term);
-        if (!term.valid) return false;
-        if (term.value.len == 0) return false;
-        if (!matchesSingularTestSelectorTerm(graph, test_node, term.value, context) and !matchesGraphExpansion(graph, test_node.unique_id, term, context)) return false;
+        const negated = std.mem.startsWith(u8, raw_term, "!");
+        const term = parseSelectorTerm(if (negated) raw_term[1..] else raw_term);
+        if (!term.valid or term.value.len == 0) return false;
+        const matches = matchesSingularTestSelectorTerm(graph, test_node, term.value, context) or matchesGraphExpansion(graph, test_node.unique_id, term, context);
+        if (matches == negated) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesSingularTestSelectorTerm(graph: *const Graph, test_node: *const SingularTestNode, value: []const u8, context: SelectionContext) bool {
+fn matchesSingularTestSelectorTerm(graph: *const Graph, test_node: *const SingularTestNode, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
+    if (std.mem.startsWith(u8, value, "config.")) {
+        var configured = @import("canonical_manifest_config.zig").testConfig(graph.allocator, test_node.config, test_node.enabled, test_node.tags.items, test_node.config_values) catch return false;
+        defer @import("config_value.zig").deinit(graph.allocator, &configured);
+        return @import("config_selector.zig").matches(configured, value[7..]);
+    }
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(test_node.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(test_node.unique_id, value, context);
     if (matchesSelectorPattern(value, test_node.name) or std.mem.eql(u8, value, test_node.unique_id) or matchesSingularTestFqnPattern(value, test_node)) return true;
@@ -588,7 +723,7 @@ fn matchesSingularTestSelectorTerm(graph: *const Graph, test_node: *const Singul
             if (matchesSelectorPattern(tag, test_tag)) return true;
         }
     }
-    if (matchesSingularDependencyNameOrFqnSelector(graph, test_node, value)) return true;
+
     if (std.mem.startsWith(u8, value, "resource_type:")) {
         const resource_type = value["resource_type:".len..];
         return std.mem.eql(u8, resource_type, "test");
@@ -609,6 +744,110 @@ fn matchesSingularTestSelectorTerm(graph: *const Graph, test_node: *const Singul
         return matchesFileSelector(file, test_node.original_file_path);
     }
     return false;
+}
+
+fn primaryResourceMatches(graph: *const Graph, unique_id: []const u8, spec: SelectorSpec, context: SelectionContext) bool {
+    for (graph.nodes.items) |*node| {
+        if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesSelector(graph, node, spec, context);
+    }
+    for (graph.sources.items) |*source| {
+        if (!source.enabled) continue;
+        if (std.mem.eql(u8, source.unique_id, unique_id)) return matchesSourceSelector(graph, source, spec, context);
+    }
+    return false;
+}
+
+const SelectionBundle = struct { direct: bool, indirect: bool = false };
+
+fn resourceDirectlyMatches(graph: *const Graph, unique_id: []const u8, value: []const u8, context: SelectionContext) bool {
+    const spec = parseSelectorSpec(value);
+    for (graph.nodes.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesSelector(graph, node, spec, context);
+    for (graph.sources.items) |*source| if (std.mem.eql(u8, source.unique_id, unique_id)) return matchesSourceSelector(graph, source, spec, context);
+    for (graph.tests.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesTestSelector(graph, node, spec, context);
+    for (graph.singular_tests.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesSingularTestSelector(graph, node, spec, context);
+    for (graph.unit_tests.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesUnitTestSelector(graph, node, spec, context);
+    for (graph.exposures.items) |*node| if (node.enabled and std.mem.eql(u8, node.unique_id, unique_id)) return matchesExposureSelector(graph, node, spec, context);
+    for (graph.semantic_resources.items) |*resource| if (resource.enabled and std.mem.eql(u8, resource.unique_id, unique_id)) {
+        return (!spec.active or spec.value.len == 0) or matchesSemanticSelectorExpression(graph, resource, spec.value, context);
+    };
+    return false;
+}
+
+fn indirectDependencies(graph: *const Graph, id: []const u8) ?[]const []const u8 {
+    for (graph.tests.items) |node| if (node.enabled and std.mem.eql(u8, node.unique_id, id)) return node.depends_on.items;
+    for (graph.singular_tests.items) |node| if (node.enabled and std.mem.eql(u8, node.unique_id, id)) return node.depends_on.items;
+    for (graph.unit_tests.items) |node| if (node.enabled and std.mem.eql(u8, node.unique_id, id)) return node.depends_on.items;
+    return null;
+}
+
+fn evaluateExpression(graph: *const Graph, id: []const u8, expression: *const SelectionExpression, context: SelectionContext) SelectionBundle {
+    const mode = expression.indirect_selection orelse context.indirect_selection;
+    const dependencies = indirectDependencies(graph, id);
+    if (expression.kind == .leaf) {
+        if (expression.implicit_all) return .{ .direct = true };
+        const value = expression.value orelse return .{ .direct = false };
+        if (value.len == 0) return .{ .direct = false };
+        if (resourceDirectlyMatches(graph, id, value, context)) return .{ .direct = true };
+        const parents = dependencies orelse return .{ .direct = false };
+        if (std.mem.eql(u8, mode, "empty")) return .{ .direct = false };
+        var any = false;
+        var all = true;
+        for (parents) |parent| {
+            const selected = primaryResourceMatches(graph, parent, parseSelectorSpec(value), context);
+            any = any or selected;
+            var available = selected;
+            if (!available and std.mem.eql(u8, mode, "buildable")) {
+                for (graph.sources.items) |source| if (std.mem.eql(u8, parent, source.unique_id)) {
+                    available = true;
+                    break;
+                };
+                for (graph.nodes.items) |*node| {
+                    if (node.enabled and matchesSelector(graph, node, parseSelectorSpec(value), context) and resourceDependsOn(graph, node.unique_id, parent)) available = true;
+                }
+            }
+            all = all and available;
+        }
+        if (!any) return .{ .direct = false };
+        const direct = std.mem.eql(u8, mode, "eager") or all;
+        return .{ .direct = direct, .indirect = !direct };
+    }
+    var direct = expression.kind != .union_set;
+    var indirect = direct;
+    for (expression.children.items, 0..) |child, index| {
+        const bundle = evaluateExpression(graph, id, child, context);
+        const full = bundle.direct or bundle.indirect;
+        switch (expression.kind) {
+            .union_set => {
+                direct = direct or bundle.direct;
+                indirect = indirect or full;
+            },
+            .intersection => {
+                direct = direct and bundle.direct;
+                indirect = indirect and full;
+            },
+            .difference => {
+                direct = if (index == 0) bundle.direct else direct and !bundle.direct;
+                indirect = if (index == 0) full else indirect and !full;
+            },
+            .leaf => unreachable,
+        }
+    }
+    if (expression.children.items.len == 0) return .{ .direct = false };
+    if (!direct and indirect and dependencies != null and !std.mem.startsWith(u8, id, "unit_test.") and (std.mem.eql(u8, mode, "cautious") or std.mem.eql(u8, mode, "buildable"))) {
+        var all = true;
+        for (dependencies.?) |parent| {
+            var available = evaluateExpression(graph, parent, expression, context).direct;
+            if (!available and std.mem.eql(u8, mode, "buildable")) {
+                for (graph.nodes.items) |node| if (node.enabled and evaluateExpression(graph, node.unique_id, expression, context).direct and resourceDependsOn(graph, node.unique_id, parent)) {
+                    available = true;
+                    break;
+                };
+            }
+            all = all and available;
+        }
+        direct = all;
+    }
+    return .{ .direct = direct, .indirect = indirect };
 }
 
 fn matchesAttachedNodeNameOrFqnSelector(graph: *const Graph, test_node: *const GenericTestNode, value: []const u8) bool {
@@ -643,6 +882,7 @@ fn matchesSingularDependencyNameOrFqnSelector(graph: *const Graph, test_node: *c
 }
 
 fn matchesSourceSelector(graph: *const Graph, source: *const SourceDef, spec: SelectorSpec, context: SelectionContext) bool {
+    if (!source.enabled) return false;
     if (!spec.active) return true;
     if (spec.value.len == 0) return true;
     return matchesSourceSelectorExpression(graph, source, spec.value, context);
@@ -660,16 +900,28 @@ fn matchesSourceSelectorIntersection(graph: *const Graph, source: *const SourceD
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
-        const term = parseSelectorTerm(raw_term);
-        if (!term.valid) return false;
-        if (term.value.len == 0) return false;
-        if (!matchesSourceSelectorTerm(graph, source, term.value, context) and !matchesGraphExpansion(graph, source.unique_id, term, context)) return false;
+        const negated = std.mem.startsWith(u8, raw_term, "!");
+        const term = parseSelectorTerm(if (negated) raw_term[1..] else raw_term);
+        if (!term.valid or term.value.len == 0) return false;
+        const matches = matchesSourceSelectorTerm(graph, source, term.value, context) or matchesGraphExpansion(graph, source.unique_id, term, context);
+        if (matches == negated) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, value: []const u8, context: SelectionContext) bool {
+fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
+    if (std.mem.startsWith(u8, value, "config.")) {
+        var configured = @import("config_value.zig").clone(graph.allocator, source.effective_config) catch return false;
+        defer @import("config_value.zig").deinit(graph.allocator, &configured);
+        @import("config_value.zig").put(graph.allocator, &configured, "enabled", .{ .bool = source.enabled }) catch return false;
+        if (@import("config_value.zig").get(configured, "loaded_at_field") == null) @import("config_value.zig").put(graph.allocator, &configured, "loaded_at_field", if (source.loaded_at_field) |field| .{ .string = field } else .null) catch return false;
+        if (@import("config_value.zig").get(configured, "loaded_at_query") == null) @import("config_value.zig").put(graph.allocator, &configured, "loaded_at_query", if (source.loaded_at_query) |query| .{ .string = query } else .null) catch return false;
+        return @import("config_selector.zig").matches(configured, value[7..]);
+    }
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(source.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(source.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "resource_type:")) {
@@ -685,8 +937,18 @@ fn matchesSourceSelectorTerm(graph: *const Graph, source: *const SourceDef, valu
     if (std.mem.startsWith(u8, value, "source_status:")) {
         const requested = value["source_status:".len..];
         const index = context.source_status_index orelse return false;
+        if (std.mem.eql(u8, requested, "fresher")) {
+            const current = context.current_source_status_index orelse return false;
+            return current.isFresherThan(index, source.unique_id);
+        }
         const status = index.statusFor(source.unique_id) orelse return false;
         return std.mem.eql(u8, requested, status);
+    }
+    if (std.mem.startsWith(u8, value, "tag:")) {
+        const tags = @import("config_value.zig").get(source.effective_config, "tags") orelse return false;
+        if (tags != .array) return false;
+        for (tags.array.items) |tag| if (tag == .string and matchesSelectorPattern(value[4..], tag.string)) return true;
+        return false;
     }
     if (std.mem.startsWith(u8, value, "source:")) {
         const source_value = value["source:".len..];
@@ -730,16 +992,20 @@ fn matchesExposureSelectorIntersection(graph: *const Graph, exposure: *const Exp
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
-        const term = parseSelectorTerm(raw_term);
-        if (!term.valid) return false;
-        if (term.value.len == 0) return false;
-        if (!matchesExposureSelectorTerm(graph, exposure, term.value, context) and !matchesGraphExpansion(graph, exposure.unique_id, term, context)) return false;
+        const negated = std.mem.startsWith(u8, raw_term, "!");
+        const term = parseSelectorTerm(if (negated) raw_term[1..] else raw_term);
+        if (!term.valid or term.value.len == 0) return false;
+        const matches = matchesExposureSelectorTerm(graph, exposure, term.value, context) or matchesGraphExpansion(graph, exposure.unique_id, term, context);
+        if (matches == negated) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef, value: []const u8, context: SelectionContext) bool {
+fn matchesExposureSelectorTerm(graph: *const Graph, exposure: *const ExposureDef, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(exposure.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(exposure.unique_id, value, context);
     if (matchesSelectorPattern(value, exposure.name) or matchesUniqueIdFqnPattern(value, exposure.unique_id)) return true;
@@ -792,16 +1058,21 @@ fn matchesUnitTestSelectorIntersection(graph: *const Graph, unit_test: *const Un
     var raw_terms = std.mem.splitScalar(u8, value, ',');
     var matched_any = false;
     while (raw_terms.next()) |raw_term| {
-        const term = parseSelectorTerm(raw_term);
-        if (!term.valid) return false;
-        if (term.value.len == 0) return false;
-        if (!matchesUnitTestSelectorTerm(graph, unit_test, term.value, context) and !matchesGraphExpansion(graph, unit_test.unique_id, term, context)) return false;
+        const negated = std.mem.startsWith(u8, raw_term, "!");
+        const term = parseSelectorTerm(if (negated) raw_term[1..] else raw_term);
+        if (!term.valid or term.value.len == 0) return false;
+        const matches = matchesUnitTestSelectorTerm(graph, unit_test, term.value, context) or matchesGraphExpansion(graph, unit_test.unique_id, term, context);
+        if (matches == negated) return false;
         matched_any = true;
     }
     return matched_any;
 }
 
-fn matchesUnitTestSelectorTerm(graph: *const Graph, unit_test: *const UnitTestDef, value: []const u8, context: SelectionContext) bool {
+fn matchesUnitTestSelectorTerm(graph: *const Graph, unit_test: *const UnitTestDef, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
+    if (std.mem.startsWith(u8, value, "fqn:")) return matchesUnitTestFqnPattern(value[4..], unit_test);
     if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(unit_test.unique_id, value, context);
     if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(unit_test.unique_id, value, context);
     if (matchesSelectorPattern(value, unit_test.name) or
@@ -904,7 +1175,21 @@ fn matchesUniqueIdFqnPattern(pattern: []const u8, unique_id: []const u8) bool {
 }
 
 fn matchesNodeFqnPattern(pattern: []const u8, node: *const Node) bool {
-    if (std.mem.eql(u8, node.resource_type, "snapshot")) {
+    if (node.version != .null) {
+        var buffer: [4096]u8 = undefined;
+        var len: usize = 0;
+        if (!appendFqnSlice(&buffer, &len, node.package_name) or !appendFqnByte(&buffer, &len, '.')) return false;
+        const unscoped_start = len;
+        if (std.mem.lastIndexOfScalar(u8, node.path, '/')) |slash| {
+            if (!appendFqnPath(&buffer, &len, node.path[0 .. slash + 1])) return false;
+        }
+        if (!appendFqnSlice(&buffer, &len, node.name) or !appendFqnSlice(&buffer, &len, ".v")) return false;
+        const version = @import("config_value.zig").scalarText(std.heap.page_allocator, node.version) catch return false;
+        defer std.heap.page_allocator.free(version);
+        if (!appendFqnSlice(&buffer, &len, version)) return false;
+        return matchesFqnCandidate(pattern, buffer[0..len]) or matchesFqnCandidate(pattern, buffer[unscoped_start..len]);
+    }
+    if (std.mem.eql(u8, node.resource_type, "snapshot") and !node.snapshot_yaml_definition) {
         var buffer: [4096]u8 = undefined;
         var len: usize = 0;
         if (!appendFqnSlice(&buffer, &len, node.package_name) or !appendFqnByte(&buffer, &len, '.')) return false;
@@ -912,11 +1197,20 @@ fn matchesNodeFqnPattern(pattern: []const u8, node: *const Node) bool {
         if (!appendFqnPath(&buffer, &len, node.path) or !appendFqnByte(&buffer, &len, '.') or !appendFqnSlice(&buffer, &len, node.name)) return false;
         return matchesFqnCandidate(pattern, buffer[0..len]) or matchesFqnCandidate(pattern, buffer[unscoped_start..len]);
     }
-    return matchesPathBackedFqnPattern(pattern, node.package_name, node.path);
+    return matchesPathBackedFqnPattern(pattern, node.package_name, node.snapshot_fqn_path orelse node.path);
 }
 
 fn matchesGenericTestFqnPattern(pattern: []const u8, test_node: *const GenericTestNode) bool {
-    return matchesPathBackedFqnPattern(pattern, test_node.package_name, test_node.path);
+    if (test_node.fqn.items.len == 0) return matchesPathBackedFqnPattern(pattern, test_node.package_name, test_node.path);
+    var buffer: [4096]u8 = undefined;
+    var len: usize = 0;
+    var unscoped_start: usize = 0;
+    for (test_node.fqn.items, 0..) |part, index| {
+        if (index != 0 and !appendFqnByte(&buffer, &len, '.')) return false;
+        if (index == 1) unscoped_start = len;
+        if (!appendFqnSlice(&buffer, &len, part)) return false;
+    }
+    return matchesFqnCandidate(pattern, buffer[0..len]) or matchesFqnCandidate(pattern, buffer[unscoped_start..len]);
 }
 
 fn matchesSingularTestFqnPattern(pattern: []const u8, test_node: *const SingularTestNode) bool {
@@ -926,6 +1220,15 @@ fn matchesSingularTestFqnPattern(pattern: []const u8, test_node: *const Singular
 fn matchesUnitTestFqnPattern(pattern: []const u8, unit_test: *const UnitTestDef) bool {
     var buffer: [4096]u8 = undefined;
     var len: usize = 0;
+    if (unit_test.fqn.items.len != 0) {
+        var unscoped_start: usize = 0;
+        for (unit_test.fqn.items, 0..) |part, index| {
+            if (index != 0 and !appendFqnByte(&buffer, &len, '.')) return false;
+            if (index == 1) unscoped_start = len;
+            if (!appendFqnSlice(&buffer, &len, part)) return false;
+        }
+        return matchesFqnCandidate(pattern, buffer[0..len]) or matchesFqnCandidate(pattern, buffer[unscoped_start..len]);
+    }
     if (!appendFqnSlice(&buffer, &len, unit_test.package_name)) return false;
     if (!appendFqnByte(&buffer, &len, '.')) return false;
     const model_start = len;
@@ -1139,7 +1442,7 @@ fn parseSelectorTerm(raw: []const u8) SelectorSpec {
         }
     }
 
-    if (include_childrens_parents and (include_parents or include_children)) return .{ .active = true, .valid = false };
+    if (include_childrens_parents and include_children) return .{ .active = true, .valid = false };
 
     return .{
         .active = true,
@@ -1154,7 +1457,12 @@ fn parseSelectorTerm(raw: []const u8) SelectorSpec {
 
 fn parseSelectorDepth(value: []const u8) !?usize {
     if (value.len == 0) return null;
-    return try std.fmt.parseInt(usize, value, 10);
+    // Core accepts arbitrarily large Python integers. A saturated native
+    // depth reaches exactly the same finite graph without overflowing.
+    return std.fmt.parseInt(usize, value, 10) catch |err| switch (err) {
+        error.Overflow => std.math.maxInt(usize),
+        else => return err,
+    };
 }
 
 fn isSelectorDigit(byte: u8) bool {
@@ -1170,6 +1478,7 @@ fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, s
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
     for (graph.tests.items) |*target| {
+        if (!target.enabled) continue;
         if (!matchesTestSelectorTerm(graph, target, spec.value, context)) continue;
         if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
         if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
@@ -1201,6 +1510,12 @@ fn matchesGraphExpansion(graph: *const Graph, candidate_unique_id: []const u8, s
         if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
         if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
     }
+    for (graph.semantic_resources.items) |*target| {
+        if (!target.enabled or !matchesSemanticSelectorTerm(graph, target, spec.value, context)) continue;
+        if (spec.include_childrens_parents and resourceInChildrensParentsSelection(graph, target.unique_id, candidate_unique_id)) return true;
+        if (spec.include_parents and resourceDependsOnDepth(graph, target.unique_id, candidate_unique_id, spec.parents_depth)) return true;
+        if (spec.include_children and resourceDependsOnDepth(graph, candidate_unique_id, target.unique_id, spec.children_depth)) return true;
+    }
     return false;
 }
 
@@ -1214,6 +1529,7 @@ fn resourceInChildrensParentsSelection(graph: *const Graph, selected_unique_id: 
         if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
     }
     for (graph.tests.items) |*resource| {
+        if (!resource.enabled) continue;
         if (resourceDependsOn(graph, resource.unique_id, selected_unique_id) and resourceDependsOn(graph, resource.unique_id, candidate_unique_id)) return true;
     }
     for (graph.singular_tests.items) |*resource| {
@@ -1241,7 +1557,7 @@ fn resourceDependsOnDepth(graph: *const Graph, resource_unique_id: []const u8, d
 }
 
 fn graphDepthLimit(graph: *const Graph) usize {
-    return graph.nodes.items.len + graph.tests.items.len + graph.singular_tests.items.len + graph.sources.items.len + graph.exposures.items.len + graph.unit_tests.items.len + 1;
+    return graph.nodes.items.len + graph.tests.items.len + graph.singular_tests.items.len + graph.sources.items.len + graph.exposures.items.len + graph.unit_tests.items.len + graph.semantic_resources.items.len + 1;
 }
 
 fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, dependency_unique_id: []const u8, remaining_depth: usize) bool {
@@ -1252,6 +1568,7 @@ fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, 
         return dependencyListContainsTransitive(graph, node.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
     for (graph.tests.items) |test_node| {
+        if (!test_node.enabled) continue;
         if (!std.mem.eql(u8, test_node.unique_id, resource_unique_id)) continue;
         return dependencyListContainsTransitive(graph, test_node.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
@@ -1268,6 +1585,10 @@ fn resourceDependsOnWithin(graph: *const Graph, resource_unique_id: []const u8, 
         if (!unit_test.enabled) continue;
         if (!std.mem.eql(u8, unit_test.unique_id, resource_unique_id)) continue;
         return dependencyListContainsTransitive(graph, unit_test.depends_on.items, dependency_unique_id, remaining_depth - 1);
+    }
+    for (graph.semantic_resources.items) |resource| {
+        if (!resource.enabled or !std.mem.eql(u8, resource.unique_id, resource_unique_id)) continue;
+        return dependencyListContainsTransitive(graph, resource.depends_on.items, dependency_unique_id, remaining_depth - 1);
     }
     return false;
 }
@@ -1466,7 +1787,7 @@ test "result selectors match run_results state and graph expansions" {
         .{ .unique_id = "test.demo.not_null_customers_customer_id.abc", .status = "fail" },
     };
     const status_index = run_results.ResultStatusIndex{ .rows = &status_rows };
-    const context = SelectionContext{ .result_status_index = &status_index };
+    const context = SelectionContext{ .result_status_index = &status_index, .indirect_selection = "empty" };
 
     const successful = try selectResourcesWithContext(allocator, &graph, null, "result:success", null, context);
     try std.testing.expectEqual(@as(usize, 1), successful.len);
@@ -1493,6 +1814,34 @@ test "result selectors match run_results state and graph expansions" {
     try std.testing.expect(usesResultSelector("result:error+", null));
     try std.testing.expect(usesResultSelector(null, "result:skipped"));
     try std.testing.expect(!usesResultSelector("source_status:warn", null));
+}
+
+test "indirect selector bundles preserve intersections and per-leaf modes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo" };
+    defer graph.deinit();
+    for ([_][]const u8{ "a", "b" }) |name| {
+        try graph.nodes.append(allocator, .{ .package_name = "demo", .unique_id = try std.fmt.allocPrint(allocator, "model.demo.{s}", .{name}), .name = name, .path = name, .original_file_path = name, .raw_code = "" });
+    }
+    try graph.tests.append(allocator, .{ .package_name = "demo", .unique_id = "test.demo.cross", .name = "cross", .alias = "cross", .path = "cross.sql", .original_file_path = "schema.yml", .raw_code = "", .test_name = "relationships" });
+    try graph.tests.items[0].depends_on.appendSlice(allocator, &.{ "model.demo.a", "model.demo.b" });
+    const eager = try selectResourcesWithContext(allocator, &graph, "test", "a,b", null, .{});
+    try std.testing.expectEqual(@as(usize, 1), eager.len);
+    const cautious = try selectResourcesWithContext(allocator, &graph, "test", "a,b", null, .{ .indirect_selection = "cautious" });
+    try std.testing.expectEqual(@as(usize, 0), cautious.len);
+    const cautious_union = try selectResourcesWithContext(allocator, &graph, "test", "a b", null, .{ .indirect_selection = "cautious" });
+    try std.testing.expectEqual(@as(usize, 1), cautious_union.len);
+    const mixed = try SelectionExpression.create(allocator, .union_set, "eager");
+    defer mixed.destroy(allocator);
+    try mixed.children.append(allocator, try SelectionExpression.leaf(allocator, "a", "empty"));
+    try mixed.children.append(allocator, try SelectionExpression.leaf(allocator, "b", "cautious"));
+    const mixed_result = try selectResourcesWithContext(allocator, &graph, "test", null, null, .{ .expression = mixed });
+    try std.testing.expectEqual(@as(usize, 0), mixed_result.len);
+    mixed.children.items[1].indirect_selection = "eager";
+    const changed = try selectResourcesWithContext(allocator, &graph, "test", null, null, .{ .expression = mixed, .indirect_selection = "empty" });
+    try std.testing.expectEqual(@as(usize, 1), changed.len);
 }
 
 test "state new selectors match prior manifest membership and graph expansions" {
@@ -1705,11 +2054,12 @@ test "selector terms parse dbt plus depth operators" {
 
     try std.testing.expect(!parseSelectorTerm("@orders+").valid);
     try std.testing.expect(!parseSelectorTerm("@orders+1").valid);
-    try std.testing.expect(!parseSelectorTerm("@+orders").valid);
-    try std.testing.expect(!parseSelectorTerm("@1+orders").valid);
+    try std.testing.expect(parseSelectorTerm("@+orders").valid);
+    try std.testing.expect(parseSelectorTerm("@1+orders").valid);
 
-    const invalid_depth = parseSelectorTerm("999999999999999999999999999999+orders");
-    try std.testing.expect(!invalid_depth.valid);
+    const large_depth = parseSelectorTerm("999999999999999999999999999999+orders");
+    try std.testing.expect(large_depth.valid);
+    try std.testing.expectEqual(@as(?usize, std.math.maxInt(usize)), large_depth.parents_depth);
 }
 
 test "snapshot file and block FQN selects separate nodes and expands dependencies" {
@@ -1730,4 +2080,60 @@ test "snapshot file and block FQN selects separate nodes and expands dependencie
     try std.testing.expectEqual(@as(usize, 2), expanded.len);
     const snapshots = try selectResources(allocator, &graph, null, "config.materialized:snapshot", null);
     try std.testing.expectEqual(@as(usize, 2), snapshots.len);
+}
+
+test "execution ID limits apply after indirect test selection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "retry" };
+    defer graph.deinit();
+    try graph.nodes.append(allocator, .{ .package_name = "retry", .unique_id = "model.retry.parent", .name = "parent", .path = "parent.sql", .original_file_path = "models/parent.sql", .raw_code = "select 1 as id" });
+    try graph.singular_tests.append(allocator, .{ .package_name = "retry", .unique_id = "test.retry.attached", .name = "attached", .alias = "attached", .path = "attached.sql", .original_file_path = "tests/attached.sql", .raw_code = "select 1 where false", .depends_on = .empty });
+    try graph.singular_tests.items[0].depends_on.append(allocator, "model.retry.parent");
+    const limited = try selectResourcesWithContext(allocator, &graph, null, "parent+", null, .{ .allowed_ids = &.{"model.retry.parent"} });
+    try std.testing.expectEqual(@as(usize, 1), limited.len);
+    try std.testing.expectEqualStrings("model.retry.parent", limited[0].unique_id);
+    const empty = try selectResourcesWithContext(allocator, &graph, null, null, null, .{ .allowed_ids = &.{} });
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+fn matchesSemanticSelectorTerm(graph: *const Graph, resource: *const types.SemanticResource, raw_value: []const u8, context: SelectionContext) bool {
+    const normalized = normalizeMethod(graph.allocator, raw_value) catch return false;
+    defer normalized.deinit(graph.allocator);
+    const value = normalized.value;
+    if (std.mem.startsWith(u8, value, "group:")) return std.mem.eql(u8, resource.resource_type, "metric") and (if (@import("group_access.zig").group(@import("config_value.zig").get(resource.data, "config") orelse .null)) |name| matchesSelectorPattern(value[6..], name) else false);
+    if (std.mem.startsWith(u8, value, "state:")) return matchesStateSelector(resource.unique_id, value, context);
+    if (std.mem.startsWith(u8, value, "result:")) return matchesResultSelector(resource.unique_id, value, context);
+    if (matchesSelectorPattern(value, resource.name) or matchesUniqueIdFqnPattern(value, resource.unique_id)) return true;
+    if (std.mem.startsWith(u8, value, "resource_type:")) return std.mem.eql(u8, value["resource_type:".len..], resource.resource_type);
+    if (std.mem.startsWith(u8, value, "package:")) return matchesUniqueIdPackage(graph, resource.unique_id, value["package:".len..]);
+    for ([_][]const u8{ "metric", "semantic_model", "saved_query" }) |kind| {
+        if (std.mem.startsWith(u8, value, kind) and value.len > kind.len and value[kind.len] == ':') return std.mem.eql(u8, kind, resource.resource_type) and (matchesSelectorPattern(value[kind.len + 1 ..], resource.name) or matchesUniqueIdFqnPattern(value[kind.len + 1 ..], resource.unique_id));
+    }
+    if (std.mem.startsWith(u8, value, "tag:")) for (resource.tags.items) |tag| {
+        if (matchesSelectorPattern(value["tag:".len..], tag)) return true;
+    };
+    if (std.mem.startsWith(u8, value, "path:")) return matchesPathSelector(value["path:".len..], resource.original_file_path);
+    if (std.mem.startsWith(u8, value, "file:")) return matchesFileSelector(value["file:".len..], resource.original_file_path);
+    return false;
+}
+
+fn matchesSemanticSelectorExpression(graph: *const Graph, resource: *const types.SemanticResource, value: []const u8, context: SelectionContext) bool {
+    var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    while (expressions.next()) |expression| {
+        var terms = std.mem.splitScalar(u8, expression, ',');
+        var all = true;
+        while (terms.next()) |raw_term| {
+            const negated = std.mem.startsWith(u8, raw_term, "!");
+            const term = parseSelectorTerm(if (negated) raw_term[1..] else raw_term);
+            const matches = matchesSemanticSelectorTerm(graph, resource, term.value, context) or matchesGraphExpansion(graph, resource.unique_id, term, context);
+            if (matches == negated) {
+                all = false;
+                break;
+            }
+        }
+        if (all) return true;
+    }
+    return false;
 }

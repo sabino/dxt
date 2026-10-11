@@ -1,0 +1,10 @@
+{
+  "unicode": "15.0.0",
+  "generator": "scripts/generate_unicode_names.py",
+  "aliases": {
+    "url": "https://raw.githubusercontent.com/unicode-org/unicodetools/main/unicodetools/data/ucd/15.0.0/NameAliases.txt",
+    "sha256": "3e39509e8fae3e5d50ba73759d0b97194501d14a9c63107a6372a46b38be18e8"
+  },
+  "names_sha256": "d4058523512ed69d588628a64e41dfa615be02f6ac892477d6617fbfff863ac4",
+  "entries": 44588
+}

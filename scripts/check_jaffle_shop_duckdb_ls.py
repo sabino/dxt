@@ -5,6 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from check_jaffle_shop_duckdb_build import copy_public_project
 from check_jaffle_shop_duckdb_parse import (
     DEFAULT_DXT,
     DEFAULT_REF,
@@ -51,6 +52,7 @@ def main() -> int:
                 if not (project_dir / "dbt_project.yml").exists():
                     raise GateError(f"--project-dir does not look like a dbt project: {project_dir}")
 
+            project_dir = copy_public_project(project_dir, workdir / "project")
             validate_selectors(dxt, project_dir)
     except GateError as exc:
         print(f"Jaffle ls gate failed: {exc}", file=sys.stderr)

@@ -1,0 +1,13 @@
+# Keep pinned upstream C/header snapshots byte-for-byte. dxt's authored
+# sources retain the standard whitespace checks.
+vendor/libyaml/**/*.c whitespace=-blank-at-eol,-blank-at-eof
+vendor/libyaml/**/*.h whitespace=-blank-at-eol,-blank-at-eof
+vendor/pcre2/**/*.c whitespace=-blank-at-eol,-blank-at-eof
+vendor/pcre2/**/*.h whitespace=-blank-at-eol,-blank-at-eof
+vendor/libpg_query/**/*.c -whitespace
+vendor/libpg_query/**/*.h -whitespace
+vendor/libpg_query/*.h -whitespace
+vendor/tree-sitter/**/*.c whitespace=-blank-at-eol,-blank-at-eof
+vendor/tree-sitter/**/*.h whitespace=-blank-at-eol,-blank-at-eof
+vendor/tree-sitter-python/**/*.c whitespace=-blank-at-eol,-blank-at-eof
+vendor/tree-sitter-python/**/*.h whitespace=-blank-at-eol,-blank-at-eof

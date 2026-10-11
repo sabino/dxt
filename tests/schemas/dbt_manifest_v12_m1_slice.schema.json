@@ -147,6 +147,7 @@
         "enabled": {"type": "boolean"},
         "materialized": {"type": "string"},
         "tags": {"$ref": "#/$defs/unique_id_array"},
+        "persist_docs": {"type": "object", "additionalProperties": false, "properties": {"relation": {"type": "boolean"}, "columns": {"type": "boolean"}}},
         "docs": {"$ref": "#/$defs/docs_config"}
       }
     },
@@ -158,6 +159,7 @@
         "enabled": {"type": "boolean"},
         "materialized": {"type": "string"},
         "tags": {"$ref": "#/$defs/unique_id_array"},
+        "persist_docs": {"type": "object", "additionalProperties": false, "properties": {"relation": {"type": "boolean"}, "columns": {"type": "boolean"}}},
         "docs": {"$ref": "#/$defs/docs_config"},
         "quote_columns": {"type": ["boolean", "null"]},
         "column_types": {
@@ -386,6 +388,7 @@
         "sources"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {
           "type": "string"
         },
@@ -487,6 +490,10 @@
         },
         "extra_ctes_injected": {
           "type": "boolean"
+        },
+        "meta": {
+          "type": "object",
+          "additionalProperties": true
         }
       }
     },
@@ -582,6 +589,31 @@
         },
         "alias": {
           "type": "string"
+        },
+        "meta": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "hard_deletes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dbt_valid_to_current": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snapshot_meta_column_names": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       }
     },
@@ -613,6 +645,7 @@
         "sources"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "model"},
         "package_name": {"type": "string"},
@@ -683,6 +716,7 @@
         "sources"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "analysis"},
         "package_name": {"type": "string"},
@@ -749,6 +783,7 @@
         "depends_on"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "seed"},
         "package_name": {"type": "string"},
@@ -769,7 +804,7 @@
         },
         "docs": {"$ref": "#/$defs/docs_config"},
         "config": {"$ref": "#/$defs/seed_config"},
-        "depends_on": {"$ref": "#/$defs/depends_on"}
+        "depends_on": {"$ref": "#/$defs/macro_depends_on"}
       }
     },
     "test_node": {
@@ -799,6 +834,7 @@
         "sources"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "test"},
         "package_name": {"type": "string"},
@@ -863,6 +899,7 @@
         "sources"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "test"},
         "package_name": {"type": "string"},
@@ -926,6 +963,7 @@
         "columns"
       ],
       "properties": {
+        "unrendered_config": {"type": "object"},
         "unique_id": {"type": "string"},
         "resource_type": {"const": "source"},
         "package_name": {"type": "string"},

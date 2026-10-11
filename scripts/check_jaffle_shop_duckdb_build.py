@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+import yaml
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -100,7 +102,14 @@ def query_scalar(duckdb: str, db_path: Path, sql: str) -> str:
 
 
 def validate_duckdb_relations(project_dir: Path, duckdb: str) -> None:
-    db_path = project_dir / "jaffle_shop.duckdb"
+    project_config = yaml.safe_load((project_dir / "dbt_project.yml").read_text())
+    profiles = yaml.safe_load((project_dir / "profiles.yml").read_text())
+    profile = profiles[project_config['profile']]
+    output = profile['outputs'][profile['target']]
+    assert_equal("verification adapter", output['type'], 'duckdb')
+    db_path = Path(output['path'])
+    if not db_path.is_absolute():
+        db_path = (project_dir / db_path).resolve()
     if not db_path.exists():
         raise GateError(f"build did not create DuckDB database: {db_path}")
     assert_equal("customers row count", query_scalar(duckdb, db_path, 'select count(*) from "main"."customers"'), "100")

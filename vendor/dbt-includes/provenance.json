@@ -1,0 +1,900 @@
+{
+  "sources": [
+    {
+      "package": "dbt",
+      "distribution": "dbt-core",
+      "version": "1.10.5",
+      "url": "https://github.com/dbt-labs/dbt-core/tree/v1.10.5/core/dbt/include/global_project"
+    },
+    {
+      "package": "dbt_duckdb",
+      "distribution": "dbt-duckdb",
+      "version": "1.9.6",
+      "url": "https://github.com/duckdb/dbt-duckdb/tree/1.9.6/dbt/include/duckdb"
+    },
+    {
+      "package": "dbt_postgres",
+      "distribution": "dbt-postgres",
+      "version": "1.9.1",
+      "url": "https://github.com/dbt-labs/dbt-postgres/tree/v1.9.1/dbt/include/postgres"
+    }
+  ],
+  "files": [
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "docs/overview.md",
+      "sha256": "56e39b338a5c4be4efc187808e351b7b44c18449f17fa837d043d6ac68f26bfc"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/apply_grants.sql",
+      "sha256": "dcd5092d698d1346405b17352ee229a3af9d4df2c40635f53ace417436ff20e4"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/columns.sql",
+      "sha256": "dd353e05de657a0981da21289ff3db20efc728614aaef413dc46f5206b45ff56"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/freshness.sql",
+      "sha256": "6e5d8a9fbb36a43333ac959e2d76325156170e69682f19ed8ce8325920dc802b"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/indexes.sql",
+      "sha256": "0dab0f9f7d829b4399ca304f056ccbe01a4af4f677c45fcfbbc361e0d80049ac"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/metadata.sql",
+      "sha256": "99e348737cf8957761d650dbf8ad6eb4a6fc573015b8ddb713a5d680c6460e14"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/persist_docs.sql",
+      "sha256": "4d46b324749a3080e510ba802cb44c0b69188f90c667d53ee8af116e0c115f0e"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/relation.sql",
+      "sha256": "c93e185428a9c5e4008e48fdf2bb1c08db7eb250bca08257ae21e592fcdb910d"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/schema.sql",
+      "sha256": "5c4968d1c7ef7448a9239869ba52d72c11173ff6278a51bed644700cca830f92"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/show.sql",
+      "sha256": "2140dc33172d164b1a6887e70adc89aaefcc6abc0495d85e82dcc77310f05108"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/timestamps.sql",
+      "sha256": "16f3f05a498cd34afdaecd838d1e70ac8f94f5a877fbc54c230939c11473b8fc"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/adapters/validate_sql.sql",
+      "sha256": "202f87115bfc0a5f2777b76273f538872aa5ae474eea994f6c7f75e0e74cfd61"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/etc/datetime.sql",
+      "sha256": "1f03715f0d311c72d52850656db738c2a4dd61eebfb2692ed44c1618cec6fba8"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/etc/statement.sql",
+      "sha256": "9649ba4fa90220f1a40ae1d54ba56e56ab005fccd5f4223b89320e9cf3999f0f"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/generic_test_sql/accepted_values.sql",
+      "sha256": "bbd7aef7e72cf59af8084972154d3cd613746c0b53e005e451c97f507e224c1e"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/generic_test_sql/not_null.sql",
+      "sha256": "846550c1b9f63eb2db8bcecf707acd3c3f0fb6fda5577ddb694c2a527a306f02"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/generic_test_sql/relationships.sql",
+      "sha256": "af3241f0f8acac3c9c1b59e009886cc4802ceba48176b0f5b5ab841bc5425a2f"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/generic_test_sql/unique.sql",
+      "sha256": "70e98df18469cfdf3b0856e9cbb3efc439f04688214b3f6764c06ef4e5b025fc"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/get_custom_name/get_custom_alias.sql",
+      "sha256": "6b11cfd41c7217265ede55aeb650573b44bf147fbc875c00d85c54bf9c97a94c"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/get_custom_name/get_custom_database.sql",
+      "sha256": "c6e39e4a4d481305512b54e24a6b2123fb203c4507777bbfc0085efbcbd8e6ab"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/get_custom_name/get_custom_schema.sql",
+      "sha256": "dbe658b83441a3645208a6535fbaf39b663bec35426871939c71bd20a34ca6f9"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/configs.sql",
+      "sha256": "69c8930d7150a22014e32f27b2b79342749c6b5f0fdad8d4471f8b408af3cae7"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/hooks.sql",
+      "sha256": "20838b45a9eb2eda58716c563da3c9ec9328c897502627040e78b8ca813d9892"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/clone/can_clone_table.sql",
+      "sha256": "615ab67f9ef8231303b84bf9adb693bd4a4b2ea73e8d07f23a00502501967269"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/clone/clone.sql",
+      "sha256": "85de8015f8ed556aaad74a2432709e0429d1c627743ef63ba6b218140ed6b78e"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/clone/create_or_replace_clone.sql",
+      "sha256": "aabdf70f014ea511b4c0656c1afafadfe31ec5830d642f7129d18e3e6202a7f7"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/incremental/column_helpers.sql",
+      "sha256": "86c950946296d285bdeecadfba0b0555147e2fa46bcd1727c2bdee2e1cc8d17e"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/incremental/incremental.sql",
+      "sha256": "c8e1be46cbff8fa2611881dd7c593beff0e820b16016ab0b376ed1e4b7429d93"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/incremental/is_incremental.sql",
+      "sha256": "4a6d53a8e7aa7024287e3dd1105700f7bcae90f07527f982943779e6be467b01"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/incremental/merge.sql",
+      "sha256": "86b3a07c013701a9b4b2bb9d6f40a01d96805050672173009dda0e9dc60fdd3f"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/incremental/on_schema_change.sql",
+      "sha256": "10e81cad887038654f9f2681bbb9087def0b4ce6153aef8087132d06cf044e94"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/incremental/strategies.sql",
+      "sha256": "3911968987e3f9bdff548a6cf450e5cb1f90e00da16735f66982e8716f1bea95"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/materialized_view.sql",
+      "sha256": "faed1c190ac710c06df1ca177ca28fa544094bded35f741169f57cef77ea7820"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/table.sql",
+      "sha256": "17da20999a1f84f7732b0861149fc67c8e504574312e34e5eb14e20a0ba543d8"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/models/view.sql",
+      "sha256": "2cfa8cdda4ec5a201a945cf7db6693a6a2aa09d97887137cb9b7305d92080c3c"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/seeds/helpers.sql",
+      "sha256": "635e5e8fe0f7826d44c4838c353db4f2ae3781193c77df3959006e192a2834bd"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/seeds/seed.sql",
+      "sha256": "612a06cd53b788852238a21433d1bbc80a462c51f83bd6effdde0a8c7a37a784"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/snapshots/helpers.sql",
+      "sha256": "11d28a9b4fee128b799ac41bb3bee215d4c987e1e6b95f218132d50d3dcc368d"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/snapshots/snapshot.sql",
+      "sha256": "725219b4213bbef397c73cf5b762a598f64cec0b921ac2bb3089eca68d0de508"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/snapshots/snapshot_merge.sql",
+      "sha256": "59a1900aebf8a3fab1070edbd8a42f5274a0d1490f925c004072b5f909e037f3"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/snapshots/strategies.sql",
+      "sha256": "01f22c462c346274329b9c14896476269884124cb8fd6053a53b44d0726fa59c"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/tests/helpers.sql",
+      "sha256": "af15310d99b812fac36e2d07fde3e0844df8fd02e6c46118da8fcb4cc73d094d"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/tests/test.sql",
+      "sha256": "2cfe326be5f99f8f7d71c69bee7d63aaf19b65666c1ba86a2665a5c7ad01bc74"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/tests/unit.sql",
+      "sha256": "2a89de3ee15fc1ccf9b89f895b40ab132f3fabe1a5e397e89e7806985bd070d5"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/materializations/tests/where_subquery.sql",
+      "sha256": "c63b98775f2d5e8f7d391789190b1f8043d8963514c85d345f32b88744898dd3"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/python_model/python.sql",
+      "sha256": "a96a28b8d38fe1076e9deff6562b739abcdbd2ca07473bb44b82b6d9a99564af"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/column/columns_spec_ddl.sql",
+      "sha256": "ba45b888bb805d87ecae795f798dba70530c17101370d57c865a7dbda94ec7c5"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/create.sql",
+      "sha256": "f7d2cb6a4d5b865851c3bca223473fe0228f946cb3a8f05e05804d7813d2983a"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/create_backup.sql",
+      "sha256": "8c05894b0dc1531bd8ae3801b3726444937f5475ed934e653163cce27fada16b"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/create_intermediate.sql",
+      "sha256": "6e03e8819a91ca452b751c68fe4be828bac9f42db1d5cfd3bed519958c147e64"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/drop.sql",
+      "sha256": "50be344b10631cb3e9207cb02981d942cc0485ea47d5820f874549e543c0c1a5"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/drop_backup.sql",
+      "sha256": "3d36f1fdb376edaa82bfd1c3f48ed3779ac9691ac7db74d70ecf5a0b97a2f10f"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/materialized_view/alter.sql",
+      "sha256": "a597196b5c5f7196695554afbc9dd8474ce7ea7a082817e44d26eba8aa2101c5"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/materialized_view/create.sql",
+      "sha256": "0bc069c84871113537378e88e163680b00747d36f768e8498fa11f4e43684ddd"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/materialized_view/drop.sql",
+      "sha256": "b4d02921d300da50057e3d3694d249e4ea3b297c1ceeacce485766fe36d7cbea"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/materialized_view/refresh.sql",
+      "sha256": "b531f18731e9f262f38898334e6ee7928a02e7e7c096c0a539fffdfa4311efde"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/materialized_view/rename.sql",
+      "sha256": "135210a1aa1c695d9bb7ebc063007001ebd245a4ac462b0264163e97d764ffe6"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/materialized_view/replace.sql",
+      "sha256": "5b16c57216331d5ba512174f6b472b168203dc6475ec7c3f98575cc862acedfd"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/rename.sql",
+      "sha256": "d182d49d9b68bf914eb6bfa3ec28c8e0b36d5d6a23586111daad6555b24c1f97"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/rename_intermediate.sql",
+      "sha256": "ae170aea37a8e607d0fb5aea15dda5c934f81ed033bbc35dcdbcf61731cc061b"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/replace.sql",
+      "sha256": "af390c19f4f42ced73fb41bb9d7abf47c6e4545d748847790ade0ab9fec6238a"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/schema.sql",
+      "sha256": "90e41e119430c9c186b40a2afca33a132bc486ab8593c8e7c7cd674f7d6ce7c3"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/table/create.sql",
+      "sha256": "f88298078182d7f626188889f8029491fbeaf140af7791317bdd688edd2be35a"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/table/drop.sql",
+      "sha256": "13ee9dc510b9ff3e769af55325172786287661db8a2bec28b88c04beed52f3e1"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/table/rename.sql",
+      "sha256": "18c9b3f374a2bace98ddf3dd9678cc617ad54433fc20d3bab4b027def7e0cd82"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/table/replace.sql",
+      "sha256": "c654c1da923f7c49003c97666eb8ab4ab9f3bc56133edcfd44e30233100d142a"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/view/create.sql",
+      "sha256": "55722c256a38399ffc929a1ecb4f3018858f5186b0daeb5054284e19e32decb9"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/view/drop.sql",
+      "sha256": "8858e1130ce2a74d1319df21e93e54b17a3874ae38d04be074ac11fe3e175fbf"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/view/rename.sql",
+      "sha256": "3f8869c65ad1d308814d9149f0ddc6c9451baa02a031f8335146c85b0f1fba2d"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/relations/view/replace.sql",
+      "sha256": "70ba8d9264f1031b094bc83e763e0ae888a4a630c62a5c821020379deacf3338"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/unit_test_sql/get_fixture_sql.sql",
+      "sha256": "70d66131d34e14119fb6bf628ffd9363f18251a286314e585537086f98c7069a"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/any_value.sql",
+      "sha256": "95e2be7c25210cdb7a305906a1f69f623bfed0bb4bd1f91bdec2577be688a2b5"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/array_append.sql",
+      "sha256": "5ec0be91c8655b157073eff50a806cd5190662df2ab0e0156eae4996c5765887"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/array_concat.sql",
+      "sha256": "d1ce30e643f537ff4163ec29a71d4e0420880ceb02d478629a44838218e3c766"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/array_construct.sql",
+      "sha256": "04803bb622ef5c3cd3be7b91abf1765488e4a2d57c87150eab5b43e2b7964945"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/bool_or.sql",
+      "sha256": "a229f41641bd71b4bcd5e4481f02981e495d1b5e47581564905c1505c0805e47"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/cast.sql",
+      "sha256": "61045764422fad70c3b38b2abc508993b6bdc678ae823446e585ac0227751722"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/cast_bool_to_text.sql",
+      "sha256": "7ce216ec033bfc12481d4e469e1c0c60682187c9af91cdbbfeca9d5b4addb334"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/concat.sql",
+      "sha256": "a87ad586b6b9412c01b246180a969e26fb02008159fdec9e1788779208ecf01d"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/data_types.sql",
+      "sha256": "470eb184ad36341f5394aa25ab219c506a1680706428fa49d5787714e071acc7"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/date.sql",
+      "sha256": "f9057034f32cc4dfce259e61e18531a013ff8192f1108287479ce4b2d3ef8572"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/date_spine.sql",
+      "sha256": "b68eb68abb1c791d088c0e39d937d4ab42e028977acc485e03ba62fb195386be"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/date_trunc.sql",
+      "sha256": "37b783120295aba050f6a51e20c27fc8a42fe504e321667a936a0c59e1a5a905"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/dateadd.sql",
+      "sha256": "fadd080ee574d5638c36cb8f8f2069f43fb6baf240761822de413c2482fd2617"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/datediff.sql",
+      "sha256": "3bde00e57137b16b1dc5fc2534e0de7f4058a1a24d1893fe3a6babcca67cab3d"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/equals.sql",
+      "sha256": "c586f246a5db814f64a4c2a1f6806e842b8862784aba6ff730fef05a6cf0ee9b"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/escape_single_quotes.sql",
+      "sha256": "d4a09c8aaa759bec539e6c73ef7375afca199b6a01c2adcdaf43486b2c8f66f3"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/except.sql",
+      "sha256": "1dff22b27ee4f1f61b931b66eb0ca0a3ebfdbb2f8dce5bedd3b2cc7e02b11cde"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/generate_series.sql",
+      "sha256": "69b5ee093b667f45a69c3aa20929983a6e876b746eb70a664e2c5f7054c925e4"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/hash.sql",
+      "sha256": "6318cf8ae33d4f5a9c097daf7ffaf59762b7627775359cfb2f26ae751c121201"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/intersect.sql",
+      "sha256": "a631eb49117b06bd56bc43d9f77e82ca32359dd3577dcc2dffd8361154ad34a4"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/last_day.sql",
+      "sha256": "86584ce7135d48fbb0f2ade13fa6a7f1a97f029504cadb4eddb912234a9fb31a"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/length.sql",
+      "sha256": "7d39c70bf201df7ec78fd7bf14b588caac5af13d0cd6667f863fc1e7bcc01efe"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/listagg.sql",
+      "sha256": "086cc1ed1492528c9c150ac2130f85c52c3bd757deb77e1f9a14a4f29ee93781"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/literal.sql",
+      "sha256": "e0dab61433aff41c55123a966fbbdab6fd9baa773e3d5a25d27feed75a6199e8"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/position.sql",
+      "sha256": "4b866a8a1f3c7720c0bead4826e4623b038061c256125040f90d6637fdf82085"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/replace.sql",
+      "sha256": "7286d613003f2901cdb503d86778c72bdc052437f56c0edefa1f46b375023793"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/right.sql",
+      "sha256": "130346f7c080148c0d0e66abc28a5fed19081e723e2cfcbb8509d418eb37f7e4"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/safe_cast.sql",
+      "sha256": "d66b30c240c00a6222d48f7d24a6fffafab792331ee0784c455ef4996f01b786"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "macros/utils/split_part.sql",
+      "sha256": "7d71084b4a0889847bfb89586dbd106d9746faad93a55eb7005775932e08e543"
+    },
+    {
+      "package": "dbt",
+      "version": "1.10.5",
+      "path": "tests/generic/builtin.sql",
+      "sha256": "a7de317723f06f64e5c602c1a827eb7117c9d50360b233ef066f1fd10e5ea993"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/adapters.sql",
+      "sha256": "44043ee183edc9b2d71f58224847d37763595bfc3b09a37fd2b0a2c4d954beb0"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/catalog.sql",
+      "sha256": "cef93a7ba77b3c25c2c740017d1e748717ad4fd1f1f9be9bcc6e2935ddc0a2b4"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/columns.sql",
+      "sha256": "019e1a7538f6a0c54dcaac410b5930078199f1b9d4d7278d453c231bad4af3e7"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/incremental_helper.sql",
+      "sha256": "dabf5936546934416ff7a11dd7e451ac8d46781c354ffca7a2dce6de2a35ad74"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/materializations/external.sql",
+      "sha256": "a793525fae8172d005b4752e5e6758dc99eb25d51825f54a769d691b6c967ba8"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/materializations/hooks.sql",
+      "sha256": "72d7e5e20094bc666ce95217d594d302ddd959305634948afafe2d2b02b64560"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/materializations/incremental.sql",
+      "sha256": "2dd2bbc204898084720bb30fffdee61b717c713e42ecfabc4d6ce3615def8a37"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/materializations/table.sql",
+      "sha256": "e5ce66c79e5e895eab4261ab544c430d4df79baf83827992a9b700e28c02fdfb"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/materializations/table_function.sql",
+      "sha256": "8867823c20e3d4d13a6dff28048b5c795753ecd8202ef199afceaf7bcbeea051"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/persist_docs.sql",
+      "sha256": "45b5868433c1b0d0c075f146dd55eea45f282545542c44d4e122e636d2a55284"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/seed.sql",
+      "sha256": "dee023666ca209d507cad8bfa71d26dc526b6bd713585c53c30a7d672631e4cb"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/snapshot_helper.sql",
+      "sha256": "449688d6d20650a5ae05790396ecb22f5e2bec21b7ae3bfa4159493ae6a7f042"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/utils/any_value.sql",
+      "sha256": "28b812a81548a0c04079ecd6da98c999ed2de32c40055c52e2fe40d9a02e8bb3"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/utils/dateadd.sql",
+      "sha256": "9c6e9490809019a5052e005e2093a8960f0419907cca87674458e48cc669ac3b"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/utils/datediff.sql",
+      "sha256": "adbe2880531b307298d579e9e86df5ea584f5ee0dd050cb8b795fcddb1c5693a"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/utils/external_location.sql",
+      "sha256": "9aa279a906c86fca557bd1231d82495121e3a4863fe3fadcf079c558c8a0c3a4"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/utils/lastday.sql",
+      "sha256": "cd6b2f37816fc3516da946640960be6ec29ba43cca6b2aec6b5a8c0bb26b4388"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/utils/listagg.sql",
+      "sha256": "e189923a742847fc69e1a68d6258d819633f2ba6fe559ed8e066be0261a47759"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/utils/splitpart.sql",
+      "sha256": "45c2e9620750f9c0bb8c5ed3cee980ca5196db6c0663189c84143996c36148d4"
+    },
+    {
+      "package": "dbt_duckdb",
+      "version": "1.9.6",
+      "path": "macros/utils/upstream.sql",
+      "sha256": "af34ef7be50f002b5ce8b35c34c55a2489bc941b6d4ec0315e8d36cd3b10abcd"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/adapters.sql",
+      "sha256": "1856746caf5dd25f6f50feeb78a2ef397eb11586de687fe287d4cf7a797e475e"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/catalog.sql",
+      "sha256": "7ec1267dc5a40066fd2162e1b77e326387f0d68aa65ffd4698dc1efe498172f3"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/materializations/incremental_strategies.sql",
+      "sha256": "c8a91e964894504675f7524cb3c1e6b0901f3407d2e4e9b7e904a98fb28e3a1b"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/materializations/snapshot_merge.sql",
+      "sha256": "3ee369fe001ab30b2bec0042b84cd9ce94c8ea5643fc864b6a60abf9777126de"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/materialized_view/alter.sql",
+      "sha256": "fc66f106e1d5191168b73576bfcff8b250fe4e9cd82f00fc6cef542e82ca6e15"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/materialized_view/create.sql",
+      "sha256": "0add8ee419564493857433ef77338e1ba1d2c280b2787773140dabcb6a518843"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/materialized_view/describe.sql",
+      "sha256": "7f3ce53e8cc5f57d02a38dc0b0e223e8ce637d704891e75e0fc65a47d060b40f"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/materialized_view/drop.sql",
+      "sha256": "932b5f14fb1c7288dfb82c0a5d0a163a45b6cf89967b447114a7e1ec78b1c6db"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/materialized_view/refresh.sql",
+      "sha256": "562974aa8f65c7e1c45c73d2237d9bf8f3f1b6ddc730f921a2ebbf79715022c0"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/materialized_view/rename.sql",
+      "sha256": "948a99204fc485d295d794dba502ed18efa05a37a964740c356b7345ffcccf7d"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/table/drop.sql",
+      "sha256": "30345c5c111b52cf8f232d3d8cc54645eb3884bfa22bb2135033285c5eb5a471"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/table/rename.sql",
+      "sha256": "78e2e99dd036b69c740b531140d4ed43ae263e3bcde5f9370f3422e524f5384b"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/table/replace.sql",
+      "sha256": "1408301faf2d475394069098494166ed2a96078a7134111c38e47ed9fe8401d8"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/view/drop.sql",
+      "sha256": "d111c07641e3bbb04ef4d30d348614dfae3d9480fec7a4c913b666ccc4e02800"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/view/rename.sql",
+      "sha256": "8cf561058b7318a5e6c65dfbfb595dabeb8022e3d801006e573a430cd660a0ba"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations/view/replace.sql",
+      "sha256": "f7bfa74feb4a76c0c65dfda826e80a994ea58e0e61cd9d05f54dd132b160621c"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/relations.sql",
+      "sha256": "fa0e1143d0cca36fbed1d0f60660364b6163901196f5ba72158b0b885990974d"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/timestamps.sql",
+      "sha256": "3e8a41c67b668764353d49841ac6aee78a7a53550bbd9c3554d500e86bdfa184"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/utils/any_value.sql",
+      "sha256": "b19cc48ddea097dce4ba763293d6c58c9809ecc255fed493543c7f98e4d66410"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/utils/columns_spec_ddl.sql",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/utils/dateadd.sql",
+      "sha256": "878a37b469fa61569262e42bd4d0a604eeadbd11b57841f8f91b6d36fb3e44e8"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/utils/datediff.sql",
+      "sha256": "420b7e9a4c851654e06d0ba7e87561bf6b09738e7f6cd550ee5cd4bdf4e9c580"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/utils/last_day.sql",
+      "sha256": "22c423ca8b8bc5e57c286d4f8061fa5cf12b65d73193d0954aa0e95ba3b12532"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/utils/listagg.sql",
+      "sha256": "43a4aa6ad4f5ef64da8700074328e6cda60a0e252a9688461977e39c0960f5d0"
+    },
+    {
+      "package": "dbt_postgres",
+      "version": "1.9.1",
+      "path": "macros/utils/split_part.sql",
+      "sha256": "0b3050c7e362fcedd09a2f70c7c2b9bce90a5d817916f1c67f3d43ece33b2521"
+    }
+  ]
+}

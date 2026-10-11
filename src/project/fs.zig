@@ -4,7 +4,22 @@ const types = @import("types.zig");
 const Runtime = types.Runtime;
 
 pub fn modelNameFromPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    return resourceNameFromPath(allocator, path, ".sql");
+    return resourceNameFromPath(allocator, path, if (std.mem.endsWith(u8, path, ".py")) ".py" else ".sql");
+}
+
+pub fn discoverPythonFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, files: *std.ArrayList([]const u8)) !void {
+    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
+    defer closeLinuxFd(fd);
+    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
+    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
+    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
+        if (entry.name.len == 0 or entry.name[0] == '.' or isIgnoredResourceDirectory(entry.name)) continue;
+        const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
+        const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
+        if (entry.kind == .directory or (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs))) {
+            try discoverPythonFiles(runtime, child_abs, child_rel, files);
+        } else if ((entry.kind == .file or entry.kind == .unknown) and std.mem.endsWith(u8, entry.name, ".py")) try files.append(runtime.allocator, child_rel);
+    }
 }
 
 pub fn resourceNameFromPath(allocator: std.mem.Allocator, path: []const u8, suffix: []const u8) ![]const u8 {
@@ -155,7 +170,7 @@ pub fn discoverChildDirectories(runtime: Runtime, absolute_dir: []const u8, dire
         const child_abs = try std.fs.path.join(runtime.allocator, &.{ absolute_dir, entry.name });
         const is_dir = if (entry.kind == .directory)
             true
-        else if (entry.kind == .unknown)
+        else if (entry.kind == .unknown or entry.kind == .sym_link)
             try linuxPathIsDirectory(runtime.allocator, child_abs)
         else
             false;

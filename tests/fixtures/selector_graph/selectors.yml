@@ -8,7 +8,7 @@ selectors:
   - name: customer_union
     definition:
       union:
-        - method: name
+        - method: fqn
           value: customers
         - method: path
           value: models/orders.sql
@@ -22,8 +22,8 @@ selectors:
   - name: customer_without_staging
     definition:
       union:
-        - method: name
+        - method: fqn
           value: "*customers"
-      exclude:
-        - method: name
-          value: stg_customers
+        - exclude:
+            - method: fqn
+              value: stg_customers

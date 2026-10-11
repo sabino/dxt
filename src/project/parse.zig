@@ -52,6 +52,7 @@ const SourceDefaults = struct {
     loaded_at_field: ?[]const u8 = null,
     loaded_at_query: ?[]const u8 = null,
     freshness: ?types.FreshnessThreshold = null,
+    freshness_set: bool = false,
 };
 
 pub fn parseBool(value: []const u8) !bool {
@@ -134,6 +135,10 @@ pub fn appendGenericTestDef(allocator: std.mem.Allocator, tests: *std.ArrayList(
 pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTestDef), source: GenericTestDef) !void {
     var cloned = GenericTestDef{
         .name = source.name,
+        .arguments = try @import("config_value.zig").clone(graph.allocator, source.arguments),
+        .config_values = try @import("config_value.zig").clone(graph.allocator, source.config_values),
+        .custom_name = source.custom_name,
+        .description = source.description,
         .namespace = source.namespace,
         .column_name = source.column_name,
         .accepted_values_quote = source.accepted_values_quote,
@@ -141,7 +146,11 @@ pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTes
         .relationship_field = source.relationship_field,
         .config = source.config,
     };
-    errdefer cloned.accepted_values.deinit(graph.allocator);
+    errdefer {
+        cloned.accepted_values.deinit(graph.allocator);
+        @import("config_value.zig").deinit(graph.allocator, &cloned.arguments);
+        @import("config_value.zig").deinit(graph.allocator, &cloned.config_values);
+    }
     for (source.accepted_values.items) |value| {
         try cloned.accepted_values.append(graph.allocator, value);
     }
@@ -150,28 +159,34 @@ pub fn appendGenericTestDefClone(graph: *Graph, tests: *std.ArrayList(GenericTes
 
 pub fn applyGenericTestConfigValue(allocator: std.mem.Allocator, test_def: *GenericTestDef, key: []const u8, value: []const u8) !bool {
     if (std.mem.eql(u8, key, "where")) {
+        test_def.config.markConfigured(.where);
         test_def.config.where = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "limit")) {
         const limit_text = try dupTrimmedScalar(allocator, value);
         defer allocator.free(limit_text);
-        test_def.config.limit = std.fmt.parseUnsigned(u64, limit_text, 10) catch return error.UnsupportedYaml;
+        test_def.config.markConfigured(.limit);
+        test_def.config.limit = std.fmt.parseInt(i64, limit_text, 10) catch return error.UnsupportedYaml;
         return true;
     }
     if (std.mem.eql(u8, key, "severity")) {
+        test_def.config.markConfigured(.severity);
         test_def.config.severity = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "warn_if")) {
+        test_def.config.markConfigured(.warn_if);
         test_def.config.warn_if = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "error_if")) {
+        test_def.config.markConfigured(.error_if);
         test_def.config.error_if = try dupTrimmedScalar(allocator, value);
         return true;
     }
     if (std.mem.eql(u8, key, "store_failures")) {
+        test_def.config.markConfigured(.store_failures);
         test_def.config.store_failures = try parseBool(value);
         return true;
     }
@@ -184,7 +199,18 @@ pub fn parseMacros(runtime: types.Runtime, project_dir: []const u8, relative_pat
     try parseMacrosFromText(runtime.allocator, text, relative_path, package_name, graph);
 }
 
-pub fn parseMacrosFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+pub fn parseMacrosFromText(allocator: std.mem.Allocator, raw_text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    try parseMacroBlocksFromText(allocator, raw_text, relative_path, package_name, graph, false);
+}
+
+pub fn parseGenericTestMacros(runtime: types.Runtime, project_dir: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
+    const path = try pathJoin(runtime.allocator, &.{ project_dir, relative_path });
+    const text = try std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(4 * 1024 * 1024));
+    try parseMacroBlocksFromText(runtime.allocator, text, relative_path, package_name, graph, true);
+}
+
+fn parseMacroBlocksFromText(allocator: std.mem.Allocator, raw_text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph, generic_tests_only: bool) !void {
+    const text = std.mem.trim(u8, raw_text, " \t\r\n");
     var index: usize = 0;
     var control_depth: usize = 0;
     while (try nextJinjaBlockOutsideIgnoredSpans(text, &index)) |open| {
@@ -206,7 +232,18 @@ pub fn parseMacrosFromText(allocator: std.mem.Allocator, text: []const u8, relat
             index = close + 2;
             continue;
         }
-        var macro_tag = parseMacroOpenTag(allocator, tag, graph.validate_macro_args) catch |err| switch (err) {
+        if (generic_tests_only) {
+            inline for (.{ .{ "macro", "endmacro" }, .{ "materialization", "endmaterialization" } }) |ignored| {
+                if (std.mem.startsWith(u8, tag, ignored[0]) and tag.len > ignored[0].len and std.ascii.isWhitespace(tag[ignored[0].len])) {
+                    const end = try findEndMacroTag(text, close + 2, ignored[1]);
+                    index = end.close + 2;
+                    break;
+                }
+            }
+            if (index > open) continue;
+        }
+        const extract_arguments = graph.validate_macro_args and !generic_tests_only;
+        var macro_tag = parseMacroOpenTag(allocator, tag, extract_arguments) catch |err| switch (err) {
             error.NotMacroBlock => {
                 index = close + 2;
                 continue;
@@ -217,18 +254,28 @@ pub fn parseMacrosFromText(allocator: std.mem.Allocator, text: []const u8, relat
 
         const end = try findEndMacroTag(text, close + 2, macro_tag.end_tag);
 
-        const macro_sql = std.mem.trim(u8, text[open .. end.close + 2], " \t\r\n");
+        // Core's block extractor includes whitespace consumed by '-' on the
+        // opening/closing tags in the original macro_sql artifact.
+        var block_start = open;
+        if (text[open + 2] == '-') {
+            while (block_start > index and std.ascii.isWhitespace(text[block_start - 1])) block_start -= 1;
+        }
+        var block_end = end.close + 2;
+        if (end.close > 0 and text[end.close - 1] == '-') {
+            while (block_end < text.len and std.ascii.isWhitespace(text[block_end])) block_end += 1;
+        }
+        const macro_sql = text[block_start..block_end];
         var macro = try macroDefFromParts(allocator, package_name, macro_tag.name, relative_path, macro_sql);
         macro.signature_arguments = macro_tag.arguments;
         macro_tag.arguments = .empty;
-        if (graph.validate_macro_args) {
+        if (extract_arguments) {
             try appendMacroArgumentClones(graph, &macro.arguments, macro.signature_arguments.items);
         }
         macro.supported_languages = macro_tag.supported_languages;
         macro_tag.supported_languages = .empty;
         macro.has_supported_languages = macro_tag.has_supported_languages;
         try graph.macros.append(allocator, macro);
-        index = end.close + 2;
+        index = block_end;
     }
     if (control_depth != 0) return error.MalformedMacroBlock;
 }
@@ -565,132 +612,9 @@ fn macroDefFromParts(allocator: std.mem.Allocator, package_name: []const u8, mac
 }
 
 pub fn parseMacroPropertiesFromText(allocator: std.mem.Allocator, text: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
-    var in_macros = false;
-    var in_arguments = false;
-    var in_docs = false;
-    var in_meta = false;
-    var macros_indent: usize = 0;
-    var macro_item_indent: ?usize = null;
-    var arguments_indent: usize = 0;
-    var argument_item_indent: ?usize = null;
-    var docs_indent: usize = 0;
-    var meta_indent: usize = 0;
-    var current_macro: ?usize = null;
-    var current_argument: ?usize = null;
-
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw_line| {
-        const line = stripYamlComment(raw_line);
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0) continue;
-        const indent = leadingSpaces(line);
-
-        if (std.mem.eql(u8, trimmed, "macros:")) {
-            in_macros = true;
-            in_arguments = false;
-            in_docs = false;
-            in_meta = false;
-            macros_indent = indent;
-            macro_item_indent = null;
-            argument_item_indent = null;
-            current_macro = null;
-            current_argument = null;
-            continue;
-        }
-        if (!in_macros) continue;
-        if (indent <= macros_indent and !std.mem.eql(u8, trimmed, "macros:")) break;
-
-        if (in_arguments and indent <= arguments_indent and !std.mem.eql(u8, trimmed, "arguments:")) {
-            in_arguments = false;
-            argument_item_indent = null;
-            current_argument = null;
-        }
-        if (in_docs and indent <= docs_indent) in_docs = false;
-        if (in_meta and indent <= meta_indent) in_meta = false;
-
-        if (std.mem.startsWith(u8, trimmed, "- name:")) {
-            const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
-            if (in_arguments and current_macro != null and indent > (macro_item_indent orelse 0)) {
-                const macro_index = current_macro.?;
-                try graph.macro_properties.items[macro_index].arguments.append(allocator, .{ .name = name });
-                current_argument = graph.macro_properties.items[macro_index].arguments.items.len - 1;
-                argument_item_indent = indent;
-            } else {
-                try graph.macro_properties.append(allocator, .{ .package_name = package_name, .name = name, .patch_path = relative_path });
-                current_macro = graph.macro_properties.items.len - 1;
-                macro_item_indent = indent;
-                in_arguments = false;
-                in_docs = false;
-                in_meta = false;
-                argument_item_indent = null;
-                current_argument = null;
-            }
-            continue;
-        }
-
-        const macro_index = current_macro orelse continue;
-        if (in_docs and indent > docs_indent) {
-            const kv = splitKeyValue(trimmed) orelse return error.UnsupportedYaml;
-            try applyMacroDocsConfigKeyValue(allocator, &graph.macro_properties.items[macro_index].docs, kv);
-            continue;
-        }
-        if (in_meta and indent > meta_indent) {
-            const kv = splitKeyValue(trimmed) orelse return error.UnsupportedYaml;
-            if (std.mem.trim(u8, kv.value, " \t").len == 0) return error.UnsupportedYaml;
-            try appendMetaEntry(allocator, &graph.macro_properties.items[macro_index].meta, kv.key, try parseJsonScalar(allocator, kv.value));
-            continue;
-        }
-        if (splitKeyValue(trimmed)) |kv| {
-            if (in_arguments and current_argument != null and indent > (argument_item_indent orelse 0)) {
-                var argument = &graph.macro_properties.items[macro_index].arguments.items[current_argument.?];
-                if (std.mem.eql(u8, kv.key, "type")) {
-                    argument.type = try dupTrimmedScalar(allocator, kv.value);
-                } else if (std.mem.eql(u8, kv.key, "description")) {
-                    argument.description = try dupTrimmedScalar(allocator, kv.value);
-                } else {
-                    return error.UnsupportedYaml;
-                }
-                continue;
-            }
-
-            if (std.mem.eql(u8, kv.key, "description")) {
-                graph.macro_properties.items[macro_index].description = try dupTrimmedScalar(allocator, kv.value);
-            } else if (std.mem.eql(u8, kv.key, "arguments")) {
-                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
-                in_arguments = true;
-                in_docs = false;
-                in_meta = false;
-                arguments_indent = indent;
-                argument_item_indent = null;
-                current_argument = null;
-            } else if (std.mem.eql(u8, kv.key, "docs")) {
-                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
-                in_arguments = false;
-                in_docs = true;
-                in_meta = false;
-                docs_indent = indent;
-                graph.macro_properties.items[macro_index].docs.configured = true;
-            } else if (std.mem.eql(u8, kv.key, "meta")) {
-                if (std.mem.trim(u8, kv.value, " \t").len != 0) return error.UnsupportedYaml;
-                in_arguments = false;
-                in_docs = false;
-                in_meta = true;
-                meta_indent = indent;
-            }
-        }
-    }
-}
-
-fn applyMacroDocsConfigKeyValue(allocator: std.mem.Allocator, docs: *types.DocsConfig, kv: util.KeyValue) !void {
-    if (std.mem.eql(u8, kv.key, "show")) {
-        docs.configured = true;
-        docs.show = try parseBool(kv.value);
-    } else if (std.mem.eql(u8, kv.key, "node_color")) {
-        docs.configured = true;
-        docs.node_color = try parseDocsNodeColor(allocator, kv.value);
-    } else {
-        return error.UnsupportedYaml;
-    }
+    var document = try @import("yaml.zig").parse(allocator, text);
+    defer document.deinit();
+    try @import("macro_properties.zig").parse(allocator, document.value, relative_path, package_name, graph);
 }
 
 fn parseDocsNodeColor(allocator: std.mem.Allocator, value: []const u8) !?[]const u8 {
@@ -706,9 +630,10 @@ pub fn applyMacroProperties(graph: *Graph) !void {
             continue;
         };
         var macro = &graph.macros.items[macro_index];
+        if (macro.patch_path != null) return error.DuplicateMacroPatch;
         macro.patch_path = property.patch_path;
-        if (property.description.len != 0) macro.description = property.description;
-        if (property.docs.configured) macro.docs = property.docs;
+        macro.description = property.description;
+        macro.docs = property.docs;
         for (property.meta.items) |entry| {
             try appendMetaEntry(graph.allocator, &macro.meta, entry.key, entry.value);
         }
@@ -765,6 +690,7 @@ fn appendMacroArgumentClones(graph: *Graph, arguments: *std.ArrayList(MacroArgum
         try arguments.append(graph.allocator, .{
             .name = argument.name,
             .type = argument.type,
+            .has_type = argument.has_type,
             .description = argument.description,
         });
     }
@@ -840,14 +766,26 @@ pub fn refDepFromValue(allocator: std.mem.Allocator, value: []const u8) !RefDep 
     if (std.mem.startsWith(u8, trimmed, "ref(")) {
         const open = std.mem.indexOfScalar(u8, trimmed, '(') orelse return error.UnsupportedRef;
         const close = findMatchingParen(trimmed, open) orelse return error.UnsupportedRef;
-        const args = std.mem.trim(u8, trimmed[open + 1 .. close], " \t\r");
-        var strings = try parseLiteralArgs(allocator, args, error.UnsupportedRef);
-        defer strings.deinit(allocator);
-        if (!(strings.items.len == 1 or strings.items.len == 2)) return error.UnsupportedRef;
-        return .{
-            .package = if (strings.items.len == 2) strings.items[0] else null,
-            .name = if (strings.items.len == 2) strings.items[1] else strings.items[0],
-        };
+        if (std.mem.trim(u8, trimmed[close + 1 ..], " \t\r\n").len != 0) return error.UnsupportedRef;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const arguments = @import("expression.zig").evaluateArguments(arena.allocator(), trimmed[open + 1 .. close], null) catch return error.UnsupportedRef;
+        var names: [2][]const u8 = undefined;
+        var count: usize = 0;
+        var version: std.json.Value = .null;
+        for (arguments) |arg| {
+            if (arg.name) |key| {
+                if (version != .null or (!std.mem.eql(u8, key, "v") and !std.mem.eql(u8, key, "version"))) return error.UnsupportedRef;
+                if (arg.value != .integer and arg.value != .number and arg.value != .string) return error.UnsupportedRef;
+                version = try @import("config_value.zig").fromExpression(allocator, arg.value);
+            } else {
+                if (arg.value != .string or count >= names.len) return error.UnsupportedRef;
+                names[count] = try allocator.dupe(u8, arg.value.string);
+                count += 1;
+            }
+        }
+        if (count == 0) return error.UnsupportedRef;
+        return .{ .package = if (count == 2) names[0] else null, .name = names[count - 1], .version = version };
     }
     return .{ .package = null, .name = try dupTrimmedScalar(allocator, trimmed) };
 }
@@ -1145,6 +1083,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                     .loaded_at_field = table_defaults.loaded_at_field,
                     .loaded_at_query = table_defaults.loaded_at_query,
                     .freshness = table_defaults.freshness,
+                    .freshness_set = table_defaults.freshness_set,
                 });
                 current_table_index = graph.sources.items.len - 1;
                 in_columns = false;
@@ -1324,6 +1263,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 active_values_index = null;
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "freshness")) {
+                source.freshness_set = true;
                 try beginFreshnessBlock(&source.freshness, kv.value);
                 freshness_scope = if (source.freshness == null and isYamlNull(kv.value)) .none else .table;
                 freshness_indent = indent;
@@ -1409,6 +1349,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
                 freshness_scope = .none;
                 freshness_time_key = null;
             } else if (std.mem.eql(u8, kv.key, "freshness")) {
+                source_defaults.freshness_set = true;
                 try beginFreshnessBlock(&source_defaults.freshness, kv.value);
                 freshness_scope = if (source_defaults.freshness == null and isYamlNull(kv.value)) .none else .source;
                 freshness_indent = indent;
@@ -1426,305 +1367,7 @@ pub fn parseSourcesFromText(allocator: std.mem.Allocator, text: []const u8, rela
 }
 
 pub fn parseUnitTestsFromText(allocator: std.mem.Allocator, text: []const u8, resource_root: []const u8, relative_path: []const u8, package_name: []const u8, graph: *Graph) !void {
-    var in_unit_tests = false;
-    var section: UnitTestSection = .none;
-    var rows_target: UnitTestRowsTarget = .none;
-    var unit_tests_indent: usize = 0;
-    var unit_test_item_indent: ?usize = null;
-    var section_indent: usize = 0;
-    var given_item_indent: usize = 0;
-    var rows_indent: usize = 0;
-    var active_row_indent: usize = 0;
-    var current_unit_test: ?usize = null;
-    var current_given: ?usize = null;
-    var active_row: ?usize = null;
-
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw_line| {
-        const line = stripYamlComment(raw_line);
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0) continue;
-        const indent = leadingSpaces(line);
-
-        if (std.mem.eql(u8, trimmed, "unit_tests:")) {
-            in_unit_tests = true;
-            section = .none;
-            rows_target = .none;
-            unit_tests_indent = indent;
-            unit_test_item_indent = null;
-            current_unit_test = null;
-            current_given = null;
-            active_row = null;
-            continue;
-        }
-        if (!in_unit_tests) continue;
-        if (indent <= unit_tests_indent and !std.mem.eql(u8, trimmed, "unit_tests:")) {
-            in_unit_tests = false;
-            section = .none;
-            rows_target = .none;
-            current_unit_test = null;
-            current_given = null;
-            active_row = null;
-            continue;
-        }
-
-        if (rows_target != .none) {
-            if (indent <= rows_indent and !std.mem.startsWith(u8, trimmed, "- ")) {
-                rows_target = .none;
-                active_row = null;
-            } else if (indent > rows_indent) {
-                var fixture = try currentUnitTestRowsFixture(graph, current_unit_test, current_given, rows_target);
-                if (std.mem.startsWith(u8, trimmed, "- ")) {
-                    active_row = try appendUnitTestRow(allocator, fixture, trimmed[2..], indent);
-                    active_row_indent = indent;
-                    continue;
-                }
-                if (active_row) |row_index| {
-                    if (indent > active_row_indent) {
-                        if (std.mem.eql(u8, trimmed, "}")) {
-                            active_row = null;
-                            continue;
-                        }
-                        const closes = std.mem.endsWith(u8, trimmed, "}");
-                        const row_line = if (closes) std.mem.trim(u8, trimmed[0 .. trimmed.len - 1], " \t\r,") else trimmed;
-                        try appendUnitTestRowEntry(allocator, &fixture.rows.items[row_index], row_line);
-                        if (closes) active_row = null;
-                        continue;
-                    }
-                    active_row = null;
-                }
-            }
-        }
-
-        if (section != .none and indent <= section_indent and !isUnitTestSectionKey(trimmed)) {
-            section = .none;
-            current_given = null;
-        }
-
-        if (std.mem.startsWith(u8, trimmed, "- name:")) {
-            if (unit_test_item_indent == null or indent == unit_test_item_indent.?) {
-                unit_test_item_indent = indent;
-                section = .none;
-                rows_target = .none;
-                current_given = null;
-                active_row = null;
-                const name = try dupTrimmedScalar(allocator, trimmed["- name:".len..]);
-                try graph.unit_tests.append(allocator, .{
-                    .package_name = package_name,
-                    .name = name,
-                    .path = relativeUnderResourcePath(relative_path, resource_root),
-                    .original_file_path = relative_path,
-                });
-                current_unit_test = graph.unit_tests.items.len - 1;
-                continue;
-            }
-        }
-
-        const unit_test_index = current_unit_test orelse continue;
-        if (unit_test_item_indent) |item_indent| {
-            if (indent <= item_indent and !std.mem.startsWith(u8, trimmed, "- name:")) {
-                section = .none;
-                rows_target = .none;
-                current_given = null;
-                active_row = null;
-            }
-        }
-
-        if (section == .given and std.mem.startsWith(u8, trimmed, "- input:") and indent > section_indent) {
-            const input = try dupTrimmedScalar(allocator, trimmed["- input:".len..]);
-            try graph.unit_tests.items[unit_test_index].given.append(allocator, .{ .input = input });
-            current_given = graph.unit_tests.items[unit_test_index].given.items.len - 1;
-            given_item_indent = indent;
-            rows_target = .none;
-            active_row = null;
-            continue;
-        }
-
-        const kv = splitKeyValue(trimmed) orelse continue;
-        if (section == .given and current_given != null and indent > given_item_indent) {
-            const fixture = &graph.unit_tests.items[unit_test_index].given.items[current_given.?];
-            try applyUnitTestFixtureKeyValue(allocator, fixture, kv, &rows_target, &rows_indent, .given, indent);
-            active_row = null;
-            continue;
-        }
-        if (section == .expect and indent > section_indent) {
-            const fixture = &graph.unit_tests.items[unit_test_index].expect;
-            try applyUnitTestFixtureKeyValue(allocator, fixture, kv, &rows_target, &rows_indent, .expect, indent);
-            active_row = null;
-            continue;
-        }
-        if (section == .config and indent > section_indent) {
-            if (std.mem.eql(u8, kv.key, "enabled")) {
-                graph.unit_tests.items[unit_test_index].enabled = try parseBool(kv.value);
-            } else if (std.mem.eql(u8, kv.key, "tags")) {
-                try parseInlineStringList(allocator, kv.value, &graph.unit_tests.items[unit_test_index].tags);
-                sortStrings(graph.unit_tests.items[unit_test_index].tags.items);
-            } else if (std.mem.eql(u8, kv.key, "meta")) {
-                if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
-            }
-            continue;
-        }
-
-        if (indent <= (unit_test_item_indent orelse 0)) continue;
-        if (std.mem.eql(u8, kv.key, "model")) {
-            graph.unit_tests.items[unit_test_index].model = try dupTrimmedScalar(allocator, kv.value);
-            try ensureUnitTestUniqueId(allocator, &graph.unit_tests.items[unit_test_index]);
-        } else if (std.mem.eql(u8, kv.key, "description")) {
-            graph.unit_tests.items[unit_test_index].description = try dupTrimmedScalar(allocator, kv.value);
-        } else if (std.mem.eql(u8, kv.key, "given")) {
-            if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
-            section = .given;
-            section_indent = indent;
-            rows_target = .none;
-            current_given = null;
-        } else if (std.mem.eql(u8, kv.key, "expect")) {
-            if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
-            section = .expect;
-            section_indent = indent;
-            rows_target = .none;
-            current_given = null;
-        } else if (std.mem.eql(u8, kv.key, "config")) {
-            if (std.mem.trim(u8, kv.value, " \t\r").len != 0) return error.UnsupportedYaml;
-            section = .config;
-            section_indent = indent;
-            rows_target = .none;
-            current_given = null;
-        } else if (std.mem.eql(u8, kv.key, "overrides") or std.mem.eql(u8, kv.key, "versions")) {
-            return error.UnsupportedYaml;
-        }
-    }
-
-    for (graph.unit_tests.items) |*unit_test| {
-        try ensureUnitTestUniqueId(allocator, unit_test);
-        if (unit_test.model.len == 0 or unit_test.given.items.len == 0) return error.UnsupportedYaml;
-        for (unit_test.given.items) |given| {
-            if (given.input == null) return error.UnsupportedYaml;
-        }
-        if (!unit_test.expect.rows_set and unit_test.expect.fixture == null) return error.UnsupportedYaml;
-    }
-}
-
-fn isUnitTestSectionKey(trimmed: []const u8) bool {
-    return std.mem.eql(u8, trimmed, "given:") or std.mem.eql(u8, trimmed, "expect:") or std.mem.eql(u8, trimmed, "config:");
-}
-
-fn ensureUnitTestUniqueId(allocator: std.mem.Allocator, unit_test: *types.UnitTestDef) !void {
-    if (unit_test.unique_id.len != 0 or unit_test.model.len == 0) return;
-    unit_test.unique_id = try std.fmt.allocPrint(allocator, "unit_test.{s}.{s}.{s}", .{ unit_test.package_name, unit_test.model, unit_test.name });
-}
-
-fn currentUnitTestRowsFixture(graph: *Graph, current_unit_test: ?usize, current_given: ?usize, target: UnitTestRowsTarget) !*UnitTestFixture {
-    const unit_test_index = current_unit_test orelse return error.UnsupportedYaml;
-    if (target == .expect) return &graph.unit_tests.items[unit_test_index].expect;
-    const given_index = current_given orelse return error.UnsupportedYaml;
-    return &graph.unit_tests.items[unit_test_index].given.items[given_index];
-}
-
-fn applyUnitTestFixtureKeyValue(
-    allocator: std.mem.Allocator,
-    fixture: *UnitTestFixture,
-    kv: KeyValue,
-    rows_target: *UnitTestRowsTarget,
-    rows_indent: *usize,
-    target: UnitTestRowsTarget,
-    indent: usize,
-) !void {
-    if (std.mem.eql(u8, kv.key, "rows")) {
-        try beginUnitTestRows(allocator, fixture, kv.value, rows_target, rows_indent, target, indent);
-    } else if (std.mem.eql(u8, kv.key, "format")) {
-        const format = try dupTrimmedScalar(allocator, kv.value);
-        if (!std.mem.eql(u8, format, "dict") and !std.mem.eql(u8, format, "csv") and !std.mem.eql(u8, format, "sql")) return error.UnsupportedYaml;
-        fixture.format = format;
-        rows_target.* = .none;
-    } else if (std.mem.eql(u8, kv.key, "fixture")) {
-        fixture.fixture = if (isYamlNull(kv.value)) null else try dupTrimmedScalar(allocator, kv.value);
-        rows_target.* = .none;
-    }
-}
-
-fn beginUnitTestRows(
-    allocator: std.mem.Allocator,
-    fixture: *UnitTestFixture,
-    raw_value: []const u8,
-    rows_target: *UnitTestRowsTarget,
-    rows_indent: *usize,
-    target: UnitTestRowsTarget,
-    indent: usize,
-) !void {
-    const value = std.mem.trim(u8, raw_value, " \t\r");
-    fixture.rows_set = true;
-    if (value.len == 0) {
-        rows_target.* = target;
-        rows_indent.* = indent;
-        return;
-    }
-    rows_target.* = .none;
-    if (std.mem.eql(u8, value, "[]")) return;
-    if (std.mem.eql(u8, value, "|") or std.mem.eql(u8, value, ">")) return error.UnsupportedYaml;
-    if (std.mem.startsWith(u8, value, "{")) {
-        _ = try appendUnitTestRow(allocator, fixture, value, indent);
-        return;
-    }
-    return error.UnsupportedYaml;
-}
-
-fn appendUnitTestRow(allocator: std.mem.Allocator, fixture: *UnitTestFixture, raw_value: []const u8, indent: usize) !usize {
-    _ = indent;
-    var row = UnitTestRow{};
-    errdefer row.entries.deinit(allocator);
-    const value = std.mem.trim(u8, raw_value, " \t\r");
-    if (value.len != 0 and !std.mem.eql(u8, value, "{")) {
-        if (std.mem.startsWith(u8, value, "{")) {
-            try parseInlineUnitTestRow(allocator, &row, value);
-        } else {
-            try appendUnitTestRowEntry(allocator, &row, value);
-        }
-    }
-    try fixture.rows.append(allocator, row);
-    return fixture.rows.items.len - 1;
-}
-
-fn parseInlineUnitTestRow(allocator: std.mem.Allocator, row: *UnitTestRow, raw_value: []const u8) !void {
-    var value = std.mem.trim(u8, raw_value, " \t\r");
-    if (value.len < 2 or value[0] != '{' or value[value.len - 1] != '}') return error.UnsupportedYaml;
-    value = std.mem.trim(u8, value[1 .. value.len - 1], " \t\r");
-    var start: usize = 0;
-    while (start < value.len) {
-        const comma = findUnitTestRowComma(value, start) orelse value.len;
-        const piece = std.mem.trim(u8, value[start..comma], " \t\r");
-        if (piece.len != 0) try appendUnitTestRowEntry(allocator, row, piece);
-        start = comma + 1;
-    }
-}
-
-fn findUnitTestRowComma(value: []const u8, start: usize) ?usize {
-    var index = start;
-    var quote: ?u8 = null;
-    while (index < value.len) : (index += 1) {
-        const byte = value[index];
-        if (quote) |q| {
-            if (byte == '\\') {
-                index += 1;
-                continue;
-            }
-            if (byte == q) quote = null;
-            continue;
-        }
-        if (byte == '"' or byte == '\'') {
-            quote = byte;
-        } else if (byte == ',') {
-            return index;
-        }
-    }
-    return null;
-}
-
-fn appendUnitTestRowEntry(allocator: std.mem.Allocator, row: *UnitTestRow, raw_entry: []const u8) !void {
-    const trimmed = std.mem.trim(u8, raw_entry, " \t\r,");
-    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "}")) return;
-    const kv = splitKeyValue(trimmed) orelse return error.UnsupportedYaml;
-    const value = std.mem.trim(u8, kv.value, " \t\r,");
-    try row.entries.append(allocator, .{ .key = try dupTrimmedScalar(allocator, kv.key), .value = try parseJsonScalar(allocator, value) });
+    try @import("unit_yaml.zig").parse(allocator, text, resource_root, relative_path, package_name, graph);
 }
 
 fn currentSourceGenericTestDef(source: *types.SourceDef, current_column: ?usize, target: SourceTestTarget, test_index: usize) !*GenericTestDef {
@@ -1820,6 +1463,7 @@ fn applyProjectSourceDefaults(allocator: std.mem.Allocator, graph: *const Graph,
             defaults.loaded_at_query = config.loaded_at_query;
         }
         if (config.freshness_set) {
+            defaults.freshness_set = true;
             mergeProjectFreshness(&defaults.freshness, config.freshness);
         }
     }
@@ -2055,6 +1699,7 @@ pub const GenericTestNames = struct {
 };
 
 pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: GenericTestDef, model_name: []const u8, column_name: ?[]const u8) !GenericTestNames {
+    if (test_def.custom_name) |name| return .{ .full = try allocator.dupe(u8, name), .compiled = try allocator.dupe(u8, name) };
     var clean_args: std.ArrayList([]const u8) = .empty;
     defer {
         for (clean_args.items) |arg| allocator.free(arg);
@@ -2068,16 +1713,36 @@ pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: Generi
     defer if (test_def.namespace != null) allocator.free(synthetic_name);
 
     const argument_name = if (std.mem.startsWith(u8, test_def.name, "source_")) test_def.name["source_".len..] else test_def.name;
-    if (column_name) |column| try clean_args.append(allocator, try cleanTestNamePart(allocator, column));
-    if (std.mem.eql(u8, argument_name, "relationships")) {
-        try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_field));
-        try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_to));
-    } else if (std.mem.eql(u8, argument_name, "accepted_values")) {
-        if (test_def.accepted_values_quote) |quote| {
-            try clean_args.append(allocator, try cleanTestNamePart(allocator, if (quote) "True" else "False"));
+    if (test_def.arguments == .object) {
+        const metadata = @import("test_metadata.zig");
+        var kwargs = try metadata.arguments(allocator, test_def.arguments, null, column_name);
+        defer @import("config_value.zig").deinit(allocator, &kwargs);
+        const keys = try metadata.sortedKeys(allocator, kwargs.object);
+        defer allocator.free(keys);
+        for (keys) |key| {
+            if (std.mem.eql(u8, key, "model")) continue;
+            const value = kwargs.object.get(key).?;
+            switch (value) {
+                .array => |array| for (array.items) |item| try appendTypedTestNamePart(allocator, &clean_args, item),
+                .object => |object| {
+                    var iterator = object.iterator();
+                    while (iterator.next()) |entry| try appendTypedTestNamePart(allocator, &clean_args, entry.value_ptr.*);
+                },
+                else => try appendTypedTestNamePart(allocator, &clean_args, value),
+            }
         }
-        for (test_def.accepted_values.items) |value| {
-            try clean_args.append(allocator, try cleanTestNamePart(allocator, value));
+    } else {
+        if (column_name) |column| try clean_args.append(allocator, try cleanTestNamePart(allocator, column));
+        if (std.mem.eql(u8, argument_name, "relationships")) {
+            try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_field));
+            try clean_args.append(allocator, try cleanTestNamePart(allocator, test_def.relationship_to));
+        } else if (std.mem.eql(u8, argument_name, "accepted_values")) {
+            if (test_def.accepted_values_quote) |quote| {
+                try clean_args.append(allocator, try cleanTestNamePart(allocator, if (quote) "True" else "False"));
+            }
+            for (test_def.accepted_values.items) |value| {
+                try clean_args.append(allocator, try cleanTestNamePart(allocator, value));
+            }
         }
     }
 
@@ -2097,6 +1762,12 @@ pub fn synthesizeGenericTestNames(allocator: std.mem.Allocator, test_def: Generi
     return .{ .full = full, .compiled = compiled };
 }
 
+fn appendTypedTestNamePart(allocator: std.mem.Allocator, parts: *std.ArrayList([]const u8), value: std.json.Value) !void {
+    const text = try @import("test_metadata.zig").scalarText(allocator, value);
+    defer allocator.free(text);
+    try parts.append(allocator, try cleanTestNamePart(allocator, text));
+}
+
 pub fn genericTestUniqueId(allocator: std.mem.Allocator, package_name: []const u8, name: []const u8, test_def: GenericTestDef, model_name: []const u8, column_name: ?[]const u8) ![]const u8 {
     const model_kwarg = try std.fmt.allocPrint(allocator, "{{{{ get_where_subquery(ref('{s}')) }}}}", .{model_name});
     defer allocator.free(model_kwarg);
@@ -2114,6 +1785,17 @@ pub fn genericTestUniqueIdForModelKwarg(allocator: std.mem.Allocator, package_na
 }
 
 fn genericTestMetadataRepr(allocator: std.mem.Allocator, test_def: GenericTestDef, model_kwarg: []const u8, column_name: ?[]const u8) ![]const u8 {
+    if (test_def.arguments == .object) {
+        const metadata = @import("test_metadata.zig");
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        const temporary = arena.allocator();
+        var value = std.json.Value{ .object = .empty };
+        try value.object.put(temporary, "kwargs", try metadata.arguments(temporary, test_def.arguments, model_kwarg, column_name));
+        try value.object.put(temporary, "name", .{ .string = test_def.name });
+        try value.object.put(temporary, "namespace", if (test_def.namespace) |namespace| .{ .string = namespace } else .null);
+        return try metadata.hashableRepr(allocator, value);
+    }
     const namespace = test_def.namespace orelse "None";
     if (std.mem.eql(u8, test_def.name, "accepted_values")) {
         const values = try pythonReprStringList(allocator, test_def.accepted_values.items);
@@ -2332,7 +2014,7 @@ test "applyGenericTestConfigValue parses supported generic test config scalars" 
     try std.testing.expect(!try applyGenericTestConfigValue(allocator, &test_def, "store_failures_as", "table"));
 
     try std.testing.expectEqualStrings("customer_id > 0", test_def.config.where.?);
-    try std.testing.expectEqual(@as(u64, 2), test_def.config.limit.?);
+    try std.testing.expectEqual(@as(i64, 2), test_def.config.limit.?);
     try std.testing.expectEqualStrings("warn", test_def.config.severity);
     try std.testing.expectEqualStrings("> 0", test_def.config.warn_if);
     try std.testing.expectEqualStrings("> 10", test_def.config.error_if);
@@ -2369,6 +2051,26 @@ test "parseMacrosFromText extracts top-level macro blocks" {
     );
     try std.testing.expectEqual(@as(usize, 0), graph.macros.items[0].arguments.items.len);
     try std.testing.expectEqual(@as(usize, 0), graph.macros.items[0].signature_arguments.items.len);
+}
+
+test "generic test directories discover only test blocks and retain their original paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var graph = Graph{ .allocator = allocator, .project_name = "demo", .validate_macro_args = true };
+    defer graph.deinit();
+    const sql =
+        \\{% macro ignored(model) %}{% if true %}ignored{% endif %}{% endmacro %}
+        \\{% test positive(model, column_name) %}select * from {{ model }} where {{ column_name }} < 0{% endtest %}
+        \\{% materialization ignored, default %}ignored{% endmaterialization %}
+    ;
+    try parseMacroBlocksFromText(allocator, sql, "data_tests/generic/nested/positive.sql", "demo", &graph, true);
+    try std.testing.expectEqual(@as(usize, 1), graph.macros.items.len);
+    const macro = graph.macros.items[0];
+    try std.testing.expectEqualStrings("macro.demo.test_positive", macro.unique_id);
+    try std.testing.expectEqualStrings("data_tests/generic/nested/positive.sql", macro.original_file_path);
+    try std.testing.expectEqualStrings("{% test positive(model, column_name) %}select * from {{ model }} where {{ column_name }} < 0{% endtest %}", macro.macro_sql);
+    try std.testing.expectEqual(@as(usize, 0), macro.arguments.items.len);
 }
 
 test "parseMacrosFromText extracts macro signature arguments when enabled" {
@@ -2734,7 +2436,7 @@ test "parseMacroPropertiesFromText records descriptions and arguments" {
     try std.testing.expect(graph.macro_properties.items[1].docs.node_color == null);
 }
 
-test "parseMacroPropertiesFromText rejects nested macro meta" {
+test "parseMacroPropertiesFromText retains nested macro meta" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2751,10 +2453,10 @@ test "parseMacroPropertiesFromText rejects nested macro meta" {
         \\        team: analytics
     ;
 
-    try std.testing.expectError(
-        error.UnsupportedYaml,
-        parseMacroPropertiesFromText(allocator, yaml, "macros/schema.yml", "demo", &graph),
-    );
+    try parseMacroPropertiesFromText(allocator, yaml, "macros/schema.yml", "demo", &graph);
+    const owner = graph.macro_properties.items[0].meta.items[0].value;
+    try std.testing.expectEqual(.json, owner.kind);
+    try std.testing.expectEqualStrings("{\"team\":\"analytics\"}", owner.text);
 }
 
 test "applyMacroProperties applies descriptions patch paths and replaces arguments" {
@@ -3545,8 +3247,8 @@ test "parseUnitTestsFromText records dict fixtures and config" {
     try std.testing.expectEqualStrings("schema.yml", unit_test.path);
     try std.testing.expectEqualStrings("verifies item flags", unit_test.description);
     try std.testing.expectEqual(@as(usize, 2), unit_test.tags.items.len);
-    try std.testing.expectEqualStrings("marts", unit_test.tags.items[0]);
-    try std.testing.expectEqualStrings("unit", unit_test.tags.items[1]);
+    try std.testing.expectEqualStrings("unit", unit_test.tags.items[0]);
+    try std.testing.expectEqualStrings("marts", unit_test.tags.items[1]);
     try std.testing.expectEqual(@as(usize, 1), unit_test.given.items.len);
     try std.testing.expectEqualStrings("ref('order_items')", unit_test.given.items[0].input.?);
     try std.testing.expectEqual(@as(usize, 2), unit_test.given.items[0].rows.items.len);

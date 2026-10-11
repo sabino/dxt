@@ -36,3 +36,5 @@ dbt_internal_packages/
 !tests/fixtures/missing_package_macro_in_macro/dbt_packages/**
 
 .agent/runs/
+.dxt-deps/
+.dxt/

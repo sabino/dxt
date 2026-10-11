@@ -6,6 +6,7 @@ pub const CatalogColumn = struct {
     name: []const u8,
     data_type: []const u8,
     index: u64,
+    comment: ?[]const u8 = null,
 };
 
 pub const CatalogEntry = struct {
@@ -14,6 +15,8 @@ pub const CatalogEntry = struct {
     schema: []const u8,
     name: []const u8,
     relation_type: []const u8,
+    comment: ?[]const u8 = null,
+    owner: ?[]const u8 = null,
     columns: std.ArrayList(CatalogColumn) = .empty,
 };
 
@@ -34,9 +37,12 @@ pub fn deinitEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Catal
         allocator.free(entry.schema);
         allocator.free(entry.name);
         allocator.free(entry.relation_type);
+        if (entry.comment) |comment| allocator.free(comment);
+        if (entry.owner) |owner| allocator.free(owner);
         for (entry.columns.items) |column| {
             allocator.free(column.name);
             allocator.free(column.data_type);
+            if (column.comment) |comment| allocator.free(comment);
         }
         entry.columns.deinit(allocator);
     }
@@ -44,22 +50,34 @@ pub fn deinitEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(Catal
 }
 
 pub fn renderCatalog(allocator: std.mem.Allocator, nodes: []const CatalogEntry, sources: []const CatalogEntry) ![]const u8 {
+    return renderCatalogWithInvocation(allocator, nodes, sources, null);
+}
+
+pub fn renderCatalogWithInvocation(allocator: std.mem.Allocator, nodes: []const CatalogEntry, sources: []const CatalogEntry, metadata: ?*const @import("invocation.zig").Metadata) ![]const u8 {
+    return renderCatalogWithInvocationAndErrors(allocator, nodes, sources, metadata, null);
+}
+
+pub fn renderCatalogWithInvocationAndErrors(allocator: std.mem.Allocator, nodes: []const CatalogEntry, sources: []const CatalogEntry, metadata: ?*const @import("invocation.zig").Metadata, errors: ?[]const []const u8) ![]const u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
 
-    try writer.writeAll("{\n  \"metadata\": {\"dbt_schema_version\": ");
-    try json.string(writer, "https://schemas.getdbt.com/dbt/catalog/v1.json");
-    try writer.writeAll(", \"dbt_version\": ");
-    try json.string(writer, "0.0.0");
-    try writer.writeAll(", \"generated_at\": ");
-    try json.string(writer, "1970-01-01T00:00:00Z");
-    try writer.writeAll(", \"invocation_id\": null, \"invocation_started_at\": null, \"env\": {}");
+    try writer.writeAll("{\n  \"metadata\": {");
+    try @import("invocation.zig").writeFields(writer, "https://schemas.getdbt.com/dbt/catalog/v1.json", metadata);
     try writer.writeAll("},\n  \"nodes\": {");
     try writeCatalogEntryMap(writer, nodes);
     try writer.writeAll("},\n  \"sources\": {");
     try writeCatalogEntryMap(writer, sources);
-    try writer.writeAll("},\n  \"errors\": null\n}\n");
+    try writer.writeAll("},\n  \"errors\": ");
+    if (errors) |messages| {
+        try writer.writeByte('[');
+        for (messages, 0..) |message, index| {
+            if (index != 0) try writer.writeByte(',');
+            try json.string(writer, message);
+        }
+        try writer.writeByte(']');
+    } else try writer.writeAll("null");
+    try writer.writeAll("\n}\n");
     return try out.toOwnedSlice();
 }
 
@@ -80,7 +98,11 @@ fn writeCatalogEntryMap(writer: *Io.Writer, entries: []const CatalogEntry) !void
         } else {
             try writer.writeAll("null");
         }
-        try writer.writeAll(", \"comment\": null, \"owner\": null}, \"columns\": {");
+        try writer.writeAll(", \"comment\": ");
+        try writeNullableString(writer, entry.comment);
+        try writer.writeAll(", \"owner\": ");
+        try writeNullableString(writer, entry.owner);
+        try writer.writeAll("}, \"columns\": {");
         for (entry.columns.items, 0..) |column, column_index| {
             if (column_index != 0) try writer.writeAll(",");
             try writer.writeAll("\n      ");
@@ -91,7 +113,9 @@ fn writeCatalogEntryMap(writer: *Io.Writer, entries: []const CatalogEntry) !void
             try writer.print("{d}", .{column.index});
             try writer.writeAll(", \"name\": ");
             try json.string(writer, column.name);
-            try writer.writeAll(", \"comment\": null}");
+            try writer.writeAll(", \"comment\": ");
+            try writeNullableString(writer, column.comment);
+            try writer.writeByte('}');
         }
         if (entry.columns.items.len != 0) try writer.writeAll("\n    ");
         try writer.writeAll("}, \"stats\": {\"has_stats\": {\"id\": \"has_stats\", \"label\": \"Has Stats?\", \"value\": false, \"description\": \"Indicates whether there are statistics for this table\", \"include\": false}}, \"unique_id\": ");
@@ -101,12 +125,16 @@ fn writeCatalogEntryMap(writer: *Io.Writer, entries: []const CatalogEntry) !void
     if (entries.len != 0) try writer.writeAll("\n  ");
 }
 
+fn writeNullableString(writer: *Io.Writer, value: ?[]const u8) !void {
+    if (value) |text| try json.string(writer, text) else try writer.writeAll("null");
+}
+
 test "catalog writer emits deterministic empty dbt catalog shape" {
     const rendered = try renderCatalog(std.testing.allocator, &.{}, &.{});
     defer std.testing.allocator.free(rendered);
 
     try std.testing.expectEqualStrings(
-        "{\n  \"metadata\": {\"dbt_schema_version\": \"https://schemas.getdbt.com/dbt/catalog/v1.json\", \"dbt_version\": \"0.0.0\", \"generated_at\": \"1970-01-01T00:00:00Z\", \"invocation_id\": null, \"invocation_started_at\": null, \"env\": {}},\n  \"nodes\": {},\n  \"sources\": {},\n  \"errors\": null\n}\n",
+        "{\n  \"metadata\": {\"dbt_schema_version\":\"https://schemas.getdbt.com/dbt/catalog/v1.json\",\"dbt_version\":\"0.0.0\",\"generated_at\":\"1970-01-01T00:00:00Z\",\"invocation_id\":null,\"invocation_started_at\":null,\"env\":{}},\n  \"nodes\": {},\n  \"sources\": {},\n  \"errors\": null\n}\n",
         rendered,
     );
 
@@ -117,6 +145,30 @@ test "catalog writer emits deterministic empty dbt catalog shape" {
     try std.testing.expect(root.get("nodes").?.object.count() == 0);
     try std.testing.expect(root.get("sources").?.object.count() == 0);
     try std.testing.expect(root.get("errors").? == .null);
+}
+
+test "catalog error arrays escape authored messages and clean up allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, catalogErrorAllocationProof, .{});
+}
+
+fn catalogErrorAllocationProof(allocator: std.mem.Allocator) !void {
+    const messages = [_][]const u8{ "catalog \"rejected\"\n\t\\ café🙂\x01", "second error" };
+    const rendered = renderCatalogWithInvocationAndErrors(allocator, &.{}, &.{}, null, &messages) catch |err| switch (err) {
+        // The allocating writer has no I/O; WriteFailed here is allocator OOM.
+        error.WriteFailed => return error.OutOfMemory,
+        else => return err,
+    };
+    defer allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqual(@as(usize, 4), root.count());
+    try std.testing.expectEqualStrings("https://schemas.getdbt.com/dbt/catalog/v1.json", root.get("metadata").?.object.get("dbt_schema_version").?.string);
+    try std.testing.expectEqual(@as(usize, 0), root.get("nodes").?.object.count());
+    try std.testing.expectEqual(@as(usize, 0), root.get("sources").?.object.count());
+    const errors = root.get("errors").?.array.items;
+    try std.testing.expectEqual(messages.len, errors.len);
+    for (messages, errors) |expected, actual| try std.testing.expectEqualStrings(expected, actual.string);
 }
 
 test "catalog writer emits selected relation metadata and ordered columns" {

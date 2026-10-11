@@ -36,25 +36,41 @@ const ResolvedFixtureInput = struct {
 
 pub fn validateUnitTest(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !void {
     _ = try modelNodeForUnitTest(graph, unit_test);
-    try validateOutputFixture(unit_test.expect);
+    try validateRuntimeFixture(unit_test.expect);
     for (unit_test.given.items) |fixture| {
-        try validateInputFixture(fixture);
-        var resolved = try resolveFixtureInput(allocator, graph, unit_test, fixture.input.?);
-        resolved.deinit(allocator);
+        try validateRuntimeFixture(fixture);
+        _ = try fixtureUniqueId(allocator, graph, unit_test, fixture.input orelse return error.InvalidUnitTestFixture);
     }
+}
+pub fn fixtureUniqueId(allocator: std.mem.Allocator, graph: *const Graph, unit: *const UnitTestDef, input: []const u8) ![]const u8 {
+    const trimmed = std.mem.trim(u8, input, " \t\r\n");
+    if (std.mem.eql(u8, trimmed, "this")) return (try modelNodeForUnitTest(graph, unit)).unique_id;
+    if (std.mem.startsWith(u8, trimmed, "source(")) return try project_resolve.resolveSourceDependency(graph, unit.package_name, try project_parse.sourceDepFromValue(allocator, trimmed));
+    return try project_resolve.resolveRefDependency(graph, unit.package_name, try project_parse.refDepFromValue(allocator, trimmed));
+}
+fn validateRuntimeFixture(fixture: UnitTestFixture) !void {
+    if (!fixture.rows_set) return error.InvalidUnitTestFixture;
+    if (std.mem.eql(u8, fixture.format, "sql")) {
+        if (fixture.rows_string == null) return error.InvalidUnitTestFixture;
+    } else if (!std.mem.eql(u8, fixture.format, "dict") and !std.mem.eql(u8, fixture.format, "csv")) return error.InvalidUnitTestFixture;
 }
 
 pub fn renderUnitTestSql(allocator: std.mem.Allocator, graph: *const Graph, unit_test: *const UnitTestDef) !PlannedUnitTestSql {
     try validateUnitTest(allocator, graph, unit_test);
-    const model_node = try modelNodeForUnitTest(graph, unit_test);
+    // All fixture relations belong to the isolated unit connection. Preserve
+    // the target context used by macros while rendering local relation names.
+    var fixture_graph = graph.*;
+    fixture_graph.unit_fixture_relations = true;
+    fixture_graph.deferred_relations = .empty;
+    const model_node = try modelNodeForUnitTest(&fixture_graph, unit_test);
 
-    var compiled_model = try compiler.compileModelWithInjectedCtes(allocator, graph, model_node);
+    var compiled_model = try compiler.compileModelWithInjectedCtes(allocator, &fixture_graph, model_node);
     defer compiled_model.deinit(allocator);
 
     var setup: std.ArrayList(u8) = .empty;
     defer setup.deinit(allocator);
     for (unit_test.given.items) |fixture| {
-        var resolved = try resolveFixtureInput(allocator, graph, unit_test, fixture.input.?);
+        var resolved = try resolveFixtureInput(allocator, &fixture_graph, unit_test, fixture.input.?);
         defer resolved.deinit(allocator);
         const fixture_sql = try renderInputFixtureSql(allocator, resolved, fixture);
         defer allocator.free(fixture_sql);
@@ -104,13 +120,11 @@ fn validateRowsFixture(fixture: UnitTestFixture) !void {
     }
 }
 
-fn modelNodeForUnitTest(graph: *const Graph, unit_test: *const UnitTestDef) !*const Node {
-    const unique_id = try std.fmt.allocPrint(graph.allocator, "model.{s}.{s}", .{ unit_test.package_name, unit_test.model });
-    defer graph.allocator.free(unique_id);
+pub fn modelNodeForUnitTest(graph: *const Graph, unit_test: *const UnitTestDef) !*const Node {
+    const unique_id = project_resolve.resolveRefDependency(graph, unit_test.package_name, .{ .package = unit_test.package_name, .name = unit_test.model, .version = unit_test.version }) catch return error.UnresolvedUnitTestModel;
     for (graph.nodes.items) |*node| {
         if (!node.enabled or !std.mem.eql(u8, node.unique_id, unique_id)) continue;
-        if (!std.mem.eql(u8, node.resource_type, "model")) return error.UnsupportedUnitTestExecution;
-        if (std.mem.eql(u8, node.materialized, "ephemeral")) return error.UnsupportedUnitTestExecution;
+        if (!std.mem.eql(u8, node.resource_type, "model") or std.mem.eql(u8, node.materialized, "ephemeral")) return error.UnsupportedUnitTestExecution;
         return node;
     }
     return error.UnresolvedUnitTestModel;
@@ -220,9 +234,9 @@ fn renderColumnList(allocator: std.mem.Allocator, row: UnitTestRow) ![]const u8 
     return try out.toOwnedSlice(allocator);
 }
 
-fn renderScalarLiteral(allocator: std.mem.Allocator, scalar: JsonScalar) ![]const u8 {
+pub fn renderScalarLiteral(allocator: std.mem.Allocator, scalar: JsonScalar) ![]const u8 {
     return switch (scalar.kind) {
-        .string => quoteSqlString(allocator, scalar.text),
+        .string, .json => quoteSqlString(allocator, scalar.text),
         .number, .bool => allocator.dupe(u8, scalar.text),
         .null => allocator.dupe(u8, "null"),
     };
@@ -240,7 +254,7 @@ fn quoteSqlString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     return try out.toOwnedSlice(allocator);
 }
 
-fn trimTrailingSqlTerminator(sql: []const u8) []const u8 {
+pub fn trimTrailingSqlTerminator(sql: []const u8) []const u8 {
     var end = sql.len;
     while (end > 0 and std.ascii.isWhitespace(sql[end - 1])) end -= 1;
     if (end > 0 and sql[end - 1] == ';') {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const incremental_config = @import("incremental_config.zig");
 const types = @import("types.zig");
 const util = @import("util.zig");
 
@@ -24,29 +25,67 @@ const dupTrimmedScalar = util.dupTrimmedScalar;
 const sortStrings = util.sortStrings;
 
 pub fn loadProjectConfig(runtime: Runtime, project_dir: []const u8) !ProjectConfig {
+    return try loadProjectConfigWithContext(runtime, project_dir, &.{}, .null);
+}
+
+pub fn loadProjectConfigWithContext(runtime: Runtime, project_dir: []const u8, cli_vars: []const VarEntry, target: std.json.Value) !ProjectConfig {
     const path = try std.fs.path.join(runtime.allocator, &.{ project_dir, "dbt_project.yml" });
     const text = std.Io.Dir.cwd().readFileAlloc(runtime.io, path, runtime.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return error.MissingProjectFile,
         else => return err,
     };
-    return try parseProjectConfigText(runtime.allocator, text);
+    return try @import("project_config.zig").parseWithTarget(runtime, text, cli_vars, target);
 }
 
 pub fn applyProjectModelPathConfigs(graph: *Graph, configs: []const ModelPathConfig, override_dependency_inline: bool, restrict_package_name: ?[]const u8) !void {
     for (graph.nodes.items) |*node| {
+        var typed_path = false;
+        for (configs) |config| {
+            if (config.values == .null) continue;
+            if (restrict_package_name) |package| if (!std.mem.eql(u8, package, node.package_name)) continue;
+            if (!std.mem.eql(u8, config.resource_type, node.resource_type)) continue;
+            if (config.package_name.len != 0 and !std.mem.eql(u8, node.package_name, config.package_name)) continue;
+            const resource_path = if (node.snapshot_config != null) path: {
+                const source = node.snapshot_fqn_path orelse node.path;
+                const extension = std.mem.lastIndexOfScalar(u8, source, '.') orelse source.len;
+                break :path if (node.snapshot_yaml_definition) source[0..extension] else try std.fmt.allocPrint(graph.allocator, "{s}/{s}", .{ source[0..extension], node.name });
+            } else if (node.version != .null) try std.fmt.allocPrint(graph.allocator, "{s}{s}{s}.sql", .{ std.fs.path.dirname(node.path) orelse "", if (std.fs.path.dirname(node.path) != null) "/" else "", node.name }) else node.path;
+            defer if (node.version != .null) graph.allocator.free(resource_path);
+            if (!modelPathConfigMatches(config.path, resource_path)) continue;
+            typed_path = true;
+            const layer = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) &node.root_override_config else &node.project_config;
+            try @import("resource_config.zig").mergeAuthored(graph.allocator, layer, config.values);
+            const raw_layer = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) &node.root_override_raw_config else &node.project_raw_config;
+            try @import("resource_config.zig").merge(graph.allocator, raw_layer, if (config.raw_values != .null) config.raw_values else config.values);
+        }
+        if (typed_path) {
+            try @import("resource_config.zig").rebuild(graph.allocator, node);
+            continue;
+        }
         if (!std.mem.eql(u8, node.resource_type, "model")) continue;
 
         var materialized_config: ?*const ModelPathConfig = null;
         var materialized_depth: usize = 0;
         var docs_config: ?*const ModelPathConfig = null;
         var docs_depth: usize = 0;
+        var incremental_depths = [_]usize{0} ** 5;
         for (configs) |*config| {
             if (restrict_package_name) |package_name| {
                 if (!std.mem.eql(u8, config.package_name, package_name)) continue;
             }
             if (!std.mem.eql(u8, node.package_name, config.package_name)) continue;
-            if (!modelPathConfigMatches(config.path, node.path)) continue;
+            const config_path = if (node.version != .null) try std.fmt.allocPrint(graph.allocator, "{s}{s}{s}.sql", .{ std.fs.path.dirname(node.path) orelse "", if (std.fs.path.dirname(node.path) != null) "/" else "", node.name }) else node.path;
+            defer if (node.version != .null) graph.allocator.free(config_path);
+            if (!modelPathConfigMatches(config.path, config_path)) continue;
             const depth = modelPathConfigDepth(config.path);
+            var protected = if (override_dependency_inline and !std.mem.eql(u8, node.package_name, graph.project_name)) types.IncrementalConfigMask{} else node.inline_incremental;
+            inline for (.{ "unique_key", "strategy", "on_schema_change", "full_refresh", "predicates" }, 0..) |field, field_index| {
+                if (@field(config.incremental.configured, field)) {
+                    if (depth < incremental_depths[field_index]) @field(protected, field) = true else incremental_depths[field_index] = depth;
+                }
+            }
+            try incremental_config.overlay(graph.allocator, &node.incremental, config.incremental, protected);
+
             if (config.materialized.len != 0 and (materialized_config == null or depth >= materialized_depth)) {
                 materialized_config = config;
                 materialized_depth = depth;
@@ -97,6 +136,13 @@ pub fn appendOrReplaceVar(allocator: std.mem.Allocator, vars: *std.ArrayList(Var
 }
 
 pub fn parseVarsText(allocator: std.mem.Allocator, text: []const u8, vars: *std.ArrayList(VarEntry)) !void {
+    var document = try @import("yaml.zig").parse(allocator, text);
+    defer document.deinit();
+    try @import("project_config.zig").appendVars(allocator, vars, document.value, false);
+    sortVars(vars.items);
+}
+
+fn parseVarsTextLegacy(allocator: std.mem.Allocator, text: []const u8, vars: *std.ArrayList(VarEntry)) !void {
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "{}")) return;
     if (trimmed[0] == '[') return error.UnsupportedYaml;
@@ -184,8 +230,7 @@ fn appendJsonVarValue(allocator: std.mem.Allocator, vars: *std.ArrayList(VarEntr
 }
 
 fn parseProjectConfigText(allocator: std.mem.Allocator, text: []const u8) !ProjectConfig {
-    try rejectProjectSnapshotConfigs(text);
-    var config = ProjectConfig{ .name = "" };
+    var config = ProjectConfig{ .name = "", .snapshot_config_text = text };
     errdefer {
         deinitProjectConfig(allocator, &config);
     }
@@ -389,6 +434,8 @@ fn parseProjectFlags(text: []const u8, config: *ProjectConfig) !void {
         const kv = splitKeyValue(trimmed) orelse continue;
         if (std.mem.eql(u8, kv.key, "validate_macro_args")) {
             config.validate_macro_args = try parseStrictBool(kv.value);
+        } else if (std.mem.eql(u8, kv.key, "enable_truthy_nulls_equals_macro")) {
+            config.enable_truthy_nulls_equals_macro = try parseStrictBool(kv.value);
         }
     }
 }
@@ -589,6 +636,9 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
     var docs_indent: usize = 0;
     var package_name: []const u8 = "";
     var docs_path: []const u8 = "";
+    var incremental_list: ?*types.IncrementalConfig = null;
+    var incremental_list_key: []const u8 = "";
+    var incremental_list_indent: usize = 0;
     var path_stack: std.ArrayList(PathStackEntry) = .empty;
     defer path_stack.deinit(allocator);
 
@@ -598,6 +648,14 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
         const indent = leadingSpaces(line);
+        if (incremental_list) |list_config| {
+            if (indent > incremental_list_indent and std.mem.startsWith(u8, trimmed, "- ")) {
+                const value = try dupTrimmedScalar(allocator, trimmed[2..]);
+                if (std.mem.eql(u8, incremental_list_key, "unique_key")) try list_config.unique_key.?.list.append(allocator, value) else try list_config.predicates.append(allocator, value);
+                continue;
+            }
+            incremental_list = null;
+        }
 
         if (std.mem.eql(u8, trimmed, "models:")) {
             in_models = true;
@@ -656,16 +714,22 @@ fn parseProjectModelPathConfigs(allocator: std.mem.Allocator, text: []const u8, 
 
         if (std.mem.startsWith(u8, kv.key, "+")) {
             const path = try joinPathStack(allocator, path_stack.items);
+            const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
+            if (try incremental_config.applyYaml(allocator, &path_config.incremental, kv.key[1..], kv.value)) {
+                if (std.mem.trim(u8, kv.value, " \t").len == 0 and (std.mem.eql(u8, kv.key, "+unique_key") or std.mem.eql(u8, kv.key, "+predicates") or std.mem.eql(u8, kv.key, "+incremental_predicates"))) {
+                    incremental_list = &path_config.incremental;
+                    incremental_list_key = kv.key[1..];
+                    incremental_list_indent = indent;
+                }
+                continue;
+            }
             if (std.mem.eql(u8, kv.key, "+materialized")) {
-                const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
                 path_config.materialized = try dupTrimmedScalar(allocator, kv.value);
             } else if (std.mem.eql(u8, kv.key, "+tags")) {
-                const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
                 path_config.tags.clearRetainingCapacity();
                 try parseInlineStringList(allocator, kv.value, &path_config.tags);
                 sortStrings(path_config.tags.items);
             } else if (std.mem.eql(u8, kv.key, "+docs") and std.mem.trim(u8, kv.value, " \t").len == 0) {
-                const path_config = try getOrCreateModelPathConfig(allocator, configs, package_name, path);
                 path_config.docs.configured = true;
                 in_docs = true;
                 docs_indent = indent;
@@ -975,7 +1039,8 @@ fn modelPathConfigMatches(config_path: []const u8, model_path: []const u8) bool 
     if (!std.mem.startsWith(u8, model_path, config_path)) return false;
     if (model_path.len == config_path.len) return true;
     if (model_path[config_path.len] == '/') return true;
-    return std.mem.eql(u8, model_path[config_path.len..], ".sql");
+    const suffix = model_path[config_path.len..];
+    return std.mem.eql(u8, suffix, ".sql") or std.mem.eql(u8, suffix, ".csv");
 }
 
 fn modelPathConfigDepth(config_path: []const u8) usize {
@@ -1314,7 +1379,7 @@ test "vars parser accepts strict JSON object scalars" {
     try std.testing.expectEqualStrings("transactions", vars.items[5].value);
 }
 
-test "vars parser rejects nested CLI values" {
+test "vars parser preserves nested CLI values and string scalar types" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1322,11 +1387,14 @@ test "vars parser rejects nested CLI values" {
     var vars: std.ArrayList(VarEntry) = .empty;
     defer vars.deinit(allocator);
 
-    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "{orders_model: [customers]}", &vars));
-    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "{\"orders_model\": [\"customers\"]}", &vars));
+    try parseVarsText(allocator, "{orders_model: [customers], options: {enabled: true, label: 'false'}}", &vars);
+    try std.testing.expectEqualStrings("options", vars.items[0].name);
+    try std.testing.expect(vars.items[0].typed_value.?.object.get("enabled").?.bool);
+    try std.testing.expectEqualStrings("false", vars.items[0].typed_value.?.object.get("label").?.string);
+    try std.testing.expectEqualStrings("customers", vars.items[1].typed_value.?.array.items[0].string);
 }
 
-test "vars parser leaves existing vars unchanged when strict JSON contains nested values" {
+test "vars parser leaves existing vars unchanged for invalid top-level sequences" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1335,7 +1403,7 @@ test "vars parser leaves existing vars unchanged when strict JSON contains neste
     defer vars.deinit(allocator);
 
     try parseVarsText(allocator, "{\"orders_model\": \"customers\"}", &vars);
-    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "{\"raw_table\": \"transactions\", \"bad\": [\"nested\"]}", &vars));
+    try std.testing.expectError(error.UnsupportedYaml, parseVarsText(allocator, "[{raw_table: transactions}]", &vars));
 
     try std.testing.expectEqual(@as(usize, 1), vars.items.len);
     try std.testing.expectEqualStrings("orders_model", vars.items[0].name);
@@ -1462,26 +1530,7 @@ test "project seed docs application targets package seeds only" {
     try std.testing.expect(!graph.nodes.items[2].docs.configured);
 }
 
-fn rejectProjectSnapshotConfigs(text: []const u8) !void {
-    var in_snapshots = false;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw_line| {
-        const line = stripYamlComment(raw_line);
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0) continue;
-        if (leadingSpaces(line) == 0) {
-            in_snapshots = false;
-            if (splitKeyValue(trimmed)) |kv| {
-                if (std.mem.eql(u8, kv.key, "snapshots")) {
-                    const value = std.mem.trim(u8, kv.value, " \t\r");
-                    if (value.len == 0) in_snapshots = true else if (!std.mem.eql(u8, value, "{}") and !std.mem.eql(u8, value, "null")) return error.UnsupportedProjectSnapshotConfig;
-                }
-            }
-        } else if (in_snapshots) return error.UnsupportedProjectSnapshotConfig;
-    }
-}
-
-test "snapshot paths honor an explicit empty list and project snapshot inheritance fails closed" {
+test "snapshot paths honor an explicit empty list" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1489,5 +1538,7 @@ test "snapshot paths honor an explicit empty list and project snapshot inheritan
     defer deinitProjectConfig(allocator, &config);
     try std.testing.expect(config.snapshot_paths_set);
     try std.testing.expectEqual(@as(usize, 0), config.snapshot_paths.items.len);
-    try std.testing.expectError(error.UnsupportedProjectSnapshotConfig, parseProjectConfigText(allocator, "name: demo\nsnapshots:\n  demo:\n    +enabled: false\n"));
+    var inherited = try parseProjectConfigText(allocator, "name: demo\nsnapshots:\n  demo:\n    +enabled: false\n");
+    defer deinitProjectConfig(allocator, &inherited);
+    try std.testing.expect(inherited.snapshot_config_text != null);
 }

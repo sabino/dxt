@@ -1,0 +1,15 @@
+{
+  "common_zone_count": 433,
+  "country_count": 249,
+  "format": "DXTZ0001: little-endian zone and transition records; NUL-terminated UTF-8 string pool",
+  "generator": "scripts/generate_pytz_tables.py",
+  "iana_upstream": "https://data.iana.org/time-zones/releases/tzdata2026e.tar.gz",
+  "iana_version": "2026e",
+  "license": "MIT for pytz; IANA timezone data is public domain",
+  "pytz_version": "2026.5",
+  "semantics": "pytz transition instants, minute rounding, DST deltas, aliases, common zones and country tables",
+  "tables_sha256": "c34ce41a90bcc240af676cf990d413ac25b784c20fc7b37f70505c52d277c705",
+  "transition_count": 40789,
+  "upstream": "https://pypi.org/project/pytz/2026.5/",
+  "zone_count": 597
+}

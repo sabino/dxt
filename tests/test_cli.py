@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import json
+import datetime
+import uuid
 import hashlib
 import shutil
 import importlib.util
@@ -12,9 +14,13 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from functools import cache
 from pathlib import Path
 
 import pytest
+import yaml
+
+from cli_helpers import json_lines
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,8 +33,20 @@ DUCKDB = shutil.which("duckdb")
 SCHEMA_SPEC = importlib.util.spec_from_file_location("validate_manifest_schema", SCHEMA_VALIDATOR_PATH)
 assert SCHEMA_SPEC is not None
 assert SCHEMA_SPEC.loader is not None
+ARTIFACT_SPEC = importlib.util.spec_from_file_location("validate_dbt_artifacts", ROOT / "scripts" / "validate_dbt_artifacts.py")
+assert ARTIFACT_SPEC is not None and ARTIFACT_SPEC.loader is not None
+artifact_validator = importlib.util.module_from_spec(ARTIFACT_SPEC)
+ARTIFACT_SPEC.loader.exec_module(artifact_validator)
 schema_validator = importlib.util.module_from_spec(SCHEMA_SPEC)
 SCHEMA_SPEC.loader.exec_module(schema_validator)
+
+
+def assert_invocation_metadata(metadata):
+    assert uuid.UUID(metadata["invocation_id"]).version == 4
+    generated = datetime.datetime.fromisoformat(metadata["generated_at"].replace("Z", "+00:00"))
+    started = datetime.datetime.fromisoformat(metadata["invocation_started_at"].replace("Z", "+00:00"))
+    assert started <= generated
+    assert (datetime.datetime.now(datetime.timezone.utc) - generated).total_seconds() < 120
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +75,14 @@ def dbt_protobuf_json_compat(message_to_json):
 
 @pytest.fixture(scope="session", autouse=True)
 def build_dxt():
+    # Pytest registers this imported fixture separately in each test module.
+    # Share its clean build and native test run across those registrations.
+    build_dxt_once()
+    assert DXT.exists()
+
+
+@cache
+def build_dxt_once():
     with tempfile.TemporaryDirectory(prefix="dxt-zig-cache-") as cache_root:
         subprocess.run(
             [
@@ -83,7 +109,6 @@ def build_dxt():
             cwd=ROOT,
             check=True,
         )
-    assert DXT.exists()
 
 
 def test_version_command():
@@ -96,8 +121,8 @@ def test_root_help_uses_canonical_name():
     result = subprocess.run([DXT, "--help"], cwd=ROOT, check=True, text=True, capture_output=True)
     assert "Data eXecution & Transformation" in result.stdout
     assert "Data Transformation eXecutor" not in result.stdout
-    assert "Load supported selected DuckDB CSV seeds." in result.stdout
-    assert "Execute supported selected DuckDB seeds, models, and tests." in result.stdout
+    assert "Load selected CSV seeds into DuckDB or PostgreSQL." in result.stdout
+    assert "Build seeds, models, snapshots, unit tests and data tests." in result.stdout
     assert "Preflight selected seeds, models, and tests without running SQL." not in result.stdout
     assert result.stderr == ""
 
@@ -106,6 +131,20 @@ def copy_fixture(tmp_path: Path, name: str) -> Path:
     source = ROOT / "tests" / "fixtures" / name
     dest = tmp_path / name
     shutil.copytree(source, dest)
+    # These synthetic fixtures previously located relative DuckDB files beside
+    # their profiles. Make that location explicit; the native CLI now correctly
+    # follows Core's invocation-CWD rule, covered by dedicated CLI oracles.
+    for profile_path in dest.rglob("profiles.yml"):
+        profile_text = profile_path.read_text()
+        document = yaml.safe_load(profile_text)
+        for profile in document.values():
+            if not isinstance(profile, dict):
+                continue
+            for output in profile.get("outputs", {}).values():
+                database = output.get("path")
+                if output.get("type") == "duckdb" and database and database != ":memory:" and "{{" not in database and not Path(database).is_absolute():
+                    profile_text = profile_text.replace("path: " + database, "path: " + str(profile_path.parent / database))
+        profile_path.write_text(profile_text)
     return dest
 
 
@@ -149,7 +188,7 @@ def test_compile_writes_compiled_sql_and_manifest_fields(tmp_path: Path):
     assert_partial_manifest_schema(manifest)
     assert_manifest_schema_slice(manifest_path)
     orders = manifest["nodes"]["model.compile_basic.orders"]
-    assert orders["database"] == "memory"
+    assert orders["database"] is None
     assert orders["schema"] == "main"
     assert orders["alias"] == "orders"
     assert orders["fqn"] == ["compile_basic", "orders"]
@@ -159,7 +198,7 @@ def test_compile_writes_compiled_sql_and_manifest_fields(tmp_path: Path):
     assert orders["compiled_path"].endswith("/compiled/compile_basic/models/orders.sql")
     assert orders["relation_name"] == '"main"."orders"'
     assert orders["extra_ctes"] == []
-    assert orders["extra_ctes_injected"] is False
+    assert orders["extra_ctes_injected"] is True
 
 
 def test_compile_select_limits_compiled_models_but_keeps_graph_context(tmp_path: Path):
@@ -197,8 +236,9 @@ def test_compile_renders_root_project_model_column_custom_generic_tests(tmp_path
     assert result.returncode == 0, result.stderr
     assert "Compiled 0 model(s) and 2 test(s)" in result.stdout
 
-    positive_sql = (target / "compiled" / "custom_generic_test_compile" / "positive_amount_orders_amount.sql").read_text()
-    nonzero_sql = (target / "compiled" / "custom_generic_test_compile" / "nonzero_amount_orders_discount.sql").read_text()
+    compiled_root = target / "compiled" / "custom_generic_test_compile" / "models" / "schema.yml"
+    positive_sql = (compiled_root / "positive_amount_orders_amount.sql").read_text()
+    nonzero_sql = (compiled_root / "nonzero_amount_orders_discount.sql").read_text()
     assert "select amount" in positive_sql
     assert 'from "main"."orders"' in positive_sql
     assert "where amount < 0" in positive_sql
@@ -226,7 +266,7 @@ def test_compile_renders_root_project_model_column_custom_generic_tests(tmp_path
     ]
     assert positive["compiled"] is True
     assert positive["compiled_code"] == positive_sql
-    assert positive["compiled_path"].endswith("/compiled/custom_generic_test_compile/positive_amount_orders_amount.sql")
+    assert positive["compiled_path"].endswith("/compiled/custom_generic_test_compile/models/schema.yml/positive_amount_orders_amount.sql")
 
     nonzero = tests_by_name["nonzero_amount"]
     assert nonzero["raw_code"] == "{{ test_nonzero_amount(**_dbt_generic_test_kwargs) }}"
@@ -251,7 +291,7 @@ def test_compile_renders_installed_package_model_column_custom_generic_tests(tmp
     assert result.returncode == 0, result.stderr
     assert "Compiled 0 model(s) and 2 test(s)" in result.stdout
 
-    compiled_root = target / "compiled" / "package_custom_generic_test_compile"
+    compiled_root = target / "compiled" / "package_custom_generic_test_compile" / "models" / "schema.yml"
     positive_sql = (compiled_root / "util_pkg_positive_amount_orders_amount.sql").read_text()
     nonzero_sql = (compiled_root / "util_pkg_nonzero_amount_orders_discount.sql").read_text()
     assert "select amount" in positive_sql
@@ -290,7 +330,7 @@ def test_compile_renders_installed_package_model_column_custom_generic_tests(tmp
     assert positive["compiled"] is True
     assert positive["compiled_code"] == positive_sql
     assert positive["compiled_path"].endswith(
-        "/compiled/package_custom_generic_test_compile/util_pkg_positive_amount_orders_amount.sql"
+        "/compiled/package_custom_generic_test_compile/models/schema.yml/util_pkg_positive_amount_orders_amount.sql"
     )
 
     nonzero = tests_by_name["nonzero_amount"]
@@ -402,7 +442,7 @@ def test_compile_renders_source_and_seed_column_custom_generic_tests(tmp_path: P
     assert result.returncode == 0, result.stderr
     assert "Compiled 0 model(s) and 2 test(s)" in result.stdout
 
-    compiled_root = target / "compiled" / "source_seed_custom_generic_test_compile"
+    compiled_root = target / "compiled" / "source_seed_custom_generic_test_compile" / "models" / "schema.yml"
     source_sql = (compiled_root / "source_positive_amount_raw_orders_src_amount.sql").read_text()
     seed_sql = (compiled_root / "util_pkg_nonzero_amount_orders_seed_amount.sql").read_text()
     assert "select amount" in source_sql
@@ -538,7 +578,7 @@ where {{ column_name }} = 0
             assert "{%" not in dbt_node["compiled_code"]
 
 
-def test_compile_rejects_unsupported_custom_generic_test_body(tmp_path: Path):
+def test_compile_renders_custom_generic_test_control_flow(tmp_path: Path):
     project = copy_fixture(tmp_path, "custom_generic_test_compile")
     (project / "macros" / "custom_tests.sql").write_text(
         """{% test positive_amount(model, column_name) %}
@@ -546,6 +586,9 @@ def test_compile_rejects_unsupported_custom_generic_test_body(tmp_path: Path):
 select {{ column_name }} from {{ model }}
 {% endif %}
 {% endtest %}
+{% data_test nonzero_amount(model, column_name) %}
+select {{ column_name }} from {{ model }} where {{ column_name }} = 0
+{% enddata_test %}
 """
     )
     target = tmp_path / "compile-target"
@@ -555,8 +598,11 @@ select {{ column_name }} from {{ model }}
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "custom generic test compilation currently supports only model, seed, or source column test blocks" in result.stderr
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((target / "manifest.json").read_text())
+    compiled = next(node["compiled_code"] for node in manifest["nodes"].values() if node["name"] == "positive_amount_orders_amount")
+    assert 'select amount from "main"."orders"' in compiled
+    assert "{%" not in compiled and "{{" not in compiled
 
 
 def statuses_by_generic_test_name(target: Path) -> dict[str, str]:
@@ -805,12 +851,13 @@ from {{ model }}
     assert_run_results_schema_slice(error_target / "run_results.json")
     error_row = json.loads((error_target / "run_results.json").read_text())["results"][0]
     assert error_row["status"] == "error"
-    assert error_row["message"] == "DuckDB execution failed"
+    assert "Binder Error" in error_row["message"]
+    assert "missing_discount" in error_row["message"]
     assert error_row["failures"] is None
     assert "missing_discount" in error_row["compiled_code"]
 
 
-def test_test_rejects_unsupported_custom_generic_test_body_before_run_results(tmp_path: Path):
+def test_test_records_custom_generic_control_flow_missing_relation_error(tmp_path: Path):
     project = copy_fixture(tmp_path, "custom_generic_test_compile")
     (project / "macros" / "custom_tests.sql").write_text(
         """{% test positive_amount(model, column_name) %}
@@ -818,6 +865,9 @@ def test_test_rejects_unsupported_custom_generic_test_body_before_run_results(tm
 select {{ column_name }} from {{ model }}
 {% endif %}
 {% endtest %}
+{% data_test nonzero_amount(model, column_name) %}
+select {{ column_name }} from {{ model }} where {{ column_name }} = 0
+{% enddata_test %}
 """
     )
     target = tmp_path / "test-target"
@@ -827,9 +877,12 @@ select {{ column_name }} from {{ model }}
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "custom generic test compilation currently supports only model, seed, or source column test blocks" in result.stderr
-    assert not (target / "run_results.json").exists()
+    assert result.returncode == 1, result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    row = json.loads((target / "run_results.json").read_text())["results"][0]
+    assert row["status"] == "error"
+    assert row["failures"] is None
+    assert 'select amount from "main"."orders"' in row["compiled_code"]
 
 
 def test_compile_injects_ephemeral_ctes_and_manifest_fields(tmp_path: Path):
@@ -845,8 +898,8 @@ def test_compile_injects_ephemeral_ctes_and_manifest_fields(tmp_path: Path):
     assert "Compiled 2 model(s)" in result.stdout
 
     compiled_root = target / "compiled" / "ephemeral_cte" / "models"
-    assert not (compiled_root / "base_ephemeral.sql").exists()
-    assert not (compiled_root / "filtered_ephemeral.sql").exists()
+    assert (compiled_root / "base_ephemeral.sql").exists()
+    assert (compiled_root / "filtered_ephemeral.sql").exists()
     one_level_sql = (compiled_root / "final_one_level.sql").read_text()
     chain_sql = (compiled_root / "final_chain.sql").read_text()
     assert one_level_sql.count("__dbt__cte__base_ephemeral as") == 1
@@ -864,7 +917,11 @@ def test_compile_injects_ephemeral_ctes_and_manifest_fields(tmp_path: Path):
     assert_manifest_schema_slice(manifest_path)
     assert manifest["nodes"]["model.ephemeral_cte.base_ephemeral"]["config"]["materialized"] == "ephemeral"
     assert manifest["nodes"]["model.ephemeral_cte.filtered_ephemeral"]["config"]["materialized"] == "ephemeral"
-    assert "compiled" not in manifest["nodes"]["model.ephemeral_cte.base_ephemeral"]
+    ephemeral = manifest["nodes"]["model.ephemeral_cte.base_ephemeral"]
+    assert ephemeral["compiled"] is True
+    assert ephemeral["compiled_code"] == (compiled_root / "base_ephemeral.sql").read_text()
+    rows = json.loads((target / "run_results.json").read_text())["results"]
+    assert all(not row["unique_id"].endswith("_ephemeral") for row in rows)
     final_one = manifest["nodes"]["model.ephemeral_cte.final_one_level"]
     final_chain = manifest["nodes"]["model.ephemeral_cte.final_chain"]
     assert final_one["extra_ctes_injected"] is True
@@ -915,7 +972,7 @@ def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
     analysis_id = "analysis.analysis_basic.customer_report"
     analysis = parse_manifest["nodes"][analysis_id]
     assert analysis["resource_type"] == "analysis"
-    assert analysis["database"] == "memory"
+    assert analysis["database"] is None
     assert analysis["schema"] == "main"
     assert analysis["alias"] == "customer_report"
     assert analysis["fqn"] == ["analysis_basic", "analysis", "customer_report"]
@@ -923,14 +980,14 @@ def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
     assert analysis["path"] == "analysis/customer_report.sql"
     assert analysis["original_file_path"] == "analyses/customer_report.sql"
     assert analysis["description"] == "Customer report analysis"
-    assert analysis["config"]["materialized"] == "analysis"
+    assert analysis["config"]["materialized"] == "view"
     assert analysis["config"]["tags"] == ["reporting"]
     assert analysis["columns"]["customer_id"]["description"] == "Customer identifier"
     assert analysis["refs"] == [{"name": "customers", "package": None, "version": None}]
     assert analysis["sources"] == [["raw", "payments"]]
     assert analysis["depends_on"]["nodes"] == [
-        "model.analysis_basic.customers",
         "source.analysis_basic.raw.payments",
+        "model.analysis_basic.customers",
     ]
 
     ls_result = subprocess.run(
@@ -948,22 +1005,20 @@ def test_parse_list_and_compile_analysis_resources(tmp_path: Path):
             "resource_type",
             "name",
             "path",
-            "config.materialized",
-            "config.tags",
+            "config",
         ],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_result.returncode == 0, ls_result.stderr
-    assert json.loads(ls_result.stdout) == [
+    assert json_lines(ls_result.stdout) == [
         {
             "unique_id": analysis_id,
             "resource_type": "analysis",
             "name": "customer_report",
             "path": "analysis/customer_report.sql",
-            "config.materialized": "analysis",
-            "config.tags": ["reporting"],
+            "config": analysis["config"],
         }
     ]
 
@@ -1101,6 +1156,12 @@ union all select 3 as id
 def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: Path):
     project = tmp_path / "static_if_compile"
     write_static_if_project(project)
+    events_path = project / "models" / "events.sql"
+    events_path.write_text(
+        "-- depends_on: {{ ref('customers') }}\n"
+        "-- depends_on: {{ source('raw', 'events') }}\n"
+        + events_path.read_text()
+    )
     target = tmp_path / "compile-target"
     profiles_dir = tmp_path / "profiles"
     profiles_dir.mkdir()
@@ -1138,8 +1199,8 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
     assert result.returncode == 0, result.stderr
 
     compiled = (target / "compiled" / "static_if_compile" / "models" / "events.sql").read_text()
-    assert 'union all select * from "main"."customers"' in compiled
-    assert 'union all select * from "raw"."events"' in compiled
+    assert 'union all select * from "oracle"."main"."customers"' in compiled
+    assert 'union all select * from "oracle"."raw"."events"' in compiled
     assert "where id >= 0" in compiled
     assert "union all select 2 as id" in compiled
     assert "union all select 3 as id" in compiled
@@ -1153,8 +1214,8 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
     manifest = json.loads((target / "manifest.json").read_text())
     events = manifest["nodes"]["model.static_if_compile.events"]
     assert events["depends_on"]["nodes"] == [
-        "model.static_if_compile.customers",
         "source.static_if_compile.raw.events",
+        "model.static_if_compile.customers",
     ]
     assert events["refs"] == [{"name": "customers", "package": None, "version": None}]
     assert events["sources"] == [["raw", "events"]]
@@ -1171,12 +1232,6 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
         import dbt_common.events.base_types as dbt_event_base_types
         import google.protobuf.json_format as protobuf_json_format
 
-        events_path = project / "models" / "events.sql"
-        events_path.write_text(
-            "-- depends_on: {{ ref('customers') }}\n"
-            "-- depends_on: {{ source('raw', 'events') }}\n"
-            + events_path.read_text()
-        )
         dbt_target = tmp_path / "dbt-target"
         original_message_to_json = protobuf_json_format.MessageToJson
         original_event_message_to_json = dbt_event_base_types.MessageToJson
@@ -1213,6 +1268,8 @@ def test_compile_renders_static_if_without_losing_parse_dependencies(tmp_path: P
 
 def test_parse_time_context_keeps_execute_false_boundary_and_static_dependencies(tmp_path: Path):
     project = copy_fixture(tmp_path, "parse_time_context")
+    model_path = project / "models" / "context_orders.sql"
+    model_path.write_text("-- depends_on: {{ ref('customers') }}\n" + model_path.read_text())
     parse_target = tmp_path / "parse-target"
     parse_result = subprocess.run(
         [DXT, "parse", "--project-dir", str(project), "--target-path", str(parse_target)],
@@ -1229,8 +1286,8 @@ def test_parse_time_context_keeps_execute_false_boundary_and_static_dependencies
     assert parsed["config"]["materialized"] == "table"
     assert parsed["config"]["tags"] == ["parse_time"]
     assert parsed["depends_on"]["nodes"] == [
-        "model.parse_time_context.customers",
         "source.parse_time_context.raw.events",
+        "model.parse_time_context.customers",
     ]
     assert parsed["refs"] == [{"name": "customers", "package": None, "version": None}]
     assert parsed["sources"] == [["raw", "events"]]
@@ -1647,7 +1704,8 @@ def test_project_level_source_config_inherits_into_freshness_docs_and_tests(tmp_
     assert orders["identifier"] == "RawOrders"
     assert orders["loaded_at_field"] == "yaml_loaded_at"
     assert orders["loaded_at_query"] is None
-    assert orders["freshness"]["warn_after"] == {"count": 3, "period": "hour"}
+    # Core sources.py replaces project freshness when YAML supplies freshness.
+    assert orders["freshness"]["warn_after"] == {"count": None, "period": None}
     assert orders["freshness"]["error_after"] == {"count": 2, "period": "day"}
 
     docs_result = subprocess.run(
@@ -1799,8 +1857,11 @@ def assert_profile_target_context_outputs(target: Path, command_name: str) -> No
     assert "'current_context' as this_name" in current_sql
     assert "'current_context' as this_table" in current_sql
     assert "'current_context' as this_identifier" in current_sql
-    assert 'from "analytics"."current_context"' in current_sql
-    assert (compiled_root / "downstream.sql").read_text().strip() == 'select *\nfrom "analytics"."current_context"'
+    assert 'from "postgres"."analytics"."current_context"' in current_sql
+    if command_name in {"compile", "docs generate"}:
+        assert (compiled_root / "downstream.sql").read_text().strip() == 'select *\nfrom "postgres"."analytics"."current_context"'
+    else:
+        assert not (compiled_root / "downstream.sql").exists()
 
     manifest_path = target / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -1808,21 +1869,40 @@ def assert_profile_target_context_outputs(target: Path, command_name: str) -> No
     assert_manifest_schema_slice(manifest_path)
     current = manifest["nodes"]["model.profile_target_context.current_context"]
     downstream = manifest["nodes"]["model.profile_target_context.downstream"]
-    assert current["relation_name"] == '"analytics"."current_context"'
-    assert downstream["compiled_code"].strip() == 'select *\nfrom "analytics"."current_context"'
+    assert current["relation_name"] == '"postgres"."analytics"."current_context"'
+    if command_name in {"compile", "docs generate"}:
+        assert downstream["compiled_code"].strip() == 'select *\nfrom "postgres"."analytics"."current_context"'
+    else:
+        assert "compiled_code" not in downstream
     if command_name == "docs generate":
         assert (target / "catalog.json").exists()
     else:
-        assert not (target / "run_results.json").exists()
+        assert_run_results_schema_slice(target / "run_results.json")
 
 
 def test_compile_docs_run_and_build_render_profile_target_and_this_context(tmp_path: Path):
+    import postgres_fixture
+
+    with postgres_fixture.get_server(tmp_path / "postgres") as server:
+        check_profile_target_context_commands(tmp_path, server)
+
+
+def check_profile_target_context_commands(tmp_path: Path, server) -> None:
     project = copy_fixture(tmp_path, "profile_target_context")
+    from urllib.parse import unquote, urlparse
+    profile_path = project / "profiles.yml"
+    profile = yaml.safe_load(profile_path.read_text())
+    info = server.get_postmaster_info()
+    profile["profile_target_context"]["outputs"]["pg"].update({
+        "host": str(info.socket_dir), "port": info.port, "dbname": "postgres",
+        "user": unquote(urlparse(server.get_uri()).username or "postgres"), "password": "",
+    })
+    profile_path.write_text(yaml.safe_dump(profile))
     commands = [
         ("compile", [DXT, "compile"], 0),
         ("docs generate", [DXT, "docs", "generate"], 0),
-        ("run", [DXT, "run"], 2),
-        ("build", [DXT, "build"], 2),
+        ("run", [DXT, "run"], 1),
+        ("build", [DXT, "build"], 1),
     ]
     for index, (command_name, command, expected_returncode) in enumerate(commands):
         target = tmp_path / f"profile-target-{index}"
@@ -1844,6 +1924,10 @@ def test_compile_docs_run_and_build_render_profile_target_and_this_context(tmp_p
         )
         assert result.returncode == expected_returncode, result.stderr
         assert_profile_target_context_outputs(target, command_name)
+        if expected_returncode == 1:
+            rows = json.loads((target / "run_results.json").read_text())["results"]
+            assert [row["status"] for row in rows] == ["error", "skipped"]
+            assert 'relation "analytics.current_context" does not exist' in rows[0]["message"]
 
 
 def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
@@ -1852,9 +1936,12 @@ def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
     assert "'analytics_mart' as this_schema" in orders_sql
     assert "'order_facts' as this_name" in orders_sql
     assert "'order_facts' as this_identifier" in orders_sql
-    assert 'from "analytics_mart"."order_facts"' in orders_sql
-    assert 'from "analytics"."base_orders"' in orders_sql
-    assert (compiled_root / "uses_orders.sql").read_text().strip() == 'select *\nfrom "analytics_mart"."order_facts"'
+    assert 'from "memory"."analytics_mart"."order_facts"' in orders_sql
+    assert 'from "memory"."analytics"."base_orders"' in orders_sql
+    if command_name in {"compile", "docs generate"}:
+        assert (compiled_root / "uses_orders.sql").read_text().strip() == 'select *\nfrom "memory"."analytics_mart"."order_facts"'
+    else:
+        assert not (compiled_root / "uses_orders.sql").exists()
 
     manifest_path = target / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -1867,8 +1954,11 @@ def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
     assert orders["alias"] == "order_facts"
     assert orders["fqn"] == ["inline_relation_config", "orders"]
     assert orders["checksum"] == dbt_sha256_text((ROOT / "tests" / "fixtures" / "inline_relation_config" / "models" / "orders.sql").read_text())
-    assert orders["relation_name"] == '"analytics_mart"."order_facts"'
-    assert uses_orders["compiled_code"].strip() == 'select *\nfrom "analytics_mart"."order_facts"'
+    assert orders["relation_name"] == '"memory"."analytics_mart"."order_facts"'
+    if command_name in {"compile", "docs generate"}:
+        assert uses_orders["compiled_code"].strip() == 'select *\nfrom "memory"."analytics_mart"."order_facts"'
+    else:
+        assert "compiled_code" not in uses_orders
     if command_name == "docs generate":
         assert (target / "catalog.json").exists()
     elif command_name in {"run", "build"} and DUCKDB is not None:
@@ -1880,8 +1970,10 @@ def assert_inline_relation_outputs(target: Path, command_name: str) -> None:
             "model.inline_relation_config.uses_orders",
         ]
         assert [item["status"] for item in run_results["results"]] == ["success", "error", "skipped"]
-        assert run_results["results"][1]["message"] == "DuckDB execution failed"
+        assert "Catalog Error: Table with name order_facts does not exist" in run_results["results"][1]["message"]
         assert run_results["results"][2]["message"] is None
+    elif command_name == "compile":
+        assert_run_results_schema_slice(target / "run_results.json")
     else:
         assert not (target / "run_results.json").exists()
 
@@ -2037,16 +2129,18 @@ def test_compile_docs_run_and_build_resolve_cli_vars(tmp_path: Path):
     ).read_text()
 
 
-def test_compile_rejects_selection_without_models(tmp_path: Path):
+def test_compile_nonexecutable_source_selection_writes_empty_results(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
+    target = tmp_path / "target"
     result = subprocess.run(
-        [DXT, "compile", "--project-dir", str(project), "--select", "source:raw.payments"],
+        [DXT, "compile", "--project-dir", str(project), "--target-path", str(target), "--select", "source:raw.payments"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "compile currently supports only selected SQL model or supported generic or singular SQL test resources" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert_run_results_schema_slice(target / "run_results.json")
+    assert json.loads((target / "run_results.json").read_text())["results"] == []
 
 
 def test_compile_uses_selected_node_package_for_compiled_path(tmp_path: Path):
@@ -2056,6 +2150,7 @@ def test_compile_uses_selected_node_package_for_compiled_path(tmp_path: Path):
         [
             DXT,
             "compile",
+            "--no-populate-cache",
             "--project-dir",
             str(project),
             "--target-path",
@@ -2189,7 +2284,7 @@ def test_run_writes_error_run_results_when_model_execution_fails(tmp_path: Path)
         "model.compile_basic.orders",
     ]
     assert [item["status"] for item in run_results["results"]] == ["success", "error"]
-    assert run_results["results"][1]["message"] == "DuckDB execution failed"
+    assert "Catalog Error: Table with name missing_relation does not exist" in run_results["results"][1]["message"]
     assert run_results["results"][1]["compiled"] is True
     assert "join missing_relation" in run_results["results"][1]["compiled_code"]
     assert run_results["results"][1]["relation_name"] == '"main"."orders"'
@@ -2234,9 +2329,10 @@ def test_run_writes_skipped_run_results_for_blocked_selected_descendants(tmp_pat
         "model.compile_basic.orders",
     ]
     assert [item["status"] for item in run_results["results"]] == ["error", "skipped"]
-    assert run_results["results"][0]["message"] == "DuckDB execution failed"
+    assert "Catalog Error: Table with name missing_relation does not exist" in run_results["results"][0]["message"]
     assert run_results["results"][1]["message"] is None
-    assert run_results["results"][1]["compiled"] is True
+    assert run_results["results"][1]["compiled"] is False
+    assert run_results["results"][1]["compiled_code"] is None
     assert run_results["results"][1]["relation_name"] == '"main"."orders"'
 
     query = subprocess.run(
@@ -2358,7 +2454,7 @@ target-path: target
     assert query.stdout.strip() == "3"
 
 
-def test_run_prepare_rejects_non_model_selection(tmp_path: Path):
+def test_run_non_model_selection_finishes_without_execution(tmp_path: Path):
     project = copy_fixture(tmp_path, "compile_basic")
     target = tmp_path / "run-target"
     result = subprocess.run(
@@ -2367,9 +2463,11 @@ def test_run_prepare_rejects_non_model_selection(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "run currently supports only selected SQL model resources" in result.stderr
-    assert not (target / "run_results.json").exists()
+    assert result.returncode == 0, result.stderr
+    assert "Nothing to do" in result.stdout + result.stderr
+    assert json.loads((target / "run_results.json").read_text())["results"] == []
+    assert (target / "manifest.json").exists()
+    assert not (target / "dxt.duckdb").exists()
 
 
 def test_run_rejects_unsupported_model_materialization_before_duckdb(tmp_path: Path):
@@ -2383,7 +2481,7 @@ target-path: target
 """
     )
     (project / "models" / "events.sql").write_text(
-        """{{ config(materialized='incremental') }}
+        """{{ config(materialized='unregistered_materialization') }}
 select 1 as id
 {% if is_incremental() %}
 where id > 0
@@ -2398,7 +2496,7 @@ where id > 0
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "run currently supports only table and view model materializations" in result.stderr
+    assert "unsupported model materialization" in result.stderr
     assert not (target / "run_results.json").exists()
 
 
@@ -2413,7 +2511,7 @@ target-path: target
 """
     )
     (project / "models" / "a_table.sql").write_text("{{ config(materialized='table') }}\nselect 1 as id\n")
-    (project / "models" / "z_incremental.sql").write_text("{{ config(materialized='incremental') }}\nselect 2 as id\n")
+    (project / "models" / "z_incremental.sql").write_text("{{ config(materialized='unregistered_materialization') }}\nselect 2 as id\n")
     target = tmp_path / "run-target"
     result = subprocess.run(
         [DXT, "run", "--project-dir", str(project), "--target-path", str(target)],
@@ -2422,7 +2520,7 @@ target-path: target
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "run currently supports only table and view model materializations" in result.stderr
+    assert "unsupported model materialization" in result.stderr
     assert not (target / "dxt.duckdb").exists()
     assert not (target / "run_results.json").exists()
 
@@ -2464,7 +2562,7 @@ target-path: target
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 run execution slice")
-def test_run_resolves_duckdb_profile_path_relative_to_profiles_dir(tmp_path: Path):
+def test_run_resolves_duckdb_profile_path_relative_to_invocation_cwd(tmp_path: Path):
     project = tmp_path / "profile_path_project"
     profiles_dir = tmp_path / "profiles"
     (project / "models").mkdir(parents=True)
@@ -2488,6 +2586,8 @@ target-path: target
 """
     )
     (project / "models" / "customers.sql").write_text("select 11 as customer_id\n")
+    invocation_dir = tmp_path / "invocation"
+    invocation_dir.mkdir()
     target = tmp_path / "run-target"
     result = subprocess.run(
         [
@@ -2502,16 +2602,17 @@ target-path: target
             "--select",
             "customers",
         ],
-        cwd=ROOT,
+        cwd=invocation_dir,
         text=True,
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert (profiles_dir / "profile-relative.duckdb").exists()
+    assert (invocation_dir / "profile-relative.duckdb").exists()
     assert not (project / "profile-relative.duckdb").exists()
+    assert not (profiles_dir / "profile-relative.duckdb").exists()
     query = subprocess.run(
-        [DUCKDB, str(profiles_dir / "profile-relative.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "analytics"."customers"'],
-        cwd=ROOT,
+        [DUCKDB, str(invocation_dir / "profile-relative.duckdb"), "-csv", "-noheader", "-c", 'select customer_id from "analytics"."customers"'],
+        cwd=invocation_dir,
         text=True,
         capture_output=True,
     )
@@ -2519,7 +2620,7 @@ target-path: target
     assert query.stdout.strip() == "11"
 
 
-def test_run_rejects_non_duckdb_profile_before_execution(tmp_path: Path):
+def test_run_rejects_unavailable_postgres_connection_before_execution(tmp_path: Path):
     project = tmp_path / "postgres_run_profile"
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -2548,7 +2649,7 @@ target-path: target
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "run currently executes only DuckDB SQL models" in result.stderr
+    assert "PostgreSQL connection failed" in result.stderr
     assert not (target / "run_results.json").exists()
 
 
@@ -2638,7 +2739,7 @@ def test_build_writes_error_run_results_when_model_execution_fails(tmp_path: Pat
         "model.compile_basic.orders",
     ]
     assert [item["status"] for item in run_results["results"]] == ["success", "error"]
-    assert run_results["results"][1]["message"] == "DuckDB execution failed"
+    assert "Catalog Error: Table with name missing_relation does not exist" in run_results["results"][1]["message"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 build skipped-results slice")
@@ -2664,9 +2765,10 @@ def test_build_writes_skipped_run_results_for_blocked_selected_descendants(tmp_p
         "model.compile_basic.orders",
     ]
     assert [item["status"] for item in run_results["results"]] == ["error", "skipped"]
-    assert run_results["results"][0]["message"] == "DuckDB execution failed"
+    assert "Catalog Error: Table with name missing_relation does not exist" in run_results["results"][0]["message"]
     assert run_results["results"][1]["message"] is None
-    assert run_results["results"][1]["compiled"] is True
+    assert run_results["results"][1]["compiled"] is False
+    assert run_results["results"][1]["compiled_code"] is None
 
 
 def test_build_rejects_unsupported_model_materialization_before_duckdb(tmp_path: Path):
@@ -2680,7 +2782,7 @@ target-path: target
 """
     )
     (project / "models" / "events.sql").write_text(
-        "{{ config(materialized='incremental') }}\nselect 1 as id\n"
+        "{{ config(materialized='unregistered_materialization') }}\nselect 1 as id\n"
     )
     target = tmp_path / "build-target"
     result = subprocess.run(
@@ -2690,8 +2792,8 @@ target-path: target
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "build currently supports only table and view model materializations" in result.stderr
-    assert "run currently supports only table and view model materializations" not in result.stderr
+    assert "unsupported build model materialization" in result.stderr
+    assert "unsupported model materialization" not in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
@@ -2782,7 +2884,7 @@ def test_seed_command_filters_mixed_selection_to_seed_resources(tmp_path: Path):
     assert [item["unique_id"] for item in run_results["results"]] == ["seed.seed_ref.raw_customers"]
 
 
-def test_seed_command_rejects_non_seed_selection_before_duckdb(tmp_path: Path):
+def test_seed_non_seed_selection_finishes_without_execution(tmp_path: Path):
     project = copy_fixture(tmp_path, "seed_ref")
     target = tmp_path / "seed-target"
     result = subprocess.run(
@@ -2791,19 +2893,21 @@ def test_seed_command_rejects_non_seed_selection_before_duckdb(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "seed currently supports only selected seed resources" in result.stderr
-    assert not (target / "run_results.json").exists()
+    assert result.returncode == 0, result.stderr
+    assert "Nothing to do" in result.stdout + result.stderr
+    assert json.loads((target / "run_results.json").read_text())["results"] == []
+    assert (target / "manifest.json").exists()
     assert not (target / "dxt.duckdb").exists()
 
 
-def write_duckdb_profile(project: Path) -> None:
+def write_duckdb_profile(project: Path, database: Path) -> None:
     (project / "profiles.yml").write_text(
-        """default:
+        f"""default:
   target: dev
   outputs:
     dev:
       type: duckdb
+      path: {database}
       schema: main
 """
     )
@@ -2827,8 +2931,8 @@ def write_duckdb_profile_at(profiles_dir: Path, path: str | None = None) -> None
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 package seed command execution slice")
 def test_seed_command_executes_package_seed_selected_by_package_selector(tmp_path: Path):
     project = copy_fixture(tmp_path, "package_ref_selector")
-    write_duckdb_profile(project)
     target = tmp_path / "seed-target"
+    write_duckdb_profile(project, target / "dxt.duckdb")
     result = subprocess.run(
         [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "package:util_pkg"],
         cwd=ROOT,
@@ -2956,8 +3060,8 @@ def test_dbt_core_package_seed_manifest_and_run_results_oracle(tmp_path: Path):
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 package seed command execution slice")
 def test_seed_command_executes_package_seed_selected_by_dependency_selector(tmp_path: Path):
     project = copy_fixture(tmp_path, "package_ref_selector")
-    write_duckdb_profile(project)
     target = tmp_path / "seed-target"
+    write_duckdb_profile(project, target / "dxt.duckdb")
     result = subprocess.run(
         [DXT, "seed", "--project-dir", str(project), "--target-path", str(target), "--select", "+pkg_seeded_customers"],
         cwd=ROOT,
@@ -3039,8 +3143,8 @@ def test_build_executes_selected_duckdb_seed_and_writes_run_results(tmp_path: Pa
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 package seed build execution slice")
 def test_build_executes_selected_package_duckdb_seed_and_writes_run_results(tmp_path: Path):
     project = copy_fixture(tmp_path, "package_ref_selector")
-    write_duckdb_profile(project)
     target = tmp_path / "build-target"
+    write_duckdb_profile(project, target / "dxt.duckdb")
     result = subprocess.run(
         [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "package:util_pkg,resource_type:seed"],
         cwd=ROOT,
@@ -3074,8 +3178,10 @@ def test_build_executes_selected_package_duckdb_seed_and_writes_run_results(tmp_
 def test_build_honors_package_seed_quote_columns_false_and_column_types(tmp_path: Path):
     project = tmp_path / "seed_config_tests"
     write_seed_config_project(project)
-    write_duckdb_profile(project)
+    # Core leaves unquoted CSV names unchanged; provide a valid SQL identifier.
+    (project / "dbt_packages/util_pkg/seeds/raw_pkg_orders.csv").write_text("order_id,amount\n1,10.50\n")
     target = tmp_path / "build-target"
+    write_duckdb_profile(project, target / "dxt.duckdb")
     result = subprocess.run(
         [DXT, "build", "--project-dir", str(project), "--target-path", str(target), "--select", "package:util_pkg,resource_type:seed"],
         cwd=ROOT,
@@ -3113,7 +3219,7 @@ def test_build_honors_package_seed_quote_columns_false_and_column_types(tmp_path
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed build execution slice")
-def test_build_replaces_existing_view_with_seed_table(tmp_path: Path):
+def test_build_rejects_existing_view_as_seed_and_preserves_it(tmp_path: Path):
     project = copy_fixture(tmp_path, "seed_ref")
     target = tmp_path / "build-target"
     target.mkdir()
@@ -3131,16 +3237,18 @@ def test_build_replaces_existing_view_with_seed_table(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, result.stderr
+    rows = json.loads((target / "run_results.json").read_text())["results"]
+    assert [(row["unique_id"], row["status"]) for row in rows] == [("seed.seed_ref.raw_customers", "error")]
 
     query = subprocess.run(
-        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select id, name from "main"."raw_customers"'],
+        [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select id from "main"."raw_customers"'],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert query.returncode == 0, query.stderr
-    assert query.stdout.strip() == "1,Ada"
+    assert query.stdout.strip() == "0"
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed+model build execution slice")
@@ -3187,7 +3295,7 @@ def test_build_prepare_reports_test_execution_boundary(tmp_path: Path):
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "test/build currently executes only selected DuckDB singular SQL tests, supported custom generic column tests, and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
+    assert "malformed or unsupported data test configuration or macro" in result.stderr
     assert not (target / "run_results.json").exists()
     manifest = json.loads((target / "manifest.json").read_text())
     assert "compiled" not in manifest["nodes"]["model.model_properties.customers"]
@@ -3203,6 +3311,8 @@ version: "1.0"
 model-paths: ["models"]
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "seeds" / "raw_customers.csv").write_text(seed_csv)
@@ -3235,6 +3345,8 @@ def write_seed_column_test_project(project: Path, seed_csv: str, schema_tests: s
 version: "1.0"
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "seeds" / "raw_customers.csv").write_text(seed_csv)
@@ -3309,6 +3421,8 @@ version: "1.0"
 model-paths: ["models"]
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "seeds" / "raw_customers.csv").write_text(
@@ -3593,6 +3707,16 @@ models:
     )
 
 
+def assert_duckdb_seed_integer_copy_error(message: str) -> None:
+    # Pinned dbt-duckdb loads seeds with COPY. Keep its failing record,
+    # authored column type and CSV sniffer diagnosis in the contract.
+    assert "Conversion Error: CSV Error on Line: 2" in message
+    assert "Original Line: not_an_int,Ada" in message
+    assert 'Error when converting column "customer_id". Could not convert string "not_an_int" to \'INTEGER\'' in message
+    assert "Column customer_id is being converted as type INTEGER" in message
+    assert "Column at position: 0 Set type: INTEGER Sniffed type: VARCHAR" in message
+
+
 def write_build_test_failure_downstream_project(project: Path) -> None:
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -3709,7 +3833,7 @@ union all select 3 as customer_id, 'ignored' as status
 """
     )
     (project / "tests" / "assert_customers.sql").write_text(
-        f"{inline_config}select * from {{{{ ref('customers') }}}} where customer_id > 0;\n"
+        f"{inline_config}select * from {{{{ ref('customers') }}}} where customer_id > 0\n"
     )
     (project / "tests" / "disabled_assert.sql").write_text("select * from {{ ref('missing_model') }}\n")
     (project / "tests" / "schema.yml").write_text(
@@ -3772,6 +3896,8 @@ def write_accepted_values_model_test_project(project: Path, customers_sql: str) 
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "customers.sql").write_text(customers_sql)
@@ -3798,6 +3924,8 @@ def write_accepted_values_quote_false_model_test_project(project: Path, customer
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "customers.sql").write_text(customers_sql)
@@ -3825,6 +3953,8 @@ def write_source_column_test_project(project: Path) -> None:
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "schema.yml").write_text(
@@ -3853,6 +3983,8 @@ def write_source_column_quote_false_test_project(project: Path) -> None:
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "schema.yml").write_text(
@@ -3880,6 +4012,8 @@ def write_source_relationships_test_project(project: Path) -> None:
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "customers.sql").write_text(
@@ -3918,6 +4052,8 @@ def write_source_to_source_relationships_test_project(project: Path) -> None:
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "schema.yml").write_text(
@@ -3952,6 +4088,8 @@ version: "1.0"
 model-paths: ["models"]
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "orders_model.sql").write_text("select 1 as customer_id\n")
@@ -4007,6 +4145,8 @@ def write_relationships_model_test_project(project: Path, customers_sql: str, or
 version: "1.0"
 model-paths: ["models"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "models" / "customers.sql").write_text(customers_sql)
@@ -4094,7 +4234,7 @@ def test_build_model_execution_failure_skips_selected_generic_tests(tmp_path: Pa
         "test.build_model_tests.unique_customers_customer_id.c5af1ff4b1",
     ]
     assert [item["status"] for item in run_results["results"]] == ["error", "skipped", "skipped"]
-    assert run_results["results"][0]["message"] == "DuckDB execution failed"
+    assert "Catalog Error: Table with name missing_relation does not exist" in run_results["results"][0]["message"]
     assert run_results["results"][1]["message"] is None
     assert run_results["results"][2]["message"] is None
 
@@ -4117,7 +4257,7 @@ def test_run_continues_independent_model_after_execution_failure(tmp_path: Path)
     run_results = json.loads((target / "run_results.json").read_text())
     results_by_id = {item["unique_id"]: item for item in run_results["results"]}
     assert results_by_id["model.run_failure_continue.bad_parent"]["status"] == "error"
-    assert results_by_id["model.run_failure_continue.bad_parent"]["message"] == "DuckDB execution failed"
+    assert "Catalog Error: Table with name missing_relation does not exist" in results_by_id["model.run_failure_continue.bad_parent"]["message"]
     assert results_by_id["model.run_failure_continue.bad_child"]["status"] == "skipped"
     assert results_by_id["model.run_failure_continue.bad_child"]["message"] is None
     assert results_by_id["model.run_failure_continue.independent"]["status"] == "success"
@@ -4154,9 +4294,9 @@ def test_build_continues_independent_model_after_execution_failure(tmp_path: Pat
         "model.build_failure_continue.zz_independent",
     ]
     assert [item["status"] for item in run_results["results"]] == ["error", "skipped", "success"]
-    assert run_results["results"][0]["message"] == "DuckDB execution failed"
+    assert "Catalog Error: Table with name missing_relation does not exist" in run_results["results"][0]["message"]
     assert run_results["results"][1]["message"] is None
-    assert run_results["results"][2]["message"] is None
+    assert run_results["results"][2]["message"] == "OK"
 
     independent = subprocess.run(
         [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select answer from "main"."zz_independent"'],
@@ -4188,19 +4328,21 @@ def test_build_continues_independent_model_after_data_test_failure(tmp_path: Pat
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "Built 3 model(s) and 1 test(s)" in result.stdout
+    assert "Built 2 model(s) and 1 test(s)" in result.stdout
     assert "1 test(s) failed with 1 failure row(s)" in result.stdout
     assert "one or more tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
-    assert [item["unique_id"] for item in run_results["results"]] == [
-        "model.build_test_failure_continue.customers",
-        "test.build_test_failure_continue.not_null_customers_customer_id.5c9bf9911d",
-        "model.build_test_failure_continue.orders",
-        "model.build_test_failure_continue.zz_independent",
-    ]
-    assert [item["status"] for item in run_results["results"]] == ["success", "fail", "skipped", "success"]
-    assert [item["failures"] for item in run_results["results"]] == [None, 1, None, None]
+    ids = [item["unique_id"] for item in run_results["results"]]
+    rows = {row["unique_id"]: (row["status"], row["failures"]) for row in run_results["results"]}
+    assert rows == {
+        "model.build_test_failure_continue.customers": ("success", None),
+        "test.build_test_failure_continue.not_null_customers_customer_id.5c9bf9911d": ("fail", 1),
+        "model.build_test_failure_continue.orders": ("skipped", None),
+        "model.build_test_failure_continue.zz_independent": ("success", None),
+    }
+    assert len(ids) == len(rows)
+    assert ids.index("model.build_test_failure_continue.customers") < ids.index("test.build_test_failure_continue.not_null_customers_customer_id.5c9bf9911d") < ids.index("model.build_test_failure_continue.orders")
 
     independent = subprocess.run(
         [DUCKDB, str(target / "dxt.duckdb"), "-csv", "-noheader", "-c", 'select answer from "main"."zz_independent"'],
@@ -4249,7 +4391,7 @@ def test_build_continues_independent_seed_model_test_after_seed_failure(tmp_path
 
     results_by_id = {item["unique_id"]: item for item in run_results["results"]}
     assert results_by_id["seed.build_seed_failure_continue.aa_bad_seed"]["status"] == "error"
-    assert results_by_id["seed.build_seed_failure_continue.aa_bad_seed"]["message"] == "DuckDB execution failed"
+    assert_duckdb_seed_integer_copy_error(results_by_id["seed.build_seed_failure_continue.aa_bad_seed"]["message"])
     assert results_by_id["model.build_seed_failure_continue.ab_bad_child"]["status"] == "skipped"
     assert results_by_id["model.build_seed_failure_continue.ab_bad_child"]["message"] is None
     assert results_by_id["seed.build_seed_failure_continue.zz_independent_seed"]["status"] == "success"
@@ -4363,7 +4505,7 @@ def test_parse_emits_generic_test_config_for_model_seed_and_source_tests(tmp_pat
         "test.generic_test_config_tests.source_not_null_raw_orders_customer_id.3962c6ab03",
     ]
     model_test = tests["test.generic_test_config_tests.not_null_customers_customer_id.5c9bf9911d"]
-    assert model_test["database"] == "memory"
+    assert model_test["database"] is None
     assert model_test["schema"] == "main_dbt_test__audit"
     assert model_test["alias"] == "not_null_customers_customer_id"
     assert model_test["fqn"] == ["generic_test_config_tests", "not_null_customers_customer_id"]
@@ -4424,7 +4566,9 @@ def test_generic_test_configs_drive_test_and_build_statuses(tmp_path: Path):
     assert result["message"] == "Got 1 result, configured to warn if > 0"
     assert "from (select * from" in result["compiled_code"]
     assert "status = 'checked'" in result["compiled_code"]
-    assert result["compiled_code"].endswith("limit 1")
+    assert "limit 1" not in result["compiled_code"]
+    configured_test = json.loads((target / "manifest.json").read_text())["nodes"][result["unique_id"]]
+    assert configured_test["config"]["limit"] == 1
 
     write_generic_test_config_project(project, severity="error", error_if="> 0")
     fail_target = tmp_path / "build-fail-target"
@@ -4456,7 +4600,7 @@ def test_generic_test_configs_drive_test_and_build_statuses(tmp_path: Path):
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for generic test store_failures coverage")
-def test_generic_test_store_failures_materializes_and_drops_audit_relation(tmp_path: Path):
+def test_generic_test_store_failures_materializes_and_keeps_empty_audit_relation(tmp_path: Path):
     project = tmp_path / "generic_test_store_failures"
     write_generic_test_config_project(project, severity="error", error_if="> 0", store_failures=True)
     target = tmp_path / "store-target"
@@ -4483,12 +4627,13 @@ def test_generic_test_store_failures_materializes_and_drops_audit_relation(tmp_p
     run_results = json.loads((target / "run_results.json").read_text())
     result = run_results["results"][0]
     assert result["status"] == "fail"
-    assert result["relation_name"] == '"dbt_test__audit"."not_null_customers_customer_id"'
-    assert result["compiled_code"].endswith("limit 1")
+    assert result["relation_name"] == '"main_dbt_test__audit"."not_null_customers_customer_id"'
+    assert "limit 1" not in result["compiled_code"]
     manifest = json.loads((target / "manifest.json").read_text())
     test_node = manifest["nodes"][result["unique_id"]]
     assert test_node["config"]["store_failures"] is True
-    assert duckdb_scalar(db_path, 'select count(*) from "dbt_test__audit"."not_null_customers_customer_id"') == "1"
+    assert test_node["config"]["limit"] == 1
+    assert duckdb_scalar(db_path, 'select count(*) from "main_dbt_test__audit"."not_null_customers_customer_id"') == "1"
 
     write_generic_test_config_project(
         project,
@@ -4506,14 +4651,15 @@ def test_generic_test_store_failures_materializes_and_drops_audit_relation(tmp_p
     assert pass_result.returncode == 0, pass_result.stderr
     pass_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in pass_results["results"]] == ["success", "pass"]
-    assert pass_results["results"][1]["relation_name"] is None
+    assert pass_results["results"][1]["relation_name"] == '"main_dbt_test__audit"."not_null_customers_customer_id"'
     assert (
         duckdb_scalar(
             db_path,
-            "select count(*) from information_schema.tables where table_schema = 'dbt_test__audit' and table_name = 'not_null_customers_customer_id'",
+            "select count(*) from information_schema.tables where table_schema = 'main_dbt_test__audit' and table_name = 'not_null_customers_customer_id'",
         )
-        == "0"
+        == "1"
     )
+    assert duckdb_scalar(db_path, 'select count(*) from "main_dbt_test__audit"."not_null_customers_customer_id"') == "0"
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 generic test command slice")
@@ -4531,10 +4677,20 @@ def test_test_command_does_not_build_missing_parent_relation(tmp_path: Path):
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "DuckDB execution failed" in result.stderr
+    assert result.returncode == 1
+    assert "one or more tests failed" in result.stderr
     assert (target / "manifest.json").exists()
-    assert not (target / "run_results.json").exists()
+    assert_run_results_schema_slice(target / "run_results.json")
+    run_results = json.loads((target / "run_results.json").read_text())
+    assert [row["unique_id"] for row in run_results["results"]] == [
+        "test.build_model_tests.not_null_customers_customer_id.5c9bf9911d",
+        "test.build_model_tests.unique_customers_customer_id.c5af1ff4b1",
+    ]
+    assert [row["status"] for row in run_results["results"]] == ["error", "error"]
+    assert all("Catalog Error" in row["message"] and "customers" in row["message"] for row in run_results["results"])
+    assert all(row["failures"] is None for row in run_results["results"])
+    assert all(row["compiled"] is True for row in run_results["results"])
+    assert all(row["compiled_code"] is not None for row in run_results["results"])
 
     if (target / "dxt.duckdb").exists():
         query = subprocess.run(
@@ -4577,7 +4733,7 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
     node = manifest["nodes"]["test.singular_tests.assert_customers"]
     assert node["resource_type"] == "test"
     assert node["name"] == "assert_customers"
-    assert node["database"] == "memory"
+    assert node["database"] is None
     assert node["schema"] == "main_dbt_test__audit"
     assert node["alias"] == "assert_customers"
     assert node["fqn"] == ["singular_tests", "assert_customers"]
@@ -4593,44 +4749,44 @@ def test_parse_lists_singular_sql_tests_and_skips_generic_test_dirs(tmp_path: Pa
     assert all("ignored" not in unique_id for unique_id in manifest["nodes"])
 
     list_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert list_result.returncode == 0, list_result.stderr
-    assert json.loads(list_result.stdout) == [
+    assert json_lines(list_result.stdout) == [
         {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"}
     ]
 
     generic_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert generic_result.returncode == 0, generic_result.stderr
-    assert json.loads(generic_result.stdout) == []
+    assert json_lines(generic_result.stdout) == []
 
     data_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:data", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:data", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert data_result.returncode == 0, data_result.stderr
-    assert json.loads(data_result.stdout) == [
+    assert json_lines(data_result.stdout) == [
         {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"}
     ]
 
     dependency_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "customers", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "customers", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert dependency_result.returncode == 0, dependency_result.stderr
-    assert json.loads(dependency_result.stdout) == [
+    assert json_lines(dependency_result.stdout) == [
         {"unique_id": "model.singular_tests.customers", "resource_type": "model", "name": "customers"},
         {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"},
     ]
@@ -4666,7 +4822,7 @@ def test_inline_disabled_singular_sql_test_is_not_active(tmp_path: Path):
     assert disabled_id not in manifest["child_map"]
     assert list(manifest["disabled"]) == [disabled_id]
     disabled_test = manifest["disabled"][disabled_id][0]
-    assert disabled_test["database"] == "memory"
+    assert disabled_test["database"] is None
     assert disabled_test["schema"] == "main_dbt_test__audit"
     assert disabled_test["alias"] == "disabled_missing_ref"
     assert disabled_test["fqn"] == ["singular_tests", "disabled_missing_ref"]
@@ -4676,13 +4832,13 @@ def test_inline_disabled_singular_sql_test_is_not_active(tmp_path: Path):
     assert disabled_test["depends_on"]["nodes"] == []
 
     list_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert list_result.returncode == 0, list_result.stderr
-    assert json.loads(list_result.stdout) == [
+    assert json_lines(list_result.stdout) == [
         {"unique_id": "test.singular_tests.assert_customers", "resource_type": "test", "name": "assert_customers"}
     ]
 
@@ -4699,7 +4855,7 @@ def test_inline_disabled_singular_sql_test_is_not_active(tmp_path: Path):
     assert sorted(path.name for path in compiled_root.glob("*.sql")) == ["assert_customers.sql"]
 
 
-def test_compile_writes_selected_singular_sql_test_artifacts_without_duckdb(tmp_path: Path):
+def test_compile_writes_selected_singular_sql_test_artifacts_without_materializing_relations(tmp_path: Path):
     project = tmp_path / "singular_tests"
     write_singular_test_project(
         project,
@@ -4716,7 +4872,9 @@ def test_compile_writes_selected_singular_sql_test_artifacts_without_duckdb(tmp_
     )
     assert result.returncode == 0, result.stderr
     assert "Compiled 0 model(s) and 1 test(s)" in result.stdout
-    assert not (target / "dxt.duckdb").exists()
+    import duckdb
+    with duckdb.connect(str(target / "dxt.duckdb")) as connection:
+        assert connection.execute("show tables").fetchall() == []
 
     compiled_path = target / "compiled" / "singular_tests" / "tests" / "assert_customers.sql"
     compiled_sql = compiled_path.read_text()
@@ -4730,7 +4888,7 @@ def test_compile_writes_selected_singular_sql_test_artifacts_without_duckdb(tmp_
     assert test_node["compiled_code"] == compiled_sql
     assert test_node["compiled_path"].endswith("/compiled/singular_tests/tests/assert_customers.sql")
     assert test_node["extra_ctes"] == []
-    assert test_node["extra_ctes_injected"] is False
+    assert test_node["extra_ctes_injected"] is True
     assert "test_metadata" not in test_node
     assert "column_name" not in test_node
     assert "attached_node" not in test_node
@@ -4778,13 +4936,13 @@ def test_parse_and_compile_apply_singular_sql_test_yaml_patches(tmp_path: Path):
     assert disabled_test["depends_on"]["nodes"] == []
 
     list_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:singular_yaml", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:singular_yaml", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert list_result.returncode == 0, list_result.stderr
-    assert json.loads(list_result.stdout) == [
+    assert json_lines(list_result.stdout) == [
         {"unique_id": test_id, "resource_type": "test", "name": "assert_customers"}
     ]
 
@@ -4798,7 +4956,7 @@ def test_parse_and_compile_apply_singular_sql_test_yaml_patches(tmp_path: Path):
     assert compile_result.returncode == 0, compile_result.stderr
     assert "Compiled 0 model(s) and 1 test(s)" in compile_result.stdout
     compiled_sql = (compile_target / "compiled" / "singular_test_configs" / "tests" / "assert_customers.sql").read_text()
-    assert compiled_sql.strip() == 'select * from "main"."customers" where customer_id > 0;'
+    assert compiled_sql.strip() == 'select * from "main"."customers" where customer_id > 0'
     compiled_manifest = json.loads((compile_target / "manifest.json").read_text())
     compiled_test = compiled_manifest["nodes"][test_id]
     assert compiled_test["compiled"] is True
@@ -4830,8 +4988,10 @@ def test_singular_sql_test_yaml_configs_drive_test_and_build_statuses(tmp_path: 
     warn_test = warn_results["results"][1]
     assert warn_test["failures"] == 1
     assert warn_test["message"] == "Got 1 result, configured to warn if > 0"
-    assert "dbt_internal_test where status = 'checked'" in warn_test["compiled_code"]
-    assert warn_test["compiled_code"].endswith("limit 1")
+    assert warn_test["compiled_code"].strip() == 'select * from "main"."customers" where customer_id > 0'
+    warn_manifest = json.loads((target / "manifest.json").read_text())
+    assert warn_manifest["nodes"][warn_test["unique_id"]]["config"]["where"] == "status = 'checked'"
+    assert warn_manifest["nodes"][warn_test["unique_id"]]["config"]["limit"] == 1
 
     test_result = subprocess.run(
         [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "tag:singular_yaml"],
@@ -4862,7 +5022,7 @@ def test_singular_sql_test_yaml_configs_drive_test_and_build_statuses(tmp_path: 
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for singular SQL test store_failures coverage")
-def test_singular_sql_test_store_failures_supports_inline_config_and_drop_on_pass(tmp_path: Path):
+def test_singular_sql_test_store_failures_supports_inline_config_and_retains_empty_audit_table(tmp_path: Path):
     project = tmp_path / "singular_store_failures"
     write_singular_test_config_project(
         project,
@@ -4888,13 +5048,13 @@ def test_singular_sql_test_store_failures_supports_inline_config_and_drop_on_pas
     result = run_results["results"][1]
     assert result["unique_id"] == "test.singular_test_configs.assert_customers"
     assert result["status"] == "fail"
-    assert result["relation_name"] == '"dbt_test__audit"."assert_customers"'
+    assert result["relation_name"] == '"main_dbt_test__audit"."assert_customers"'
     manifest = json.loads((target / "manifest.json").read_text())
     assert manifest["nodes"][result["unique_id"]]["config"]["store_failures"] is True
-    assert duckdb_scalar(db_path, 'select count(*) from "dbt_test__audit"."assert_customers"') == "1"
+    assert duckdb_scalar(db_path, 'select count(*) from "main_dbt_test__audit"."assert_customers"') == "1"
 
     (project / "tests" / "assert_customers.sql").write_text(
-        "{{ config(store_failures=true) }}\nselect * from {{ ref('customers') }} where customer_id < 0;\n"
+        "{{ config(store_failures=true) }}\nselect * from {{ ref('customers') }} where customer_id < 0\n"
     )
     pass_result = subprocess.run(
         [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "tag:singular_yaml"],
@@ -4905,17 +5065,18 @@ def test_singular_sql_test_store_failures_supports_inline_config_and_drop_on_pas
     assert pass_result.returncode == 0, pass_result.stderr
     pass_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in pass_results["results"]] == ["pass"]
-    assert pass_results["results"][0]["relation_name"] is None
+    assert pass_results["results"][0]["relation_name"] == '"main_dbt_test__audit"."assert_customers"'
     assert (
         duckdb_scalar(
             db_path,
-            "select count(*) from information_schema.tables where table_schema = 'dbt_test__audit' and table_name = 'assert_customers'",
+            "select count(*) from information_schema.tables where table_schema = 'main_dbt_test__audit' and table_name = 'assert_customers'",
         )
-        == "0"
+        == "1"
     )
+    assert duckdb_scalar(db_path, 'select count(*) from "main_dbt_test__audit"."assert_customers"') == "0"
 
 
-def test_compile_writes_selected_generic_test_artifacts_without_duckdb(tmp_path: Path):
+def test_compile_writes_selected_generic_test_artifacts_without_materializing_relations(tmp_path: Path):
     project = copy_fixture(tmp_path, "generic_test_arguments")
     schema_path = project / "models" / "schema.yml"
     schema_path.write_text(schema_path.read_text().replace("          - unique\n", "          - unique\n          - not_null\n", 1))
@@ -4929,8 +5090,10 @@ def test_compile_writes_selected_generic_test_artifacts_without_duckdb(tmp_path:
     )
     assert result.returncode == 0, result.stderr
     assert "Compiled 0 model(s) and 5 test(s)" in result.stdout
-    assert not (target / "dxt.duckdb").exists()
-    assert not (target / "run_results.json").exists()
+    import duckdb
+    with duckdb.connect(str(target / "dxt.duckdb")) as connection:
+        assert connection.execute("show tables").fetchall() == []
+    assert_run_results_schema_slice(target / "run_results.json")
 
     manifest_path = target / "manifest.json"
     assert_manifest_schema_slice(manifest_path)
@@ -4943,16 +5106,16 @@ def test_compile_writes_selected_generic_test_artifacts_without_duckdb(tmp_path:
     assert len(test_nodes) == 5
     assert all(node["compiled"] is True for node in test_nodes)
     assert all(node["extra_ctes"] == [] for node in test_nodes)
-    assert all(node["extra_ctes_injected"] is False for node in test_nodes)
+    assert all(node["extra_ctes_injected"] is True for node in test_nodes)
 
     accepted_values = next(node for node in test_nodes if node["name"].startswith("accepted_values_orders_status__"))
     assert "with all_values as" in accepted_values["compiled_code"]
-    assert "\"status\" as value_field" in accepted_values["compiled_code"]
-    assert "value_field not in ('placed', 'shipped', 'completed', 'return_pending', 'returned')" in accepted_values["compiled_code"]
+    assert "status as value_field" in accepted_values["compiled_code"]
+    assert "value_field not in (\n    'placed','shipped','completed','return_pending','returned'\n)" in accepted_values["compiled_code"]
     compiled_path = Path(accepted_values["compiled_path"])
     assert compiled_path.exists()
     assert compiled_path.read_text() == accepted_values["compiled_code"]
-    assert compiled_path.parent == target / "compiled" / "generic_test_arguments"
+    assert compiled_path.parent == target / "compiled" / "generic_test_arguments" / "models" / "schema.yml"
     assert compiled_path.name.startswith("accepted_values_orders_")
     assert compiled_path.suffix == ".sql"
 
@@ -4962,7 +5125,7 @@ def test_compile_writes_selected_generic_test_artifacts_without_duckdb(tmp_path:
 
     not_null = next(node for node in test_nodes if node["test_metadata"]["name"] == "not_null")
     assert 'from "main"."customers"' in not_null["compiled_code"]
-    assert 'where "customer_id" is null' in not_null["compiled_code"]
+    assert 'where customer_id is null' in not_null["compiled_code"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for singular SQL test execution coverage")
@@ -4971,7 +5134,7 @@ def test_build_and_test_execute_singular_sql_tests(tmp_path: Path):
     write_singular_test_project(
         project,
         "select 1 as customer_id, 'Ada' as customer_name\n",
-        "select * from {{ ref('customers') }} where customer_id is null;\n",
+        "select * from {{ ref('customers') }} where customer_id is null\n",
     )
     (project / "tests" / "disabled_missing_ref.sql").write_text(
         "{{ config(enabled=false) }}\nselect * from {{ ref('missing_model') }}\n"
@@ -4998,7 +5161,7 @@ def test_build_and_test_execute_singular_sql_tests(tmp_path: Path):
     assert 'from "main"."customers"' in run_results["results"][1]["compiled_code"]
 
     (project / "tests" / "assert_customers.sql").write_text(
-        "select * from {{ ref('customers') }} where customer_id = 1;\n"
+        "select * from {{ ref('customers') }} where customer_id = 1\n"
     )
     test_result = subprocess.run(
         [DXT, "test", "--project-dir", str(project), "--target-path", str(target), "--select", "customers"],
@@ -5062,8 +5225,8 @@ def test_build_executes_selected_duckdb_accepted_values_generic_test(tmp_path: P
     assert result["failures"] == 0
     assert result["compiled"] is True
     assert "with all_values as" in result["compiled_code"]
-    assert "\"customer_type\" as value_field" in result["compiled_code"]
-    assert "value_field not in ('new', 'returning')" in result["compiled_code"]
+    assert "customer_type as value_field" in result["compiled_code"]
+    assert "value_field not in (\n    'new','returning'\n)" in result["compiled_code"]
     assert "dbt_internal_test" not in result["compiled_code"]
     assert result["relation_name"] is None
 
@@ -5097,14 +5260,14 @@ def test_build_executes_selected_duckdb_accepted_values_quote_false_generic_test
         test_node["unique_id"]
         == "test.accepted_values_quote_false_tests.accepted_values_customers_customer_id__False__1__2.d3fda7ba1b"
     )
-    assert test_node["test_metadata"]["kwargs"]["values"] == ["1", "2"]
+    assert test_node["test_metadata"]["kwargs"]["values"] == [1, 2]
     assert test_node["test_metadata"]["kwargs"]["quote"] is False
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["success", "pass"]
     compiled_code = run_results["results"][1]["compiled_code"]
-    assert "value_field not in (1, 2)" in compiled_code
-    assert "value_field not in ('1', '2')" not in compiled_code
+    assert "value_field not in (\n    1,2\n)" in compiled_code
+    assert "value_field not in (\n    '1','2'\n)" not in compiled_code
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 accepted_values build execution slice")
@@ -5177,7 +5340,7 @@ def test_build_reports_failing_duckdb_accepted_values_quote_false_generic_test(t
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["success", "fail"]
     assert [item["failures"] for item in run_results["results"]] == [None, 1]
-    assert "value_field not in (1, 2)" in run_results["results"][1]["compiled_code"]
+    assert "value_field not in (\n    1,2\n)" in run_results["results"][1]["compiled_code"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 accepted_values model+test build execution slice")
@@ -5315,7 +5478,7 @@ def test_build_executes_selected_duckdb_source_accepted_values_quote_false_gener
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["pass"]
-    assert "value_field not in (1, 2)" in run_results["results"][0]["compiled_code"]
+    assert "value_field not in (\n    1,2\n)" in run_results["results"][0]["compiled_code"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 source relationships build execution slice")
@@ -5822,10 +5985,10 @@ seeds:
         "test.build_seed_model_tests.unique_customers_customer_id.c5af1ff4b1",
     ]
     assert [item["status"] for item in run_results["results"]] == ["error", "skipped", "skipped", "skipped"]
-    assert run_results["results"][0]["message"] == "DuckDB execution failed"
+    assert_duckdb_seed_integer_copy_error(run_results["results"][0]["message"])
     assert [item["message"] for item in run_results["results"][1:]] == [None, None, None]
-    assert run_results["results"][1]["compiled"] is True
-    assert run_results["results"][1]["compiled_code"].strip().startswith("select")
+    assert all(item["compiled"] is False for item in run_results["results"][1:])
+    assert all(item["compiled_code"] is None for item in run_results["results"][1:])
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 table-level generic-test build slice")
@@ -5916,7 +6079,7 @@ def test_build_executes_table_level_source_generic_test(tmp_path: Path):
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["pass"]
-    assert "value_field not in (1, 2)" in run_results["results"][0]["compiled_code"]
+    assert "value_field not in (\n    1,2\n)" in run_results["results"][0]["compiled_code"]
     manifest = json.loads((target / "manifest.json").read_text())
     test_nodes = [
         node
@@ -5935,12 +6098,12 @@ def test_build_executes_table_level_source_generic_test(tmp_path: Path):
     assert source_test["test_metadata"]["kwargs"] == {
         "model": "{{ get_where_subquery(source('raw', 'orders')) }}",
         "column_name": "customer_id",
-        "values": ["1", "2"],
+        "values": [1, 2],
         "quote": False,
     }
 
 
-def test_parse_ignores_unsupported_source_table_generic_test_without_column_name(tmp_path: Path):
+def test_parse_preserves_source_table_generic_test_without_column_name(tmp_path: Path):
     project = tmp_path / "source_table_without_column"
     (project / "models").mkdir(parents=True)
     (project / "dbt_project.yml").write_text(
@@ -5970,8 +6133,13 @@ sources:
     assert result.returncode == 0, result.stderr
     assert_manifest_schema_slice(target / "manifest.json")
     manifest = json.loads((target / "manifest.json").read_text())
-    assert [node for node in manifest["nodes"].values() if node["resource_type"] == "test"] == []
-    assert manifest["child_map"]["source.source_table_without_column.raw.orders"] == []
+    test_nodes = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
+    assert len(test_nodes) == 1
+    node = test_nodes[0]
+    assert node["unique_id"] == "test.source_table_without_column.source_not_null_raw_orders_.f187fb185c"
+    assert node["test_metadata"]["kwargs"] == {"model": "{{ get_where_subquery(source('raw', 'orders')) }}"}
+    assert node["column_name"] is None
+    assert manifest["child_map"]["source.source_table_without_column.raw.orders"] == [node["unique_id"]]
 
 
 def test_parse_seed_column_properties_and_tests(tmp_path: Path):
@@ -6006,7 +6174,7 @@ def test_parse_seed_column_properties_and_tests(tmp_path: Path):
     assert accepted["test_metadata"]["kwargs"] == {
         "model": "{{ get_where_subquery(ref('raw_customers')) }}",
         "column_name": "customer_id",
-        "values": ["1", "2"],
+        "values": [1, 2],
         "quote": False,
     }
     assert accepted["depends_on"]["nodes"] == ["seed.seed_column_tests.raw_customers"]
@@ -6033,7 +6201,7 @@ def test_build_executes_selected_duckdb_seed_column_generic_tests(tmp_path: Path
     assert all(item["unique_id"].startswith("test.seed_column_tests.") for item in run_results["results"][1:])
     assert [item["status"] for item in run_results["results"]] == ["success", "pass", "pass", "pass"]
     assert [item["failures"] for item in run_results["results"]] == [None, 0, 0, 0]
-    assert "value_field not in (1, 2)" in run_results["results"][1]["compiled_code"]
+    assert "value_field not in (\n    1,2\n)" in run_results["results"][1]["compiled_code"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed column accepted_values build slice")
@@ -6059,7 +6227,7 @@ def test_build_executes_selected_duckdb_seed_column_default_quoted_accepted_valu
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
     assert [item["status"] for item in run_results["results"]] == ["success", "pass"]
-    assert "value_field not in ('A', 'B')" in run_results["results"][1]["compiled_code"]
+    assert "value_field not in (\n    'A','B'\n)" in run_results["results"][1]["compiled_code"]
 
 
 @pytest.mark.skipif(DUCKDB is None, reason="duckdb CLI is required for the M3 seed column relationships generic-test build slice")
@@ -6071,6 +6239,8 @@ def test_build_executes_selected_duckdb_seed_relationships_generic_test(tmp_path
 version: "1.0"
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "seeds" / "raw_customers.csv").write_text("customer_id,customer_name\n1,Ada\n")
@@ -6173,6 +6343,8 @@ version: "1.0"
 model-paths: ["models"]
 seed-paths: ["seeds"]
 target-path: target
+flags:
+  require_generic_test_arguments_property: true
 """
     )
     (project / "seeds" / "raw_customers.csv").write_text("customer_id,customer_name\n1,Ada\n")
@@ -6214,12 +6386,16 @@ models:
     assert "Built 2 seed(s), 2 model(s), and 1 test(s)" in result.stdout
     assert_run_results_schema_slice(target / "run_results.json")
     run_results = json.loads((target / "run_results.json").read_text())
-    assert [item["unique_id"] for item in run_results["results"][:4]] == [
+    assert set(item["unique_id"] for item in run_results["results"][:4]) == {
         "seed.build_seed_model_relationships_tests.raw_customers",
         "seed.build_seed_model_relationships_tests.raw_orders",
         "model.build_seed_model_relationships_tests.customers",
         "model.build_seed_model_relationships_tests.orders",
-    ]
+    }
+    ids = [item["unique_id"] for item in run_results["results"]]
+    assert len(ids) == 5
+    assert ids.index("seed.build_seed_model_relationships_tests.raw_customers") < ids.index("model.build_seed_model_relationships_tests.customers") < ids.index("model.build_seed_model_relationships_tests.orders")
+    assert ids.index("seed.build_seed_model_relationships_tests.raw_orders") < ids.index("model.build_seed_model_relationships_tests.orders")
     assert run_results["results"][4]["unique_id"].startswith(
         "test.build_seed_model_relationships_tests.relationships_orders_customer_id__customer_id__ref_customers_."
     )
@@ -6272,7 +6448,7 @@ models:
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "test/build currently executes only selected DuckDB singular SQL tests, supported custom generic column tests, and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
+    assert "malformed or unsupported data test configuration or macro" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
@@ -6319,7 +6495,7 @@ def test_build_data_test_failure_skips_selected_downstream_model(tmp_path: Path)
         capture_output=True,
     )
     assert result.returncode == 1
-    assert "Built 2 model(s) and 1 test(s)" in result.stdout
+    assert "Built 1 model(s) and 1 test(s)" in result.stdout
     assert "1 test(s) failed with 1 failure row(s)" in result.stdout
     assert "one or more tests failed" in result.stderr
     assert_run_results_schema_slice(target / "run_results.json")
@@ -6387,7 +6563,7 @@ def test_build_rejects_model_selection_with_unsupported_generic_test_before_duck
     )
     assert result.returncode == 2
     assert result.stdout == ""
-    assert "test/build currently executes only selected DuckDB singular SQL tests, supported custom generic column tests, and model/seed/source not_null/unique/accepted_values/relationships column tests" in result.stderr
+    assert "malformed or unsupported data test configuration or macro" in result.stderr
     assert not (target / "run_results.json").exists()
     assert not (target / "dxt.duckdb").exists()
     assert (target / "manifest.json").exists()
@@ -6569,13 +6745,13 @@ unit_tests:
     assert unit_id in manifest["child_map"]["model.unit_test_project.orders"]
 
     list_json = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "unit_test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "unit_test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert list_json.returncode == 0, list_json.stderr
-    listed = json.loads(list_json.stdout)
+    listed = json_lines(list_json.stdout)
     assert listed == [{"unique_id": unit_id, "resource_type": "unit_test", "name": "assert_order_flags"}]
 
     list_selector = subprocess.run(
@@ -6640,7 +6816,8 @@ def test_test_command_executes_selected_duckdb_unit_tests(tmp_path: Path):
     assert result_row["status"] == "pass"
     assert result_row["failures"] == 0
     assert result_row["compiled"] is True
-    assert '"main"."stg_orders"' in result_row["compiled_code"]
+    assert 'with "__dxt_unit_input_0" as' in result_row["compiled_code"]
+    assert 'cast(true as BOOLEAN) as "has_food"' in result_row["compiled_code"]
     assert "except all" in result_row["compiled_code"]
 
 
@@ -6659,7 +6836,7 @@ def test_build_executes_selected_duckdb_unit_tests_and_records_failures(tmp_path
 
     assert result.returncode == 1
     assert "Built 1 test(s)" in result.stdout
-    assert "1 test(s) failed with 2 failure row(s)" in result.stdout
+    assert "1 test(s) failed with 1 failure row(s)" in result.stdout
     assert "one or more tests failed" in result.stderr
     assert_manifest_schema_slice(target / "manifest.json")
     assert_run_results_schema_slice(target / "run_results.json")
@@ -6667,8 +6844,8 @@ def test_build_executes_selected_duckdb_unit_tests_and_records_failures(tmp_path
     result_row = run_results["results"][0]
     assert result_row["unique_id"] == "unit_test.unit_test_execution_project.orders.assert_food_orders"
     assert result_row["status"] == "fail"
-    assert result_row["failures"] == 2
-    assert result_row["message"] == "Got 2 results, configured to fail if != 0"
+    assert result_row["failures"] == 1
+    assert "actual differs from expected" in result_row["message"]
 
 
 def test_dbt_core_unit_test_status_oracle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -6776,8 +6953,7 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
     assert manifest["metadata"].get("dbt_schema_version") == "https://schemas.getdbt.com/dbt/manifest/v12.json"
     assert manifest["metadata"].get("dbt_version") == "0.0.0"
     assert isinstance(manifest["metadata"].get("generated_at"), str)
-    assert manifest["metadata"].get("invocation_id") is None
-    assert manifest["metadata"].get("invocation_started_at") is None
+    assert_invocation_metadata(manifest["metadata"])
     assert manifest["metadata"].get("env") == {}
     assert isinstance(manifest["metadata"].get("project_name"), str)
     assert isinstance(manifest["metadata"].get("adapter_type"), str)
@@ -6832,7 +7008,7 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
             if node["patch_path"] is not None:
                 assert not Path(node["patch_path"]).is_absolute()
         assert not Path(node["original_file_path"]).is_absolute()
-        assert set(node["depends_on"]) == {"macros", "nodes"}
+        assert set(node["depends_on"]) == ({"macros"} if node["resource_type"] == "seed" else {"macros", "nodes"})
     for unique_id, source in manifest["sources"].items():
         assert unique_id == source["unique_id"]
         assert source["resource_type"] == "source"
@@ -6871,31 +7047,19 @@ def assert_partial_manifest_schema(manifest: dict) -> None:
 
 
 def assert_manifest_schema_slice(manifest_path: Path) -> None:
-    manifest = json.loads(manifest_path.read_text())
-    schema = schema_validator.load_json(schema_validator.DEFAULT_SCHEMA)
-    errors = schema_validator.validate_manifest(manifest, schema)
-    assert errors == []
+    artifact_validator.assert_artifact(manifest_path)
 
 
 def assert_catalog_schema_slice(catalog_path: Path) -> None:
-    catalog = json.loads(catalog_path.read_text())
-    schema = schema_validator.load_json(CATALOG_SCHEMA)
-    errors = schema_validator.validate_manifest(catalog, schema)
-    assert errors == []
+    artifact_validator.assert_artifact(catalog_path)
 
 
 def assert_run_results_schema_slice(run_results_path: Path) -> None:
-    run_results = json.loads(run_results_path.read_text())
-    schema = schema_validator.load_json(RUN_RESULTS_SCHEMA)
-    errors = schema_validator.validate_manifest(run_results, schema)
-    assert errors == []
+    artifact_validator.assert_artifact(run_results_path)
 
 
 def assert_sources_schema_slice(sources_path: Path) -> None:
-    sources = json.loads(sources_path.read_text())
-    schema = schema_validator.load_json(SOURCES_SCHEMA)
-    errors = schema_validator.validate_manifest(sources, schema)
-    assert errors == []
+    artifact_validator.assert_artifact(sources_path)
 
 
 def write_sources_state(state_dir: Path, rows: dict[str, str]) -> Path:
@@ -7094,7 +7258,15 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     first_manifest = manifest_path.read_text()
     second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
     assert second.returncode == 0, second.stderr
-    assert manifest_path.read_text() == first_manifest
+    first_value = json.loads(first_manifest)
+    second_value = json.loads(manifest_path.read_text())
+    assert_invocation_metadata(first_value["metadata"])
+    assert_invocation_metadata(second_value["metadata"])
+    assert first_value["metadata"]["invocation_id"] != second_value["metadata"]["invocation_id"]
+    for value in (first_value, second_value):
+        for key in ("generated_at", "invocation_id", "invocation_started_at"):
+            value["metadata"].pop(key)
+    assert second_value == first_value
 
     manifest = json.loads(first_manifest)
     assert_manifest_schema_slice(manifest_path)
@@ -7117,13 +7289,13 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert node["columns"]["customer_name"]["description"] == "Display name"
 
     ls_schema_path = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "path:models/*.yml", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "path:models/*.yml", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_schema_path.returncode == 0, ls_schema_path.stderr
-    assert [item["unique_id"] for item in json.loads(ls_schema_path.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_schema_path.stdout)] == [
         "model.model_properties.customers",
         *expected_tests,
     ]
@@ -7209,7 +7381,7 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert manifest["child_map"][column_test["unique_id"]] == []
 
     ls_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:published"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "tag:published"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7217,25 +7389,25 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     assert ls_result.returncode == 0, ls_result.stderr
     assert ls_result.stdout.splitlines() == ["model.model_properties.customers", *expected_tests]
     tag_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:pub*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "tag:pub*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert tag_wildcard.returncode == 0, tag_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(tag_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(tag_wildcard.stdout)] == [
         "model.model_properties.customers",
         *expected_tests,
     ]
 
     ls_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_tests.returncode == 0, ls_tests.stderr
-    assert json.loads(ls_tests.stdout) == [
+    assert json_lines(ls_tests.stdout) == [
         {
             "unique_id": "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
             "resource_type": "test",
@@ -7254,61 +7426,61 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     ]
 
     ls_tests_by_file = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "file:schema.yml", "--resource-type", "test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "file:schema.yml", "--resource-type", "test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_tests_by_file.returncode == 0, ls_tests_by_file.stderr
-    assert json.loads(ls_tests_by_file.stdout) == json.loads(ls_tests.stdout)
+    assert json_lines(ls_tests_by_file.stdout) == json_lines(ls_tests.stdout)
 
     ls_resource_type_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "resource_type:test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_resource_type_tests.returncode == 0, ls_resource_type_tests.stderr
-    assert json.loads(ls_resource_type_tests.stdout) == json.loads(ls_tests.stdout)
+    assert json_lines(ls_resource_type_tests.stdout) == json_lines(ls_tests.stdout)
 
     ls_package_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties,resource_type:test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties,resource_type:test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_package_tests.returncode == 0, ls_package_tests.stderr
-    assert json.loads(ls_package_tests.stdout) == json.loads(ls_tests.stdout)
+    assert json_lines(ls_package_tests.stdout) == json_lines(ls_tests.stdout)
 
     ls_package_all = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:model_properties", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_package_all.returncode == 0, ls_package_all.stderr
-    assert [item["unique_id"] for item in json.loads(ls_package_all.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_package_all.stdout)] == [
         "model.model_properties.customers",
         *expected_tests,
     ]
 
     ls_generic_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:generic", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_generic_tests.returncode == 0, ls_generic_tests.stderr
-    assert json.loads(ls_generic_tests.stdout) == json.loads(ls_tests.stdout)
+    assert json_lines(ls_generic_tests.stdout) == json_lines(ls_tests.stdout)
 
     ls_model_and_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "customers test_type:generic", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "customers test_type:generic", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_model_and_tests.returncode == 0, ls_model_and_tests.stderr
-    assert [item["unique_id"] for item in json.loads(ls_model_and_tests.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_model_and_tests.stdout)] == [
         "model.model_properties.customers",
         "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
         "test.model_properties.unique_customers_.ccc5343706",
@@ -7316,29 +7488,29 @@ def test_parse_model_properties_and_columns(tmp_path: Path):
     ]
     for model_selector in ("customers", "customers*", "model_properties.customers", "model_properties.customers*"):
         ls_indirect_tests = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--select", model_selector, "--output", "json"],
+            [DXT, "ls", "--project-dir", str(project), "--select", model_selector, "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
         )
         assert ls_indirect_tests.returncode == 0, ls_indirect_tests.stderr
-        assert [item["unique_id"] for item in json.loads(ls_indirect_tests.stdout)] == [
+        assert [item["unique_id"] for item in json_lines(ls_indirect_tests.stdout)] == [
             "model.model_properties.customers",
             "test.model_properties.not_null_customers_customer_id.5c9bf9911d",
             "test.model_properties.unique_customers_.ccc5343706",
             "test.model_properties.unique_customers_customer_id.c5af1ff4b1",
         ]
     ls_nested_model_selector = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "model_properties.customers.*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "model_properties.customers.*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_nested_model_selector.returncode == 0, ls_nested_model_selector.stderr
-    assert json.loads(ls_nested_model_selector.stdout) == []
+    assert json_lines(ls_nested_model_selector.stdout) == []
 
     ls_singular_tests = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "test_type:singular"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "test_type:singular"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -7463,7 +7635,7 @@ def test_parse_macro_artifacts_and_model_macro_dependency(tmp_path: Path):
     macro_id = "macro.macro_artifacts.format_id"
     dependent_macro_id = "macro.macro_artifacts.outer_id"
     nested_macro_id = "macro.macro_artifacts.wrap_optional"
-    assert sorted(manifest["macros"]) == [macro_id, dependent_macro_id, nested_macro_id]
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [macro_id, dependent_macro_id, nested_macro_id]
     assert manifest["macros"][macro_id] == {
         "unique_id": macro_id,
         "resource_type": "macro",
@@ -7497,13 +7669,13 @@ def test_parse_macro_artifacts_and_model_macro_dependency(tmp_path: Path):
     assert macro_id not in manifest["child_map"]
 
     ls_default = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_default.returncode == 0, ls_default.stderr
-    assert json.loads(ls_default.stdout) == [
+    assert json_lines(ls_default.stdout) == [
         {
             "unique_id": "model.macro_artifacts.customers",
             "resource_type": "model",
@@ -7524,7 +7696,7 @@ def test_parse_macro_block_variants(tmp_path: Path):
 
     manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
     assert_manifest_schema_slice(project / "target-dxt" / "manifest.json")
-    assert sorted(manifest["macros"]) == [
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [
         "macro.macro_block_variants.format_id",
         "macro.macro_block_variants.materialization_empty_langs_default",
         "macro.macro_block_variants.materialization_incremental_default",
@@ -7601,7 +7773,7 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
     root_external_macro_id = "macro.package_macro_namespace.wrap_external_id"
     package_macro_id = "macro.util_pkg.format_id"
     package_outer_macro_id = "macro.util_pkg.outer_id"
-    assert sorted(manifest["macros"]) == [
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [
         root_macro_id,
         root_external_macro_id,
         package_macro_id,
@@ -7625,34 +7797,34 @@ def test_parse_package_macro_namespaces(tmp_path: Path):
     assert str(project) not in manifest_path.read_text()
 
     ls_root_package = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:package_macro_namespace", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:package_macro_namespace", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_root_package.returncode == 0, ls_root_package.stderr
-    assert [item["unique_id"] for item in json.loads(ls_root_package.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_root_package.stdout)] == [
         "model.package_macro_namespace.customers",
         "model.package_macro_namespace.local_customers",
     ]
 
     ls_macro_package = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_macro_package.returncode == 0, ls_macro_package.stderr
-    assert json.loads(ls_macro_package.stdout) == []
+    assert json_lines(ls_macro_package.stdout) == []
 
     ls_unknown_package = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:not_a_package", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:not_a_package", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_unknown_package.returncode == 0, ls_unknown_package.stderr
-    assert json.loads(ls_unknown_package.stdout) == []
+    assert json_lines(ls_unknown_package.stdout) == []
 
 
 def test_parse_macro_namespace_search_order(tmp_path: Path):
@@ -7674,7 +7846,7 @@ def test_parse_macro_namespace_search_order(tmp_path: Path):
     other_shared = "macro.other_pkg.shared"
     package_same = "macro.util_pkg.same_name"
     package_wrap = "macro.util_pkg.pkg_wrap"
-    assert sorted(manifest["macros"]) == [
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [
         root_only,
         root_same,
         other_shared,
@@ -7690,9 +7862,9 @@ def test_parse_macro_namespace_search_order(tmp_path: Path):
     assert manifest["nodes"]["model.util_pkg.pkg_local"]["depends_on"]["macros"] == [package_same]
     assert manifest["nodes"]["model.util_pkg.pkg_root_fallback"]["depends_on"]["macros"] == [root_only]
     assert manifest["macros"][package_wrap]["depends_on"]["macros"] == [
+        package_same,
         root_only,
         other_shared,
-        package_same,
     ]
     assert str(project) not in manifest_path.read_text()
 
@@ -7717,7 +7889,7 @@ def test_parse_static_adapter_dispatch_dependencies(tmp_path: Path):
     package_value = "macro.util_pkg.duckdb__package_value"
     package_wrap = "macro.util_pkg.wrap_dispatch"
 
-    assert sorted(manifest["macros"]) == [
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [
         root_package_value,
         root_render,
         package_value,
@@ -7734,8 +7906,8 @@ def test_parse_static_adapter_dispatch_dependencies(tmp_path: Path):
         package_render
     ]
     assert manifest["macros"][package_wrap]["depends_on"]["macros"] == [
-        root_package_value,
         package_render,
+        root_package_value,
     ]
     assert str(project) not in manifest_path.read_text()
 
@@ -7754,7 +7926,7 @@ def test_parse_static_adapter_dispatch_uses_project_dispatch_config(tmp_path: Pa
     manifest = json.loads(manifest_path.read_text())
     assert_manifest_schema_slice(manifest_path)
 
-    assert sorted(manifest["macros"]) == [
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == [
         "macro.adapter_dispatch_project_config.default__render_value",
         "macro.override_pkg.duckdb__render_value",
         "macro.util_pkg.duckdb__render_value",
@@ -7865,7 +8037,7 @@ def test_macro_paths_replace_default_macro_directory(tmp_path: Path):
     assert result.returncode == 0, result.stderr
 
     manifest = json.loads((project / "target-dxt" / "manifest.json").read_text())
-    assert sorted(manifest["macros"]) == ["macro.macro_paths_custom.kept_macro"]
+    assert sorted(identifier for identifier, macro in manifest["macros"].items() if macro["package_name"] not in {"dbt", "dbt_duckdb", "dbt_postgres"}) == ["macro.macro_paths_custom.kept_macro"]
     macro = manifest["macros"]["macro.macro_paths_custom.kept_macro"]
     assert macro["path"] == "custom_macros/kept.sql"
     assert macro["original_file_path"] == "custom_macros/kept.sql"
@@ -7915,7 +8087,7 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
         package_seed,
     ]
     assert sorted(manifest["sources"]) == [package_source]
-    assert sorted(manifest["docs"]) == [package_doc]
+    assert sorted(identifier for identifier, doc in manifest["docs"].items() if doc["package_name"] != "dbt") == [package_doc]
     assert sorted(manifest["exposures"]) == [package_exposure]
     assert manifest["sources"][package_source]["package_name"] == "util_pkg"
     assert manifest["docs"][package_doc]["package_name"] == "util_pkg"
@@ -7979,20 +8151,20 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
     assert manifest["parent_map"][package_from_source] == [package_source]
     assert manifest["parent_map"][package_exposure] == [package_customers]
     assert manifest["child_map"][package_source] == [root_pkg_source, package_from_source]
-    assert manifest["child_map"][package_customers] == [root_customers, package_exposure]
+    assert manifest["child_map"][package_customers] == sorted([root_customers, package_exposure])
     assert manifest["child_map"][package_only_customers] == [root_unqualified_package_only]
     assert manifest["parent_map"][package_seeded_customers] == [package_seed]
     assert manifest["child_map"][package_seed] == [package_seeded_customers]
     assert str(project) not in manifest_path.read_text()
 
     ls_package = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_package.returncode == 0, ls_package.stderr
-    assert [item["unique_id"] for item in json.loads(ls_package.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_package.stdout)] == [
         package_exposure,
         package_from_source,
         package_customers,
@@ -8004,13 +8176,13 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
     ]
 
     ls_package_models = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg,resource_type:model", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg,resource_type:model", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_package_models.returncode == 0, ls_package_models.stderr
-    assert [item["unique_id"] for item in json.loads(ls_package_models.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_package_models.stdout)] == [
         package_from_source,
         package_customers,
         package_only_customers,
@@ -8019,13 +8191,13 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
     ]
 
     ls_root = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:this", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:this", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_root.returncode == 0, ls_root.stderr
-    assert [item["unique_id"] for item in json.loads(ls_root.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_root.stdout)] == [
         root_same_name,
         root_customers,
         root_orders,
@@ -8034,13 +8206,13 @@ def test_parse_installed_package_refs_and_resources(tmp_path: Path):
     ]
 
     ls_package_exclude = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--exclude", "pkg_seeded_customers", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:util_pkg", "--exclude", "pkg_seeded_customers", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_package_exclude.returncode == 0, ls_package_exclude.stderr
-    assert [item["unique_id"] for item in json.loads(ls_package_exclude.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_package_exclude.stdout)] == [
         package_exposure,
         package_from_source,
         package_customers,
@@ -8201,7 +8373,7 @@ def test_disabled_model_is_not_active_but_is_represented(tmp_path: Path):
     assert disabled_id not in manifest["child_map"]
     assert list(manifest["disabled"]) == [disabled_id]
     disabled_node = manifest["disabled"][disabled_id][0]
-    assert disabled_node["database"] == "memory"
+    assert disabled_node["database"] is None
     assert disabled_node["schema"] == "main"
     assert disabled_node["alias"] == "disabled_customers"
     assert disabled_node["fqn"] == ["disabled_model", "disabled_customers"]
@@ -8210,7 +8382,7 @@ def test_disabled_model_is_not_active_but_is_represented(tmp_path: Path):
     assert disabled_node["description"] == "Disabled model should stay out of active graph"
 
     ls_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project)],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8248,7 +8420,7 @@ def test_inline_config_enabled_false_model_is_disabled(tmp_path: Path):
     assert disabled_id not in manifest["child_map"]
     assert list(manifest["disabled"]) == [disabled_id]
     disabled_node = manifest["disabled"][disabled_id][0]
-    assert disabled_node["database"] == "memory"
+    assert disabled_node["database"] is None
     assert disabled_node["schema"] == "main"
     assert disabled_node["alias"] == "disabled_customers"
     assert disabled_node["fqn"] == ["inline_disabled_model", "disabled_customers"]
@@ -8257,7 +8429,7 @@ def test_inline_config_enabled_false_model_is_disabled(tmp_path: Path):
     assert disabled_node["description"] == "Inline-disabled model should stay out of active graph"
 
     ls_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project)],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8314,7 +8486,15 @@ def test_parse_ref_dependency_maps_are_deterministic(tmp_path: Path):
     first_manifest = manifest_path.read_text()
     second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
     assert second.returncode == 0, second.stderr
-    assert manifest_path.read_text() == first_manifest
+    first_value = json.loads(first_manifest)
+    second_value = json.loads(manifest_path.read_text())
+    assert_invocation_metadata(first_value["metadata"])
+    assert_invocation_metadata(second_value["metadata"])
+    assert first_value["metadata"]["invocation_id"] != second_value["metadata"]["invocation_id"]
+    for value in (first_value, second_value):
+        for key in ("generated_at", "invocation_id", "invocation_started_at"):
+            value["metadata"].pop(key)
+    assert second_value == first_value
 
     manifest = json.loads(first_manifest)
     customer = manifest["nodes"]["model.model_ref.customers"]
@@ -8386,13 +8566,13 @@ def test_parse_and_ls_resolve_vars_inside_ref_and_source(tmp_path: Path):
             "{customer_model: alt_customers}",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_result.returncode == 0, ls_result.stderr
-    assert [item["unique_id"] for item in json.loads(ls_result.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_result.stdout)] == [
         "model.dynamic_var_ref.alt_customers",
         "model.dynamic_var_ref.orders",
     ]
@@ -8415,10 +8595,10 @@ def test_parse_and_ls_resolve_static_loop_ref_and_source_dependencies(tmp_path: 
     ]
     assert looped["sources"] == [["raw", "events"], ["raw", "payments"]]
     assert looped["depends_on"]["nodes"] == [
-        "model.static_loop_deps.customers",
-        "model.static_loop_deps.orders",
         "source.static_loop_deps.raw.events",
         "source.static_loop_deps.raw.payments",
+        "model.static_loop_deps.customers",
+        "model.static_loop_deps.orders",
     ]
     assert manifest["parent_map"]["model.static_loop_deps.looped"] == [
         "model.static_loop_deps.customers",
@@ -8430,13 +8610,13 @@ def test_parse_and_ls_resolve_static_loop_ref_and_source_dependencies(tmp_path: 
     assert "model.static_loop_deps.looped" in manifest["child_map"]["source.static_loop_deps.raw.events"]
 
     upstream_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "+looped", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "+looped", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert upstream_result.returncode == 0, upstream_result.stderr
-    assert [item["unique_id"] for item in json.loads(upstream_result.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(upstream_result.stdout)] == [
         "model.static_loop_deps.customers",
         "model.static_loop_deps.looped",
         "model.static_loop_deps.orders",
@@ -8445,13 +8625,13 @@ def test_parse_and_ls_resolve_static_loop_ref_and_source_dependencies(tmp_path: 
     ]
 
     source_descendant_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "source:raw.events+", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "source:raw.events+", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert source_descendant_result.returncode == 0, source_descendant_result.stderr
-    assert [item["unique_id"] for item in json.loads(source_descendant_result.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_descendant_result.stdout)] == [
         "model.static_loop_deps.looped",
         "source.static_loop_deps.raw.events",
     ]
@@ -8490,7 +8670,15 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     first_manifest = manifest_path.read_text()
     second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
     assert second.returncode == 0, second.stderr
-    assert manifest_path.read_text() == first_manifest
+    first_value = json.loads(first_manifest)
+    second_value = json.loads(manifest_path.read_text())
+    assert_invocation_metadata(first_value["metadata"])
+    assert_invocation_metadata(second_value["metadata"])
+    assert first_value["metadata"]["invocation_id"] != second_value["metadata"]["invocation_id"]
+    for value in (first_value, second_value):
+        for key in ("generated_at", "invocation_id", "invocation_started_at"):
+            value["metadata"].pop(key)
+    assert second_value == first_value
 
     manifest = json.loads(first_manifest)
     assert_partial_manifest_schema(manifest)
@@ -8501,7 +8689,7 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     ]
     seed = manifest["nodes"]["seed.seed_ref.raw_customers"]
     assert seed["resource_type"] == "seed"
-    assert seed["database"] == "memory"
+    assert seed["database"] is None
     assert seed["schema"] == "main"
     assert seed["alias"] == "raw_customers"
     assert seed["fqn"] == ["seed_ref", "raw_customers"]
@@ -8516,24 +8704,24 @@ def test_parse_seed_ref_dependency_and_ls_seed(tmp_path: Path):
     assert manifest["child_map"]["seed.seed_ref.raw_customers"] == ["model.seed_ref.stg_customers"]
 
     ls_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "seed", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "seed", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_result.returncode == 0, ls_result.stderr
-    assert json.loads(ls_result.stdout) == [
+    assert json_lines(ls_result.stdout) == [
         {"unique_id": "seed.seed_ref.raw_customers", "resource_type": "seed", "name": "raw_customers"}
     ]
 
     ls_file_seed = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "file:raw_customers.csv", "--resource-type", "seed", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "file:raw_customers.csv", "--resource-type", "seed", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_file_seed.returncode == 0, ls_file_seed.stderr
-    assert json.loads(ls_file_seed.stdout) == json.loads(ls_result.stdout)
+    assert json_lines(ls_file_seed.stdout) == json_lines(ls_result.stdout)
 
 
 def test_parse_docs_blocks_and_literal_doc_descriptions(tmp_path: Path):
@@ -8545,12 +8733,20 @@ def test_parse_docs_blocks_and_literal_doc_descriptions(tmp_path: Path):
     first_manifest = manifest_path.read_text()
     second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
     assert second.returncode == 0, second.stderr
-    assert manifest_path.read_text() == first_manifest
+    first_value = json.loads(first_manifest)
+    second_value = json.loads(manifest_path.read_text())
+    assert_invocation_metadata(first_value["metadata"])
+    assert_invocation_metadata(second_value["metadata"])
+    assert first_value["metadata"]["invocation_id"] != second_value["metadata"]["invocation_id"]
+    for value in (first_value, second_value):
+        for key in ("generated_at", "invocation_id", "invocation_started_at"):
+            value["metadata"].pop(key)
+    assert second_value == first_value
 
     manifest = json.loads(first_manifest)
     assert_partial_manifest_schema(manifest)
     assert_manifest_schema_slice(manifest_path)
-    assert sorted(manifest["docs"]) == [
+    assert sorted(identifier for identifier, doc in manifest["docs"].items() if doc["package_name"] != "dbt") == [
         "doc.docs_blocks.customer_id",
         "doc.docs_blocks.customer_model",
     ]
@@ -8630,20 +8826,20 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     assert str(project) not in (project / "target-dxt" / "manifest.json").read_text()
 
     ls_package_all = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "package:exposure_artifacts", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "package:exposure_artifacts", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_package_all.returncode == 0, ls_package_all.stderr
-    assert [item["unique_id"] for item in json.loads(ls_package_all.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(ls_package_all.stdout)] == [
         exposure_id,
         model_id,
         source_id,
     ]
 
     ls_default = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project)],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8656,18 +8852,18 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     ]
 
     ls_exposure = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "exposure", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "exposure", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert ls_exposure.returncode == 0, ls_exposure.stderr
-    assert json.loads(ls_exposure.stdout) == [
+    assert json_lines(ls_exposure.stdout) == [
         {"unique_id": exposure_id, "resource_type": "exposure", "name": "weekly_kpis"}
     ]
 
     ls_parents = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "+weekly_kpis"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "+weekly_kpis"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8680,7 +8876,7 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     ]
 
     ls_children = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "orders+"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "orders+"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8689,7 +8885,7 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     assert ls_children.stdout.splitlines() == [exposure_id, model_id]
 
     ls_tag = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:bi"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "tag:bi"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8698,7 +8894,7 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
     assert ls_tag.stdout.splitlines() == [exposure_id]
 
     ls_tag_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:b*"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "tag:b*"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8710,14 +8906,15 @@ def test_parse_exposure_artifacts_and_graph_maps(tmp_path: Path):
 def test_ls_text_json_and_tag_selection(tmp_path: Path):
     project = copy_fixture(tmp_path, "inline_config")
     text_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "tag:nightly"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "tag:nightly"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert text_result.returncode == 0, text_result.stderr
     assert text_result.stdout.splitlines() == ["model.inline_config.orders"]
-    assert not (project / "target").exists()
+    assert_manifest_schema_slice(project / "target" / "manifest.json")
+    assert not (project / "target" / "run_results.json").exists()
 
     name_result = subprocess.run(
         [DXT, "ls", "--project-dir", str(project), "--select", "tag:nightly", "--output", "name"],
@@ -8747,13 +8944,13 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     assert selector_result.stdout.splitlines() == ["inline_config.orders"]
 
     json_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--output", "json", "--resource-type", "model"],
+        [DXT, "ls", "--project-dir", str(project), "--output", "json", "--resource-type", "model", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert json_result.returncode == 0, json_result.stderr
-    assert json.loads(json_result.stdout) == [
+    assert json_lines(json_result.stdout) == [
         {"unique_id": "model.inline_config.orders", "resource_type": "model", "name": "orders"}
     ]
 
@@ -8780,12 +8977,11 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert keyed_json.returncode == 0, keyed_json.stderr
-    assert json.loads(keyed_json.stdout) == [
+    assert json_lines(keyed_json.stdout) == [
         {
             "name": "orders",
             "path": "orders.sql",
             "original_file_path": "models/orders.sql",
-            "selector": "inline_config.orders",
             "unique_id": "model.inline_config.orders",
         }
     ]
@@ -8810,7 +9006,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert repeated_keyed_json.returncode == 0, repeated_keyed_json.stderr
-    assert json.loads(repeated_keyed_json.stdout) == [{"name": "orders", "unique_id": "model.inline_config.orders"}]
+    assert json_lines(repeated_keyed_json.stdout) == [{"name": "orders", "unique_id": "model.inline_config.orders"}]
 
     package_keyed_json = subprocess.run(
         [
@@ -8825,8 +9021,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
             "--output-keys",
             "package_name",
             "alias",
-            "config.materialized",
-            "config.tags",
+            "config",
             "non_existent_key",
         ],
         cwd=ROOT,
@@ -8834,12 +9029,11 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert package_keyed_json.returncode == 0, package_keyed_json.stderr
-    assert json.loads(package_keyed_json.stdout) == [
+    assert json_lines(package_keyed_json.stdout) == [
         {
             "package_name": "inline_config",
             "alias": "orders",
-            "config.materialized": "table",
-            "config.tags": ["finance", "nightly"],
+            "config": json.loads((project / "target" / "manifest.json").read_text())["nodes"]["model.inline_config.orders"]["config"],
         }
     ]
 
@@ -8863,7 +9057,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert alias_keyed_json.returncode == 0, alias_keyed_json.stderr
-    assert json.loads(alias_keyed_json.stdout) == [{"name": "orders", "alias": "order_facts"}]
+    assert json_lines(alias_keyed_json.stdout) == [{"name": "orders", "alias": "order_facts"}]
 
     untagged_project = copy_fixture(tmp_path, "model_ref")
     untagged_keyed_json = subprocess.run(
@@ -8879,16 +9073,15 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
             "--output-keys",
             "name",
             "alias",
-            "config.materialized",
-            "config.tags",
+            "config",
         ],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert untagged_keyed_json.returncode == 0, untagged_keyed_json.stderr
-    assert json.loads(untagged_keyed_json.stdout) == [
-        {"name": "stg_customers", "alias": "stg_customers", "config.materialized": "view", "config.tags": []}
+    assert json_lines(untagged_keyed_json.stdout) == [
+        {"name": "stg_customers", "alias": "stg_customers", "config": json.loads((untagged_project / "target" / "manifest.json").read_text())["nodes"]["model.model_ref.stg_customers"]["config"]}
     ]
 
     depends_keyed_json = subprocess.run(
@@ -8915,14 +9108,11 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert depends_keyed_json.returncode == 0, depends_keyed_json.stderr
-    assert json.loads(depends_keyed_json.stdout) == [
+    assert json_lines(depends_keyed_json.stdout) == [
         {
             "name": "customers",
             "tags": [],
-            "depends_on.nodes": ["model.model_ref.stg_customers"],
-            "depends_on.macros": [],
-            "config.enabled": True,
-            "config.docs.show": True,
+            "depends_on": {"nodes": ["model.model_ref.stg_customers"], "macros": []},
         }
     ]
 
@@ -8950,7 +9140,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
         capture_output=True,
     )
     assert source_keyed_json.returncode == 0, source_keyed_json.stderr
-    assert json.loads(source_keyed_json.stdout) == [
+    assert json_lines(source_keyed_json.stdout) == [
         {"name": "customers", "source_name": "raw", "identifier": "customers"}
     ]
 
@@ -8964,7 +9154,7 @@ def test_ls_text_json_and_tag_selection(tmp_path: Path):
     assert "requires a value" in missing_output_key.stderr
 
     excluded = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "orders", "--exclude", "orders"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "orders", "--exclude", "orders"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -8987,13 +9177,13 @@ def test_ls_multi_argv_and_repeated_selector_flags(tmp_path: Path):
 
     def ls_json(*args: str) -> list[str]:
         result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args, "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     expected_pair = [
         "model.selector_graph.customers",
@@ -9110,13 +9300,13 @@ def test_dbt_core_file_selector_basename_stem_and_literal_wildcard_oracle(
 
     for selector in selectors:
         dxt_result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--select", selector, "--output", "json"],
+            [DXT, "ls", "--project-dir", str(project), "--select", selector, "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
         )
         assert dxt_result.returncode == 0, dxt_result.stderr
-        dxt_ids = sorted(item["unique_id"] for item in json.loads(dxt_result.stdout))
+        dxt_ids = sorted(item["unique_id"] for item in json_lines(dxt_result.stdout))
 
         dbt_result = dbtRunner().invoke(
             [
@@ -9129,7 +9319,7 @@ def test_dbt_core_file_selector_basename_stem_and_literal_wildcard_oracle(
                 selector,
                 "--output",
                 "json",
-            ]
+             "--output-keys", "unique_id", "resource_type", "name"]
         )
         dbt_stdout = capsys.readouterr().out
         dbt_ids = sorted(
@@ -9148,13 +9338,13 @@ def test_ls_root_selectors_yml_scalar_aliases(tmp_path: Path):
 
     def ls_json(*args: str) -> list[str]:
         result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args, "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert ls_json("--selector", "customer_family") == ls_json("--select", "*customers")
     assert ls_json("--selector", "customer_and_descendants") == ls_json("--select", "customers+")
@@ -9207,13 +9397,13 @@ def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys:
     )
 
     dxt_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--selector", "customer_without_staging", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--selector", "customer_without_staging", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert dxt_result.returncode == 0, dxt_result.stderr
-    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+    dxt_ids = [item["unique_id"] for item in json_lines(dxt_result.stdout)]
 
     dbt_result = dbtRunner().invoke(
         [
@@ -9226,7 +9416,7 @@ def test_dbt_core_root_selectors_yml_scalar_alias_oracle(tmp_path: Path, capsys:
             "customer_without_staging",
             "--output",
             "json",
-        ]
+         "--output-keys", "unique_id", "resource_type", "name"]
     )
     dbt_stdout = capsys.readouterr().out
     dbt_ids = sorted(
@@ -9265,13 +9455,13 @@ def test_ls_source_status_selects_sources_from_sources_json_state(tmp_path: Path
                 f"source_status:{status}",
                 "--output",
                 "json",
-            ],
+             "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert selected_ids("error") == ["source.source_freshness.raw.orders"]
     assert selected_ids("warn") == ["source.source_freshness.raw.customers"]
@@ -9314,7 +9504,7 @@ def test_source_status_selector_reports_missing_malformed_and_version_mismatch(t
     missing = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9330,7 +9520,7 @@ def test_source_status_selector_reports_missing_malformed_and_version_mismatch(t
     assert "directory containing sources.json" in missing.stderr
 
     no_state = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "source_status:warn"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "source_status:warn"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9344,7 +9534,7 @@ def test_source_status_selector_reports_missing_malformed_and_version_mismatch(t
     malformed = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9373,7 +9563,7 @@ def test_source_status_selector_reports_missing_malformed_and_version_mismatch(t
     version = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9408,13 +9598,13 @@ def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_pa
     )
 
     tests_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--resource-type", "test", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert tests_result.returncode == 0, tests_result.stderr
-    test_id = json.loads(tests_result.stdout)[0]["unique_id"]
+    test_id = json_lines(tests_result.stdout)[0]["unique_id"]
 
     state_dir = tmp_path / "state"
     write_run_results_state(
@@ -9440,16 +9630,16 @@ def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_pa
                 f"result:{status}",
                 "--output",
                 "json",
-            ],
+             "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert selected_ids("success") == ["model.selector_graph.stg_customers"]
-    assert selected_ids("error") == ["model.selector_graph.customers"]
+    assert selected_ids("error") == ["model.selector_graph.customers", test_id]
     assert selected_ids("skipped") == ["model.selector_graph.orders"]
     assert selected_ids("fail") == [test_id]
 
@@ -9465,13 +9655,13 @@ def test_ls_result_selector_selects_resources_from_run_results_json_state(tmp_pa
             "result:error+",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert expanded.returncode == 0, expanded.stderr
-    assert [item["unique_id"] for item in json.loads(expanded.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(expanded.stdout)] == [
         "model.selector_graph.customers",
         "model.selector_graph.orders",
         test_id,
@@ -9484,7 +9674,7 @@ def test_result_selector_reports_missing_malformed_and_version_mismatch(tmp_path
     missing = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9500,7 +9690,7 @@ def test_result_selector_reports_missing_malformed_and_version_mismatch(tmp_path
     assert "directory containing run_results.json" in missing.stderr
 
     no_state = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "result:error"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "result:error"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9514,7 +9704,7 @@ def test_result_selector_reports_missing_malformed_and_version_mismatch(tmp_path
     malformed = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9543,7 +9733,7 @@ def test_result_selector_reports_missing_malformed_and_version_mismatch(tmp_path
     version = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9583,13 +9773,13 @@ def test_ls_state_new_selects_resources_from_prior_manifest_state(tmp_path: Path
                 selector,
                 "--output",
                 "json",
-            ],
+             "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert selected_ids("state:new") == ["model.selector_graph.customers"]
     assert selected_ids("state:new+") == [
@@ -9615,13 +9805,13 @@ def test_ls_state_new_selects_resources_from_prior_manifest_state(tmp_path: Path
             "stg_customers",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert excluded.returncode == 0, excluded.stderr
-    assert [item["unique_id"] for item in json.loads(excluded.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(excluded.stdout)] == [
         "model.selector_graph.customers"
     ]
 
@@ -9632,7 +9822,7 @@ def test_state_new_selector_reports_missing_malformed_and_version_mismatch(tmp_p
     missing = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9648,7 +9838,7 @@ def test_state_new_selector_reports_missing_malformed_and_version_mismatch(tmp_p
     assert "directory containing manifest.json" in missing.stderr
 
     no_state = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "state:new"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "state:new"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -9665,7 +9855,7 @@ def test_state_new_selector_reports_missing_malformed_and_version_mismatch(tmp_p
     malformed = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9699,7 +9889,7 @@ def test_state_new_selector_reports_missing_malformed_and_version_mismatch(tmp_p
     version = subprocess.run(
         [
             DXT,
-            "ls",
+            "ls", "--output", "text",
             "--project-dir",
             str(project),
             "--state",
@@ -9783,13 +9973,13 @@ def test_dbt_core_result_selector_oracle(tmp_path: Path, capsys: pytest.CaptureF
             "result:error+",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert dxt_result.returncode == 0, dxt_result.stderr
-    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+    dxt_ids = [item["unique_id"] for item in json_lines(dxt_result.stdout)]
 
     dbt_result = dbtRunner().invoke(
         [
@@ -9806,7 +9996,7 @@ def test_dbt_core_result_selector_oracle(tmp_path: Path, capsys: pytest.CaptureF
             "result:error+",
             "--output",
             "json",
-        ]
+         "--output-keys", "unique_id", "resource_type", "name"]
     )
     dbt_stdout = capsys.readouterr().out
     dbt_ids = sorted(
@@ -9884,13 +10074,13 @@ def test_dbt_core_state_new_selector_oracle(tmp_path: Path, capsys: pytest.Captu
             "state:new",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert dxt_result.returncode == 0, dxt_result.stderr
-    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+    dxt_ids = [item["unique_id"] for item in json_lines(dxt_result.stdout)]
 
     dbt_result = dbtRunner().invoke(
         [
@@ -9907,7 +10097,7 @@ def test_dbt_core_state_new_selector_oracle(tmp_path: Path, capsys: pytest.Captu
             "state:new",
             "--output",
             "json",
-        ]
+         "--output-keys", "unique_id", "resource_type", "name"]
     )
     dbt_stdout = capsys.readouterr().out
     dbt_ids = sorted(
@@ -9969,13 +10159,13 @@ def test_dbt_core_source_status_fresher_and_dxt_status_extension_oracle(
             "source_status:warn",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert dxt_result.returncode == 0, dxt_result.stderr
-    dxt_ids = [item["unique_id"] for item in json.loads(dxt_result.stdout)]
+    dxt_ids = [item["unique_id"] for item in json_lines(dxt_result.stdout)]
     assert dxt_ids == ["source.source_ref.raw.customers"]
 
     dbt_target = tmp_path / "dbt-target"
@@ -9999,7 +10189,7 @@ def test_dbt_core_source_status_fresher_and_dxt_status_extension_oracle(
                 selector,
                 "--output",
                 "json",
-            ]
+             "--output-keys", "unique_id", "resource_type", "name"]
         )
         dbt_stdout = capsys.readouterr().out
         assert dbt_result.success, dbt_result.exception
@@ -10026,7 +10216,7 @@ def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
 
     def ls_text(*args: str) -> list[str]:
         result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), *args],
+            [DXT, "ls", "--output", "text", "--project-dir", str(project), *args],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -10048,7 +10238,7 @@ def test_ls_config_materialized_and_comma_intersection(tmp_path: Path):
 
     default_project = copy_fixture(tmp_path, "single_model")
     default_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(default_project), "--select", "config.materialized:view"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(default_project), "--select", "config.materialized:view"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10074,18 +10264,18 @@ def test_project_model_path_configs_apply_below_inline_and_yaml_configs(tmp_path
     assert nodes["model.project_model_path_config.customers"]["config"]["materialized"] == "table"
     assert nodes["model.project_model_path_config.stg_customers"]["config"]["materialized"] == "view"
     assert nodes["model.project_model_path_config.orders"]["config"]["materialized"] == "table"
-    assert nodes["model.project_model_path_config.orders"]["config"]["tags"] == ["published", "root"]
+    assert nodes["model.project_model_path_config.orders"]["config"]["tags"] == ["root", "published"]
     assert nodes["model.project_model_path_config.inline_orders"]["config"]["materialized"] == "incremental"
     assert nodes["model.project_model_path_config.inline_orders"]["config"]["tags"] == [
-        "inline",
-        "published",
         "root",
+        "published",
         "yaml_inline",
+        "inline",
     ]
     assert nodes["model.project_model_path_config.yaml_orders"]["config"]["materialized"] == "view"
     assert nodes["model.project_model_path_config.yaml_orders"]["config"]["tags"] == [
-        "published",
         "root",
+        "published",
         "yaml",
     ]
     assert nodes["model.project_model_path_config.customers"]["docs"] == {
@@ -10115,7 +10305,7 @@ def test_project_model_path_configs_apply_below_inline_and_yaml_configs(tmp_path
 
     def ls_text(*args: str) -> list[str]:
         ls_result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), *args],
+            [DXT, "ls", "--output", "text", "--project-dir", str(project), *args],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -10161,97 +10351,97 @@ def test_project_model_path_configs_apply_below_inline_and_yaml_configs(tmp_path
 def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
     source_project = copy_fixture(tmp_path, "source_ref")
     source_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "resource_type:source", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "resource_type:source", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert source_result.returncode == 0, source_result.stderr
-    assert [item["unique_id"] for item in json.loads(source_result.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_result.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
     source_union = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw.customers source:raw.orders", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw.customers source:raw.orders", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert source_union.returncode == 0, source_union.stderr
-    assert [item["unique_id"] for item in json.loads(source_union.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_union.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
     source_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw.*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw.*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert source_wildcard.returncode == 0, source_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(source_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_wildcard.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
     source_package_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:source_ref.raw.*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:source_ref.raw.*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert source_package_wildcard.returncode == 0, source_package_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(source_package_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_package_wildcard.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
     source_name_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:raw*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert source_name_wildcard.returncode == 0, source_name_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(source_name_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_name_wildcard.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
     source_table_without_source = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:*orders", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "source:*orders", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert source_table_without_source.returncode == 0, source_table_without_source.stderr
-    assert json.loads(source_table_without_source.stdout) == []
+    assert json_lines(source_table_without_source.stdout) == []
     for bare_source_selector in ("orders", "*orders", "source_ref.raw.*", "source.source_ref.raw.orders"):
         bare_source = subprocess.run(
-            [DXT, "ls", "--project-dir", str(source_project), "--select", bare_source_selector, "--output", "json"],
+            [DXT, "ls", "--project-dir", str(source_project), "--select", bare_source_selector, "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
         )
         assert bare_source.returncode == 0, bare_source.stderr
-        assert json.loads(bare_source.stdout) == []
+        assert json_lines(bare_source.stdout) == []
     source_path = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "path:models/*.yml", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "path:models/*.yml", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert source_path.returncode == 0, source_path.stderr
-    assert [item["unique_id"] for item in json.loads(source_path.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_path.stdout)] == [
         "model.source_ref.stg_customers",
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
     source_file = subprocess.run(
-        [DXT, "ls", "--project-dir", str(source_project), "--select", "file:schema.yml", "--resource-type", "source", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(source_project), "--select", "file:schema.yml", "--resource-type", "source", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert source_file.returncode == 0, source_file.stderr
-    assert [item["unique_id"] for item in json.loads(source_file.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_file.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
@@ -10265,13 +10455,13 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
             "package:source_ref,resource_type:source",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert source_package.returncode == 0, source_package.stderr
-    assert [item["unique_id"] for item in json.loads(source_package.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(source_package.stdout)] == [
         "source.source_ref.raw.customers",
         "source.source_ref.raw.orders",
     ]
@@ -10330,25 +10520,24 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert source_keyed_json.returncode == 0, source_keyed_json.stderr
-    assert json.loads(source_keyed_json.stdout) == [
+    assert json_lines(source_keyed_json.stdout) == [
         {
             "package_name": "source_ref",
             "source_name": "raw",
             "original_file_path": "models/schema.yml",
             "path": "models/schema.yml",
-            "selector": "source:source_ref.raw.customers",
         }
     ]
 
     exposure_project = copy_fixture(tmp_path, "exposure_artifacts")
     exposure_result = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "resource_type:exposure", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "resource_type:exposure", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert exposure_result.returncode == 0, exposure_result.stderr
-    assert json.loads(exposure_result.stdout) == [
+    assert json_lines(exposure_result.stdout) == [
         {
             "unique_id": "exposure.exposure_artifacts.weekly_kpis",
             "resource_type": "exposure",
@@ -10356,71 +10545,71 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         }
     ]
     exposure_union = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "orders weekly_kpis", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "orders weekly_kpis", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert exposure_union.returncode == 0, exposure_union.stderr
-    assert [item["unique_id"] for item in json.loads(exposure_union.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(exposure_union.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis",
         "model.exposure_artifacts.orders",
     ]
     exposure_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:weekly_*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:weekly_*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert exposure_wildcard.returncode == 0, exposure_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(exposure_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(exposure_wildcard.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis"
     ]
     exposure_package_wildcard = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:exposure_artifacts.weekly_*", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:exposure_artifacts.weekly_*", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert exposure_package_wildcard.returncode == 0, exposure_package_wildcard.stderr
-    assert [item["unique_id"] for item in json.loads(exposure_package_wildcard.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(exposure_package_wildcard.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis"
     ]
     exposure_prefixed_unique_id = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:exposure.exposure_artifacts.weekly_kpis", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure:exposure.exposure_artifacts.weekly_kpis", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert exposure_prefixed_unique_id.returncode == 0, exposure_prefixed_unique_id.stderr
-    assert json.loads(exposure_prefixed_unique_id.stdout) == []
+    assert json_lines(exposure_prefixed_unique_id.stdout) == []
     bare_exposure_unique_id = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure.exposure_artifacts.weekly_kpis", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "exposure.exposure_artifacts.weekly_kpis", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert bare_exposure_unique_id.returncode == 0, bare_exposure_unique_id.stderr
-    assert json.loads(bare_exposure_unique_id.stdout) == []
+    assert json_lines(bare_exposure_unique_id.stdout) == []
     exposure_path = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "path:models/*.yml", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "path:models/*.yml", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert exposure_path.returncode == 0, exposure_path.stderr
-    assert [item["unique_id"] for item in json.loads(exposure_path.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(exposure_path.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis",
         "source.exposure_artifacts.raw.customers",
     ]
     exposure_file = subprocess.run(
-        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "file:schema.yml", "--resource-type", "exposure", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(exposure_project), "--select", "file:schema.yml", "--resource-type", "exposure", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert exposure_file.returncode == 0, exposure_file.stderr
-    assert [item["unique_id"] for item in json.loads(exposure_file.stdout)] == [
+    assert [item["unique_id"] for item in json_lines(exposure_file.stdout)] == [
         "exposure.exposure_artifacts.weekly_kpis"
     ]
     exposure_selector_output = subprocess.run(
@@ -10467,11 +10656,10 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
         capture_output=True,
     )
     assert exposure_keyed_json.returncode == 0, exposure_keyed_json.stderr
-    assert json.loads(exposure_keyed_json.stdout) == [
+    assert json_lines(exposure_keyed_json.stdout) == [
         {
             "original_file_path": "models/schema.yml",
             "path": "schema.yml",
-            "selector": "exposure:exposure_artifacts.weekly_kpis",
         }
     ]
     exposure_package = subprocess.run(
@@ -10484,13 +10672,13 @@ def test_ls_resource_type_selectors_for_sources_and_exposures(tmp_path: Path):
             "package:exposure_artifacts,resource_type:exposure",
             "--output",
             "json",
-        ],
+         "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert exposure_package.returncode == 0, exposure_package.stderr
-    assert json.loads(exposure_package.stdout) == [
+    assert json_lines(exposure_package.stdout) == [
         {
             "unique_id": "exposure.exposure_artifacts.weekly_kpis",
             "resource_type": "exposure",
@@ -10504,13 +10692,13 @@ def test_ls_graph_plus_selectors(tmp_path: Path):
 
     def ls_json(*args: str) -> list[str]:
         result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args, "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert ls_json("--select", "customers") == ["model.selector_graph.customers"]
     assert ls_json("--select", "+customers") == [
@@ -10613,7 +10801,7 @@ def test_ls_graph_plus_selectors(tmp_path: Path):
 def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     project = copy_fixture(tmp_path, "single_model")
     unsupported_type = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--resource-type", "function"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--resource-type", "function"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10622,28 +10810,13 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     assert "--resource-type supports only model, analysis, snapshot, seed, source, exposure, test, or unit_test" in unsupported_type.stderr
 
     for selector in [
-        "state:modified",
-        "config.schema:audit",
+        "state:unsupported",
         "resource_type:function",
-        "tag:nightly,",
-        "config.materialized:",
-        "package:",
-        "tag:nightly, config.materialized:view",
-        "++customers",
-        "1++customers",
-        "customers++",
-        "customers+1+",
-        "++customers++",
-        "@",
-        "@@customers",
-        "customers@",
         "@customers+",
         "@customers+1",
-        "@+customers",
-        "@1+customers",
     ]:
         unsupported_selector = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--select", selector],
+            [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", selector],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -10651,8 +10824,22 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         assert unsupported_selector.returncode == 2
         assert "selector syntax is not supported" in unsupported_selector.stderr
 
+    # Core treats extra operators inside values as literal FQN characters,
+    # and allows empty criteria. Only parsed @/child expansion conflicts fail.
+    for selector in [
+        "config.schema:audit", "tag:nightly,", "config.materialized:",
+        "package:", "tag:nightly, config.materialized:view", "++customers",
+        "1++customers", "customers++", "customers+1+", "++customers++",
+        "@", "@@customers", "customers@", "@+customers", "@1+customers",
+    ]:
+        result = subprocess.run(
+            [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", selector],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+
     missing_selector = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "--output", "json"],
+        [DXT, "ls", "--project-dir", str(project), "--select", "--output", "json", "--output-keys", "unique_id", "resource_type", "name"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10661,7 +10848,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     assert "option `--select` requires a value" in missing_selector.stderr
 
     unsupported_in_list = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--select", "customers", "state:modified"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--select", "customers", "state:unsupported"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10670,7 +10857,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
     assert "selector syntax is not supported" in unsupported_in_list.stderr
 
     missing_alias = subprocess.run(
-        [DXT, "ls", "--project-dir", str(project), "--selector", "customer_family"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(project), "--selector", "customer_family"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10692,7 +10879,7 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
         + "\n"
     )
     duplicated_alias = subprocess.run(
-        [DXT, "ls", "--project-dir", str(duplicated_alias_project), "--selector", "duplicate"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(duplicated_alias_project), "--selector", "duplicate"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10708,13 +10895,13 @@ def test_ls_rejects_unsupported_resource_type_and_selector(tmp_path: Path):
                 "  - name: stateful",
                 "    definition:",
                 "      method: state",
-                "      value: modified",
+                "      value: unsupported",
             ]
         )
         + "\n"
     )
     unsupported_yaml_alias = subprocess.run(
-        [DXT, "ls", "--project-dir", str(unsupported_yaml_alias_project), "--selector", "stateful"],
+        [DXT, "ls", "--output", "text", "--project-dir", str(unsupported_yaml_alias_project), "--selector", "stateful"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -10728,13 +10915,13 @@ def test_ls_at_selector_includes_descendant_parents(tmp_path: Path):
 
     def ls_json(*args: str) -> list[str]:
         result = subprocess.run(
-            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args],
+            [DXT, "ls", "--project-dir", str(project), "--output", "json", *args, "--output-keys", "unique_id", "resource_type", "name"],
             cwd=ROOT,
             text=True,
             capture_output=True,
         )
         assert result.returncode == 0, result.stderr
-        return [item["unique_id"] for item in json.loads(result.stdout)]
+        return [item["unique_id"] for item in json_lines(result.stdout)]
 
     assert ls_json("--select", "+customers+") == [
         "model.selector_at_graph.customers",
@@ -10783,7 +10970,7 @@ def test_dynamic_ref_fails_loudly(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "unresolved var" in result.stderr
+    assert "InvalidJinjaArguments" in result.stderr
 
 
 def test_dynamic_doc_fails_loudly(tmp_path: Path):
@@ -10795,7 +10982,7 @@ def test_dynamic_doc_fails_loudly(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "unsupported dynamic doc" in result.stderr
+    assert "InvalidDocArguments" in result.stderr
 
 
 def test_missing_doc_reference_fails_loudly(tmp_path: Path):
@@ -10807,7 +10994,7 @@ def test_missing_doc_reference_fails_loudly(tmp_path: Path):
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "unresolved doc reference" in result.stderr
+    assert "UnresolvedDoc" in result.stderr
 
 
 def test_duplicate_doc_name_fails_loudly(tmp_path: Path):
@@ -10834,40 +11021,56 @@ def test_malformed_docs_block_fails_loudly(tmp_path: Path):
     assert "malformed docs block" in result.stderr
 
 
-def test_unsupported_macro_call_fails_loudly(tmp_path: Path):
+def test_missing_expression_var_fails_loudly(tmp_path: Path):
     project = copy_fixture(tmp_path, "unsupported_macro_call")
-    result = subprocess.run(
+    parsed = subprocess.run(
         [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "unsupported or malformed Jinja" in result.stderr
+    assert "UnresolvedVar" in result.stderr
 
 
 def test_missing_package_macro_fails_loudly(tmp_path: Path):
     project = copy_fixture(tmp_path, "missing_package_macro")
-    result = subprocess.run(
+    parsed = subprocess.run(
         [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "unresolved macro reference" in result.stderr
+    assert "UnresolvedMacro" in result.stderr
 
 
-def test_missing_package_macro_in_macro_body_fails_loudly(tmp_path: Path):
+def test_unused_missing_package_macro_in_macro_body_does_not_block_compile(tmp_path: Path):
     project = copy_fixture(tmp_path, "missing_package_macro_in_macro")
-    result = subprocess.run(
+    parsed = subprocess.run(
         [DXT, "parse", "--project-dir", str(project)],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+    result = subprocess.run(
+        [DXT, "compile", "--project-dir", str(project)],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
-    assert result.returncode == 2
-    assert "unresolved macro reference" in result.stderr
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((project / "target" / "manifest.json").read_text())
+    assert manifest["nodes"]["model.missing_package_macro_in_macro.customers"]["compiled_code"].strip() == "select 1 as customer_id"
 
 
 def test_parse_profile_flags_require_profiles_yml(tmp_path: Path):
@@ -11194,7 +11397,7 @@ def test_docs_generate_writes_manifest_catalog_and_compiled_sql(tmp_path: Path):
     assert manifest["nodes"]["model.docs_blocks.customers"]["compiled_path"].endswith(
         "/compiled/docs_blocks/models/customers.sql"
     )
-    assert sorted(manifest["docs"]) == [
+    assert sorted(identifier for identifier, doc in manifest["docs"].items() if doc["package_name"] != "dbt") == [
         "doc.docs_blocks.customer_id",
         "doc.docs_blocks.customer_model",
     ]
@@ -11205,8 +11408,7 @@ def test_docs_generate_writes_manifest_catalog_and_compiled_sql(tmp_path: Path):
     assert_catalog_schema_slice(catalog_path)
     assert catalog["metadata"]["dbt_schema_version"] == "https://schemas.getdbt.com/dbt/catalog/v1.json"
     assert catalog["metadata"]["dbt_version"] == "0.0.0"
-    assert catalog["metadata"]["invocation_id"] is None
-    assert catalog["metadata"]["invocation_started_at"] is None
+    assert_invocation_metadata(catalog["metadata"])
     assert catalog["metadata"]["env"] == {}
     assert catalog["nodes"] == {}
     assert catalog["sources"] == {}
@@ -11491,8 +11693,7 @@ def test_source_freshness_checks_selected_duckdb_source_and_writes_sources_json(
     sources = json.loads(sources_path.read_text())
     assert sources["metadata"]["dbt_schema_version"] == "https://schemas.getdbt.com/dbt/sources/v3.json"
     assert sources["metadata"]["dbt_version"] == "0.0.0"
-    assert sources["metadata"]["invocation_id"] is None
-    assert sources["metadata"]["invocation_started_at"] is None
+    assert_invocation_metadata(sources["metadata"])
     assert sources["metadata"]["env"] == {}
     assert len(sources["results"]) == 1
     result_row = sources["results"][0]
@@ -11507,9 +11708,11 @@ def test_source_freshness_checks_selected_duckdb_source_and_writes_sources_json(
         "filter": None,
     }
     assert result_row["adapter_response"] == {}
-    assert result_row["timing"] == [{"name": "execute", "started_at": None, "completed_at": None}]
+    assert result_row["timing"][0]["name"] == "execute"
+    assert result_row["timing"][0]["started_at"].endswith("Z")
+    assert result_row["timing"][0]["completed_at"] >= result_row["timing"][0]["started_at"]
     assert result_row["thread_id"] == "Thread-1"
-    assert result_row["execution_time"] == 0.0
+    assert result_row["execution_time"] > 0
     assert str(project) not in sources_path.read_text()
     assert (target / "manifest.json").exists()
 
@@ -12009,7 +12212,7 @@ def test_docs_generate_reuses_file_selectors(tmp_path: Path):
     assert "compiled" not in manifest["nodes"]["model.compile_basic.from_source"]
 
 
-def test_docs_generate_fails_loudly_on_unsupported_compile_jinja(tmp_path: Path):
+def test_docs_generate_fails_loudly_on_missing_expression_var(tmp_path: Path):
     project = copy_fixture(tmp_path, "unsupported_macro_call")
     result = subprocess.run(
         [DXT, "docs", "generate", "--project-dir", str(project)],
@@ -12018,7 +12221,7 @@ def test_docs_generate_fails_loudly_on_unsupported_compile_jinja(tmp_path: Path)
         capture_output=True,
     )
     assert result.returncode == 2
-    assert "unsupported or malformed Jinja" in result.stderr
+    assert "UnresolvedVar" in result.stderr
 
 
 def test_unknown_option_is_rejected():
@@ -12157,11 +12360,9 @@ def test_snapshot_custom_paths_replace_default_and_empty_paths_disable_discovery
     ("{% snapshot bad name %}select 1{% endsnapshot %}", "malformed SQL snapshot block"),
     ("{% snapshot bad %}{{ config(strategy='timestamp', unique_key='id') }}select 1{% endsnapshot %}", "valid timestamp or check strategy"),
     ("{% snapshot bad %}{{ config(strategy='check', unique_key='id', check_cols='id') }}{% endsnapshot %}", "valid timestamp or check strategy"),
-    ("{% snapshot bad %}{{ config(strategy=var('strategy')) }}{% endsnapshot %}", "unsupported SQL snapshot config"),
-    ("{% snapshot bad %}{% if execute %}select 1{% endif %}{% endsnapshot %}", "only named blocks"),
-    ("{% snapshot bad %}{{ config(enabled=false, unknown='value') }}{% endsnapshot %}", "unsupported SQL snapshot config"),
-    ("{% snapshot bad %}{{ config(enabled=false, enabled=true) }}{% endsnapshot %}", "unsupported SQL snapshot config"),
-    ("{% snapshot bad %}{{ config(enabled=false, unique_key=['id']) }}{{ config(unique_key=var('key')) }}{% endsnapshot %}", "unsupported SQL snapshot config"),
+    ("{% snapshot bad %}{{ config(strategy=var('strategy')) }}{% endsnapshot %}", "valid timestamp or check strategy"),
+    ("{% snapshot bad %}{% if execute %}select 1{% endif %}{% endsnapshot %}", "valid timestamp or check strategy"),
+    ("{% snapshot bad %}{{ config(enabled=false, enabled=true) }}{% endsnapshot %}", "InvalidJinjaArguments"),
 ])
 def test_snapshot_malformed_and_unsupported_blocks_fail_closed(tmp_path: Path, body: str, diagnostic: str):
     project = copy_fixture(tmp_path, "single_model")
@@ -12175,24 +12376,71 @@ def test_snapshot_malformed_and_unsupported_blocks_fail_closed(tmp_path: Path, b
     assert not target.exists()
 
 
-@pytest.mark.parametrize("command", ["compile", "build", "run", "seed", "test", "docs generate", "snapshot"])
-def test_snapshot_execution_commands_fail_before_writing_or_running_sql(tmp_path: Path, command: str):
-    project = copy_fixture(tmp_path, "snapshot_sql")
+def test_disabled_snapshot_preserves_extra_config_like_core(tmp_path: Path):
+    project=copy_fixture(tmp_path,"single_model")
+    (project/"snapshots").mkdir()
+    (project/"snapshots/history.sql").write_text("{% snapshot history %}{{ config(enabled=false, unknown='value') }}{% endsnapshot %}")
+    target=tmp_path/"target"
+    result=snapshot_cli(project,target)
+    assert result.returncode==0,result.stderr
+    node=json.loads((target/"manifest.json").read_text())["disabled"]["snapshot.single_model.history"][0]
+    assert node["config"]["unknown"]=="value" and node["config"]["enabled"] is False
+
+
+def test_disabled_snapshot_preserves_missing_var_config_like_core(tmp_path: Path):
+    # Core skips required snapshot configuration validation for disabled nodes.
+    project = copy_fixture(tmp_path, "single_model")
+    (project / "snapshots").mkdir()
+    (project / "snapshots/history.sql").write_text(
+        "{% snapshot history %}{{ config(enabled=false, unique_key=['id']) }}"
+        "{{ config(unique_key=var('key')) }}{% endsnapshot %}"
+    )
     target = tmp_path / "target"
-    result = snapshot_cli(project, target, command, "--select", "customers customer_history")
-    assert result.returncode == 2
-    assert "snapshot resources currently support parse and ls only" in result.stderr
-    assert not target.exists()
+    result = snapshot_cli(project, target)
+    assert result.returncode == 0, result.stderr
+    node = json.loads((target / "manifest.json").read_text())["disabled"]["snapshot.single_model.history"][0]
+    assert node["config"]["unique_key"] is None
+    assert node["config"]["enabled"] is False
 
 
-def test_snapshot_yaml_properties_are_explicitly_unsupported(tmp_path: Path):
+def executable_snapshot_project(tmp_path: Path):
+    from test_usability_snapshots import project_at, snapshot
+    project = project_at(tmp_path / "executable_snapshot", "")
+    (project / "models").mkdir()
+    (project / "models/customers.sql").write_text("{{ config(materialized='table') }} select * from main.input")
+    (project / "models/current_customers.sql").write_text("{{ config(materialized='table') }} select * from {{ ref('history') }} where dbt_valid_to is null")
+    (project / "seeds").mkdir()
+    (project / "seeds/region.csv").write_text("region\nEU\n")
+    (project / "tests").mkdir()
+    (project / "tests/assert_history.sql").write_text("select * from {{ ref('history') }} where false")
+    snapshot(project)
+    return project
+
+
+@pytest.mark.skipif(DUCKDB is None, reason="DuckDB CLI is required")
+@pytest.mark.parametrize("command", ["compile", "build", "run", "seed", "test", "docs generate", "snapshot"])
+def test_snapshot_execution_commands_support_resource_filtering(tmp_path: Path, command: str):
+    project = executable_snapshot_project(tmp_path)
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target, command, "--select", "customers history region assert_history")
+    assert result.returncode == 0, result.stderr
+    assert (target / "manifest.json").exists()
+    if command in {"compile", "docs generate", "build", "run", "seed", "test", "snapshot"}:
+        assert_run_results_schema_slice(target / "run_results.json")
+        results = json.loads((target / "run_results.json").read_text())["results"]
+        assert results and all(row["status"] in {"success", "pass"} for row in results)
+    assert duckdb_scalar(project / "warehouse.duckdb", "select count(*) from archive.history") == "2"
+
+
+def test_snapshot_yaml_properties_patch_sql_snapshots(tmp_path: Path):
     project = copy_fixture(tmp_path, "snapshot_sql")
     (project / "snapshots/schema.yml").write_text("version: 2\nsnapshots:\n  - name: customer_history\n    description: history\n")
     target = tmp_path / "target"
     result = snapshot_cli(project, target)
-    assert result.returncode == 2
-    assert "YAML snapshot definitions and properties are not supported" in result.stderr
-    assert not target.exists()
+    assert result.returncode == 0, result.stderr
+    node = json.loads((target / "manifest.json").read_text())["nodes"]["snapshot.snapshot_sql.customer_history"]
+    assert node["description"] == "history"
+    assert node["patch_path"] == "snapshot_sql://snapshots/schema.yml"
 
 
 def test_snapshot_disabled_reference_and_duplicate_names_fail_closed(tmp_path: Path):
@@ -12263,60 +12511,73 @@ def test_snapshot_default_commands_filter_to_unrelated_executable_resources(tmp_
     assert all(row["status"] in {"success", "pass"} for row in results)
 
 
-def test_snapshot_project_config_inheritance_is_explicitly_unsupported(tmp_path: Path):
+def test_snapshot_project_config_inheritance_disables_snapshots(tmp_path: Path):
     project = copy_fixture(tmp_path, "snapshot_sql")
+    (project / "models/current_customers.sql").unlink()
     (project / "dbt_project.yml").write_text((project / "dbt_project.yml").read_text() + "snapshots:\n  snapshot_sql:\n    +enabled: false\n")
     target = tmp_path / "target"
     result = snapshot_cli(project, target)
-    assert result.returncode == 2
-    assert "project snapshot config inheritance is not supported" in result.stderr
-    assert not target.exists()
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((target / "manifest.json").read_text())
+    assert "snapshot.snapshot_sql.customer_history" not in manifest["nodes"]
+    assert manifest["disabled"]["snapshot.snapshot_sql.customer_history"][0]["config"]["enabled"] is False
+    assert "snapshot.util_pkg.package_history" in manifest["nodes"]
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="DuckDB CLI is required")
 @pytest.mark.parametrize("command,resource", [("compile", "current_customers"), ("run", "current_customers"), ("test", "assert_history")])
-def test_snapshot_consumers_fail_before_compilation_or_execution(tmp_path: Path, command: str, resource: str):
-    project = copy_fixture(tmp_path, "snapshot_sql")
-    (project / "tests").mkdir()
-    (project / "tests/assert_history.sql").write_text("select * from {{ ref('customer_history') }} where false")
+def test_snapshot_consumers_compile_and_execute(tmp_path: Path, command: str, resource: str):
+    project = executable_snapshot_project(tmp_path)
     target = tmp_path / "target"
     result = snapshot_cli(project, target, command, "--select", resource)
-    assert result.returncode == 2
-    assert "snapshot resources currently support parse and ls only" in result.stderr
-    assert not target.exists()
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((target / "manifest.json").read_text())
+    node = manifest["nodes"][f"{'test' if command == 'test' else 'model'}.snapshot_runtime.{resource}"]
+    if command != "test":
+        assert node["compiled"] is True and '"archive"."history"' in node["compiled_code"]
+    if command != "compile":
+        result = json.loads((target / "run_results.json").read_text())["results"][0]
+        assert result["status"] == ("pass" if command == "test" else "success")
+        assert '"archive"."history"' in result["compiled_code"]
 
 
 @pytest.mark.parametrize("resource_type", ["model", "seed"])
-def test_snapshot_colliding_refable_names_are_explicitly_unsupported(tmp_path: Path, resource_type: str):
+def test_snapshot_refable_name_precedence_matches_core_parser_order(tmp_path: Path, resource_type: str):
     project = copy_fixture(tmp_path, "snapshot_sql")
     if resource_type == "model":
         (project / "models/customer_history.sql").write_text("select 1 as customer_id")
     else:
         (project / "seeds").mkdir()
         (project / "seeds/customer_history.csv").write_text("customer_id\n1\n")
-    result = snapshot_cli(project, tmp_path / "target")
-    assert result.returncode == 2
-    assert "ref to a snapshot sharing a name with a model or seed is not supported" in result.stderr
-    assert not (tmp_path / "target").exists()
+    target = tmp_path / "target"
+    result = snapshot_cli(project, target)
+    assert result.returncode == 0, result.stderr
+    node = json.loads((target / "manifest.json").read_text())["nodes"]["model.snapshot_sql.current_customers"]
+    expected = "snapshot.snapshot_sql.customer_history" if resource_type == "model" else "seed.snapshot_sql.customer_history"
+    assert node["depends_on"]["nodes"] == [expected]
 
 
-def test_snapshot_default_test_rejects_singular_consumer(tmp_path: Path):
-    project = copy_fixture(tmp_path, "snapshot_sql")
-    (project / "tests").mkdir()
-    (project / "tests/assert_history.sql").write_text("select * from {{ ref('customer_history') }} where false")
+@pytest.mark.skipif(DUCKDB is None, reason="DuckDB CLI is required")
+def test_snapshot_default_test_executes_singular_consumer(tmp_path: Path):
+    project = executable_snapshot_project(tmp_path)
     target = tmp_path / "target"
     result = snapshot_cli(project, target, "test")
-    assert result.returncode == 2
-    assert "snapshot resources currently support parse and ls only" in result.stderr
-    assert not target.exists()
+    assert result.returncode == 0, result.stderr
+    results = json.loads((target / "run_results.json").read_text())["results"]
+    assert results[0]["unique_id"] == "test.snapshot_runtime.assert_history"
+    assert results[0]["status"] == "pass"
 
 
+@pytest.mark.skipif(DUCKDB is None, reason="DuckDB CLI is required")
 @pytest.mark.parametrize("command", ["compile", "run"])
-def test_snapshot_consumer_via_unselected_ephemeral_parent_fails_closed(tmp_path: Path, command: str):
-    project = copy_fixture(tmp_path, "snapshot_sql")
-    (project / "models/ephemeral_history.sql").write_text("{{ config(materialized='ephemeral') }}\nselect * from {{ ref('customer_history') }}")
+def test_snapshot_consumer_via_unselected_ephemeral_parent_executes(tmp_path: Path, command: str):
+    project = executable_snapshot_project(tmp_path)
+    (project / "models/ephemeral_history.sql").write_text("{{ config(materialized='ephemeral') }}\nselect * from {{ ref('history') }}")
     (project / "models/final_history.sql").write_text("select * from {{ ref('ephemeral_history') }}")
     target = tmp_path / "target"
     result = snapshot_cli(project, target, command, "--select", "final_history")
-    assert result.returncode == 2
-    assert "snapshot resources currently support parse and ls only" in result.stderr
-    assert not target.exists()
+    assert result.returncode == 0, result.stderr
+    node = json.loads((target / "manifest.json").read_text())["nodes"]["model.snapshot_runtime.final_history"]
+    assert node["extra_ctes_injected"] and '"archive"."history"' in node["compiled_code"]
+    if command == "run":
+        assert duckdb_scalar(project / "warehouse.duckdb", "select count(*) from main.final_history") == "2"

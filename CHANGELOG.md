@@ -1,269 +1,166 @@
 # Changelog
 
-All notable changes to `dxt` are documented here.
-
-This project is pre-alpha. Entries describe supported slices, not full dbt
-compatibility.
+Notable changes to `dxt` are recorded here. Unreleased entries describe native
+implementations and their focused evidence, not a completed release or
+universal dbt certification. The initial execution scope is SQL models on
+DuckDB and PostgreSQL.
 
 ## Unreleased
 
 ### Added
 
-- Read-only legacy SQL snapshot parsing and listing for root projects and
-  installed packages, with Manifest v12 snapshot nodes, literal timestamp/check
-  configs, disabled nodes, static dependencies, whole-file checksums and
-  file/block FQN selectors. Unsupported snapshot compilation, execution,
-  dynamic definitions and YAML snapshot properties fail explicitly.
-- A pinned dbt Core 1.10.5/dbt-duckdb 1.9.6 snapshot oracle CI gate, comparing
-  supported artifact/listing fields and validating active/disabled Snapshot
-  nodes against the full published Manifest v12 Snapshot schema.
-
-- A dbt replacement roadmap with audited execution gaps, versioned Core
-  compatibility gates, and sequenced semantic, static-analysis, stateful
-  planning, adapter, and cross-database work.
-
-- Release archive safety validation now checks packaged binary tarballs for the
-  expected archive shape, version/target naming, denylisted paths, binary/doc
-  string leaks, executable metadata, and checksum coverage before upload.
-- GitHub-backed Agent OS scaffolding for multidisciplinary agent coordination:
-  issue forms, PR template, label/project/seed-issue manifests, project-scoped
-  specialist agents including a product-manager board monitor, validation and
-  bootstrap scripts, a local autonomous Codex worker orchestrator, project-local
-  Codex subagent configuration, and docs for supervisor, hierarchical, network,
-  and reflection patterns.
-- Agent OS Project item reconciliation for unambiguous labels and
-  `dxt-agent-event` comments, including dry-run field drift reporting plus
-  public-safe readiness, branch, and dependency fields.
-- Codex pull-plug restart helpers for ignored local handoff state, optional
-  detached `codex exec` relaunches, and a two-phase tmux/Hermes watchdog path
-  that can resume Codex in the same visible terminal pane only after the active
-  agent marks the request safe to exit.
-- Multi-agent worktree workflow documentation, project-scoped Codex agent
-  roles, and helper scripts for isolated concurrent development and PR
-  convergence.
-- Root-project `selectors.yml` scalar string aliases for selector-backed
-  commands through `--selector <name>`, lowering supported alias definitions to
-  the existing Zig selector engine.
-- `state:new` selectors now read prior Manifest v12 `manifest.json` resource
-  IDs from `--state`, select current supported resources absent from that prior
-  manifest, and compose through existing graph expansion and `--exclude`
+- Native DuckDB C API and PostgreSQL libpq adapters with held sessions, typed
+  nullable results, DML responses, introspection, cancellation, readonly
+  boundaries and connection recovery.
+- Dependency workers for mixed seed/model/snapshot/unit/data-test builds,
+  physical readiness through ephemeral ancestry, real thread limits,
+  fail-fast cancellation, independent continuation and durable blocked rows.
+- Native table/view and adapter-specific incremental execution with first,
+  repeated and full-refresh runs, unique keys, predicates, schema policies
+  and merge column controls; PostgreSQL unlogged/index/materialized-view
   behavior.
-- Supported built-in DuckDB generic tests now parse and emit `where`, `limit`,
-  `severity`, `warn_if`, and `error_if` configs for model, seed, and source
-  tests, apply `where`/`limit` to failure-row SQL, and classify warning results
-  without failing `dxt test` or `dxt build`.
-- Source relation identity now parses source/table `database` plus source/table
-  `quoting` for database/schema/identifier, emits dbt-shaped Manifest source
-  fields, and applies the same resolved identity to `source()` compilation,
-  DuckDB source catalog lookup, source freshness SQL, and source generic-test
-  SQL.
-- Root-project `dbt_project.yml` `sources:` configs now provide lower-precedence
-  defaults for supported source relation identity and freshness fields used by
-  `compile`, `docs generate`, `source freshness`, and supported source tests.
-- Singular SQL data-test YAML patches now parse top-level `tests:` /
-  `data_tests:` entries for description, config tags, enabled, severity,
-  thresholds, `where`, and `limit`; emit those Manifest fields without
-  generic-only test fields; and apply supported configs during DuckDB
-  `dxt test` / `dxt build`.
-- DuckDB-backed `dxt seed` and seed paths inside `dxt build` now parse
-  supported seed YAML `quote_columns` and `column_types` configs for root and
-  installed-package CSV seeds, preserve those config fields in `manifest.json`,
-  and apply them at the DuckDB CSV load boundary.
-- Supported DuckDB generic and singular data tests now parse and emit
-  `store_failures`, materialize deterministic `dbt_test__audit` failure tables
-  for non-empty failing-row SQL in `dxt test` / `dxt build`, and drop those
-  audit tables on zero-row passing runs to avoid stale failure artifacts.
-- `dxt compile` now supports compile-only custom generic tests on source and
-  seed columns, in addition to model columns, for root-project and
-  installed-package `{% test %}` / `{% data_test %}` blocks that use the
-  existing static `{{ model }}` and `{{ column_name }}` renderer.
-- `dxt test` and `dxt build` now execute the same supported static custom
-  generic model/source/seed column tests through DuckDB, writing deterministic
-  Run Results v6 pass/fail/warn rows and custom-test DuckDB execution-error
-  rows while keeping broader Jinja, adapter dispatch, and table-level custom
-  tests unsupported.
-- Narrow static `{% if %}` rendering now supports `elif` chains plus simple
-  `==` / `!=` comparisons over supported bool and string compile-context
-  values without expanding into general Jinja expression evaluation.
-- Public Jaffle fixture CI now has explicit `dxt ls` and `dxt compile` gates
-  alongside parse, DuckDB build/run, and docs-generate, with compile artifact
-  checks for generated SQL files and dbt-shaped Manifest fields.
-- `dxt test` and test-only `dxt build` now execute selected supported unit
-  tests through DuckDB for the parsed dict row-fixture subset, materializing
-  literal `ref`/local default-quoted `source` fixtures inside a rollback-only
-  transaction, comparing projected actual rows to expected rows, and writing
-  Run Results v6 pass/fail rows.
+- Calendar microbatch orchestration, lookback, event-time/sample input bounds,
+  native typed batch timestamps, partial outcomes, batch rollback and retry.
+  Authored materializations execute per batch with Core's first/last-batch hook
+  boundaries; a failed final hook preserves previously committed batches.
+  Stock DuckDB microbatch is an explicit extension to the pinned adapter.
+- Native SQL/YAML timestamp/check snapshots on both adapters, including
+  updates/deletes/returning rows, metadata configs and schema evolution.
+- State-defined DuckDB/PostgreSQL clone view copies with existing-relation,
+  full-refresh, no-op/error and real adapter-response behavior.
+- DuckDB local external CSV/JSON/Parquet publication/reader views and
+  parameterized table-function models; cloud publication/registration remains
+  outside the current scope.
+- Resource pre/post hooks and project on-run-start/on-run-end operations with
+  native contexts, held transactions, rollback and artifact results.
+- Native grants and persist-docs execution through bundled adapter dispatch,
+  including PostgreSQL role revocation and actual relation/column comments.
+  DuckDB grants retain its upstream warning capability.
+- Native table/view/incremental contract validation and adapter-supported
+  constraints, including declared column order, PostgreSQL foreign keys and
+  rollback on schema or data violations.
+- Authored SQL materializations with adapter/package selection, explicit
+  builtin overrides, held-session SQL/hooks, validated relation returns and
+  authored `main` response metadata.
+- Native DuckDB profile initialization for configuration/settings,
+  attachments, extensions and secrets, with private credentials, connection
+  lifetime and typed connect/query retry policies. Python-dependent profile
+  plugins, filesystems and remote drivers fail visibly.
+- Native generic/singular data-test configs, SQL thresholds and persisted
+  failure tables/views; dict/CSV/SQL unit fixtures, sparse/empty inputs, typed
+  macro/var/env overrides and versioned models.
+- Executed data-test materialization helpers, compiled SQL/files and macro
+  dependencies, inherited test metadata, and retained audit table/view reruns.
+- Shared native YAML parsing, typed project/profile/env/var handling, complete
+  config layering, package overlays, disabled resources, versions and
+  groups/access validation.
+- Typed Jinja expressions, Unicode/numeric/tuple/container values, filters,
+  scoped control/capture/call blocks, macro defaults/kwargs/returns, namespace
+  mutation and adapter dispatch.
+- Native `modules.re` pattern/match objects, substitutions, iteration and
+  flags through statically linked PCRE2 and a Zig compatibility layer.
+- Native restricted `modules.datetime` and `modules.pytz` contexts, typed
+  date/datetime/time/timedelta/tzinfo values, ISO/strptime constructors,
+  timezone transitions and DST localization/normalization. Pinned pytz/IANA
+  data and provenance ship with the native binary's notices.
+- All fourteen pinned Core `modules.itertools` exports as lazy native
+  iterators, including shared cursors, tee buffers and active Jinja callbacks.
+- Native `str.format` and `format_map`: typed fields, conversions, nested
+  specifications, numeric/Unicode formatting and temporal formatting, with
+  actual Core error and sandbox comparisons.
+- Invocation-wide `warn_once` deduplication and stock materialization
+  status/message/adapter-response metadata, including snapshot tombstone counts.
+- Embedded pinned dbt Core/DuckDB/PostgreSQL SQL macros and native
+  Relation/Column/timestamp/query-result objects, database queries/statements,
+  named results and adapter metadata caches.
+- Separate original held-cursor values and fetched Agate tables, with exact
+  numeric, binary/NUL, temporal, composite and description metadata;
+  cursor aliases, typed recursive/named bindings, PostgreSQL buffer views and
+  returned range adaptation have actual driver/Core comparisons.
+- Genuine DuckDB COPY and PostgreSQL parameterized CSV seed execution through
+  the bundled macros, including the unchanged 70,000-binding batch and its
+  actual SQL artifacts, typed rows and retained mutable aliases.
+- Native Tree-sitter Python resource discovery, static literal metadata and
+  dbt scaffold compilation. Authored Python is never evaluated; selected Python
+  execution fails before warehouse writes under the initial SQL-only scope.
+- Local/Git/registry/tarball dependency installation with transitive resolution,
+  safe archives/paths, reproducible lock files, upgrade/offline behavior and
+  installed package macro execution.
+- Recursive named YAML selectors, defaults/indirect modes, state comparisons,
+  Core fresher selection, defer/favor-state/separate state and exact-ID retry.
+- Working debug/init/run-operation/retry/clone commands, effective command/env
+  flags, warning/logging/output/profiling controls and input sampling.
+- Full upstream artifact schema checks for Manifest v12, Run Results v6,
+  Catalog v1 and Sources v3, plus semantic-interface validation.
+- Embedded dbt docs application, native catalog/freshness execution, static
+  offline docs and native HTTP serving.
+- Native semantic resources and MetricFlow-style simple/derived/ratio/
+  cumulative/conversion planning, join/grain/time checks, saved queries and
+  locked transactional exports on supported adapters.
+- Native dialect SQL grammars, typed logical IR, column lineage, source
+  diagnostics, readonly analysis/explain and dependency-aware cache reuse.
+- Governed cross-database plans and execution: named connections, pushdown and
+  source reduction, typed broadcast/staged/embedded movement, policy/budget
+  guards, retained caches/snapshots, source watermarks, locks, recoverable run
+  records and adaptive task/query retries.
+- Versioned environment planning/apply, immutable model versions and physical
+  reuse, isolated views, UTC interval/backfill accounting, blocking audits,
+  promotion and rollback.
+- Native persistent parse and relation caches with input-safe invalidation.
+  The native parse cache is separate from Core's MessagePack format.
+- Parsed database/schema/alias generator policies across root/package scopes,
+  dispatch, versions, seeds, snapshots, audit identities and saved-query
+  exports; consumers and warm-cache restores retain resolved identities.
+- Deterministic release archives with embedded-source licenses/provenance,
+  checksum/architecture/safety checks and actual extracted installation gates
+  for both adapters with PATH empty.
+- Actual Linux x86_64/ARM full compatibility/install CI configuration, portable
+  native PostgreSQL fixtures and browser setup, plus correctness-aware
+  cold/warm performance gates.
+- GitHub-backed Agent OS coordination, isolated worktree helper workflows and
+  public-safe developer restart/handoff tooling.
 
 ### Fixed
 
-- Source built-in generic-test IDs now hash their original test metadata and
-  arguments while retaining source-prefixed node names, matching dbt Core
-  identity for `not_null`, `unique`, `relationships` and `accepted_values`.
+- Physical ancestors and failing unit/data tests now gate consumers correctly,
+  while independent resources continue and earlier completed results remain.
+- Built-in generic, singular and unit SQL errors produce sanitized durable
+  error rows instead of aborting before result emission.
+- Source generic-test IDs hash original metadata/arguments while retaining
+  source-prefixed display names, matching pinned Core identities.
+- Compiled resource artifacts, relation identities, dependency ordering and
+  retry arguments have pinned Core comparisons; compile/docs errors retain
+  durable extension results consumable by Core retry.
+- Actual option effects replace the previous stored-only threads and ignored
+  full-refresh behavior.
+- Generic tests preserve typed `get_where_subquery` results for authored
+  Relation attribute/method access, retain configured input bounds and inject
+  ephemeral dependencies into generic/singular compiled SQL.
+- Compiled generic-test macro bodies retain authored SQL; configured limits
+  belong to the runtime materialization rather than compiled-code rewriting.
 
-- Optional dbt oracle logging now supports both Protobuf JSON keyword variants;
-  source-status tests distinguish dxt status extensions from Core's `fresher`
-  method, and build-order assertions reflect tests running before descendants.
+### Compatibility And Acceptance
 
-- DuckDB `source freshness` now reports selected sources that have freshness
-  thresholds but no `loaded_at_field` or `loaded_at_query` as dbt-shaped
-  Sources v3 runtime-error rows explaining that DuckDB does not support
-  metadata-based freshness, while continuing other selected loaded-at checks.
-- First DuckDB-compatible `ephemeral` model slice: downstream SQL models now
-  compile supported ephemeral parents into deterministic injected CTEs, emit
-  Manifest `extra_ctes` / `extra_ctes_injected`, and run/build without creating
-  standalone ephemeral DuckDB relations.
-- Agent OS dry-runs no longer append ignored local run-state entries, and the
-  Hermes Codex watchdog stays silent when there is no ready restart request.
-- `dxt ls --output json --output-keys` support for compact `tags`,
-  `config.enabled`, `config.docs.show`, `depends_on.nodes`, and
-  `depends_on.macros` fields using the existing Zig graph data.
-- First-class `analysis` resources in the Zig runtime for parse/list/compile:
-  default `analyses` discovery, Manifest nodes with refs/sources/macros,
-  YAML description/tag/column patches, `resource_type:analysis` selectors, and
-  selected compile output under `target/compiled/<package>/analysis/...`.
-- `dxt seed` command for selected root-project DuckDB CSV seeds, reusing the
-  Zig seed execution boundary, writing `manifest.json` and seed-shaped Run
-  Results v6 rows, filtering mixed selections to seeds, and rejecting
-  selections that match no seeds before DuckDB side effects.
-- `dxt compile` support for selected singular SQL data tests, writing compiled
-  SQL under `target/compiled/<package>/tests/...` and emitting dbt-shaped
-  compiled Manifest fields without requiring DuckDB execution.
-- `dxt compile` support for selected supported built-in generic data tests,
-  writing compiled failure-row SQL under `target/compiled/<package>/...` and
-  emitting dbt-shaped compiled Manifest fields without requiring DuckDB
-  execution or writing run results.
-- Singular SQL data tests in the Zig runtime, including `test-paths`
-  discovery with `generic/` and `fixtures/` skipped, Manifest nodes without
-  generic-only fields, `test_type:singular` / `test_type:data` selection, and
-  DuckDB `build` / `test` execution through dbt-style failure-row counting.
-- Documentation baseline with a reader-focused README, primer, compatibility
-  matrix, architecture diagrams, release process, and changelog.
-- GitHub Actions release workflow for tagged native Zig binary artifacts and
-  checksums.
-- Source-grounded upstream reference-map refresh with the next five small
-  dbt Core/Fusion-backed compatibility slices.
-- Future SQLMesh reference-map note for later state, plan/apply,
-  environment, audit, incremental, multi-engine gateway, and adapter capability
-  design once the dbt Core baseline is mature enough.
-- `dxt test` command for the existing DuckDB generic-test execution subset,
-  writing `manifest.json` and Run Results v6-shaped `run_results.json` for
-  supported `not_null`, `unique`, `accepted_values`, and `relationships` tests
-  against already-existing target relations.
-- Partial DuckDB execution-failure artifacts for `dxt run` and supported
-  `dxt build` model/seed branches, writing completed prior `run_results.json`
-  rows plus a sanitized `status: "error"` row for the failed resource and
-  returning exit code `1`.
-- Partial skipped-result propagation for `dxt run` and supported `dxt build`
-  model/seed execution failures, writing `status: "skipped"` rows for selected
-  blocked descendants and selected blocked generic tests while preserving
-  `--exclude`.
-- `dxt run` now continues selected independent DuckDB SQL models after a
-  selected model execution failure while still recording selected blocked
-  descendants as `skipped` rows in `run_results.json`.
-- `dxt build` now continues selected independent supported DuckDB seeds,
-  models, and data tests after supported execution or data-test failures while
-  still writing dbt-shaped `error` / `fail` and selected blocked `skipped`
-  rows.
-- Partial `dxt build` data-test failure blocking for selected DuckDB model and
-  seed+model builds: ready selected data tests run before downstream selected
-  resources, and failing tests write `fail` plus downstream `skipped` Run
-  Results rows instead of creating blocked downstream relations.
-- Literal inline SQL model `config(enabled=false)` / `config(enabled=true)`
-  parsing in the Zig scanner, reusing the existing disabled-node manifest and
-  selector behavior while rejecting dynamic enabled expressions for now.
-- Literal inline singular SQL test `config(enabled=false)` parsing, filtering
-  disabled singular tests from active manifest maps, selectors, compile, test,
-  and build while preserving them under `manifest.disabled`.
-- Selector wildcard parity for bracket character classes in the shared Zig
-  selector engine, covering `file:` and slash-aware `path:` selectors used by
-  `dxt ls` and other selector-backed commands.
-- `file:` selectors now match dbt Core's basename/stem behavior for multi-dot
-  filenames and bracket-escaped literal `]`, `*`, and `?` filename characters.
-- CI validation pyramid split into native Zig/safety, Python integration matrix,
-  and public Jaffle parse/build/run/docs gates with a pinned and
-  checksum-verified DuckDB CLI, pytest JUnit reports, and focused local
-  validation guidance.
-- GitHub CI stale-run cancellation, job timeouts, and a native Zig test coverage
-  map artifact workflow for Zig source/build changes, main pushes, and manual
-  coverage runs. The coverage summary now renders as Markdown with real native
-  test declaration counts instead of escaped newline text. The public Jaffle job
-  now fetches the pinned fixture checkout once and passes it to each public
-  harness to reduce repeated network clone work.
-- Shared Zig JSON writer helpers for artifact emission, replacing duplicated
-  per-artifact string escaping helpers across manifest, run-results, catalog,
-  and sources writers while keeping behavior stable.
-- Strict JSON object parsing for stringified scalar `--vars` / project vars in
-  the Zig parser, while preserving the existing loose inline YAML-style scalar
-  map support for current fixtures.
-- `dxt ls --output json --output-keys` compact selected-resource expansion for
-  `package_name` and source-only `source_name`.
-- `dxt ls --output json --output-keys` support for compact nested config keys
-  `config.materialized` and `config.tags` on selected resources that carry
-  those config values.
-- `dxt ls --output json --output-keys` support for compact identity keys
-  `alias` on model/seed/test resources and source-only `identifier`.
-- Table-level model, seed, and source built-in generic tests with explicit
-  `arguments.column_name`, including Manifest kwargs and DuckDB `build`
-  execution for the existing supported test types while preserving dbt's
-  table-level `column_name: null` artifact attachment semantics.
-- Literal `source('source', 'table')` targets for built-in `relationships`
-  generic tests on models, seeds, and sources, including dbt-shaped Manifest
-  source dependency ordering and DuckDB source-to-source execution.
-- Static `dxt docs serve` command in the Zig runtime, serving generated
-  target-directory docs artifacts over localhost HTTP with dbt-style host,
-  port, no-browser/browser flag parsing, traversal protection, and integration
-  coverage that verifies `manifest.json` and `catalog.json` are not mutated.
-- Safe `dxt clean` command in the Zig runtime, including `clean-targets`
-  parsing, effective `target-path` fallback, project-relative deletion guards,
-  source-directory protection, profile-free execution, and CLI safety tests.
-- Parse/list dependency recovery for static Jinja string-list loops, so
-  `ref(loop_var)` and `source('raw', loop_var)` inside supported `{% for %}`
-  loops populate manifest dependencies and selector graph expansion.
-- Compile-time relation rendering for static Jinja string-list loop variables,
-  so supported `ref(loop_var)`, `ref('package', loop_var)`, and
-  `source('raw', loop_var)` calls render through `compile`, `docs generate`,
-  `run`, and `build`.
-- Root-project seed column generic-test parsing and DuckDB execution for
-  `not_null`, `unique`, explicit `accepted_values` `quote: false`, and
-  ref-backed `relationships`, including seed-path schema YAML discovery,
-  seed manifest columns/patch metadata, and seed+test run-results coverage.
-- Source column ref-backed `relationships` generic-test parsing and DuckDB
-  execution, including source-style manifest refs/sources dependencies and
-  pass/fail run-results coverage against existing source and target relations.
-- Explicit `accepted_values` `quote: false` support for model and source column
-  DuckDB generic tests, including dbt-style synthetic names, hash metadata,
-  Manifest kwargs, raw SQL rendering, and pass/fail execution.
-- Narrow Zig compile/runtime rendering for Jaffle-style macro dispatch wrappers
-  such as `cents_to_dollars`, including adapter/default implementation
-  selection, manifest macro dependency coverage, and DuckDB run/build
-  integration coverage.
-- Source/table `config:` parsing for `loaded_at_field`, `loaded_at_query`, and
-  freshness inheritance, narrow source `schema: "{{ target.schema }}_raw"`
-  rendering, expanded Manifest v12-shaped source fields, and DuckDB source
-  freshness execution against resolved inherited source settings.
-- Source table `identifier` parsing as a physical relation-name override for
-  `source()` compilation, manifest source fields, DuckDB docs catalog lookup,
-  source freshness SQL, and source generic-test relation rendering while
-  preserving logical source selectors and unique IDs.
-- Read-only unit-test artifact support for dict-style YAML `unit_tests:`
-  entries, Manifest v12-shaped `unit_tests`, tested-model dependency maps,
-  `ls` resource-type/unit-test/test-type selectors, and explicit unsupported
-  `build` behavior without unit-test `run_results.json`.
-- `file:` selector support for basename/stem matching across selectable graph
-  resources, with selector reuse covered through `ls` and `docs generate`.
-- Depth-limited dbt-style `+` graph selectors for parent and child expansion,
-  including `1+model`, `model+1`, and combined `1+model+1` forms.
-- `@` graph selector support for selecting descendants and the parents needed
-  to build those descendants in the supported graph subset.
-- `dxt ls --output name`, `--output path`, and `--output selector` formats,
-  while preserving the legacy text and JSON outputs.
-- Narrow `dxt ls --output json --output-keys ...` filtering for compact
-  selected-resource JSON fields.
-- `dxt ls --output json --output-keys ...` support for compact resource
-  locator fields `path`, `original_file_path`, and `selector`.
-- Narrow compile rendering for static `{% if %}` branches, including
-  compile-phase `execute` and static dependency recovery for guarded refs and
-  sources.
+- Comparisons target dbt Core **1.10.5**, dbt-duckdb **1.9.6**, dbt-postgres
+  **1.9.1**, MetricFlow **0.208.1** and semantic interfaces **0.9.0**; native
+  fixtures pin DuckDB **1.4.2** and Zig **0.16.0**.
+- Contracts, authored materializations, naming, native profile initialization,
+  executed data-test helpers, warnings, stock responses and microbatch custom
+  lifecycle have focused upstream evidence. Configured path/null publication,
+  builtin-override deprecation, class protocols, literal identity and saved
+  receiver behavior also have focused Core certificates. Whole-tree acceptance
+  remains a separate gate.
+- Native helper semantics target CPython **3.12**. Version-specific Core 3.11
+  iterator identity and floating-sum differences are explicit compatibility
+  boundaries, rather than changes to the installed native runtime.
+- Focused native/CLI/Core/MetricFlow evidence exists across the implemented
+  tracks. Final whole-tree/public-project, both-adapter archive, platform and
+  performance acceptance remains pending.
+- Python, cloud adapters, external cloud publication and newer Core/platform
+  targets do not inherit execution certification from the initial SQL scope.
+- See [Compatibility](docs/COMPATIBILITY.md) and the
+  [roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) for current boundaries and final
+  gates. Historical release entries below retain their original scope.
 
 ## 0.0.0-pre-alpha
 
