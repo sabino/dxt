@@ -10,6 +10,8 @@ import tarfile
 from pathlib import Path
 from typing import NamedTuple
 
+from release_markdown import file_target, markdown_targets
+
 
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -197,6 +199,8 @@ def check_elf(data: bytes, target: str, context: str) -> list[str]:
 def check_archive(path: Path, expectation: ArchiveExpectation) -> list[str]:
     findings: list[str] = []
     seen: set[str] = set()
+    files: set[str] = set()
+    markdown: dict[str, bytes] = {}
     try:
         with tarfile.open(path, "r:gz") as archive:
             members = archive.getmembers()
@@ -235,11 +239,14 @@ def check_archive(path: Path, expectation: ArchiveExpectation) -> list[str]:
                     findings.append(f"{path}: required member {relative_name!r} is not a regular file")
 
                 if member.isfile():
+                    files.add(relative_name)
                     extracted = archive.extractfile(member)
                     if extracted is None:
                         findings.append(f"{path}: could not read {normalized!r}")
                         continue
                     data = extracted.read()
+                    if relative_name.endswith('.md'):
+                        markdown[relative_name] = data
                     findings.extend(scan_bytes(data, f"{path}:{relative_name}"))
                     if relative_name == "dxt":
                         findings.extend(check_elf(data, expectation.target, f"{path}:dxt"))
@@ -248,6 +255,16 @@ def check_archive(path: Path, expectation: ArchiveExpectation) -> list[str]:
 
     for member in sorted(REQUIRED_MEMBERS - seen):
         findings.append(f"{path}: missing required member {expectation.root_name}/{member}")
+
+    bundled = files | {str(parent) for name in files for parent in Path(name).parents}
+    for document, data in sorted(markdown.items()):
+        try:
+            for destination in markdown_targets(data.decode('utf-8')):
+                target = file_target(document, destination.value)
+                if target is not None and target.path not in bundled:
+                    findings.append(f'{path}:{document}: unresolved relative Markdown target {destination.value!r}')
+        except (UnicodeError, ValueError) as exc:
+            findings.append(f'{path}:{document}: invalid Markdown link: {exc}')
 
     return findings
 
