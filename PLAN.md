@@ -60,7 +60,7 @@ bundled documents. Archive validation rejects unresolved relative links.
 | --- | --- | --- | --- |
 | Public documentation | Docs curator, `docs/public-docs-curation` | README, SECURITY, docs, CHANGELOG and citations in existing research notes | Integrated |
 | Release documentation links | Release worker, `fix/release-documentation-links` | Package/archive validation scripts and focused archive tests | Integrated |
-| Planning and integration | Supervisor, `docs/production-readiness-cleanup` | PLAN, commit integration and final validation | Local gates passing; archive and PR checks next |
+| Planning and integration | Supervisor, `docs/production-readiness-cleanup` | PLAN, commit integration and final validation | Integrated; local and archive checks pass; PR checks required |
 
 Each writer has a separate worktree from `origin/main`. File scopes are
 disjoint. The docs curator owns release process prose; the release worker
@@ -121,12 +121,14 @@ as positive compatibility evidence.
 
 ### Current Evidence
 
-The integrated branch passes all 70 focused archive/public-safety cases,
+The integrated branch passes all 72 focused archive/public-safety cases,
 runtime-boundary and public-safety scans, shell syntax and diff checks. No
 numbered PR/issue citations remain in README, PLAN, SECURITY, CHANGELOG, docs
 or research notes. Native runtime/build inputs are unchanged from main.
-The final PR checks and real-archive verification carry the remaining evidence;
-this local result does not claim a new full-platform certification.
+The fresh ReleaseSafe build passes. Two real-binary archives are byte-identical
+and pass validation with 42 members, 15 Markdown documents and 206 immutable
+source links. Final PR checks carry the remaining evidence; these local results
+do not claim a new full-platform certification.
 
 ## Next Roadmap Work
 
