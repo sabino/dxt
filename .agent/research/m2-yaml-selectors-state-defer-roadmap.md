@@ -2,7 +2,7 @@
 
 ## Scope
 
-This is a source-grounded roadmap for issue #134. It maps dbt Core v1 selector
+This source-grounded roadmap maps dbt Core v1 selector
 configuration, state/result/source-status selectors, and deferral behavior to
 dxt ownership boundaries before any broad implementation work.
 

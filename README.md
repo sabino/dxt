@@ -10,8 +10,12 @@
   <a href="https://github.com/sabino/dxt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sabino/dxt/ci.yml?branch=main&label=CI" alt="CI" /></a>
   <a href="https://github.com/sabino/dxt/releases"><img src="https://img.shields.io/github/v/release/sabino/dxt?include_prereleases&label=release" alt="Release" /></a>
   <img src="https://img.shields.io/badge/runtime-Zig%200.16.0-f7a41d" alt="Zig 0.16.0 runtime" />
-  <img src="https://img.shields.io/badge/status-release%20candidate-blue" alt="Release candidate" />
+  <img src="https://img.shields.io/badge/status-prerelease-orange" alt="Prerelease" />
 </p>
+
+> **Prerelease — not production ready.** The initial Linux SQL scope has passed
+> its acceptance gates. Evaluate your own workloads and operational requirements
+> before adopting dxt in production.
 
 `dxt` loads dbt projects, compiles typed Jinja and SQL, executes resource graphs
 and writes dbt artifacts through a native Zig binary. The initial execution
@@ -23,25 +27,22 @@ Native semantic queries, typed SQL analysis, versioned environments and
 governed cross-database execution are also implemented. They have namespaced
 commands and artifacts alongside the dbt-compatible interface.
 
-Database-backed macros use native held sessions with typed bindings and cursor
-values. Fetched query tables apply dbt's separate Agate conversion contract.
-CSV seeds execute the actual COPY or bound INSERT lifecycle, with regression
-coverage for typed data and the unchanged 70,000-parameter PostgreSQL batch.
+SQL macros can query databases through native sessions, and CSV seeds load
+through each adapter's native lifecycle with typed data and rollback on failure.
 
 Compatibility evidence targets dbt Core **1.10.5**, dbt-duckdb **1.9.6**,
 dbt-postgres **1.9.1**, MetricFlow **0.208.1** and semantic interfaces **0.9.0**.
-Release readiness is established for each candidate by the gates in the
-[compatibility matrix](docs/COMPATIBILITY.md). Candidate-specific receipts and
-outcomes are tracked in [PR #221](https://github.com/sabino/dxt/pull/221) and
-[issue #220](https://github.com/sabino/dxt/issues/220). Supported behavior and
-intentional differences do not establish universal dbt or adapter certification.
+The [validation snapshot](docs/VALIDATION.md) records the accepted initial
+candidate, its exact source and the public CI evidence. The
+[compatibility matrix](docs/COMPATIBILITY.md) defines supported behavior and
+intentional differences. Each later candidate requires its own applicable
+checks; the initial results do not establish universal dbt or adapter certification.
 The project is independent of dbt Labs.
 
 ## Quick Start
 
-Build the current source with Zig **0.16.0**. The
-[release process](docs/RELEASES.md) describes packaged installation once the
-candidate passes its release gates.
+Build the current source with Zig **0.16.0**, or follow the
+[release process](docs/RELEASES.md) to verify a published native archive.
 
 ```sh
 zig build -Doptimize=ReleaseSafe
@@ -89,10 +90,9 @@ system `git`, `curl` and `tar` for the corresponding package transports.
 | Cross-database | Named connections, source reduction/pushdown, typed movement, retained stages, incremental watermarks, policy/budget guards, locks, recovery and adaptive task retries. |
 | Environments | Immutable model versions, isolated environment views, physical reuse, interval/backfill accounting, audits, promotion and rollback. |
 
-These rows describe implemented capabilities with focused evidence. Functional
-coverage and candidate-specific public-project, platform and release acceptance
-are tracked in the
-[replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md).
+These rows describe implemented capabilities within the pinned compatibility
+contract. The [replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) distinguishes
+the delivered initial scope, production rollout work and later implementation.
 
 ## System Map
 
@@ -116,7 +116,8 @@ flowchart LR
 | --- | --- |
 | [Primer](docs/PRIMER.md) | Runnable workflows and command families. |
 | [Compatibility](docs/COMPATIBILITY.md) | Versioned support, evidence and explicit boundaries. |
-| [Replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) | Core/proposed feature coverage and candidate acceptance gates. |
+| [Replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) | Delivered scope, operational work and future implementation. |
+| [Validation snapshot](docs/VALIDATION.md) | Accepted source identity, test counts and public CI evidence. |
 | [Architecture](docs/ARCHITECTURE.md) | Native modules, execution flow and dependencies. |
 | [Releases](docs/RELEASES.md) | Linux x86_64/ARM archives, notices, checksums and installation checks. |
 | [Performance](docs/PERFORMANCE.md) | Correctness-aware cold/warm measurement and budgets. |

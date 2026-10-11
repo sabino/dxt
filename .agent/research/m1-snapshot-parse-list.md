@@ -1,6 +1,6 @@
 # SQL Snapshot Parse And List Foundation
 
-This is the source map for issue #213. The product boundary is read-only
+This is the source map for the snapshot parse/list slice. The product boundary is read-only
 snapshot ingestion, Manifest v12 nodes and selectors. Snapshot compilation,
 execution and materialization remain separate work.
 

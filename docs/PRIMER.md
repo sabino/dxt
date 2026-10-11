@@ -3,9 +3,11 @@
 `dxt` means **Data eXecution & Transformation**. It executes dbt SQL projects through a
 native Zig binary, with DuckDB and PostgreSQL as the initial adapter targets.
 Compatibility is checked against pinned upstream behavior and complete artifact
-schemas. Consult [Compatibility](COMPATIBILITY.md) for supported combinations;
-the implementation campaign and final release gates remain tracked in
-[PLAN.md](../PLAN.md).
+schemas. This is a prerelease and is **not production ready**. Consult
+[Compatibility](COMPATIBILITY.md) for supported combinations and
+[Validation](VALIDATION.md) for the accepted initial source. The
+[roadmap](DBT_REPLACEMENT_ROADMAP.md) describes remaining work;
+[PLAN.md](../PLAN.md) tracks active implementation sequencing.
 
 ## Start With A Local Project
 
