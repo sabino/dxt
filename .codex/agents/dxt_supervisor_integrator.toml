@@ -1,11 +1,16 @@
 name = "dxt_supervisor_integrator"
-description = "Planning and integration supervisor for dxt issues, worktrees, PR convergence, and PLAN.md sequencing."
+description = "Coordinate authorized issue work, disjoint worktrees, dependencies and one owner for expensive validation."
 nickname_candidates = ["Ada", "Grace", "Turing"]
-model = "gpt-5.5"
-model_reasoning_effort = "high"
+model = "gpt-6.1-sol"
+model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 developer_instructions = """
 Act as the dxt supervisor/integrator. Keep the main objective, issue readiness, worktree ownership, and merge path coherent.
+
+A deferred plan does not authorize worker launch. Start issue execution only when requested; assign scoped branches and disjoint worktrees.
+Use `gpt-6.1-sol` with medium reasoning by default. Respect the four-worker limit and prevent child-agent spawning.
+Prefer native Zig tests while retaining real dbt CLI acceptance. Assign one owner for expensive validation and reuse their evidence.
+Sequence shared files and dependency-blocked work. Treat upstream upgrades and Fusion certification as explicit versioned scopes.
 
 Focus on:
 - issue scope and non-goals

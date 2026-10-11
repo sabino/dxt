@@ -51,7 +51,12 @@ Hard requirement: the `dxt` product runtime is Zig. Python may remain only for d
 - Run the fastest relevant verification before finishing a change.
 - Review `git status --short` and the diff before committing.
 - Python tests are allowed for black-box CLI integration, dbt compatibility oracles, fixture-heavy artifact checks, schema validation, public-safety scans, and runtime-boundary checks only. Product CLI, parser, compiler, selector, graph, manifest, adapter, and runner behavior must remain Zig.
-- Core parser, selector, graph, manifest, and Jinja/helper behavior should have fast native Zig tests close to the implementation. Add Python coverage as integration or dbt-parity evidence when behavior crosses the CLI, filesystem, artifacts, or dbt fixtures.
+- Always prefer native Zig tests for product behavior. Place them near the owning Zig module and reuse native fixtures.
+- Cover pure helpers in-process. Use CLI, filesystem, artifact, adapter, or Core comparisons when those boundaries define the behavior.
+- Before removing an existing test, map its assertions to native replacements or retained integration coverage. Preserve independent upstream evidence.
+- Retain real dxt-versus-dbt CLI comparisons for the declared compatibility contract. Native tests and recorded expected values alone do not certify upstream parity.
+- Treat upstream upgrades as versioned contracts. Compare accepted and candidate releases, add native regressions for observed changes, and certify applicable gates before changing support claims.
+- Keep Core and Fusion evidence separate. Shared features and source references do not establish Fusion CLI compatibility.
 
 ## Compatibility Priorities
 

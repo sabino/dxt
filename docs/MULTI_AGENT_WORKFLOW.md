@@ -22,7 +22,7 @@ a smaller or larger batch:
 python scripts/agent_os_orchestrator.py run \
   --repo sabino/dxt \
   --profile azure \
-  --model gpt-5.5 \
+  --model gpt-6.1-sol \
   --max-workers 4 \
   --loop
 ```
@@ -91,7 +91,7 @@ separate Codex CLI process in the worktree.
 ```sh
 DXT_CODEX_PROFILE=<profile> scripts/worktree_start.sh compat/small-slice
 cd ../dxt-worktrees/compat/small-slice
-codex -p "$DXT_CODEX_PROFILE" -m gpt-5.5 -C "$PWD" \
+codex -p "$DXT_CODEX_PROFILE" -m gpt-6.1-sol -C "$PWD" \
   --ask-for-approval never --sandbox danger-full-access exec \
   "Read AGENTS.md and PLAN.md. Implement only the requested slice."
 ```

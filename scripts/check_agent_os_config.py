@@ -303,12 +303,17 @@ def validate_codex_config(findings: list[str]) -> None:
     if not isinstance(agents, dict):
         findings.append(".codex/config.toml missing [agents]")
         return
-    if agents.get("max_threads") != 18:
-        findings.append(".codex/config.toml agents.max_threads should be 18")
+    if agents.get("max_concurrent_threads_per_session") != 4:
+        findings.append(".codex/config.toml agents.max_concurrent_threads_per_session should be 4")
+    if agents.get("default_subagent_model") != "gpt-6.1-sol":
+        findings.append(".codex/config.toml agents.default_subagent_model should be gpt-6.1-sol")
+    if agents.get("default_subagent_reasoning_effort") != "medium":
+        findings.append(".codex/config.toml agents.default_subagent_reasoning_effort should be medium")
     if agents.get("max_depth") != 2:
         findings.append(".codex/config.toml agents.max_depth should be 2")
-    if agents.get("job_max_runtime_seconds") != 7200:
-        findings.append(".codex/config.toml agents.job_max_runtime_seconds should be 7200")
+    for key in ["max_threads", "job_max_runtime_seconds"]:
+        if key in agents:
+            findings.append(f".codex/config.toml agents.{key} is unsupported; remove it")
 
     for name in EXPECTED_AGENTS:
         entry = agents.get(name)

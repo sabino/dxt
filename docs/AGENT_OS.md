@@ -8,6 +8,20 @@ GitHub Issues and Projects are the shared public coordination state. `PLAN.md`
 remains the active ExecPlan for sequencing, cross-slice risks, current status,
 and validation policy. Worktrees remain the execution boundary for code changes.
 
+Project agents use `gpt-6.1-sol` with medium reasoning by default.
+Each `.codex/agents/*.toml` sets `model` and `model_reasoning_effort` explicitly.
+The orchestrator's default model matches the agent files.
+Worker and PM launchers pass each role's reasoning effort explicitly, overriding profile defaults.
+See [OpenAI custom agent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agents)
+for supported TOML fields and model selection.
+
+Always prefer native Zig tests for product behavior.
+Keep real dxt-versus-dbt CLI acceptance and versioned upstream fixture provenance.
+Core and Fusion certification are separate contracts.
+Follow the [planned task queue](TEST_OPTIMIZATION_PLAN.md) for native test optimization,
+release-upgrade tooling and Fusion assessment when that work is requested.
+A deferred plan does not launch workers or publish issues automatically.
+
 ## Autonomous Local Loop
 
 The GitHub Issues and Project are not the automation engine by themselves. They
@@ -55,7 +69,7 @@ Start one autonomous batch:
 python scripts/agent_os_orchestrator.py run \
   --repo sabino/dxt \
   --profile azure \
-  --model gpt-5.5 \
+  --model gpt-6.1-sol \
   --max-workers 4
 ```
 
@@ -65,7 +79,7 @@ Run a long local supervisor loop:
 python scripts/agent_os_orchestrator.py run \
   --repo sabino/dxt \
   --profile azure \
-  --model gpt-5.5 \
+  --model gpt-6.1-sol \
   --max-workers 4 \
   --loop \
   --poll-seconds 900 \
@@ -86,8 +100,8 @@ Useful control commands:
 
 ```sh
 python scripts/agent_os_orchestrator.py status
-python scripts/agent_os_orchestrator.py product-manager --repo sabino/dxt --profile azure --model gpt-5.5 --dry-run
-python scripts/agent_os_orchestrator.py product-manager --repo sabino/dxt --profile azure --model gpt-5.5
+python scripts/agent_os_orchestrator.py product-manager --repo sabino/dxt --profile azure --model gpt-6.1-sol --dry-run
+python scripts/agent_os_orchestrator.py product-manager --repo sabino/dxt --profile azure --model gpt-6.1-sol
 python scripts/agent_os_orchestrator.py nudge 123 "Narrow this to manifest fields only."
 python scripts/agent_os_orchestrator.py merge-ready --repo sabino/dxt --apply --delete-branch
 python scripts/agent_os_orchestrator.py cleanup --repo sabino/dxt
@@ -101,8 +115,9 @@ up new issue state on the next polling cycle.
 
 When `--max-workers` is omitted, the orchestrator uses
 `.github/agent-team/orchestrator.json` `default_max_workers`, currently `4`.
-Pass `--max-workers` to lower or raise the local batch size for the current
-machine.
+Use `--max-workers` to lower the local batch size for the machine.
+The project limit remains four concurrent workers; workers must not spawn child agents.
+One owner runs expensive validation, and other workers reuse matching evidence.
 
 Detached Agent OS workers launch through `codex exec` with
 `danger-full-access` in this repository. That is intentional: these workers are
@@ -148,7 +163,7 @@ broad:
 python scripts/agent_os_orchestrator.py product-manager \
   --repo sabino/dxt \
   --profile azure \
-  --model gpt-5.5
+  --model gpt-6.1-sol
 ```
 
 Run implementation only after the board has ready, scoped issues:
@@ -157,7 +172,7 @@ Run implementation only after the board has ready, scoped issues:
 python scripts/agent_os_orchestrator.py run \
   --repo sabino/dxt \
   --profile azure \
-  --model gpt-5.5 \
+  --model gpt-6.1-sol \
   --loop \
   --merge-ready
 ```
@@ -275,7 +290,7 @@ python scripts/codex_tmux_supervisor.py start \
   --session dxt-codex \
   --session-id <session-id> \
   --profile azure \
-  --model gpt-5.5 \
+  --model gpt-6.1-sol \
   --attach
 ```
 
@@ -380,24 +395,25 @@ flowchart TD
 
 | Role | Agent | Responsibility |
 | --- | --- | --- |
-| Product Manager | `dxt_product_manager` | Monitor board health, priorities, readiness, stale claims, blockers, and issue nudges. Filesystem read-only; may write repo-scoped GitHub issue/project state. |
-| Supervisor / Integrator | `dxt_supervisor_integrator` or the main Codex thread | Triage issues, allocate branches/worktrees, prevent overlap, update `PLAN.md`, merge after green CI. |
-| Issue Triager | `dxt_issue_triager` | Normalize issue fields, labels, project status, and readiness. |
-| Compatibility Curator | `dxt_compatibility_curator` | Turn roadmap gaps into small dbt-compatible issues and keep support docs honest. |
-| Code Mapper | `dxt_code_mapper` | Map owning Zig modules, fixtures, artifacts, and validation before work starts. |
-| dbt Reference Researcher | `dxt_dbt_reference_researcher` | Name dbt Core v1 and Fusion references, affected artifact fields, and stop conditions. |
-| Zig Runtime Architect | `dxt_zig_runtime_architect` | Guard module boundaries, dependency direction, adapter ABI direction, and `src/project.zig` shrinkage. |
-| Zig Slice Worker | `dxt_zig_slice_worker` | Implement one scoped product slice in Zig in one branch/worktree. |
-| Jinja/Macro Specialist | `dxt_jinja_macro_specialist` | Own parse-vs-execute Jinja, macro namespace, adapter dispatch, and macro dependency behavior. |
-| Selector/State Specialist | `dxt_selector_state_specialist` | Own selector parity, YAML selectors, graph expansion, state/defer/result/source-status behavior. |
-| Execution/Adapter Specialist | `dxt_execution_adapter_specialist` | Own DuckDB execution, future adapter ABI, run results, source freshness, and catalog behavior. |
-| Semantic/Cross-DB Planner | `dxt_semantic_crossdb_planner` | Own semantic layer direction, metrics, capability matrices, staging, and movement policy. |
-| QA Fixture Engineer | `dxt_qa_fixture_engineer` | Own fixture ladder, dbt oracle checks, focused pytest, public Jaffle gates, and CI signal quality. |
-| Artifact Parity Reviewer | `dxt_artifact_parity_reviewer` | Review dbt-shaped JSON artifacts, schema fields, ordering, and normalization. |
-| Runtime Boundary Auditor | `dxt_runtime_boundary_auditor` | Confirm Python stays developer-only and public-safety scans stay clean. |
-| Reflection Reviewer | `dxt_reflection_reviewer` | Re-check assumptions after failures, drift, or repeated blockers. |
-| Network Coordinator | `dxt_network_coordinator` | Coordinate peer specialist reviews without turning them into merge gates. |
-| Docs Release Curator | `dxt_docs_release_curator` | Maintain README, docs, changelog, releases, and compatibility wording. |
+| Product Manager | `dxt_product_manager` | Maintain issue readiness, dependencies and native Zig validation. Publish board changes only within assigned PM scope. |
+| Supervisor / Integrator | `dxt_supervisor_integrator` or the main Codex thread | Coordinate authorized work, disjoint worktrees, dependencies and one expensive-validation owner. |
+| Issue Triager | `dxt_issue_triager` | Recommend readiness, dependencies, file ownership and role routing. |
+| Compatibility Curator | `dxt_compatibility_curator` | Scope compatibility and upgrade issues with native regressions and CLI evidence. |
+| Code Mapper | `dxt_code_mapper` | Map Zig owners, existing assertions, retained boundaries and focused checks. |
+| dbt Reference Researcher | `dxt_dbt_reference_researcher` | Record pinned Core/Fusion contracts, CLI evidence and candidate release differences. |
+| Zig Runtime Architect | `dxt_zig_runtime_architect` | Review Zig boundaries, reuse and native test access while preserving behavior. |
+| Zig Slice Worker | `dxt_zig_slice_worker` | Implement one scoped issue with native Zig tests and mapped integration coverage. |
+| Jinja/Macro Specialist | `dxt_jinja_macro_specialist` | Implement scoped evaluator and macro behavior with native tests and Core CLI checks. |
+| Selector/State Specialist | `dxt_selector_state_specialist` | Implement scoped selection/state contracts with native regressions and retained CLI evidence. |
+| Execution/Adapter Specialist | `dxt_execution_adapter_specialist` | Own native DuckDB/PostgreSQL lifecycles, database checks and CLI artifact evidence. |
+| Semantic/Cross-DB Planner | `dxt_semantic_crossdb_planner` | Plan bounded semantic/movement work with explicit upstream compatibility boundaries. |
+| QA Fixture Engineer | `dxt_qa_fixture_engineer` | Own native fixtures, real CLI comparisons, provenance, test isolation and measured cost. |
+| Artifact Parity Reviewer | `dxt_artifact_parity_reviewer` | Review complete schemas, deterministic output, normalization and retained CLI coverage. |
+| Runtime Boundary Auditor | `dxt_runtime_boundary_auditor` | Audit Zig ownership, developer-only Python and public-safe artifacts. |
+| Reflection Reviewer | `dxt_reflection_reviewer` | Investigate repeated failures, unsupported assumptions and upstream drift. |
+| Network Coordinator | `dxt_network_coordinator` | Coordinate authorized handoffs and reuse independent validation evidence. |
+| Convergence Reviewer | `dxt_convergence_reviewer` | Review scope, file overlap, mapped test replacements and applicable merge checks. |
+| Docs Release Curator | `dxt_docs_release_curator` | Maintain versioned support claims, acceptance evidence and measured development guidance. |
 
 ## Coordination Patterns
 

@@ -1,11 +1,14 @@
 name = "dxt_code_mapper"
-description = "Read-only mapper for dxt Zig module ownership, fixtures, artifact paths, and validation commands before a slice starts."
+description = "Read-only mapper for Zig owners, native assertions, CLI boundaries and focused validation commands."
 nickname_candidates = ["Atlas", "Delta", "Scout"]
-model = "gpt-5.4-mini"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 developer_instructions = """
 Map dxt code paths before implementation. Stay read-only.
+
+Map native Zig coverage first, then retained CLI, filesystem, database and upstream checks.
+Identify each assertion and its independent expected behavior before recommending test removal. Name shared files that require sequential ownership.
 
 Focus on:
 - owning Zig modules and public facades
