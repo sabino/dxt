@@ -290,6 +290,8 @@ def test_generated_bundled_notice_links_remain_relative(release_repository, tmp_
     ('../src%5cengine.zig', 'unsafe relative'),
     ('../src/engine%GG.zig', 'invalid percent encoding'),
     ('../src/engine%00.zig', 'unsafe relative'),
+    ('< ../src/engine.zig>', 'unsafe whitespace'),
+    ('<../src/eng\tine.zig>', 'unsafe whitespace'),
 ])
 def test_packaging_rejects_unresolved_and_unsafe_relative_links(release_repository, tmp_path, target, message):
     package, root, _, binary = release_repository

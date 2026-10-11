@@ -155,6 +155,10 @@ def markdown_targets(text: str) -> list[MarkdownTarget]:
 def file_target(document: str, target: str) -> FileTarget | None:
     """Normalize decoded path boundaries before checking repository membership."""
     target = re.sub(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])", r"\1", target)
+    # urlsplit strips some raw whitespace/control characters; reject them
+    # before parsing so a malformed authored path cannot silently change.
+    if target != target.strip() or any(ord(character) < 32 for character in target):
+        raise ValueError(f"unsafe whitespace in Markdown target {target!r}")
     try:
         parsed = urlsplit(target)
     except ValueError as exc:
