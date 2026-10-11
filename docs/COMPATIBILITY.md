@@ -1,9 +1,14 @@
 # Compatibility Matrix
 
 The initial execution contract is **SQL models on native DuckDB and PostgreSQL**.
-The implementation has focused native, CLI, warehouse and upstream comparison
-evidence. Release acceptance requires the candidate-specific gates below; an
-implemented row does not establish universal dbt parity.
+The implementation has native, CLI, warehouse and upstream comparison evidence.
+The accepted initial source passed the integrated Linux x86_64 and ARM gates
+recorded in [Validation](VALIDATION.md). An implemented row does not establish
+universal dbt parity.
+
+> **Prerelease — not production ready.** Acceptance covers the pinned versions
+> and tested initial scope. Validate your project's behavior and operational
+> requirements before production adoption.
 
 | Contract | Pinned version |
 | --- | --- |
@@ -42,7 +47,7 @@ Python model metadata is collected statically from supported literal
 Invalid syntax, dynamic metadata arguments and unsupported literal forms fail
 visibly. Authored Python is never imported or evaluated. Selecting a Python
 model for `run` or `build` fails before warehouse mutations; execution is
-outside the user-confirmed initial SQL scope.
+outside the initial SQL execution scope.
 
 ## Configuration, Jinja And Selection
 
@@ -137,7 +142,7 @@ DuckDB CLI. Database-backed commands use held native sessions and reject forced
 separately verifies CLI SELECT, NULL and empty-result behavior.
 Package transports can require `git`, `curl` and `tar`.
 
-## Artifacts, Caches And Proposed Feature Tracks
+## Artifacts, Caches And dxt Extensions
 
 | Surface | Implementation and evidence |
 | --- | --- |
@@ -212,10 +217,12 @@ Package transports can require `git`, `curl` and `tar`.
 
 ## Validation Status
 
-Candidate-specific test counts, remaining blockers and final CI outcomes are
-recorded in [PR #221](https://github.com/sabino/dxt/pull/221) and
-[issue #220](https://github.com/sabino/dxt/issues/220). Historical focused
-passes cannot certify a subsequent product change.
+The [validation snapshot](VALIDATION.md) records the exact accepted initial
+source, complete platform counts and public CI evidence. Both actual Linux
+architectures passed 817 native tests and all 5,819 canonical compatibility
+cases, alongside the public-project, archive-installation and performance
+gates. Those results apply to that source; they cannot certify a subsequent
+product or release-tooling change.
 
 Focused feature gates exercise real native adapters and pinned Core/MetricFlow
 outputs, with negative cases and complete applicable schemas. Candidate

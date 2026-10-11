@@ -2,7 +2,7 @@
 
 ## Scope
 
-This is the source-grounded research note for issue #137. It maps dbt semantic
+This source-grounded research note maps dbt semantic
 models, metrics, saved queries, `semantic_manifest.json`, and later MetricFlow
 query planning to dxt-owned slices.
 

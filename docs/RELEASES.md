@@ -3,9 +3,10 @@
 Releases package a native Zig executable, public documentation and upstream
 license/provenance notices. Python scripts build and verify release artifacts
 in developer/CI environments; they are not part of product execution. The
-initial SQL execution adapter scope is DuckDB and PostgreSQL. A tag or successful binary build
-alone does not establish full dbt compatibility: the integrated release gates
-must pass for each published platform.
+initial SQL execution adapter scope is DuckDB and PostgreSQL. This is a
+**prerelease, not production ready**. [Validation](VALIDATION.md) records the
+accepted initial source; each later release needs its own applicable gates on
+every published platform.
 
 ## Versions And Targets
 
@@ -42,10 +43,10 @@ extracting packages; install those tools for the corresponding `deps` workflows.
 The YAML parser, PostgreSQL SQL grammar, static Python model syntax frontend,
 Unicode tables/names, PCRE2 regular-expression engine, pytz/IANA timezone data,
 default SQL macro sources and docs application are embedded in the executable.
-The regex engine is statically linked without JIT or an external runtime library. Python model
-discovery and compilation preserve resources; model execution in the initial
-release is SQL only. End users do not install dbt,
-MetricFlow, a Python interpreter or developer requirements to run dxt.
+The regex engine is statically linked without JIT or an external runtime library.
+Python model discovery and compilation preserve resources; model execution in
+the initial release is SQL only. End users do not install dbt, MetricFlow, a
+Python interpreter or developer requirements to run dxt.
 
 ## Workflow Gates
 
@@ -105,6 +106,14 @@ symbols; C build flags map source-directory paths before compilation.
 
 Each archive has one `dxt-v<version>-<target>/` root containing `dxt`, README,
 CHANGELOG, SECURITY, the public `docs/` tree and a project LICENSE if present.
+
+Links between bundled documents stay relative for offline use. Links to tracked
+files or directories omitted from the archive become GitHub `blob` or `tree`
+links pinned to the exact source commit. Packaging defaults to `HEAD`;
+`--source-revision <commit>` selects an explicit revision. Referenced omitted
+files must exist and match their committed bytes at that revision. Archive
+validation rejects unresolved relative links and links escaping the archive.
+
 `docs/licenses/` contains:
 
 - libyaml **0.2.5** MIT license and upstream reference.

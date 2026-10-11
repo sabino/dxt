@@ -7,6 +7,15 @@ DuckDB and PostgreSQL.
 
 ## Unreleased
 
+### Documentation
+
+- Added a durable initial-acceptance snapshot with source identities and public
+  CI evidence; removed numbered work-item citations from public documentation.
+- Clarified the delivered SQL scope, prerelease warning, production rollout
+  work and later adapter/provider/platform implementation.
+- Release archives keep bundled documentation links local and pin references
+  to omitted repository files to the exact source commit.
+
 ### Added
 
 - Native DuckDB C API and PostgreSQL libpq adapters with held sessions, typed
@@ -153,11 +162,13 @@ DuckDB and PostgreSQL.
 - Native helper semantics target CPython **3.12**. Version-specific Core 3.11
   iterator identity and floating-sum differences are explicit compatibility
   boundaries, rather than changes to the installed native runtime.
-- Focused native/CLI/Core/MetricFlow evidence exists across the implemented
-  tracks. Final whole-tree/public-project, both-adapter archive, platform and
-  performance acceptance remains pending.
-- Python, cloud adapters, external cloud publication and newer Core/platform
-  targets do not inherit execution certification from the initial SQL scope.
+- The accepted initial source passed complete Linux x86_64/ARM compatibility,
+  native tests, unchanged public projects, both-adapter archive installation
+  and performance gates. [Validation](docs/VALIDATION.md) records the exact
+  source and results; later changes require their own applicable checks.
+- Authored Python execution remains outside the initial SQL scope. Cloud
+  adapters, external cloud publication and newer Core/platform targets need
+  separate implementation and certification.
 - See [Compatibility](docs/COMPATIBILITY.md) and the
   [roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) for current boundaries and final
   gates. Historical release entries below retain their original scope.

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -187,3 +188,182 @@ def test_target_checksum_is_generated_before_every_archive_install(workflow):
     assert package_index < checksum_index < install_index
     assert "--checksum-file" in runs[install_index]
     assert "--require-postgres" in runs[install_index]
+
+
+@pytest.fixture
+def release_repository(tmp_path, monkeypatch):
+    package_release = importlib.import_module('package_release')
+    root = tmp_path / 'repository'
+    root.mkdir()
+    monkeypatch.setattr(package_release, 'ROOT', root)
+    contents = {
+        'README.md': '# dxt\n', 'CHANGELOG.md': '# Changelog\n',
+        'SECURITY.md': '# Security\n', 'LICENSE': 'License\n',
+        'docs/RELEASES.md': '# Releases\n', 'docs/guide.md': '# Guide\n',
+        'docs/image.png': 'image', 'src/engine.zig': '// engine\n',
+        'src/file (one).zig': '// parentheses\n', 'src/file space.zig': '// spaces\n',
+        'tests/test_engine.py': '# evidence\n', '.agent/research/notes.md': '# Notes\n',
+    }
+    contents.update({path: 'Public upstream notice\n' for path in package_release.NOTICES.values()})
+    for name, data in contents.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data, encoding='utf-8')
+    subprocess.run(['git', 'init', '-q', str(root)], check=True)
+    subprocess.run(['git', 'add', '.'], cwd=root, check=True)
+    subprocess.run(['git', '-c', 'user.name=Release Tests', '-c', 'user.email=release@example.invalid',
+                    'commit', '-qm', 'Source fixture'], cwd=root, check=True)
+    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+    binary = tmp_path / 'dxt'
+    binary.write_bytes(elf_header())
+    return package_release, root, revision, binary
+
+
+def archive_text(path, name):
+    with tarfile.open(path, 'r:gz') as archive:
+        return archive.extractfile(f'{path.name.removesuffix(".tar.gz")}/{name}').read().decode('utf-8')
+
+
+def test_archive_only_links_pin_exact_source_and_preserve_bundled_navigation(release_repository, tmp_path):
+    package, root, revision, binary = release_repository
+    original = '''# Guide
+[engine](../src/engine.zig#L1) and [local](RELEASES.md#releases).
+[angle](<../src/file%20space.zig?raw=1#L1> "source title")
+[parentheses](../src/file%20\\(one\\).zig)
+![bundled image](image.png) and ![source image](../src/engine.zig)
+[research](../.agent/research/) and [evidence][tests].
+[tests]: <../tests/test_engine.py#L1> "Evidence"
+[web](https://example.invalid/path) [mail](mailto:release@example.invalid) [anchor](#guide)
+`[example](../missing-inline.zig)`
+````md
+```md
+[example](../missing-fence.zig)
+```
+````
+~~~md
+[example](../missing-tilde.zig)
+~~~
+<!-- [example](../missing-comment.zig) -->
+
+    [example](../missing-indented.zig)
+
+\t[example](../missing-tab.zig)
+'''
+    (root / 'docs/guide.md').write_text(original, encoding='utf-8')
+    first = package.package(binary, tmp_path / 'first', '0.0.0', 'x86_64-linux-gnu')
+    second = package.package(binary, tmp_path / 'second', '0.0.0', 'x86_64-linux-gnu', revision=revision)
+    assert first.read_bytes() == second.read_bytes()
+    actual = archive_text(first, 'docs/guide.md')
+    prefix = f'https://github.com/sabino/dxt/blob/{revision}/'
+    assert f'[engine]({prefix}src/engine.zig#L1)' in actual
+    assert f'[angle](<{prefix}src/file%20space.zig?raw=1#L1> "source title")' in actual
+    assert f'[parentheses]({prefix}src/file%20%28one%29.zig)' in actual
+    assert f'![source image]({prefix}src/engine.zig)' in actual
+    assert f'[tests]: <{prefix}tests/test_engine.py#L1> "Evidence"' in actual
+    assert f'[research](https://github.com/sabino/dxt/tree/{revision}/.agent/research)' in actual
+    for unchanged in ['[local](RELEASES.md#releases)', '![bundled image](image.png)',
+                      '[web](https://example.invalid/path)', '[mail](mailto:release@example.invalid)',
+                      '[anchor](#guide)', '[example](../missing-inline.zig)',
+                      '[example](../missing-fence.zig)', '[example](../missing-tilde.zig)',
+                      '[example](../missing-comment.zig)', '[example](../missing-indented.zig)',
+                      '[example](../missing-tab.zig)']:
+        assert unchanged in actual
+    assert (root / 'docs/guide.md').read_text(encoding='utf-8') == original
+    assert release_archive.check_archive(first, release_archive.infer_expectation(first, '0.0.0', None)) == []
+
+
+def test_generated_bundled_notice_links_remain_relative(release_repository, tmp_path):
+    package, root, _, binary = release_repository
+    original = '[notice](licenses/libyaml-LICENSE)\n'
+    (root / 'docs/guide.md').write_text(original)
+    assert not (root / 'docs/licenses/libyaml-LICENSE').exists()
+    archive = package.package(binary, tmp_path / 'output', '0.0.0', 'x86_64-linux-gnu')
+    assert archive_text(archive, 'docs/guide.md') == original
+    assert release_archive.check_archive(archive, release_archive.infer_expectation(archive, '0.0.0', None)) == []
+
+
+@pytest.mark.parametrize('target,message', [
+    ('../missing.zig', 'unresolved repository target'),
+    ('../../outside.zig', 'escapes release root'),
+    ('%2e%2e/%2e%2e/outside.zig', 'escapes release root'),
+    ('%2fetc/passwd', 'unsafe relative'),
+    ('../src%5cengine.zig', 'unsafe relative'),
+    ('../src/engine%GG.zig', 'invalid percent encoding'),
+    ('../src/engine%00.zig', 'unsafe relative'),
+    ('< ../src/engine.zig>', 'unsafe whitespace'),
+    ('<../src/eng\tine.zig>', 'unsafe whitespace'),
+])
+def test_packaging_rejects_unresolved_and_unsafe_relative_links(release_repository, tmp_path, target, message):
+    package, root, _, binary = release_repository
+    (root / 'docs/guide.md').write_text(f'[source]({target})\n', encoding='utf-8')
+    with pytest.raises(ValueError, match=message):
+        package.package(binary, tmp_path / 'output', '0.0.0', 'x86_64-linux-gnu')
+    assert not list((tmp_path / 'output').glob('*.tar.gz'))
+
+
+@pytest.mark.parametrize('state', ['untracked', 'modified', 'symlink'])
+def test_omitted_links_require_unchanged_real_files_at_pinned_commit(release_repository, tmp_path, state):
+    package, root, _, binary = release_repository
+    target = root / 'src/engine.zig'
+    if state == 'untracked':
+        target = root / 'src/untracked.zig'
+        target.write_text('// untracked\n')
+        message = 'not a file or directory at source'
+    elif state == 'modified':
+        target.write_text('// changed\n')
+        message = 'differs from source'
+    else:
+        target.unlink()
+        target.symlink_to('file space.zig')
+        message = 'not a file or directory at source'
+    (root / 'docs/guide.md').write_text(f'[source](../src/{target.name})\n')
+    with pytest.raises(ValueError, match=message):
+        package.package(binary, tmp_path / 'output', '0.0.0', 'x86_64-linux-gnu')
+
+
+@pytest.mark.parametrize('revision', ['HEAD', 'main', 'v0.0.0', 'abcdef', 'a' * 40])
+def test_source_revision_rejects_mutable_shorthand_and_unavailable_commits(release_repository, revision):
+    package, _, _, _ = release_repository
+    with pytest.raises(ValueError, match='immutable commit hash|cannot resolve'):
+        package.source_revision(revision)
+
+
+def test_explicit_revision_cannot_link_new_bytes_to_older_commit(release_repository, tmp_path):
+    package, root, revision, binary = release_repository
+    (root / 'src/engine.zig').write_text('// newer source\n')
+    subprocess.run(['git', 'add', '.'], cwd=root, check=True)
+    subprocess.run(['git', '-c', 'user.name=Release Tests', '-c', 'user.email=release@example.invalid',
+                    'commit', '-qm', 'New source'], cwd=root, check=True)
+    (root / 'docs/guide.md').write_text('[source](../src/engine.zig)\n')
+    with pytest.raises(ValueError, match='differs from source'):
+        package.package(binary, tmp_path / 'old', '0.0.0', 'x86_64-linux-gnu', revision=revision)
+    current = package.source_revision()
+    archive = package.package(binary, tmp_path / 'current', '0.0.0', 'x86_64-linux-gnu')
+    assert f'/blob/{current}/src/engine.zig' in archive_text(archive, 'docs/guide.md')
+
+
+@pytest.mark.parametrize('markdown,message', [
+    ('[source](../src/engine.zig)\n', 'unresolved relative Markdown target'),
+    ('![source](../image.png)\n', 'unresolved relative Markdown target'),
+    ('[source][engine]\n[engine]: <../src/engine.zig#L1>\n', 'unresolved relative Markdown target'),
+    ('[source](../../outside.zig)\n', 'escapes release root'),
+    ('[source](%2e%2e/%2e%2e/outside.zig)\n', 'escapes release root'),
+    ('[source](<../src/engine.zig)\n', 'unterminated angle-bracket'),
+    ('[source](../src/engine.zig\n', 'unterminated Markdown link'),
+])
+def test_archive_checker_rejects_unresolved_or_malformed_document_links(tmp_path, markdown, message):
+    archive = tmp_path / 'dxt-v0.0.0-x86_64-linux-gnu.tar.gz'
+    write_release_archive(archive)
+    # Add a new document without weakening the normal archive shape checks.
+    with tarfile.open(archive, 'r:gz') as existing:
+        members = [(member, existing.extractfile(member).read() if member.isfile() else None)
+                   for member in existing.getmembers()]
+    with tarfile.open(archive, 'w:gz') as output:
+        for member, data in members:
+            if data is None:
+                output.addfile(member)
+            else:
+                add_tar_file(output, member.name, data, member.mode)
+        add_tar_file(output, 'dxt-v0.0.0-x86_64-linux-gnu/docs/guide.md', markdown.encode('utf-8'))
+    findings = release_archive.check_archive(archive, release_archive.infer_expectation(archive, '0.0.0', None))
+    assert any(message in finding for finding in findings)

@@ -1,12 +1,17 @@
 # Roadmap To A dbt Replacement
 
-The Core delivery ladder and proposed feature tracks now have native
-implementations and focused compatibility evidence. This document tracks their
-coverage and candidate acceptance policy. It does **not** declare the entire
-roadmap or release complete before the candidate's integrated gates pass.
+The initial Core delivery ladder and four dxt feature tracks are implemented.
+The accepted initial candidate passed integrated, public-project, archive,
+performance and actual-platform gates. [Validation](VALIDATION.md) records the
+exact source and evidence. This roadmap distinguishes that delivered scope
+from production rollout work and later implementation.
+
+> **Prerelease — not production ready.** Initial acceptance is complete for the
+> recorded source. Production use still requires validation against your
+> workloads, warehouse configuration and operating procedures.
 
 The initial release targets **SQL models on DuckDB and PostgreSQL on Linux
-x86_64 and ARM**, as confirmed for this project. Python resources are discovered,
+x86_64 and ARM**. Python resources are discovered,
 parsed, selected and compiled without evaluating authored code; execution rejects before
 warehouse writes. Additional adapters and platforms require their own drivers
 and certification.
@@ -16,11 +21,24 @@ differences. [PLAN.md](../PLAN.md) remains the active integration/sequencing
 contract.
 
 There are **12 functional implementation tracks**: eight Core tracks and the
-four proposed tracks below. The ninth Core row is release acceptance. This is
-a track count, not a count of individually certified features. Current
-candidate counts and final gate outcomes are recorded in
-[PR #221](https://github.com/sabino/dxt/pull/221) and
-[issue #220](https://github.com/sabino/dxt/issues/220).
+four dxt feature tracks below. The ninth Core row covers recurring release
+acceptance. This is a track count, not a count of individually certified features.
+
+## Remaining Work
+
+| Area | Status | Next work |
+| --- | --- | --- |
+| Initial Linux SQL scope | Delivered and accepted for the recorded source. | Preserve the complete native, compatibility, public-project, archive and performance gates as changes land. |
+| Production rollout and operations | Project-specific validation remains. | Exercise representative workloads and warehouse privileges, establish monitoring and failure handling, and rehearse backup, rollback and recovery procedures. Measure concurrency, latency and movement budgets in the intended deployment. |
+| Release publication | Candidate-specific process. | Verify the exact source/version, tested archives, checksums and compatibility limits before publishing a release. Acceptance of a source does not publish a version automatically. |
+| Snowflake, BigQuery and Redshift | Planned; native drivers and conformance are not implemented. | Add adapter capabilities, native execution and actual warehouse contract tests before claiming support. |
+| Remote DuckDB providers | Later scope; local native profile behavior is implemented. | Implement and validate remote DuckLake/MotherDuck and credential-provider integration with real service evidence. Python-dependent profile facilities currently fail visibly. |
+| Cloud publication and stage adapters | Later scope; local DuckDB external files and supported local movement are implemented. | Add cloud destination publication, plugin registration and dedicated object-storage/stage adapters with permissions, cleanup and recovery evidence. |
+| Additional platforms | macOS and Windows are not supported release targets. | Port Linux-specific discovery, add native dependency packaging and run the complete suite and extracted archives on each actual platform. |
+| New upstream versions | Outside the pinned contract. | Establish a new version contract and repeat applicable oracle, artifact, adapter and platform gates. |
+
+Authored Python execution is outside the initial SQL scope. Static Python
+resource support does not create a remaining execution obligation.
 
 ## Versioned Acceptance Contract
 
@@ -50,8 +68,8 @@ empty artifact map or discovered macro is insufficient evidence for execution.
 
 ## Core Delivery Ladder
 
-“Implemented” here means native code plus focused evidence exist. The final
-integrated release run is a separate gate.
+“Implemented” means native code and focused evidence exist. Initial integrated
+acceptance is recorded separately; later candidates repeat the applicable gates.
 
 | Ladder | Current implementation | Evidence and scope |
 | --- | --- | --- |
@@ -63,7 +81,7 @@ integrated release run is a separate gate.
 | 6. State/CI workflows | Recursive YAML selectors, defaults/indirect modes, graph/config/version/group/access selectors, state comparisons, result statuses, Core fresher comparison and defer/favor-state/separate-state. [Selection](../src/project/selection_expression.zig), [state](../src/project/state.zig), [defer](../src/project/defer.zig). | [State and selector oracles](../tests/test_usability_state.py), [CLI controls](../tests/test_usability_cli_options.py). Native caches use their own format; no Core MessagePack interchange claim. |
 | 7. Commands/integration | Debug/init/operations, snapshots/retry/clone, effective flags/env precedence, structured logs, docs browser/catalog, freshness and native metadata. [Commands](../src/project/commands.zig), [CLI](../src/project/cli_options.zig), [global hooks](../src/project/hook_operations.zig). | [Commands](../tests/test_usability_commands.py), [compile retry](../tests/test_usability_compile_artifacts.py), [CLI](../tests/test_usability_cli_execution.py), [global hooks](../tests/test_usability_global_hooks.py), [docs browser](../tests/test_usability_artifacts.py). |
 | 8. Native adapters | DuckDB C API and libpq sessions, typed results, quoting/introspection, transactions, cancellation, readonly boundaries and recovery; native DuckDB profile initialization, private settings/secrets, attachments and retry policies. [Adapter](../src/project/adapter.zig), [DuckDB](../src/project/native_duckdb.zig), [PostgreSQL](../src/project/native_postgres.zig), [profiles](../src/project/duckdb_profile.zig). | [Actual driver fixtures](../tests/test_usability_adapters.py), [native profile Core cases](../tests/test_usability_duckdb_profiles.py). Live remote extension/credential-provider availability is separate from local profile evidence; Python-dependent profile facilities fail visibly. Other adapters and remote DuckLake/MotherDuck remain later certification scope. |
-| 9. Release acceptance | Complete artifact validation, actual-platform CI, deterministic archives/notices/checksums, extracted installation with both adapters and PATH empty, browser fixtures and correctness-aware performance budgets. | [CI](../.github/workflows/ci.yml), [release](../.github/workflows/release.yml), [installation](../scripts/check_install.py), [performance](../scripts/check_performance.py). Candidate-specific results and receipt links are tracked in PR #221 and issue #220 above. |
+| 9. Release acceptance | Complete artifact validation, actual-platform CI, deterministic archives/notices/checksums, extracted installation with both adapters and PATH empty, browser fixtures and correctness-aware performance budgets. | Initial acceptance is recorded in [Validation](VALIDATION.md). Recurring gates are defined in [CI](../.github/workflows/ci.yml), [release](../.github/workflows/release.yml), [installation](../scripts/check_install.py) and [performance](../scripts/check_performance.py). |
 
 The former immediate correctness queue is implemented: ephemeral ancestry,
 built-in/singular/unit SQL error outcomes, mixed unit build gates, effective
@@ -71,7 +89,7 @@ threads/full-refresh and snapshot execution all have regression fixtures.
 Those historical missing-queue descriptions no longer describe the current
 runtime.
 
-## Proposed Feature Tracks
+## dxt Feature Tracks
 
 These tracks are implemented dxt capabilities with namespaced commands and
 artifacts. Their focused gates are distinct from candidate release
@@ -91,19 +109,23 @@ Reference maps remain source/design context:
 - [Cross-database architecture](../.agent/research/cross-database-architecture.md)
 - [SQLMesh reference](../.agent/research/sqlmesh-future-reference-map.md)
 
-## Candidate Acceptance Gates
+## Recurring Candidate Acceptance Gates
 
-| Gate | Evidence checkpoints | Required candidate evidence |
-| --- | --- | --- |
-| Lifecycle/identity closure | Contracts, authored materializations, naming, native profiles, executed test helpers/metadata, warnings, stock responses, compiled-path/null publication and microbatch lifecycle have focused Core evidence. | Final integrated actual Core first/repeated/failure cases, full executed naming/dependency artifacts, effective configuration and complete schemas, with no accepted-but-ignored settings. |
-| Native context edge closure | Restricted module providers, formatting, class protocols, literal pools, identity and saved mutable receivers have positive/negative Core certificates. A historical typed cursor/parameter/range checkpoint passed 776 native tests and all 463 query/UUID/Decimal/seed/alias/range comparisons, including the unchanged wide seed. The stock test-result tuple consumer is corrected; four Core comparisons cover stored result shapes on both adapters. | Actual Core behavior, errors, stage/consumption/alias comparisons and complete artifacts on both initial adapters; explicit CPython 3.12 contract. Whole-tree, unchanged public-project and release acceptance are separate candidate gates. |
-| Package-heavy public project | Historical local and Actions checkpoints passed the complete unchanged PostgreSQL dbt-utils ladder, including complete schemas, graph/config/dependencies, exact compiled SQL, catalog and typed rows. | Run the unchanged dependency/compile/build/artifact/row ladder against Core on the declared candidate: seven Native/Core command pairs (14 commands). |
-| Public Jaffle project | Historical integrated checkpoints passed all six unchanged parse/list/compile/build/run/docs gates. | Run all six unchanged steps on the declared candidate and retain their outputs. |
-| Complete integrated checks | Historical focused worker/integration gates and the CLI regression gate have passed. | Debug/ReleaseSafe builds, native tests, full pytest with pinned real adapters/browser, complete schema checks, safety/runtime scans and zero skipped/xfail cases in final canonical reports. |
-| Installation/archives | Historical checkpoints cover deterministic archive packaging and extracted native checks. | Exact archive notices/checksums/architecture verified; debug/build/static docs/rows/artifacts pass after extraction with PATH empty on both adapters. |
-| Actual platforms | Historical checkpoints cover actual extracted archive installation on Linux x86_64 and ARM. | Native execution of the final full suite and real archive on each published architecture, including PostgreSQL/browser fixtures. |
-| Performance | Historical Actions checkpoints passed the cold/warm budget with exact model SQL and complete artifacts checked separately for every phase. An earlier 70,000-binding checkpoint passed 81 seed/alias comparisons and 708 native tests; its ReleaseSafe CLI completed the wide fixture in 6.15 seconds versus Core's 15.41 seconds in one shared-machine invocation. These counts and timings do not certify a later candidate. | Final combined ReleaseSafe rerun compares every compiled model and full artifacts before accepting measured budgets; retain the original wide-seed rows, bindings and artifacts. These measurements are candidate-specific. |
-| Publication | Candidate-specific counts, timings, CI outcomes and receipt links are recorded in PR #221 and issue #220 above. | Accept the full candidate reports, document exact versions/scope/results, and publish the reviewed PR and release through their applicable green-gate workflow. |
+All of these gates passed for the accepted initial source in
+[Validation](VALIDATION.md). They remain requirements for later release claims;
+historical counts and timings cannot certify changed source or archives.
+
+| Gate | Required candidate evidence |
+| --- | --- |
+| Lifecycle and identity | Actual Core first/repeated/failure cases, full executed naming/dependency artifacts, effective configuration and complete schemas, including contracts, authored materializations, tests, paths and microbatch lifecycle. |
+| Native contexts | Actual Core values/errors and stage/consumption/alias comparisons on both adapters, including typed cursors, bindings, fetched tables, formatting and restricted module providers under the CPython 3.12 contract. |
+| Public package project | The unchanged PostgreSQL dbt-utils dependency/compile/build/artifact/row ladder: seven Native/Core command pairs (14 commands), with full graph/config/dependencies, exact SQL, catalog and typed rows. |
+| Public Jaffle project | All six unchanged parse/list/compile/build/run/docs steps with retained outputs. |
+| Complete integrated checks | Debug/ReleaseSafe builds, native tests, full pytest with pinned real adapters/browser, complete schemas, safety/runtime scans and zero skipped/xfail cases in canonical reports. |
+| Installation and archives | Exact archive notices/checksums/architecture verified; debug/build/static docs/rows/artifacts pass after extraction with PATH empty on both adapters. |
+| Actual platforms | Native execution of the complete canonical suite and real archive on every published architecture, including PostgreSQL/browser fixtures. |
+| Performance | ReleaseSafe cold/warm measurements with every model's exact compiled SQL and complete artifacts verified per phase; unchanged 70,000-binding seed rows, bindings and artifacts retained. |
+| Publication | Accepted reports, exact versions/scope/results and applicable green checks for the published head, followed by review of the exact draft release assets. |
 
 Cloud adapters, remote external publication/plugin registration and non-Linux
 platforms remain explicit later certification targets. The initial SQL scope

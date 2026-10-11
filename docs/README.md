@@ -1,8 +1,11 @@
 # dxt Documentation
 
-These docs describe the native SQL DuckDB/PostgreSQL release candidate and its
-validation boundaries. Production replacement readiness remains unconfirmed
-until the final integrated and platform gates pass.
+These docs describe the native SQL DuckDB/PostgreSQL prerelease, its validated
+initial scope and its operational boundaries.
+
+> **Prerelease — not production ready.** Initial Linux x86_64 and ARM acceptance
+> is complete for the source recorded in [Validation](VALIDATION.md). Production
+> adoption still requires validation of your workloads and operating procedures.
 
 ## Start Here
 
@@ -10,13 +13,15 @@ until the final integrated and platform gates pass.
 | --- | --- |
 | [Primer](PRIMER.md) | Product goals, runtime rules, development loop, and high-level flow. |
 | [Compatibility Matrix](COMPATIBILITY.md) | Implemented behavior, pinned references and explicit differences. |
-| [Replacement Roadmap](DBT_REPLACEMENT_ROADMAP.md) | Functional tracks and remaining acceptance gates. |
+| [Replacement Roadmap](DBT_REPLACEMENT_ROADMAP.md) | Delivered scope, production rollout work and later implementation. |
+| [Validation Snapshot](VALIDATION.md) | Accepted source, platform results and public CI evidence. |
 | [Architecture](ARCHITECTURE.md) | Zig module ownership, artifact flow, and Mermaid diagrams. |
 | [Agent OS](AGENT_OS.md) | Multidisciplinary agent-team operating model plus local autonomous Codex worker loop across GitHub Issues, Projects, PRs, and worktrees. |
 | [Agent Protocols](AGENT_PROTOCOLS.md) | Public-safe issue/PR comment formats, role nudges, handoffs, and reflection protocol. |
 | [GitHub Projects Setup](GITHUB_PROJECTS.md) | Desired Project fields, views, label syncing, seed issue bootstrap, and worker-loop commands. |
 | [Multi-Agent Workflow](MULTI_AGENT_WORKFLOW.md) | Concurrent Codex/worktree workflow, project agent roles, autonomous orchestration, validation, and PR convergence. |
 | [Release Process](RELEASES.md) | Release tags, binary artifacts, checksums, and safety gates. |
+| [Performance](PERFORMANCE.md) | Correctness checks, cold/warm measurements and regression budgets. |
 | [Changelog](../CHANGELOG.md) | What has changed so far. |
 | [ExecPlan](../PLAN.md) | Active milestone plan and implementation sequencing. |
 
