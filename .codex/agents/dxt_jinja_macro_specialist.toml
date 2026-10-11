@@ -1,11 +1,14 @@
 name = "dxt_jinja_macro_specialist"
-description = "Specialist for parse-time/runtime Jinja, macro namespace search, adapter dispatch, and macro dependencies."
+description = "Implement scoped Jinja and macro behavior with native Zig tests and focused Core CLI comparisons."
 nickname_candidates = ["Jade", "Macro", "Rune"]
-model = "gpt-5.5"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Work on dxt Jinja and macro compatibility slices only when scoped.
+
+Prefer native Zig tests for pure helpers and evaluator behavior. Preserve real dbt CLI checks for context wiring, authored callbacks and error publication.
+Use pinned upstream expectations and map every removed assertion. Keep shared expression and compiler edits within explicit file ownership.
 
 Focus on:
 - parse-time vs execute-time behavior

@@ -51,92 +51,108 @@ separate implementation and certification.
 
 ## Active Work
 
-The current change makes documentation usable independently of development
-tickets and fixes a release documentation defect. Packaging now rewrites links
-to omitted repository files to exact source URLs while preserving links to
-bundled documents. Archive validation rejects unresolved relative links.
+Prepare the native test optimization queue in
+[Native test optimization](docs/TEST_OPTIMIZATION_PLAN.md).
+Implementation is deferred to a later Agent OS session.
+The queue preserves the supported contract while replacing repeated project
+compilation with native Zig coverage where the behavior is pure.
 
-| Slice | Owner and branch | Files | Status |
+Project agent definitions select `gpt-6.1-sol` with medium reasoning by default.
+Semantic, architecture, convergence and reflection specialists use high reasoning.
+The Agent OS model default matches those definitions.
+Python remains developer tooling for independent Core evidence and boundaries.
+Real dxt-versus-dbt CLI comparisons remain compatibility acceptance gates.
+The queue also prepares an upstream upgrade process and a separate Fusion assessment.
+
+### Sequencing And Ownership
+
+| Phase | Owner | Scope | Status |
 | --- | --- | --- | --- |
-| Public documentation | Docs curator, `docs/public-docs-curation` | README, SECURITY, docs, CHANGELOG and citations in existing research notes | Integrated |
-| Release documentation links | Release worker, `fix/release-documentation-links` | Package/archive validation scripts and focused archive tests | Integrated |
-| Planning and integration | Supervisor, `docs/production-readiness-cleanup` | PLAN, commit integration and final validation | Integrated; local and archive checks pass; PR checks required |
+| Planning and agent settings | Supervisor, `perf/native-test-suite` | This plan, task queue, testing policy and project agent configuration | Prepared; no test migration started |
+| Inventory and native foundations | Mapper, supervisor and one scoped worker | Assertion mapping, matched baseline and reusable native fixtures | Task 1 first; foundations depend on its output |
+| Native migrations | Separate workers | Regex, itertools, datetime, timezone and remaining mapped module families | Planned; disjoint ownership required |
+| Oracle consolidation and distribution | One integration worker | Core boundaries, verified builds, process isolation and CI reports | Planned after relevant migrations |
+| Final acceptance | One validation owner and supervisor | Both actual architectures, coverage ledger and measured results | Planned after integration |
+| Upstream upgrade process | One scoped tooling worker | Accepted/candidate CLI comparisons, fixture provenance and bounded release-change issues | Task 12; no pin changes authorized by test optimization |
+| Fusion assessment | Researcher and supervisor | Versioned engine scope, evidence gaps and later certification tasks | Task 13; no Fusion support claim |
 
-Each writer has a separate worktree from `origin/main`. File scopes are
-disjoint. The docs curator owns release process prose; the release worker
-supplies its interface and behavior for that prose after implementation.
-The supervisor integrates commits through Git, without copying files between
-worktrees, rebases on current main and owns final validation and publication.
+Tasks 3, 4 and 5 can proceed concurrently after shared fixtures are ready.
+Task 6 follows task 5 where timezone files depend on datetime owners.
+Task 7 produces bounded child issues, not a whole-suite implementation claim.
+Shared fixture, compiler and workflow files have one writer at a time.
+The supervisor owns the durable coverage inventory and this plan.
 
-GitHub Issues and PRs carry coordination state using
-[Agent Protocols](docs/AGENT_PROTOCOLS.md). This plan carries the active
-sequencing contract, not a transcript or a duplicate ticket ledger.
+GitHub Issues and Projects carry execution state after the next session
+creates or reuses the scoped issues. No implementation workers are launched
+by this planning change.
 
 ### Scope And Acceptance
 
-1. Keep README concise and product-focused with an explicit prerelease and
-   production-readiness disclaimer.
-2. Remove specific numbered PR/issue citations from durable documentation.
-   Retain generic Agent OS coordination templates and dependency syntax.
-3. Store initial acceptance facts in a durable validation page with exact
-   source identity and scope. Replace obsolete pending-candidate wording.
-4. Separate implemented initial scope, production rollout work and later
-   implementation/certification in the roadmap.
-5. Keep bundled document links local in release archives. Rewrite links to
-   omitted repository files to immutable source URLs during packaging.
-6. Reject unresolved relative archive links and retain deterministic archive
-   generation, binary/safety checks and upstream notices.
-7. Open one non-draft integration PR after local verification and follow
-   applicable CI to a mergeable result. Do not merge, tag or publish a release.
+Always prefer native Zig tests for product behavior, near their owner modules.
+Use independent expected values and retain Core checks for observable upstream
+behavior. Every removed assertion needs an executable replacement or a retained
+boundary check in the coverage inventory.
+
+Preserve actual CLI, artifact schema, adapter lifecycle, public-project,
+installation, safety and correctness-aware performance evidence.
+Execute real binaries on unchanged inputs at compatibility acceptance.
+Revalidate recorded expected fixtures through upstream CLI behavior.
+Do not change product semantics, upstream pins, supported platforms or CI
+frequency to meet a test runtime target.
+
+Native and Python case counts may change during migration. Coverage is the
+mapped behavior; a lower count alone proves neither improvement nor loss.
+A distributed run must prove complete collection and execution, with no gaps,
+duplicates, failures, errors, skips or xfail cases.
 
 ### Validation
 
-During implementation, run focused checks only for the changed surfaces.
-At the integration boundary:
+For this planning/configuration change:
 
-- `git diff --check` and shell syntax checks.
-- `scripts/worktree_finish.sh` for runtime-boundary and public-safety scans.
-- Focused archive validation and public-safety tests.
-- Deterministic packaging and validation of the transformed archive.
-- Review changed files for generated noise, credentials and local paths.
-- Rebase on `origin/main`, then verify the final source and applicable CI.
+- Parse all project agent TOML and Agent OS JSON settings.
+- Validate project and agent configuration against the official OpenAI schema.
+- Run focused Agent OS developer tests and public-safety/runtime-boundary scans.
+- Check the diff, references and working tree without running product acceptance.
 
-Native product behavior is unchanged. Full canonical platform, public-project,
-installation and performance jobs remain applicable where configured; local
-tooling checks do not replace their results. No skipped or xfail case counts
-as positive compatibility evidence.
+This planning/configuration PR may merge after fast CI checks pass.
+Complete Core comparisons may finish afterward under its merge exception.
+Implementation PRs retain their declared compatibility acceptance gates.
+
+Implementation workers use focused native checks first.
+One validation owner measures expensive baselines and final full runs.
+Actual Linux x86_64 and ARM64 gates remain required for applicable acceptance.
+Trial targets are a native developer gate under five minutes and full CI under
+thirty minutes. Task 1 sets the measurement conditions; the targets are unproven.
 
 ### Risks And Stop Conditions
 
-- Do not equate the historical initial acceptance with production readiness
-  or certification of the changed candidate.
-- Do not alter source document evidence links merely to match archive layout;
-  the packaging transformation belongs to developer release tooling.
-- Preserve Markdown targets, fragments and escaping while preventing links
-  from escaping the repository/archive boundary.
-- Do not weaken release safety, checksums, artifact assertions or native
-  runtime ownership to make a check pass.
-- Stop before unrelated dirty work, overlapping writes, unsupported claims,
-  private data publication or unbounded new adapter/platform work.
+Stop before deleting an assertion without independent replacement evidence.
+Split work when owner modules or shared fixtures overlap.
+Keep stateful errors, transactions and identity checks separate when batching
+would alter their behavior.
+Use isolated processes for Core globals and measure runner CPU/memory limits.
+Reject cached binaries from another source, target or toolchain.
+Record a missed runtime target instead of weakening coverage to pass it.
 
-### Current Evidence
+### Evidence And Open Choices
 
-The integrated branch passes all 72 focused archive/public-safety cases,
-runtime-boundary and public-safety scans, shell syntax and diff checks. No
-numbered PR/issue citations remain in README, PLAN, SECURITY, CHANGELOG, docs
-or research notes. Native runtime/build inputs are unchanged from main.
-The fresh ReleaseSafe build passes. Two real-binary archives are byte-identical
-and pass validation with 42 members, 15 Markdown documents and 206 immutable
-source links. Final PR checks carry the remaining evidence; these local results
-do not claim a new full-platform certification.
+The dated task-plan baseline records 5,846 passing Python cases per architecture
+from a completed CI run. Five helper families account for about 27% of x86 pytest
+time. These observations guide priorities, not a claim that every case is redundant.
+
+Exact native groups, retained cases and worker/shard counts depend on the inventory
+and measured trials. Runtime targets have low confidence before those trials.
+Candidate upstream versions and Fusion certification targets remain unspecified.
+Core parity does not certify Fusion; the assessment must define separate evidence.
+The test suite, product runtime and CI scheduling remain unmodified by this plan.
 
 ## Next Roadmap Work
 
 The initial functional ladder has no known unimplemented track. The next
-release work is documentation integrity and repeatable verification of each
-published candidate, followed by real-project rollout evidence and operational
-hardening. The roadmap must record observed failures as bounded slices with
-owners, source grounding and relevant tests.
+developer work reduces validation cost through native tests and scoped integration
+execution. Repeatable candidate verification, real-project rollout evidence and
+operational hardening remain release priorities. Record observed failures as
+bounded slices with owners, source grounding and relevant tests.
 
 Later scope includes additional native adapters, remote DuckDB integrations,
 non-Linux portability and updated upstream version contracts. Each needs a
@@ -151,6 +167,7 @@ SQL contract; it is not an implied requirement for this cleanup.
 - [Roadmap](docs/DBT_REPLACEMENT_ROADMAP.md): delivered and later scope.
 - [Architecture](docs/ARCHITECTURE.md): native module ownership and data flow.
 - [Release process](docs/RELEASES.md): archives, versions and publication gates.
+- [Native test optimization](docs/TEST_OPTIMIZATION_PLAN.md): native coverage, CLI acceptance, upgrade process and Fusion assessment tasks.
 - [Agent OS](docs/AGENT_OS.md): supervisor, workers and public coordination.
 - [Multi-agent workflow](docs/MULTI_AGENT_WORKFLOW.md): isolated branches,
   validation and convergence.

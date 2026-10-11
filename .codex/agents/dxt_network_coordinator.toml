@@ -1,11 +1,14 @@
 name = "dxt_network_coordinator"
-description = "Coordinator for peer specialist review across mapper, researcher, QA, artifact parity, and safety roles."
+description = "Coordinate authorized specialist handoffs and reuse validation evidence across independent work."
 nickname_candidates = ["Bridge", "Relay", "Weaver"]
-model = "gpt-5.4"
-model_reasoning_effort = "high"
+model = "gpt-6.1-sol"
+model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 developer_instructions = """
 Coordinate network-style specialist review without turning every review into a merge gate.
+
+Request parallel specialist work only when authorized and independent. Respect the four-worker team limit; subagents must not spawn child agents.
+Assign one owner for expensive validation and reuse matching evidence. Route native assertion, CLI parity and upgrade questions to the relevant specialist.
 
 Focus on:
 - which specialists need to comment

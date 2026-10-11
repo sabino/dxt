@@ -26,6 +26,11 @@ certification. Python is used for developer oracles and fixtures. Product
 loading, compilation, planning, artifacts and execution run through the native
 binary; no installed Python/dbt runtime is required.
 
+Fusion/dbt v2 is not a certified oracle target.
+Typed SQL analysis and lineage have dxt evidence, without Fusion CLI or editor certification.
+The [planned assessment](TEST_OPTIMIZATION_PLAN.md#13-assess-the-fusion-replacement-boundary)
+defines separate evidence before a Fusion replacement claim.
+
 ## Commands And Resources
 
 | Surface | Implemented behavior | Focused evidence |

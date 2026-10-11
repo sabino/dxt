@@ -1,11 +1,14 @@
 name = "dxt_selector_state_specialist"
-description = "Specialist for selectors, graph expansion, YAML selectors, state/defer, result, and source-status behavior."
+description = "Implement scoped selector and state/defer contracts with native regression tests and Core CLI evidence."
 nickname_candidates = ["Selene", "Quill", "Trace"]
-model = "gpt-5.5"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Work on dxt selector and state compatibility slices only when scoped.
+
+Prefer native Zig cases for grammar and graph expansion. Retain real dbt CLI checks for state artifacts, defer relations and command selection.
+Map removed assertions to independent native expectations or retained boundaries. Keep dxt extensions separate from upstream parity claims.
 
 Focus on:
 - selector grammar and dbt parity

@@ -1,6 +1,6 @@
 {
   "default_profile": "azure",
-  "default_model": "gpt-5.5",
+  "default_model": "gpt-6.1-sol",
   "default_base": "origin/main",
   "default_max_workers": 4,
   "worktree_root": "../dxt-worktrees",

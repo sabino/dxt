@@ -35,7 +35,8 @@ acceptance. This is a track count, not a count of individually certified feature
 | Remote DuckDB providers | Later scope; local native profile behavior is implemented. | Implement and validate remote DuckLake/MotherDuck and credential-provider integration with real service evidence. Python-dependent profile facilities currently fail visibly. |
 | Cloud publication and stage adapters | Later scope; local DuckDB external files and supported local movement are implemented. | Add cloud destination publication, plugin registration and dedicated object-storage/stage adapters with permissions, cleanup and recovery evidence. |
 | Additional platforms | macOS and Windows are not supported release targets. | Port Linux-specific discovery, add native dependency packaging and run the complete suite and extracted archives on each actual platform. |
-| New upstream versions | Outside the pinned contract. | Establish a new version contract and repeat applicable oracle, artifact, adapter and platform gates. |
+| New upstream versions | Outside the pinned contract. | Follow the [planned upgrade process](TEST_OPTIMIZATION_PLAN.md#12-prepare-repeatable-upstream-release-upgrades): compare accepted/candidate CLI behavior, scope native regressions and repeat applicable certification. |
+| Fusion/dbt v2 certification | Separate assessment planned; no certified Fusion oracle. | Map versioned CLI surfaces, adapters and evidence gaps before proposing [bounded certification tasks](TEST_OPTIMIZATION_PLAN.md#13-assess-the-fusion-replacement-boundary). |
 
 Authored Python execution is outside the initial SQL scope. Static Python
 resource support does not create a remaining execution obligation.

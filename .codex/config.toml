@@ -4,102 +4,103 @@
 multi_agent = true
 
 [agents]
-max_threads = 18
+default_subagent_model = "gpt-6.1-sol"
+default_subagent_reasoning_effort = "medium"
+max_concurrent_threads_per_session = 4
 max_depth = 2
-job_max_runtime_seconds = 7200
 
 [agents.dxt_supervisor_integrator]
-description = "Supervisor for issue queue, worktree ownership, PR convergence, and PLAN.md sequencing."
+description = "Coordinate authorized issue work, disjoint worktrees, dependencies and one owner for expensive validation."
 config_file = "agents/dxt_supervisor_integrator.toml"
 nickname_candidates = ["Ada", "Grace", "Turing"]
 
 [agents.dxt_issue_triager]
-description = "Read-only triager for labels, Project fields, readiness, and routing."
+description = "Read-only triager for issue readiness, dependencies, file ownership and Agent OS routing."
 config_file = "agents/dxt_issue_triager.toml"
 nickname_candidates = ["Iris", "Nora", "Uma"]
 
 [agents.dxt_product_manager]
-description = "Product manager for roadmap hygiene, issue board monitoring, priorities, and nudges."
+description = "Maintain roadmap and issue readiness with bounded tasks, dependencies and native Zig validation."
 config_file = "agents/dxt_product_manager.toml"
 nickname_candidates = ["Ari", "Morgan", "Riley"]
 
 [agents.dxt_code_mapper]
-description = "Read-only mapper for Zig owner modules, fixtures, artifacts, and validation."
+description = "Read-only mapper for Zig owners, native assertions, CLI boundaries and focused validation commands."
 config_file = "agents/dxt_code_mapper.toml"
 nickname_candidates = ["Atlas", "Delta", "Scout"]
 
 [agents.dxt_dbt_reference_researcher]
-description = "Read-only researcher for dbt Core v1 and Fusion source reference maps."
+description = "Read-only researcher for pinned Core and Fusion contracts, CLI evidence and upstream release changes."
 config_file = "agents/dxt_dbt_reference_researcher.toml"
 nickname_candidates = ["Hypatia", "Kepler", "Noether"]
 
 [agents.dxt_compatibility_curator]
-description = "Planner for turning dbt compatibility gaps into small source-grounded issues."
+description = "Plan small compatibility and upstream upgrade slices with CLI evidence and native Zig regression coverage."
 config_file = "agents/dxt_compatibility_curator.toml"
 nickname_candidates = ["Curie", "Lovelace", "Franklin"]
 
 [agents.dxt_zig_runtime_architect]
-description = "Architecture reviewer for Zig module boundaries, adapter ABI, and dependency direction."
+description = "Read-only reviewer for Zig ownership, module boundaries, reuse and native test access while preserving behavior."
 config_file = "agents/dxt_zig_runtime_architect.toml"
 nickname_candidates = ["Babbage", "Hamilton", "Knuth"]
 
 [agents.dxt_zig_slice_worker]
-description = "Implementation worker for one small Zig product slice in an isolated worktree."
+description = "Implement one scoped issue in an isolated worktree with native Zig tests and mapped CLI integration coverage."
 config_file = "agents/dxt_zig_slice_worker.toml"
 nickname_candidates = ["Bolt", "Forge", "Vector"]
 
 [agents.dxt_jinja_macro_specialist]
-description = "Specialist for parse/runtime Jinja, macro namespace, dispatch, and dependencies."
+description = "Implement scoped Jinja and macro behavior with native Zig tests and focused Core CLI comparisons."
 config_file = "agents/dxt_jinja_macro_specialist.toml"
 nickname_candidates = ["Jade", "Macro", "Rune"]
 
 [agents.dxt_selector_state_specialist]
-description = "Specialist for selectors, graph expansion, state/defer, result, and source-status behavior."
+description = "Implement scoped selector and state/defer contracts with native regression tests and Core CLI evidence."
 config_file = "agents/dxt_selector_state_specialist.toml"
 nickname_candidates = ["Selene", "Quill", "Trace"]
 
 [agents.dxt_execution_adapter_specialist]
-description = "Specialist for DuckDB execution, adapter ABI, run results, catalog, and freshness."
+description = "Implement scoped native adapter lifecycles with focused Zig, database and CLI artifact checks."
 config_file = "agents/dxt_execution_adapter_specialist.toml"
 nickname_candidates = ["Arrow", "Flux", "Spark"]
 
 [agents.dxt_semantic_crossdb_planner]
-description = "Planner for semantic layer, metrics, saved queries, and cross-database execution."
+description = "Plan semantic and cross-database work with native ownership and explicit upstream compatibility boundaries."
 config_file = "agents/dxt_semantic_crossdb_planner.toml"
 nickname_candidates = ["Meridian", "Sage", "Vectoria"]
 
 [agents.dxt_qa_fixture_engineer]
-description = "Fixture and validation specialist for Zig tests, pytest, dbt oracles, and public gates."
+description = "Own native Zig fixtures, real dbt CLI comparisons, test isolation and measured validation cost."
 config_file = "agents/dxt_qa_fixture_engineer.toml"
 nickname_candidates = ["Beacon", "Gauge", "Signal"]
 
 [agents.dxt_artifact_parity_reviewer]
-description = "Read-only reviewer for artifact schema parity, ordering, escaping, and normalization."
+description = "Read-only reviewer for dbt artifact schemas, deterministic output, normalization and retained CLI oracle coverage."
 config_file = "agents/dxt_artifact_parity_reviewer.toml"
 nickname_candidates = ["Ledger", "Schema", "Tally"]
 
 [agents.dxt_runtime_boundary_auditor]
-description = "Read-only auditor for Zig runtime boundary and public-safety constraints."
+description = "Read-only auditor for Zig runtime ownership, Python tooling boundaries and public-safe artifacts."
 config_file = "agents/dxt_runtime_boundary_auditor.toml"
 nickname_candidates = ["Aegis", "Locke", "Sentinel"]
 
 [agents.dxt_reflection_reviewer]
-description = "Read-only reviewer for repeated failures, bad assumptions, dbt drift, and validation gaps."
+description = "Read-only reviewer for repeated failures, unsupported assumptions, upstream drift and validation gaps."
 config_file = "agents/dxt_reflection_reviewer.toml"
 nickname_candidates = ["Mirror", "Socrates", "Vega"]
 
 [agents.dxt_network_coordinator]
-description = "Coordinator for peer specialist review without making every review a merge gate."
+description = "Coordinate authorized specialist handoffs and reuse validation evidence across independent work."
 config_file = "agents/dxt_network_coordinator.toml"
 nickname_candidates = ["Bridge", "Relay", "Weaver"]
 
 [agents.dxt_convergence_reviewer]
-description = "Read-only PR-boundary reviewer for overlap, risk, missing tests, generated noise, and readiness."
+description = "Read-only reviewer for PR scope, file overlap, mapped test replacements, applicable checks and merge readiness."
 config_file = "agents/dxt_convergence_reviewer.toml"
 nickname_candidates = ["Anchor", "Faro", "Harbor"]
 
 [agents.dxt_docs_release_curator]
-description = "Curator for public docs, compatibility wording, changelog, releases, and binary safety."
+description = "Maintain public docs, versioned acceptance evidence, release archives and measured test guidance."
 config_file = "agents/dxt_docs_release_curator.toml"
 nickname_candidates = ["Page", "Quarto", "Scribe"]
 

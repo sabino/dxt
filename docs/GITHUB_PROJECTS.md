@@ -120,7 +120,7 @@ Launch workers in separate git worktrees:
 python scripts/agent_os_orchestrator.py run \
   --repo sabino/dxt \
   --profile azure \
-  --model gpt-5.5 \
+  --model gpt-6.1-sol \
   --max-workers 3
 ```
 
@@ -131,7 +131,7 @@ are green:
 python scripts/agent_os_orchestrator.py run \
   --repo sabino/dxt \
   --profile azure \
-  --model gpt-5.5 \
+  --model gpt-6.1-sol \
   --max-workers 3 \
   --loop \
   --merge-ready

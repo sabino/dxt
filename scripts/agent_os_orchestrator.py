@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -833,7 +834,14 @@ Issue payload at launch:
 
 Rules:
 - Product runtime behavior must stay in Zig.
+- Always prefer native Zig tests near the product implementation; exercise pure helpers in-process.
+- Retain real dxt-versus-dbt CLI comparisons for the declared compatibility contract, including artifacts, rows, exit codes and warning/error behavior.
+- Map every removed assertion to native coverage or retained integration evidence. Record independent upstream fixture provenance.
+- Keep accepted upstream versions, candidate upgrades and unverified Fusion behavior separate. Do not change certified pins during test optimization.
 - Python is allowed only for developer scripts, tests, fixtures, dbt oracle checks, schema validation, public-safety scans, and orchestration.
+- A deferred plan does not authorize its execution. Stay within the assigned issue and exact file ownership.
+- You are not alone in the repository; preserve other agents' work. Do not spawn child agents or competing workers.
+- Reuse the designated owner's expensive validation evidence; run focused checks for this slice.
 - Keep raw logs under .agent/runs/ only.
 - Use public-safe issue comments from docs/AGENT_PROTOCOLS.md for claims, plans, validation, and handoff.
 - If scope is unclear, comment a slice plan and stop instead of making broad product changes.
@@ -865,6 +873,14 @@ def claim_issue(repo: str, issue: dict[str, Any], role: dict[str, Any], branch: 
     gh(["issue", "edit", str(issue["number"]), "--repo", repo, "--add-label", "status:claimed"], check=False)
 
 
+def read_role_reasoning_effort(root: Path, agent: str) -> str:
+    path = root / ".codex" / "agents" / f"{agent}.toml"
+    effort = tomllib.loads(path.read_text(encoding="utf-8")).get("model_reasoning_effort")
+    if not isinstance(effort, str) or effort not in {"low", "medium", "high", "xhigh", "max"}:
+        raise ValueError(f"{agent} must declare a supported model_reasoning_effort")
+    return effort
+
+
 def launch_worker(
     *,
     repo: str,
@@ -880,6 +896,7 @@ def launch_worker(
 ) -> dict[str, Any]:
     log_path = worktree / ".agent" / "runs" / f"agent-os-issue-{issue['number']}.log"
     last_path = worktree / ".agent" / "runs" / f"agent-os-issue-{issue['number']}-last.md"
+    reasoning_effort = read_role_reasoning_effort(worktree, role["agent"])
     prompt = worker_prompt(
         repo=repo,
         issue=issue,
@@ -894,6 +911,8 @@ def launch_worker(
         profile,
         "-m",
         model,
+        "-c",
+        f'model_reasoning_effort="{reasoning_effort}"',
         "-C",
         str(worktree),
         "--ask-for-approval",
@@ -907,7 +926,7 @@ def launch_worker(
     ]
     if dry_run:
         print("would launch:")
-        print("  " + " ".join(cmd[:13]) + " <prompt>")
+        print("  " + " ".join(cmd[:-1]) + " <prompt>")
         return {
             "issue_number": issue["number"],
             "branch": branch,
@@ -1147,6 +1166,10 @@ Read AGENTS.md, PLAN.md, docs/AGENT_OS.md, docs/AGENT_PROTOCOLS.md, and .codex/a
 Mission:
 - Keep the GitHub issue board moving toward the dxt goal: a Zig dbt-core-compatible drop-in replacement.
 - Prioritize dbt Core compatibility slices over speculative expansion.
+- Honor deferred plans. A planning artifact alone does not authorize publishing its task queue or starting implementation.
+- Prefer native Zig product tests while retaining real dbt CLI acceptance and independent fixture provenance.
+- Separate accepted upstream versions, candidate upgrade issues and unverified Fusion behavior.
+- Require exact file ownership and dependency-clear scope before recommending a worker claim. Reuse matching validation evidence.
 - Treat the board as empty or stale when the snapshot has no open issues, no ready unclaimed issues outside blocked/claimed/review labels, or only orchestration work while PLAN.md/docs name immediate dbt Core compatibility gaps.
 - Create or update actionable GitHub issues for those roadmap gaps. Do not wait for a human to pre-create every slice.
 - Each PM-created issue must include role, priority, readiness, risk, validation, dependencies or sequencing notes, acceptance criteria, and stop conditions.
@@ -1155,6 +1178,7 @@ Mission:
 - Use concise public-safe GitHub issue comments and label changes when they clearly improve routing.
 - Do not edit local files and do not implement product behavior.
 - Stop before launching implementation workers; recommend the next supervisor/orchestrator command instead.
+- Do not spawn child agents or competing workers.
 - Never publish local absolute paths, private hostnames or mounts, secrets, tokens, raw command logs, raw Codex/session transcripts, or `.agent/runs/` contents in issues or comments.
 
 {project_note}
@@ -1197,6 +1221,7 @@ def launch_product_manager(
     snapshot = fetch_board_snapshot(repo, issue_limit)
     can_apply_project = project_scopes_available(owner)
     prompt = product_manager_prompt(repo, snapshot, can_apply_project)
+    reasoning_effort = read_role_reasoning_effort(ROOT, "dxt_product_manager")
     timestamp = utc_now().replace(":", "").replace("-", "")
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     log_path = STATE_DIR / f"product-manager-{timestamp}.log"
@@ -1207,6 +1232,8 @@ def launch_product_manager(
         profile,
         "-m",
         model,
+        "-c",
+        f'model_reasoning_effort="{reasoning_effort}"',
         "-C",
         str(ROOT),
         "--ask-for-approval",
@@ -1248,7 +1275,8 @@ def launch_product_manager(
         )
         print(
             "  "
-            f"codex -p {profile} -m {model} -C <repo-root> "
+            f"codex -p {profile} -m {model} "
+            f"-c 'model_reasoning_effort=\"{reasoning_effort}\"' -C <repo-root> "
             f"--ask-for-approval never --sandbox {sandbox} exec "
             "--output-last-message <ignored-last-message> <prompt>"
         )
