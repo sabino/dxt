@@ -52,15 +52,15 @@ separate implementation and certification.
 ## Active Work
 
 The current change makes documentation usable independently of development
-tickets and fixes a release documentation defect. Public Markdown packaged
-unchanged currently links to source, tests, scripts and planning files that
-are absent from the archive.
+tickets and fixes a release documentation defect. Packaging now rewrites links
+to omitted repository files to exact source URLs while preserving links to
+bundled documents. Archive validation rejects unresolved relative links.
 
 | Slice | Owner and branch | Files | Status |
 | --- | --- | --- | --- |
-| Public documentation | Docs curator, `docs/public-docs-curation` | README, docs, CHANGELOG and citations in existing research notes | In progress |
-| Release documentation links | Release worker, `fix/release-documentation-links` | Package/archive validation scripts and focused archive tests | In progress |
-| Planning and integration | Supervisor, `docs/production-readiness-cleanup` | PLAN and commit integration | In progress |
+| Public documentation | Docs curator, `docs/public-docs-curation` | README, SECURITY, docs, CHANGELOG and citations in existing research notes | Integrated |
+| Release documentation links | Release worker, `fix/release-documentation-links` | Package/archive validation scripts and focused archive tests | Integrated |
+| Planning and integration | Supervisor, `docs/production-readiness-cleanup` | PLAN, commit integration and final validation | Local gates passing; archive and PR checks next |
 
 Each writer has a separate worktree from `origin/main`. File scopes are
 disjoint. The docs curator owns release process prose; the release worker
@@ -118,6 +118,15 @@ as positive compatibility evidence.
   runtime ownership to make a check pass.
 - Stop before unrelated dirty work, overlapping writes, unsupported claims,
   private data publication or unbounded new adapter/platform work.
+
+### Current Evidence
+
+The integrated branch passes all 70 focused archive/public-safety cases,
+runtime-boundary and public-safety scans, shell syntax and diff checks. No
+numbered PR/issue citations remain in README, PLAN, SECURITY, CHANGELOG, docs
+or research notes. Native runtime/build inputs are unchanged from main.
+The final PR checks and real-archive verification carry the remaining evidence;
+this local result does not claim a new full-platform certification.
 
 ## Next Roadmap Work
 
