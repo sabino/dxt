@@ -688,11 +688,32 @@ pub fn planJson(allocator: std.mem.Allocator, plan: Plan) ![]const u8 {
 
 pub fn writeAtomic(runtime: Runtime, path: []const u8, text: []const u8) !void {
     if (std.fs.path.dirname(path)) |directory| try Dir.cwd().createDirPath(runtime.io, directory);
-    const temporary = try std.fmt.allocPrint(runtime.allocator, "{s}.tmp", .{path});
-    defer runtime.allocator.free(temporary);
-    defer Dir.cwd().deleteFile(runtime.io, temporary) catch {};
-    try Dir.cwd().writeFile(runtime.io, .{ .sub_path = temporary, .data = text });
+    while (true) {
+        var nonce: [16]u8 = undefined;
+        runtime.io.random(&nonce);
+        const suffix = std.fmt.bytesToHex(nonce, .lower);
+        const temporary = try std.fmt.allocPrint(runtime.allocator, "{s}.{s}.tmp", .{ path, suffix });
+        defer runtime.allocator.free(temporary);
+        writeAtomicCandidate(runtime, path, text, temporary) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        };
+        return;
+    }
+}
+
+fn writeAtomicCandidate(runtime: Runtime, path: []const u8, text: []const u8, temporary: []const u8) !void {
+    // Cleanup belongs only to a writer that successfully created this file.
+    // Exclusive creation also protects a collided path or a stale symlink.
+    const file = try Dir.cwd().createFile(runtime.io, temporary, .{ .exclusive = true });
+    var published = false;
+    defer if (!published) Dir.cwd().deleteFile(runtime.io, temporary) catch {};
+    {
+        defer file.close(runtime.io);
+        try file.writeStreamingAll(runtime.io, text);
+    }
     try Dir.rename(Dir.cwd(), temporary, Dir.cwd(), path, runtime.io);
+    published = true;
 }
 pub fn projectPath(runtime: Runtime, root: []const u8, path: []const u8) ![]const u8 {
     return if (std.fs.path.isAbsolute(path)) path else std.fs.path.join(runtime.allocator, &.{ root, path });
@@ -797,4 +818,132 @@ test "cross option and budget diagnostics reject malformed recovery and numeric 
     try std.testing.expectEqual(@as(?u64, 1024), options.max_spill_bytes);
     try std.testing.expectError(error.InvalidCrossDatabaseBudget, parseBudget(.null, .{ .max_memory_bytes = 1 }));
     try std.testing.expect(validRunId("12345678-1234-5678-abcd-1234567890ab"));
+}
+
+test "cross atomic publication preserves collided temporary files and prior target" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const runtime: Runtime = .{ .allocator = a, .io = io };
+    var directory = std.testing.tmpDir(.{ .iterate = true });
+    defer directory.cleanup();
+    const target = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/state.json", .{directory.sub_path});
+    defer a.free(target);
+    const collision = try std.fmt.allocPrint(a, "{s}.collision.tmp", .{target});
+    defer a.free(collision);
+    try Dir.cwd().writeFile(io, .{ .sub_path = target, .data = "prior target" });
+    try Dir.cwd().writeFile(io, .{ .sub_path = collision, .data = "other writer" });
+    try std.testing.expectError(error.PathAlreadyExists, writeAtomicCandidate(runtime, target, "new", collision));
+    const preserved = try Dir.cwd().readFileAlloc(io, collision, a, .limited(100));
+    defer a.free(preserved);
+    try std.testing.expectEqualStrings("other writer", preserved);
+    const prior = try Dir.cwd().readFileAlloc(io, target, a, .limited(100));
+    defer a.free(prior);
+    try std.testing.expectEqualStrings("prior target", prior);
+    try writeAtomic(runtime, target, "complete replacement");
+    const replacement = try Dir.cwd().readFileAlloc(io, target, a, .limited(100));
+    defer a.free(replacement);
+    try std.testing.expectEqualStrings("complete replacement", replacement);
+    var entries = directory.dir.iterate();
+    var count: usize = 0;
+    while (try entries.next(io)) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "cross failed atomic rename cleans its own file and preserves other writer and destination" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const runtime: Runtime = .{ .allocator = a, .io = io };
+    var directory = std.testing.tmpDir(.{ .iterate = true });
+    defer directory.cleanup();
+    const target = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/destination", .{directory.sub_path});
+    defer a.free(target);
+    const temporary = try std.fmt.allocPrint(a, "{s}.owned.tmp", .{target});
+    defer a.free(temporary);
+    try directory.dir.createDir(io, "destination", .default_dir);
+    try directory.dir.writeFile(io, .{ .sub_path = "destination/retained", .data = "prior data" });
+    try directory.dir.writeFile(io, .{ .sub_path = "destination.tmp", .data = "other writer" });
+    try std.testing.expectError(error.IsDir, writeAtomicCandidate(runtime, target, "replacement", temporary));
+    try std.testing.expectError(error.FileNotFound, Dir.cwd().openFile(io, temporary, .{}));
+    const retained = try directory.dir.readFileAlloc(io, "destination/retained", a, .limited(100));
+    defer a.free(retained);
+    try std.testing.expectEqualStrings("prior data", retained);
+    const other = try directory.dir.readFileAlloc(io, "destination.tmp", a, .limited(100));
+    defer a.free(other);
+    try std.testing.expectEqualStrings("other writer", other);
+    var entries = directory.dir.iterate();
+    var count: usize = 0;
+    while (try entries.next(io)) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "cross concurrent atomic writers expose complete payloads and retain unrelated temporary files" {
+    const Worker = struct {
+        target: []const u8,
+        byte: u8,
+        ready: *std.atomic.Value(usize),
+        start: *std.atomic.Value(bool),
+        done: *std.atomic.Value(usize),
+        failure: ?anyerror = null,
+
+        fn work(self: *@This()) void {
+            _ = self.ready.fetchAdd(1, .release);
+            while (!self.start.load(.acquire)) std.Thread.yield() catch {};
+            defer _ = self.done.fetchAdd(1, .release);
+            var payload: [65536]u8 = undefined;
+            @memset(&payload, self.byte);
+            for (0..12) |_| writeAtomic(.{ .allocator = std.heap.page_allocator, .io = std.testing.io }, self.target, &payload) catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+    };
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var directory = std.testing.tmpDir(.{ .iterate = true });
+    defer directory.cleanup();
+    const target = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/state.json", .{directory.sub_path});
+    defer a.free(target);
+    var initial: [65536]u8 = undefined;
+    @memset(&initial, 'A');
+    try directory.dir.writeFile(io, .{ .sub_path = "state.json", .data = &initial });
+    try directory.dir.writeFile(io, .{ .sub_path = "state.json.tmp", .data = "unrelated writer" });
+    var ready: std.atomic.Value(usize) = .init(0);
+    var start: std.atomic.Value(bool) = .init(false);
+    var done: std.atomic.Value(usize) = .init(0);
+    var workers: [8]Worker = undefined;
+    var threads: [8]std.Thread = undefined;
+    var spawned: usize = 0;
+    var joined = false;
+    defer if (!joined) {
+        start.store(true, .release);
+        for (threads[0..spawned]) |thread| thread.join();
+    };
+    for (&workers, &threads, 0..) |*worker, *thread, index| {
+        worker.* = .{ .target = target, .byte = 'A' + @as(u8, @intCast(index)), .ready = &ready, .start = &start, .done = &done };
+        thread.* = try std.Thread.spawn(.{}, Worker.work, .{worker});
+        spawned += 1;
+    }
+    while (ready.load(.acquire) != workers.len) std.Thread.yield() catch {};
+    start.store(true, .release);
+    var observations: usize = 0;
+    while (true) {
+        const payload = try directory.dir.readFileAlloc(io, "state.json", a, .limited(initial.len + 1));
+        defer a.free(payload);
+        try std.testing.expectEqual(initial.len, payload.len);
+        try std.testing.expect(payload[0] >= 'A' and payload[0] <= 'H');
+        for (payload) |byte| try std.testing.expectEqual(payload[0], byte);
+        observations += 1;
+        if (done.load(.acquire) == workers.len) break;
+    }
+    for (threads) |thread| thread.join();
+    joined = true;
+    for (workers) |worker| try std.testing.expect(worker.failure == null);
+    try std.testing.expect(observations != 0);
+    const other = try directory.dir.readFileAlloc(io, "state.json.tmp", a, .limited(100));
+    defer a.free(other);
+    try std.testing.expectEqualStrings("unrelated writer", other);
+    var entries = directory.dir.iterate();
+    var count: usize = 0;
+    while (try entries.next(io)) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 2), count);
 }
