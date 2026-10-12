@@ -60,14 +60,18 @@ The batch preserves the pinned Core/platform contract and all existing gates.
 
 | Owner branch | Issues | Exclusive scope | Sequencing |
 | --- | --- | --- | --- |
-| `fix/state-resource-comparisons` | #226 | `state.zig`, state CLI fixtures | Model reference metadata and semantic resource comparisons; one writer |
+| `fix/state-resource-comparisons` | #226 | `state.zig`, model metadata/types/properties/version/manifest/cache owners as required, state CLI fixtures | Model reference metadata and semantic resource comparisons; one writer |
 | `fix/postgres-profile-compatibility` | #227, #228 | Profile/native PostgreSQL/adapter session policy, incremental strategy owners, new focused fixture files | Profile/session changes first, custom strategies second; one writer |
 | `fix/native-publication-recovery` | #229, #230 | `workflow.zig`, workflow fixtures, `cross_database.zig` native publication tests | Committed apply reconciliation first, unique publication files second; one writer |
 | `fix/dbt-state-compatibility` | #225 | This plan, support evidence and PR convergence | Supervisor integrates scoped worker PRs; owns expensive final validation |
 
 Every editing owner uses an isolated worktree. State, execution and publication
-owners have disjoint product modules and fixture files. Shared type changes, if
-needed for PostgreSQL session policy, belong to the execution owner only.
+owners have disjoint product modules and fixture files. Execution confirmed no
+shared type edits are needed; `types.zig` belongs exclusively to the state owner
+for model deprecation metadata. The actual authored-date oracle revealed that
+dxt omitted this field before comparison, requiring the narrow parser/artifact
+extension. Preserve Core's separate unversioned/versioned date scopes,
+normalization, validation and warm-cache invalidation.
 Workers do not spawn child agents. Issues carry the reference and slice plans;
 Project synchronization is unavailable through the current GitHub CLI access,
 so issues and PRs retain coordination state without claiming a board update.
