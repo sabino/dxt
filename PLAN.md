@@ -72,6 +72,11 @@ for model deprecation metadata. The actual authored-date oracle revealed that
 dxt omitted this field before comparison, requiring the narrow parser/artifact
 extension. Preserve Core's separate unversioned/versioned date scopes,
 normalization, validation and warm-cache invalidation.
+The facade `src/project.zig` has sequential regional ownership: execution
+first removes the two eager strategy validations in concurrent preflight and
+compilation for #228. After that commit is complete, state may update only
+`applyModelProperties` for deprecation metadata. No simultaneous facade edits
+or mechanical extraction are part of these behavior changes.
 Workers do not spawn child agents. Issues carry the reference and slice plans;
 Project synchronization is unavailable through the current GitHub CLI access,
 so issues and PRs retain coordination state without claiming a board update.
