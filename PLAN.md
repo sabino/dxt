@@ -51,6 +51,48 @@ separate implementation and certification.
 
 ## Active Work
 
+### SQL Compatibility And Native Publication Hardening
+
+The current authorized implementation batch is tracked by
+[#225](https://github.com/sabino/dxt/issues/225). Read-only inspection found
+concrete gaps in delivered behavior despite the completed initial track ladder.
+The batch preserves the pinned Core/platform contract and all existing gates.
+
+| Owner branch | Issues | Exclusive scope | Sequencing |
+| --- | --- | --- | --- |
+| `fix/state-resource-comparisons` | #226 | `state.zig`, state CLI fixtures | Model reference metadata and semantic resource comparisons; one writer |
+| `fix/postgres-profile-compatibility` | #227, #228 | Profile/native PostgreSQL/adapter session policy, incremental strategy owners, new focused fixture files | Profile/session changes first, custom strategies second; one writer |
+| `fix/native-publication-recovery` | #229, #230 | `workflow.zig`, workflow fixtures, `cross_database.zig` native publication tests | Committed apply reconciliation first, unique publication files second; one writer |
+| `fix/dbt-state-compatibility` | #225 | This plan, support evidence and PR convergence | Supervisor integrates scoped worker PRs; owns expensive final validation |
+
+Every editing owner uses an isolated worktree. State, execution and publication
+owners have disjoint product modules and fixture files. Shared type changes, if
+needed for PostgreSQL session policy, belong to the execution owner only.
+Workers do not spawn child agents. Issues carry the reference and slice plans;
+Project synchronization is unavailable through the current GitHub CLI access,
+so issues and PRs retain coordination state without claiming a board update.
+
+Acceptance requires native positive/negative regressions, actual pinned Core
+CLI comparisons for compatibility changes, and real DuckDB/PostgreSQL fault
+fixtures for workflow recovery. The integration owner runs the native suite,
+focused state/semantic/profile/incremental/workflow/cross-database checks,
+runtime-boundary/public-safety scans and applicable CI. Scoped implementation
+PRs converge into one user-facing integration PR targeting `main`.
+
+Stop for unsupported adapters, authored Python execution, upstream upgrades,
+Fusion certification, unrelated compiler changes or an owner overlap. Preserve
+Core's intentionally ignored metric/query fields and new-resource state rules.
+Retries after committed workflow publication failures must not replay database
+writes, audits or events. Temporary publication cleanup must remove only the
+current writer's file. Contract-breaking state diagnostics, connection retries
+and catalog retention remain separate observed follow-ups.
+
+Status: source maps and issue scopes are ready; implementation is starting.
+The native test optimization queue below remains deferred and is not part of
+this product-correctness batch.
+
+### Deferred Native Test Optimization
+
 Prepare the native test optimization queue in
 [Native test optimization](docs/TEST_OPTIMIZATION_PLAN.md).
 Implementation is deferred to a later Agent OS session.
