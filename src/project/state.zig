@@ -64,7 +64,7 @@ pub const PriorManifestIndex = struct {
             if (!std.mem.eql(u8, kind, "model")) return false;
             return old == null or !sameContract(old.?, new);
         }
-        const changed = if (old) |prior| !sameContents(prior, new, kind) or self.macrosChanged(current, new, 0) else !std.mem.eql(u8, kind, "source") and !std.mem.eql(u8, kind, "exposure");
+        const changed = if (old) |prior| !sameContents(prior, new, kind) or self.macrosChanged(current, new, 0) else !unchangedNewKind(kind);
         if (std.mem.eql(u8, method, "modified")) return changed;
         if (std.mem.eql(u8, method, "unmodified")) return !changed;
         return false;
@@ -217,6 +217,7 @@ fn excludedConfig(key: []const u8) bool {
 }
 
 fn sameConfig(old: std.json.Value, new: std.json.Value, kind: []const u8) bool {
+    if (std.mem.eql(u8, kind, "semantic_model") or std.mem.eql(u8, kind, "saved_query")) return equalFields(old, new, "config");
     const a = configOf(old);
     const b = configOf(new);
     if (a != .object or b != .object) return equalValues(a, b);
@@ -229,6 +230,7 @@ fn sameConfig(old: std.json.Value, new: std.json.Value, kind: []const u8) bool {
     for ([_]std.json.ObjectMap{ a.object, b.object }) |map| {
         var iter = map.iterator();
         while (iter.next()) |entry| {
+            if (std.mem.eql(u8, kind, "metric") and std.mem.eql(u8, entry.key_ptr.*, "group")) continue;
             if ((isSqlKind(kind) or std.mem.eql(u8, kind, "seed")) and excludedConfig(entry.key_ptr.*)) continue;
             if (!sameConfigField(a, b, entry.key_ptr.*)) return false;
         }
@@ -285,7 +287,7 @@ fn sameContract(old: std.json.Value, new: std.json.Value) bool {
 
 fn sameContents(old: std.json.Value, new: std.json.Value, kind: []const u8) bool {
     if (std.mem.eql(u8, kind, "test") and valueField(new, "test_metadata") != null) return sameConfig(old, new, kind) and equalFields(old, new, "fqn");
-    if (isSqlKind(kind) or std.mem.eql(u8, kind, "seed")) return sameBody(old, new, kind) and sameConfig(old, new, kind) and sameRelation(old, new, kind) and samePersistedDescriptions(old, new) and equalFields(old, new, "fqn") and (!std.mem.eql(u8, kind, "model") or sameContract(old, new));
+    if (isSqlKind(kind) or std.mem.eql(u8, kind, "seed")) return sameBody(old, new, kind) and sameConfig(old, new, kind) and sameRelation(old, new, kind) and samePersistedDescriptions(old, new) and equalFields(old, new, "fqn") and (!std.mem.eql(u8, kind, "model") or (sameContract(old, new) and sameModelReferences(old, new)));
     if (std.mem.eql(u8, kind, "source")) {
         for ([_][]const u8{ "fqn", "quoting", "freshness", "loaded_at_field", "external" }) |key| if (!equalFields(old, new, key)) return false;
         return sameRelation(old, new, kind) and sameConfig(old, new, kind);
@@ -300,7 +302,60 @@ fn sameContents(old: std.json.Value, new: std.json.Value, kind: []const u8) bool
         for ([_][]const u8{ "model", "versions", "given", "expect", "overrides" }) |key| if (!equalFields(old, new, key)) return false;
         return true;
     }
+    if (std.mem.eql(u8, kind, "semantic_model")) {
+        for ([_][]const u8{ "model", "description", "defaults", "entities", "dimensions", "measures", "primary_entity", "group" }) |key| if (!equalFields(old, new, key)) return false;
+        return sameConfig(old, new, kind);
+    }
+    if (std.mem.eql(u8, kind, "metric")) {
+        // Core 1.10.5 deliberately leaves filter/metadata/type_params comparisons
+        // as always-true TODO methods. Preserve that versioned contract.
+        for ([_][]const u8{ "type", "description", "label" }) |key| if (!equalFields(old, new, key)) return false;
+        return sameConfig(old, new, kind);
+    }
+    if (std.mem.eql(u8, kind, "saved_query")) {
+        for ([_][]const u8{ "description", "label", "group", "tags" }) |key| if (!equalFields(old, new, key)) return false;
+        const a = valueField(old, "query_params") orelse .null;
+        const b = valueField(new, "query_params") orelse .null;
+        for ([_][]const u8{ "metrics", "group_by", "where" }) |key| if (!equalFields(a, b, key)) return false;
+        return sameConfig(old, new, kind) and sameExports(old, new);
+    }
     return sameConfig(old, new, kind);
+}
+
+fn unchangedNewKind(kind: []const u8) bool {
+    for ([_][]const u8{ "source", "exposure", "metric", "semantic_model", "saved_query" }) |candidate| if (std.mem.eql(u8, kind, candidate)) return true;
+    return false;
+}
+
+fn sameModelReferences(old: std.json.Value, new: std.json.Value) bool {
+    for ([_][]const u8{ "latest_version", "access" }) |key| if (!equalFields(old, new, key)) return false;
+    if (equalFields(old, new, "deprecation_date")) return true;
+    const a = stringField(old, "deprecation_date") orelse return false;
+    const b = stringField(new, "deprecation_date") orelse return false;
+    // Core compares datetime values, so authored fixed offsets may differ
+    // while representing the same instant. Artifact dates retain their offset.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const parser = @import("datetime_parse.zig").iso;
+    const av = parser(arena.allocator(), a, false) catch return false;
+    const bv = parser(arena.allocator(), b, false) catch return false;
+    const ao = av.offset_us orelse return false;
+    const bo = bv.offset_us orelse return false;
+    return av.civil_ns - @as(i96, ao) * std.time.ns_per_us == bv.civil_ns - @as(i96, bo) * std.time.ns_per_us;
+}
+
+fn sameExports(old: std.json.Value, new: std.json.Value) bool {
+    const a = valueField(old, "exports") orelse .null;
+    const b = valueField(new, "exports") orelse .null;
+    if (a != .array or b != .array) return equalValues(a, b);
+    if (a.array.items.len != b.array.items.len) return false;
+    for (a.array.items, b.array.items) |prior, next| {
+        if (!equalFields(prior, next, "name")) return false;
+        const ac = valueField(prior, "unrendered_config") orelse .null;
+        const bc = valueField(next, "unrendered_config") orelse .null;
+        for ([_][]const u8{ "export_as", "schema", "alias" }) |key| if (!equalFields(ac, bc, key)) return false;
+    }
+    return true;
 }
 
 fn appendManifestMapUniqueIds(allocator: std.mem.Allocator, unique_ids: *std.ArrayList([]const u8), root: std.json.ObjectMap, field: []const u8) !void {
@@ -408,4 +463,137 @@ test "state manifest retains artifact strings after the input buffer is released
     try std.testing.expectEqualStrings("select 1", stringField(index.resource("model.demo.a").?, "raw_code").?);
     try std.testing.expect(index.matches(&index, "model.demo.a", "old"));
     try std.testing.expect(!index.matches(&index, "model.demo.a", "modified.body"));
+}
+
+// Expected comparisons follow dbt Core 1.10.5 contracts/graph/nodes.py;
+// deliberately ignored fields need negative assertions as well as changes.
+test "model reference metadata participates only in complete state contents" {
+    const a = std.testing.allocator;
+    var old = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"raw_code":"select 1","latest_version":1,"access":"protected","deprecation_date":null}
+    , .{});
+    defer old.deinit();
+    for ([_][]const u8{ "latest_version", "access", "deprecation_date" }) |key| {
+        var next = try std.json.parseFromSlice(std.json.Value, a,
+            \\{"raw_code":"select 1","latest_version":1,"access":"protected","deprecation_date":null}
+        , .{});
+        defer next.deinit();
+        try next.value.object.put(next.arena.allocator(), key, .{ .string = "changed" });
+        try std.testing.expect(!sameContents(old.value, next.value, "model"));
+        try std.testing.expect(sameBody(old.value, next.value, "model"));
+        try std.testing.expect(sameConfig(old.value, next.value, "model"));
+        try std.testing.expect(sameRelation(old.value, next.value, "model"));
+    }
+}
+
+test "semantic state contents use ordered fields and rendered config" {
+    const a = std.testing.allocator;
+    const baseline =
+        \\{"model":"ref('a')","description":"before","defaults":{"agg_time_dimension":"day"},"entities":[{"name":"a"},{"name":"b"}],"dimensions":[],"measures":[],"primary_entity":"a","group":null,"config":{"meta":{"value":"rendered"}},"unrendered_config":{"meta":{"value":"{{ var('v') }}"}}}
+    ;
+    var old = try std.json.parseFromSlice(std.json.Value, a, baseline, .{});
+    defer old.deinit();
+    for ([_][]const u8{ "model", "description", "defaults", "entities", "dimensions", "measures", "primary_entity", "group", "config" }) |key| {
+        var next = try std.json.parseFromSlice(std.json.Value, a, baseline, .{});
+        defer next.deinit();
+        try next.value.object.put(next.arena.allocator(), key, .{ .string = "changed" });
+        try std.testing.expect(!sameContents(old.value, next.value, "semantic_model"));
+    }
+    var next = try std.json.parseFromSlice(std.json.Value, a, baseline, .{});
+    defer next.deinit();
+    try next.value.object.put(next.arena.allocator(), "unrendered_config", .null);
+    try std.testing.expect(sameContents(old.value, next.value, "semantic_model"));
+    const entities = next.value.object.getPtr("entities").?;
+    std.mem.swap(std.json.Value, &entities.array.items[0], &entities.array.items[1]);
+    try std.testing.expect(!sameContents(old.value, next.value, "semantic_model"));
+}
+
+test "metric state preserves Core intentional omissions and group exclusion" {
+    const a = std.testing.allocator;
+    const baseline =
+        \\{"type":"simple","description":"before","label":"Revenue","filter":null,"metadata":null,"type_params":{},"unrendered_config":{"group":"before","meta":{}},"config":{}}
+    ;
+    var old = try std.json.parseFromSlice(std.json.Value, a, baseline, .{});
+    defer old.deinit();
+    for ([_][]const u8{ "type", "description", "label", "filter", "metadata", "type_params", "config" }) |key| {
+        var next = try std.json.parseFromSlice(std.json.Value, a, baseline, .{});
+        defer next.deinit();
+        try next.value.object.put(next.arena.allocator(), key, .{ .string = "changed" });
+        const substantive = std.mem.eql(u8, key, "type") or std.mem.eql(u8, key, "description") or std.mem.eql(u8, key, "label");
+        try std.testing.expectEqual(!substantive, sameContents(old.value, next.value, "metric"));
+    }
+    var next = try std.json.parseFromSlice(std.json.Value, a, baseline, .{});
+    defer next.deinit();
+    try next.value.object.getPtr("unrendered_config").?.object.put(next.arena.allocator(), "group", .{ .string = "after" });
+    try std.testing.expect(sameConfig(old.value, next.value, "metric"));
+    try next.value.object.getPtr("unrendered_config").?.object.put(next.arena.allocator(), "meta", .null);
+    try std.testing.expect(!sameConfig(old.value, next.value, "metric"));
+}
+
+test "saved query state compares selected query and ordered export fields" {
+    const a = std.testing.allocator;
+    const baseline =
+        \\{"description":"before","label":"Daily","group":null,"tags":["a","b"],"config":{},"query_params":{"metrics":["revenue"],"group_by":["day"],"where":null,"order_by":[],"limit":null},"exports":[{"name":"first","unrendered_config":{"export_as":"table","schema":"exports","alias":"first"},"config":{}},{"name":"second","unrendered_config":{}}]}
+    ;
+    var old = try std.json.parseFromSlice(std.json.Value, a, baseline, .{});
+    defer old.deinit();
+    for ([_][]const u8{ "metrics", "group_by", "where", "order_by", "limit" }) |key| {
+        var next = try std.json.parseFromSlice(std.json.Value, a, baseline, .{});
+        defer next.deinit();
+        try next.value.object.getPtr("query_params").?.object.put(next.arena.allocator(), key, .{ .string = "changed" });
+        const ignored = std.mem.eql(u8, key, "order_by") or std.mem.eql(u8, key, "limit");
+        try std.testing.expectEqual(ignored, sameContents(old.value, next.value, "saved_query"));
+    }
+    for ([_][]const u8{ "export_as", "schema", "alias", "ignored" }) |key| {
+        var next = try std.json.parseFromSlice(std.json.Value, a, baseline, .{});
+        defer next.deinit();
+        try next.value.object.getPtr("exports").?.array.items[0].object.getPtr("unrendered_config").?.object.put(next.arena.allocator(), key, .{ .string = "changed" });
+        try std.testing.expectEqual(std.mem.eql(u8, key, "ignored"), sameContents(old.value, next.value, "saved_query"));
+    }
+    var next = try std.json.parseFromSlice(std.json.Value, a, baseline, .{});
+    defer next.deinit();
+    const exports = next.value.object.getPtr("exports").?;
+    try exports.array.items[0].object.put(next.arena.allocator(), "config", .null);
+    try exports.array.items[1].object.getPtr("unrendered_config").?.object.put(next.arena.allocator(), "schema", .null);
+    try std.testing.expect(sameContents(old.value, next.value, "saved_query"));
+    std.mem.swap(std.json.Value, &exports.array.items[0], &exports.array.items[1]);
+    try std.testing.expect(!sameContents(old.value, next.value, "saved_query"));
+}
+
+test "new semantic resources follow Core contents and subselector capabilities" {
+    const a = std.testing.allocator;
+    var old = try parsePriorManifestIndex(a,
+        \\{"metadata":{"dbt_schema_version":"https://schemas.getdbt.com/dbt/manifest/v12.json"},"nodes":{},"sources":{},"exposures":{},"unit_tests":{}}
+    );
+    defer old.deinit(a);
+    var next = try parsePriorManifestIndex(a,
+        \\{"metadata":{"dbt_schema_version":"https://schemas.getdbt.com/dbt/manifest/v12.json"},"nodes":{},"sources":{},"exposures":{},"unit_tests":{},"metrics":{"metric.demo.a":{"unique_id":"metric.demo.a"}},"semantic_models":{"semantic_model.demo.a":{"unique_id":"semantic_model.demo.a"}},"saved_queries":{"saved_query.demo.a":{"unique_id":"saved_query.demo.a"}}}
+    );
+    defer next.deinit(a);
+    for ([_][]const u8{ "metric.demo.a", "semantic_model.demo.a", "saved_query.demo.a" }) |id| {
+        try std.testing.expect(old.matches(&next, id, "new"));
+        try std.testing.expect(!old.matches(&next, id, "old"));
+        try std.testing.expect(!old.matches(&next, id, "modified"));
+        try std.testing.expect(old.matches(&next, id, "unmodified"));
+        try std.testing.expect(old.matches(&next, id, "modified.configs"));
+        for ([_][]const u8{ "modified.body", "modified.relation", "modified.persisted_descriptions", "modified.contract", "modified.macros" }) |method| try std.testing.expect(!old.matches(&next, id, method));
+    }
+}
+
+test "model deprecation state compares aware instants rather than offset text" {
+    const a = std.testing.allocator;
+    var old = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"deprecation_date":"2099-01-02T03:04:05.123456+05:30"}
+    , .{});
+    defer old.deinit();
+    var equivalent = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"deprecation_date":"2099-01-01T21:34:05.123456+00:00"}
+    , .{});
+    defer equivalent.deinit();
+    var changed = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"deprecation_date":"2099-01-01T21:34:05.123457+00:00"}
+    , .{});
+    defer changed.deinit();
+    try std.testing.expect(sameModelReferences(old.value, equivalent.value));
+    try std.testing.expect(!sameModelReferences(old.value, changed.value));
 }
