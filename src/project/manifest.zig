@@ -976,6 +976,8 @@ fn writeModelNode(allocator: std.mem.Allocator, writer: *Io.Writer, graph: *cons
         try json.string(writer, @import("group_access.zig").access(&node));
         try writer.writeAll(",\"version\":");
         try std.json.Stringify.value(node.version, .{}, writer);
+        try writer.writeAll(",\"deprecation_date\":");
+        try std.json.Stringify.value(@import("config_value.zig").get(node.properties, "deprecation_date") orelse .null, .{}, writer);
         try writer.writeAll(",\"latest_version\":");
         try std.json.Stringify.value(node.latest_version, .{}, writer);
     }

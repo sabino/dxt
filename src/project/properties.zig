@@ -12,6 +12,12 @@ pub fn parseModels(runtime: types.Runtime, document: std.json.Value, path: []con
                 if (item != .object) return error.InvalidResourceProperties;
                 if (comptime std.mem.eql(u8, pair[1], "model")) {
                     if (values.get(item, "versions") != null) {
+                        // Core validates the parent date before patching versions,
+                        // although each version uses only its own authored date.
+                        if (values.get(item, "deprecation_date")) |date| {
+                            var normalized = try normalizeDeprecationDate(runtime.allocator, date);
+                            defer values.deinit(runtime.allocator, &normalized);
+                        }
                         var expanded = try @import("model_versions.zig").expand(runtime.allocator, item);
                         defer @import("model_versions.zig").deinit(runtime.allocator, &expanded);
                         for (expanded.items) |version| {
@@ -33,6 +39,13 @@ pub fn parseModels(runtime: types.Runtime, document: std.json.Value, path: []con
 
 fn parseModelItem(runtime: types.Runtime, item: std.json.Value, path: []const u8, package: []const u8, resource_type: []const u8, graph: *const types.Graph) !types.ModelProperty {
     var property = types.ModelProperty{ .package_name = package, .resource_type = resource_type, .name = try ownedString(runtime.allocator, values.get(item, "name") orelse return error.InvalidResourceProperties), .patch_path = path, .properties = try values.clone(runtime.allocator, item) };
+    if (std.mem.eql(u8, resource_type, "model")) {
+        if (values.get(item, "deprecation_date")) |date| {
+            var normalized = try normalizeDeprecationDate(runtime.allocator, date);
+            defer values.deinit(runtime.allocator, &normalized);
+            try values.put(runtime.allocator, &property.properties, "deprecation_date", normalized);
+        }
+    }
     if (values.get(item, "description")) |description| property.description = try ownedString(runtime.allocator, description);
     var context = renderer.Context{ .runtime = runtime, .vars = graph.vars.items, .target = graph.target_context, .package_name = package };
     if (values.get(item, "config")) |config| {
@@ -189,4 +202,40 @@ test "generic argument nesting respects the Core project flag" {
     try std.testing.expect(values.get(legacy.items[0].arguments, "threshold") == null);
     try std.testing.expectEqual(@as(i64, 3), values.get(values.get(legacy.items[0].arguments, "arguments").?, "threshold").?.integer);
     try std.testing.expectEqual(@as(i64, 3), values.get(modern.items[0].arguments, "threshold").?.integer);
+}
+
+/// Core UnparsedModelUpdate/UnparsedVersion.normalize_date makes naive dates
+/// host-local aware datetimes, while retaining an authored aware timezone.
+fn normalizeDeprecationDate(allocator: std.mem.Allocator, input: std.json.Value) !std.json.Value {
+    if (input == .null) return .null;
+    if (input != .string) return error.InvalidResourceProperties;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Core's dataclass deserializer uses dateutil, which rejects timezone
+    // seconds/fractions even though Python's datetime.fromisoformat accepts them.
+    if (input.string.len > 10) if (std.mem.lastIndexOfAny(u8, input.string[10..], "+-")) |offset| {
+        if (input.string[10 + offset ..].len > 6) return error.InvalidResourceProperties;
+    };
+    const parsed = @import("datetime_parse.zig").iso(a, input.string, false) catch return error.InvalidResourceProperties;
+    const temporal = @import("timestamp_context.zig");
+    var date = try temporal.datetimeValueWithOffsetUs(a, parsed.civil_ns, false, parsed.offset_us, null, 0);
+    if (temporal.state(date).?.offset_us == null) date = (try temporal.call(a, date.attribute("astimezone").callable, &.{})).?;
+    const text = (try temporal.call(a, date.attribute("isoformat").callable, &.{})).?.string;
+    return .{ .string = try allocator.dupe(u8, text) };
+}
+
+test "model deprecation dates normalize awareness fractions and invalid inputs" {
+    const a = std.testing.allocator;
+    for ([_][2][]const u8{
+        .{ "2099-01-02T03:04:05Z", "2099-01-02T03:04:05+00:00" },
+        .{ "2099-01-02T03:04:05.123456+05:30", "2099-01-02T03:04:05.123456+05:30" },
+    }) |pair| {
+        var normalized = try normalizeDeprecationDate(a, .{ .string = pair[0] });
+        defer values.deinit(a, &normalized);
+        try std.testing.expectEqualStrings(pair[1], normalized.string);
+    }
+    try std.testing.expectEqual(std.json.Value.null, try normalizeDeprecationDate(a, .null));
+    try std.testing.expectError(error.InvalidResourceProperties, normalizeDeprecationDate(a, .{ .integer = 1 }));
+    for ([_][]const u8{ "bad", "2099-02-29", "2099-01-01T25:00:00", "2099-01-01T00:00:00+24:00", "2099-01-02T03:04:05+05:30:45.123456" }) |text| try std.testing.expectError(error.InvalidResourceProperties, normalizeDeprecationDate(a, .{ .string = text }));
 }
