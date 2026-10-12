@@ -77,8 +77,17 @@ pub fn validate(config: types.IncrementalConfig) !void {
 pub fn validateForAdapter(adapter_type: []const u8, config: types.IncrementalConfig) !void {
     const strategy = config.strategy orelse "default";
     if (std.mem.eql(u8, adapter_type, "postgres") and (std.mem.eql(u8, strategy, "merge") or std.mem.eql(u8, strategy, "microbatch"))) return;
-    // The pinned DuckDB strategies plus dxt's native microbatch extension.
-    if (!std.mem.eql(u8, strategy, "default") and !std.mem.eql(u8, strategy, "append") and !std.mem.eql(u8, strategy, "delete+insert") and !std.mem.eql(u8, strategy, "microbatch")) return error.UnsupportedIncrementalStrategy;
+    // Core validates adapter support only for builtin strategies. Authored names
+    // are resolved through get_incremental_<name>_sql at the adapter lifecycle boundary.
+    // Keep dxt's existing native DuckDB microbatch extension.
+    if (std.mem.eql(u8, strategy, "merge") or std.mem.eql(u8, strategy, "insert_overwrite")) return error.UnsupportedIncrementalStrategy;
+}
+
+pub fn strategyMacroName(allocator: std.mem.Allocator, strategy: []const u8) ![]const u8 {
+    const normalized = try allocator.dupe(u8, strategy);
+    defer allocator.free(normalized);
+    std.mem.replaceScalar(u8, normalized, '+', '_');
+    return std.fmt.allocPrint(allocator, "get_incremental_{s}_sql", .{normalized});
 }
 
 pub fn schemaPolicy(config: types.IncrementalConfig) []const u8 {
@@ -110,4 +119,18 @@ test "incremental config overlays preserve inline fields and nullable refresh ov
     const node = types.Node{ .package_name = "demo", .unique_id = "model.demo.a", .name = "a", .path = "a.sql", .original_file_path = "models/a.sql", .raw_code = "", .incremental = model };
     try std.testing.expect(!fullRefresh(&graph, &node));
     try std.testing.expectError(error.UnsupportedIncrementalStrategy, validate(.{ .strategy = "merge" }));
+}
+
+test "incremental strategy validation distinguishes builtin support from authored names" {
+    inline for (.{ "custom_append", "custom+append", "missing_strategy" }) |strategy| {
+        try validateForAdapter("duckdb", .{ .strategy = strategy });
+        try validateForAdapter("postgres", .{ .strategy = strategy });
+    }
+    try std.testing.expectError(error.UnsupportedIncrementalStrategy, validateForAdapter("duckdb", .{ .strategy = "merge" }));
+    try std.testing.expectError(error.UnsupportedIncrementalStrategy, validateForAdapter("duckdb", .{ .strategy = "insert_overwrite" }));
+    try std.testing.expectError(error.UnsupportedIncrementalStrategy, validateForAdapter("postgres", .{ .strategy = "insert_overwrite" }));
+    try validateForAdapter("postgres", .{ .strategy = "merge" });
+    const name = try strategyMacroName(std.testing.allocator, "custom+append+rows");
+    defer std.testing.allocator.free(name);
+    try std.testing.expectEqualStrings("get_incremental_custom_append_rows_sql", name);
 }

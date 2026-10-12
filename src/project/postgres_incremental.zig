@@ -10,7 +10,12 @@ pub const Column = @import("incremental.zig").Column;
 pub const ExecutionPolicy = materialization.ExecutionPolicy;
 
 pub fn executeWithPolicy(runtime: types.Runtime, graph: *const types.Graph, node: *const types.Node, policy: ExecutionPolicy) !void {
+    // Core's PostgreSQL materialization resolves the strategy even on creation
+    // and full refresh, unlike the pinned DuckDB update-only lifecycle.
     try config.validateForAdapter("postgres", node.incremental);
+    const strategy_name = try config.strategyMacroName(runtime.allocator, node.incremental.strategy orelse "default");
+    defer runtime.allocator.free(strategy_name);
+    if (@import("resolve.zig").findMacroIdForUnqualifiedNamespaceCall(graph, node.package_name, strategy_name) == null) return error.UnresolvedMacro;
     if (!policy.manage_transaction and runtime.adapter_session == null) return error.NativeAdapterSessionRequired;
     var owned: ?adapter.Session = null;
     defer if (owned) |*session| session.deinit();
