@@ -102,6 +102,11 @@ pub fn parseAdapterIdentityTextWithEnvironment(allocator: std.mem.Allocator, tex
         if (count < 1 or count > 65535) return error.InvalidProfileThreads;
         break :blk @intCast(count);
     } else 1;
+    if (std.mem.eql(u8, normalized_adapter_type, "postgres")) {
+        inline for (.{ .{ "database", "dbname" }, .{ "password", "pass" } }) |names| {
+            if (values.get(output, names[0]) != null and values.get(output, names[1]) != null) return error.PostgresCredentialAliasCollision;
+        }
+    }
     var target_context: std.json.Value = .null;
     var it = output.object.iterator();
     while (it.next()) |entry| {
@@ -113,7 +118,10 @@ pub fn parseAdapterIdentityTextWithEnvironment(allocator: std.mem.Allocator, tex
     try values.put(allocator, &target_context, "schema", .{ .string = target_schema });
     try values.put(allocator, &target_context, "type", .{ .string = normalized_adapter_type });
     try values.put(allocator, &target_context, "threads", .{ .integer = threads });
-    if (values.get(output, "dbname")) |database| try values.put(allocator, &target_context, "database", database);
+    if (values.get(output, "database") orelse values.get(output, "dbname")) |database| {
+        try values.put(allocator, &target_context, "database", database);
+        if (std.mem.eql(u8, normalized_adapter_type, "postgres")) try values.put(allocator, &target_context, "dbname", database);
+    }
     if (std.mem.eql(u8, normalized_adapter_type, "duckdb")) {
         const basename = std.fs.path.basename(path orelse ":memory:");
         const extension = std.fs.path.extension(basename);
@@ -128,13 +136,18 @@ fn postgresConnectionInfoValue(allocator: std.mem.Allocator, output: std.json.Va
     const values = @import("config_value.zig");
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "connect_timeout=10 application_name=dxt ");
-    inline for (.{ "host", "port", "dbname", "user", "password", "sslmode", "sslcert", "sslkey", "sslrootcert", "connect_timeout", "keepalives_idle" }) |key| {
-        if (values.get(output, key)) |raw| {
+    try out.appendSlice(allocator, "connect_timeout=10 ");
+    if (values.get(output, "application_name") == null) try out.appendSlice(allocator, "application_name=dbt ");
+    for ([_][]const u8{ "host", "port", "dbname", "user", "password", "sslmode", "sslcert", "sslkey", "sslrootcert", "connect_timeout", "keepalives_idle", "application_name" }) |key| {
+        const credential = if (std.mem.eql(u8, key, "dbname")) values.get(output, "database") orelse values.get(output, "dbname") else if (std.mem.eql(u8, key, "password")) values.get(output, "password") orelse values.get(output, "pass") else values.get(output, key);
+        if (credential) |raw| {
+            if (raw == .null) continue;
             const value = try values.scalarText(allocator, raw);
             defer allocator.free(value);
             if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidPostgresProfile;
-            try out.appendSlice(allocator, key ++ "='");
+            if (std.mem.eql(u8, key, "application_name") and value.len == 0) continue;
+            try out.appendSlice(allocator, key);
+            try out.appendSlice(allocator, "='");
             for (value) |byte| {
                 if (byte == '\'' or byte == '\\') try out.append(allocator, '\\');
                 try out.append(allocator, byte);
@@ -142,6 +155,21 @@ fn postgresConnectionInfoValue(allocator: std.mem.Allocator, output: std.json.Va
             try out.appendSlice(allocator, "' ");
         }
     }
+    if (values.get(output, "search_path")) |raw| if (raw != .null) {
+        const path = try values.scalarText(allocator, raw);
+        defer allocator.free(path);
+        if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPostgresProfile;
+        if (path.len != 0) {
+            try out.appendSlice(allocator, "options='-c search_path=");
+            for (path) |byte| {
+                // Core escapes spaces for libpq's options parser, then conninfo escaping.
+                if (byte == ' ') try out.appendSlice(allocator, "\\\\");
+                if (byte == '\'' or byte == '\\') try out.append(allocator, '\\');
+                try out.append(allocator, byte);
+            }
+            try out.appendSlice(allocator, "' ");
+        }
+    };
     return try out.toOwnedSlice(allocator);
 }
 
@@ -499,4 +527,37 @@ test "profile parser reports missing profile target and type" {
     try std.testing.expectError(error.MissingProfileType, parseAdapterIdentityText(allocator, text, "analytics", "dev"));
     try std.testing.expectError(error.MissingProfileSchema, parseAdapterIdentityText(allocator, "analytics:\n  outputs:\n    default:\n      type: postgres\n", "analytics", null));
     try std.testing.expectError(error.MissingProfile, parseAdapterIdentityText(allocator, text, "other", null));
+}
+
+test "PostgreSQL canonical credentials and session options preserve private aliases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const identity = try parseAdapterIdentityText(arena.allocator(),
+        \\demo:
+        \\  outputs:
+        \\    default:
+        \\      type: postgres
+        \\      schema: analytics
+        \\      database: warehouse
+        \\      pass: synthetic-private-password
+        \\      search_path: '"Mixed Schema",public'
+        \\      application_name: "fixture's application"
+    , "demo", null);
+    try std.testing.expectEqualStrings("warehouse", identity.target_context.object.get("database").?.string);
+    try std.testing.expectEqualStrings("warehouse", identity.target_context.object.get("dbname").?.string);
+    try std.testing.expect(identity.target_context.object.get("password") == null);
+    try std.testing.expect(identity.target_context.object.get("pass") == null);
+    try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "dbname='warehouse'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "password='synthetic-private-password'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "options='-c search_path=\"Mixed\\\\ Schema\",public'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "application_name='fixture\\'s application'") != null);
+}
+
+test "PostgreSQL credential alias collisions reject even equal values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    inline for (.{ "database: warehouse, dbname: warehouse", "password: private, pass: private" }) |collision| {
+        const text = "demo: {outputs: {default: {type: postgres, schema: public, " ++ collision ++ "}}}";
+        try std.testing.expectError(error.PostgresCredentialAliasCollision, parseAdapterIdentityText(arena.allocator(), text, "demo", null));
+    }
 }
