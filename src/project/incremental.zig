@@ -169,7 +169,6 @@ pub fn executeWithPolicy(runtime: types.Runtime, db_path: []const u8, graph: *co
         else => err,
     };
     if (!policy.manage_transaction and runtime.adapter_session == null) return error.NativeAdapterSessionRequired;
-    try config.validate(node.incremental);
     const existing = try relationKind(runtime, db_path, graph, node);
     const schema = try compiler.relationSchemaForNode(runtime.allocator, graph, node);
     defer runtime.allocator.free(schema);
@@ -208,6 +207,7 @@ pub fn executeWithPolicy(runtime: types.Runtime, db_path: []const u8, graph: *co
         defer runtime.allocator.free(sql);
         return try executeSql(runtime, db_path, sql);
     }
+    try config.validate(node.incremental);
     var stage_arena = std.heap.ArenaAllocator.init(runtime.allocator);
     defer stage_arena.deinit();
     const stage_allocator = stage_arena.allocator();
