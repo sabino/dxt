@@ -392,3 +392,222 @@ models:
         for method in ['modified', 'modified.configs', 'modified.body', 'unmodified']:
             args = ('--state', state, '--select', f'state:{method}', '--indirect-selection', 'empty')
             assert selected_ids(root, *args) == core_ids(root, tmp_path / 'core-current', *args), (changed, method)
+
+
+@pytest.mark.skipif(shutil.which('dbt') is None, reason='pinned Core oracle required')
+@pytest.mark.parametrize('field,value', [
+    ('latest_version', 2), ('access', 'public'),
+    ('deprecation_date', '2099-01-01T00:00:00Z'),
+])
+def test_model_reference_metadata_state_core_oracle(tmp_path, field, value):
+    root = project(tmp_path)
+    (root / 'models' / 'a_v1.sql').write_text('select 1 as id')
+    (root / 'models' / 'a_v2.sql').write_text('select 2 as id')
+    (root / 'models' / 'a.sql').unlink()
+    definition = {'name': 'a', 'latest_version': 1, 'access': 'protected',
+                  'versions': [{'v': 1}, {'v': 2}]}
+    if field == 'deprecation_date':
+        definition['deprecation_date'] = '2098-01-01'
+    schema = root / 'models' / 'schema.yml'
+    schema.write_text(json.dumps({'version': 2, 'models': [definition]}))
+    state = tmp_path / 'core-state'
+    result = subprocess.run(['dbt', '--quiet', 'parse', '--project-dir', str(root),
+                             '--profiles-dir', str(root), '--target-path', str(state)],
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    if field == 'deprecation_date':
+        definition['versions'][0][field] = value
+    else:
+        definition[field] = value
+    schema.write_text(json.dumps({'version': 2, 'models': [definition]}))
+    for method in ['modified', 'unmodified', 'modified.body', 'modified.configs', 'modified.relation']:
+        args = ('--state', state, '--select', f'state:{method}', '--indirect-selection', 'empty')
+        expected = core_ids(root, tmp_path / 'core-current', *args)
+        assert selected_ids(root, *args) == expected, (field, method)
+        if method == 'modified':
+            affected = {'model.usability_state.a.v1'} if field == 'deprecation_date' else {'model.usability_state.a.v1', 'model.usability_state.a.v2'}
+            assert affected <= expected
+
+
+def semantic_state_definition():
+    return {
+        'version': 2,
+        'groups': [{'name': name, 'owner': {'name': 'Analytics'}} for name in ['first', 'second']],
+        'semantic_models': [{
+            'name': 'events', 'model': "ref('a')", 'description': 'Before',
+            'defaults': {'agg_time_dimension': 'event_time'},
+            'entities': [{'name': 'event', 'type': 'primary', 'expr': 'id'},
+                         {'name': 'customer', 'type': 'foreign', 'expr': 'id'}],
+            'dimensions': [{'name': 'event_time', 'type': 'time',
+                            'type_params': {'time_granularity': 'day'}}],
+            'measures': [{'name': 'amount', 'agg': 'sum', 'expr': 'id'}],
+            'config': {'group': 'first', 'meta': {'rendered': "{{ var('state_value', 'before') }}"}},
+        }],
+        'metrics': [{'name': 'revenue', 'label': 'Revenue', 'description': 'Before',
+                     'type': 'simple', 'type_params': {'measure': 'amount'},
+                     'config': {'group': 'first', 'meta': {'owner': 'before'}}}],
+        'saved_queries': [{
+            'name': 'daily', 'label': 'Daily', 'description': 'Before',
+            'query_params': {'metrics': ['revenue'],
+                             'group_by': ["TimeDimension('metric_time', 'day')"], 'limit': 10},
+            'exports': [{'name': 'first', 'config': {'export_as': 'table', 'schema': 'reporting'}},
+                        {'name': 'second', 'config': {'export_as': 'table', 'schema': 'reporting'}}],
+            'config': {'group': 'first', 'tags': ['a', 'b'],
+                       'meta': {'rendered': "{{ var('state_value', 'before') }}"}},
+        }],
+    }
+
+
+@pytest.mark.skipif(shutil.which('dbt') is None, reason='pinned Core oracle required')
+@pytest.mark.parametrize('kind,change', [
+    ('semantic_models', 'description'), ('semantic_models', 'entity_order'),
+    ('semantic_models', 'measure'), ('semantic_models', 'group'),
+    ('semantic_models', 'rendered_config'),
+    ('metrics', 'description'), ('metrics', 'label'), ('metrics', 'group'),
+    ('metrics', 'meta'), ('metrics', 'filter'), ('metrics', 'type_params'),
+    ('saved_queries', 'description'), ('saved_queries', 'group'),
+    ('saved_queries', 'rendered_config'), ('saved_queries', 'tags_order'),
+    ('saved_queries', 'where'), ('saved_queries', 'limit'),
+    ('saved_queries', 'export_order'), ('saved_queries', 'export_schema'),
+])
+def test_semantic_resource_state_core_oracle(tmp_path, kind, change):
+    root = project(tmp_path)
+    (root / 'models' / 'a.sql').write_text("select 1 as id, date '2024-01-01' as event_time")
+    (root / 'models' / 'metricflow_time_spine.sql').write_text("select date '2024-01-01' as date_day")
+    definition = semantic_state_definition()
+    schema = root / 'models' / 'schema.yml'
+    schema.write_text(json.dumps(definition))
+    state = tmp_path / 'core-state'
+    result = subprocess.run(['dbt', '--quiet', 'parse', '--project-dir', str(root),
+                             '--profiles-dir', str(root), '--target-path', str(state)],
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    resource = definition[kind][0]
+    extra = ()
+    if change in ['description', 'label']:
+        resource[change] = 'After'
+    elif change == 'entity_order':
+        resource['entities'].reverse()
+    elif change == 'measure':
+        resource['measures'][0]['expr'] = 'id * 2'
+    elif change == 'group':
+        resource['config']['group'] = 'second'
+    elif change == 'rendered_config':
+        extra = ('--vars', '{state_value: after}')
+    elif change == 'meta':
+        resource['config']['meta']['owner'] = 'after'
+    elif change == 'filter':
+        resource['filter'] = "{{ Dimension('event__event_time') }} > '2020-01-01'"
+    elif change == 'type_params':
+        resource['type_params']['measure'] = {'name': 'amount', 'filter': 'id > 0'}
+    elif change == 'tags_order':
+        resource['config']['tags'].reverse()
+    elif change == 'where':
+        resource['query_params']['where'] = "{{ TimeDimension('metric_time', 'day') }} > '2020-01-01'"
+    elif change == 'limit':
+        resource['query_params']['limit'] = 20
+    elif change == 'export_order':
+        resource['exports'].reverse()
+    elif change == 'export_schema':
+        resource['exports'][0]['config']['schema'] = 'after'
+    schema.write_text(json.dumps(definition))
+    for method in ['modified', 'modified.configs', 'unmodified']:
+        args = ('--state', state, '--select', f'state:{method}', '--indirect-selection', 'empty', *extra)
+        assert selected_ids(root, *args) == core_ids(root, tmp_path / 'core-current', *args), (kind, change, method)
+
+
+@pytest.mark.skipif(shutil.which('dbt') is None, reason='pinned Core oracle required')
+def test_new_semantic_resource_state_capabilities_core_oracle(tmp_path):
+    root = project(tmp_path)
+    state = tmp_path / 'core-state'
+    result = subprocess.run(['dbt', '--quiet', 'parse', '--project-dir', str(root),
+                             '--profiles-dir', str(root), '--target-path', str(state)],
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    (root / 'models' / 'a.sql').write_text("select 1 as id, date '2024-01-01' as event_time")
+    (root / 'models' / 'metricflow_time_spine.sql').write_text("select date '2024-01-01' as date_day")
+    (root / 'models' / 'schema.yml').write_text(json.dumps(semantic_state_definition()))
+    for method in ['new', 'old', 'modified', 'unmodified', 'modified.body', 'modified.configs',
+                   'modified.relation', 'modified.macros', 'modified.contract', 'modified.persisted_descriptions']:
+        args = ('--state', state, '--select', f'state:{method}', '--indirect-selection', 'empty')
+        assert selected_ids(root, *args) == core_ids(root, tmp_path / 'core-current', *args), method
+
+
+@pytest.mark.skipif(shutil.which('dbt') is None, reason='pinned Core oracle required')
+@pytest.mark.parametrize('authored,tz,expected', [
+    ('2099-01-02', 'UTC', '2099-01-02T00:00:00+00:00'),
+    ('2099-01-02', 'America/New_York', '2099-01-02T00:00:00-05:00'),
+    ('2099-01-02T03:04:05', 'America/New_York', '2099-01-02T03:04:05-05:00'),
+    ('2099-01-02T03:04:05Z', 'America/New_York', '2099-01-02T03:04:05+00:00'),
+    ('2099-01-02T03:04:05.123456+05:30', 'UTC', '2099-01-02T03:04:05.123456+05:30'),
+    ('20990102T0304+0530', 'UTC', '2099-01-02T03:04:00+05:30'),
+    (None, 'UTC', None),
+])
+def test_model_deprecation_metadata_context_and_warm_cache_core_oracle(tmp_path, monkeypatch, authored, tz, expected):
+    monkeypatch.setenv('TZ', tz)
+    root = project(tmp_path)
+    schema = root / 'models' / 'schema.yml'
+    schema.write_text(json.dumps({'version': 2, 'models': [{'name': 'a', 'deprecation_date': authored}]}))
+    native = tmp_path / 'native'
+    core = tmp_path / 'core'
+    def parse_pair():
+        result = invoke(root, 'parse', '--target-path', native)
+        assert result.returncode == 0, result.stdout + result.stderr
+        reference = subprocess.run(['dbt', '--quiet', 'parse', '--project-dir', str(root),
+                                    '--profiles-dir', str(root), '--target-path', str(core)],
+                                   text=True, capture_output=True)
+        assert reference.returncode == 0, reference.stdout + reference.stderr
+        actual = json.loads((native / 'manifest.json').read_text())['nodes']['model.usability_state.a']
+        upstream = json.loads((core / 'manifest.json').read_text())['nodes']['model.usability_state.a']
+        assert actual['deprecation_date'] == upstream['deprecation_date']
+        return actual['deprecation_date']
+    assert parse_pair() == expected
+    assert parse_pair() == expected  # unchanged warm native and Core parse caches
+    schema.write_text(json.dumps({'version': 2, 'models': [{'name': 'a', 'deprecation_date': '2099-12-31T00:00:00Z'}]}))
+    assert parse_pair() == '2099-12-31T00:00:00+00:00'  # property-only cache invalidation
+    (root / 'models' / 'a.sql').write_text("select '{{ model.deprecation_date }}' as date")
+    result = invoke(root, 'compile', '--target-path', native, '--select', 'a')
+    assert result.returncode == 0, result.stdout + result.stderr
+    reference = subprocess.run(['dbt', '--quiet', 'compile', '--project-dir', str(root),
+                                '--profiles-dir', str(root), '--target-path', str(core), '--select', 'a'],
+                               text=True, capture_output=True)
+    assert reference.returncode == 0, reference.stdout + reference.stderr
+    actual = json.loads((native / 'manifest.json').read_text())['nodes']['model.usability_state.a']['compiled_code']
+    upstream = json.loads((core / 'manifest.json').read_text())['nodes']['model.usability_state.a']['compiled_code']
+    assert actual == upstream == "select '2099-12-31T00:00:00+00:00' as date"
+    # Core's macro model context serializes the datetime to a string.
+    (root / 'models' / 'a.sql').write_text("select '{{ model.deprecation_date.isoformat() }}' as date")
+    result = invoke(root, 'compile', '--target-path', native, '--select', 'a')
+    reference = subprocess.run(['dbt', '--quiet', 'compile', '--project-dir', str(root),
+                                '--profiles-dir', str(root), '--target-path', str(core), '--select', 'a'],
+                               text=True, capture_output=True)
+    assert result.returncode == reference.returncode == 2
+
+
+
+@pytest.mark.skipif(shutil.which('dbt') is None, reason='pinned Core oracle required')
+@pytest.mark.parametrize('authored', ['bad', '2099-02-29', '2099-01-01T25:00:00', '2099-01-02T03:04:05+05:30:45.123456', 1])
+def test_invalid_model_deprecation_metadata_core_oracle(tmp_path, authored):
+    root = project(tmp_path)
+    (root / 'models' / 'schema.yml').write_text(json.dumps({'version': 2, 'models': [{'name': 'a', 'deprecation_date': authored}]}))
+    result = invoke(root, 'parse')
+    reference = subprocess.run(['dbt', '--quiet', 'parse', '--project-dir', str(root), '--profiles-dir', str(root)],
+                               text=True, capture_output=True)
+    assert result.returncode == reference.returncode == 2
+
+
+@pytest.mark.skipif(shutil.which('dbt') is None, reason='pinned Core oracle required')
+def test_equivalent_aware_model_deprecation_state_core_oracle(tmp_path):
+    root = project(tmp_path)
+    schema = root / 'models' / 'schema.yml'
+    schema.write_text(json.dumps({'version': 2, 'models': [{'name': 'a', 'deprecation_date': '2099-01-02T03:04:05.123456+05:30'}]}))
+    state = tmp_path / 'core-state'
+    result = subprocess.run(['dbt', '--quiet', 'parse', '--project-dir', str(root),
+                             '--profiles-dir', str(root), '--target-path', str(state)], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    for authored, changed in [('2099-01-01T21:34:05.123456Z', False), ('2099-01-01T21:34:05.123457Z', True)]:
+        schema.write_text(json.dumps({'version': 2, 'models': [{'name': 'a', 'deprecation_date': authored}]}))
+        args = ('--state', state, '--select', 'state:modified', '--indirect-selection', 'empty')
+        expected = core_ids(root, tmp_path / 'core-current', *args)
+        assert ('model.usability_state.a' in expected) is changed
+        assert selected_ids(root, *args) == expected
