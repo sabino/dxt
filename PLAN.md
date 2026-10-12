@@ -115,9 +115,16 @@ effective role separately. Preserve all other conninfo bytes and explicit
 policy changes; cross-database profile identities remain unchanged. The
 publication owner switches to a new isolated branch after its prior clean PR.
 
-Status: the five initial fixes have scoped PRs and passing new boundary cases;
-combined regressions are running. The integration identity blocker above is
-being repaired before final publication. Observed follow-ups are tracked as
+Status: all six fixes are integrated locally through scoped PRs. The final
+runtime candidate passed 836 native tests, Debug/ReleaseSafe builds and all
+24 workflow cases. Frozen integration snapshots passed 276 execution cases
+and 336 metadata/state cases; the final workflow recheck overlaps 22 of those
+execution cases. All reported local cases passed without skips or xfails.
+Formatting, runtime-boundary and public-safety gates passed. The consolidated
+PR targets `main`; its complete CI/platform matrix remains the merge gate.
+No release or production-readiness claim changes.
+
+Observed follow-ups are tracked as
 [#231](https://github.com/sabino/dxt/issues/231),
 [#232](https://github.com/sabino/dxt/issues/232) and
 [#233](https://github.com/sabino/dxt/issues/233) and
