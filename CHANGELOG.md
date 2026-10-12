@@ -19,6 +19,8 @@ DuckDB and PostgreSQL.
   Core's plus normalization and adapter-specific strategy validation timing.
 - Committed workflow applies retain exact successful evidence and repair failed
   artifact publication without repeating warehouse work, audits or events.
+- PostgreSQL workflow identities preserve old default-profile plans through
+  attribution changes and invalidate prior state when effective role changes.
 - Cross-database artifact writers use exclusive private temporary files and
   preserve complete publications and unrelated files under concurrent writes.
 
