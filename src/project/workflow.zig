@@ -75,6 +75,7 @@ pub const Revision = struct {
     plan_id: []const u8,
     models: []const Model,
     audits: []const Audit = &.{},
+    committed_apply: ?Run = null,
 };
 
 pub const Environment = struct {
@@ -86,6 +87,7 @@ pub const Environment = struct {
     models: []const Model,
     audits: []const Audit = &.{},
     history: []const Revision = &.{},
+    committed_apply: ?Run = null,
 };
 
 pub const AuditResult = struct { unique_id: []const u8, failures: ?u64, status: enum { pass, warn, fail, @"error" }, error_code: ?[]const u8 = null };
@@ -245,6 +247,25 @@ const Context = struct {
         const payload = try adapter.quoteLiteral(self.runtime.allocator, try std.json.Stringify.valueAlloc(self.runtime.allocator, run, .{}));
         const sql = try std.fmt.allocPrint(self.runtime.allocator, "insert into _dxt.workflow_events values ({s},{s},{s},{s})", .{ project, plan, action, payload });
         try self.session.?.execute(sql);
+    }
+
+    fn committedApply(self: *Context, environment: Environment) !Run {
+        if (environment.committed_apply) |run| {
+            try validateCommittedApply(run, environment);
+            return run;
+        }
+        // Older metadata has only event evidence. Never guess between multiple
+        // executions of a plan that was rolled back and then reapplied.
+        const a = self.runtime.allocator;
+        const project = try adapter.quoteLiteral(a, environment.project);
+        const plan = try adapter.quoteLiteral(a, environment.plan_id);
+        var result = try self.session.?.query(try std.fmt.allocPrint(a, "select payload from _dxt.workflow_events where project={s} and plan_id={s} and action='apply'", .{ project, plan }));
+        defer result.deinit(a);
+        if (result.rows.len != 1) return error.WorkflowCommittedRunInvalid;
+        const payload = result.firstScalar() orelse return error.WorkflowCommittedRunInvalid;
+        const run = (try std.json.parseFromSlice(Run, a, payload, .{ .allocate = .alloc_always })).value;
+        try validateCommittedApply(run, environment);
+        return run;
     }
 
     fn artifact(self: *Context, filename: []const u8, object: anytype) !void {
@@ -446,7 +467,14 @@ fn apply(context: *Context, plan: Plan) !Run {
     try validateName(plan.environment);
     if (!eq(plan.environment, context.options.environment)) return error.WorkflowEnvironmentMismatch;
     var current = try context.loadEnvironment(plan.environment);
-    if (current) |environment| if (eq(environment.plan_id, plan.plan_id)) return .{ .project = plan.project, .environment = plan.environment, .plan_id = plan.plan_id, .action = "apply", .status = "already_applied", .reused = plan.models.len };
+    if (current) |environment| if (eq(environment.plan_id, plan.plan_id)) {
+        // Warehouse metadata and its event commit together. Repair publication
+        // from that evidence without compiling, building or auditing again.
+        const committed_run = try context.committedApply(environment);
+        try context.artifact("run.json", committed_run);
+        try context.artifact("environment.json", environment);
+        return .{ .project = plan.project, .environment = plan.environment, .plan_id = plan.plan_id, .action = "apply", .status = "already_applied", .reused = plan.models.len };
+    };
     if (!optionalEqual(plan.base_plan_id, if (current) |environment| environment.plan_id else null)) return error.WorkflowStalePlan;
     context.options.restate = plan.restate;
     if (plan.requested) |range| {
@@ -479,11 +507,11 @@ fn apply(context: *Context, plan: Plan) !Run {
     @memset(completed, false);
     var remaining = models.len;
     var run: Run = .{ .project = plan.project, .environment = plan.environment, .plan_id = plan.plan_id, .action = "apply", .status = "success" };
-    errdefer |err| {
+    errdefer |err| if (!committed) {
         if (!eq(run.status, "audit_failed")) run.status = "execution_failed";
         run.error_code = @errorName(err);
         context.artifact("run.json", run) catch {};
-    }
+    };
     while (remaining != 0) {
         var progressed = false;
         for (models, 0..) |*model, index| {
@@ -519,7 +547,7 @@ fn apply(context: *Context, plan: Plan) !Run {
         try context.artifact("run.json", run);
         return error.WorkflowAuditFailure;
     }
-    const environment: Environment = .{ .project = plan.project, .gateway = plan.gateway, .name = plan.environment, .plan_id = plan.plan_id, .models = models, .audits = plan.audits, .history = try appendHistory(a, current) };
+    const environment: Environment = .{ .project = plan.project, .gateway = plan.gateway, .name = plan.environment, .plan_id = plan.plan_id, .models = models, .audits = plan.audits, .history = try appendHistory(a, current), .committed_apply = run };
     try switchViews(context, current, environment);
     try context.store("workflow_environments", "name", environment.name, environment);
     try context.event(run);
@@ -552,6 +580,7 @@ fn transition(context: *Context, command: []const u8) !Run {
         if (eq(source.name, context.options.environment)) return error.WorkflowEnvironmentMismatch;
         environment = source;
         environment.name = context.options.environment;
+        environment.committed_apply = null;
         environment.history = try appendHistory(a, current);
         environment.plan_id = try hash(a, &.{ "promote", source.plan_id, environment.name, if (current) |prior| prior.plan_id else "" });
     } else {
@@ -561,16 +590,17 @@ fn transition(context: *Context, command: []const u8) !Run {
         environment = prior;
         environment.models = revision.models;
         environment.audits = revision.audits;
+        environment.committed_apply = revision.committed_apply;
         environment.plan_id = revision.plan_id;
         environment.history = prior.history[0 .. prior.history.len - 1];
     }
     var run: Run = .{ .project = context.graph.project_name, .environment = environment.name, .plan_id = environment.plan_id, .action = command, .status = "success", .reused = environment.models.len };
     try context.lockVersions(environment.models);
-    errdefer |err| {
+    errdefer |err| if (!committed) {
         if (!eq(run.status, "audit_failed")) run.status = "execution_failed";
         run.error_code = @errorName(err);
         context.artifact("run.json", run) catch {};
-    }
+    };
     const audits = try runAudits(context, environment.audits, &run);
     run.audits = audits;
     if (hasAuditFailure(audits)) {
@@ -690,7 +720,7 @@ fn appendHistory(a: std.mem.Allocator, current: ?Environment) ![]const Revision 
     const environment = current orelse return &.{};
     const history = try a.alloc(Revision, environment.history.len + 1);
     @memcpy(history[0..environment.history.len], environment.history);
-    history[environment.history.len] = .{ .plan_id = environment.plan_id, .models = environment.models, .audits = environment.audits };
+    history[environment.history.len] = .{ .plan_id = environment.plan_id, .models = environment.models, .audits = environment.audits, .committed_apply = environment.committed_apply };
     return history;
 }
 
@@ -897,6 +927,10 @@ fn truth(text: ?[]const u8) bool {
 fn trimSql(sql: []const u8) []const u8 {
     return std.mem.trimEnd(u8, std.mem.trim(u8, sql, " \t\r\n"), "; \t\r\n");
 }
+fn validateCommittedApply(run: Run, environment: Environment) !void {
+    if (!eq(run.schema_version, "dxt/run/v1") or !eq(run.project, environment.project) or !eq(run.environment, environment.name) or !eq(run.plan_id, environment.plan_id) or !eq(run.action, "apply") or !eq(run.status, "success")) return error.WorkflowCommittedRunInvalid;
+}
+
 fn eq(lhs: []const u8, rhs: []const u8) bool {
     return std.mem.eql(u8, lhs, rhs);
 }
@@ -1041,4 +1075,35 @@ fn bindingOwnershipAllocationProof(a: std.mem.Allocator) !void {
     try std.testing.expectEqualStrings("\"catalog\".\"dxt_data\".\"m_raw\"", graph.deferred_relations.items[1].relation_name);
     try bindRelations(&graph, &.{});
     try std.testing.expectEqual(@as(usize, 0), graph.deferred_relations.items.len);
+}
+
+test "workflow publication recovery requires matching successful committed apply evidence" {
+    const environment: Environment = .{ .project = "demo", .gateway = "gateway", .name = "preview", .plan_id = "revision", .models = &.{} };
+    const run: Run = .{ .project = "demo", .environment = "preview", .plan_id = "revision", .action = "apply", .status = "success", .built = 2 };
+    try validateCommittedApply(run, environment);
+    for ([_][]const u8{ "schema_version", "project", "environment", "plan_id", "action", "status" }) |field_name| {
+        var invalid = run;
+        inline for (std.meta.fields(Run)) |field_info| {
+            if (field_info.type == []const u8) {
+                if (eq(field_name, field_info.name)) @field(invalid, field_info.name) = "mismatch";
+            }
+        }
+        try std.testing.expectError(error.WorkflowCommittedRunInvalid, validateCommittedApply(invalid, environment));
+    }
+}
+
+test "workflow legacy environment and revision metadata default committed apply evidence to null" {
+    const a = std.testing.allocator;
+    const environment = try std.json.parseFromSlice(Environment, a, "{\"project\":\"demo\",\"gateway\":\"gateway\",\"name\":\"prod\",\"plan_id\":\"first\",\"models\":[],\"history\":[{\"plan_id\":\"old\",\"models\":[]}]}", .{});
+    defer environment.deinit();
+    try std.testing.expect(environment.value.committed_apply == null);
+    try std.testing.expect(environment.value.history[0].committed_apply == null);
+    const run: Run = .{ .project = "demo", .environment = "prod", .plan_id = "first", .action = "apply", .status = "success", .built = 2 };
+    var current = environment.value;
+    current.committed_apply = run;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const history = try appendHistory(arena.allocator(), current);
+    try std.testing.expectEqual(@as(usize, 2), history.len);
+    try std.testing.expectEqual(@as(usize, 2), history[1].committed_apply.?.built);
 }
