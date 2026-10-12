@@ -87,7 +87,19 @@ writes, audits or events. Temporary publication cleanup must remove only the
 current writer's file. Contract-breaking state diagnostics, connection retries
 and catalog retention remain separate observed follow-ups.
 
-Status: source maps and issue scopes are ready; implementation is starting.
+Workflow recovery stores an optional successful `committed_apply` result in
+the environment and its revision history within the original transaction.
+Rollback restores that evidence; promotion clears source-environment apply
+identity. Older payloads default to no embedded evidence and may recover from
+one matching validated event. Ambiguous historical events fail visibly rather
+than selecting an arbitrary run. This is an additive native metadata field,
+with no dbt artifact schema or warehouse table migration.
+
+Status: source maps and issue scopes are ready; implementation and focused
+checks are in progress. The three observed follow-ups are tracked as
+[#231](https://github.com/sabino/dxt/issues/231),
+[#232](https://github.com/sabino/dxt/issues/232) and
+[#233](https://github.com/sabino/dxt/issues/233); none is claimed complete.
 The native test optimization queue below remains deferred and is not part of
 this product-correctness batch.
 
@@ -190,11 +202,14 @@ The test suite, product runtime and CI scheduling remain unmodified by this plan
 
 ## Next Roadmap Work
 
-The initial functional ladder has no known unimplemented track. The next
-developer work reduces validation cost through native tests and scoped integration
-execution. Repeatable candidate verification, real-project rollout evidence and
-operational hardening remain release priorities. Record observed failures as
-bounded slices with owners, source grounding and relevant tests.
+The initial functional ladder has no known unimplemented track. Individual
+behaviors still need source-grounded gap checks: the active hardening batch and
+its follow-ups above address observed omissions within delivered tracks.
+The deferred developer queue reduces validation cost through native tests and
+scoped integration execution. Repeatable candidate verification, real-project
+rollout evidence and operational hardening remain release priorities. Record
+observed failures as bounded slices with owners, source grounding and relevant
+tests.
 
 Later scope includes additional native adapters, remote DuckDB integrations,
 non-Linux portability and updated upstream version contracts. Each needs a
