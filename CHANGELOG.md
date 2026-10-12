@@ -7,6 +7,21 @@ DuckDB and PostgreSQL.
 
 ## Unreleased
 
+### Fixed
+
+- State comparisons now include model reference/deprecation metadata and
+  substantive semantic resources, preserving pinned Core's config, ordering,
+  new-resource and intentionally ignored-field rules. Model dates retain
+  normalized timezone-aware metadata through parsing, artifacts and caches.
+- PostgreSQL profiles honor canonical credential aliases and configured held
+  session roles, search paths and application names without publishing passwords.
+- Authored incremental strategy macros execute through native lifecycles with
+  Core's plus normalization and adapter-specific strategy validation timing.
+- Committed workflow applies retain exact successful evidence and repair failed
+  artifact publication without repeating warehouse work, audits or events.
+- Cross-database artifact writers use exclusive private temporary files and
+  preserve complete publications and unrelated files under concurrent writes.
+
 ### Documentation
 
 - Added a durable initial-acceptance snapshot with source identities and public
