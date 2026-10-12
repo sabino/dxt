@@ -39,6 +39,10 @@ acceptance. This is a track count, not a count of individually certified feature
 | New upstream versions | Outside the pinned contract. | Follow the [planned upgrade process](TEST_OPTIMIZATION_PLAN.md#12-prepare-repeatable-upstream-release-upgrades): compare accepted/candidate CLI behavior, scope native regressions and repeat applicable certification. |
 | Fusion/dbt v2 certification | Separate assessment planned; no certified Fusion oracle. | Map versioned CLI surfaces, adapters and evidence gaps before proposing [bounded certification tasks](TEST_OPTIMIZATION_PLAN.md#13-assess-the-fusion-replacement-boundary). |
 
+Core's free-form model deprecation date parsing is also an
+[observed follow-up](https://github.com/sabino/dxt/issues/237); current metadata
+evidence covers common ISO forms and their state/cache behavior.
+
 Authored Python execution is outside the initial SQL scope. Static Python
 resource support does not create a remaining execution obligation.
 

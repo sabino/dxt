@@ -138,6 +138,11 @@ and public artifacts. [Profile comparisons](../tests/test_usability_postgres_pro
 use a dedicated database, actual password authentication and worker sessions.
 Configured connection retries remain an observed follow-up.
 
+Model deprecation metadata supports the tested ISO date/datetime forms,
+local-timezone normalization and serialized macro values. Core also accepts
+free-form dates such as `January 2, 2099`; native parsing of those forms remains
+an [observed follow-up](https://github.com/sabino/dxt/issues/237).
+
 Executed data-test helpers/publication, inherited test metadata, invocation-wide
 `warn_once`, stock main responses and microbatch custom-materialization/hooks
 have focused Core certificates. Runtime path/null publication,
