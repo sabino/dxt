@@ -63,6 +63,7 @@ The batch preserves the pinned Core/platform contract and all existing gates.
 | `fix/state-resource-comparisons` | #226 | `state.zig`, model metadata/types/properties/version/manifest/cache owners as required, state CLI fixtures | Model reference metadata and semantic resource comparisons; one writer |
 | `fix/postgres-profile-compatibility` | #227, #228 | Profile/native PostgreSQL/adapter session policy, incremental strategy owners, new focused fixture files | Profile/session changes first, custom strategies second; one writer |
 | `fix/native-publication-recovery` | #229, #230 | `workflow.zig`, workflow fixtures, `cross_database.zig` native publication tests | Committed apply reconciliation first, unique publication files second; one writer |
+| `fix/workflow-postgres-identity` | #238 | `workflow.zig`, workflow fixtures | Follows the completed publication branch; preserves actual legacy default-prefix identity and binds effective roles |
 | `fix/dbt-state-compatibility` | #225 | This plan, support evidence and PR convergence | Supervisor integrates scoped worker PRs; owns expensive final validation |
 
 Every editing owner uses an isolated worktree. State, execution and publication
@@ -80,6 +81,10 @@ or mechanical extraction are part of these behavior changes.
 Workers do not spawn child agents. Issues carry the reference and slice plans;
 Project synchronization is unavailable through the current GitHub CLI access,
 so issues and PRs retain coordination state without claiming a board update.
+
+Execution and metadata regression suites run against frozen snapshots so
+their source cannot change during collection or native fixture builds. A
+read-only metadata validation helper reports to the integration owner.
 
 Acceptance requires native positive/negative regressions, actual pinned Core
 CLI comparisons for compatibility changes, and real DuckDB/PostgreSQL fault
@@ -104,11 +109,21 @@ one matching validated event. Ambiguous historical events fail visibly rather
 than selecting an arbitrary run. This is an additive native metadata field,
 with no dbt artifact schema or warehouse table migration.
 
-Status: source maps and issue scopes are ready; implementation and focused
-checks are in progress. The three observed follow-ups are tracked as
+Integration reproduced a PostgreSQL workflow upgrade blocker: changing the
+implicit application attribution default stranded old gateway/model hashes,
+while an effective role change was absent from those hashes. #238 canonicalizes
+only the exact native default prefix for workflow identity and binds nonempty
+effective role separately. Preserve all other conninfo bytes and explicit
+policy changes; cross-database profile identities remain unchanged. The
+publication owner switches to a new isolated branch after its prior clean PR.
+
+Status: the five initial fixes have scoped PRs and passing new boundary cases;
+combined regressions are running. The integration identity blocker above is
+being repaired before final publication. Observed follow-ups are tracked as
 [#231](https://github.com/sabino/dxt/issues/231),
 [#232](https://github.com/sabino/dxt/issues/232) and
-[#233](https://github.com/sabino/dxt/issues/233); none is claimed complete.
+[#233](https://github.com/sabino/dxt/issues/233) and
+[#237](https://github.com/sabino/dxt/issues/237); none is claimed complete.
 The native test optimization queue below remains deferred and is not part of
 this product-correctness batch.
 
