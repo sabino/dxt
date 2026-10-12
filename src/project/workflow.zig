@@ -122,8 +122,7 @@ const Context = struct {
         try validateName(options.from_environment);
         if (common.select != null or common.selector != null or common.exclude != null or common.defer_enabled) return error.WorkflowPartialSelection;
         const db_path = try duckdb.databasePath(runtime.allocator, target_dir, graph);
-        const identity = if (std.mem.eql(u8, graph.adapter_type, "postgres")) graph.connection_info orelse "" else db_path;
-        const gateway = try hash(runtime.allocator, &.{ graph.adapter_type, identity });
+        const gateway = if (std.mem.eql(u8, graph.adapter_type, "postgres")) try postgresGateway(runtime.allocator, graph.connection_info orelse "", values.get(graph.target_context, "role")) else try hash(runtime.allocator, &.{ graph.adapter_type, db_path });
         var context: Context = .{ .runtime = runtime, .graph = graph, .common = common, .options = options, .target_dir = target_dir, .db_path = db_path, .gateway = gateway };
         const config_path = options.config_file orelse try std.fs.path.join(runtime.allocator, &.{ common.project_dir, ".dxt", "workflow.yml" });
         const text = std.Io.Dir.cwd().readFileAlloc(runtime.io, config_path, runtime.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
@@ -880,6 +879,21 @@ fn appendMacros(a: std.mem.Allocator, graph: *const types.Graph, ids: []const []
     };
 }
 
+fn postgresGateway(a: std.mem.Allocator, conninfo: []const u8, role: ?std.json.Value) ![]const u8 {
+    var effective_role: ?[]const u8 = null;
+    if (role) |value| if (value != .null) {
+        if (value != .string) return error.InvalidPostgresProfile;
+        if (value.string.len != 0) effective_role = value.string;
+    };
+    // Only the native generated default attribution changed. Retain the
+    // historical gateway and model fingerprints without normalizing any
+    // explicit connection/session policy or accepting alternate hashes.
+    const prefix = "connect_timeout=10 application_name=dbt ";
+    const identity = if (effective_role == null and std.mem.startsWith(u8, conninfo, prefix)) try std.fmt.allocPrint(a, "connect_timeout=10 application_name=dxt {s}", .{conninfo[prefix.len..]}) else conninfo;
+    defer if (identity.ptr != conninfo.ptr) a.free(identity);
+    return if (effective_role) |configured| hash(a, &.{ "postgres", identity, "role", configured }) else hash(a, &.{ "postgres", identity });
+}
+
 fn planHash(a: std.mem.Allocator, input: Plan) ![]const u8 {
     var plan = input;
     plan.plan_id = "";
@@ -1106,4 +1120,50 @@ test "workflow legacy environment and revision metadata default committed apply 
     const history = try appendHistory(arena.allocator(), current);
     try std.testing.expectEqual(@as(usize, 2), history.len);
     try std.testing.expectEqual(@as(usize, 2), history[1].committed_apply.?.built);
+}
+
+test "workflow PostgreSQL gateway preserves only the historical generated default attribution" {
+    const a = std.testing.allocator;
+    const legacy = "connect_timeout=10 application_name=dxt host='fixture.example' port='5432' dbname='warehouse' user='fixture' ";
+    const current = "connect_timeout=10 application_name=dbt host='fixture.example' port='5432' dbname='warehouse' user='fixture' ";
+    // Independent length-prefixed SHA256 of the historical native emitter.
+    const expected = "1f2e19be2c9cb5b7e144df81448fac9251e32b6094c6af362f07401dd2d25751";
+    for ([_][]const u8{ legacy, current }) |conninfo| {
+        const actual = try postgresGateway(a, conninfo, null);
+        defer a.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+    for ([_]?std.json.Value{ .null, .{ .string = "" } }) |role| {
+        const actual = try postgresGateway(a, current, role);
+        defer a.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+    for ([_][]const u8{
+        "connect_timeout=10 application_name=dbt host='other.example' port='5432' dbname='warehouse' user='fixture' ",
+        "connect_timeout=10 application_name=dbt host='fixture.example' port='5432' dbname='other' user='fixture' ",
+        "connect_timeout=10 application_name=dbt host='fixture.example' port='5432' dbname='warehouse' user='fixture' password='synthetic' ",
+        "connect_timeout=10 application_name=dbt host='fixture.example' port='5432' dbname='warehouse' user='fixture' options='-c search_path=public' ",
+        "connect_timeout=10 host='fixture.example' port='5432' dbname='warehouse' user='fixture' application_name='dbt' ",
+    }) |conninfo| {
+        const actual = try postgresGateway(a, conninfo, null);
+        defer a.free(actual);
+        try std.testing.expect(!eq(expected, actual));
+    }
+}
+
+test "workflow PostgreSQL gateway binds effective role and rejects invalid policy values" {
+    const a = std.testing.allocator;
+    const conninfo = "connect_timeout=10 application_name=dbt user='fixture' ";
+    const baseline = try postgresGateway(a, conninfo, null);
+    defer a.free(baseline);
+    const first = try postgresGateway(a, conninfo, .{ .string = "role_a" });
+    defer a.free(first);
+    const second = try postgresGateway(a, conninfo, .{ .string = "role_b" });
+    defer a.free(second);
+    try std.testing.expect(!eq(baseline, first));
+    try std.testing.expect(!eq(first, second));
+    const legacy = try postgresGateway(a, "connect_timeout=10 application_name=dxt user='fixture' ", null);
+    defer a.free(legacy);
+    try std.testing.expect(!eq(legacy, first));
+    try std.testing.expectError(error.InvalidPostgresProfile, postgresGateway(a, conninfo, .{ .integer = 1 }));
 }
