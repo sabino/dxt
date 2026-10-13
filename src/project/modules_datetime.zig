@@ -365,6 +365,23 @@ test "native datetime module constructors preserve civil values and fixed clock"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    // fromtimestamp uses the host timezone. Give its independent UTC fixtures
+    // an explicit process timezone and restore the caller's state afterwards.
+    const test_c = @cImport({
+        @cInclude("stdlib.h");
+        @cInclude("time.h");
+    });
+    const inherited_timezone = if (test_c.getenv("TZ")) |zone| try a.dupeZ(u8, std.mem.span(zone)) else null;
+    try std.testing.expectEqual(@as(c_int, 0), test_c.setenv("TZ", "UTC", 1));
+    test_c.tzset();
+    defer {
+        if (inherited_timezone) |zone| {
+            _ = test_c.setenv("TZ", zone, 1);
+        } else {
+            _ = test_c.unsetenv("TZ");
+        }
+        test_c.tzset();
+    }
     try std.testing.expect(abstract_zone.isAbstract((try call(a, "modules.datetime.tzinfo", &.{ .{ .value = .{ .integer = "1" } }, .{ .name = "extra", .value = .none } }, .{})).?));
     const dt = (try call(a, "modules.datetime.datetime", &.{ .{ .value = .{ .integer = "2024" } }, .{ .value = .{ .integer = "2" } }, .{ .value = .{ .integer = "29" } }, .{ .value = .{ .integer = "13" } } }, .{})).?;
     try std.testing.expectEqualStrings("2024-02-29 13:00:00", try dt.text(a));

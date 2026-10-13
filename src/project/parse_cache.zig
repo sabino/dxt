@@ -236,7 +236,7 @@ pub fn save(runtime: types.Runtime, state: State, graph: *const types.Graph) !vo
     const write_path = state.write_path orelse state.path;
     const parent = std.fs.path.dirname(write_path) orelse ".";
     try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
-    const temporary = try std.fmt.allocPrint(a, "{s}.{d}.{x}.tmp", .{ write_path, std.os.linux.getpid(), @intFromPtr(graph) });
+    const temporary = try std.fmt.allocPrint(a, "{s}.{d}.{x}.tmp", .{ write_path, @import("platform.zig").processId(), @intFromPtr(graph) });
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = temporary, .data = bytes });
     defer std.Io.Dir.cwd().deleteFile(runtime.io, temporary) catch {};
     try std.Io.Dir.cwd().rename(temporary, std.Io.Dir.cwd(), write_path, runtime.io);

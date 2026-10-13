@@ -915,7 +915,7 @@ fn hash(a: std.mem.Allocator, parts: []const []const u8) ![]const u8 {
 
 fn atomicWrite(runtime: types.Runtime, path: []const u8, text: []const u8) !void {
     if (std.fs.path.dirname(path)) |parent| try std.Io.Dir.cwd().createDirPath(runtime.io, parent);
-    const temporary = try std.fmt.allocPrint(runtime.allocator, "{s}.{d}.{d}.tmp", .{ path, std.os.linux.getpid(), std.Io.Clock.real.now(runtime.io).nanoseconds });
+    const temporary = try std.fmt.allocPrint(runtime.allocator, "{s}.{d}.{d}.tmp", .{ path, @import("platform.zig").processId(), std.Io.Clock.real.now(runtime.io).nanoseconds });
     defer std.Io.Dir.cwd().deleteFile(runtime.io, temporary) catch {};
     try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = temporary, .data = text });
     try std.Io.Dir.rename(std.Io.Dir.cwd(), temporary, std.Io.Dir.cwd(), path, runtime.io);

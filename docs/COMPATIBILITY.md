@@ -26,6 +26,13 @@ certification. Python is used for developer oracles and fixtures. Product
 loading, compilation, planning, artifacts and execution run through the native
 binary; no installed Python/dbt runtime is required.
 
+macOS source builds are experimental and have separate local validation in
+[PLAN.md](../PLAN.md). The standalone macOS build statically bundles DuckDB and
+the PostgreSQL client/TLS libraries; this is a distribution option, not a new
+Core acceptance certificate. Intel macOS and Windows execution are not certified.
+Native `strftime` retains the host libc behavior as CPython does; for example,
+glibc's `%04Y` width extension is not implemented by Darwin and renders `4Y`.
+
 Fusion/dbt v2 is not a certified oracle target.
 Typed SQL analysis and lineage have dxt evidence, without Fusion CLI or editor certification.
 The [planned assessment](TEST_OPTIMIZATION_PLAN.md#13-assess-the-fusion-replacement-boundary)
@@ -151,8 +158,11 @@ also have focused evidence. Native providers cover their declared APIs; general 
 standard-library execution remains outside the product contract.
 
 DuckDB requires a native library; PostgreSQL requires libpq and a reachable
-database. Library overrides are `DXT_DUCKDB_LIBRARY` and
+database in the ordinary dynamic build. The standalone macOS build embeds both
+native drivers; the PostgreSQL server remains user-provided. Library overrides are `DXT_DUCKDB_LIBRARY` and
 `DXT_POSTGRES_LIBRARY`. `DXT_DUCKDB_BACKEND=native` requires the native driver.
+Bundled DuckDB overrides require the exact embedded version; other library
+versions need a dynamic build and separate compatibility evidence.
 The retained `adapter.queryJson` API can execute autocommit queries through the
 DuckDB CLI. Database-backed commands use held native sessions and reject forced
 `DXT_DUCKDB_BACKEND=cli`. [Driver conformance](../tests/test_usability_adapters.py)

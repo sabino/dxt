@@ -11,6 +11,11 @@ schemas. This is a prerelease and is **not production ready**. Consult
 
 ## Start With A Local Project
 
+For the experimental standalone macOS build, run `./scripts/build_macos.sh`.
+It bundles DuckDB and the PostgreSQL client/TLS libraries. See
+[Getting started](GETTING_STARTED.md) for SDK/build requirements and the
+difference between build-time packages and runtime dependencies.
+
 Install a release binary as described in [Releases](RELEASES.md), or build from
 the repository with Zig **0.16.0**:
 
@@ -19,7 +24,8 @@ zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/dxt version
 ```
 
-Make the binary available as `dxt` on PATH. Install DuckDB's native library;
+Make the binary available as `dxt` on PATH. For the ordinary dynamic build,
+install DuckDB's native library;
 library discovery can find `libduckdb.so`, or `DXT_DUCKDB_LIBRARY` can select the
 library you installed. These examples require native execution:
 
@@ -40,8 +46,10 @@ command writes the documentation application, catalog and an offline
 
 An existing project can keep its dbt files and profile layout. Pass
 `--project-dir`, `--profiles-dir`, `--profile` and `--target` when needed. For
-PostgreSQL, use a dbt `type: postgres` output and install libpq; the native driver
-loads `libpq.so.5`, or an explicit `DXT_POSTGRES_LIBRARY`. Credentials can remain
+PostgreSQL, use a dbt `type: postgres` output and your existing server. The
+standalone macOS binary includes libpq; the dynamic build loads `libpq.so.5`
+on Linux or `libpq.5.dylib`/`libpq.dylib` on macOS, or an explicit
+`DXT_POSTGRES_LIBRARY`. Credentials can remain
 in the profile's `env_var()` expressions. Neither adapter needs an installed
 Python/dbt runtime to execute through dxt.
 
@@ -180,6 +188,7 @@ installation requirements.
 | Native build/helpers | `zig build`, `zig build test` |
 | Focused native CLI/Core evidence | `pytest -q tests/test_usability_<area>.py` |
 | Complete integrated fixtures | `pytest -q` with pinned developer dependencies and native database/browser fixtures |
+| Distributed canonical CI | Eight isolated module shards per actual architecture, with [complete case audit](TEST_OPTIMIZATION_PLAN.md#isolated-ci-distribution) |
 | Complete artifact schemas | `python scripts/validate_dbt_artifacts.py <artifact.json>` |
 | Product/runtime boundary | `python scripts/check_runtime_boundary.py` |
 | Public-safe repository | `python scripts/check_public_safety.py` |

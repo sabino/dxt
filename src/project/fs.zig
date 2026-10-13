@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("types.zig");
 
 const Runtime = types.Runtime;
@@ -8,15 +9,13 @@ pub fn modelNameFromPath(allocator: std.mem.Allocator, path: []const u8) ![]cons
 }
 
 pub fn discoverPythonFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, files: *std.ArrayList([]const u8)) !void {
-    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
-    defer closeLinuxFd(fd);
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
+    var reader = try DirectoryReader.open(runtime, absolute_dir);
+    defer reader.close(runtime.io);
+    while (try reader.next(runtime.io)) |entry| {
         if (entry.name.len == 0 or entry.name[0] == '.' or isIgnoredResourceDirectory(entry.name)) continue;
         const child_abs = try pathJoin(runtime.allocator, &.{ absolute_dir, entry.name });
         const child_rel = try pathJoin(runtime.allocator, &.{ relative_dir, entry.name });
-        if (entry.kind == .directory or (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs))) {
+        if (entry.kind == .directory or (entry.kind == .unknown and try pathIsDirectory(runtime, child_abs))) {
             try discoverPythonFiles(runtime, child_abs, child_rel, files);
         } else if ((entry.kind == .file or entry.kind == .unknown) and std.mem.endsWith(u8, entry.name, ".py")) try files.append(runtime.allocator, child_rel);
     }
@@ -43,18 +42,15 @@ pub fn pathJoin(allocator: std.mem.Allocator, parts: []const []const u8) ![]cons
 }
 
 pub fn discoverProjectFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8), md_files: *std.ArrayList([]const u8)) !void {
-    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
-    defer closeLinuxFd(fd);
-
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
+    var reader = try DirectoryReader.open(runtime, absolute_dir);
+    defer reader.close(runtime.io);
+    while (try reader.next(runtime.io)) |entry| {
         if (entry.name.len == 0 or entry.name[0] == '.') continue;
         if (isIgnoredResourceDirectory(entry.name)) continue;
 
         const child_abs = try std.fs.path.join(runtime.allocator, &.{ absolute_dir, entry.name });
         const child_rel = try std.fs.path.join(runtime.allocator, &.{ relative_dir, entry.name });
-        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
+        if (entry.kind == .unknown and try pathIsDirectory(runtime, child_abs)) {
             try discoverProjectFiles(runtime, child_abs, child_rel, sql_files, yaml_files, md_files);
             continue;
         }
@@ -75,17 +71,14 @@ pub fn discoverProjectFiles(runtime: Runtime, absolute_dir: []const u8, relative
 }
 
 pub fn discoverSeedFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, seed_files: *std.ArrayList([]const u8)) !void {
-    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
-    defer closeLinuxFd(fd);
-
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
+    var reader = try DirectoryReader.open(runtime, absolute_dir);
+    defer reader.close(runtime.io);
+    while (try reader.next(runtime.io)) |entry| {
         if (entry.name.len == 0 or entry.name[0] == '.') continue;
 
         const child_abs = try std.fs.path.join(runtime.allocator, &.{ absolute_dir, entry.name });
         const child_rel = try std.fs.path.join(runtime.allocator, &.{ relative_dir, entry.name });
-        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
+        if (entry.kind == .unknown and try pathIsDirectory(runtime, child_abs)) {
             try discoverSeedFiles(runtime, child_abs, child_rel, seed_files);
             continue;
         }
@@ -102,18 +95,15 @@ pub fn discoverSeedFiles(runtime: Runtime, absolute_dir: []const u8, relative_di
 }
 
 fn discoverSqlFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8)) !void {
-    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
-    defer closeLinuxFd(fd);
-
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
+    var reader = try DirectoryReader.open(runtime, absolute_dir);
+    defer reader.close(runtime.io);
+    while (try reader.next(runtime.io)) |entry| {
         if (entry.name.len == 0 or entry.name[0] == '.') continue;
         if (isIgnoredResourceDirectory(entry.name)) continue;
 
         const child_abs = try std.fs.path.join(runtime.allocator, &.{ absolute_dir, entry.name });
         const child_rel = try std.fs.path.join(runtime.allocator, &.{ relative_dir, entry.name });
-        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
+        if (entry.kind == .unknown and try pathIsDirectory(runtime, child_abs)) {
             try discoverSqlFiles(runtime, child_abs, child_rel, sql_files);
             continue;
         }
@@ -130,18 +120,15 @@ fn discoverSqlFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []
 }
 
 pub fn discoverMacroFiles(runtime: Runtime, absolute_dir: []const u8, relative_dir: []const u8, sql_files: *std.ArrayList([]const u8), yaml_files: *std.ArrayList([]const u8)) !void {
-    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
-    defer closeLinuxFd(fd);
-
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
+    var reader = try DirectoryReader.open(runtime, absolute_dir);
+    defer reader.close(runtime.io);
+    while (try reader.next(runtime.io)) |entry| {
         if (entry.name.len == 0 or entry.name[0] == '.') continue;
         if (isIgnoredResourceDirectory(entry.name)) continue;
 
         const child_abs = try std.fs.path.join(runtime.allocator, &.{ absolute_dir, entry.name });
         const child_rel = try std.fs.path.join(runtime.allocator, &.{ relative_dir, entry.name });
-        if (entry.kind == .unknown and try linuxPathIsDirectory(runtime.allocator, child_abs)) {
+        if (entry.kind == .unknown and try pathIsDirectory(runtime, child_abs)) {
             try discoverMacroFiles(runtime, child_abs, child_rel, sql_files, yaml_files);
             continue;
         }
@@ -160,18 +147,15 @@ pub fn discoverMacroFiles(runtime: Runtime, absolute_dir: []const u8, relative_d
 }
 
 pub fn discoverChildDirectories(runtime: Runtime, absolute_dir: []const u8, directories: *std.ArrayList([]const u8)) !void {
-    const fd = try openLinuxDirectory(runtime.allocator, absolute_dir);
-    defer closeLinuxFd(fd);
-
-    var buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-    var iter = LinuxDirReadState{ .fd = fd, .buffer = &buffer };
-    while (try nextLinuxDirectoryEntry(&iter)) |entry| {
+    var reader = try DirectoryReader.open(runtime, absolute_dir);
+    defer reader.close(runtime.io);
+    while (try reader.next(runtime.io)) |entry| {
         if (entry.name.len == 0 or entry.name[0] == '.') continue;
         const child_abs = try std.fs.path.join(runtime.allocator, &.{ absolute_dir, entry.name });
         const is_dir = if (entry.kind == .directory)
             true
         else if (entry.kind == .unknown or entry.kind == .sym_link)
-            try linuxPathIsDirectory(runtime.allocator, child_abs)
+            try pathIsDirectory(runtime, child_abs)
         else
             false;
         if (is_dir) {
@@ -181,9 +165,66 @@ pub fn discoverChildDirectories(runtime: Runtime, absolute_dir: []const u8, dire
 }
 
 const LinuxDirEntry = struct {
-    name: [:0]const u8,
+    name: []const u8,
     kind: std.Io.File.Kind,
 };
+
+// Keep the established synchronous Linux reader for mounts that report
+// DT_UNKNOWN. Other hosts must use their own directory ABI through std.Io.
+const DirectoryReader = if (builtin.os.tag == .linux) LinuxDirectoryReader else PortableDirectoryReader;
+
+const LinuxDirectoryReader = struct {
+    fd: std.os.linux.fd_t,
+    buffer: [8192]u8 align(@alignOf(std.os.linux.dirent64)) = undefined,
+    index: usize = 0,
+    end: usize = 0,
+
+    fn open(runtime: Runtime, path: []const u8) !LinuxDirectoryReader {
+        return .{ .fd = try openLinuxDirectory(runtime.allocator, path) };
+    }
+
+    fn close(self: *LinuxDirectoryReader, _: std.Io) void {
+        closeLinuxFd(self.fd);
+    }
+
+    fn next(self: *LinuxDirectoryReader, _: std.Io) !?LinuxDirEntry {
+        var state: LinuxDirReadState = .{ .fd = self.fd, .buffer = &self.buffer, .index = self.index, .end = self.end };
+        defer {
+            self.index = state.index;
+            self.end = state.end;
+        }
+        return nextLinuxDirectoryEntry(&state);
+    }
+};
+
+const PortableDirectoryReader = struct {
+    directory: std.Io.Dir,
+    iterator: std.Io.Dir.Iterator,
+
+    fn open(runtime: Runtime, path: []const u8) !PortableDirectoryReader {
+        const directory = try std.Io.Dir.cwd().openDir(runtime.io, path, .{ .iterate = true });
+        return .{ .directory = directory, .iterator = directory.iterate() };
+    }
+
+    fn close(self: *PortableDirectoryReader, io: std.Io) void {
+        self.directory.close(io);
+    }
+
+    fn next(self: *PortableDirectoryReader, io: std.Io) !?LinuxDirEntry {
+        const entry = (try self.iterator.next(io)) orelse return null;
+        return .{ .name = entry.name, .kind = entry.kind };
+    }
+};
+
+fn pathIsDirectory(runtime: Runtime, path: []const u8) !bool {
+    if (builtin.os.tag == .linux) return linuxPathIsDirectory(runtime.allocator, path);
+    const directory = std.Io.Dir.cwd().openDir(runtime.io, path, .{ .iterate = true }) catch |err| switch (err) {
+        error.NotDir, error.FileNotFound => return false,
+        else => return err,
+    };
+    directory.close(runtime.io);
+    return true;
+}
 
 const LinuxDirReadState = struct {
     fd: std.os.linux.fd_t,
@@ -270,6 +311,50 @@ test "resource discovery skips generated and package directories" {
     try std.testing.expect(isIgnoredResourceDirectory(".zig-cache"));
     try std.testing.expect(isIgnoredResourceDirectory("zig-out"));
     try std.testing.expect(!isIgnoredResourceDirectory("models"));
+}
+
+test "host directory discovery loads nested resources and preserves ignored paths" {
+    const io = std.testing.io;
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const runtime: Runtime = .{ .allocator = a, .io = io };
+    const paths = [_][]const u8{
+        "models/base.sql",          "models/schema.yml",  "models/docs.md",         "models/python.py",
+        "macros/format.sql",        "macros/schema.yaml", "seeds/input.csv",        "target/ignored.sql",
+        "dbt_packages/ignored.sql", "zig-out/ignored.py", ".zig-cache/ignored.sql", ".hidden/ignored.sql",
+    };
+    for (paths) |path| {
+        try fixture.dir.createDirPath(io, std.fs.path.dirname(path).?);
+        try fixture.dir.writeFile(io, .{ .sub_path = path, .data = "fixture" });
+    }
+    if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
+        try fixture.dir.symLink(io, "models", "linked_models", .{ .is_directory = true });
+        try fixture.dir.symLink(io, "models/base.sql", "linked.sql", .{});
+    }
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buffer[0..try fixture.dir.realPath(io, &path_buffer)];
+    var sql: std.ArrayList([]const u8) = .empty;
+    var yaml: std.ArrayList([]const u8) = .empty;
+    var docs: std.ArrayList([]const u8) = .empty;
+    try discoverProjectFiles(runtime, root, "", &sql, &yaml, &docs);
+    try std.testing.expectEqual(@as(usize, 2), sql.items.len);
+    try std.testing.expectEqual(@as(usize, 2), yaml.items.len);
+    try std.testing.expectEqualStrings("models/docs.md", docs.items[0]);
+    var python: std.ArrayList([]const u8) = .empty;
+    try discoverPythonFiles(runtime, root, "", &python);
+    try std.testing.expectEqual(@as(usize, 1), python.items.len);
+    try std.testing.expectEqualStrings("models/python.py", python.items[0]);
+    var seeds: std.ArrayList([]const u8) = .empty;
+    try discoverSeedFiles(runtime, root, "", &seeds);
+    try std.testing.expectEqual(@as(usize, 1), seeds.items.len);
+    try std.testing.expectEqualStrings("seeds/input.csv", seeds.items[0]);
+    try std.testing.expect(try pathIsDirectory(runtime, root));
+    try std.testing.expect(!try pathIsDirectory(runtime, try pathJoin(a, &.{ root, "models/base.sql" })));
+    try std.testing.expect(!try pathIsDirectory(runtime, try pathJoin(a, &.{ root, "missing" })));
+    try std.testing.expectError(error.FileNotFound, DirectoryReader.open(runtime, try pathJoin(a, &.{ root, "missing" })));
 }
 
 test "resourceNameFromPath strips the requested suffix from the basename only" {

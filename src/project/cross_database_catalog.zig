@@ -134,11 +134,11 @@ pub fn epoch(io: std.Io) u64 {
 pub fn version(allocator: std.mem.Allocator, session: *adapter.Session) ![]const u8 {
     return switch (session.*) {
         .duckdb => |*connection| blk: {
-            const get = connection.pool.library.?.dyn.lookup(*const fn () callconv(.c) [*:0]const u8, "duckdb_library_version") orelse return error.NativeDuckDbAbiMismatch;
+            const get = connection.pool.library.?.lookup(*const fn () callconv(.c) [*:0]const u8, "duckdb_library_version") orelse return error.NativeDuckDbAbiMismatch;
             break :blk allocator.dupe(u8, std.mem.span(get()));
         },
         .postgres => |*connection| blk: {
-            const get = connection.library.lookup(*const fn (?*anyopaque) callconv(.c) c_int, "PQserverVersion") orelse return error.NativePostgresAbiMismatch;
+            const get = connection.lookup(*const fn (?*anyopaque) callconv(.c) c_int, "PQserverVersion") orelse return error.NativePostgresAbiMismatch;
             const value = get(connection.handle);
             break :blk std.fmt.allocPrint(allocator, "{d}.{d}", .{ @divTrunc(value, 10000), @mod(value, 10000) });
         },

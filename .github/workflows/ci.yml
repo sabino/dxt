@@ -145,22 +145,9 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe --summary all
 
   integration:
-    name: ${{ matrix.context }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.python-version == '3.11' && 60 || 360 }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - python-version: "3.11"
-            runner: ubuntu-24.04
-            context: test py3.11
-          - python-version: "3.12"
-            runner: ubuntu-24.04
-            context: test py3.12
-          - python-version: "3.12"
-            runner: ubuntu-24.04-arm
-            context: test py3.12 aarch64
+    name: test py3.11
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -169,7 +156,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
           cache: pip
           cache-dependency-path: |
             requirements-dev.txt
@@ -189,29 +176,145 @@ jobs:
           python --version
 
       - name: Run developer and native CLI checks
-        if: matrix.python-version == '3.11'
         run: >-
           python -m pytest -q
-          --junitxml=reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
+          --junitxml=reports/pytest-3.11-${{ runner.arch }}.xml
           tests/test_agent_os_orchestrator.py tests/test_github_agent_os.py
           tests/test_public_safety.py tests/test_runtime_boundary_metadata.py
+          tests/test_compatibility_shards.py tests/test_pytest_report.py
           tests/test_artifact_json.py tests/test_cli.py tests/test_usability_adapters.py
-
-      # Native Jinja semantics follow CPython 3.12. The complete Core oracle
-      # remains mandatory on both architectures under that reference runtime.
-      - name: Run the complete canonical Core compatibility suite
-        if: matrix.python-version == '3.12'
-        run: |
-          python -m pytest -q --junitxml=reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
-          python scripts/check_pytest_report.py reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
 
       - name: Upload pytest report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-${{ matrix.python-version }}-${{ runner.arch }}
-          path: reports/pytest-${{ matrix.python-version }}-${{ runner.arch }}.xml
+          name: pytest-3.11-${{ runner.arch }}
+          path: reports/pytest-3.11-${{ runner.arch }}.xml
           if-no-files-found: ignore
+
+  canonical-plan:
+    name: collect complete canonical suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-oracle.txt
+      - name: Install collection dependencies
+        run: python -m pip install -r requirements-dev.txt -r requirements-oracle.txt
+      - name: Collect every case and balance complete modules
+        env:
+          PYTHONPATH: scripts
+        run: >-
+          python -m pytest -q --collect-only -p pytest_shard
+          --dxt-shard-count=8 --dxt-shard-timings=tests/compatibility_timings.json
+          --dxt-shard-output=reports/canonical-plan.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canonical-plan
+          path: reports/canonical-plan.json
+          if-no-files-found: error
+
+  canonical-shards:
+    name: Core ${{ matrix.platform.arch }} shard ${{ matrix.shard }}
+    needs: canonical-plan
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 60
+    strategy:
+      # Collect all failure evidence, rather than canceling sibling shards.
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        platform:
+          - runner: ubuntu-24.04
+            arch: X64
+          - runner: ubuntu-24.04-arm
+            arch: ARM64
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-oracle.txt
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install compatibility fixtures
+        uses: ./.github/actions/setup-oracles
+      - uses: actions/download-artifact@v4
+        with:
+          name: canonical-plan
+          path: reports
+      # Core globals and module fixtures remain isolated on separate runners.
+      # No cases or upstream CLI assertions are removed by this distribution.
+      - name: Execute the assigned canonical modules
+        env:
+          PYTHONPATH: scripts
+        run: >-
+          python -m pytest -q -p pytest_shard
+          --dxt-shard-plan=reports/canonical-plan.json
+          --dxt-shard-index=${{ matrix.shard }}
+          --dxt-shard-output=reports/shards/shard-${{ matrix.shard }}.json
+          --junitxml=reports/shards/shard-${{ matrix.shard }}.xml
+      - name: Upload execution identities and JUnit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canonical-${{ matrix.platform.arch }}-${{ matrix.shard }}
+          path: reports/shards/
+          if-no-files-found: error
+
+  canonical-acceptance:
+    # Stable branch-protection contexts now certify the union of every shard.
+    name: ${{ matrix.context }}
+    if: always()
+    needs: [canonical-plan, canonical-shards]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: X64
+            machine: x86_64
+            context: test py3.12
+          - arch: ARM64
+            machine: aarch64
+            context: test py3.12 aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require successful collection and all workers
+        env:
+          COLLECTION_RESULT: ${{ needs.canonical-plan.result }}
+          SHARDS_RESULT: ${{ needs.canonical-shards.result }}
+        run: |
+          test "$COLLECTION_RESULT" = success
+          test "$SHARDS_RESULT" = success
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: canonical-plan
+          path: reports
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: canonical-${{ matrix.arch }}-*
+          path: reports/shards
+          merge-multiple: true
+      - name: Require every collected case to pass exactly once on the actual architecture
+        run: >-
+          python scripts/check_compatibility_shards.py --plan reports/canonical-plan.json
+          --reports-dir reports/shards --expected-machine ${{ matrix.machine }}
 
   performance:
     name: cold and warm native performance

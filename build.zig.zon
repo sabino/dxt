@@ -3,11 +3,32 @@
     .version = "0.0.0",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0x11fc3590db5d95, // Changing this has security and trust implications.
+    .dependencies = .{
+        .duckdb_macos_arm64 = .{
+            .url = "https://github.com/duckdb/duckdb/releases/download/v1.4.2/static-libs-osx-arm64.zip",
+            .hash = "N-V-__8AAKPLTAV6LyvS-XfXQkYv878S8auVbwkavkt71x1l",
+            .lazy = true,
+        },
+        .duckdb_macos_x86_64 = .{
+            .url = "https://github.com/duckdb/duckdb/releases/download/v1.4.2/static-libs-osx-amd64.zip",
+            .hash = "N-V-__8AAMMBnQVvh8prfoRJQ5V_2jY9wH8bGz5VOpH-5kJu",
+            .lazy = true,
+        },
+        .libpq = .{
+            .url = "https://github.com/allyourcodebase/libpq/archive/ad2f65b2d91311f6d85c329e7551d902f67c31b5.tar.gz",
+            .hash = "libpq-5.18.4-QME6aQMZAQCNCrTsnm7YktHJMqXvBdJ5MyXHWrdT-GR6",
+            .lazy = true,
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         ".zigversion",
         "src",
+        "scripts/macos_archive.zig",
+        "scripts/build_macos.sh",
+        "docs/GETTING_STARTED.md",
+        "docs/licenses/native-drivers",
         "vendor/libyaml",
         "vendor/libpg_query",
         "vendor/tree-sitter",

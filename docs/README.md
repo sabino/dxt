@@ -11,6 +11,7 @@ initial scope and its operational boundaries.
 
 | Page | Use it for |
 | --- | --- |
+| [Getting started](GETTING_STARTED.md) | Platform requirements, standalone macOS builds and the first SQL project. |
 | [Primer](PRIMER.md) | Product goals, runtime rules, development loop, and high-level flow. |
 | [Compatibility Matrix](COMPATIBILITY.md) | Implemented behavior, pinned references and explicit differences. |
 | [Replacement Roadmap](DBT_REPLACEMENT_ROADMAP.md) | Delivered scope, production rollout work and later implementation. |
@@ -24,7 +25,7 @@ initial scope and its operational boundaries.
 | [Performance](PERFORMANCE.md) | Correctness checks, cold/warm measurements and regression budgets. |
 | [Changelog](../CHANGELOG.md) | What has changed so far. |
 | [ExecPlan](../PLAN.md) | Active milestone plan and implementation sequencing. |
-| [Native test optimization](TEST_OPTIMIZATION_PLAN.md) | Planned Agent OS tasks for native coverage, actual CLI checks, parallel integration, upstream upgrades and Fusion assessment. |
+| [Native test optimization](TEST_OPTIMIZATION_PLAN.md) | Isolated parallel CI and case audits; later native coverage, upstream upgrade and Fusion assessment tasks. |
 
 ## Documentation Rules
 

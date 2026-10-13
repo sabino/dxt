@@ -60,7 +60,7 @@ const Api = struct {
 };
 
 const Library = struct {
-    dyn: std.DynLib,
+    dyn: ?std.DynLib,
     api: Api,
 
     fn open(path: []const u8) !Library {
@@ -75,6 +75,24 @@ const Library = struct {
             }
         }
         return .{ .dyn = dyn, .api = api };
+    }
+
+    fn linked() Library {
+        var api: Api = undefined;
+        inline for (std.meta.fields(Api)) |field| {
+            if (comptime std.mem.eql(u8, field.name, "vectors")) {
+                api.vectors = vectors.Api.linked();
+            } else {
+                @field(api, field.name) = @extern(field.type, .{ .name = field.name });
+            }
+        }
+        return .{ .dyn = null, .api = api };
+    }
+
+    pub fn lookup(self: *Library, comptime T: type, comptime name: [:0]const u8) ?T {
+        if (self.dyn) |*dynamic| return dynamic.lookup(T, name);
+        if (comptime @import("runtime_options").bundle_duckdb) return @extern(T, .{ .name = name });
+        return null;
     }
 };
 
@@ -150,7 +168,7 @@ pub const Pool = struct {
                 config_values.deinit(self.allocator, &database.profile);
                 self.allocator.destroy(database);
             }
-            library.dyn.close();
+            if (library.dyn) |*dynamic| dynamic.close();
         }
         self.databases.deinit(self.allocator);
         self.databases = .empty;
@@ -183,11 +201,26 @@ pub const Pool = struct {
                 if (!std.mem.eql(u8, backend, "native") and !std.mem.eql(u8, backend, "auto")) return error.InvalidDuckDbBackend;
             }
             if (environment.get("DXT_DUCKDB_LIBRARY")) |path| {
-                self.library = try Library.open(path);
+                var library = try Library.open(path);
+                errdefer if (library.dyn) |*dynamic| dynamic.close();
+                if (comptime @import("runtime_options").bundle_duckdb) {
+                    // Mach-O coalesces exported C++ weak symbols. Loading
+                    // another DuckDB version alongside the embedded one can
+                    // combine incompatible internal layouts despite C API ABI
+                    // compatibility. Reject it before opening any database.
+                    const loadedVersion = library.lookup(*const fn () callconv(.c) [*:0]const u8, "duckdb_library_version") orelse return error.NativeDuckDbAbiMismatch;
+                    const bundledVersion = @extern(*const fn () callconv(.c) [*:0]const u8, .{ .name = "duckdb_library_version" });
+                    try requireSameDriverVersion(std.mem.span(bundledVersion()), std.mem.span(loadedVersion()));
+                }
+                self.library = library;
                 return true;
             }
         }
-        for ([_][]const u8{ "libduckdb.so", "libduckdb.dylib", "duckdb.dll" }) |candidate| {
+        if (comptime @import("runtime_options").bundle_duckdb) {
+            self.library = Library.linked();
+            return true;
+        }
+        for (@import("native_libraries.zig").candidates(.duckdb, @import("builtin").os.tag)) |candidate| {
             self.library = Library.open(candidate) catch |err| switch (err) {
                 error.NativeDuckDbLibraryNotFound => continue,
                 else => return err,
@@ -754,6 +787,27 @@ fn duckdbKind(type_id: u32) result.Kind {
         17, 27 => .text,
         else => .other,
     };
+}
+
+fn requireSameDriverVersion(bundled: []const u8, override: []const u8) !void {
+    if (!std.mem.eql(u8, bundled, override)) return error.NativeDuckDbVersionConflict;
+}
+
+test "bundled DuckDB version policy rejects mixed minor and patch versions" {
+    try requireSameDriverVersion("v1.4.2", "v1.4.2");
+    try std.testing.expectError(error.NativeDuckDbVersionConflict, requireSameDriverVersion("v1.4.2", "v1.5.6"));
+    try std.testing.expectError(error.NativeDuckDbVersionConflict, requireSameDriverVersion("v1.4.2", "v1.4.3"));
+}
+
+test "DuckDB explicit missing driver override remains authoritative in bundled builds" {
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("DXT_DUCKDB_BACKEND", "native");
+    try environment.put("DXT_DUCKDB_LIBRARY", "dxt-test-driver-does-not-exist");
+    var pool = Pool.init(std.testing.allocator, std.testing.io, &environment);
+    defer pool.deinit();
+    try std.testing.expectError(error.NativeDuckDbLibraryNotFound, pool.available());
+    try std.testing.expectError(error.NativeDuckDbLibraryNotFound, pool.available());
 }
 
 test "DuckDB raw diagnostic capture bounds complete secrets before publication and remains safe under OOM" {
