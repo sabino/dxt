@@ -5,6 +5,7 @@ reference, while the dxt-specific commands deliberately have their own schema.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -340,3 +341,213 @@ def test_portable_csv_seed_types_values_and_quoting_match_pinned_core(tmp_path, 
     actual_types = query(driver, root, duckdb_environment, "duckdb", f"describe {physical}")
     expected_types = query(driver, root, duckdb_environment, "duckdb", "describe oracle.raw")
     assert [(row["column_name"], row["column_type"]) for row in actual_types] == [(row["column_name"], row["column_type"]) for row in expected_types]
+
+
+@pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
+@pytest.mark.parametrize("blocked_artifact", ["run.json", "environment.json"])
+def test_committed_apply_repairs_failed_publication_without_reexecution(
+    tmp_path, request, driver, adapter, blocked_artifact,
+):
+    environment = request.getfixturevalue("duckdb_environment") if adapter == "duckdb" else request.getfixturevalue("postgres_fixture")[1]
+    server = None if adapter == "duckdb" else request.getfixturevalue("postgres_fixture")[0]
+    root = project(tmp_path, adapter, server)
+    query(driver, root, environment, adapter,
+          "drop schema if exists _dxt cascade; drop schema if exists analytics cascade; "
+          "drop schema if exists analytics_dxt_data cascade; "
+          "drop schema if exists raw cascade; create schema raw; "
+          "create table raw.input(id integer); insert into raw.input values (7); "
+          "create table raw.audit_input(id integer)")
+    (root / "models/a.sql").write_text("select * from raw.input\n")
+    (root / "tests").mkdir()
+    (root / "tests/audit.sql").write_text("select * from raw.audit_input\n")
+    plan = invoke(root, environment, "plan")
+    artifact_dir = root / "target/dxt"
+    blocked = artifact_dir / blocked_artifact
+    blocked.mkdir()
+    failed = invoke(root, environment, "apply", ok=False)
+    assert failed.returncode != 0
+    assert query(driver, root, environment, adapter, "select * from analytics.b") == [{"id": 7}]
+    events = query(driver, root, environment, adapter,
+                   "select payload from _dxt.workflow_events where action='apply'")
+    assert len(events) == 1
+    committed = json.loads(events[0]["payload"])
+    assert committed["status"] == "success" and committed["built"] == 2
+    assert len(committed["audits"]) == 1 and committed["audits"][0]["status"] == "pass"
+    if blocked_artifact == "environment.json":
+        # A later publication failure must not relabel committed execution.
+        assert json.loads((artifact_dir / "run.json").read_text()) == committed
+    blocked.rmdir()
+    (artifact_dir / "run.json").write_text('{"status":"stale"}')
+    (artifact_dir / "environment.json").unlink(missing_ok=True)
+    # Both model and audit execution now fail if replayed. Publication recovery
+    # must use the warehouse event instead of executing either statement.
+    query(driver, root, environment, adapter, "drop table raw.input; drop table raw.audit_input")
+    repaired = invoke(root, environment, "apply")
+    assert repaired["status"] == "already_applied"
+    assert json.loads((artifact_dir / "run.json").read_text()) == committed
+    restored = json.loads((artifact_dir / "environment.json").read_text())
+    assert restored["plan_id"] == plan["plan_id"]
+    assert restored["name"] == "prod"
+    assert query(driver, root, environment, adapter, "select * from analytics.b") == [{"id": 7}]
+    assert query(driver, root, environment, adapter,
+                 "select payload from _dxt.workflow_events where action='apply'") == events
+    # Legacy environment payloads recover through their single committed event.
+    legacy = dict(restored)
+    legacy.pop("committed_apply")
+    payload = json.dumps(legacy).replace("'", "''")
+    query(driver, root, environment, adapter,
+          f"update _dxt.workflow_environments set payload='{payload}' where name='prod'")
+    (artifact_dir / "run.json").unlink()
+    assert invoke(root, environment, "apply")["status"] == "already_applied"
+    assert json.loads((artifact_dir / "run.json").read_text()) == committed
+    # Ambiguous legacy evidence must fail visibly rather than invent a run.
+    query(driver, root, environment, adapter,
+          "insert into _dxt.workflow_events select * from _dxt.workflow_events where action='apply'")
+    (artifact_dir / "run.json").unlink()
+    ambiguous = invoke(root, environment, "apply", ok=False)
+    assert ambiguous.returncode != 0 and "WorkflowCommittedRunInvalid" in ambiguous.stderr
+    assert not (artifact_dir / "run.json").exists()
+
+
+@pytest.mark.parametrize("adapter", ["duckdb", "postgres"])
+def test_reapplied_plan_recovers_exact_committed_run_despite_duplicate_events(
+    tmp_path, request, driver, adapter,
+):
+    environment = request.getfixturevalue("duckdb_environment") if adapter == "duckdb" else request.getfixturevalue("postgres_fixture")[1]
+    server = None if adapter == "duckdb" else request.getfixturevalue("postgres_fixture")[0]
+    root = project(tmp_path, adapter, server)
+    query(driver, root, environment, adapter,
+          "drop schema if exists _dxt cascade; drop schema if exists analytics cascade; "
+          "drop schema if exists analytics_dxt_data cascade")
+    first_path = root / "first.json"
+    second_path = root / "second.json"
+    first = invoke(root, environment, "plan", "--plan", first_path)
+    first_run = invoke(root, environment, "apply", "--plan", first_path)
+    (root / "models/a.sql").write_text("select 2 as id\n")
+    second = invoke(root, environment, "plan", "--plan", second_path)
+    second_run = invoke(root, environment, "apply", "--plan", second_path)
+    assert second_run["built"] == 2
+    invoke(root, environment, "rollback")
+    assert json.loads((root / "target/dxt/environment.json").read_text())["committed_apply"] == first_run
+    assert invoke(root, environment, "apply", "--plan", first_path)["status"] == "already_applied"
+    assert json.loads((root / "target/dxt/run.json").read_text()) == first_run
+    assert first["plan_id"] != second["plan_id"]
+    reapplied = invoke(root, environment, "apply", "--plan", second_path)
+    assert reapplied["built"] == 0 and reapplied["reused"] == 2
+    events_before = query(driver, root, environment, adapter,
+                          "select payload from _dxt.workflow_events where action='apply'")
+    assert sum(json.loads(row["payload"])["plan_id"] == second["plan_id"] for row in events_before) == 2
+    (root / "target/dxt/run.json").unlink()
+    (root / "target/dxt/environment.json").unlink()
+    assert invoke(root, environment, "apply", "--plan", second_path)["status"] == "already_applied"
+    assert json.loads((root / "target/dxt/run.json").read_text()) == reapplied
+    assert json.loads((root / "target/dxt/environment.json").read_text())["committed_apply"] == reapplied
+    assert query(driver, root, environment, adapter,
+                 "select payload from _dxt.workflow_events where action='apply'") == events_before
+
+
+def legacy_postgres_workflow_plan(server):
+    """Historical native emitter/Builder/plan hash at 7db2ad1, independently rebuilt.
+
+    This shape and its own_hash/version/plan_id were checked against the actual
+    old-prefix binary. No candidate gateway or fingerprint is substituted.
+    """
+    def digest(parts):
+        result = hashlib.sha256()
+        for part in parts:
+            value = part.encode()
+            result.update(len(value).to_bytes(8, "little"))
+            result.update(value)
+        return result.hexdigest()
+
+    info = server.get_postmaster_info()
+    credentials = {"host": str(info.socket_dir), "port": info.port,
+                   "dbname": "postgres", "user": "postgres"}
+    conninfo = "connect_timeout=10 application_name=dxt "
+    for key in ("host", "port", "dbname", "user"):
+        value = str(credentials[key]).replace("\\", "\\\\").replace("'", "\\'")
+        conninfo += f"{key}='{value}' "
+    gateway = digest(["postgres", conninfo])
+    identifier = "model.workflow.a"
+    raw = "select 1 as id"
+    own_hash = digest([identifier, raw, "view", gateway, "null", raw, "", "day", "0"])
+    version = digest([own_hash])
+    relation = f'"postgres"."analytics_dxt_data"."m_{digest([identifier])[:12]}_{version[:32]}"'
+    model = {"unique_id": identifier, "name": "a", "resource_type": "model",
+             "schema": "analytics", "alias": "a", "own_hash": own_hash,
+             "version": version, "relation": relation, "sql": raw,
+             "ephemeral": False, "time_column": None, "interval_unit": "day",
+             "lookback": 0, "processed": [], "depends_on": []}
+    plan = {"schema_version": "dxt/plan/v1", "project": "workflow", "adapter": "postgres",
+            "gateway": gateway, "environment": "prod", "base_plan_id": None,
+            "plan_id": "", "requested": None, "restate": False,
+            "models": [{"model": model, "change": "added", "missing_intervals": [], "physical_exists": False}],
+            "removed": [], "audits": []}
+    plan["plan_id"] = digest([json.dumps(plan, separators=(",", ":"))])
+    return plan
+
+
+def test_historical_postgres_default_identity_preserves_pending_and_committed_plans(
+    tmp_path, postgres_fixture, driver,
+):
+    server, environment = postgres_fixture
+    root = project(tmp_path, "postgres", server)
+    (root / "models/b.sql").unlink()
+    query(driver, root, environment, "postgres",
+          "drop schema if exists _dxt cascade; drop schema if exists analytics cascade; "
+          "drop schema if exists analytics_dxt_data cascade")
+    legacy = legacy_postgres_workflow_plan(server)
+    saved = root / "legacy-plan.json"
+    saved.write_text(json.dumps(legacy))
+    # A still-pending actual historical plan must pass fresh model revalidation.
+    applied = invoke(root, environment, "apply", "--plan", saved)
+    assert applied["built"] == 1
+    state = invoke(root, environment, "environment")
+    assert state["gateway"] == legacy["gateway"]
+    assert state["models"][0] == legacy["models"][0]["model"]
+    # Restore the old environment shape; its committed event is the independent
+    # recovery evidence used before committed_apply metadata existed.
+    state.pop("committed_apply")
+    payload = json.dumps(state).replace("'", "''")
+    query(driver, root, environment, "postgres",
+          f"update _dxt.workflow_environments set payload='{payload}' where name='prod'")
+    (root / "target/dxt/run.json").unlink()
+    assert invoke(root, environment, "apply", "--plan", saved)["status"] == "already_applied"
+    assert json.loads((root / "target/dxt/run.json").read_text()) == applied
+    planned = invoke(root, environment, "plan")
+    assert planned["gateway"] == legacy["gateway"]
+    assert planned["models"][0]["change"] == "unchanged"
+    assert planned["models"][0]["model"]["version"] == legacy["models"][0]["model"]["version"]
+    assert query(driver, root, environment, "postgres", "select count(*) as events from _dxt.workflow_events") == [{"events": 1}]
+
+
+def test_postgres_workflow_identity_rejects_effective_role_and_connection_policy_changes(
+    tmp_path, postgres_fixture, driver,
+):
+    server, environment = postgres_fixture
+    root = project(tmp_path, "postgres", server)
+    (root / "models/b.sql").unlink()
+    query(driver, root, environment, "postgres",
+          "drop schema if exists _dxt cascade; drop schema if exists analytics cascade; "
+          "drop schema if exists analytics_dxt_data cascade; "
+          "drop role if exists workflow_identity_a; drop role if exists workflow_identity_b; "
+          "create role workflow_identity_a superuser; create role workflow_identity_b superuser")
+    base = (root / "profiles.yml").read_text()
+    saved = root / "legacy-plan.json"
+    saved.write_text(json.dumps(legacy_postgres_workflow_plan(server)))
+    for policy in ("role: workflow_identity_a", "search_path: public", "application_name: dbt",
+                   "password: synthetic", "connect_timeout: 11"):
+        (root / "profiles.yml").write_text(base + "      " + policy + "\n")
+        rejected = invoke(root, environment, "apply", "--plan", saved, ok=False)
+        assert rejected.returncode == 2 and "WorkflowGatewayMismatch" in rejected.stderr
+    (root / "profiles.yml").write_text(base + "      role: workflow_identity_a\n")
+    first = invoke(root, environment, "plan")
+    invoke(root, environment, "apply")
+    (root / "profiles.yml").write_text(base + "      role: workflow_identity_b\n")
+    rejected = invoke(root, environment, "apply", ok=False)
+    assert rejected.returncode == 2 and "WorkflowGatewayMismatch" in rejected.stderr
+    rejected = invoke(root, environment, "environment", ok=False)
+    assert rejected.returncode == 2 and "WorkflowGatewayMismatch" in rejected.stderr
+    other = invoke(root, environment, "plan", "--environment", "other", "--from-environment", "other")
+    assert first["gateway"] != other["gateway"]
+    assert first["models"][0]["model"]["version"] != other["models"][0]["model"]["version"]

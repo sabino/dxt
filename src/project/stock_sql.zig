@@ -37,7 +37,7 @@ pub fn incremental(allocator: std.mem.Allocator, graph: *const types.Graph, node
         .{ .key = "incremental_predicates", .value = .{ .list = predicates } },
     }) };
     const strategy = node.incremental.strategy orelse "default";
-    const macro_name = try std.fmt.allocPrint(allocator, "get_incremental_{s}_sql", .{if (std.mem.eql(u8, strategy, "delete+insert")) "delete_insert" else strategy});
+    const macro_name = try @import("incremental_config.zig").strategyMacroName(allocator, strategy);
     const value = try compiler.renderMacroForNode(allocator, graph, node, macro_name, &.{.{ .value = args }});
     if (value != .string) return error.InvalidMaterializationResult;
     return value.string;
@@ -85,5 +85,17 @@ test "stock SQL uses authored helpers and passes typed relation and column argum
     const target = context.RelationDef{ .schema = "main", .identifier = "m", .relation_type = "table" };
     const stage = context.RelationDef{ .identifier = "m__dbt_tmp", .relation_type = "table" };
     try std.testing.expectEqualStrings("create table \"main\".\"m\" as (select 9 as id)", try create(a, &graph, &node, target, "select 9 as id", false));
+    try std.testing.expectEqualStrings("insert into \"main\".\"m\" select \"id\" from \"m__dbt_tmp\"", try incremental(a, &graph, &node, target, stage, &.{.{ .column_name = "id", .data_type = "INTEGER" }}));
+}
+
+test "stock incremental SQL resolves authored strategies with Core plus normalization" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var graph = types.Graph{ .allocator = a, .project_name = "fixture" };
+    try graph.macros.append(a, .{ .package_name = "fixture", .unique_id = "macro.fixture.get_incremental_custom_append_sql", .name = "get_incremental_custom_append_sql", .path = "custom.sql", .original_file_path = "macros/custom.sql", .macro_sql = "{% macro get_incremental_custom_append_sql(arg_dict) %}{{ return('insert into ' ~ arg_dict.target_relation.render() ~ ' select ' ~ arg_dict.dest_columns[0].quoted ~ ' from ' ~ arg_dict.temp_relation.render()) }}{% endmacro %}" });
+    const node = types.Node{ .package_name = "fixture", .unique_id = "model.fixture.m", .name = "m", .path = "m.sql", .original_file_path = "models/m.sql", .raw_code = "", .incremental = .{ .strategy = "custom+append" } };
+    const target = context.RelationDef{ .schema = "main", .identifier = "m", .relation_type = "table" };
+    const stage = context.RelationDef{ .identifier = "m__dbt_tmp", .relation_type = "table" };
     try std.testing.expectEqualStrings("insert into \"main\".\"m\" select \"id\" from \"m__dbt_tmp\"", try incremental(a, &graph, &node, target, stage, &.{.{ .column_name = "id", .data_type = "INTEGER" }}));
 }

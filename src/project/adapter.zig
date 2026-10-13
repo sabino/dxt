@@ -194,6 +194,10 @@ pub fn openSession(runtime: Runtime, graph: *const Graph, db_path: []const u8) !
         hash.update(db_path);
         hash.update("\x00");
         if (graph.connection_info) |conninfo| hash.update(conninfo);
+        if (@import("config_value.zig").get(graph.target_context, "role")) |role| if (role == .string) {
+            hash.update("\x00role\x00");
+            hash.update(role.string);
+        };
         var digest: [32]u8 = undefined;
         hash.final(&digest);
         const context = @import("relation_cache.zig").Context{ .cache = cache, .scope = std.fmt.bytesToHex(digest, .lower) };
@@ -215,7 +219,14 @@ fn openSessionUncached(runtime: Runtime, graph: *const Graph, db_path: []const u
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
         const conninfo = graph.connection_info orelse return error.MissingPostgresConnection;
         const library = if (runtime.environment) |environment| environment.get("DXT_POSTGRES_LIBRARY") else null;
-        return .{ .postgres = try PostgresConnection.openWithEnvironment(runtime.allocator, conninfo, library, runtime.environment) };
+        var connection = try PostgresConnection.openWithEnvironment(runtime.allocator, conninfo, library, runtime.environment);
+        errdefer connection.deinit();
+        const role = @import("config_value.zig").get(graph.target_context, "role");
+        if (role) |value| if (value != .null) {
+            if (value != .string) return error.InvalidPostgresProfile;
+            if (value.string.len != 0) try connection.setRole(value.string);
+        };
+        return .{ .postgres = connection };
     }
     return error.UnsupportedAdapterExecution;
 }

@@ -51,6 +51,89 @@ separate implementation and certification.
 
 ## Active Work
 
+### SQL Compatibility And Native Publication Hardening
+
+The current authorized implementation batch is tracked by
+[#225](https://github.com/sabino/dxt/issues/225). Read-only inspection found
+concrete gaps in delivered behavior despite the completed initial track ladder.
+The batch preserves the pinned Core/platform contract and all existing gates.
+
+| Owner branch | Issues | Exclusive scope | Sequencing |
+| --- | --- | --- | --- |
+| `fix/state-resource-comparisons` | #226 | State, properties, model versions, manifest, macro context and state CLI fixtures | Model reference metadata and semantic resource comparisons; one writer |
+| `fix/postgres-profile-compatibility` | #227, #228 | Profile/native PostgreSQL/adapter session policy, incremental strategy owners, new focused fixture files | Profile/session changes first, custom strategies second; one writer |
+| `fix/native-publication-recovery` | #229, #230 | `workflow.zig`, workflow fixtures, `cross_database.zig` native publication tests | Committed apply reconciliation first, unique publication files second; one writer |
+| `fix/workflow-postgres-identity` | #238 | `workflow.zig`, workflow fixtures | Follows the completed publication branch; preserves actual legacy default-prefix identity and binds effective roles |
+| `fix/dbt-state-compatibility` | #225 | This plan, support evidence and PR convergence | Supervisor integrates scoped worker PRs; owns expensive final validation |
+
+Every editing owner uses an isolated worktree. State, execution and publication
+owners have disjoint product modules and fixture files. The actual authored-date
+oracle revealed that dxt omitted this field before comparison, requiring the
+narrow parser/artifact extension. Existing node properties and generic cache
+encoding carry the field without changing shared types or cache codecs.
+Preserve Core's separate unversioned/versioned date scopes, normalization,
+validation and warm-cache invalidation. Execution alone changes the facade
+`src/project.zig`, removing the two eager strategy validations in concurrent
+preflight and compilation for #228. No mechanical extraction is part of these
+behavior changes.
+Workers do not spawn child agents. Issues carry the reference and slice plans;
+Project synchronization is unavailable through the current GitHub CLI access,
+so issues and PRs retain coordination state without claiming a board update.
+
+Execution and metadata regression suites run against frozen snapshots so
+their source cannot change during collection or native fixture builds. A
+read-only metadata validation helper reports to the integration owner.
+
+Acceptance requires native positive/negative regressions, actual pinned Core
+CLI comparisons for compatibility changes, and real DuckDB/PostgreSQL fault
+fixtures for workflow recovery. The integration owner runs the native suite,
+focused state/semantic/profile/incremental/workflow/cross-database checks,
+runtime-boundary/public-safety scans and applicable CI. Scoped implementation
+PRs converge into one user-facing integration PR targeting `main`.
+
+Stop for unsupported adapters, authored Python execution, upstream upgrades,
+Fusion certification, unrelated compiler changes or an owner overlap. Preserve
+Core's intentionally ignored metric/query fields and new-resource state rules.
+Retries after committed workflow publication failures must not replay database
+writes, audits or events. Temporary publication cleanup must remove only the
+current writer's file. Contract-breaking state diagnostics, connection retries
+and catalog retention remain separate observed follow-ups.
+
+Workflow recovery stores an optional successful `committed_apply` result in
+the environment and its revision history within the original transaction.
+Rollback restores that evidence; promotion clears source-environment apply
+identity. Older payloads default to no embedded evidence and may recover from
+one matching validated event. Ambiguous historical events fail visibly rather
+than selecting an arbitrary run. This is an additive native metadata field,
+with no dbt artifact schema or warehouse table migration.
+
+Integration reproduced a PostgreSQL workflow upgrade blocker: changing the
+implicit application attribution default stranded old gateway/model hashes,
+while an effective role change was absent from those hashes. #238 canonicalizes
+only the exact native default prefix for workflow identity and binds nonempty
+effective role separately. Preserve all other conninfo bytes and explicit
+policy changes; cross-database profile identities remain unchanged. The
+publication owner switches to a new isolated branch after its prior clean PR.
+
+Status: all six fixes are integrated locally through scoped PRs. The final
+runtime candidate passed 836 native tests, Debug/ReleaseSafe builds and all
+24 workflow cases. Frozen integration snapshots passed 276 execution cases
+and 336 metadata/state cases; the final workflow recheck overlaps 22 of those
+execution cases. All reported local cases passed without skips or xfails.
+Formatting, runtime-boundary and public-safety gates passed. The consolidated
+PR targets `main`; its complete CI/platform matrix remains the merge gate.
+No release or production-readiness claim changes.
+
+Observed follow-ups are tracked as
+[#231](https://github.com/sabino/dxt/issues/231),
+[#232](https://github.com/sabino/dxt/issues/232) and
+[#233](https://github.com/sabino/dxt/issues/233) and
+[#237](https://github.com/sabino/dxt/issues/237); none is claimed complete.
+The native test optimization queue below remains deferred and is not part of
+this product-correctness batch.
+
+### Deferred Native Test Optimization
+
 Prepare the native test optimization queue in
 [Native test optimization](docs/TEST_OPTIMIZATION_PLAN.md).
 Implementation is deferred to a later Agent OS session.
@@ -148,11 +231,14 @@ The test suite, product runtime and CI scheduling remain unmodified by this plan
 
 ## Next Roadmap Work
 
-The initial functional ladder has no known unimplemented track. The next
-developer work reduces validation cost through native tests and scoped integration
-execution. Repeatable candidate verification, real-project rollout evidence and
-operational hardening remain release priorities. Record observed failures as
-bounded slices with owners, source grounding and relevant tests.
+The initial functional ladder has no known unimplemented track. Individual
+behaviors still need source-grounded gap checks: the active hardening batch and
+its follow-ups above address observed omissions within delivered tracks.
+The deferred developer queue reduces validation cost through native tests and
+scoped integration execution. Repeatable candidate verification, real-project
+rollout evidence and operational hardening remain release priorities. Record
+observed failures as bounded slices with owners, source grounding and relevant
+tests.
 
 Later scope includes additional native adapters, remote DuckDB integrations,
 non-Linux portability and updated upstream version contracts. Each needs a

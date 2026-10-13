@@ -108,6 +108,7 @@ pub fn model(allocator: std.mem.Allocator, graph: *const types.Graph, node: *con
         .{ .key = "columns", .value = .{ .object = if (columns.items.len == 0) try expression.allocateEntries(allocator, 0) else try columns.toOwnedSlice(allocator) } },
         .{ .key = "tags", .value = .{ .list = tags } },
         .{ .key = "version", .value = try values.toExpression(allocator, node.version) },
+        .{ .key = "deprecation_date", .value = try values.toExpression(allocator, values.get(node.properties, "deprecation_date") orelse .null) },
         .{ .key = "latest_version", .value = try values.toExpression(allocator, node.latest_version) },
         .{ .key = "batch", .value = batch_value },
     }) };

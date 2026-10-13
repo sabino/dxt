@@ -29,6 +29,7 @@ acceptance. This is a track count, not a count of individually certified feature
 | Area | Status | Next work |
 | --- | --- | --- |
 | Initial Linux SQL scope | Delivered and accepted for the recorded source. | Preserve the complete native, compatibility, public-project, archive and performance gates as changes land. |
+| Observed compatibility and operational gaps | The completed track ladder does not cover every behavior within a track. | The [current hardening batch](https://github.com/sabino/dxt/issues/225) covers state comparisons, PostgreSQL profile/session handling, authored incremental strategies and native publication recovery. Follow-ups cover [contract-breaking state diagnostics](https://github.com/sabino/dxt/issues/231), [PostgreSQL connection retries](https://github.com/sabino/dxt/issues/232) and [catalog retention](https://github.com/sabino/dxt/issues/233); these remain unimplemented. |
 | Production rollout and operations | Project-specific validation remains. | Exercise representative workloads and warehouse privileges, establish monitoring and failure handling, and rehearse backup, rollback and recovery procedures. Measure concurrency, latency and movement budgets in the intended deployment. |
 | Release publication | Candidate-specific process. | Verify the exact source/version, tested archives, checksums and compatibility limits before publishing a release. Acceptance of a source does not publish a version automatically. |
 | Snowflake, BigQuery and Redshift | Planned; native drivers and conformance are not implemented. | Add adapter capabilities, native execution and actual warehouse contract tests before claiming support. |
@@ -37,6 +38,10 @@ acceptance. This is a track count, not a count of individually certified feature
 | Additional platforms | macOS and Windows are not supported release targets. | Port Linux-specific discovery, add native dependency packaging and run the complete suite and extracted archives on each actual platform. |
 | New upstream versions | Outside the pinned contract. | Follow the [planned upgrade process](TEST_OPTIMIZATION_PLAN.md#12-prepare-repeatable-upstream-release-upgrades): compare accepted/candidate CLI behavior, scope native regressions and repeat applicable certification. |
 | Fusion/dbt v2 certification | Separate assessment planned; no certified Fusion oracle. | Map versioned CLI surfaces, adapters and evidence gaps before proposing [bounded certification tasks](TEST_OPTIMIZATION_PLAN.md#13-assess-the-fusion-replacement-boundary). |
+
+Core's free-form model deprecation date parsing is also an
+[observed follow-up](https://github.com/sabino/dxt/issues/237); current metadata
+evidence covers common ISO forms and their state/cache behavior.
 
 Authored Python execution is outside the initial SQL scope. Static Python
 resource support does not create a remaining execution obligation.

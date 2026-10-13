@@ -25,7 +25,7 @@ pub fn expand(allocator: std.mem.Allocator, item: std.json.Value) !std.ArrayList
         if (try equal(allocator, latest, v)) found_latest = true;
         var merged = try values.clone(allocator, item);
         errdefer values.deinit(allocator, &merged);
-        for ([_][]const u8{ "versions", "latest_version" }) |key| if (merged.object.fetchOrderedRemove(key)) |removed| {
+        for ([_][]const u8{ "versions", "latest_version", "deprecation_date" }) |key| if (merged.object.fetchOrderedRemove(key)) |removed| {
             allocator.free(removed.key);
             var removed_value = removed.value;
             values.deinit(allocator, &removed_value);
@@ -162,4 +162,19 @@ test "model versions expand latest and column inheritance and reject inconsisten
     try std.testing.expectEqualStrings("label", values.get(columns[1], "name").?.string);
     try values.put(allocator, &document.value, "latest_version", .{ .integer = 3 });
     try std.testing.expectError(error.InvalidModelVersion, expand(allocator, document.value));
+}
+
+test "version deprecation dates override rather than inherit parent dates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var parsed = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"name":"orders","deprecation_date":"2099-01-01","versions":[{"v":1},{"v":2,"deprecation_date":"2099-02-01"},{"v":3,"deprecation_date":null}]}
+    , .{});
+    defer parsed.deinit();
+    var expanded = try expand(a, parsed.value);
+    defer deinit(a, &expanded);
+    try std.testing.expect(values.get(expanded.items[0].item, "deprecation_date") == null);
+    try std.testing.expectEqualStrings("2099-02-01", values.get(expanded.items[1].item, "deprecation_date").?.string);
+    try std.testing.expect(values.get(expanded.items[2].item, "deprecation_date").? == .null);
 }

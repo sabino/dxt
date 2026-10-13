@@ -74,6 +74,14 @@ pub const Connection = struct {
         return .{ .allocator = allocator, .library = library, .api = api, .handle = handle, .cancellation = cancellation, .environment = environment };
     }
 
+    /// Apply the configured SQL role before handing a connection to any caller.
+    pub fn setRole(self: *Connection, role: []const u8) !void {
+        if (std.mem.indexOfScalar(u8, role, 0) != null) return error.InvalidPostgresProfile;
+        const sql = try std.fmt.allocPrint(self.allocator, "set role {s}", .{role});
+        defer self.allocator.free(sql);
+        try self.execute(sql);
+    }
+
     pub fn deinit(self: *Connection) void {
         if (self.cache_context) |*context| context.close();
         self.clearError();
