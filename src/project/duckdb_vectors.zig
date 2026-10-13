@@ -111,6 +111,12 @@ pub const Api = struct {
         inline for (std.meta.fields(Api)) |field| @field(api, field.name) = dyn.lookup(field.type, field.name ++ "\x00") orelse return error.NativeDuckDbAbiMismatch;
         return api;
     }
+
+    pub fn linked() Api {
+        var api: Api = undefined;
+        inline for (std.meta.fields(Api)) |field| @field(api, field.name) = @extern(field.type, .{ .name = field.name });
+        return api;
+    }
 };
 
 pub fn typeName(a: std.mem.Allocator, api: *const Api, logical: Handle) anyerror![]const u8 {

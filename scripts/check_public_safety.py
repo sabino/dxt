@@ -10,6 +10,7 @@ SKIP_DIRS = {
     ".git",
     ".pytest_cache",
     ".zig-cache",
+    "zig-pkg",
     "__pycache__",
     ".agent/runs",
     ".venv",

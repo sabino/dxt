@@ -69,17 +69,17 @@ pub const Reader = struct {
                 defer connection.api.duckdb_destroy_prepare(&prepared);
                 if (connection.api.duckdb_prepare_extracted_statement(connection.handle, extracted, 0, &prepared) != 0) return error.DuckDbExecutionFailed;
                 if (connection.api.duckdb_prepared_statement_type(prepared) != 1) return error.InvalidCrossDatabaseQuery;
-                const countColumns = connection.pool.library.?.dyn.lookup(*const fn (Handle) callconv(.c) u64, "duckdb_prepared_statement_column_count") orelse return error.NativeDuckDbAbiMismatch;
-                const columnName = connection.pool.library.?.dyn.lookup(*const fn (Handle, u64) callconv(.c) ?[*:0]u8, "duckdb_prepared_statement_column_name") orelse return error.NativeDuckDbAbiMismatch;
+                const countColumns = connection.pool.library.?.lookup(*const fn (Handle) callconv(.c) u64, "duckdb_prepared_statement_column_count") orelse return error.NativeDuckDbAbiMismatch;
+                const columnName = connection.pool.library.?.lookup(*const fn (Handle, u64) callconv(.c) ?[*:0]u8, "duckdb_prepared_statement_column_name") orelse return error.NativeDuckDbAbiMismatch;
                 const count_columns: usize = @intCast(countColumns(prepared));
                 self.columns = try allocator.alloc(Column, count_columns);
                 for (self.columns) |*column| column.* = .{ .name = "", .kind = .other, .type_sql = "" };
-                const logicalType = connection.pool.library.?.dyn.lookup(*const fn (Handle, u64) callconv(.c) Handle, "duckdb_prepared_statement_column_logical_type") orelse return error.NativeDuckDbAbiMismatch;
-                const typeId = connection.pool.library.?.dyn.lookup(*const fn (Handle) callconv(.c) c_uint, "duckdb_get_type_id") orelse return error.NativeDuckDbAbiMismatch;
-                const decimalWidth = connection.pool.library.?.dyn.lookup(*const fn (Handle) callconv(.c) u8, "duckdb_decimal_width") orelse return error.NativeDuckDbAbiMismatch;
-                const decimalScale = connection.pool.library.?.dyn.lookup(*const fn (Handle) callconv(.c) u8, "duckdb_decimal_scale") orelse return error.NativeDuckDbAbiMismatch;
-                const destroyType = connection.pool.library.?.dyn.lookup(*const fn (*Handle) callconv(.c) void, "duckdb_destroy_logical_type") orelse return error.NativeDuckDbAbiMismatch;
-                const getAlias = connection.pool.library.?.dyn.lookup(*const fn (Handle) callconv(.c) ?[*:0]u8, "duckdb_logical_type_get_alias") orelse return error.NativeDuckDbAbiMismatch;
+                const logicalType = connection.pool.library.?.lookup(*const fn (Handle, u64) callconv(.c) Handle, "duckdb_prepared_statement_column_logical_type") orelse return error.NativeDuckDbAbiMismatch;
+                const typeId = connection.pool.library.?.lookup(*const fn (Handle) callconv(.c) c_uint, "duckdb_get_type_id") orelse return error.NativeDuckDbAbiMismatch;
+                const decimalWidth = connection.pool.library.?.lookup(*const fn (Handle) callconv(.c) u8, "duckdb_decimal_width") orelse return error.NativeDuckDbAbiMismatch;
+                const decimalScale = connection.pool.library.?.lookup(*const fn (Handle) callconv(.c) u8, "duckdb_decimal_scale") orelse return error.NativeDuckDbAbiMismatch;
+                const destroyType = connection.pool.library.?.lookup(*const fn (*Handle) callconv(.c) void, "duckdb_destroy_logical_type") orelse return error.NativeDuckDbAbiMismatch;
+                const getAlias = connection.pool.library.?.lookup(*const fn (Handle) callconv(.c) ?[*:0]u8, "duckdb_logical_type_get_alias") orelse return error.NativeDuckDbAbiMismatch;
                 for (self.columns, 0..) |*column, index| {
                     var logical = logicalType(prepared, index);
                     defer destroyType(&logical);
@@ -97,9 +97,9 @@ pub const Reader = struct {
                 defer allocator.free(guarded_z);
                 var stream_prepared: Handle = null;
                 defer connection.api.duckdb_destroy_prepare(&stream_prepared);
-                const prepare = connection.pool.library.?.dyn.lookup(*const fn (Handle, [*:0]const u8, *Handle) callconv(.c) c_uint, "duckdb_prepare") orelse return error.NativeDuckDbAbiMismatch;
+                const prepare = connection.pool.library.?.lookup(*const fn (Handle, [*:0]const u8, *Handle) callconv(.c) c_uint, "duckdb_prepare") orelse return error.NativeDuckDbAbiMismatch;
                 if (prepare(connection.handle, guarded_z, &stream_prepared) != 0) return error.DuckDbExecutionFailed;
-                const executeStreaming = connection.pool.library.?.dyn.lookup(*const fn (Handle, *RawDuckResult) callconv(.c) c_uint, "duckdb_execute_prepared_streaming") orelse return error.NativeDuckDbAbiMismatch;
+                const executeStreaming = connection.pool.library.?.lookup(*const fn (Handle, *RawDuckResult) callconv(.c) c_uint, "duckdb_execute_prepared_streaming") orelse return error.NativeDuckDbAbiMismatch;
                 self.duck_active = true;
                 if (executeStreaming(stream_prepared, &self.duck_result) != 0) return self.duckError();
             },
@@ -110,7 +110,7 @@ pub const Reader = struct {
     pub fn deinit(self: *Reader) void {
         if (self.duck_active) {
             if (self.duck_chunk != null) {
-                const destroy = self.session.duckdb.pool.library.?.dyn.lookup(*const fn (*Handle) callconv(.c) void, "duckdb_destroy_data_chunk").?;
+                const destroy = self.session.duckdb.pool.library.?.lookup(*const fn (*Handle) callconv(.c) void, "duckdb_destroy_data_chunk").?;
                 destroy(&self.duck_chunk);
             }
             self.session.duckdb.api.duckdb_destroy_result(@ptrCast(&self.duck_result));
@@ -149,7 +149,7 @@ pub const Reader = struct {
 
     fn duckFetch(self: *Reader) !?adapter.QueryResult {
         const connection = &self.session.duckdb;
-        const dyn = &connection.pool.library.?.dyn;
+        const dyn = &connection.pool.library.?;
         const fetch = dyn.lookup(*const fn (RawDuckResult) callconv(.c) Handle, "duckdb_fetch_chunk") orelse return error.NativeDuckDbAbiMismatch;
         const size = dyn.lookup(*const fn (Handle) callconv(.c) u64, "duckdb_data_chunk_get_size") orelse return error.NativeDuckDbAbiMismatch;
         const destroy = dyn.lookup(*const fn (*Handle) callconv(.c) void, "duckdb_destroy_data_chunk") orelse return error.NativeDuckDbAbiMismatch;
@@ -231,7 +231,7 @@ pub const Reader = struct {
             if (!copy_rows) {
                 self.columns = try self.allocator.alloc(Column, count_columns);
                 for (self.columns) |*column| column.* = .{ .name = "", .kind = .other, .type_sql = "" };
-                const modifier = connection.library.lookup(*const fn (Handle, c_int) callconv(.c) c_int, "PQfmod") orelse return error.NativePostgresAbiMismatch;
+                const modifier = connection.lookup(*const fn (Handle, c_int) callconv(.c) c_int, "PQfmod") orelse return error.NativePostgresAbiMismatch;
                 for (self.columns, 0..) |*column, index| {
                     const mapped = pgType(self.allocator, connection.api.PQftype(raw, @intCast(index)), modifier(raw, @intCast(index))) catch |err| {
                         failed = err;

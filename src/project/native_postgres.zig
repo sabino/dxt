@@ -37,18 +37,52 @@ const Api = struct {
     PQfreeCancel: *const fn (Handle) callconv(.c) void,
 };
 
+const Provider = struct { library: ?std.DynLib, api: Api };
+
+fn loadProvider(path: ?[]const u8) !Provider {
+    if (comptime @import("runtime_options").bundle_postgres) {
+        if (path == null) {
+            var api: Api = undefined;
+            inline for (std.meta.fields(Api)) |field| @field(api, field.name) = @extern(field.type, .{ .name = field.name });
+            return .{ .library = null, .api = api };
+        }
+    }
+    if (path) |explicit| return loadDynamicProvider(explicit);
+    for (@import("native_libraries.zig").candidates(.postgres, @import("builtin").os.tag)) |candidate| {
+        return loadDynamicProvider(candidate) catch |err| switch (err) {
+            error.NativePostgresLibraryNotFound => continue,
+            else => return err,
+        };
+    }
+    return error.NativePostgresLibraryNotFound;
+}
+
+fn loadDynamicProvider(path: []const u8) !Provider {
+    var library = std.DynLib.open(path) catch return error.NativePostgresLibraryNotFound;
+    errdefer library.close();
+    var api: Api = undefined;
+    inline for (std.meta.fields(Api)) |field| @field(api, field.name) = library.lookup(field.type, field.name ++ "\x00") orelse return error.NativePostgresAbiMismatch;
+    return .{ .library = library, .api = api };
+}
+
 pub const Connection = struct {
     cursor_types: bool = false,
     cache_context: ?@import("relation_cache.zig").Context = null,
     cancellation_token: ?*const std.atomic.Value(bool) = null,
     allocator: std.mem.Allocator,
-    library: std.DynLib,
+    library: ?std.DynLib,
     api: Api,
     handle: Handle,
     cancellation: Handle,
     last_error: ?[]const u8 = null,
     last_error_position: ?usize = null,
     environment: ?*const std.process.Environ.Map = null,
+
+    pub fn lookup(self: *Connection, comptime T: type, comptime name: [:0]const u8) ?T {
+        if (self.library) |*library| return library.lookup(T, name);
+        if (comptime @import("runtime_options").bundle_postgres) return @extern(T, .{ .name = name });
+        return null;
+    }
 
     /// conninfo and raw server diagnostics stay in memory.
     pub fn open(allocator: std.mem.Allocator, conninfo: []const u8, library_path: ?[]const u8) !Connection {
@@ -57,12 +91,9 @@ pub const Connection = struct {
 
     pub fn openWithEnvironment(allocator: std.mem.Allocator, conninfo: []const u8, library_path: ?[]const u8, environment: ?*const std.process.Environ.Map) !Connection {
         if (std.mem.indexOfScalar(u8, conninfo, 0) != null) return error.InvalidPostgresConnection;
-        var library = std.DynLib.open(library_path orelse "libpq.so.5") catch return error.NativePostgresLibraryNotFound;
-        errdefer library.close();
-        var api: Api = undefined;
-        inline for (std.meta.fields(Api)) |field| {
-            @field(api, field.name) = library.lookup(field.type, field.name ++ "\x00") orelse return error.NativePostgresAbiMismatch;
-        }
+        var provider = try loadProvider(library_path);
+        errdefer if (provider.library) |*library| library.close();
+        const api = provider.api;
         const conninfo_z = try allocator.dupeZ(u8, conninfo);
         defer allocator.free(conninfo_z);
         const handle = api.PQconnectdb(conninfo_z);
@@ -71,7 +102,7 @@ pub const Connection = struct {
         if (api.PQstatus(handle) != 0) return error.PostgresConnectionFailed;
         _ = api.PQsetNoticeProcessor(handle, ignoreNotice, null);
         const cancellation = api.PQgetCancel(handle) orelse return error.PostgresCancellationFailed;
-        return .{ .allocator = allocator, .library = library, .api = api, .handle = handle, .cancellation = cancellation, .environment = environment };
+        return .{ .allocator = allocator, .library = provider.library, .api = api, .handle = handle, .cancellation = cancellation, .environment = environment };
     }
 
     /// Apply the configured SQL role before handing a connection to any caller.
@@ -87,7 +118,7 @@ pub const Connection = struct {
         self.clearError();
         self.api.PQfreeCancel(self.cancellation);
         self.api.PQfinish(self.handle);
-        self.library.close();
+        if (self.library) |*library| library.close();
         self.handle = null;
     }
 
@@ -311,6 +342,10 @@ pub fn classifySqlState(state: ?[]const u8) anyerror {
     if (std.mem.eql(u8, code, "40P01")) return error.PostgresDeadlockDetected;
     if (std.mem.eql(u8, code, "55P03")) return error.PostgresLockNotAvailable;
     return error.PostgresExecutionFailed;
+}
+
+test "PostgreSQL explicit missing driver override remains authoritative in bundled builds" {
+    try std.testing.expectError(error.NativePostgresLibraryNotFound, loadProvider("dxt-test-driver-does-not-exist"));
 }
 
 test "SQLSTATE retry classification requires a known server rejection" {
