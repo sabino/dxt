@@ -11,6 +11,7 @@ initial scope and its operational boundaries.
 
 | Page | Use it for |
 | --- | --- |
+| [Getting started](GETTING_STARTED.md) | Platform requirements, standalone macOS builds and the first SQL project. |
 | [Primer](PRIMER.md) | Product goals, runtime rules, development loop, and high-level flow. |
 | [Compatibility Matrix](COMPATIBILITY.md) | Implemented behavior, pinned references and explicit differences. |
 | [Replacement Roadmap](DBT_REPLACEMENT_ROADMAP.md) | Delivered scope, production rollout work and later implementation. |

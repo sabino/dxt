@@ -23,11 +23,14 @@ in the same release-preparation commit before using another version.
 Each target runs on its actual architecture. These are Linux GNU/libc binaries.
 macOS, Windows and other database adapters need separate portability and
 warehouse certification before publication as supported targets.
+macOS now has an experimental standalone source build described in
+[Getting started](GETTING_STARTED.md). Local source-build evidence does not add
+a certified macOS archive to this release matrix.
 
 ## Runtime Dependencies
 
 Install DuckDB's native library for DuckDB execution, and libpq for PostgreSQL.
-The libraries are external to the dxt archive. Native CI pins DuckDB **1.4.2**
+The libraries are external to the existing Linux dxt archive. Native CI pins DuckDB **1.4.2**
 and downloads architecture-specific CLI/library archives with SHA-256 checks.
 The CLI is used by developer fixtures and the retained autocommit query helper.
 Warehouse execution through held sessions requires the native library.
@@ -39,6 +42,15 @@ default; `DXT_POSTGRES_LIBRARY` selects an explicit library. Database/profile
 credentials are supplied by the project or environment and never bundled.
 Dependency transports use external `git`, `curl` and `tar` when fetching and
 extracting packages; install those tools for the corresponding `deps` workflows.
+
+The optional macOS `-Dbundle-drivers=true` build includes the DuckDB static
+libraries and the libpq client/LibreSSL TLS implementation. It does not require
+external driver libraries at runtime; macOS supplies its system/C++ runtimes.
+The PostgreSQL server, profile credentials and trust certificates are provided
+by the user. Build inputs are hash-pinned in `build.zig.zon` and remain build-time
+dependencies. Bundled distributions must retain the additional notices under
+`docs/licenses/native-drivers/` and certify their exact client/TLS/extension
+behavior before publication. No standalone macOS release is currently claimed.
 
 The YAML parser, PostgreSQL SQL grammar, static Python model syntax frontend,
 Unicode tables/names, PCRE2 regular-expression engine, pytz/IANA timezone data,

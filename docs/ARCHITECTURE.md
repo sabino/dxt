@@ -5,6 +5,8 @@ selection, SQL planning, warehouse execution and artifact writing run inside the
 binary. Python belongs to developer fixtures, upstream comparisons and release
 checks. DuckDB and PostgreSQL are the initial execution targets; support for
 another adapter requires its own driver and warehouse certification.
+The experimental macOS source build can statically bundle both database drivers;
+the PostgreSQL component is a client only, connecting to a user-provided server.
 The initial release executes SQL models. Python-authored models remain visible
 to discovery, parsing, selection and compilation; selecting them for execution
 fails before warehouse writes. Their authored code is never imported or run.
@@ -32,6 +34,12 @@ codes. `src/project.zig` remains the orchestration facade; focused modules own
 the parser, compiler, adapters, schedulers and artifact contracts.
 
 ## Project And Compiler Model
+
+`fs.zig` selects a host directory backend: the established synchronous Linux
+reader retains DT_UNKNOWN handling, while macOS uses the native `std.Io`
+directory ABI. `platform.zig` supplies process identity for atomic cache and
+workflow publication. Driver library names are isolated in `native_libraries.zig`.
+These boundaries do not themselves certify another platform.
 
 The loader reads project/profile configuration, SQL and Python model files,
 properties, seeds, snapshots, unit fixtures and installed packages into
@@ -106,6 +114,17 @@ columns, nullable cells, affected rows, transactions, cancellation and
 introspection. `native_duckdb.zig` dynamically loads DuckDB's C API and shares
 database handles across bounded workers. `native_postgres.zig` dynamically loads
 libpq and opens PostgreSQL sessions from the selected profile.
+`-Dbundle-drivers=true` on macOS links the official hash-pinned DuckDB **1.4.2**
+static archives, including their extensions, and builds the libpq **18.4** client
+plus LibreSSL **4.0.0** through pinned Zig packages. The same native function
+tables and cross-database symbol boundary serve dynamic and linked providers.
+The executable uses the OS-supplied system/C++ runtimes. Explicit driver
+overrides still win; ordinary builds retain dynamic driver discovery.
+Bundled DuckDB rejects a different-version override before opening a database:
+Mach-O weak C++ symbols can otherwise combine incompatible internal layouts.
+The accepted PostgreSQL grammar (17.7) and the client (18.4) retain independent
+pins and isolated private C helpers/keyword tables, including definitions that
+would otherwise silently interpose at static link time.
 
 Held cursor values and Agate query tables have separate representations.
 `duckdb_vectors.zig` copies length-delimited chunk/vector values before releasing
@@ -131,7 +150,7 @@ specific library; `DXT_DUCKDB_BACKEND=native` requires native execution.
 Database-backed commands use held native sessions and reject forced CLI
 execution. The retained `adapter.queryJson` compatibility API supports DuckDB CLI autocommit queries,
 with separate SELECT/NULL/empty-result conformance. PostgreSQL loads
-`libpq.so.5` by default, with
+`libpq.so.5` on Linux or `libpq.5.dylib`/`libpq.dylib` on macOS, with
 `DXT_POSTGRES_LIBRARY` available as an explicit override.
 
 `duckdb_profile.zig` validates and applies private native connection options,

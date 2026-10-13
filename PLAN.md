@@ -51,9 +51,117 @@ separate implementation and certification.
 
 ## Active Work
 
+### macOS Native Runtime And Getting Started
+
+One local editing owner on `fix/macos-native-runtime` owns this slice. No
+Agent OS orchestration or additional agents are involved. The initial Linux
+acceptance contract stays intact; macOS source builds are an experimental
+development target until their complete platform gates are certified.
+
+The observed Apple Silicon build can run version/help/init, but project
+discovery terminates with SIGSYS because it invokes Linux directory syscalls.
+The slice adds a native platform boundary for directory discovery and process
+identity, uses platform-specific database library discovery, and documents a
+checksum-verified, Python-free local macOS setup. Keep the existing Linux
+directory backend and resource/ignore/symlink behavior. Preserve explicit
+library override precedence and adapter error handling. The user's clarified
+distribution goal permits build-time C/C++ dependencies while the executable
+should run without separately installed database client libraries.
+
+Scope: `src/project/fs.zig`, focused native platform/library helpers,
+`parse_cache.zig`, `workflow.zig`, native adapter library loading and the shared
+cross-database symbol lookup boundary, build options
+and pinned native dependencies, setup tooling, notices, README and relevant
+architecture/platform/startup docs. Windows library names
+may be described or factored without claiming Windows execution support.
+Assess and implement static DuckDB/client linking where the pinned native
+sources and TLS dependencies can be built and verified. PostgreSQL servers
+remain user-provided; only the libpq client belongs in the executable.
+Replacing the PostgreSQL wire protocol, package transport rewrites and new
+adapter/upstream contracts are deferred. Keep the existing dynamic-driver
+build available for compatibility gates and isolate any unverified bundling
+limitation rather than silently disabling encryption or authentication.
+
+Validation: native positive/negative discovery and library policy tests;
+Debug/ReleaseSafe builds and native tests on the actual Apple Silicon host;
+real scaffold parse/list/compile/build/repeated-build/tests/static-docs and
+cache reuse with native DuckDB and no executable PATH; supported Linux cross
+builds; formatting, runtime-boundary and public-safety scans. Exercise native
+PostgreSQL if a disposable local fixture is available, and state any missing
+platform/adapter evidence explicitly. Do not open a browser or install global
+packages/services. Keep downloaded tools, fixtures and logs ignored.
+
+Status: implemented and locally validated on Apple Silicon. The setup helper
+builds `zig-out/bin/dxt` with the bundled drivers; ordinary installation emits
+one executable. No published macOS archive or full macOS Core certification
+is claimed. Implementation and documentation are prepared as focused local
+commits for PR review; publication and CI remain separate release gates.
+
+Local evidence for this slice:
+
+- 842 native tests pass in each dynamic and bundled Debug configuration, with
+  no skips. The CSV fixture uses an in-memory database so bundling does not
+  leave a warehouse file in the checkout.
+- The checksum-verified setup helper completes a ReleaseSafe standalone build.
+  Its executable is 50.69 MiB, or 17.25 MiB gzip, and links only macOS
+  `libSystem` and `libc++`. A binary scan finds no local user path.
+- With PATH empty and driver overrides absent, scaffold init, parse, list,
+  debug, compile, build, repeated build, tests and static docs all succeed.
+  Same-version DuckDB overrides work; a 1.5.6 override fails with a clear
+  version-conflict diagnostic before execution.
+  A copied executable also builds a scaffold outside the source checkout with
+  PATH empty; installed workflows do not read the native build packages.
+- The bundled client executes PostgreSQL debug/compile/run against a disposable
+  PostgreSQL 16.2 fixture with SCRAM authentication; independent native psql
+  verifies the result. A developer TLS terminator forwards to that real server:
+  the embedded client negotiates TLS 1.3 with `verify-full`, and rejects a wrong
+  hostname and wrong password. This is client/TLS evidence, not server packaging
+  or enterprise authentication certification.
+- Actual typed movement succeeds in both PostgreSQL-to-DuckDB and
+  DuckDB-to-PostgreSQL directions, preserving bigint, decimal, date, binary and
+  quoted text values. Product processes run with PATH empty.
+- Linux x86_64/ARM64 ReleaseSafe cross builds and the Intel macOS 13.0 bundled
+  cross build succeed. Intel execution and actual Linux runtime retesting have
+  not occurred on this Mac.
+- Runtime-boundary, public-safety, formatting and diff checks pass. Existing
+  Core CLI oracles remain intact; no new macOS Core acceptance claim is made.
+
+Build investigation: Zig 0.16's Mach-O linker rejects relocations in the
+official DuckDB static archives and crashes on a ReleaseSafe adapter driver.
+macOS builds compile product and C sources with Zig, then use Apple's SDK
+linker. Their archive bridge preserves
+every C object, including duplicate member names, while restoring the alignment
+required by Apple's linker. This tooling is excluded from product installation.
+
+Candidate versions checked separately: Zig 0.17.0 was released on October 1,
+2026; a trial fails at changed build APIs before product compilation. Its
+removal of `@cImport` also requires a C binding migration. DuckDB 1.5.6 is an
+upgrade candidate, not the accepted database contract. Spatial issue #794 was
+resolved by refreshing development sources with generated geometry helpers;
+it does not require adding spatial to dxt. Keep both accepted pins while
+collecting candidate evidence and record migration scope before an upgrade.
+In a separate dynamic-only adapter driver, DuckDB 1.4.2 and 1.5.6 each pass
+eight identical exercises: conformance, result ownership, pooling, relation
+cache, parallel cache, binding, read-only binding and cancellation. Actual
+library-version queries confirm the candidates. This focused evidence does
+not replace the complete dbt/extension/storage upgrade gates.
+
+Static-provider checks found two independent collision boundaries. The SQL
+grammar is based on PostgreSQL 17.7 and the client package uses 18.4. Their
+overlapping private helper and keyword symbols must be namespaced; matching
+version strings alone would not reconcile frontend/backend build settings.
+The grammar's observed behavior stays pinned. The available Zig-compatible
+libpq build package pins 18.4; aligning it to 17.7 would require maintaining a
+different native build package, while changing the grammar requires its own
+artifact/SQL compatibility slice. Loading a second DuckDB version
+alongside the embedded C++ library also causes Mach-O weak-symbol mixing;
+bundled overrides now require the exact embedded version and fail before
+opening a database otherwise. Upgrade trials use a separate dynamic-driver
+build. These constraints and pins must be explicit in startup documentation.
+
 ### SQL Compatibility And Native Publication Hardening
 
-The current authorized implementation batch is tracked by
+The completed implementation batch is tracked by
 [#225](https://github.com/sabino/dxt/issues/225). Read-only inspection found
 concrete gaps in delivered behavior despite the completed initial track ladder.
 The batch preserves the pinned Core/platform contract and all existing gates.
@@ -115,13 +223,13 @@ effective role separately. Preserve all other conninfo bytes and explicit
 policy changes; cross-database profile identities remain unchanged. The
 publication owner switches to a new isolated branch after its prior clean PR.
 
-Status: all six fixes are integrated locally through scoped PRs. The final
+Status: all six fixes merged into `main` through #240. The final
 runtime candidate passed 836 native tests, Debug/ReleaseSafe builds and all
 24 workflow cases. Frozen integration snapshots passed 276 execution cases
 and 336 metadata/state cases; the final workflow recheck overlaps 22 of those
 execution cases. All reported local cases passed without skips or xfails.
-Formatting, runtime-boundary and public-safety gates passed. The consolidated
-PR targets `main`; its complete CI/platform matrix remains the merge gate.
+Formatting, runtime-boundary and public-safety gates passed. The complete
+CI/platform matrix remains candidate acceptance evidence.
 No release or production-readiness claim changes.
 
 Observed follow-ups are tracked as

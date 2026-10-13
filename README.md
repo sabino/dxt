@@ -41,18 +41,35 @@ The project is independent of dbt Labs.
 
 ## Quick Start
 
-Build the current source with Zig **0.16.0**, or follow the
-[release process](docs/RELEASES.md) to verify a published native archive.
+On **macOS**, build a standalone executable from source:
 
 ```sh
-zig build -Doptimize=ReleaseSafe
+./scripts/build_macos.sh
 export PATH="$PWD/zig-out/bin:$PATH"
 dxt version
 ```
 
-Install DuckDB's native library so `libduckdb.so` is discoverable, or select
-the installed library with `DXT_DUCKDB_LIBRARY`. Then create and build a local
-project:
+The helper uses checksum-verified Zig **0.16.0** and Zig-managed native build
+dependencies. It bundles DuckDB and the PostgreSQL **client** with TLS into
+`dxt`; running this binary requires no separately installed database libraries,
+Homebrew packages, Python, dbt or MetricFlow. Apple's Command Line Tools/macOS
+SDK are needed to build, and macOS supplies the system/C++ runtime libraries.
+Install the tools with `xcode-select --install` if needed. Apple Silicon source
+builds are experimental; macOS does not yet have full release certification.
+
+On **Linux**, the existing build/release contract uses external native drivers:
+
+```sh
+zig build -Doptimize=ReleaseSafe
+export PATH="$PWD/zig-out/bin:$PATH"
+```
+
+Install DuckDB **1.4.2**'s native library so `libduckdb.so` is discoverable, or
+select it with `DXT_DUCKDB_LIBRARY`. PostgreSQL execution uses libpq. See
+[Getting started](docs/GETTING_STARTED.md) for platform requirements, standalone
+build options and explicit driver paths.
+
+Create and build a local DuckDB project:
 
 ```sh
 export DXT_DUCKDB_BACKEND=native
@@ -70,9 +87,15 @@ artifacts are written to `demo/target`; static docs include an offline
 Existing projects retain their dbt project files, profiles, SQL and packages.
 Use `--project-dir`, `--profiles-dir`, `--profile` and `--target` as needed.
 PostgreSQL uses a dbt `type: postgres` profile and native libpq, discovered as
-`libpq.so.5` or selected with `DXT_POSTGRES_LIBRARY`. End users do not need
-Python, dbt or MetricFlow installed. Dependency fetching/extraction uses
-system `git`, `curl` and `tar` for the corresponding package transports.
+`libpq.so.5` on Linux or `libpq.5.dylib`/`libpq.dylib` on macOS, or bundled in
+the standalone build. `DXT_POSTGRES_LIBRARY` explicitly selects an external
+library. Your PostgreSQL server remains external and user-provided; no server
+is included or installed. Dependency fetching/extraction uses system `git`,
+`curl` and `tar` for the corresponding package transports. Ordinary run/build
+with installed packages does not need those tools.
+Bundled DuckDB overrides must match its pinned version; use a dynamic build
+when evaluating a newer library. [Upgrade notes](docs/GETTING_STARTED.md#upgrade-candidates)
+record the Zig 0.17 and DuckDB 1.5.6 candidates.
 
 ## Implemented Surface
 
@@ -114,6 +137,7 @@ flowchart LR
 
 | Document | Purpose |
 | --- | --- |
+| [Getting started](docs/GETTING_STARTED.md) | macOS standalone builds, first project and platform/dependency requirements. |
 | [Primer](docs/PRIMER.md) | Runnable workflows and command families. |
 | [Compatibility](docs/COMPATIBILITY.md) | Versioned support, evidence and explicit boundaries. |
 | [Replacement roadmap](docs/DBT_REPLACEMENT_ROADMAP.md) | Delivered scope, operational work and future implementation. |
