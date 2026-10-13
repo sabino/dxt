@@ -212,12 +212,7 @@ fn normalizeDeprecationDate(allocator: std.mem.Allocator, input: std.json.Value)
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // Core's dataclass deserializer uses dateutil, which rejects timezone
-    // seconds/fractions even though Python's datetime.fromisoformat accepts them.
-    if (input.string.len > 10) if (std.mem.lastIndexOfAny(u8, input.string[10..], "+-")) |offset| {
-        if (input.string[10 + offset ..].len > 6) return error.InvalidResourceProperties;
-    };
-    const parsed = @import("datetime_parse.zig").iso(a, input.string, false) catch return error.InvalidResourceProperties;
+    const parsed = @import("deprecation_dates.zig").parse(a, input.string) catch return error.InvalidResourceProperties;
     const temporal = @import("timestamp_context.zig");
     var date = try temporal.datetimeValueWithOffsetUs(a, parsed.civil_ns, false, parsed.offset_us, null, 0);
     if (temporal.state(date).?.offset_us == null) date = (try temporal.call(a, date.attribute("astimezone").callable, &.{})).?;
