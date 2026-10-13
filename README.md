@@ -170,7 +170,10 @@ python scripts/check_public_safety.py
 Native database and browser fixtures are required for the complete suite.
 [CI fixture setup](.github/actions/setup-oracles/action.yml) documents the
 pinned dependencies; the portable PostgreSQL helper can use installed native
-tools through `DXT_POSTGRES_BIN`. Run `pytest -q` for integrated validation and
+tools through `DXT_POSTGRES_BIN`. Canonical CI distributes the complete suite
+over eight isolated runners per architecture and audits every case identity;
+see [parallel validation commands](docs/TEST_OPTIMIZATION_PLAN.md#isolated-ci-distribution).
+Run `pytest -q` for integrated validation and
 `python scripts/validate_dbt_artifacts.py <artifact.json>` for complete upstream
 artifact schemas.
 

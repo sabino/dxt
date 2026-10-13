@@ -4,7 +4,11 @@ Replace repeated project-level helper checks with native Zig coverage.
 Distribute the integration checks that still need real command boundaries.
 Preserve the supported behavior in [Compatibility](COMPATIBILITY.md).
 
-Status: planned. Test migrations and CI changes are deferred to an Agent OS session.
+Status: isolated CI distribution is being implemented on
+`ci/parallel-compatibility-tests`, with one local editor and no Agent OS run.
+Native test migrations, build consolidation and the later research queue remain
+deferred. Distribution preserves the existing assertions and does not require
+those migrations first.
 Agent configuration uses `gpt-6.1-sol` with medium reasoning by default.
 Use each role file's declared effort for specialist work.
 Upstream upgrade tooling and Fusion assessment are also deferred.
@@ -29,6 +33,87 @@ The compatibility jobs run pytest without test distribution.
 These counts are historical, not fixed acceptance thresholds.
 Native, integration and oracle counts overlap; do not add them into a behavior total.
 Refresh the baseline against the implementation source before measuring improvements.
+
+## Isolated CI distribution
+
+The [more recent baseline](https://github.com/sabino/dxt/actions/runs/38219109929)
+tested source `3b238e4972840178a8162f85a422cfe9a43bc38e` on 2026-10-12.
+Both JUnit reports contain 5,916 passing cases. Summed case durations are
+12,735 seconds on x86_64 and 12,335 seconds on ARM64. The slowest complete
+module takes about twelve minutes; no single module dominates the full run.
+
+CI collects the complete canonical suite once and balances whole modules
+across **eight independent runners per architecture**. Each runner retains
+its own checkout, native builds, Core process globals, PostgreSQL fixtures,
+DuckDB files, temporary projects and browser state. Module case order stays
+unchanged. No test assertions, adapters or upstream comparisons are removed.
+There is no new Python dependency; these scripts are developer tooling only.
+
+`tests/compatibility_timings.json` contains the maximum measured module cost
+from the two baseline reports. Unknown modules receive a conservative estimate
+and always run. Timing weights affect placement only, never coverage. Reusing
+that baseline gives a maximum shard estimate of **27.4 minutes**, before runner
+setup and queue time. This is a projection, not a measured new CI result.
+More runners consume additional setup/build minutes; concurrency is bounded
+at sixteen canonical runners across both architectures.
+
+The `test py3.12` and `test py3.12 aarch64` aggregate checks require successful
+collection and every shard. Their evidence audit also requires:
+
+- The same complete collection and source content fingerprint on every runner.
+- Exactly one assignment and one passing JUnit case per collected node ID.
+- All shard manifests and reports, with no missing or unexpected files.
+- Successful setup, call and teardown, with zero failures, errors, skips or xfails.
+- The actual expected Linux architecture and CPython 3.12 on every shard.
+
+Native, installation, public-project, performance and safety gates remain
+separate. Release validation retains its complete suite and strict report
+check; this change accelerates pull-request/main CI scheduling.
+
+For a local trial in an otherwise prepared CPython 3.12 developer environment:
+
+```sh
+PYTHONPATH=scripts python -m pytest -q --collect-only -p pytest_shard \
+  --dxt-shard-count=8 --dxt-shard-timings=tests/compatibility_timings.json \
+  --dxt-shard-output=.agent/runs/canonical-plan.json
+PYTHONPATH=scripts python -m pytest -q -p pytest_shard \
+  --dxt-shard-plan=.agent/runs/canonical-plan.json --dxt-shard-index=0 \
+  --dxt-shard-output=.agent/runs/shards/shard-0.json \
+  --junitxml=.agent/runs/shards/shard-0.xml
+```
+
+Run indices 0–7 in separate checkouts when launching them concurrently.
+Copy the same plan to each checkout and gather their uniquely named reports:
+
+```sh
+python scripts/check_compatibility_shards.py \
+  --plan .agent/runs/canonical-plan.json --reports-dir .agent/runs/shards
+```
+
+One shard is focused developer feedback, not full acceptance. Ordinary
+`pytest -q` remains available. Recollect the plan after any source change;
+stale source fingerprints fail visibly. Focused developer plans may name test
+modules, but canonical CI always collects the complete suite.
+
+### Local measured trial
+
+A fixed 67-case selection from primitive identity, conditional expressions,
+filter rendering and JSON rendering ran through the real native binary and
+pinned Core 1.10.5 comparisons. Each mode used separate source snapshots,
+CPython 3.12.15, Zig 0.16.0 and DuckDB 1.4.2 on Apple Silicon. Debug binaries
+were built before timing; measurements include pytest startup and fixtures,
+but exclude plan collection and the initial build.
+
+| Isolated processes | Elapsed time | Passing cases |
+| --- | ---: | ---: |
+| 1 | 39.70 seconds | 67 |
+| 2 | 25.71 seconds | 67 |
+| 4 | 18.01 seconds | 67 |
+
+All three unions pass the complete case-identity audit with zero skips or
+xfails. Four processes give a measured 2.20x improvement for this selection;
+its largest module limits further splitting. This local trial does not certify
+the full Linux suite or establish the projected CI duration.
 
 ## Required testing policy
 
@@ -76,9 +161,10 @@ dxt's typed SQL analysis and lineage have native evidence for their own contract
 They do not certify Fusion CLI behavior, editor integrations or platform features.
 Task 13 scopes a separate assessment before any Fusion replacement claim.
 
-## Agent OS execution contract
+## Future native migration execution contract
 
-Create or update one parent issue and the task issues below when implementation is requested.
+For a later explicitly requested Agent OS migration run, create or update one
+parent issue and the task issues below.
 Reuse matching issues instead of appending duplicates.
 Use [Agent Protocols](AGENT_PROTOCOLS.md) for claims, plans, validation and handoffs.
 
@@ -277,6 +363,10 @@ Stop if caching hides a build failure or accepts a binary from another source.
 ### 10. Distribute integration cases across isolated processes
 
 Scope: `.github/workflows/ci.yml`, pytest distribution, fixture isolation and report validation.
+
+The current distribution slice above implements this independently of test
+migration and shared-build changes. Whole-module isolation preserves existing
+fixtures; task 9's build consolidation remains later work.
 
 Use process isolation for Core globals; size concurrency to measured CPU and memory resources.
 Use CI shards where one runner remains the bottleneck.

@@ -51,6 +51,52 @@ separate implementation and certification.
 
 ## Active Work
 
+### Parallel Compatibility Validation
+
+The user's requested test acceleration is owned by one local editor on
+`ci/parallel-compatibility-tests`, in an isolated worktree. No Agent OS run
+or additional agents are involved. PR #241 retains its running checks and
+separate merge gate; this slice does not modify that candidate.
+
+Distribute the unchanged canonical suite across eight independent GitHub
+runners per actual Linux architecture, balancing complete test modules using
+historical JUnit timings. Keep module fixtures and case order intact, and avoid
+sharing Core globals, warehouse state or binary installations across runners.
+Preserve the required `test py3.12` check name through aggregate acceptance.
+The Python 3.11 developer gate and native, installation, public-project,
+performance and safety gates remain applicable.
+
+Scope: CI scheduling, developer-only pytest shard selection and report
+validation, timing weights, tooling regressions and test documentation.
+Every runner collects the full suite before assigning modules; acceptance
+requires matching collections and source identities, a disjoint complete
+assignment, all expected reports and an individually passing JUnit case for
+each collected node ID. Missing, duplicate, skipped, xfailed or failed evidence
+must fail the aggregate. Do not delete assertions or change product behavior,
+upstream pins or supported-platform claims.
+
+Recent baseline run `38219109929` has 5,916 passing cases per architecture.
+Summed case times are 12,735 seconds on x86_64 and 12,335 seconds on ARM64.
+Its largest complete module costs about twelve minutes, so balancing modules
+can reduce elapsed time without splitting their shared fixtures. Timings guide
+scheduling only; they never determine which cases are required.
+
+Validation: adversarial report/assignment tests, real pytest subprocesses with
+1/2/4 isolated processes, full collection and predicted balance against both
+historical reports, and representative real native/Core comparisons. Preserve
+the complete both-architecture CI gate for final acceptance. Document measured
+local results separately from projected CI time and increased runner-minute
+cost. Native helper migrations remain separate later work; distribution of
+unchanged assertions does not depend on those migrations.
+
+Status: distribution and evidence audit implemented locally. Actionlint passes;
+full collection contains 5,954 cases, including 38 new distribution-tooling
+regressions. A fixed 67-case native/Core trial passes with 1/2/4 isolated
+processes in 39.70/25.71/18.01 seconds, with complete disjoint JUnit evidence and
+zero skips or xfails. Timing excludes initial builds and plan collection.
+The eight-shard historical estimate is 27.4 minutes before CI setup/queues;
+the full both-architecture CI trial remains required before merge.
+
 ### macOS Native Runtime And Getting Started
 
 One local editing owner on `fix/macos-native-runtime` owns this slice. No
@@ -335,7 +381,9 @@ Exact native groups, retained cases and worker/shard counts depend on the invent
 and measured trials. Runtime targets have low confidence before those trials.
 Candidate upstream versions and Fusion certification targets remain unspecified.
 Core parity does not certify Fusion; the assessment must define separate evidence.
-The test suite, product runtime and CI scheduling remain unmodified by this plan.
+Native helper migrations remain deferred. The active distribution slice above
+changes CI scheduling and adds developer-tooling tests; existing product and
+compatibility assertions remain unchanged.
 
 ## Next Roadmap Work
 

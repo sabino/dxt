@@ -188,6 +188,7 @@ installation requirements.
 | Native build/helpers | `zig build`, `zig build test` |
 | Focused native CLI/Core evidence | `pytest -q tests/test_usability_<area>.py` |
 | Complete integrated fixtures | `pytest -q` with pinned developer dependencies and native database/browser fixtures |
+| Distributed canonical CI | Eight isolated module shards per actual architecture, with [complete case audit](TEST_OPTIMIZATION_PLAN.md#isolated-ci-distribution) |
 | Complete artifact schemas | `python scripts/validate_dbt_artifacts.py <artifact.json>` |
 | Product/runtime boundary | `python scripts/check_runtime_boundary.py` |
 | Public-safe repository | `python scripts/check_public_safety.py` |
