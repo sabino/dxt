@@ -70,10 +70,10 @@ for Core's versioned contract error; other diagnostic phases are unchanged.
 
 | Order | Worker branch | Exclusive ownership | Current status |
 | --- | --- | --- | --- |
-| 1 | `fix/state-contract-diagnostics` | State/selector diagnostic owners and new contract-state CLI fixtures | Integrated with reviewed inline artifact correction; final CI pending |
+| 1 | `fix/state-contract-diagnostics` | State/selector diagnostic owners and new contract-state CLI fixtures | Integrated with reviewed inline artifact correction; local evidence on the issue |
 | 2 | `fix/postgres-connection-retries` | PostgreSQL profile/session retry owners and new connection-retry fixtures | Integrated; 9 focused native and 33 actual Core/native cases passed |
 | 3 | `fix/cross-catalog-retention` | Cross-database catalog retention and new catalog CLI fixtures | Integrated; native cap/expiry and bidirectional actual warehouse checks passed |
-| 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Worker active after completed grammar/reference map and claim |
+| 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Integrated; 4 focused native and 54 Core/native date/context cases passed |
 
 The supervisor integrates each clean, validated worker commit through Git
 before launching the next implementation. Existing shared fixtures and the
@@ -127,9 +127,16 @@ unchanged. Catalog retention is integrated after reproducing the exhausted
 catalog failure following successful warehouse commits. Six focused native
 cases and bidirectional actual warehouse cap/expiry/replacement/unknown-budget
 checks passed; existing catalog/concurrent-writer/movement cases are retained.
-The date worker is active last. Its claim requires complete authored dates and excludes
-dateutil's clock-dependent partial-date defaults. Full integrated/platform
-acceptance remains pending.
+The date helper is integrated after review preserved existing low ISO years.
+Its bounded complete-date grammar excludes dateutil's clock-dependent partial
+defaults. The final worker source passed 4 focused native cases and 54 real
+Core/native cases: 40 new authored-date fixtures and 14 retained context/state
+cases, with zero skips/xfails. Scheduling weights use successful local JUnit
+case durations with explicit unsealed/mixed-snapshot provenance where applicable.
+All four implementations are integrated. Complete frozen integrated/platform
+acceptance remains the PR readiness requirement. Its current results and final
+handoff belong on the integration PR and linked issues; local slice evidence
+does not itself establish source or release acceptance.
 
 ### Delivered Parallel Compatibility Validation
 
@@ -359,11 +366,12 @@ Formatting, runtime-boundary and public-safety gates passed. The complete
 CI/platform matrix remains candidate acceptance evidence.
 No release or production-readiness claim changes.
 
-Observed follow-ups are tracked as
+The observed follow-ups tracked as
 [#231](https://github.com/sabino/dxt/issues/231),
 [#232](https://github.com/sabino/dxt/issues/232) and
 [#233](https://github.com/sabino/dxt/issues/233) and
-[#237](https://github.com/sabino/dxt/issues/237); none is claimed complete.
+[#237](https://github.com/sabino/dxt/issues/237) are implemented in the
+remaining open issue campaign above; its final combined acceptance is separate.
 The native test optimization queue below remains deferred and is not part of
 this product-correctness batch.
 

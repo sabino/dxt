@@ -17,6 +17,9 @@ DuckDB and PostgreSQL.
   substantive semantic resources, preserving pinned Core's config, ordering,
   new-resource and intentionally ignored-field rules. Model dates retain
   normalized timezone-aware metadata through parsing, artifacts and caches.
+- Model deprecation dates accept complete English month and numeric slash/dot
+  forms alongside calendar ISO dates, preserving timezone awareness,
+  version-specific dates, warm caches and equivalent-instant state comparisons.
 - PostgreSQL profiles honor canonical credential aliases and configured held
   session roles, search paths and application names without publishing passwords.
 - PostgreSQL profile sessions apply connection-only retries with Core's

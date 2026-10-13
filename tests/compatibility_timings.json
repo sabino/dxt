@@ -41,6 +41,7 @@
     "tests/test_usability_consuming_loops.py": 29.891,
     "tests/test_usability_context_constructor_edges.py": 29.897,
     "tests/test_usability_contracts.py": 70.099,
+    "tests/test_usability_cross_catalog.py": 9.942,
     "tests/test_usability_cross_database.py": 40.294,
     "tests/test_usability_cursor_decimal.py": 67.584,
     "tests/test_usability_cursor_uuid.py": 11.391,
@@ -50,6 +51,7 @@
     "tests/test_usability_datetime_public_api.py": 472.594,
     "tests/test_usability_datetime_strptime.py": 217.444,
     "tests/test_usability_dependencies.py": 7.661,
+    "tests/test_usability_deprecation_dates.py": 172.294,
     "tests/test_usability_dictsort.py": 152.623,
     "tests/test_usability_docs_context.py": 59.829,
     "tests/test_usability_duckdb_file_materializations.py": 104.796,
@@ -97,6 +99,7 @@
     "tests/test_usability_postgres_clone.py": 83.564,
     "tests/test_usability_postgres_incremental.py": 177.348,
     "tests/test_usability_postgres_profiles.py": 11.691,
+    "tests/test_usability_postgres_retries.py": 213.782,
     "tests/test_usability_postgres_snapshots.py": 162.986,
     "tests/test_usability_primitive_identity.py": 13.666,
     "tests/test_usability_profile_flags.py": 40.947,
@@ -128,6 +131,7 @@
     "tests/test_usability_sql_snapshot_jinja.py": 74.414,
     "tests/test_usability_standard_filters.py": 86.628,
     "tests/test_usability_state.py": 600.695,
+    "tests/test_usability_state_contracts.py": 611.374,
     "tests/test_usability_stock_artifacts.py": 149.208,
     "tests/test_usability_stored_test_failures.py": 44.348,
     "tests/test_usability_string_format.py": 178.382,
@@ -153,5 +157,57 @@
     "tests/test_usability_yaml.py": 4.385,
     "tests/test_usability_yaml_bytes.py": 120.858,
     "tests/test_usability_yaml_values.py": 32.066
-  }
+  },
+  "local_scheduling_samples": [
+    {
+      "module": "tests/test_usability_state_contracts.py",
+      "cases": 90,
+      "case_seconds": 611.374,
+      "recorded_on": "2026-10-13",
+      "measurement": "sum_junit_testcase_seconds",
+      "associated_implementation_commits": [
+        "e196e9a1a7f7e79fe4d28da1bcd94e1224161f22",
+        "50caa702be4f8f86bc6d288441a457569212761a"
+      ],
+      "sampling": "Deduplicated successful receipts with latest correction preferred; mixed snapshots.",
+      "limitation": "Local scheduling estimate; receipt source/runtime identities are not sealed. Not current acceptance evidence."
+    },
+    {
+      "module": "tests/test_usability_postgres_retries.py",
+      "cases": 33,
+      "case_seconds": 213.782,
+      "recorded_on": "2026-10-13",
+      "measurement": "sum_junit_testcase_seconds",
+      "associated_implementation_commits": [
+        "4162957b272a5cb8b994d43bb1db2853491353ae"
+      ],
+      "sampling": "Complete focused worker module.",
+      "limitation": "Local scheduling estimate; receipt source/runtime identities are not sealed. Not current acceptance evidence."
+    },
+    {
+      "module": "tests/test_usability_cross_catalog.py",
+      "cases": 6,
+      "case_seconds": 9.942,
+      "recorded_on": "2026-10-13",
+      "measurement": "sum_junit_testcase_seconds",
+      "associated_implementation_commits": [
+        "c3a0a21874091331b3d69e7af45bf1d243fa9ec1",
+        "6a8f7e86be6c16c3837588fd772024fad65fc748"
+      ],
+      "sampling": "Bidirectional new module only; excludes adjacent regression testcase.",
+      "limitation": "Local scheduling estimate; receipt source/runtime identities are not sealed. Not current acceptance evidence."
+    },
+    {
+      "module": "tests/test_usability_deprecation_dates.py",
+      "cases": 40,
+      "case_seconds": 172.294,
+      "recorded_on": "2026-10-13",
+      "measurement": "sum_junit_testcase_seconds",
+      "associated_implementation_commits": [
+        "2ec1192c174ab38a55d11ff3f2e4f35f0be25b3b"
+      ],
+      "sampling": "Complete final focused worker module; excludes retained existing cases.",
+      "limitation": "Local scheduling estimate; receipt source/runtime identities are not sealed. Not current acceptance evidence."
+    }
+  ]
 }

@@ -153,10 +153,21 @@ allocation failures are not retried. [Connection fault comparisons](../tests/tes
 use causal transport failures against actual PostgreSQL and verify that SQL
 side effects are not replayed.
 
-Model deprecation metadata supports the tested ISO date/datetime forms,
-local-timezone normalization and serialized macro values. Core also accepts
-free-form dates such as `January 2, 2099`; native parsing of those forms remains
-an [observed follow-up](https://github.com/sabino/dxt/issues/237).
+Model deprecation metadata accepts calendar ISO dates and complete English
+month dates such as `January 2, 2099`, with full names or abbreviations and
+month/day/year, day/month/year or year/month/day order. Complete numeric
+slash/dot dates use year/month/day when the year comes first; otherwise they
+follow Core's default month-first interpretation, using day-first when the
+first number cannot be a month. New textual/numeric forms require a four-digit
+year from 1000 through 9999; existing valid ISO years are preserved. Optional
+clocks use basic or colon-separated ISO hours/minutes/seconds, with fractional
+seconds and numeric offsets at minute precision. Partial dates, rolling
+two-digit years, prose clocks and named timezones are outside this bounded grammar.
+Local-timezone normalization, nullable version-specific dates, parent
+validation, warm-cache invalidation and equivalent-instant state comparisons
+retain their existing behavior. [Authored date comparisons](../tests/test_usability_deprecation_dates.py)
+cover actual Core/native parsing, precision, versions and caches; existing
+metadata/context comparisons remain in the [state fixtures](../tests/test_usability_state.py).
 
 `state:modified`, `state:unmodified` and `state:modified.contract` compare
 contract enforcement, columns/types, supported enforced constraints and
