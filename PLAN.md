@@ -70,7 +70,7 @@ for Core's versioned contract error; other diagnostic phases are unchanged.
 
 | Order | Worker branch | Exclusive ownership | Current status |
 | --- | --- | --- | --- |
-| 1 | `fix/state-contract-diagnostics` | State/selector diagnostic owners and new contract-state CLI fixtures | Claimed; implementation and focused acceptance |
+| 1 | `fix/state-contract-diagnostics` | State/selector diagnostic owners and new contract-state CLI fixtures | Focused checks green; root review requires inline artifact correction |
 | 2 | `fix/postgres-connection-retries` | PostgreSQL profile/session retry owners and new connection-retry fixtures | Reference and ownership mapping; follows order 1 |
 | 3 | `fix/cross-catalog-retention` | Cross-database catalog retention and new catalog CLI fixtures | Ownership and retention-policy mapping; follows order 2 |
 | 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Grammar/reference mapping; follows order 3 |
@@ -106,11 +106,12 @@ handoffs; merging, tags and release publication remain separate actions.
 
 Status: current main pulled and integration branch created. All four issues
 are open. The first issue has a published reference map, slice plan and claim;
-its isolated worker is implementing contract diagnostics. Retry parameter
-validation and catalog retention mapping continue read-only. The date grammar
-map is complete; its eventual claim will require complete authored dates and
-explicitly exclude dateutil's clock-dependent partial-date defaults. No
-completed acceptance is claimed yet.
+its isolated worker passed 33 focused native and 78 real Core/native cases.
+Root review holds integration until inline SQL keeps the authored manifest
+representation while publication waits for contract preflight. The other
+three maps are complete; their workers remain paused. The date claim requires
+complete authored dates and excludes dateutil's clock-dependent partial-date
+defaults. Full integrated/platform acceptance remains pending.
 
 ### Delivered Parallel Compatibility Validation
 
