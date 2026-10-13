@@ -131,7 +131,7 @@
     "tests/test_usability_sql_snapshot_jinja.py": 74.414,
     "tests/test_usability_standard_filters.py": 86.628,
     "tests/test_usability_state.py": 600.695,
-    "tests/test_usability_state_contracts.py": 611.374,
+    "tests/test_usability_state_contracts.py": 683.629,
     "tests/test_usability_stock_artifacts.py": 149.208,
     "tests/test_usability_stored_test_failures.py": 44.348,
     "tests/test_usability_string_format.py": 178.382,
@@ -161,15 +161,16 @@
   "local_scheduling_samples": [
     {
       "module": "tests/test_usability_state_contracts.py",
-      "cases": 90,
-      "case_seconds": 611.374,
+      "cases": 104,
+      "case_seconds": 683.629,
       "recorded_on": "2026-10-13",
       "measurement": "sum_junit_testcase_seconds",
       "associated_implementation_commits": [
         "e196e9a1a7f7e79fe4d28da1bcd94e1224161f22",
-        "50caa702be4f8f86bc6d288441a457569212761a"
+        "50caa702be4f8f86bc6d288441a457569212761a",
+        "229b8dd3e21ec5fee2f84e1b0891480c695a99ba"
       ],
-      "sampling": "Deduplicated successful receipts with latest correction preferred; mixed snapshots.",
+      "sampling": "Deduplicated successful receipts with latest correction preferred, plus 14 distinct nested-selector correction cases; mixed snapshots.",
       "limitation": "Local scheduling estimate; receipt source/runtime identities are not sealed. Not current acceptance evidence."
     },
     {

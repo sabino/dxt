@@ -74,7 +74,7 @@ for Core's versioned contract error; other diagnostic phases are unchanged.
 | 2 | `fix/postgres-connection-retries` | PostgreSQL profile/session retry owners and new connection-retry fixtures | Integrated; 9 focused native and 33 actual Core/native cases passed |
 | 3 | `fix/cross-catalog-retention` | Cross-database catalog retention and new catalog CLI fixtures | Integrated; native cap/expiry and bidirectional actual warehouse checks passed |
 | 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Integrated; 4 focused native and 54 Core/native date/context cases passed |
-| 5 | `fix/nested-contract-state-diagnostics` | State-leaf detection in selector.zig and nested YAML cases in the contract-state fixture | Review correction: remapped before final acceptance |
+| 5 | `fix/nested-contract-state-diagnostics` | State-leaf detection in selector.zig and nested YAML cases in the contract-state fixture | Integrated; 2 native additions and 26 focused CLI cases passed; targeted review clear |
 
 The supervisor integrates each clean, validated worker commit through Git
 before launching the next implementation. Existing shared fixtures and the
@@ -136,9 +136,12 @@ cases, with zero skips/xfails. Scheduling weights use successful local JUnit
 case durations with explicit unsealed/mixed-snapshot provenance where applicable.
 All four implementations are integrated. Independent PR review found that
 nested named YAML exclusions lower to negated state leaves that bypass state
-loading and contract preflight. A final sequential selector worker reproduces
-and corrects that detection, with native and actual Core/native nested YAML
-regressions. Existing selector lowering and other owners retain their contracts.
+loading and contract preflight. The final sequential worker reproduced actual
+native artifact/warehouse changes where Core rejected the contract break,
+then corrected state/contract dependency detection. Two native additions and
+26 focused CLI cases passed, including 14 new nested YAML regressions; targeted
+read-only review is clear. Existing 90 contract cases and selector lowering
+remain unchanged. The complete contract module now contains 104 cases.
 The initial candidate's CI is superseded; final acceptance uses the corrected
 head and preserves all assertions. Complete frozen integrated/platform
 acceptance remains the PR readiness requirement. Its current results and final
