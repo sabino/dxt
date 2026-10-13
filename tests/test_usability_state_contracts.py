@@ -292,6 +292,96 @@ def test_breaking_state_selector_boundaries_core_native(tmp_path, selector_args)
         assert all('Columns were removed' not in r.stdout + r.stderr for r in results)
 
 
+def nested_contract_selector(root, method):
+    # The exclusion belongs to one intersection branch, so native lowering
+    # must keep it as a negated leaf inside the outer union.
+    (root / 'selectors.yml').write_text(f'''selectors:
+  - name: nested_contract
+    definition:
+      union:
+        - intersection:
+            - method: fqn
+              value: '*'
+            - exclude:
+                - method: state
+                  value: {method}
+        - method: fqn
+          value: other
+''')
+
+
+@pytest.mark.parametrize('versioned', [False, True])
+@pytest.mark.parametrize('method', METHODS)
+def test_nested_contract_exclusion_core_native(tmp_path, versioned, method):
+    root = project(tmp_path, versioned)
+    state, original = baseline(root, tmp_path)
+    nested_contract_selector(root, method)
+    schema = definition(versioned)
+    schema['models'][0]['columns'].pop()
+    write_schema(root, schema)
+    results = [invoke(root, 'ls', '--state', state, '--selector', 'nested_contract',
+                      '--output', 'json', '--indirect-selection', 'empty', core=core)
+               for core in (True, False)]
+    for result in results:
+        assert result.returncode == (2 if versioned else 0), result.stdout + result.stderr
+        assert 'Columns were removed' in result.stdout + result.stderr
+        if versioned:
+            assert 'Breaking change to contract Error in ' in result.stdout + result.stderr
+            assert not selected(result)
+        else:
+            events = breaking_events(result)
+            assert events and all(event['info']['code'] == 'I071' for event in events)
+            assert all(event['data']['model_name'] == 'a' and event['data']['columns_removed'] == ['label']
+                       for event in events)
+            expected = {'model.state_contracts.other'}
+            if method == 'unmodified':
+                expected.add('model.state_contracts.a')
+            assert selected(result) == expected
+    assert (state / 'manifest.json').read_bytes() == original
+
+
+@pytest.mark.parametrize('command', ['compile', 'run', 'build', 'docs'])
+@pytest.mark.parametrize('promoted', [False, True])
+def test_nested_contract_failure_preserves_artifacts_and_warehouse(tmp_path, command, promoted):
+    import duckdb
+    root = project(tmp_path, versioned=not promoted)
+    state, original = baseline(root, tmp_path)
+    nested_contract_selector(root, 'modified.contract')
+    with duckdb.connect(str(root / 'warehouse.duckdb')) as connection:
+        connection.execute('create schema analytics')
+        connection.execute('create table analytics.sentinel as select 42 as id')
+        connection.execute('create table analytics.other as select 11 as id')
+    schema = definition(not promoted)
+    schema['models'][0]['columns'].pop()
+    (root / 'models' / ('a.sql' if promoted else 'a_v1.sql')).write_text('select 2 as id')
+    # This independent union branch is selected even though the changed model
+    # is excluded. Premature execution would delete the sentinel and replace
+    # its existing relation, making both warehouse assertions meaningful.
+    schema['models'].append({'name': 'other', 'config': {
+        'materialized': 'table', 'pre-hook': 'delete from analytics.sentinel'}})
+    write_schema(root, schema)
+    args = ('generate',) if command == 'docs' else ()
+    for core in (True, False):
+        target = tmp_path / ('core-target' if core else 'native-target')
+        target.mkdir()
+        previous = {name: ('previous ' + name).encode()
+                    for name in ('manifest.json', 'run_results.json', 'catalog.json')}
+        for name, data in previous.items():
+            (target / name).write_bytes(data)
+        result = invoke(root, command, *args, '--state', state, '--selector', 'nested_contract',
+                        core=core, target=target, policy=('--warn-error',) if promoted else ())
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert 'Columns were removed' in result.stdout + result.stderr
+        if not core:
+            assert {name: (target / name).read_bytes() for name in previous} == previous
+        assert (state / 'manifest.json').read_bytes() == original
+        with duckdb.connect(str(root / 'warehouse.duckdb')) as connection:
+            assert connection.execute('select * from analytics.sentinel').fetchall() == [(42,)]
+            assert connection.execute('select * from analytics.other').fetchall() == [(11,)]
+            assert connection.execute("select table_name from information_schema.tables "
+                                      "where table_schema='analytics' order by table_name").fetchall() == [('other',), ('sentinel',)]
+
+
 @pytest.fixture(scope='module')
 def contract_postgres(tmp_path_factory):
     import postgres_fixture

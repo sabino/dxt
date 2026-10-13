@@ -116,7 +116,7 @@ pub fn usesContractStateSelector(select: ?[]const u8, exclude: ?[]const u8) bool
         while (clauses.next()) |clause| {
             var terms = std.mem.splitScalar(u8, clause, ',');
             while (terms.next()) |raw| {
-                const term = parseSelectorTerm(raw);
+                const term = parseStateSelectorTerm(raw);
                 if (!term.valid) continue;
                 for ([_][]const u8{ "state:modified", "state:unmodified", "state:modified.contract" }) |method| {
                     if (std.mem.eql(u8, term.value, method)) return true;
@@ -165,11 +165,40 @@ fn selectorValueUsesState(value: []const u8) bool {
     while (expressions.next()) |expression| {
         var terms = std.mem.splitScalar(u8, expression, ',');
         while (terms.next()) |raw_term| {
-            const term = parseSelectorTerm(raw_term);
+            const term = parseStateSelectorTerm(raw_term);
             if (term.valid and std.mem.startsWith(u8, term.value, "state:")) return true;
         }
     }
     return false;
+}
+
+fn parseStateSelectorTerm(raw_term: []const u8) SelectorSpec {
+    // Named YAML exclusions can lower into a single negated intersection
+    // leaf. It still needs state and contract preflight before evaluation.
+    // Strip exactly the same leading operator as selection and validation.
+    return parseSelectorTerm(if (std.mem.startsWith(u8, raw_term, "!")) raw_term[1..] else raw_term);
+}
+
+test "state dependency detection recognizes lowered negated leaves" {
+    for ([_][]const u8{ "*,!state:new other", "*,!+state:old+", "tag:daily,!2+state:modified.body+1", "*,!@state:modified.macros", "!state:modified.contract", "!state:unmodified" }) |value| {
+        try std.testing.expect(usesStateSelector(value, null));
+        try std.testing.expect(usesStateSelector(null, value));
+    }
+    for ([_][]const u8{ "!fqn:state:modified", "!tag:state:new", "fqn:!state:old", "!!state:modified", "+!state:modified", "!@state:modified+", "*,!result:error", "*,!source_status:fresher", "*,!stateful:modified" }) |value| {
+        try std.testing.expect(!usesStateSelector(value, null));
+        try std.testing.expect(!usesStateSelector(null, value));
+    }
+}
+
+test "contract state preflight recognizes lowered negation with exact boundaries" {
+    for ([_][]const u8{ "*,!state:modified.contract other", "tag:daily,!2+state:modified.contract+1", "*,!+state:modified+", "*,!@state:unmodified" }) |value| {
+        try std.testing.expect(usesContractStateSelector(value, null));
+        try std.testing.expect(usesContractStateSelector(null, value));
+    }
+    for ([_][]const u8{ "!state:new", "!state:old", "!state:modified.body", "!state:modified.configs", "!state:modified.macros", "!state:modified.relation", "!state:modified.persisted_descriptions", "!state:modified.contractual", "!state:modified.contract+tag", "!fqn:state:modified.contract", "!tag:state:modified", "!!state:modified.contract", "+!state:modified.contract", "!@state:unmodified+" }) |value| {
+        try std.testing.expect(!usesContractStateSelector(value, null));
+        try std.testing.expect(!usesContractStateSelector(null, value));
+    }
 }
 
 fn validateSelectorExpression(value: []const u8) !void {
