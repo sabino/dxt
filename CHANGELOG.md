@@ -9,6 +9,10 @@ DuckDB and PostgreSQL.
 
 ### Fixed
 
+- Contract-aware state selection reports unversioned breaking-change warnings
+  and versioned errors before artifact publication or warehouse writes,
+  including removed models, enforced constraints and materialization changes.
+  Inline/show publication preserves authored resources and existing failures.
 - State comparisons now include model reference/deprecation metadata and
   substantive semantic resources, preserving pinned Core's config, ordering,
   new-resource and intentionally ignored-field rules. Model dates retain

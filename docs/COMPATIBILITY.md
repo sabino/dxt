@@ -73,7 +73,7 @@ outside the initial SQL execution scope.
 | Restricted module providers | Core's `datetime`, `pytz` and fourteen `itertools` exports use native typed values and pinned timezone data. Iterators preserve lazy consumption, shared cursors, tee buffering and active Jinja callbacks. [Provider cache](../tests/test_usability_modules_provider.py), [datetime](../tests/test_usability_datetime.py), [strptime](../tests/test_usability_datetime_strptime.py), [pytz](../tests/test_usability_pytz.py), [itertools](../tests/test_usability_itertools.py). These are defined native providers, not an arbitrary Python import facility. |
 | dbt context | Typed Relation/Column/timestamps; model/config/graph/flags; database queries, named results and native adapter introspection. Held cursors and fetched Agate tables preserve their separate type, naming and consumption contracts. Pinned bundled Core/adapter SQL macros are embedded with licenses. [Configuration/context](../tests/test_usability_configuration.py), [commands](../tests/test_usability_commands.py), [cursor/bindings](../tests/test_usability_query_bindings.py). |
 | Selectors | Names/FQN, paths/packages/tags/resource/config/version/group/access, wildcards, graph expansion, recursive named YAML selectors and eager/cautious/buildable/empty indirect selection. [State/selector cases](../tests/test_usability_state.py), [versions](../tests/test_usability_configuration.py), [groups](../tests/test_usability_groups.py). |
-| State and defer | New/old/modified/unmodified and tested body/config/relation/macro/contract/description comparisons; model reference/deprecation metadata and semantic-model/metric/saved-query contents, including pinned Core's ordered and intentionally ignored fields. Result statuses, Core `source_status:fresher`, defer/favor-state and separate defer state. [State](../tests/test_usability_state.py). |
+| State and defer | New/old/modified/unmodified and tested body/config/relation/macro/contract/description comparisons; model reference/deprecation metadata and semantic-model/metric/saved-query contents, including pinned Core's ordered and intentionally ignored fields. Contract-aware methods warn about unversioned breaks and reject versioned breaks before artifact publication or warehouse writes. Result statuses, Core `source_status:fresher`, defer/favor-state and separate defer state. [State](../tests/test_usability_state.py), [contract diagnostics](../tests/test_usability_state_contracts.py). |
 | Effective flags | Actual workers/cancellation for threads/fail-fast; adapter-specific full-refresh; empty/sample/event-time input bounds; failure audits; env/CLI precedence, warnings, quiet/print/colors, JSON/file logging and parser/cache/profiling controls. Unsupported command placements/values reject. [CLI options](../tests/test_usability_cli_options.py), [execution](../tests/test_usability_cli_execution.py), [profiling](../tests/test_usability_cli_profiling.py), [parser options](../tests/test_usability_parser_options.py), [worker logs](../tests/test_usability_worker_logs.py). |
 
 Package-heavy compatibility is checked separately from individual macro
@@ -149,6 +149,17 @@ Model deprecation metadata supports the tested ISO date/datetime forms,
 local-timezone normalization and serialized macro values. Core also accepts
 free-form dates such as `January 2, 2099`; native parsing of those forms remains
 an [observed follow-up](https://github.com/sabino/dxt/issues/237).
+
+`state:modified`, `state:unmodified` and `state:modified.contract` compare
+contract enforcement, columns/types, supported enforced constraints and
+constrained table/incremental materialization changes. They also inspect
+removed or disabled models, with Core's past-deprecation removal exception.
+Other state methods keep their independent comparisons. Diagnostics follow
+the warning policy; versioned breaking changes retain Core's specific error
+phase. Pinned Core's removed-custom-constraint lookup can raise `KeyError`, so
+custom-removal parity is not claimed; existing custom DDL execution is unchanged.
+Inline SQL operations stay out of the authored manifest, and ordinary
+inline/show failures retain their established publication behavior.
 
 Executed data-test helpers/publication, inherited test metadata, invocation-wide
 `warn_once`, stock main responses and microbatch custom-materialization/hooks
