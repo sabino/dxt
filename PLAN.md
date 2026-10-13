@@ -73,7 +73,7 @@ for Core's versioned contract error; other diagnostic phases are unchanged.
 | 1 | `fix/state-contract-diagnostics` | State/selector diagnostic owners and new contract-state CLI fixtures | Integrated with reviewed inline artifact correction; final CI pending |
 | 2 | `fix/postgres-connection-retries` | PostgreSQL profile/session retry owners and new connection-retry fixtures | Integrated; 9 focused native and 33 actual Core/native cases passed |
 | 3 | `fix/cross-catalog-retention` | Cross-database catalog retention and new catalog CLI fixtures | Integrated; native cap/expiry and bidirectional actual warehouse checks passed |
-| 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Claimed next; complete-date grammar/reference map complete |
+| 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Worker active after completed grammar/reference map and claim |
 
 The supervisor integrates each clean, validated worker commit through Git
 before launching the next implementation. Existing shared fixtures and the
@@ -118,7 +118,7 @@ unchanged. Catalog retention is integrated after reproducing the exhausted
 catalog failure following successful warehouse commits. Six focused native
 cases and bidirectional actual warehouse cap/expiry/replacement/unknown-budget
 checks passed; existing catalog/concurrent-writer/movement cases are retained.
-The date worker starts last. Its claim requires complete authored dates and excludes
+The date worker is active last. Its claim requires complete authored dates and excludes
 dateutil's clock-dependent partial-date defaults. Full integrated/platform
 acceptance remains pending.
 
