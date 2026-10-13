@@ -55,8 +55,8 @@ separate implementation and certification.
 
 The user authorized implementation of every currently open repository issue,
 one at a time, followed by one integration PR. The supervisor owns
-`fix/remaining-issue-backlog`, this plan, public issue coordination and final
-validation. The starting inventory contains four issues: contract-breaking
+`fix/remaining-issue-backlog`, this plan, support documentation, public issue
+coordination and final validation. The starting inventory contains four issues: contract-breaking
 state diagnostics, PostgreSQL connection retries, cross-database catalog
 retention and free-form model deprecation dates. No open PR overlaps this batch.
 
@@ -80,7 +80,10 @@ before launching the next implementation. Existing shared fixtures and the
 project facade have one writer at a time; exact ownership is recorded in the
 issue claim before edits. Support documentation belongs to the supervisor.
 Native test optimization remains deferred; sharding distributes unchanged
-acceptance assertions and does not authorize deleting them.
+acceptance assertions and does not authorize deleting them. The supervisor
+also maintains the four new module scheduling weights after reviewing focused
+JUnit case durations, keeping local sample provenance separate from historical
+both-architecture CI measurements. Scheduling weights never establish acceptance.
 
 Acceptance requires native positive/negative cases near each Zig owner, real
 pinned Core/native CLI comparisons for upstream behavior, deterministic actual
@@ -93,14 +96,20 @@ do not claim general dateutil compatibility from a few examples.
 
 Final validation runs on a frozen integrated source: Debug/ReleaseSafe builds,
 native tests, affected CLI/oracle suites, runtime-boundary/public-safety and
-diff checks, then all applicable CI gates including eight canonical shards per
+diff checks, plus all applicable CI gates including eight canonical shards per
 actual Linux architecture and their complete evidence aggregate. Rebase on
 current main before final validation. No skip, xfail, assertion removal,
 upstream pin change or unsupported-platform certification is authorized.
 
 Stop and remap an overlapping owner, unsupported adapter, broader recovery
 redesign, ambiguous upstream/default-date policy or unrelated behavior change.
-Resolve routine implementation choices within the user's authorization. The
+Resolve routine implementation choices within the user's authorization.
+
+The unchanged CLI build fixture certifies a clean Debug build and complete
+native test run; reuse that frozen-source evidence within the integrated
+validation session. A draft integration PR may run the CI matrix concurrently
+with the supervisor's affected CLI suites. Keep the same source frozen and
+mark the PR ready only after both local and CI gates pass. The
 end state is one non-draft, green integration PR with issue evidence and
 handoffs; merging, tags and release publication remain separate actions.
 
