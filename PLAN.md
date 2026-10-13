@@ -110,12 +110,12 @@ map is complete; its eventual claim will require complete authored dates and
 explicitly exclude dateutil's clock-dependent partial-date defaults. No
 completed acceptance is claimed yet.
 
-### Parallel Compatibility Validation
+### Delivered Parallel Compatibility Validation
 
-The user's requested test acceleration is owned by one local editor on
-`ci/parallel-compatibility-tests`, in an isolated worktree. No Agent OS run
-or additional agents are involved. PR #241 retains its running checks and
-separate merge gate; this slice does not modify that candidate.
+The requested test acceleration is merged into main. Its original owner used
+`ci/parallel-compatibility-tests` in an isolated worktree. The current issue
+campaign uses the delivered distribution and evidence audit without changing
+their required assertions or acceptance policy.
 
 Distribute the unchanged canonical suite across eight independent GitHub
 runners per actual Linux architecture, balancing complete test modules using
@@ -148,7 +148,8 @@ local results separately from projected CI time and increased runner-minute
 cost. Native helper migrations remain separate later work; distribution of
 unchanged assertions does not depend on those migrations.
 
-Status: distribution and evidence audit implemented locally. Actionlint passes;
+Status: distribution and evidence audit merged. Recorded local validation:
+Actionlint passes;
 full collection contains 5,954 cases, including 38 new distribution-tooling
 regressions. A fixed 67-case native/Core trial passes with 1/2/4 isolated
 processes in 39.70/25.71/18.01 seconds, with complete disjoint JUnit evidence and
@@ -156,12 +157,12 @@ zero skips or xfails. Timing excludes initial builds and plan collection.
 The eight-shard historical estimate is 27.4 minutes before CI setup/queues;
 the full both-architecture CI trial remains required before merge.
 
-### macOS Native Runtime And Getting Started
+### Delivered macOS Native Runtime And Getting Started
 
-One local editing owner on `fix/macos-native-runtime` owns this slice. No
-Agent OS orchestration or additional agents are involved. The initial Linux
-acceptance contract stays intact; macOS source builds are an experimental
-development target until their complete platform gates are certified.
+The experimental source-build slice is merged into main. Its original local
+editing owner used `fix/macos-native-runtime`. The initial Linux acceptance
+contract stays intact; macOS source builds remain an experimental development
+target until their complete platform gates are certified.
 
 The observed Apple Silicon build can run version/help/init, but project
 discovery terminates with SIGSYS because it invokes Linux directory syscalls.
@@ -196,11 +197,11 @@ PostgreSQL if a disposable local fixture is available, and state any missing
 platform/adapter evidence explicitly. Do not open a browser or install global
 packages/services. Keep downloaded tools, fixtures and logs ignored.
 
-Status: implemented and locally validated on Apple Silicon. The setup helper
+Status: merged and locally validated on Apple Silicon. The setup helper
 builds `zig-out/bin/dxt` with the bundled drivers; ordinary installation emits
 one executable. No published macOS archive or full macOS Core certification
-is claimed. Implementation and documentation are prepared as focused local
-commits for PR review; publication and CI remain separate release gates.
+is claimed. Published release archives and complete platform certification
+remain separate gates.
 
 Local evidence for this slice:
 
