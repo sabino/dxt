@@ -131,7 +131,10 @@ test "datetime strftime preserves escaped directives NUL and exact timezone fiel
     try std.testing.expectEqualStrings("-00:05:30.123456|%:z", try render(a, ns, "%:z|%%:z", .{ .offset_us = -330123456 }));
     try std.testing.expectEqualStrings("2024\x0002\x0029", try render(a, ns, "%Y\x00%m\x00%d", .{}));
     try std.testing.expectEqualStrings("000000||", try render(a, ns, "%f|%z|%Z", .{ .date_only = true, .offset_us = 0, .abbreviation = "UTC" }));
-    try std.testing.expectEqualStrings("0001-01-01", try render(a, -62135596800 * @as(i96, std.time.ns_per_s), "%04Y-%m-%d", .{}));
+    // CPython delegates this libc extension too: Darwin does not implement
+    // glibc's numeric width flag, and returns the literal "4Y" component.
+    const width_year = if (@import("builtin").os.tag == .macos) "4Y-01-01" else "0001-01-01";
+    try std.testing.expectEqualStrings(width_year, try render(a, -62135596800 * @as(i96, std.time.ns_per_s), "%04Y-%m-%d", .{}));
 }
 
 test "datetime strftime delegates native ISO week calendar and locale directives" {

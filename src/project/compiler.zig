@@ -1506,7 +1506,7 @@ test "ten thousand seven-column CSV extensions certify native table backing once
     var graph = Graph{ .allocator = a, .project_name = "demo" };
     const node = Node{ .package_name = "demo", .unique_id = "seed.demo.wide", .name = "wide", .resource_type = "seed", .path = "wide.csv", .original_file_path = "seeds/wide.csv", .project_root = "project", .raw_code = csv.written() };
     var output: std.Io.Writer.Allocating = .init(a);
-    var operation = try @import("commands.zig").OperationHost.init(.{ .allocator = a, .io = std.testing.io }, &graph, "unused", &output.writer);
+    var operation = try @import("commands.zig").OperationHost.init(.{ .allocator = a, .io = std.testing.io }, &graph, ":memory:", &output.writer);
     defer operation.deinit();
     const operation_host = operation.host();
     _ = operation_host.set_node.?(operation_host.context, &node);
