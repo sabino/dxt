@@ -145,6 +145,42 @@ pub fn version(allocator: std.mem.Allocator, session: *adapter.Session) ![]const
     };
 }
 
+// Array order records admission order and breaks ties between observed timestamps.
+// Caller-specific max age is only a matching policy, not a retention policy.
+fn usable(stat: Statistic, now: u64) bool {
+    return stat.observed_epoch <= now and now < stat.expires_epoch;
+}
+
+fn pruneStatistics(stats: *std.ArrayList(Statistic), now: u64) void {
+    var retained: usize = 0;
+    for (stats.items) |stat| {
+        if (!usable(stat, now)) continue;
+        stats.items[retained] = stat;
+        retained += 1;
+    }
+    stats.shrinkRetainingCapacity(retained);
+}
+
+fn admitStatistic(allocator: std.mem.Allocator, stats: *std.ArrayList(Statistic), stat: Statistic, now: u64) !void {
+    if (!usable(stat, now)) return;
+    for (stats.items, 0..) |old, index| {
+        if (std.mem.eql(u8, old.logical_id, stat.logical_id) and std.mem.eql(u8, old.connection, stat.connection) and std.mem.eql(u8, old.binding_hash, stat.binding_hash) and std.mem.eql(u8, old.query_hash, stat.query_hash)) {
+            _ = stats.orderedRemove(index);
+            try stats.append(allocator, stat);
+            return;
+        }
+    }
+    if (stats.items.len == 4096) {
+        var oldest: usize = 0;
+        for (stats.items, 0..) |old, index| {
+            if (old.observed_epoch < stats.items[oldest].observed_epoch) oldest = index;
+        }
+        if (stat.observed_epoch < stats.items[oldest].observed_epoch) return;
+        _ = stats.orderedRemove(oldest);
+    }
+    try stats.append(allocator, stat);
+}
+
 pub fn record(runtime: cross.Runtime, root: []const u8, plan: *const cross.Plan, run_id: []const u8, records: []const run.Record) !void {
     var scratch = std.heap.ArenaAllocator.init(runtime.allocator);
     defer scratch.deinit();
@@ -159,6 +195,8 @@ pub fn record(runtime: cross.Runtime, root: []const u8, plan: *const cross.Plan,
     defer store.deinit();
     var stats: std.ArrayList(Statistic) = .empty;
     try stats.appendSlice(allocator, store.value.relation_stats);
+    const now = epoch(runtime.io);
+    pruneStatistics(&stats, now);
     var models: std.ArrayList(ModelInfo) = .empty;
     for (store.value.models) |previous| {
         var selected = false;
@@ -176,7 +214,6 @@ pub fn record(runtime: cross.Runtime, root: []const u8, plan: *const cross.Plan,
         if (!selected) try lineage.append(allocator, previous);
     }
     const tasks = try allocator.alloc(Task, records.len);
-    const now = epoch(runtime.io);
     for (plan.models, records, tasks) |model, completed, *task| {
         task.* = .{ .model = model.name, .status = completed.status, .strategy = model.strategy, .rows_moved = completed.rows_moved, .bytes_moved = completed.bytes_moved, .output_rows = completed.output_rows, .egress_cost = completed.egress_cost, .estimated_rows = model.estimated_rows, .estimated_bytes = model.estimated_bytes, .estimated_cost = model.estimated_cost, .error_name = completed.error_name, .attempt_count = completed.attempt_count, .throttled_connection = completed.throttled_connection };
         const input_ids = try allocator.alloc([]const u8, model.inputs.len);
@@ -192,16 +229,7 @@ pub fn record(runtime: cross.Runtime, root: []const u8, plan: *const cross.Plan,
                 const hash = try bindingHash(allocator, connection);
                 const schema = try std.json.Stringify.valueAlloc(allocator, observed.source_columns, .{});
                 const stat: Statistic = .{ .logical_id = input.logical_id, .connection = connection.name, .binding_hash = hash, .query_hash = observed.query_hash, .observed_epoch = now, .data_as_of_epoch = observed.data_as_of_epoch, .expires_epoch = observed.retention_until_epoch orelse now +| 86400, .rows = observed.rows, .bytes = observed.bytes, .schema_hash = try cross.digest(allocator, schema), .columns = observed.source_columns, .sensitivity = observed.sensitivity, .source_adapter = observed.source_adapter, .source_version = observed.source_version, .run_id = run_id };
-                var found = false;
-                for (stats.items) |*old| if (std.mem.eql(u8, old.logical_id, stat.logical_id) and std.mem.eql(u8, old.connection, stat.connection) and std.mem.eql(u8, old.binding_hash, stat.binding_hash) and std.mem.eql(u8, old.query_hash, stat.query_hash)) {
-                    old.* = stat;
-                    found = true;
-                    break;
-                };
-                if (!found) {
-                    if (stats.items.len == 4096) return error.CrossDatabaseCatalogObjectBudgetExceeded;
-                    try stats.append(allocator, stat);
-                }
+                try admitStatistic(allocator, &stats, stat, now);
             }
         }
     }
@@ -240,4 +268,104 @@ test "observed catalog estimates require an unchanged fresh physical boundary" {
     try std.testing.expect(match(&store, "warehouse", "source.p.orders", "other", "query", 110, 60) == null);
     try std.testing.expect(match(&store, "warehouse", "source.p.orders", "bound", "query", 201, 60) == null);
     try std.testing.expect(match(&store, "warehouse", "source.p.orders", "bound", "query", 150, 10) == null);
+}
+
+fn testStatistic(query_hash: []const u8, observed: u64, expires: u64) Statistic {
+    return .{ .logical_id = "source.p.orders", .connection = "warehouse", .binding_hash = "bound", .query_hash = query_hash, .observed_epoch = observed, .data_as_of_epoch = observed, .expires_epoch = expires, .rows = 7, .bytes = 80, .schema_hash = "schema", .columns = &.{}, .sensitivity = "public", .source_adapter = "duckdb", .source_version = "v1.4.2", .run_id = "run" };
+}
+
+fn testFullStatistics(allocator: std.mem.Allocator, observed: u64) !std.ArrayList(Statistic) {
+    var stats: std.ArrayList(Statistic) = .empty;
+    for (0..4096) |index| try stats.append(allocator, testStatistic(try std.fmt.allocPrint(allocator, "query-{d}", .{index}), observed, 1000));
+    return stats;
+}
+
+test "catalog retention prunes expired future and unusable observations before admission" {
+    var stats: std.ArrayList(Statistic) = .empty;
+    defer stats.deinit(std.testing.allocator);
+    try stats.appendSlice(std.testing.allocator, &.{ testStatistic("expired", 10, 100), testStatistic("future", 101, 200), testStatistic("invalid", 80, 70), testStatistic("old-but-live", 1, 200), testStatistic("fresh", 99, 101) });
+    pruneStatistics(&stats, 100);
+    try std.testing.expectEqual(@as(usize, 2), stats.items.len);
+    try std.testing.expectEqualStrings("old-but-live", stats.items[0].query_hash);
+    try std.testing.expectEqualStrings("fresh", stats.items[1].query_hash);
+    try admitStatistic(std.testing.allocator, &stats, testStatistic("expired-incoming", 100, 100), 100);
+    try admitStatistic(std.testing.allocator, &stats, testStatistic("future-incoming", 101, 200), 100);
+    try admitStatistic(std.testing.allocator, &stats, testStatistic("invalid-incoming", 100, 99), 100);
+    try std.testing.expectEqual(@as(usize, 2), stats.items.len);
+    const store: Store = .{ .arena = undefined, .owner = std.testing.allocator, .value = .{ .relation_stats = stats.items } };
+    try std.testing.expect(match(&store, "warehouse", "source.p.orders", "bound", "old-but-live", 100, 10) == null);
+    try std.testing.expect(match(&store, "warehouse", "source.p.orders", "bound", "old-but-live", 100, 100) != null);
+}
+
+test "catalog retention replaces full identity at capacity and renews FIFO admission" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var stats = try testFullStatistics(allocator, 100);
+    var replacement = testStatistic("query-0", 100, 900);
+    replacement.rows = 17;
+    try admitStatistic(allocator, &stats, replacement, 100);
+    try std.testing.expectEqual(@as(usize, 4096), stats.items.len);
+    try std.testing.expectEqualStrings("query-1", stats.items[0].query_hash);
+    try std.testing.expectEqualStrings("query-0", stats.items[4095].query_hash);
+    try std.testing.expectEqual(@as(u64, 17), stats.items[4095].rows);
+    try admitStatistic(allocator, &stats, testStatistic("new", 100, 1000), 100);
+    try std.testing.expectEqualStrings("query-2", stats.items[0].query_hash);
+    try std.testing.expectEqualStrings("query-0", stats.items[4094].query_hash);
+    try std.testing.expectEqualStrings("new", stats.items[4095].query_hash);
+}
+
+test "catalog retention chooses minimum observed epoch rather than array head" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var stats = try testFullStatistics(allocator, 100);
+    stats.items[3000].observed_epoch = 1;
+    try admitStatistic(allocator, &stats, testStatistic("new", 101, 1000), 101);
+    try std.testing.expectEqualStrings("query-0", stats.items[0].query_hash);
+    try std.testing.expectEqualStrings("query-2999", stats.items[2999].query_hash);
+    try std.testing.expectEqualStrings("query-3001", stats.items[3000].query_hash);
+    try std.testing.expectEqualStrings("new", stats.items[4095].query_hash);
+    try admitStatistic(allocator, &stats, testStatistic("too-old", 99, 1000), 101);
+    try std.testing.expectEqualStrings("query-0", stats.items[0].query_hash);
+    try std.testing.expectEqualStrings("new", stats.items[4095].query_hash);
+    try std.testing.expectEqual(@as(usize, 4096), stats.items.len);
+}
+
+test "catalog retention full identity includes connection logical id binding and query" {
+    var stats: std.ArrayList(Statistic) = .empty;
+    defer stats.deinit(std.testing.allocator);
+    const base = testStatistic("query", 100, 200);
+    try admitStatistic(std.testing.allocator, &stats, base, 100);
+    var other = base;
+    other.connection = "other";
+    try admitStatistic(std.testing.allocator, &stats, other, 100);
+    other = base;
+    other.logical_id = "source.p.other";
+    try admitStatistic(std.testing.allocator, &stats, other, 100);
+    other = base;
+    other.binding_hash = "other";
+    try admitStatistic(std.testing.allocator, &stats, other, 100);
+    other = base;
+    other.query_hash = "other";
+    try admitStatistic(std.testing.allocator, &stats, other, 100);
+    try std.testing.expectEqual(@as(usize, 5), stats.items.len);
+    try admitStatistic(std.testing.allocator, &stats, base, 100);
+    try std.testing.expectEqual(@as(usize, 5), stats.items.len);
+    try std.testing.expectEqualStrings("other", stats.items[0].connection);
+    try std.testing.expectEqualStrings("query", stats.items[4].query_hash);
+}
+
+test "catalog retention sustained tied timestamp churn stays bounded and evictions are unknown" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var stats = try testFullStatistics(allocator, 100);
+    for (4096..8192) |index| try admitStatistic(allocator, &stats, testStatistic(try std.fmt.allocPrint(allocator, "query-{d}", .{index}), 100, 1000), 100);
+    try std.testing.expectEqual(@as(usize, 4096), stats.items.len);
+    try std.testing.expectEqualStrings("query-4096", stats.items[0].query_hash);
+    try std.testing.expectEqualStrings("query-8191", stats.items[4095].query_hash);
+    const store: Store = .{ .arena = undefined, .owner = std.testing.allocator, .value = .{ .relation_stats = stats.items } };
+    try std.testing.expect(match(&store, "warehouse", "source.p.orders", "bound", "query-0", 100, 100) == null);
+    try std.testing.expectEqual(@as(u64, 7), match(&store, "warehouse", "source.p.orders", "bound", "query-4096", 100, 100).?.rows);
 }
