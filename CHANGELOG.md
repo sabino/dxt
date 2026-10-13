@@ -30,6 +30,10 @@ DuckDB and PostgreSQL.
   attribution changes and invalidate prior state when effective role changes.
 - Cross-database artifact writers use exclusive private temporary files and
   preserve complete publications and unrelated files under concurrent writes.
+- Cross-database catalogs prune unusable observations before admission and
+  retain the newest 4,096 rather than exhausting the count budget after a
+  warehouse commit. Evicted estimates become unknown; movement budgets and
+  rollback safeguards remain enforced in both directions.
 
 ### Documentation
 

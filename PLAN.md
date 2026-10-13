@@ -72,8 +72,8 @@ for Core's versioned contract error; other diagnostic phases are unchanged.
 | --- | --- | --- | --- |
 | 1 | `fix/state-contract-diagnostics` | State/selector diagnostic owners and new contract-state CLI fixtures | Integrated with reviewed inline artifact correction; final CI pending |
 | 2 | `fix/postgres-connection-retries` | PostgreSQL profile/session retry owners and new connection-retry fixtures | Integrated; 9 focused native and 33 actual Core/native cases passed |
-| 3 | `fix/cross-catalog-retention` | Cross-database catalog retention and new catalog CLI fixtures | Claimed next; retention and fixture map complete |
-| 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Grammar/reference mapping; follows order 3 |
+| 3 | `fix/cross-catalog-retention` | Cross-database catalog retention and new catalog CLI fixtures | Integrated; native cap/expiry and bidirectional actual warehouse checks passed |
+| 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Claimed next; complete-date grammar/reference map complete |
 
 The supervisor integrates each clean, validated worker commit through Git
 before launching the next implementation. Existing shared fixtures and the
@@ -114,8 +114,11 @@ PostgreSQL retries are integrated through both native entry points, including
 Core's separate profile-shape/open-limit validation. The final real-server
 module passed 33 cases without skips/xfails; 9 distinct focused native cases
 also passed. Connection policy leaves physical identity and SQL/task retries
-unchanged. Catalog retention starts next; the date worker remains paused.
-The date claim requires complete authored dates and excludes
+unchanged. Catalog retention is integrated after reproducing the exhausted
+catalog failure following successful warehouse commits. Six focused native
+cases and bidirectional actual warehouse cap/expiry/replacement/unknown-budget
+checks passed; existing catalog/concurrent-writer/movement cases are retained.
+The date worker starts last. Its claim requires complete authored dates and excludes
 dateutil's clock-dependent partial-date defaults. Full integrated/platform
 acceptance remains pending.
 
