@@ -294,6 +294,17 @@ fn sqlOperation(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: 
     try resolveDependencies(&graph);
     try writeWarnings(runtime, stderr, &graph);
     const target_dir = try targetDir(runtime, options);
+    var selection = resolveSelection(runtime, options) catch |err| {
+        // SQL operations historically publish authored resources before
+        // reporting an invalid named selector. No operation has been added.
+        _ = try writeManifest(runtime, &graph, target_dir);
+        return err;
+    };
+    defer selection.deinit(runtime.allocator);
+    const defer_manifest = selector.usesContractStateSelector(selection.select, selection.exclude);
+    // Keep ordinary inline/show failure publication ahead of temporary-node
+    // parsing. Contract selectors must first pass their state preflight.
+    if (!defer_manifest) _ = try writeManifest(runtime, &graph, target_dir);
     if (std.mem.eql(u8, options.which, "show") and options.select == null and (options.inline_sql == null or options.inline_sql.?.len == 0)) return error.MissingShowSelection;
     const original_nodes = graph.nodes.items.len;
     if (options.inline_sql) |sql| {
@@ -310,11 +321,15 @@ fn sqlOperation(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: 
         types.deinitNode(runtime.allocator, &graph.nodes.items[original_nodes]);
         graph.nodes.shrinkRetainingCapacity(original_nodes);
     };
-    var selection = try resolveSelection(runtime, options);
-    defer selection.deinit(runtime.allocator);
     var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
-    _ = try writeManifest(runtime, &graph, target_dir);
+    if (defer_manifest) {
+        // Publication describes authored resources, including on empty or
+        // failed inline commands. The operation stays in the execution graph.
+        var authored_graph = graph;
+        authored_graph.nodes.items = graph.nodes.items[0..original_nodes];
+        _ = try writeManifest(runtime, &authored_graph, target_dir);
+    }
     try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
     const selected = if (options.inline_sql != null) try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "sql_operation", selection.select, selection.exclude, selection_state.context()) else try commandSelection(runtime.allocator, try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context()), .compile);
     if (selected.len == 0) return finishEmptySelection(runtime, target_dir, stderr);

@@ -367,3 +367,68 @@ def test_removed_foreign_key_core_native(tmp_path, adapter, level):
     location['constraints'].clear()
     write_schema(root, schema)
     compare(root, state, False, 'Enforced ' + level + ' level constraints were removed', methods=('modified.contract',))
+
+
+def assert_authored_manifest(root):
+    manifest = json.loads((root / 'native-current/manifest.json').read_text())
+    assert set(manifest['nodes']) == {'model.state_contracts.a', 'model.state_contracts.other'}
+    for mapping in ('parent_map', 'child_map'):
+        assert not any(key.startswith('sql_operation.') for key in manifest[mapping])
+        assert not any(node.startswith('sql_operation.') for nodes in manifest[mapping].values() for node in nodes)
+
+
+@pytest.mark.parametrize('command,query', [
+    ('show', 'select missing_column'),
+    ('show', "select * from {{ ref('not_found') }}"),
+    ('compile', "select * from {{ ref('not_found') }}"),
+    ('compile', "{{ exceptions.raise_compiler_error('inline failure') }}"),
+])
+def test_inline_failure_publishes_only_authored_manifest_core_native(tmp_path, command, query):
+    root = project(tmp_path)
+    for core in (False, True):
+        result = invoke(root, command, '--inline', query, core=core)
+        assert result.returncode == 2, result.stdout + result.stderr
+        target = root / ('core-current' if core else 'native-current')
+        manifest = json.loads((target / 'manifest.json').read_text())
+        assert set(manifest['nodes']) == {'model.state_contracts.a', 'model.state_contracts.other'}
+        for mapping in ('parent_map', 'child_map'):
+            assert not any(key.startswith('sql_operation.') for key in manifest[mapping])
+            assert not any(node.startswith('sql_operation.') for nodes in manifest[mapping].values() for node in nodes)
+        assert not (target / 'run_results.json').exists()
+
+
+def test_show_missing_selection_preserves_authored_publication(tmp_path):
+    root = project(tmp_path)
+    result = invoke(root, 'show')
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert_authored_manifest(root)
+    assert not (root / 'native-current/run_results.json').exists()
+
+
+@pytest.mark.parametrize('command', ['show', 'compile'])
+@pytest.mark.parametrize('contract_selector', [False, True])
+def test_inline_empty_selection_keeps_operation_out_of_authored_manifest(tmp_path, command, contract_selector):
+    root = project(tmp_path)
+    if contract_selector:
+        state, _ = baseline(root, tmp_path)
+        schema = definition(enforced=False)
+        write_schema(root, schema)
+        args = ('--state', state, '--select', 'state:modified.contract')
+    else:
+        args = ('--select', 'tag:missing')
+    # Native inline selection can legitimately be empty. The temporary node
+    # must stay out of artifacts even when final success cleanup is not reached.
+    result = invoke(root, command, '--inline', 'select 7 as id', *args)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert_authored_manifest(root)
+    assert json.loads((root / 'native-current/run_results.json').read_text())['results'] == []
+
+
+@pytest.mark.parametrize('command,inline', [('show', False), ('show', True), ('compile', True)])
+def test_invalid_named_selector_preserves_authored_sql_operation_publication(tmp_path, command, inline):
+    root = project(tmp_path)
+    args = ('--inline', 'select 7 as id') if inline else ()
+    result = invoke(root, command, *args, '--selector', 'missing_selector')
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert_authored_manifest(root)
+    assert not (root / 'native-current/run_results.json').exists()
