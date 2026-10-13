@@ -65,6 +65,8 @@ fixtures and stop conditions. An implementation claim follows the recorded
 mapping; research-only issue restrictions are satisfied through that gate.
 Each editing worker then uses its own branch and worktree. Workers do not
 spawn child agents. Only the supervisor runs expensive integrated validation.
+The state owner also owns the narrow `compile_diagnostics.zig` phase mapping
+for Core's versioned contract error; other diagnostic phases are unchanged.
 
 | Order | Worker branch | Exclusive ownership | Current status |
 | --- | --- | --- | --- |
