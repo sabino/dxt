@@ -68,7 +68,7 @@ spawn child agents. Only the supervisor runs expensive integrated validation.
 
 | Order | Worker branch | Exclusive ownership | Current status |
 | --- | --- | --- | --- |
-| 1 | `fix/state-contract-diagnostics` | State/selector diagnostic owners and new contract-state CLI fixtures | Reference and ownership mapping |
+| 1 | `fix/state-contract-diagnostics` | State/selector diagnostic owners and new contract-state CLI fixtures | Claimed; implementation and focused acceptance |
 | 2 | `fix/postgres-connection-retries` | PostgreSQL profile/session retry owners and new connection-retry fixtures | Reference and ownership mapping; follows order 1 |
 | 3 | `fix/cross-catalog-retention` | Cross-database catalog retention and new catalog CLI fixtures | Ownership and retention-policy mapping; follows order 2 |
 | 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Grammar/reference mapping; follows order 3 |
@@ -103,8 +103,12 @@ end state is one non-draft, green integration PR with issue evidence and
 handoffs; merging, tags and release publication remain separate actions.
 
 Status: current main pulled and integration branch created. All four issues
-are open; their specialist mapping is in progress. No implementation claim
-or completed acceptance is made yet.
+are open. The first issue has a published reference map, slice plan and claim;
+its isolated worker is implementing contract diagnostics. Retry parameter
+validation and catalog retention mapping continue read-only. The date grammar
+map is complete; its eventual claim will require complete authored dates and
+explicitly exclude dateutil's clock-dependent partial-date defaults. No
+completed acceptance is claimed yet.
 
 ### Parallel Compatibility Validation
 
