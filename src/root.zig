@@ -368,7 +368,7 @@ fn runCommand(args: []const []const u8, stdout: *Io.Writer, stderr: *Io.Writer, 
         };
         var options = parseOptions(rt.allocator, rt.io, args[2..], stderr, .list, rt.global_options) catch |err| return commandError(err, stderr);
         options.which = command;
-        project.list(commandRuntime(rt, &options), options, stdout) catch |err| return commandError(err, stderr);
+        project.list(commandRuntime(rt, &options), options, stdout, stderr) catch |err| return commandError(err, stderr);
         return .ok;
     }
     if (equals(command, "clean")) {

@@ -107,6 +107,35 @@ pub fn usesStateSelector(select: ?[]const u8, exclude: ?[]const u8) bool {
     return false;
 }
 
+/// Only these state methods invoke Core's breaking-contract comparison.
+/// Reuse term parsing so graph operators and comma intersections retain the
+/// same boundaries as selection, including lowered named YAML selectors.
+pub fn usesContractStateSelector(select: ?[]const u8, exclude: ?[]const u8) bool {
+    for ([_]?[]const u8{ select, exclude }) |value| {
+        var clauses = std.mem.tokenizeAny(u8, value orelse "", " \t\r\n");
+        while (clauses.next()) |clause| {
+            var terms = std.mem.splitScalar(u8, clause, ',');
+            while (terms.next()) |raw| {
+                const term = parseSelectorTerm(raw);
+                if (!term.valid) continue;
+                for ([_][]const u8{ "state:modified", "state:unmodified", "state:modified.contract" }) |method| {
+                    if (std.mem.eql(u8, term.value, method)) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+test "contract state preflight recognizes exact selector leaves and graph operators" {
+    try std.testing.expect(usesContractStateSelector("tag:daily,2+state:modified.contract+1", null));
+    try std.testing.expect(usesContractStateSelector(null, "@state:unmodified"));
+    try std.testing.expect(usesContractStateSelector("state:modified", null));
+    for ([_][]const u8{ "state:new", "state:old", "state:modified.body", "state:modified.configs", "state:modified.relation", "state:modified.macros", "state:modified.persisted_descriptions", "fqn:state:modified", "tag:state:modified", "state:modified.contractual" }) |value| {
+        try std.testing.expect(!usesContractStateSelector(value, null));
+    }
+}
+
 fn selectorValueUsesSourceStatus(value: []const u8) bool {
     var expressions = std.mem.tokenizeAny(u8, value, " \t\r\n");
     while (expressions.next()) |expression| {

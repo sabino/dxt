@@ -42,10 +42,23 @@ pub fn captureError(path: []const u8, name: []const u8, authored: []const u8, er
 }
 pub fn phase(err: anyerror) []const u8 {
     return switch (err) {
+        error.ContractBreakingChange => "Breaking change to contract Error",
         error.DuckDbExecutionFailed, error.AdapterQueryCancelled => "Runtime Error",
         error.PostgresExecutionFailed, error.PostgresSerializationFailure, error.PostgresDeadlockDetected, error.PostgresLockNotAvailable => "Database Error",
         else => "Compilation Error",
     };
+}
+
+test "state contract failures retain the pinned Core breaking contract phase" {
+    const scope = beginScope(null);
+    defer scope.end();
+    captureError("models/orders_v1.sql", "orders", "Columns were removed", error.ContractBreakingChange);
+    try std.testing.expectEqualStrings("Breaking change to contract Error in orders (models/orders_v1.sql):\nColumns were removed", message(error.ContractBreakingChange).?);
+    try std.testing.expect(message(error.JinjaCompilerError) == null);
+    try std.testing.expectEqualStrings("Compilation Error", phase(error.JinjaCompilerError));
+    try std.testing.expectEqualStrings("Runtime Error", phase(error.DuckDbExecutionFailed));
+    try std.testing.expectEqualStrings("Database Error", phase(error.PostgresExecutionFailed));
+    clear();
 }
 pub fn message(err: anyerror) ?[]const u8 {
     return if (err == captured_error and used != 0) buffer[0..used] else null;
