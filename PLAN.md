@@ -71,8 +71,8 @@ for Core's versioned contract error; other diagnostic phases are unchanged.
 | Order | Worker branch | Exclusive ownership | Current status |
 | --- | --- | --- | --- |
 | 1 | `fix/state-contract-diagnostics` | State/selector diagnostic owners and new contract-state CLI fixtures | Integrated with reviewed inline artifact correction; final CI pending |
-| 2 | `fix/postgres-connection-retries` | PostgreSQL profile/session retry owners and new connection-retry fixtures | Claimed next; parameter and entry-point map complete |
-| 3 | `fix/cross-catalog-retention` | Cross-database catalog retention and new catalog CLI fixtures | Ownership and retention-policy mapping; follows order 2 |
+| 2 | `fix/postgres-connection-retries` | PostgreSQL profile/session retry owners and new connection-retry fixtures | Integrated; 9 focused native and 33 actual Core/native cases passed |
+| 3 | `fix/cross-catalog-retention` | Cross-database catalog retention and new catalog CLI fixtures | Claimed next; retention and fixture map complete |
 | 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Grammar/reference mapping; follows order 3 |
 
 The supervisor integrates each clean, validated worker commit through Git
@@ -110,9 +110,12 @@ its isolated worker passed 33 focused native and 78 real Core/native cases.
 The state commits are integrated after root review corrected inline authored
 manifest publication. Additional targeted and unchanged inline/show checks
 passed; those counts overlap the original module and are not additive.
-PostgreSQL retries start next, including both native entry points and Core's
-separate profile-shape/open-limit validation. Catalog and date workers remain
-paused. The date claim requires complete authored dates and excludes
+PostgreSQL retries are integrated through both native entry points, including
+Core's separate profile-shape/open-limit validation. The final real-server
+module passed 33 cases without skips/xfails; 9 distinct focused native cases
+also passed. Connection policy leaves physical identity and SQL/task retries
+unchanged. Catalog retention starts next; the date worker remains paused.
+The date claim requires complete authored dates and excludes
 dateutil's clock-dependent partial-date defaults. Full integrated/platform
 acceptance remains pending.
 

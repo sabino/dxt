@@ -19,6 +19,9 @@ DuckDB and PostgreSQL.
   normalized timezone-aware metadata through parsing, artifacts and caches.
 - PostgreSQL profiles honor canonical credential aliases and configured held
   session roles, search paths and application names without publishing passwords.
+- PostgreSQL profile sessions apply connection-only retries with Core's
+  attempt/backoff policy, cleanup and cancellation; SQL and uncertain commits
+  are never replayed. Ordinary and cross-database session paths share the policy.
 - Authored incremental strategy macros execute through native lifecycles with
   Core's plus normalization and adapter-specific strategy validation timing.
 - Committed workflow applies retain exact successful evidence and repair failed

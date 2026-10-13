@@ -143,7 +143,15 @@ alias collisions and apply configured `role`, `search_path` and
 `application_name` to every held session. Password aliases stay outside target
 and public artifacts. [Profile comparisons](../tests/test_usability_postgres_profiles.py)
 use a dedicated database, actual password authentication and worker sessions.
-Configured connection retries remain an observed follow-up.
+Initial connections honor `retries` with one additional attempt by default,
+quadratic waits (0, 1, 4 seconds and so on), and no wait after exhaustion.
+Profile parsing accepts integers/integral floats; connection opening validates
+the observed 0–1000 limit separately. Failed handles are released before retry,
+and cancellation stops the policy. Both ordinary and cross-database profile
+sessions use it; SQL, role failures, uncertain commits, driver loading and
+allocation failures are not retried. [Connection fault comparisons](../tests/test_usability_postgres_retries.py)
+use causal transport failures against actual PostgreSQL and verify that SQL
+side effects are not replayed.
 
 Model deprecation metadata supports the tested ISO date/datetime forms,
 local-timezone normalization and serialized macro values. Core also accepts
