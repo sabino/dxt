@@ -81,16 +81,17 @@ the complete sharded PR acceptance and native/Linux installation gates. Final
 PR validation must exercise the new macOS runners before support claims are
 promoted. Tags and release publication require separate authorization.
 
-PR #243's first native Apple Silicon gate passed, but Zig 0.16 crashed while
-emitting the Intel Debug test object, before test execution. An explicit LLVM
-trial also crashed; its stack trace points to LLVM's stack-protection emission.
-Selecting Zig's own x86 backend explicitly builds the complete Intel Debug test
-binary locally. Apply this backend only to Intel Mac Debug test and executable
-objects, retaining Debug safety, all assertions, the pinned compiler, release
-backend and SDK linker. Scope includes these two narrow build settings.
-Require all actual-platform PR gates on the corrected source; earlier CI
-evidence is superseded for final acceptance. Final status/evidence is tracked
-on PR #243, keeping the validated source frozen through merge.
+PR #243's Intel gate exposed a Zig 0.16 LLVM crash when embedding compiler
+support routines in the Debug native test object. A trial using Zig's x86
+backend compiled and ran all 866 tests but decoded a half-precision float
+incorrectly (865 passed, one failed). Keep LLVM and compile the same pinned
+compiler support source as a separate ReleaseSafe static library only for
+Intel Mac Debug objects. The complete test binary links locally without the
+LLVM crash. Preserve numeric ABI, Debug runtime checks, all assertions and
+the release build path; introduce no runtime dependency or compiler upgrade.
+Scope includes this narrow build/link setting. Cancel superseded CI; require
+every actual-platform PR gate on the corrected source. Final status/evidence
+is tracked on PR #243, keeping the validated source frozen through merge.
 
 Status: locally implemented; PR CI remains pending. Actionlint, shell syntax, runtime-boundary and
 public-safety checks pass. All 140 combined release/safety/installer tooling
