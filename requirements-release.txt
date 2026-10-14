@@ -1,0 +1,6 @@
+# Developer/CI archive certification only; never installed by end users.
+dbt-core==1.10.5
+duckdb==1.4.2
+jsonschema==4.26.0
+psycopg2-binary==2.9.13
+pgserver==0.1.4; platform_system == "Darwin"

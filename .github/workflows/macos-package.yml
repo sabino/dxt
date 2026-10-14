@@ -1,0 +1,79 @@
+name: macOS package validation
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        required: true
+      version:
+        type: string
+        default: ""
+      native_tests:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: standalone ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-macos
+            runner: macos-15
+          - target: x86_64-macos
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-release.txt
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: "0.16.0"
+      - name: Select Apple's active macOS SDK
+        run: echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+      - name: Install developer-only artifact and warehouse fixtures
+        run: python -m pip install -r requirements-release.txt
+      - name: Run bundled native tests on the actual Mac architecture
+        if: inputs.native_tests
+        run: zig build test -Dbundle-drivers=true -Dtarget=${{ matrix.target }} -j2 --summary all
+      - name: Build the standalone ReleaseSafe binary
+        run: zig build -Doptimize=ReleaseSafe -Dbundle-drivers=true -Dtarget=${{ matrix.target }} -j2 --summary all
+      - name: Read native version and enforce the release tag version when supplied
+        id: native
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          version=$(./zig-out/bin/dxt version)
+          if [ -n "$EXPECTED_VERSION" ]; then
+            test "$version" = "$EXPECTED_VERSION"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Package binary, documentation and bundled driver notices
+        run: python scripts/package_release.py --version "${{ steps.native.outputs.version }}" --target "${{ matrix.target }}"
+      - name: Generate checksum before opening the archive
+        run: |
+          cd dist
+          shasum -a 256 "dxt-v${{ steps.native.outputs.version }}-${{ matrix.target }}.tar.gz" > "dxt-v${{ steps.native.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt"
+      - name: Certify extracted archive with both bundled adapters and PATH empty
+        run: >-
+          python scripts/check_install.py --archive "dist/dxt-v${{ steps.native.outputs.version }}-${{ matrix.target }}.tar.gz"
+          --checksum-file "dist/dxt-v${{ steps.native.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt"
+          --version "${{ steps.native.outputs.version }}" --bundled-drivers --postgres-fixture --require-postgres
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

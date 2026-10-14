@@ -9,9 +9,44 @@ runtime requirements.
 | Platform | Current status |
 | --- | --- |
 | Linux x86_64 and ARM64 | Initial SQL acceptance platforms. Release archives currently use external native DuckDB/libpq libraries. |
-| macOS Apple Silicon | Experimental source build, including a standalone driver-bundled build. Local validation is recorded in the active plan. |
-| macOS Intel | Pinned Zig/DuckDB build inputs exist; actual Intel execution is not certified. |
-| Windows | Future portability/certification work. Library-name support alone is not Windows support. |
+| macOS Apple Silicon and Intel | Experimental standalone builds/downloads. Archive publication requires native tests and both-adapter installation on actual macOS runners; complete Core compatibility certification remains pending. |
+| Windows | No release binary yet. The vendored SQL parser currently fails to compile on missing Unix headers; portability and native execution gates are required. |
+
+## Release Downloads
+
+[GitHub Releases](https://github.com/sabino/dxt/releases) lists published archives
+and SHA256 files. Downloads appear after the automatic workflow succeeds;
+use the source-build instructions below until the first release exists.
+
+| Machine | Archive target |
+| --- | --- |
+| Linux Intel/AMD 64-bit | `x86_64-linux-gnu` |
+| Linux ARM64 | `aarch64-linux-gnu` |
+| Mac Apple Silicon | `aarch64-macos` |
+| Mac Intel | `x86_64-macos` |
+
+Download the archive and its target-specific `SHA256SUMS.txt` from the same
+release. For example, on Apple Silicon, using the version you downloaded:
+
+```sh
+shasum -a 256 -c dxt-v0.0.0-aarch64-macos-SHA256SUMS.txt
+tar -xzf dxt-v0.0.0-aarch64-macos.tar.gz
+mkdir -p "$HOME/.local/bin"
+cp dxt-v0.0.0-aarch64-macos/dxt "$HOME/.local/bin/dxt"
+export PATH="$HOME/.local/bin:$PATH"
+dxt version
+```
+
+Use `sha256sum -c` on Linux and replace the archive target/version as needed.
+macOS downloads need no Zig, SDK, Homebrew, Python or separate database driver
+installation. Linux still requires the native libraries described under
+[Dynamic driver builds](#dynamic-driver-builds). PostgreSQL servers and
+credentials are always supplied by you.
+
+Mac archives are not Apple Developer ID signed or notarized. Downloaded binaries
+may require approval in System Settings → Privacy & Security. Verify the
+release checksum before approving the executable. The current macOS CI runners
+use macOS 15; older macOS versions have not been separately certified.
 
 ## macOS Standalone Build
 
@@ -47,7 +82,8 @@ zig build -Doptimize=ReleaseSafe -Dbundle-drivers=true
 Use `-Dmacos-sdk=<SDK directory>` when needed. Bundled DuckDB currently supports
 macOS x86_64/aarch64 only. `-Dbundle-duckdb` and `-Dbundle-postgres` can be
 selected independently; ordinary `zig build` preserves the existing dynamic
-driver build. These source builds do not create a certified macOS release.
+driver build. Release downloads additionally pass the archive and native
+installation gates; this does not establish complete macOS Core parity.
 
 The SQL grammar library retains its accepted PostgreSQL **17.7** source;
 libpq **18.4** is the separately pinned connection client. Their private C

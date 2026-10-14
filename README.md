@@ -41,6 +41,14 @@ The project is independent of dbt Labs.
 
 ## Quick Start
 
+Download a matching Linux or macOS archive from [GitHub Releases](https://github.com/sabino/dxt/releases),
+verify its SHA256, extract it and put `dxt` on your PATH. GitHub Actions creates
+these downloads automatically for validated version tags and published releases.
+macOS archives bundle both database clients; Linux archives use the external
+drivers described below. macOS downloads remain experimental, and Windows
+binaries are not yet available. Until the first release is published, use a
+source build. See [download instructions](docs/GETTING_STARTED.md#release-downloads).
+
 On **macOS**, build a standalone executable from source:
 
 ```sh
@@ -55,7 +63,8 @@ dependencies. It bundles DuckDB and the PostgreSQL **client** with TLS into
 Homebrew packages, Python, dbt or MetricFlow. Apple's Command Line Tools/macOS
 SDK are needed to build, and macOS supplies the system/C++ runtime libraries.
 Install the tools with `xcode-select --install` if needed. Apple Silicon source
-builds are experimental; macOS does not yet have full release certification.
+builds and downloads are experimental; macOS does not yet have complete Core
+compatibility certification.
 
 On **Linux**, the existing build/release contract uses external native drivers:
 

@@ -18,7 +18,7 @@ from check_release_archive import check_archive, check_checksums, infer_expectat
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def certify_adapter(install, binary, library, version, postgres_uri=None):
+def certify_adapter(install, binary, library, version, postgres_uri=None, *, bundled_drivers=False):
     adapter = "postgres" if postgres_uri else "duckdb"
     project = install / adapter
     schema = "install_" + install.name.rsplit("-", 1)[-1].replace("-", "_")
@@ -39,7 +39,15 @@ def certify_adapter(install, binary, library, version, postgres_uri=None):
     (project / "models/output.sql").write_text("select * from {{ ref('input') }}")
     (project / "models/schema.yml").write_text("version: 2\nmodels:\n  - name: output\n    columns:\n      - name: id\n        tests: [not_null, unique]\n")
     environment = {**os.environ, "PATH": str(install / "no-subprocess-executables"),
-                   "DXT_DUCKDB_BACKEND": "native", "DXT_DUCKDB_LIBRARY": str(Path(library).resolve())}
+                   "DXT_DUCKDB_BACKEND": "native"}
+    if bundled_drivers:
+        # A developer's driver/search-path overrides must not certify a bundled
+        # archive by accidentally loading its external fixture libraries.
+        for key in ("DXT_DUCKDB_LIBRARY", "DXT_POSTGRES_LIBRARY", "LD_LIBRARY_PATH",
+                    "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"):
+            environment.pop(key, None)
+    else:
+        environment["DXT_DUCKDB_LIBRARY"] = str(Path(library).resolve())
 
     def invoke(arguments):
         result = subprocess.run([binary, *arguments], cwd=project, env=environment,
@@ -103,15 +111,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--postgres-uri", default=os.environ.get("DXT_INSTALL_POSTGRES_URI"),
                         help="Also certify an isolated PostgreSQL fixture supplied by the developer/CI")
     parser.add_argument("--require-postgres", action="store_true")
+    parser.add_argument("--bundled-drivers", action="store_true",
+                        help="Certify embedded drivers with all external driver overrides unset")
+    parser.add_argument("--postgres-fixture", action="store_true",
+                        help="Start/stop an isolated developer-only native PostgreSQL fixture")
     args = parser.parse_args(argv)
     if args.archive and not args.checksum_file:
         parser.error("--archive requires --checksum-file before extracted installation")
     if args.checksum_file and not args.archive:
         parser.error("--checksum-file requires --archive")
     library = os.environ.get("DXT_DUCKDB_LIBRARY")
-    if not library or not Path(library).is_file():
+    if not args.bundled_drivers and (not library or not Path(library).is_file()):
         parser.error("Set DXT_DUCKDB_LIBRARY to the certified DuckDB native library")
-    if args.require_postgres and not args.postgres_uri:
+    if args.postgres_fixture and args.postgres_uri:
+        parser.error("--postgres-fixture cannot be combined with --postgres-uri")
+    if args.require_postgres and not (args.postgres_uri or args.postgres_fixture):
         parser.error("PostgreSQL installation certification requires its isolated fixture URI")
     with tempfile.TemporaryDirectory(prefix="dxt-clean-install-") as temporary:
         install = Path(temporary)
@@ -121,9 +135,15 @@ def main(argv: list[str] | None = None) -> int:
             binary = install / "bin/dxt"
             binary.parent.mkdir()
             shutil.copy2(args.dxt.resolve(), binary)
-        certify_adapter(install, binary, library, args.version)
+        certify_adapter(install, binary, library, args.version, bundled_drivers=args.bundled_drivers)
+        if args.postgres_fixture:
+            from postgres_fixture import get_server
+            with get_server(install / "pgdata") as server:
+                certify_adapter(install, binary, library, args.version, server.get_uri(),
+                                bundled_drivers=args.bundled_drivers)
         if args.postgres_uri:
-            certify_adapter(install, binary, library, args.version, args.postgres_uri)
+            certify_adapter(install, binary, library, args.version, args.postgres_uri,
+                            bundled_drivers=args.bundled_drivers)
     return 0
 
 

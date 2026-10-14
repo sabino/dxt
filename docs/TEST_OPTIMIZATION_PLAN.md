@@ -71,8 +71,10 @@ collection and every shard. Their evidence audit also requires:
 - The actual expected Linux architecture and CPython 3.12 on every shard.
 
 Native, installation, public-project, performance and safety gates remain
-separate. Release validation retains its complete suite and strict report
-check; this change accelerates pull-request/main CI scheduling.
+separate. Full testing runs on pull requests only. Releases require the
+successful PR source certificate and matching source tree, then validate the
+actual download archives without repeating the complete suite. Main merges do
+not start duplicate tests. See [Releases](RELEASES.md) for qualification gates.
 
 For a local trial in an otherwise prepared CPython 3.12 developer environment:
 

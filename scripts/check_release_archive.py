@@ -17,6 +17,16 @@ VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ELF_MACHINES = {"x86_64-linux-gnu": 62, "aarch64-linux-gnu": 183}
+MACHO_CPUS = {"x86_64-macos": 0x01000007, "aarch64-macos": 0x0100000C}
+RELEASE_TARGETS = {*ELF_MACHINES, *MACHO_CPUS}
+NATIVE_DRIVER_NOTICES = {
+    "docs/licenses/native-drivers/" + name for name in (
+        "DUCKDB-LICENSE.txt", "DUCKDB-THIRD-PARTY-NOTICES.txt",
+        "POSTGRESQL-LICENSE.txt", "LIBPQ-BUILD-LICENSE.txt",
+        "LIBRESSL-LICENSE.txt", "LIBRESSL-BUILD-LICENSE.txt",
+        "LIBCQUERY-LICENSE.txt", "README.md",
+    )
+}
 
 REQUIRED_MEMBERS = {
     "dxt",
@@ -114,7 +124,7 @@ def infer_expectation(path: Path, version: str, target: str | None) -> ArchiveEx
         raise ValueError(f"{path}: archive target {inferred_target!r} is not valid")
     if target is not None and target != inferred_target:
         raise ValueError(f"{path}: archive target {inferred_target} does not match expected {target}")
-    if inferred_target not in ELF_MACHINES:
+    if inferred_target not in RELEASE_TARGETS:
         raise ValueError(f"{path}: unsupported release target {inferred_target!r}")
 
     return ArchiveExpectation(
@@ -196,11 +206,59 @@ def check_elf(data: bytes, target: str, context: str) -> list[str]:
     return findings
 
 
+def check_macho(data: bytes, target: str, context: str) -> list[str]:
+    """Require a thin 64-bit executable and only the bundled build's OS libraries."""
+    if len(data) < 32:
+        return [f"{context}: dxt binary has a truncated Mach-O64 header"]
+    magic, cpu, _, file_type, count, commands_size, _, _ = struct.unpack("<8I", data[:32])
+    if magic != 0xFEEDFACF:
+        return [f"{context}: dxt binary is not a little-endian Mach-O64 executable"]
+    findings = []
+    if cpu != MACHO_CPUS.get(target):
+        findings.append(f"{context}: Mach-O CPU {cpu} does not match target {target}")
+    if file_type != 2:  # MH_EXECUTE
+        findings.append(f"{context}: dxt binary is not a Mach-O executable")
+    end = 32 + commands_size
+    if end > len(data) or count > commands_size // 8:
+        return findings + [f"{context}: truncated Mach-O load commands"]
+    position = 32
+    libraries = set()
+    for _ in range(count):
+        if position + 8 > end:
+            return findings + [f"{context}: truncated Mach-O load command"]
+        command, size = struct.unpack_from("<2I", data, position)
+        if size < 8 or size % 8 or position + size > end:
+            return findings + [f"{context}: invalid Mach-O load command size"]
+        if command in {0xC, 0x80000018, 0x8000001F, 0x20, 0x80000023}:
+            if size < 24:
+                return findings + [f"{context}: truncated Mach-O library command"]
+            offset = struct.unpack_from("<I", data, position + 8)[0]
+            if offset < 24 or offset >= size:
+                return findings + [f"{context}: invalid Mach-O library name offset"]
+            name = data[position + offset:position + size]
+            if b"\0" not in name:
+                return findings + [f"{context}: unterminated Mach-O library name"]
+            try:
+                library = name.split(b"\0", 1)[0].decode("utf-8")
+            except UnicodeError:
+                return findings + [f"{context}: invalid Mach-O library name"]
+            libraries.add(library)
+            if library not in {"/usr/lib/libSystem.B.dylib", "/usr/lib/libc++.1.dylib"}:
+                findings.append(f"{context}: external runtime library {library!r} in bundled macOS binary")
+        position += size
+    if position != end:
+        findings.append(f"{context}: inconsistent Mach-O load command count")
+    if "/usr/lib/libSystem.B.dylib" not in libraries:
+        findings.append(f"{context}: Mach-O executable is missing its system runtime")
+    return findings
+
+
 def check_archive(path: Path, expectation: ArchiveExpectation) -> list[str]:
     findings: list[str] = []
     seen: set[str] = set()
     files: set[str] = set()
     markdown: dict[str, bytes] = {}
+    required = REQUIRED_MEMBERS | (NATIVE_DRIVER_NOTICES if expectation.target in MACHO_CPUS else set())
     try:
         with tarfile.open(path, "r:gz") as archive:
             members = archive.getmembers()
@@ -235,7 +293,7 @@ def check_archive(path: Path, expectation: ArchiveExpectation) -> list[str]:
                         findings.append(f"{path}: dxt binary is not a regular file")
                     elif member.mode & 0o111 == 0:
                         findings.append(f"{path}: dxt binary is not executable in archive metadata")
-                elif relative_name in REQUIRED_MEMBERS and not member.isfile():
+                elif relative_name in required and not member.isfile():
                     findings.append(f"{path}: required member {relative_name!r} is not a regular file")
 
                 if member.isfile():
@@ -249,11 +307,12 @@ def check_archive(path: Path, expectation: ArchiveExpectation) -> list[str]:
                         markdown[relative_name] = data
                     findings.extend(scan_bytes(data, f"{path}:{relative_name}"))
                     if relative_name == "dxt":
-                        findings.extend(check_elf(data, expectation.target, f"{path}:dxt"))
+                        check_binary = check_macho if expectation.target in MACHO_CPUS else check_elf
+                        findings.extend(check_binary(data, expectation.target, f"{path}:dxt"))
     except (tarfile.TarError, OSError, EOFError) as exc:
         return [f"{path}: could not read archive: {exc}"]
 
-    for member in sorted(REQUIRED_MEMBERS - seen):
+    for member in sorted(required - seen):
         findings.append(f"{path}: missing required member {expectation.root_name}/{member}")
 
     bundled = files | {str(parent) for name in files for parent in Path(name).parents}
@@ -328,6 +387,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", required=True, help="Expected version without the leading v.")
     parser.add_argument("--target", help="Expected target triple. Use only when checking one archive.")
     parser.add_argument("--checksum-file", type=Path, help="Optional SHA256SUMS file to verify.")
+    parser.add_argument("--require-all-targets", action="store_true",
+                        help="Require exactly one archive for every release target before publication")
     return parser
 
 
@@ -340,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
 
     findings: list[str] = []
     archives = [archive.resolve() for archive in args.archives]
+    targets = []
     for archive in archives:
         if not archive.is_file():
             findings.append(f"{archive}: archive does not exist")
@@ -349,7 +411,11 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             findings.append(str(exc))
             continue
+        targets.append(expectation.target)
         findings.extend(check_archive(archive, expectation))
+
+    if args.require_all_targets and (set(targets) != RELEASE_TARGETS or len(targets) != len(RELEASE_TARGETS)):
+        findings.append("publication requires exactly one archive for every release target")
 
     if args.checksum_file is not None:
         findings.extend(check_checksums(args.checksum_file.resolve(), archives))
