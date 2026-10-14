@@ -152,7 +152,12 @@ pub fn build(b: *std.Build) void {
     }
     run_step.dependOn(&run_cmd.step);
 
-    const mod_tests = b.addTest(.{ .root_module = if (apple_linker) |linker| linker.product else mod, .emit_object = use_apple_linker });
+    const mod_tests = b.addTest(.{
+        .root_module = if (apple_linker) |linker| linker.product else mod,
+        .emit_object = use_apple_linker,
+        // Match the separate compiler-runtime library's Darwin float ABI.
+        .use_llvm = if (use_apple_linker and target.result.cpu.arch == .x86_64 and optimize == .Debug) true else null,
+    });
     const tests_binary = if (apple_linker) |linker| linker.link("dxt-native-tests", mod_tests) else mod_tests.getEmittedBin();
     const run_mod_tests = if (use_apple_linker) std.Build.Step.Run.create(b, "run native tests") else b.addRunArtifact(mod_tests);
     if (use_apple_linker) run_mod_tests.addFileArg(tests_binary);
@@ -213,6 +218,7 @@ const AppleLinker = struct {
     product: *std.Build.Module,
     original: *std.Build.Module,
     support: *std.Build.Step.Compile,
+    compiler_rt: ?*std.Build.Step.Compile,
     repack: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
@@ -232,6 +238,28 @@ const AppleLinker = struct {
             else => {},
         };
         const support = b.addLibrary(.{ .name = "dxt_c_support", .linkage = .static, .root_module = support_module });
+        // Zig 0.16's LLVM stack-protector pass crashes when the Intel Debug
+        // object embeds compiler-rt. Compile that same pinned support code
+        // separately; retain Debug safety, LLVM's float ABI and static linkage.
+        const compiler_rt = if (target.result.cpu.arch == .x86_64 and optimize == .Debug) b.addLibrary(.{
+            .name = "dxt_compiler_rt",
+            .linkage = .static,
+            .use_llvm = true,
+            .root_module = b.createModule(.{
+                .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ b.graph.zig_lib_directory.path.?, "compiler_rt.zig" }) },
+                .target = target,
+                .optimize = .ReleaseSafe,
+                .strip = true,
+                .link_libc = true,
+                // Memory builtins are implemented here; lowering their loops
+                // back into libc calls would recurse into these same symbols.
+                .no_builtin = true,
+            }),
+        }) else null;
+        if (compiler_rt) |runtime| {
+            runtime.bundle_compiler_rt = false;
+            runtime.bundle_ubsan_rt = false;
+        }
         const repack = b.addExecutable(.{
             .name = "dxt-macos-archive",
             .root_module = b.createModule(.{
@@ -241,12 +269,14 @@ const AppleLinker = struct {
                 .link_libc = true,
             }),
         });
-        return .{ .b = b, .product = product, .original = original, .support = support, .repack = repack, .target = target, .optimize = optimize, .sdk = sdk, .use_cxx = use_cxx };
+        return .{ .b = b, .product = product, .original = original, .support = support, .compiler_rt = compiler_rt, .repack = repack, .target = target, .optimize = optimize, .sdk = sdk, .use_cxx = use_cxx };
     }
 
     fn executable(self: AppleLinker, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
         const object = self.b.addObject(.{
             .name = name,
+            // Use the same Darwin float ABI as the compiler-runtime library.
+            .use_llvm = if (self.target.result.cpu.arch == .x86_64 and self.optimize == .Debug) true else null,
             .root_module = self.b.createModule(.{
                 .root_source_file = source,
                 .target = self.target,
@@ -260,7 +290,7 @@ const AppleLinker = struct {
     }
 
     fn link(self: AppleLinker, name: []const u8, object: *std.Build.Step.Compile) std.Build.LazyPath {
-        object.bundle_compiler_rt = true;
+        object.bundle_compiler_rt = self.compiler_rt == null;
         object.bundle_ubsan_rt = self.optimize == .Debug;
         const command = self.b.addSystemCommand(&.{ "/usr/bin/clang", "-arch", if (self.target.result.cpu.arch == .aarch64) "arm64" else "x86_64", "-isysroot", self.sdk, "-Wl,-dead_strip", "-o" });
         const output = command.addOutputFileArg(name);
@@ -268,6 +298,7 @@ const AppleLinker = struct {
         command.addArg(self.b.fmt("-mmacosx-version-min={d}.{d}.{d}", .{ minimum.major, minimum.minor, minimum.patch }));
         if (self.optimize != .Debug) command.addArg("-Wl,-S,-x");
         command.addFileArg(object.getEmittedBin());
+        if (self.compiler_rt) |runtime| command.addFileArg(self.repacked(runtime));
         command.addFileArg(self.repacked(self.support));
         self.addLibraries(command, self.original);
         if (self.use_cxx) command.addArg("-lc++");

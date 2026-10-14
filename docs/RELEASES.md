@@ -14,18 +14,23 @@ Use tags with a leading `v`, such as `v0.0.0` or `v0.1.0-alpha.1`. The tag's
 version must match `dxt version` and `.version` in `build.zig.zon`. The current
 source version is **0.0.0**; update the native CLI version and package metadata
 in the same release-preparation commit before using another version.
+Packaging reads the native version automatically; update version-specific
+test expectations in that preparation PR as needed.
 
 | Target | Native runner | Archive |
 | --- | --- | --- |
 | `x86_64-linux-gnu` | `ubuntu-24.04` | `dxt-v<version>-x86_64-linux-gnu.tar.gz` |
 | `aarch64-linux-gnu` | `ubuntu-24.04-arm` | `dxt-v<version>-aarch64-linux-gnu.tar.gz` |
+| `aarch64-macos` (experimental) | `macos-15` | `dxt-v<version>-aarch64-macos.tar.gz` |
+| `x86_64-macos` (experimental) | `macos-15-intel` | `dxt-v<version>-x86_64-macos.tar.gz` |
 
-Each target runs on its actual architecture. These are Linux GNU/libc binaries.
-macOS, Windows and other database adapters need separate portability and
-warehouse certification before publication as supported targets.
-macOS now has an experimental standalone source build described in
-[Getting started](GETTING_STARTED.md). Local source-build evidence does not add
-a certified macOS archive to this release matrix.
+Each target runs on its actual architecture. Linux binaries use GNU/libc;
+macOS binaries bundle their database clients and use only OS system/C++ libraries.
+Mac archive gates cover native tests, both live adapters and artifacts, while
+complete macOS Core compatibility certification remains pending. They remain
+experimental. Windows is excluded until its vendored SQL parser and runtime
+build and pass native platform gates. See [Getting started](GETTING_STARTED.md)
+for download and source-build requirements.
 
 ## Runtime Dependencies
 
@@ -43,14 +48,16 @@ credentials are supplied by the project or environment and never bundled.
 Dependency transports use external `git`, `curl` and `tar` when fetching and
 extracting packages; install those tools for the corresponding `deps` workflows.
 
-The optional macOS `-Dbundle-drivers=true` build includes the DuckDB static
+The macOS releases use `-Dbundle-drivers=true` and include the DuckDB static
 libraries and the libpq client/LibreSSL TLS implementation. It does not require
 external driver libraries at runtime; macOS supplies its system/C++ runtimes.
 The PostgreSQL server, profile credentials and trust certificates are provided
 by the user. Build inputs are hash-pinned in `build.zig.zon` and remain build-time
 dependencies. Bundled distributions must retain the additional notices under
 `docs/licenses/native-drivers/` and certify their exact client/TLS/extension
-behavior before publication. No standalone macOS release is currently claimed.
+behavior before publication. Mach-O archive checks reject separately installed
+runtime libraries and require the bundled driver notices. Mac downloads are
+not Developer ID signed or notarized; see the startup instructions for approval.
 
 The YAML parser, PostgreSQL SQL grammar, static Python model syntax frontend,
 Unicode tables/names, PCRE2 regular-expression engine, pytz/IANA timezone data,
@@ -62,35 +69,51 @@ Python interpreter or developer requirements to run dxt.
 
 ## Workflow Gates
 
-[Release](../.github/workflows/release.yml) triggers for `v*.*.*` tags and manual
-dispatch with an existing tag. Manual runs default to a dry run that builds and
-packages without creating/updating a GitHub Release. Publication creates or
-updates a **draft** release only after verification and both package jobs.
+[Release](../.github/workflows/release.yml) triggers when a `v*.*.*` tag is pushed,
+when a GitHub Release is published, or by manual dispatch with an existing tag.
+After all archive gates succeed, it creates a public release or attaches
+downloads to the existing release. Prerelease version suffixes and `v0.0.0`
+are marked as prereleases on automatic creation. Manual dispatch defaults to
+`dry_run: true`: build and validate without uploading. Reruns update the assets
+without creating another release. A moved tag is rejected before publication.
 
-The candidate verification job checks whitespace/formatting, repository safety,
-the native runtime boundary, Debug/ReleaseSafe builds, native tests, complete
-Python/Core fixtures, clean installation, performance budgets and version
-consistency. The compatibility contract pins dbt Core **1.10.5**, dbt-duckdb
+[CI](../.github/workflows/ci.yml) runs the full checks on **pull requests only**;
+merging into main does not start another test run. After every required job
+passes, `validated-source.json` records the tested source tree, PR head, run ID
+and target set. A release must match that tree exactly and come from a merged
+PR with successful CI. Squash merges are accepted by tree equality; untested
+changes, partial/failed runs, missing or expired records and version mismatches
+block release packaging. CI records are retained for 90 days; rerun a matching
+PR's CI if its record has expired. Older PRs without a record need a new
+validated release-preparation PR.
+
+This reuses all applicable PR checks, including whitespace/formatting, safety,
+runtime-boundary, Debug/ReleaseSafe builds, native tests, eight canonical shards
+on each actual Linux architecture and their strict evidence audits, public
+projects, installation and performance. Release jobs do not repeat the full
+Core suite. The compatibility contract pins dbt Core **1.10.5**, dbt-duckdb
 **1.9.6**, dbt-postgres **1.9.1**, MetricFlow **0.208.1** and semantic interfaces
 **0.9.0**. Those are developer-only oracle dependencies.
 
-Each architecture's package job then:
+Each release package job then:
 
 1. Builds and smoke-tests the native ReleaseSafe target with Zig **0.16.0**.
-2. Installs the complete pinned compatibility/native fixtures for that runner.
-3. Runs native tests and the full compatibility suite on the actual target.
-4. Rebuilds ReleaseSafe after integration tests, which may build a Debug binary.
-5. Creates the real archive with `scripts/package_release.py`, generates its
-   SHA256 file, and validates contents, ELF64 class and target machine,
+2. Installs the pinned developer-only artifact and database fixtures.
+3. Creates the real archive with `scripts/package_release.py`, generates its
+   SHA256 file, and validates contents, ELF64/Mach-O class and target machine,
    executable metadata, notices and public-safe bytes.
-6. Verifies that checksum before opening or extracting the archive and checks
+4. Verifies that checksum before opening or extracting the archive and checks
    `debug`, `build`, static docs, actual rows and complete artifacts against
    both live adapters with PATH empty.
-7. Uploads the exact validated archive for the draft-release job.
+5. Uploads the exact validated archive for publication. Missing any of the four
+   target archives blocks all uploads to the release.
 
 The extracted-installation gate uses `scripts/check_install.py --archive` with
 `--checksum-file` and `--require-postgres`; its disposable PostgreSQL service
-is a CI fixture. This checks the static docs output; browser behavior is
+is a CI fixture. macOS uses `--bundled-drivers --postgres-fixture` with the pinned
+developer server; no server is distributed. Both external driver overrides and
+library-search overrides are cleared when testing the bundled binary. This
+checks the static docs output; browser behavior is
 covered by the separate compatibility fixtures. Full
 compatibility fixtures use `scripts/postgres_fixture.py` for isolated native
 clusters. Linux ARM selects installed PostgreSQL tools through
@@ -100,14 +123,14 @@ Linux x86_64. No emulated database or skipped adapter gate replaces these tests.
 [CI](../.github/workflows/ci.yml) also configures native tests/safety,
 developer integration, canonical CPython **3.12** Core comparisons, public
 Jaffle/package projects, performance and actual
-Linux x86_64/ARM installation gates. Its full platform compatibility jobs and
-the release jobs are configured gates; their results must be checked on the
-release candidate. See [Performance](PERFORMANCE.md) for artifact/compiled-SQL
+Linux x86_64/ARM installation gates, plus both experimental Mac archive gates.
+The release source certificate depends on every CI job succeeding.
+See [Performance](PERFORMANCE.md) for artifact/compiled-SQL
 comparisons and cold/warm budgets.
 
 Python 3.11 CI jobs run developer/native CLI checks; both architectures run the
-complete canonical Core compatibility suite under Python 3.12. Oracle routing
-does not remove that suite from a published platform's acceptance requirements.
+complete canonical Core compatibility suite under Python 3.12. Mac archive
+installation checks do not claim the separate full Core platform certification.
 
 ## Archive Contents And Licenses
 
@@ -125,6 +148,12 @@ links pinned to the exact source commit. Packaging defaults to `HEAD`;
 `--source-revision <commit>` selects an explicit revision. Referenced omitted
 files must exist and match their committed bytes at that revision. Archive
 validation rejects unresolved relative links and links escaping the archive.
+
+The separate [curl installer](../scripts/install.sh) fetches a matching archive
+and target-specific SHA256 file from the release. It selects the newest
+published release (including prereleases) unless `--version` is supplied and
+atomically replaces a user-local binary only after checksum and native version
+verification. See [installation and usage](GETTING_STARTED.md#install-with-curl).
 
 `docs/licenses/` contains:
 
@@ -152,7 +181,8 @@ changes the embedded sources.
 
 The publish job downloads the validated archives, generates
 `dxt-v<version>-SHA256SUMS.txt` from their exact bytes, checks every archive and
-checksum entry again, and attaches them to the draft release.
+checksum entry again, and attaches them to the public release, along with the
+PR/source validation record and per-target checksum files.
 
 ## Local Release Check
 
@@ -189,7 +219,10 @@ tar -xzf dxt-v0.0.0-x86_64-linux-gnu.tar.gz
 ./dxt-v0.0.0-x86_64-linux-gnu/dxt version
 ```
 
-Review draft assets, checksums and candidate gate results before making a
-release public. Announce the tested platform/adapter contract and any remaining
+After merging the release-preparation PR with all CI gates green, push the
+matching tag or publish that tag through GitHub's release UI. Actions attaches
+downloads automatically; no separate binary upload or draft-publishing step is
+required. Do not push a tag from uncommitted or untested version changes.
+Announce the tested platform/adapter contract and any remaining
 compatibility limits; do not infer universal dbt support from the initial
 DuckDB/PostgreSQL certification scope.

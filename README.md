@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sabino/dxt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sabino/dxt/ci.yml?branch=main&label=CI" alt="CI" /></a>
+  <a href="https://github.com/sabino/dxt/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sabino/dxt/ci.yml?event=pull_request&label=PR%20CI" alt="PR CI" /></a>
   <a href="https://github.com/sabino/dxt/releases"><img src="https://img.shields.io/github/v/release/sabino/dxt?include_prereleases&label=release" alt="Release" /></a>
   <img src="https://img.shields.io/badge/runtime-Zig%200.16.0-f7a41d" alt="Zig 0.16.0 runtime" />
   <img src="https://img.shields.io/badge/status-prerelease-orange" alt="Prerelease" />
@@ -41,6 +41,24 @@ The project is independent of dbt Labs.
 
 ## Quick Start
 
+Install the newest published Linux or macOS release, including prereleases:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sabino/dxt/main/scripts/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+dxt version
+```
+
+The installer chooses your OS/CPU, checks SHA256 and installs into
+`~/.local/bin` without sudo. Use `sh -s -- --version v0.0.0` after the pipe to
+choose a specific published version. You can also download and verify a matching
+archive from [GitHub Releases](https://github.com/sabino/dxt/releases). Actions creates
+these downloads automatically for validated version tags and published releases.
+macOS archives bundle both database clients; Linux archives use the external
+drivers described below. macOS downloads remain experimental, and Windows
+binaries are not yet available. Until the first release is published, use a
+source build. See [download instructions](docs/GETTING_STARTED.md#release-downloads).
+
 On **macOS**, build a standalone executable from source:
 
 ```sh
@@ -55,7 +73,8 @@ dependencies. It bundles DuckDB and the PostgreSQL **client** with TLS into
 Homebrew packages, Python, dbt or MetricFlow. Apple's Command Line Tools/macOS
 SDK are needed to build, and macOS supplies the system/C++ runtime libraries.
 Install the tools with `xcode-select --install` if needed. Apple Silicon source
-builds are experimental; macOS does not yet have full release certification.
+builds and downloads are experimental; macOS does not yet have complete Core
+compatibility certification.
 
 On **Linux**, the existing build/release contract uses external native drivers:
 

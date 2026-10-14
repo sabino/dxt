@@ -2,9 +2,6 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -21,6 +18,12 @@ env:
   JAFFLE_SHOP_DUCKDB_REF: "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb"
 
 jobs:
+  macos-package:
+    name: macOS release archives
+    uses: ./.github/workflows/macos-package.yml
+    with:
+      source_ref: ${{ github.sha }}
+
   platform-installation:
     name: native installation ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
@@ -66,14 +69,20 @@ jobs:
         run: zig build test -Dtarget=${{ matrix.target }} --summary all
       - name: Build the release-safe target
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
+      - name: Read the native version
+        id: version
+        run: echo "version=$(./zig-out/bin/dxt version)" >> "$GITHUB_OUTPUT"
       - name: Package the actual release target with docs and upstream licenses
-        run: python scripts/package_release.py --target ${{ matrix.target }}
+        run: python scripts/package_release.py --version "${{ steps.version.outputs.version }}" --target ${{ matrix.target }}
       - name: Generate the target archive checksum before extracted installation
         run: |
           cd dist
-          sha256sum "dxt-v0.0.0-${{ matrix.target }}.tar.gz" > "dxt-v0.0.0-${{ matrix.target }}-SHA256SUMS.txt"
+          sha256sum "dxt-v${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz" > "dxt-v${{ steps.version.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt"
       - name: Certify both adapters from the actual release archive with PATH empty
-        run: python scripts/check_install.py --archive dist/dxt-v0.0.0-${{ matrix.target }}.tar.gz --checksum-file dist/dxt-v0.0.0-${{ matrix.target }}-SHA256SUMS.txt --require-postgres
+        run: >-
+          python scripts/check_install.py --archive "dist/dxt-v${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz"
+          --checksum-file "dist/dxt-v${{ steps.version.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt"
+          --version "${{ steps.version.outputs.version }}" --require-postgres
 
   public-package:
     name: unchanged public dbt-utils PostgreSQL project
@@ -428,3 +437,37 @@ jobs:
 
       - name: Verify DuckDB CLI autocommit query compatibility
         run: pytest -q tests/test_usability_adapters.py::test_cli_fallback_remains_available_and_normalizes_empty_rows
+
+  validated-source:
+    name: certify complete PR source
+    if: always()
+    needs:
+      - platform-installation
+      - macos-package
+      - public-package
+      - native
+      - integration
+      - canonical-plan
+      - canonical-shards
+      - canonical-acceptance
+      - performance
+      - snapshot-oracle
+      - public-fixtures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Record exact source only after every required job passes
+        env:
+          CI_JOB_RESULTS: ${{ toJSON(needs) }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python scripts/release_workflow.py certify --output reports/validated-source.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-source
+          path: reports/validated-source.json
+          if-no-files-found: error
+          retention-days: 90

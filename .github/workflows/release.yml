@@ -4,116 +4,64 @@ on:
   push:
     tags:
       - "v*.*.*"
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to package, for example v0.1.0-alpha.1"
+        description: "Existing version tag to package"
+        type: string
         required: true
       dry_run:
-        description: "Build and package without creating/updating a release"
-        required: false
-        default: "true"
+        description: "Build and validate without uploading release assets"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
-
-env:
-  ZIG_VERSION: "0.16.0"
+  actions: read
+  pull-requests: read
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  verify:
-    name: verify release candidate
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+  qualify:
+    name: qualify tagged source against green PR CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
-      tag: ${{ steps.version.outputs.tag }}
-      version: ${{ steps.version.outputs.version }}
-
+      tag: ${{ steps.source.outputs.tag }}
+      version: ${{ steps.source.outputs.version }}
+      revision: ${{ steps.source.outputs.revision }}
+      prerelease: ${{ steps.source.outputs.prerelease }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Resolve version
-        id: version
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            tag="${{ inputs.tag }}"
-            git fetch --tags --force
-            git checkout "${tag}"
-          else
-            tag="${GITHUB_REF_NAME}"
-          fi
-          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "release tag must look like v0.1.0 or v0.1.0-alpha.1" >&2
-            exit 1
-          fi
-          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
-          echo "version=${tag#v}" >> "${GITHUB_OUTPUT}"
-
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Require a matching version and complete PR validation for the exact source tree
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+        run: >-
+          python scripts/release_workflow.py prepare --tag "$RELEASE_TAG"
+          --github-output "$GITHUB_OUTPUT" --record-dir release-evidence
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-source
+          path: release-evidence/*
+          if-no-files-found: error
 
-      - name: Install pinned compatibility fixtures
-        uses: ./.github/actions/setup-oracles
-
-      - name: Check whitespace
-        run: git show --check --format=short --no-renames HEAD
-
-      - name: Check Zig formatting
-        run: |
-          zig fmt --check build.zig build.zig.zon
-          find src -name '*.zig' -print0 | sort -z | xargs -0 zig fmt --check
-
-      - name: Run public-safety scan
-        run: python scripts/check_public_safety.py
-
-      - name: Check runtime boundary
-        run: python scripts/check_runtime_boundary.py
-
-      - name: Build Zig binary
-        run: zig build --summary all
-
-      - name: Run Zig tests
-        run: zig build test --summary all
-
-      - name: Build release-safe binary
-        run: zig build -Doptimize=ReleaseSafe --summary all
-
-      - name: Certify complete compatibility suite
-        run: |
-          pytest -q --junitxml=.agent/runs/release-tests.xml
-          python scripts/check_pytest_report.py .agent/runs/release-tests.xml
-
-      - name: Certify clean native installation and performance budgets
-        run: |
-          zig build -Doptimize=ReleaseSafe --summary all
-          python scripts/check_install.py --version "${{ steps.version.outputs.version }}"
-          python scripts/check_performance.py
-
-      - name: Version consistency
-        run: |
-          test "$(./zig-out/bin/dxt version)" = "${{ steps.version.outputs.version }}"
-          rg -q ".version = \"${{ steps.version.outputs.version }}\"" build.zig.zon
-
-  package:
+  linux:
     name: package ${{ matrix.target }}
+    needs: qualify
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 360
-    needs: verify
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -122,7 +70,6 @@ jobs:
             runner: ubuntu-24.04
           - target: aarch64-linux-gnu
             runner: ubuntu-24.04-arm
-
     services:
       postgres:
         image: postgres:17.7
@@ -137,123 +84,101 @@ jobs:
           --health-retries 10
     env:
       DXT_INSTALL_POSTGRES_URI: postgresql://postgres:installation_fixture@localhost:5432/postgres
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.verify.outputs.tag }}
-
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v2.2.1
+          ref: ${{ needs.qualify.outputs.revision }}
+      - uses: mlugg/setup-zig@v2.2.1
         with:
-          version: ${{ env.ZIG_VERSION }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+          version: "0.16.0"
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Build target
+          cache: pip
+          cache-dependency-path: requirements-release.txt
+      - name: Install developer-only artifact and warehouse fixtures
+        run: python -m pip install -r requirements-release.txt
+      - name: Install checksum-verified native DuckDB fixtures
+        uses: ./.github/actions/setup-native-duckdb
+      - name: Build qualified ReleaseSafe target
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
-
-      - name: Smoke test native target
-        run: |
-          ./zig-out/bin/dxt --help
-          test "$(./zig-out/bin/dxt version)" = "${{ needs.verify.outputs.version }}"
-
-      - name: Install complete compatibility fixtures on the actual target
-        uses: ./.github/actions/setup-oracles
-
-      - name: Run all native tests on the actual target
-        run: zig build test -Dtarget=${{ matrix.target }} --summary all
-
-      - name: Certify the complete compatibility suite on the actual target
-        run: |
-          pytest -q --junitxml=.agent/runs/release-${{ matrix.target }}.xml
-          python scripts/check_pytest_report.py .agent/runs/release-${{ matrix.target }}.xml
-
-      - name: Rebuild the release-safe binary after integration fixtures
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --summary all
-
-      - name: Package the actual release target with docs and upstream licenses
-        run: python scripts/package_release.py --version "${{ needs.verify.outputs.version }}" --target "${{ matrix.target }}"
-
-      - name: Generate the target archive checksum before extraction
+      - name: Package target with documentation and upstream licenses
+        run: python scripts/package_release.py --version "${{ needs.qualify.outputs.version }}" --target "${{ matrix.target }}"
+      - name: Generate checksum before opening the archive
         run: |
           cd dist
-          sha256sum "dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" > "dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt"
-
-      - name: Check release archive safety
-        run: |
-          python scripts/check_release_archive.py \
-            "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" \
-            --version "${{ needs.verify.outputs.version }}" \
-            --target "${{ matrix.target }}" \
-            --checksum-file "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt"
-
+          sha256sum "dxt-v${{ needs.qualify.outputs.version }}-${{ matrix.target }}.tar.gz" > "dxt-v${{ needs.qualify.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt"
       - name: Certify extracted archive with both live adapters and PATH empty
-        run: python scripts/check_install.py --archive "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz" --checksum-file "dist/dxt-v${{ needs.verify.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt" --version "${{ needs.verify.outputs.version }}" --require-postgres
-
-      - name: Upload packaged binary
-        uses: actions/upload-artifact@v4
+        run: >-
+          python scripts/check_install.py --archive "dist/dxt-v${{ needs.qualify.outputs.version }}-${{ matrix.target }}.tar.gz"
+          --checksum-file "dist/dxt-v${{ needs.qualify.outputs.version }}-${{ matrix.target }}-SHA256SUMS.txt"
+          --version "${{ needs.qualify.outputs.version }}" --require-postgres
+      - uses: actions/upload-artifact@v4
         with:
-          name: dxt-${{ needs.verify.outputs.tag }}-${{ matrix.target }}
-          path: dist/*.tar.gz
+          name: release-${{ matrix.target }}
+          path: dist/*
           if-no-files-found: error
 
+  macos:
+    name: package standalone macOS
+    needs: qualify
+    uses: ./.github/workflows/macos-package.yml
+    with:
+      source_ref: ${{ needs.qualify.outputs.revision }}
+      version: ${{ needs.qualify.outputs.version }}
+      native_tests: false
+
   publish:
-    name: create draft release
-    runs-on: ubuntu-latest
-    needs:
-      - verify
-      - package
-    if: github.event_name == 'push' || inputs.dry_run != 'true'
+    name: publish validated release downloads
+    needs: [qualify, linux, macos]
+    if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
-
+      actions: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.verify.outputs.tag }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+          ref: ${{ needs.qualify.outputs.revision }}
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
+          pattern: release-*
           path: dist
           merge-multiple: true
-
-      - name: Generate checksums
+      - name: Generate combined checksums
+        env:
+          RELEASE_TAG: ${{ needs.qualify.outputs.tag }}
         run: |
           cd dist
-          sha256sum *.tar.gz > "dxt-${{ needs.verify.outputs.tag }}-SHA256SUMS.txt"
-          cat "dxt-${{ needs.verify.outputs.tag }}-SHA256SUMS.txt"
-
-      - name: Check release archives and checksums
-        run: |
-          python scripts/check_release_archive.py \
-            dist/*.tar.gz \
-            --version "${{ needs.verify.outputs.version }}" \
-            --checksum-file "dist/dxt-${{ needs.verify.outputs.tag }}-SHA256SUMS.txt"
-
-      - name: Create or update draft release
+          sha256sum *.tar.gz > "dxt-${RELEASE_TAG}-SHA256SUMS.txt"
+      - name: Require every target archive and verify checksums, headers, notices and safe contents
+        env:
+          RELEASE_TAG: ${{ needs.qualify.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.qualify.outputs.version }}
+        run: >-
+          python scripts/check_release_archive.py dist/*.tar.gz --version "$RELEASE_VERSION"
+          --checksum-file "dist/dxt-${RELEASE_TAG}-SHA256SUMS.txt" --require-all-targets
+      - name: Reject a tag moved after qualification
+        env:
+          RELEASE_TAG: ${{ needs.qualify.outputs.tag }}
+          RELEASE_REVISION: ${{ needs.qualify.outputs.revision }}
+        run: python scripts/release_workflow.py check-tag --tag "$RELEASE_TAG" --revision "$RELEASE_REVISION"
+      - name: Create release or attach downloads to an existing release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.qualify.outputs.tag }}
+          PRERELEASE: ${{ needs.qualify.outputs.prerelease }}
         run: |
-          tag="${{ needs.verify.outputs.tag }}"
-          if gh release view "${tag}" >/dev/null 2>&1; then
-            gh release upload "${tag}" dist/* --clobber
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+            gh release edit "$RELEASE_TAG" --draft=false
+          elif [ "$PRERELEASE" = true ]; then
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --prerelease --latest=false --title "dxt ${RELEASE_TAG}" --generate-notes
           else
-            gh release create "${tag}" dist/* \
-              --draft \
-              --verify-tag \
-              --title "dxt ${tag}" \
-              --generate-notes
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --title "dxt ${RELEASE_TAG}" --generate-notes
           fi

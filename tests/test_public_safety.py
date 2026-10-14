@@ -87,7 +87,10 @@ def write_release_archive(path: Path, *, leaked_binary_text: bytes = b"", binary
         add_tar_file(archive, f"{root}/CHANGELOG.md", b"# Changelog\n")
         add_tar_file(archive, f"{root}/SECURITY.md", b"# Security\n")
         add_tar_file(archive, f"{root}/docs/RELEASES.md", b"# Release Process\n")
-        for notice in sorted(release_archive.REQUIRED_MEMBERS):
+        required = release_archive.REQUIRED_MEMBERS
+        if root.endswith('-macos'):
+            required = required | release_archive.NATIVE_DRIVER_NOTICES
+        for notice in sorted(required):
             if notice.startswith('docs/licenses/'):
                 add_tar_file(archive, f"{root}/{notice}", b"Public upstream notice\n")
 

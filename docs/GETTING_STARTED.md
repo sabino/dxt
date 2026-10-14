@@ -9,9 +9,88 @@ runtime requirements.
 | Platform | Current status |
 | --- | --- |
 | Linux x86_64 and ARM64 | Initial SQL acceptance platforms. Release archives currently use external native DuckDB/libpq libraries. |
-| macOS Apple Silicon | Experimental source build, including a standalone driver-bundled build. Local validation is recorded in the active plan. |
-| macOS Intel | Pinned Zig/DuckDB build inputs exist; actual Intel execution is not certified. |
-| Windows | Future portability/certification work. Library-name support alone is not Windows support. |
+| macOS Apple Silicon and Intel | Experimental standalone builds/downloads. Archive publication requires native tests and both-adapter installation on actual macOS runners; complete Core compatibility certification remains pending. |
+| Windows | No release binary yet. The vendored SQL parser currently fails to compile on missing Unix headers; portability and native execution gates are required. |
+
+## Release Downloads
+
+[GitHub Releases](https://github.com/sabino/dxt/releases) lists published archives
+and SHA256 files. Downloads appear after the automatic workflow succeeds;
+use the source-build instructions below until the first release exists.
+
+### Install With Curl
+
+Run this on macOS or GNU/Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sabino/dxt/main/scripts/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+dxt version
+```
+
+The [installer](../scripts/install.sh) selects your machine's native archive,
+verifies its SHA256 before extraction and installs `dxt` into `~/.local/bin`.
+It includes published prereleases when selecting the newest release, requires
+no sudo, and preserves an existing binary if download, checksum or native
+version verification fails. It uses OS command-line tools: sh, curl, tar and
+sha256sum or shasum. macOS provides these; minimal Linux installations may need
+curl and coreutils. No Python, dbt or Zig is required.
+
+To choose a version or installation directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sabino/dxt/main/scripts/install.sh \
+  | sh -s -- --version v0.0.0 --bin-dir "$HOME/.local/bin"
+```
+
+Replace `v0.0.0` with the tag listed on the release page. To inspect the script
+before running it, download it first:
+
+```sh
+curl -fsSL -o dxt-install.sh https://raw.githubusercontent.com/sabino/dxt/main/scripts/install.sh
+less dxt-install.sh
+sh dxt-install.sh --version v0.0.0
+```
+
+The installer leaves shell startup files alone. Add
+`export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` for zsh or `~/.bashrc` for
+bash to retain it in future terminals. Rerun the installer to upgrade or use
+`--version` to select an older published release. Remove `~/.local/bin/dxt` to
+uninstall; project files and warehouses are preserved.
+
+### Manual Download
+
+| Machine | Archive target |
+| --- | --- |
+| Linux Intel/AMD 64-bit | `x86_64-linux-gnu` |
+| Linux ARM64 | `aarch64-linux-gnu` |
+| Mac Apple Silicon | `aarch64-macos` |
+| Mac Intel | `x86_64-macos` |
+
+Download the archive and its target-specific `SHA256SUMS.txt` from the same
+release. For example, on Apple Silicon, using the version you downloaded:
+
+```sh
+shasum -a 256 -c dxt-v0.0.0-aarch64-macos-SHA256SUMS.txt
+tar -xzf dxt-v0.0.0-aarch64-macos.tar.gz
+mkdir -p "$HOME/.local/bin"
+cp dxt-v0.0.0-aarch64-macos/dxt "$HOME/.local/bin/dxt"
+export PATH="$HOME/.local/bin:$PATH"
+dxt version
+```
+
+Use `sha256sum -c` on Linux and replace the archive target/version as needed.
+macOS downloads need no Zig, SDK, Homebrew, Python or separate database driver
+installation. Linux still requires the native libraries described under
+[Dynamic driver builds](#dynamic-driver-builds). PostgreSQL servers and
+credentials are always supplied by you.
+
+Mac archives are not Apple Developer ID signed or notarized. Downloaded binaries
+may require approval in System Settings → Privacy & Security. Verify the
+release checksum before approving the executable; follow
+[Apple's approval instructions](https://support.apple.com/en-us/102445) if needed.
+The current macOS CI runners
+use macOS 15; older macOS versions have not been separately certified.
 
 ## macOS Standalone Build
 
@@ -26,6 +105,7 @@ From a checkout, build:
 ```sh
 ./scripts/build_macos.sh
 ./zig-out/bin/dxt version
+export PATH="$PWD/zig-out/bin:$PATH"
 ```
 
 The helper downloads and verifies Zig **0.16.0** into an ignored tool directory.
@@ -47,7 +127,14 @@ zig build -Doptimize=ReleaseSafe -Dbundle-drivers=true
 Use `-Dmacos-sdk=<SDK directory>` when needed. Bundled DuckDB currently supports
 macOS x86_64/aarch64 only. `-Dbundle-duckdb` and `-Dbundle-postgres` can be
 selected independently; ordinary `zig build` preserves the existing dynamic
-driver build. These source builds do not create a certified macOS release.
+driver build. Release downloads additionally pass the archive and native
+installation gates; this does not establish complete macOS Core parity.
+
+Intel Mac Debug builds compile the pinned Zig compiler support routines as a
+separate static library to avoid a Zig 0.16 LLVM crash when embedding them in
+the full native test object. LLVM's numeric ABI, Debug checks and assertions
+remain enabled. ReleaseSafe builds retain their normal path; this workaround
+adds no installation or runtime dependency.
 
 The SQL grammar library retains its accepted PostgreSQL **17.7** source;
 libpq **18.4** is the separately pinned connection client. Their private C
@@ -56,15 +143,20 @@ The client version does not require your server to be the same version.
 
 ## First DuckDB Project
 
-For a bundled build, clear any old explicit driver override. An override is
+For a bundled Mac build, clear any old explicit driver override. An override is
 authoritative and still selects that external library. A DuckDB override must
 match the embedded **1.4.2** version exactly; mixing two DuckDB C++ versions in
 one process is unsafe and is rejected before opening a database. Use the dynamic
-driver build to evaluate another DuckDB version.
+driver build to evaluate another DuckDB version. On a bundled Mac build:
 
 ```sh
 unset DXT_DUCKDB_LIBRARY DXT_POSTGRES_LIBRARY
-export PATH="$PWD/zig-out/bin:$PATH"
+```
+
+On Linux, keep the library path from [Linux driver setup](#linux-release-driver-setup).
+With `dxt` on PATH, create and run a project on either platform:
+
+```sh
 export DXT_DUCKDB_BACKEND=native
 dxt init demo
 dxt debug --project-dir demo --profiles-dir demo
@@ -101,6 +193,7 @@ An ordinary build is smaller and loads database libraries separately:
 
 ```sh
 zig build -Doptimize=ReleaseSafe
+export PATH="$PWD/zig-out/bin:$PATH"
 ```
 
 Set `DXT_DUCKDB_LIBRARY` or `DXT_POSTGRES_LIBRARY` to an installed native library
@@ -118,6 +211,45 @@ export DXT_POSTGRES_LIBRARY="$(brew --prefix libpq)/lib/libpq.5.dylib"
 For the pinned DuckDB library, use the official [1.4.2 native archives](https://github.com/duckdb/duckdb/releases/tag/v1.4.2)
 and select the extracted library explicitly. A package manager may install a
 newer DuckDB version, which requires separate compatibility validation.
+
+### Linux Release Driver Setup
+
+Linux release downloads use external database libraries. On Debian/Ubuntu,
+install download tools and the PostgreSQL **client** library:
+
+```sh
+sudo apt-get update
+sudo apt-get install curl unzip libpq5
+```
+
+`libpq5` does not install or start a PostgreSQL server. For DuckDB, download the
+checksum-pinned native library into your user directory:
+
+```sh
+case "$(uname -m)" in
+  x86_64)
+    dxt_duckdb_arch=amd64
+    dxt_duckdb_sha=0a68e623cbdcfa06e10e1b5d6a3092d3fd3679f616008fb1a39b92e4a10d8f43
+    ;;
+  aarch64|arm64)
+    dxt_duckdb_arch=arm64
+    dxt_duckdb_sha=095194f4a16aa507afcb4c2e83aa682162a87dd8e779c00bc1bd9c0ebb2ec970
+    ;;
+  *) echo "Unsupported Linux architecture" >&2; exit 1 ;;
+esac
+mkdir -p "$HOME/.local/lib/dxt"
+curl -fL -o "$HOME/.local/lib/dxt/libduckdb.zip" \
+  "https://github.com/duckdb/duckdb/releases/download/v1.4.2/libduckdb-linux-${dxt_duckdb_arch}.zip"
+printf '%s  %s\n' "$dxt_duckdb_sha" "$HOME/.local/lib/dxt/libduckdb.zip" | sha256sum -c - &&
+  unzip -o "$HOME/.local/lib/dxt/libduckdb.zip" -d "$HOME/.local/lib/dxt"
+export DXT_DUCKDB_LIBRARY="$HOME/.local/lib/dxt/libduckdb.so"
+export DXT_DUCKDB_BACKEND=native
+```
+
+Retain the two exports in your shell configuration. Then run the commands in
+[First DuckDB project](#first-duckdb-project); keep `DXT_DUCKDB_LIBRARY` set on Linux.
+Other Linux distributions need their equivalent libpq client package. These
+archives target GNU libc; musl/Alpine is not a certified target.
 
 ## What Still Uses External Tools?
 

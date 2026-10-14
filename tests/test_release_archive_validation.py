@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import subprocess
+import struct
 import tarfile
 from pathlib import Path
 
@@ -172,7 +173,7 @@ def test_packaging_remains_deterministic_and_checks_architecture(tmp_path, monke
         package_release.package(binary, tmp_path / "wrong", "0.0.0", "aarch64-linux-gnu")
 
 
-@pytest.mark.parametrize("workflow", ["ci.yml", "release.yml"])
+@pytest.mark.parametrize("workflow", ["ci.yml", "release.yml", "macos-package.yml"])
 def test_target_checksum_is_generated_before_every_archive_install(workflow):
     root = Path(__file__).resolve().parents[1]
     jobs = yaml.safe_load((root / ".github/workflows" / workflow).read_text())["jobs"]
@@ -183,11 +184,84 @@ def test_target_checksum_is_generated_before_every_archive_install(workflow):
     assert len(installation_jobs) == 1
     runs = [step.get("run", "") for step in installation_jobs[0]["steps"]]
     package_index = next(i for i, run in enumerate(runs) if "scripts/package_release.py" in run)
-    checksum_index = next(i for i, run in enumerate(runs) if "sha256sum" in run)
+    checksum_index = next(i for i, run in enumerate(runs) if "sha256sum" in run or "shasum -a 256" in run)
     install_index = next(i for i, run in enumerate(runs) if "scripts/check_install.py --archive" in run)
     assert package_index < checksum_index < install_index
     assert "--checksum-file" in runs[install_index]
     assert "--require-postgres" in runs[install_index]
+
+
+def macho_header(cpu=0x0100000C, *, libraries=None, file_type=2):
+    libraries = libraries if libraries is not None else ["/usr/lib/libSystem.B.dylib", "/usr/lib/libc++.1.dylib"]
+    commands = []
+    for library in libraries:
+        name = library.encode() + b"\0"
+        size = (24 + len(name) + 7) // 8 * 8
+        commands.append(struct.pack("<6I", 0xC, size, 24, 0, 0, 0) + name + bytes(size - 24 - len(name)))
+    body = b"".join(commands)
+    return struct.pack("<8I", 0xFEEDFACF, cpu, 0, file_type, len(commands), len(body), 0, 0) + body
+
+
+@pytest.mark.parametrize("target,cpu", [("x86_64-macos", 0x01000007), ("aarch64-macos", 0x0100000C)])
+def test_macos_archive_checks_architecture_notices_and_install_extraction(tmp_path, install_module, target, cpu):
+    archive = tmp_path / f"dxt-v0.0.0-{target}.tar.gz"
+    data = macho_header(cpu)
+    write_release_archive(archive, binary=data)
+    checksums = checksum_file(tmp_path, archive)
+    binary = install_module.extract_verified_archive(archive, checksums, tmp_path / "install", "0.0.0")
+    assert binary.read_bytes() == data
+    assert binary.stat().st_mode & 0o111
+
+
+@pytest.mark.parametrize("library", ["/opt/homebrew/lib/libpq.dylib", "@rpath/libduckdb.dylib", "/tmp/libclient.dylib"])
+def test_bundled_macos_archive_rejects_external_driver_dependencies(library):
+    findings = release_archive.check_macho(macho_header(libraries=["/usr/lib/libSystem.B.dylib", library]),
+                                         "aarch64-macos", "binary")
+    assert any("external runtime library" in row for row in findings)
+
+
+@pytest.mark.parametrize("offset,value,message", [
+    (0, 0, "not a little-endian Mach-O64"), (4, 0x01000007, "does not match target"),
+    (12, 6, "not a Mach-O executable"), (16, 1000, "truncated Mach-O load commands"),
+    (20, 10000, "truncated Mach-O load commands"), (36, 7, "invalid Mach-O load command size"),
+    (40, 1, "invalid Mach-O library name offset"),
+])
+def test_malformed_macho_is_rejected(offset, value, message):
+    data = bytearray(macho_header())
+    struct.pack_into("<I", data, offset, value)
+    assert any(message in row for row in release_archive.check_macho(data, "aarch64-macos", "binary"))
+
+
+def test_macos_archive_requires_bundled_driver_licenses(tmp_path):
+    archive = tmp_path / "dxt-v0.0.0-aarch64-macos.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        add_tar_file(output, "dxt-v0.0.0-aarch64-macos/dxt", macho_header(), 0o755)
+    findings = release_archive.check_archive(archive, release_archive.infer_expectation(archive, "0.0.0", None))
+    assert any("missing required member" in row and "native-drivers/DUCKDB-LICENSE.txt" in row for row in findings)
+
+
+def test_publication_requires_complete_target_set(tmp_path):
+    archives = []
+    for target in sorted(release_archive.RELEASE_TARGETS):
+        archive = tmp_path / f"dxt-v0.0.0-{target}.tar.gz"
+        binary = (macho_header(release_archive.MACHO_CPUS[target]) if target in release_archive.MACHO_CPUS
+                  else elf_header(release_archive.ELF_MACHINES[target]))
+        write_release_archive(archive, binary=binary)
+        archives.append(str(archive))
+    arguments = ["--version", "0.0.0", "--require-all-targets"]
+    assert release_archive.main(arguments + archives) == 0
+    assert release_archive.main(arguments + archives[:-1]) == 1
+    assert release_archive.main(arguments + archives + archives[:1]) == 1
+
+
+def test_bundled_install_needs_no_external_library(tmp_path, monkeypatch, install_module):
+    monkeypatch.delenv("DXT_DUCKDB_LIBRARY", raising=False)
+    binary = tmp_path / "dxt"
+    binary.write_bytes(macho_header())
+    invocations = []
+    monkeypatch.setattr(install_module, "certify_adapter", lambda *a, **kw: invocations.append(kw))
+    assert install_module.main(["--dxt", str(binary), "--bundled-drivers"]) == 0
+    assert invocations == [{"bundled_drivers": True}]
 
 
 @pytest.fixture

@@ -51,7 +51,71 @@ separate implementation and certification.
 
 ## Active Work
 
-### Remaining Open Issue Campaign
+### Automatic Release Downloads
+
+The user requested automatic GitHub Release downloads and PR-only full testing.
+One editing owner uses `ci/automatic-release-assets` in an isolated worktree.
+Scope: release/CI workflows, developer-only release qualification and archive
+checks, Linux/macOS packaging, focused tooling regressions and startup/release
+documentation. The user also requested a curl-based installer: verify SHA256
+before extraction, select the native target/version, stage before replacing an
+existing executable and document Linux's driver requirements. Product runtime
+behavior and upstream pins remain unchanged.
+
+Full CI runs on pull requests, not again after merging into main. A final CI
+certificate records the tested source tree only after every applicable job
+passes. Release tags and published releases must match that tree and version;
+failed, missing, expired or mismatched evidence blocks publication. Release jobs
+build and certify the actual archives without repeating the full Core suite.
+Manual release runs remain dry by default. Publish Linux x86_64/ARM64 and
+experimental standalone macOS Apple Silicon/Intel archives only after their
+actual native runner and both-adapter installation gates pass. Windows is
+excluded: the current cross-build fails in the vendored SQL parser on Unix
+headers. Linux archives retain their documented external driver requirements.
+
+Validation: source-qualification failure cases, Mach-O architecture/dependency
+checks, checksum-before-extraction and deterministic archive regressions;
+Actionlint, runtime-boundary/public-safety scans and actual bundled macOS
+archive installation with both adapters and empty executable PATH. Preserve
+the complete sharded PR acceptance and native/Linux installation gates. Final
+PR validation must exercise the new macOS runners before support claims are
+promoted. Tags and release publication require separate authorization.
+
+PR #243's Intel gate exposed a Zig 0.16 LLVM crash when embedding compiler
+support routines in the Debug native test object. A trial using Zig's x86
+backend compiled and ran all 866 tests but decoded a half-precision float
+incorrectly (865 passed, one failed). Keep LLVM and compile the same pinned
+compiler support source as a separate ReleaseSafe static library only for
+Intel Mac Debug objects. Disable implicit builtin lowering for this support
+library: otherwise LLVM turns its memset implementation into self-recursion.
+Verify both native tests and Debug CLI startup on each actual Mac architecture.
+The complete test binary links locally without the LLVM crash. Preserve
+numeric ABI, Debug runtime checks, all assertions and
+the release build path; introduce no runtime dependency or compiler upgrade.
+Scope includes this narrow build/link setting. Cancel superseded CI; require
+every actual-platform PR gate on the corrected source. Final status/evidence
+is tracked on PR #243, keeping the validated source frozen through merge.
+
+Status: locally implemented; PR CI remains pending. Actionlint, shell syntax, runtime-boundary and
+public-safety checks pass. All 140 combined release/safety/installer tooling
+cases pass without skips. Both Mac architectures build and package; the
+extracted Apple Silicon archive passes both live
+adapters with PATH empty using only declared release-validation dependencies;
+invalid external driver overrides are cleared. A native Mac installer trial
+preserves the exact archive binary bytes and runs with PATH empty. Its GitHub
+downloads are supplied by a local transport fixture until a release exists.
+The Intel Mac ReleaseSafe
+cross-build passes; actual Intel execution and final Linux/Mac runner acceptance
+remain PR gates. No tag or GitHub Release has been created.
+
+Review of the current main source passed
+866 native tests and 183 new Core/native integration cases on Apple Silicon;
+the identical merged source passed all Linux CI gates, including 6,137 cases
+on each actual architecture. Those results describe the reviewed source, not
+this release-workflow change. A numeric date-token rejection mismatch found
+during review is a separate product compatibility issue.
+
+### Delivered Issue Campaign
 
 The user authorized implementation of every currently open repository issue,
 one at a time, followed by one integration PR. The supervisor owns
@@ -114,8 +178,10 @@ mark the PR ready only after both local and CI gates pass. The
 end state is one non-draft, green integration PR with issue evidence and
 handoffs; merging, tags and release publication remain separate actions.
 
-Status: current main pulled and integration branch created. All four issues
-are open. The first issue has a published reference map, slice plan and claim;
+Status: merged as PR #242; all four issues are closed. Its final source passed
+all 29 CI checks, 866 native tests and 6,137 canonical cases on each actual
+Linux architecture. The checkpoints below retain the implementation evidence.
+The first issue has a published reference map, slice plan and claim;
 its isolated worker passed 33 focused native and 78 real Core/native cases.
 The state commits are integrated after root review corrected inline authored
 manifest publication. Additional targeted and unchanged inline/show checks
@@ -144,7 +210,7 @@ read-only review is clear. Existing 90 contract cases and selector lowering
 remain unchanged. The complete contract module now contains 104 cases.
 The initial candidate's CI is superseded; final acceptance uses the corrected
 head and preserves all assertions. Complete frozen integrated/platform
-acceptance remains the PR readiness requirement. Its current results and final
+acceptance passed for PR #242. Its results and final
 handoff belong on the integration PR and linked issues; local slice evidence
 does not itself establish source or release acceptance.
 
