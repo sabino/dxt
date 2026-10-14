@@ -251,6 +251,9 @@ const AppleLinker = struct {
                 .optimize = .ReleaseSafe,
                 .strip = true,
                 .link_libc = true,
+                // Memory builtins are implemented here; lowering their loops
+                // back into libc calls would recurse into these same symbols.
+                .no_builtin = true,
             }),
         }) else null;
         if (compiler_rt) |runtime| {

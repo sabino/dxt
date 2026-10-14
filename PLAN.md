@@ -86,8 +86,11 @@ support routines in the Debug native test object. A trial using Zig's x86
 backend compiled and ran all 866 tests but decoded a half-precision float
 incorrectly (865 passed, one failed). Keep LLVM and compile the same pinned
 compiler support source as a separate ReleaseSafe static library only for
-Intel Mac Debug objects. The complete test binary links locally without the
-LLVM crash. Preserve numeric ABI, Debug runtime checks, all assertions and
+Intel Mac Debug objects. Disable implicit builtin lowering for this support
+library: otherwise LLVM turns its memset implementation into self-recursion.
+Verify both native tests and Debug CLI startup on each actual Mac architecture.
+The complete test binary links locally without the LLVM crash. Preserve
+numeric ABI, Debug runtime checks, all assertions and
 the release build path; introduce no runtime dependency or compiler upgrade.
 Scope includes this narrow build/link setting. Cancel superseded CI; require
 every actual-platform PR gate on the corrected source. Final status/evidence

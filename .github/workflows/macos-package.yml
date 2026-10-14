@@ -48,6 +48,11 @@ jobs:
       - name: Run bundled native tests on the actual Mac architecture
         if: inputs.native_tests
         run: zig build test -Dbundle-drivers=true -Dtarget=${{ matrix.target }} -j2 --summary all
+      - name: Verify the Debug CLI starts without external executables
+        if: inputs.native_tests
+        run: |
+          zig build -Dbundle-drivers=true -Dtarget=${{ matrix.target }} -j2 --summary all
+          PATH='' ./zig-out/bin/dxt version
       - name: Build the standalone ReleaseSafe binary
         run: zig build -Doptimize=ReleaseSafe -Dbundle-drivers=true -Dtarget=${{ matrix.target }} -j2 --summary all
       - name: Read native version and enforce the release tag version when supplied
