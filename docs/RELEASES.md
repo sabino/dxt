@@ -14,6 +14,8 @@ Use tags with a leading `v`, such as `v0.0.0` or `v0.1.0-alpha.1`. The tag's
 version must match `dxt version` and `.version` in `build.zig.zon`. The current
 source version is **0.0.0**; update the native CLI version and package metadata
 in the same release-preparation commit before using another version.
+Packaging reads the native version automatically; update version-specific
+test expectations in that preparation PR as needed.
 
 | Target | Native runner | Archive |
 | --- | --- | --- |
@@ -146,6 +148,12 @@ links pinned to the exact source commit. Packaging defaults to `HEAD`;
 `--source-revision <commit>` selects an explicit revision. Referenced omitted
 files must exist and match their committed bytes at that revision. Archive
 validation rejects unresolved relative links and links escaping the archive.
+
+The separate [curl installer](../scripts/install.sh) fetches a matching archive
+and target-specific SHA256 file from the release. It selects the newest
+published release (including prereleases) unless `--version` is supplied and
+atomically replaces a user-local binary only after checksum and native version
+verification. See [installation and usage](GETTING_STARTED.md#install-with-curl).
 
 `docs/licenses/` contains:
 

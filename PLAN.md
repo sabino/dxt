@@ -57,7 +57,10 @@ The user requested automatic GitHub Release downloads and PR-only full testing.
 One editing owner uses `ci/automatic-release-assets` in an isolated worktree.
 Scope: release/CI workflows, developer-only release qualification and archive
 checks, Linux/macOS packaging, focused tooling regressions and startup/release
-documentation. Product runtime behavior and upstream pins remain unchanged.
+documentation. The user also requested a curl-based installer: verify SHA256
+before extraction, select the native target/version, stage before replacing an
+existing executable and document Linux's driver requirements. Product runtime
+behavior and upstream pins remain unchanged.
 
 Full CI runs on pull requests, not again after merging into main. A final CI
 certificate records the tested source tree only after every applicable job
@@ -78,7 +81,19 @@ the complete sharded PR acceptance and native/Linux installation gates. Final
 PR validation must exercise the new macOS runners before support claims are
 promoted. Tags and release publication require separate authorization.
 
-Status: implementation in progress. Review of the current main source passed
+Status: locally implemented; PR CI remains pending. Actionlint, shell syntax, runtime-boundary and
+public-safety checks pass. All 140 combined release/safety/installer tooling
+cases pass without skips. Both Mac architectures build and package; the
+extracted Apple Silicon archive passes both live
+adapters with PATH empty using only declared release-validation dependencies;
+invalid external driver overrides are cleared. A native Mac installer trial
+preserves the exact archive binary bytes and runs with PATH empty. Its GitHub
+downloads are supplied by a local transport fixture until a release exists.
+The Intel Mac ReleaseSafe
+cross-build passes; actual Intel execution and final Linux/Mac runner acceptance
+remain PR gates. No tag or GitHub Release has been created.
+
+Review of the current main source passed
 866 native tests and 183 new Core/native integration cases on Apple Silicon;
 the identical merged source passed all Linux CI gates, including 6,137 cases
 on each actual architecture. Those results describe the reviewed source, not
