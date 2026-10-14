@@ -219,7 +219,7 @@ fn openSessionUncached(runtime: Runtime, graph: *const Graph, db_path: []const u
     if (std.mem.eql(u8, graph.adapter_type, "postgres")) {
         const conninfo = graph.connection_info orelse return error.MissingPostgresConnection;
         const library = if (runtime.environment) |environment| environment.get("DXT_POSTGRES_LIBRARY") else null;
-        var connection = try PostgresConnection.openWithEnvironment(runtime.allocator, conninfo, library, runtime.environment);
+        var connection = try PostgresConnection.openWithProfile(runtime.allocator, runtime.io, conninfo, library, runtime.environment, graph.target_context, runtime.cancellation_token);
         errdefer connection.deinit();
         const role = @import("config_value.zig").get(graph.target_context, "role");
         if (role) |value| if (value != .null) {

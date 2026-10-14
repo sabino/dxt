@@ -89,7 +89,7 @@ pub fn clone(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     try writeWarnings(runtime, stderr, &graph);
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var state = try loadSelectionState(runtime, options, selection, &graph);
+    var state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer state.deinit(runtime.allocator);
     const selected = try selector.selectResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, state.context());
     const target_dir = try targetDir(runtime, options);
@@ -235,14 +235,14 @@ pub fn parse(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io
     });
 }
 
-pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer) !void {
+pub fn list(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var graph = try project_loader.loadGraph(runtime, options, loader_callbacks);
     defer graph.deinit();
 
     try resolveDependencies(&graph);
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
     const resource_type = if (options.resource_type) |value| try runtime.allocator.dupe(u8, value) else null;
     const candidates = try selector.selectResourcesWithContext(runtime.allocator, &graph, resource_type, selection.select, selection.exclude, selection_state.context());
@@ -294,7 +294,17 @@ fn sqlOperation(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: 
     try resolveDependencies(&graph);
     try writeWarnings(runtime, stderr, &graph);
     const target_dir = try targetDir(runtime, options);
-    _ = try writeManifest(runtime, &graph, target_dir);
+    var selection = resolveSelection(runtime, options) catch |err| {
+        // SQL operations historically publish authored resources before
+        // reporting an invalid named selector. No operation has been added.
+        _ = try writeManifest(runtime, &graph, target_dir);
+        return err;
+    };
+    defer selection.deinit(runtime.allocator);
+    const defer_manifest = selector.usesContractStateSelector(selection.select, selection.exclude);
+    // Keep ordinary inline/show failure publication ahead of temporary-node
+    // parsing. Contract selectors must first pass their state preflight.
+    if (!defer_manifest) _ = try writeManifest(runtime, &graph, target_dir);
     if (std.mem.eql(u8, options.which, "show") and options.select == null and (options.inline_sql == null or options.inline_sql.?.len == 0)) return error.MissingShowSelection;
     const original_nodes = graph.nodes.items.len;
     if (options.inline_sql) |sql| {
@@ -311,10 +321,15 @@ fn sqlOperation(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: 
         types.deinitNode(runtime.allocator, &graph.nodes.items[original_nodes]);
         graph.nodes.shrinkRetainingCapacity(original_nodes);
     };
-    var selection = try resolveSelection(runtime, options);
-    defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
+    if (defer_manifest) {
+        // Publication describes authored resources, including on empty or
+        // failed inline commands. The operation stays in the execution graph.
+        var authored_graph = graph;
+        authored_graph.nodes.items = graph.nodes.items[0..original_nodes];
+        _ = try writeManifest(runtime, &authored_graph, target_dir);
+    }
     try @import("project/selection_warnings.zig").check(runtime, &graph, selection.select, selection.exclude, selection_state.context(), stderr);
     const selected = if (options.inline_sql != null) try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "sql_operation", selection.select, selection.exclude, selection_state.context()) else try commandSelection(runtime.allocator, try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context()), .compile);
     if (selected.len == 0) return finishEmptySelection(runtime, target_dir, stderr);
@@ -348,7 +363,7 @@ pub fn compile(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
     const target_dir = try targetDir(runtime, options);
     _ = try writeManifest(runtime, &graph, target_dir);
@@ -403,7 +418,7 @@ pub fn analyze(runtime: Runtime, options: Options, stdout: *Io.Writer, stderr: *
     try resolveDependencies(&graph);
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
     const candidates = try selector.selectResourcesWithContext(runtime.allocator, &graph, options.resource_type, selection.select, selection.exclude, selection_state.context());
     var included: std.ArrayList(selector.SelectedResource) = .empty;
@@ -434,7 +449,7 @@ pub fn docsGenerate(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
     const selected = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, null, selection.select, selection.exclude, selection_state.context());
 
@@ -518,7 +533,7 @@ pub fn sourceFreshness(runtime: Runtime, options: Options, stdout: *Io.Writer, s
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
     const selection_context = selection_state.context();
     const selected_sources = try selector.selectExecutionResourcesWithContext(runtime.allocator, &graph, "source", selection.select, selection.exclude, selection_context);
@@ -624,7 +639,7 @@ pub fn runPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, stde
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
     const target_dir = try targetDir(runtime, options);
     _ = try writeManifest(runtime, &graph, target_dir);
@@ -683,7 +698,7 @@ pub fn snapshotRun(runtime: Runtime, options: Options, stdout: *Io.Writer, stder
     try writeWarnings(runtime, stderr, &graph);
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
     const target_dir = try targetDir(runtime, options);
     _ = try writeManifest(runtime, &graph, target_dir);
@@ -731,7 +746,7 @@ pub fn seedPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
     const target_dir = try targetDir(runtime, options);
     _ = try writeManifest(runtime, &graph, target_dir);
@@ -780,7 +795,7 @@ pub fn testPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, std
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
     const target_dir = try targetDir(runtime, options);
     _ = try writeManifest(runtime, &graph, target_dir);
@@ -839,7 +854,7 @@ pub fn buildPreflight(runtime: Runtime, options: Options, stdout: *Io.Writer, st
 
     var selection = try resolveSelection(runtime, options);
     defer selection.deinit(runtime.allocator);
-    var selection_state = try loadSelectionState(runtime, options, selection, &graph);
+    var selection_state = try loadSelectionState(runtime, options, selection, &graph, stderr);
     defer selection_state.deinit(runtime.allocator);
     const target_dir = try targetDir(runtime, options);
     _ = try writeManifest(runtime, &graph, target_dir);
@@ -1636,7 +1651,7 @@ const SelectionState = struct {
     }
 };
 
-fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_config.ResolvedSelection, graph: *const Graph) !SelectionState {
+fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_config.ResolvedSelection, graph: *const Graph, stderr: *Io.Writer) !SelectionState {
     const needs_source_status = selector.usesSourceStatusSelector(selection.select, selection.exclude);
     const needs_result = selector.usesResultSelector(selection.select, selection.exclude);
     const needs_state = selector.usesStateSelector(selection.select, selection.exclude);
@@ -1655,6 +1670,9 @@ fn loadSelectionState(runtime: Runtime, options: Options, selection: selector_co
         const current_json = try manifest.renderManifest(runtime.allocator, graph);
         defer runtime.allocator.free(current_json);
         state.current_manifest_index = try state_artifacts.parsePriorManifestIndex(runtime.allocator, current_json);
+        if (selector.usesContractStateSelector(selection.select, selection.exclude)) {
+            try @import("project/state_contract.zig").check(runtime, &state.prior_manifest_index.?, &state.current_manifest_index.?, graph.adapter_type, stderr);
+        }
     }
     if (needs_source_status) state.source_status_index = try source_freshness.loadSourceStatusIndex(runtime, state_dir);
     if (selector.usesFresherSelector(selection.select, selection.exclude)) {

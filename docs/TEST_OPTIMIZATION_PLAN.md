@@ -49,10 +49,14 @@ DuckDB files, temporary projects and browser state. Module case order stays
 unchanged. No test assertions, adapters or upstream comparisons are removed.
 There is no new Python dependency; these scripts are developer tooling only.
 
-`tests/compatibility_timings.json` contains the maximum measured module cost
-from the two baseline reports. Unknown modules receive a conservative estimate
-and always run. Timing weights affect placement only, never coverage. Reusing
-that baseline gives a maximum shard estimate of **27.4 minutes**, before runner
+`tests/compatibility_timings.json` retains the maximum measured module cost
+from the two baseline reports and separately identifies local scheduling
+samples for new regression modules. Local samples are scheduling estimates,
+not sealed source/platform acceptance evidence; the contract sample combines
+successful receipts with the latest correction preferred for duplicate cases.
+Unknown modules receive a case-count estimate and always run. Timing weights
+affect placement only, never coverage. Reusing the historical baseline alone
+gave a maximum shard estimate of **27.4 minutes**, before runner
 setup and queue time. This is a projection, not a measured new CI result.
 More runners consume additional setup/build minutes; concurrency is bounded
 at sixteen canonical runners across both architectures.

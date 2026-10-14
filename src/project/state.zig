@@ -276,7 +276,7 @@ fn samePersistedDescriptions(old: std.json.Value, new: std.json.Value) bool {
     return true;
 }
 
-fn sameContract(old: std.json.Value, new: std.json.Value) bool {
+pub fn sameContract(old: std.json.Value, new: std.json.Value) bool {
     const a = valueField(old, "contract") orelse valueField(configOf(old), "contract") orelse .null;
     const b = valueField(new, "contract") orelse valueField(configOf(new), "contract") orelse .null;
     const av: std.json.Value = valueField(a, "enforced") orelse .{ .bool = false };

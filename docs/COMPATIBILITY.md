@@ -73,7 +73,7 @@ outside the initial SQL execution scope.
 | Restricted module providers | Core's `datetime`, `pytz` and fourteen `itertools` exports use native typed values and pinned timezone data. Iterators preserve lazy consumption, shared cursors, tee buffering and active Jinja callbacks. [Provider cache](../tests/test_usability_modules_provider.py), [datetime](../tests/test_usability_datetime.py), [strptime](../tests/test_usability_datetime_strptime.py), [pytz](../tests/test_usability_pytz.py), [itertools](../tests/test_usability_itertools.py). These are defined native providers, not an arbitrary Python import facility. |
 | dbt context | Typed Relation/Column/timestamps; model/config/graph/flags; database queries, named results and native adapter introspection. Held cursors and fetched Agate tables preserve their separate type, naming and consumption contracts. Pinned bundled Core/adapter SQL macros are embedded with licenses. [Configuration/context](../tests/test_usability_configuration.py), [commands](../tests/test_usability_commands.py), [cursor/bindings](../tests/test_usability_query_bindings.py). |
 | Selectors | Names/FQN, paths/packages/tags/resource/config/version/group/access, wildcards, graph expansion, recursive named YAML selectors and eager/cautious/buildable/empty indirect selection. [State/selector cases](../tests/test_usability_state.py), [versions](../tests/test_usability_configuration.py), [groups](../tests/test_usability_groups.py). |
-| State and defer | New/old/modified/unmodified and tested body/config/relation/macro/contract/description comparisons; model reference/deprecation metadata and semantic-model/metric/saved-query contents, including pinned Core's ordered and intentionally ignored fields. Result statuses, Core `source_status:fresher`, defer/favor-state and separate defer state. [State](../tests/test_usability_state.py). |
+| State and defer | New/old/modified/unmodified and tested body/config/relation/macro/contract/description comparisons; model reference/deprecation metadata and semantic-model/metric/saved-query contents, including pinned Core's ordered and intentionally ignored fields. Contract-aware methods warn about unversioned breaks and reject versioned breaks before artifact publication or warehouse writes. Result statuses, Core `source_status:fresher`, defer/favor-state and separate defer state. [State](../tests/test_usability_state.py), [contract diagnostics](../tests/test_usability_state_contracts.py). |
 | Effective flags | Actual workers/cancellation for threads/fail-fast; adapter-specific full-refresh; empty/sample/event-time input bounds; failure audits; env/CLI precedence, warnings, quiet/print/colors, JSON/file logging and parser/cache/profiling controls. Unsupported command placements/values reject. [CLI options](../tests/test_usability_cli_options.py), [execution](../tests/test_usability_cli_execution.py), [profiling](../tests/test_usability_cli_profiling.py), [parser options](../tests/test_usability_parser_options.py), [worker logs](../tests/test_usability_worker_logs.py). |
 
 Package-heavy compatibility is checked separately from individual macro
@@ -143,12 +143,42 @@ alias collisions and apply configured `role`, `search_path` and
 `application_name` to every held session. Password aliases stay outside target
 and public artifacts. [Profile comparisons](../tests/test_usability_postgres_profiles.py)
 use a dedicated database, actual password authentication and worker sessions.
-Configured connection retries remain an observed follow-up.
+Initial connections honor `retries` with one additional attempt by default,
+quadratic waits (0, 1, 4 seconds and so on), and no wait after exhaustion.
+Profile parsing accepts integers/integral floats; connection opening validates
+the observed 0–1000 limit separately. Failed handles are released before retry,
+and cancellation stops the policy. Both ordinary and cross-database profile
+sessions use it; SQL, role failures, uncertain commits, driver loading and
+allocation failures are not retried. [Connection fault comparisons](../tests/test_usability_postgres_retries.py)
+use causal transport failures against actual PostgreSQL and verify that SQL
+side effects are not replayed.
 
-Model deprecation metadata supports the tested ISO date/datetime forms,
-local-timezone normalization and serialized macro values. Core also accepts
-free-form dates such as `January 2, 2099`; native parsing of those forms remains
-an [observed follow-up](https://github.com/sabino/dxt/issues/237).
+Model deprecation metadata accepts calendar ISO dates and complete English
+month dates such as `January 2, 2099`, with full names or abbreviations and
+month/day/year, day/month/year or year/month/day order. Complete numeric
+slash/dot dates use year/month/day when the year comes first; otherwise they
+follow Core's default month-first interpretation, using day-first when the
+first number cannot be a month. New textual/numeric forms require a four-digit
+year from 1000 through 9999; existing valid ISO years are preserved. Optional
+clocks use basic or colon-separated ISO hours/minutes/seconds, with fractional
+seconds and numeric offsets at minute precision. Partial dates, rolling
+two-digit years, prose clocks and named timezones are outside this bounded grammar.
+Local-timezone normalization, nullable version-specific dates, parent
+validation, warm-cache invalidation and equivalent-instant state comparisons
+retain their existing behavior. [Authored date comparisons](../tests/test_usability_deprecation_dates.py)
+cover actual Core/native parsing, precision, versions and caches; existing
+metadata/context comparisons remain in the [state fixtures](../tests/test_usability_state.py).
+
+`state:modified`, `state:unmodified` and `state:modified.contract` compare
+contract enforcement, columns/types, supported enforced constraints and
+constrained table/incremental materialization changes. They also inspect
+removed or disabled models, with Core's past-deprecation removal exception.
+Other state methods keep their independent comparisons. Diagnostics follow
+the warning policy; versioned breaking changes retain Core's specific error
+phase. Pinned Core's removed-custom-constraint lookup can raise `KeyError`, so
+custom-removal parity is not claimed; existing custom DDL execution is unchanged.
+Inline SQL operations stay out of the authored manifest, and ordinary
+inline/show failures retain their established publication behavior.
 
 Executed data-test helpers/publication, inherited test metadata, invocation-wide
 `warn_once`, stock main responses and microbatch custom-materialization/hooks
@@ -179,7 +209,7 @@ Package transports can require `git`, `curl` and `tar`.
 | Caches | Content-safe whole-graph and unchanged literal-file parse reuse, invocation relation caches and typed SQL-analysis invalidation. `dxt_parse_cache.json` is a native versioned cache, not a claim of Core MessagePack interchange. [Parse cache](../tests/test_usability_parse_cache.py), [relation cache](../tests/test_usability_relation_cache.py), [SQL analysis](../tests/test_usability_sql_analysis.py). |
 | Semantic/MetricFlow-style planning | Models/entities/measures/dimensions, simple/derived/ratio/cumulative/conversion metrics, saved queries, join/grain checks, time spines, non-additive dimensions, offsets/windows and locked transactional exports. [Metric planner](../src/project/metric_plan.zig), [semantic/query evidence](../tests/test_usability_semantics.py), [export locks](../tests/test_usability_metric_export_locks.py). |
 | Typed SQL analysis | PostgreSQL grammar and DuckDB AST, logical IR, bound columns/types, lineage, source locations, readonly analysis and cache invalidation. [SQL analysis](../src/project/sql_analysis.zig), [evidence](../tests/test_usability_sql_analysis.py). |
-| Cross-database execution | Named secret-free plans; same-engine pushdown; source reduction, broadcast/staged/embedded joins; exact typed movement, cost confidence, trust/sensitivity/budget guards, retained caches/snapshots, watermarks, task limits, adaptive retries, locks and recovery. Atomic artifact publication uses exclusive writer-owned temporary files with concurrent native regressions. [Cross-database modules](../src/project/cross_database.zig), [evidence](../tests/test_usability_cross_database.py). |
+| Cross-database execution | Named secret-free plans; same-engine pushdown; source reduction, broadcast/staged/embedded joins; exact typed movement, cost confidence, trust/sensitivity/budget guards, retained caches/snapshots, watermarks, task limits, adaptive retries, locks and recovery. Catalog observations prune unusable entries and retain the newest 4,096 with admission-order ties; evicted estimates become unknown and runtime budgets remain enforced. Atomic artifact publication uses exclusive writer-owned temporary files with concurrent native regressions. [Cross-database modules](../src/project/cross_database.zig), [evidence](../tests/test_usability_cross_database.py), [catalog retention](../tests/test_usability_cross_catalog.py). |
 | Versioned environments | Immutable model versions, physical reuse, isolated views, direct/indirect changes, half-open UTC intervals/backfills, audits, promotion and rollback. Repeating a committed apply repairs publication from durable evidence without replaying builds/audits/events; legacy ambiguous evidence fails visibly. PostgreSQL gateway/model identity preserves the implicit attribution-default upgrade and binds effective role and explicit connection policy. These are dxt state contracts. [Workflow](../src/project/workflow.zig), [evidence](../tests/test_usability_workflow.py). |
 
 ## Explicit Differences

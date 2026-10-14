@@ -45,12 +45,28 @@ pub fn nothingToDo(runtime: types.Runtime, writer: *std.Io.Writer) !void {
 }
 
 pub fn warning(runtime: types.Runtime, writer: *std.Io.Writer, event: []const u8, code: []const u8, message: []const u8, criterion: ?[]const u8) !void {
+    return warningDetails(runtime, writer, event, code, message, criterion, .{});
+}
+
+/// Structured event details accompany the message through the same warning
+/// policy and delivery path used by selection diagnostics.
+pub fn warningWithData(runtime: types.Runtime, writer: *std.Io.Writer, event: []const u8, code: []const u8, message: []const u8, data: anytype) !void {
+    return warningDetails(runtime, writer, event, code, message, null, data);
+}
+
+fn warningDetails(runtime: types.Runtime, writer: *std.Io.Writer, event: []const u8, code: []const u8, message: []const u8, criterion: ?[]const u8, data: anytype) !void {
     if (try cli_options.warningIsSilenced(runtime, event)) return;
     const promoted = try cli_options.warningIsError(runtime, event);
     try writer.writeAll("{\"data\":{");
     if (criterion) |raw| {
         try writer.writeAll("\"spec_raw\":");
         try std.json.Stringify.value(raw, .{}, writer);
+        try writer.writeByte(',');
+    }
+    inline for (@typeInfo(@TypeOf(data)).@"struct".fields) |field| {
+        try std.json.Stringify.value(field.name, .{}, writer);
+        try writer.writeByte(':');
+        try std.json.Stringify.value(@field(data, field.name), .{}, writer);
         try writer.writeByte(',');
     }
     try writer.writeAll("\"msg\":");

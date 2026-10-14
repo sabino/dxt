@@ -39,7 +39,7 @@ fn run(init: std.process.Init) !void {
         try emit(init.io, output);
         return;
     }
-    if (std.mem.eql(u8, args[2], "profile")) {
+    if (std.mem.eql(u8, args[2], "profile") or std.mem.eql(u8, args[2], "cross-profile")) {
         const config: adapter.ProjectConfig = .{ .name = "native_demo", .profile_name = "native_demo" };
         var profile_runtime = runtime;
         profile_runtime.allocator = arena.allocator();
@@ -47,6 +47,28 @@ fn run(init: std.process.Init) !void {
         graph.adapter_type = identity.adapter_type;
         graph.connection_info = identity.connection_info;
         graph.target_schema = identity.target_schema;
+        graph.target_context = identity.target_context;
+        if (std.mem.eql(u8, args[2], "cross-profile")) {
+            const cross = @import("dxt").CrossDatabase;
+            var session = try cross.openConnection(runtime, args[3], .{
+                .name = "retry_fixture",
+                .profile_name = identity.profile_name,
+                .target = identity.target_name,
+                .adapter_type = identity.adapter_type,
+                .role = "both",
+                .trust_domain = "default",
+                .allowed_destinations = &.{},
+                .identity = identity,
+            });
+            defer session.deinit();
+            if (args.len != 5) return error.MissingSql;
+            var output = try session.query(args[4]);
+            defer output.deinit(allocator);
+            const json = try output.json(allocator);
+            defer allocator.free(json);
+            try emit(init.io, json);
+            return;
+        }
     }
     if (std.mem.eql(u8, args[2], "pool")) {
         try poolConformance(runtime, &graph, args[3]);

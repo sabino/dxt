@@ -51,12 +51,109 @@ separate implementation and certification.
 
 ## Active Work
 
-### Parallel Compatibility Validation
+### Remaining Open Issue Campaign
 
-The user's requested test acceleration is owned by one local editor on
-`ci/parallel-compatibility-tests`, in an isolated worktree. No Agent OS run
-or additional agents are involved. PR #241 retains its running checks and
-separate merge gate; this slice does not modify that candidate.
+The user authorized implementation of every currently open repository issue,
+one at a time, followed by one integration PR. The supervisor owns
+`fix/remaining-issue-backlog`, this plan, support documentation, public issue
+coordination and final validation. The starting inventory contains four issues: contract-breaking
+state diagnostics, PostgreSQL connection retries, cross-database catalog
+retention and free-form model deprecation dates. No open PR overlaps this batch.
+
+Read-only specialists first map exact upstream references, owner modules,
+fixtures and stop conditions. An implementation claim follows the recorded
+mapping; research-only issue restrictions are satisfied through that gate.
+Each editing worker then uses its own branch and worktree. Workers do not
+spawn child agents. Only the supervisor runs expensive integrated validation.
+The state owner also owns the narrow `compile_diagnostics.zig` phase mapping
+for Core's versioned contract error; other diagnostic phases are unchanged.
+
+| Order | Worker branch | Exclusive ownership | Current status |
+| --- | --- | --- | --- |
+| 1 | `fix/state-contract-diagnostics` | State/selector diagnostic owners and new contract-state CLI fixtures | Integrated with reviewed inline artifact correction; local evidence on the issue |
+| 2 | `fix/postgres-connection-retries` | PostgreSQL profile/session retry owners and new connection-retry fixtures | Integrated; 9 focused native and 33 actual Core/native cases passed |
+| 3 | `fix/cross-catalog-retention` | Cross-database catalog retention and new catalog CLI fixtures | Integrated; native cap/expiry and bidirectional actual warehouse checks passed |
+| 4 | `fix/textual-deprecation-dates` | Properties/date normalization and new authored-date oracle fixtures | Integrated; 4 focused native and 54 Core/native date/context cases passed |
+| 5 | `fix/nested-contract-state-diagnostics` | State-leaf detection in selector.zig and nested YAML cases in the contract-state fixture | Integrated; 2 native additions and 26 focused CLI cases passed; targeted review clear |
+
+The supervisor integrates each clean, validated worker commit through Git
+before launching the next implementation. Existing shared fixtures and the
+project facade have one writer at a time; exact ownership is recorded in the
+issue claim before edits. Support documentation belongs to the supervisor.
+Native test optimization remains deferred; sharding distributes unchanged
+acceptance assertions and does not authorize deleting them. The supervisor
+also maintains the four new module scheduling weights after reviewing focused
+JUnit case durations, keeping local sample provenance separate from historical
+both-architecture CI measurements. Scheduling weights never establish acceptance.
+
+Acceptance requires native positive/negative cases near each Zig owner, real
+pinned Core/native CLI comparisons for upstream behavior, deterministic actual
+PostgreSQL connection fault fixtures, and actual cross-database catalog
+publication/estimate checks. Preserve artifacts on state preflight failure;
+retry connection establishment only, never SQL or uncertain commits. Bound
+catalog statistics without weakening binding, expiry or unknown-estimate
+safeguards. Define textual date grammar and defaults before implementation;
+do not claim general dateutil compatibility from a few examples.
+
+Final validation runs on a frozen integrated source: Debug/ReleaseSafe builds,
+native tests, affected CLI/oracle suites, runtime-boundary/public-safety and
+diff checks, plus all applicable CI gates including eight canonical shards per
+actual Linux architecture and their complete evidence aggregate. Rebase on
+current main before final validation. No skip, xfail, assertion removal,
+upstream pin change or unsupported-platform certification is authorized.
+
+Stop and remap an overlapping owner, unsupported adapter, broader recovery
+redesign, ambiguous upstream/default-date policy or unrelated behavior change.
+Resolve routine implementation choices within the user's authorization.
+
+The unchanged CLI build fixture certifies a clean Debug build and complete
+native test run; reuse that frozen-source evidence within the integrated
+validation session. A draft integration PR may run the CI matrix concurrently
+with the supervisor's affected CLI suites. Keep the same source frozen and
+mark the PR ready only after both local and CI gates pass. The
+end state is one non-draft, green integration PR with issue evidence and
+handoffs; merging, tags and release publication remain separate actions.
+
+Status: current main pulled and integration branch created. All four issues
+are open. The first issue has a published reference map, slice plan and claim;
+its isolated worker passed 33 focused native and 78 real Core/native cases.
+The state commits are integrated after root review corrected inline authored
+manifest publication. Additional targeted and unchanged inline/show checks
+passed; those counts overlap the original module and are not additive.
+PostgreSQL retries are integrated through both native entry points, including
+Core's separate profile-shape/open-limit validation. The final real-server
+module passed 33 cases without skips/xfails; 9 distinct focused native cases
+also passed. Connection policy leaves physical identity and SQL/task retries
+unchanged. Catalog retention is integrated after reproducing the exhausted
+catalog failure following successful warehouse commits. Six focused native
+cases and bidirectional actual warehouse cap/expiry/replacement/unknown-budget
+checks passed; existing catalog/concurrent-writer/movement cases are retained.
+The date helper is integrated after review preserved existing low ISO years.
+Its bounded complete-date grammar excludes dateutil's clock-dependent partial
+defaults. The final worker source passed 4 focused native cases and 54 real
+Core/native cases: 40 new authored-date fixtures and 14 retained context/state
+cases, with zero skips/xfails. Scheduling weights use successful local JUnit
+case durations with explicit unsealed/mixed-snapshot provenance where applicable.
+All four implementations are integrated. Independent PR review found that
+nested named YAML exclusions lower to negated state leaves that bypass state
+loading and contract preflight. The final sequential worker reproduced actual
+native artifact/warehouse changes where Core rejected the contract break,
+then corrected state/contract dependency detection. Two native additions and
+26 focused CLI cases passed, including 14 new nested YAML regressions; targeted
+read-only review is clear. Existing 90 contract cases and selector lowering
+remain unchanged. The complete contract module now contains 104 cases.
+The initial candidate's CI is superseded; final acceptance uses the corrected
+head and preserves all assertions. Complete frozen integrated/platform
+acceptance remains the PR readiness requirement. Its current results and final
+handoff belong on the integration PR and linked issues; local slice evidence
+does not itself establish source or release acceptance.
+
+### Delivered Parallel Compatibility Validation
+
+The requested test acceleration is merged into main. Its original owner used
+`ci/parallel-compatibility-tests` in an isolated worktree. The current issue
+campaign uses the delivered distribution and evidence audit without changing
+their required assertions or acceptance policy.
 
 Distribute the unchanged canonical suite across eight independent GitHub
 runners per actual Linux architecture, balancing complete test modules using
@@ -89,7 +186,8 @@ local results separately from projected CI time and increased runner-minute
 cost. Native helper migrations remain separate later work; distribution of
 unchanged assertions does not depend on those migrations.
 
-Status: distribution and evidence audit implemented locally. Actionlint passes;
+Status: distribution and evidence audit merged. Recorded local validation:
+Actionlint passes;
 full collection contains 5,954 cases, including 38 new distribution-tooling
 regressions. A fixed 67-case native/Core trial passes with 1/2/4 isolated
 processes in 39.70/25.71/18.01 seconds, with complete disjoint JUnit evidence and
@@ -97,12 +195,12 @@ zero skips or xfails. Timing excludes initial builds and plan collection.
 The eight-shard historical estimate is 27.4 minutes before CI setup/queues;
 the full both-architecture CI trial remains required before merge.
 
-### macOS Native Runtime And Getting Started
+### Delivered macOS Native Runtime And Getting Started
 
-One local editing owner on `fix/macos-native-runtime` owns this slice. No
-Agent OS orchestration or additional agents are involved. The initial Linux
-acceptance contract stays intact; macOS source builds are an experimental
-development target until their complete platform gates are certified.
+The experimental source-build slice is merged into main. Its original local
+editing owner used `fix/macos-native-runtime`. The initial Linux acceptance
+contract stays intact; macOS source builds remain an experimental development
+target until their complete platform gates are certified.
 
 The observed Apple Silicon build can run version/help/init, but project
 discovery terminates with SIGSYS because it invokes Linux directory syscalls.
@@ -137,11 +235,11 @@ PostgreSQL if a disposable local fixture is available, and state any missing
 platform/adapter evidence explicitly. Do not open a browser or install global
 packages/services. Keep downloaded tools, fixtures and logs ignored.
 
-Status: implemented and locally validated on Apple Silicon. The setup helper
+Status: merged and locally validated on Apple Silicon. The setup helper
 builds `zig-out/bin/dxt` with the bundled drivers; ordinary installation emits
 one executable. No published macOS archive or full macOS Core certification
-is claimed. Implementation and documentation are prepared as focused local
-commits for PR review; publication and CI remain separate release gates.
+is claimed. Published release archives and complete platform certification
+remain separate gates.
 
 Local evidence for this slice:
 
@@ -278,11 +376,12 @@ Formatting, runtime-boundary and public-safety gates passed. The complete
 CI/platform matrix remains candidate acceptance evidence.
 No release or production-readiness claim changes.
 
-Observed follow-ups are tracked as
+The observed follow-ups tracked as
 [#231](https://github.com/sabino/dxt/issues/231),
 [#232](https://github.com/sabino/dxt/issues/232) and
 [#233](https://github.com/sabino/dxt/issues/233) and
-[#237](https://github.com/sabino/dxt/issues/237); none is claimed complete.
+[#237](https://github.com/sabino/dxt/issues/237) are implemented in the
+remaining open issue campaign above; its final combined acceptance is separate.
 The native test optimization queue below remains deferred and is not part of
 this product-correctness batch.
 

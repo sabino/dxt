@@ -103,6 +103,9 @@ pub fn parseAdapterIdentityTextWithEnvironment(allocator: std.mem.Allocator, tex
         break :blk @intCast(count);
     } else 1;
     if (std.mem.eql(u8, normalized_adapter_type, "postgres")) {
+        var retries = try @import("postgres_profile.zig").normalize(allocator, values.get(output, "retries"));
+        defer values.deinit(allocator, &retries);
+        try values.put(allocator, &output, "retries", retries);
         inline for (.{ .{ "database", "dbname" }, .{ "password", "pass" } }) |names| {
             if (values.get(output, names[0]) != null and values.get(output, names[1]) != null) return error.PostgresCredentialAliasCollision;
         }
@@ -559,5 +562,28 @@ test "PostgreSQL credential alias collisions reject even equal values" {
     inline for (.{ "database: warehouse, dbname: warehouse", "password: private, pass: private" }) |collision| {
         const text = "demo: {outputs: {default: {type: postgres, schema: public, " ++ collision ++ "}}}";
         try std.testing.expectError(error.PostgresCredentialAliasCollision, parseAdapterIdentityText(arena.allocator(), text, "demo", null));
+    }
+}
+
+test "PostgreSQL retry profile parser normalizes integers without applying opening limits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    inline for (.{ .{ "", @as(i64, 1) }, .{ ", retries: 2.0", @as(i64, 2) }, .{ ", retries: -1", @as(i64, -1) }, .{ ", retries: 1001", @as(i64, 1001) } }) |case| {
+        const text = "demo: {outputs: {default: {type: postgres, schema: public" ++ case[0] ++ "}}}";
+        const identity = try parseAdapterIdentityText(allocator, text, "demo", null);
+        try std.testing.expectEqual(case[1], identity.target_context.object.get("retries").?.integer);
+        try std.testing.expect(std.mem.indexOf(u8, identity.connection_info.?, "retries") == null);
+    }
+    const huge = try parseAdapterIdentityText(allocator, "demo: {outputs: {default: {type: postgres, schema: public, retries: 999999999999999999999999999}}}", "demo", null);
+    try std.testing.expectEqualStrings("999999999999999999999999999", huge.target_context.object.get("retries").?.number_string);
+}
+
+test "PostgreSQL retry profile parser rejects null bool string fractional and object shapes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    inline for (.{ "null", "false", "true", "'2'", "2.5", "{}", "[]", ".inf", ".nan" }) |retry| {
+        const text = "demo: {outputs: {default: {type: postgres, schema: public, retries: " ++ retry ++ "}}}";
+        try std.testing.expectError(error.InvalidPostgresRetryPolicy, parseAdapterIdentityText(arena.allocator(), text, "demo", null));
     }
 }

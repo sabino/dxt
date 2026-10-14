@@ -39,6 +39,38 @@ const Api = struct {
 
 const Provider = struct { library: ?std.DynLib, api: Api };
 
+const ConnectContext = struct {
+    api: Api,
+    conninfo: [:0]const u8,
+    io: ?std.Io,
+    token: ?*const std.atomic.Value(bool),
+
+    pub fn checkCancellation(self: *ConnectContext) !void {
+        if (self.token) |token| if (token.load(.acquire)) return error.AdapterQueryCancelled;
+    }
+
+    pub fn openOnce(self: *ConnectContext) !Handle {
+        // libpq documents a NULL handle as allocation failure. Only an actual
+        // failed connection status is eligible for connection retries.
+        const handle = self.api.PQconnectdb(self.conninfo) orelse return error.OutOfMemory;
+        if (self.api.PQstatus(handle) != 0) {
+            self.api.PQfinish(handle);
+            return error.PostgresConnectionFailed;
+        }
+        return handle;
+    }
+
+    pub fn pause(self: *ConnectContext, seconds: u64) !void {
+        try self.checkCancellation();
+        // Short waits keep cancellation responsive and avoid duration overflow.
+        for (0..seconds) |_| for (0..10) |_| {
+            try self.checkCancellation();
+            try std.Io.sleep(self.io.?, .fromMilliseconds(100), .awake);
+        };
+        try self.checkCancellation();
+    }
+};
+
 fn loadProvider(path: ?[]const u8) !Provider {
     if (comptime @import("runtime_options").bundle_postgres) {
         if (path == null) {
@@ -90,19 +122,29 @@ pub const Connection = struct {
     }
 
     pub fn openWithEnvironment(allocator: std.mem.Allocator, conninfo: []const u8, library_path: ?[]const u8, environment: ?*const std.process.Environ.Map) !Connection {
+        // Raw callers have no profile or I/O policy; preserve their one open.
+        return openConfigured(allocator, conninfo, library_path, environment, 0, null, null);
+    }
+
+    pub fn openWithProfile(allocator: std.mem.Allocator, io: std.Io, conninfo: []const u8, library_path: ?[]const u8, environment: ?*const std.process.Environ.Map, profile: std.json.Value, cancellation_token: ?*const std.atomic.Value(bool)) !Connection {
+        const retries = try @import("postgres_profile.zig").retryLimit(profile);
+        return openConfigured(allocator, conninfo, library_path, environment, retries, io, cancellation_token);
+    }
+
+    fn openConfigured(allocator: std.mem.Allocator, conninfo: []const u8, library_path: ?[]const u8, environment: ?*const std.process.Environ.Map, retries: u16, io: ?std.Io, cancellation_token: ?*const std.atomic.Value(bool)) !Connection {
         if (std.mem.indexOfScalar(u8, conninfo, 0) != null) return error.InvalidPostgresConnection;
         var provider = try loadProvider(library_path);
         errdefer if (provider.library) |*library| library.close();
         const api = provider.api;
         const conninfo_z = try allocator.dupeZ(u8, conninfo);
         defer allocator.free(conninfo_z);
-        const handle = api.PQconnectdb(conninfo_z);
-        if (handle == null) return error.PostgresConnectionFailed;
+        var opening: ConnectContext = .{ .api = api, .conninfo = conninfo_z, .io = io, .token = cancellation_token };
+        const handle = try @import("postgres_profile.zig").connect(&opening, retries);
         errdefer api.PQfinish(handle);
-        if (api.PQstatus(handle) != 0) return error.PostgresConnectionFailed;
+        try opening.checkCancellation();
         _ = api.PQsetNoticeProcessor(handle, ignoreNotice, null);
         const cancellation = api.PQgetCancel(handle) orelse return error.PostgresCancellationFailed;
-        return .{ .allocator = allocator, .library = provider.library, .api = api, .handle = handle, .cancellation = cancellation, .environment = environment };
+        return .{ .allocator = allocator, .library = provider.library, .api = api, .handle = handle, .cancellation = cancellation, .environment = environment, .cancellation_token = cancellation_token };
     }
 
     /// Apply the configured SQL role before handing a connection to any caller.
@@ -355,6 +397,50 @@ test "SQLSTATE retry classification requires a known server rejection" {
     try std.testing.expectEqual(error.AdapterQueryCancelled, classifySqlState("57014"));
     try std.testing.expectEqual(error.PostgresExecutionFailed, classifySqlState("08006"));
     try std.testing.expectEqual(error.PostgresExecutionFailed, classifySqlState(null));
+}
+
+test "PostgreSQL unsuccessful connection handles are released before retry" {
+    const Mock = struct {
+        var opens: usize = 0;
+        var finished: usize = 0;
+        var status: c_int = 1;
+        var allocation_failure: bool = false;
+        fn connect(_: [*:0]const u8) callconv(.c) Handle {
+            opens += 1;
+            return if (allocation_failure) null else @ptrFromInt(16);
+        }
+        fn connectionStatus(_: Handle) callconv(.c) c_int {
+            return status;
+        }
+        fn finish(_: Handle) callconv(.c) void {
+            finished += 1;
+        }
+    };
+    Mock.opens = 0;
+    Mock.finished = 0;
+    Mock.status = 1;
+    Mock.allocation_failure = false;
+    var api: Api = undefined;
+    api.PQconnectdb = Mock.connect;
+    api.PQstatus = Mock.connectionStatus;
+    api.PQfinish = Mock.finish;
+    var opening: ConnectContext = .{ .api = api, .conninfo = "", .io = null, .token = null };
+    try std.testing.expectError(error.PostgresConnectionFailed, @import("postgres_profile.zig").connect(&opening, 1));
+    try std.testing.expectEqual(@as(usize, 2), Mock.opens);
+    try std.testing.expectEqual(@as(usize, 2), Mock.finished);
+    Mock.allocation_failure = true;
+    try std.testing.expectError(error.OutOfMemory, @import("postgres_profile.zig").connect(&opening, 3));
+    try std.testing.expectEqual(@as(usize, 3), Mock.opens);
+    try std.testing.expectEqual(@as(usize, 2), Mock.finished);
+    Mock.allocation_failure = false;
+    Mock.status = 0;
+    try std.testing.expect((try opening.openOnce()) != null);
+    try std.testing.expectEqual(@as(usize, 2), Mock.finished);
+    var token: std.atomic.Value(bool) = .init(true);
+    opening.token = &token;
+    try std.testing.expectError(error.AdapterQueryCancelled, @import("postgres_profile.zig").connect(&opening, 3));
+    try std.testing.expectEqual(@as(usize, 4), Mock.opens);
+    try std.testing.expectError(error.AdapterQueryCancelled, opening.pause(4));
 }
 
 test "PostgreSQL raw diagnostic capture retains complete secrets for publication safely under OOM" {

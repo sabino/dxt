@@ -9,12 +9,22 @@ DuckDB and PostgreSQL.
 
 ### Fixed
 
+- Contract-aware state selection reports unversioned breaking-change warnings
+  and versioned errors before artifact publication or warehouse writes,
+  including removed models, enforced constraints and materialization changes.
+  Inline/show publication preserves authored resources and existing failures.
 - State comparisons now include model reference/deprecation metadata and
   substantive semantic resources, preserving pinned Core's config, ordering,
   new-resource and intentionally ignored-field rules. Model dates retain
   normalized timezone-aware metadata through parsing, artifacts and caches.
+- Model deprecation dates accept complete English month and numeric slash/dot
+  forms alongside calendar ISO dates, preserving timezone awareness,
+  version-specific dates, warm caches and equivalent-instant state comparisons.
 - PostgreSQL profiles honor canonical credential aliases and configured held
   session roles, search paths and application names without publishing passwords.
+- PostgreSQL profile sessions apply connection-only retries with Core's
+  attempt/backoff policy, cleanup and cancellation; SQL and uncertain commits
+  are never replayed. Ordinary and cross-database session paths share the policy.
 - Authored incremental strategy macros execute through native lifecycles with
   Core's plus normalization and adapter-specific strategy validation timing.
 - Committed workflow applies retain exact successful evidence and repair failed
@@ -23,6 +33,10 @@ DuckDB and PostgreSQL.
   attribution changes and invalidate prior state when effective role changes.
 - Cross-database artifact writers use exclusive private temporary files and
   preserve complete publications and unrelated files under concurrent writes.
+- Cross-database catalogs prune unusable observations before admission and
+  retain the newest 4,096 rather than exhausting the count budget after a
+  warehouse commit. Evicted estimates become unknown; movement budgets and
+  rollback safeguards remain enforced in both directions.
 
 ### Documentation
 
