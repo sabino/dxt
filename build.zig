@@ -152,7 +152,13 @@ pub fn build(b: *std.Build) void {
     }
     run_step.dependOn(&run_cmd.step);
 
-    const mod_tests = b.addTest(.{ .root_module = if (apple_linker) |linker| linker.product else mod, .emit_object = use_apple_linker });
+    const mod_tests = b.addTest(.{
+        .root_module = if (apple_linker) |linker| linker.product else mod,
+        .emit_object = use_apple_linker,
+        // LLVM crashes generating stack protection for this Intel Mach-O
+        // Debug object. Zig's x86 backend keeps all Debug checks and tests.
+        .use_llvm = if (use_apple_linker and target.result.cpu.arch == .x86_64 and optimize == .Debug) false else null,
+    });
     const tests_binary = if (apple_linker) |linker| linker.link("dxt-native-tests", mod_tests) else mod_tests.getEmittedBin();
     const run_mod_tests = if (use_apple_linker) std.Build.Step.Run.create(b, "run native tests") else b.addRunArtifact(mod_tests);
     if (use_apple_linker) run_mod_tests.addFileArg(tests_binary);
@@ -247,6 +253,8 @@ const AppleLinker = struct {
     fn executable(self: AppleLinker, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
         const object = self.b.addObject(.{
             .name = name,
+            // Match the native test object's Intel Mac Debug backend.
+            .use_llvm = if (self.target.result.cpu.arch == .x86_64 and self.optimize == .Debug) false else null,
             .root_module = self.b.createModule(.{
                 .root_source_file = source,
                 .target = self.target,

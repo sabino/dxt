@@ -130,6 +130,11 @@ selected independently; ordinary `zig build` preserves the existing dynamic
 driver build. Release downloads additionally pass the archive and native
 installation gates; this does not establish complete macOS Core parity.
 
+Intel Mac Debug builds explicitly use Zig's own x86 backend to avoid a
+Zig 0.16 LLVM compiler crash when generating the full native test object.
+Debug checks and assertions remain enabled. ReleaseSafe builds retain their
+normal backend; this workaround adds no installation or runtime dependency.
+
 The SQL grammar library retains its accepted PostgreSQL **17.7** source;
 libpq **18.4** is the separately pinned connection client. Their private C
 helpers are isolated because their frontend/backend build settings differ.
